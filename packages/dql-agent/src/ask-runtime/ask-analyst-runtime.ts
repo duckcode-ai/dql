@@ -274,7 +274,10 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
           reason: request.selectedResultBindingGap.message,
           requiresClarification: true,
           clarifyingQuestion: request.selectedResultBindingGap.message,
-          clarificationOptions: [],
+          // Offer the members the reference could have meant. Without these the
+          // user was told the question was unanswerable when in fact one tap
+          // would have answered it.
+          clarificationOptions: request.selectedResultBindingGap.options ?? [],
           askAnalystDecision: { version: 1, mode, state },
         };
       }

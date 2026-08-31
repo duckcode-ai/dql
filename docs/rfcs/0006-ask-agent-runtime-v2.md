@@ -20,9 +20,20 @@ One same-plan repair is permitted after a frozen execution failure.
 
 ## V2 ingress and compatibility
 
-- `authoritative_v2` is the normal host-selected Ask runtime.
+- `authoritative_v2` is the intended steady state for the Ask runtime.
 - `shadow_v2` records V2 state but serves the explicit V1 comparison result.
+  **It is the shipping default** until a canary justifies the flip; a rollout
+  control that defaults to on is not a rollout control.
 - `legacy_v1` is the explicit operator rollback.
+- The mode is selected by `agent.askRuntimeMode` in `dql.config.json`, which
+  every Ask surface honors (`dql notebook`, `serve`, `preview`, `agent ask`),
+  or overridden per launch by `--ask-runtime-mode`. Precedence is CLI flag >
+  project config > default, and an unrecognized value fails at startup rather
+  than silently serving a different mode.
+- `dql agent shadow-report` compares, per recorded run, what V1 answered
+  against how V2 framed the same turn. Shadow never executes, so it compares
+  framing and required objects — not results. This is the evidence the flip
+  decision is made on.
 - Explicit qualified artifacts, Apply/direct reruns, and frozen Research child
   executions remain zero-provider-call paths.  All other free-text turns first
   retrieve context and then use the bounded tool runtime.

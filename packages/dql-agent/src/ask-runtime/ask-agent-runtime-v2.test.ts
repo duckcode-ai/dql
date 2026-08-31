@@ -62,6 +62,51 @@ const legacyDecision = (): IntentDecision => ({
   },
 });
 
+describe('AskAgentRuntimeV2 prior-result continuity', () => {
+  const customers = ['Mr. Matthew Meyer', 'Aaron Gardner', 'Angela Moyer'];
+  const ambiguousGap = {
+    code: 'PRIOR_RESULT_MEMBER_AMBIGUOUS',
+    message: 'The previous answer listed 3 customers. Which one did you mean?',
+    options: customers.map((label) => ({ id: `member:customer:${label}`, label, kind: 'member' })),
+  };
+
+  // An ambiguous reference to the previous answer is still ABOUT the previous
+  // answer. Framing it as fresh analytics would ask the user to choose a
+  // member while presenting the turn as a brand-new question.
+  it('classifies an ambiguous prior-result reference as a prior-result turn', async () => {
+    const getEvidence = vi.fn(async () => evidence());
+    const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
+    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence, legacyRouter });
+
+    const decision = await runtime.decide({
+      question: 'what region he belongs to',
+      requestedMode: 'ask',
+      selectedResultBindingGap: ambiguousGap,
+    });
+
+    expect(decision.action).toBe('clarify');
+    expect(decision.askAgentV2Decision?.state.turnClass).toBe('prior_result');
+    // The members must reach the analyst so it can offer them rather than guess.
+    expect(decision.clarificationOptions?.map((option) => option.label)).toEqual(customers);
+    expect(decision.askAgentV2Decision?.state.conversation.ambiguousMemberLabels).toEqual(customers);
+  });
+
+  it('offers no member choices when the host resolved the reference unambiguously', async () => {
+    const getEvidence = vi.fn(async () => evidence());
+    const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
+    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence, legacyRouter });
+
+    const decision = await runtime.decide({
+      question: 'which region "Mr. Matthew Meyer" belongs to',
+      requestedMode: 'ask',
+      priorResultMemberBinding: { version: 1, displayDimension: 'customer_name', values: ['Mr. Matthew Meyer'] },
+    });
+
+    expect(decision.askAgentV2Decision?.state.turnClass).toBe('prior_result');
+    expect(decision.askAgentV2Decision?.state.conversation.ambiguousMemberLabels).toBeUndefined();
+  });
+});
+
 describe('AskAgentRuntimeV2', () => {
   it('AGT-047 keeps a semantic-incomplete question in the agent tool runtime instead of producing a coverage terminal', async () => {
     const getEvidence = vi.fn(async () => evidence());

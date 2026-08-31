@@ -5179,6 +5179,133 @@ describe('conversation context follow-up routing', () => {
     });
   });
 
+  // The reported regression, in its exact shape: ten customers on screen, and
+  // the display column is a bare `name` — not `customer_name`. Alias lookup
+  // found nothing under `customer`, so the pronoun resolved to no dimension,
+  // no candidates, and therefore NO clarification either. The turn died as
+  // "Not enough context to answer safely" with the answer one tap away.
+  it('offers the displayed people as choices when the prior column is a bare name', () => {
+    const customers = [
+      'Mr. Matthew Meyer', 'Aaron Gardner', 'Angela Moyer', 'Ryan Byrd', 'Ronnie Knight',
+      'Brittany Barrera', 'Jose Fox', 'Rodney Gonzalez', 'Jeffrey Love', 'Lori Butler',
+    ];
+    const question = 'what region he belongs to';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_top_customers',
+        turns: [{
+          id: 'turn_top_customers',
+          question: 'who are the top customers',
+          result: {
+            columns: ['name', 'customer_type', 'count_lifetime_orders', 'lifetime_spend'],
+            dimensionValues: { name: customers, customer_type: ['returning'] },
+            measureColumns: ['count_lifetime_orders', 'lifetime_spend'],
+          },
+        }],
+      },
+    } as AgentRunRequest, question);
+
+    // Ambiguous over ten people: ask, never guess.
+    expect(followUp?.filters).toBeUndefined();
+    expect(followUp?.memberBindings ?? []).toEqual([]);
+    expect(followUp?.deicticChoices).toMatchObject({ dimension: 'name', values: customers });
+  });
+
+  // A pronoun must never widen into the whole prior population. Before the
+  // fix, a `name`-only result sent "he" down the generic single-dimension
+  // fallback, which bound all ten people as a filter with no clarification and
+  // no sign anything had been assumed.
+  it('never binds every displayed person for a singular pronoun', () => {
+    const customers = ['Mr. Matthew Meyer', 'Aaron Gardner', 'Angela Moyer'];
+    const question = 'which region he belongs to';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        sourceQuestion: 'who are the top customers',
+        resultColumns: ['name', 'lifetime_spend'],
+        resultDimensionValues: { name: customers },
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp?.filters).toBeUndefined();
+    expect(followUp?.memberBindings ?? []).toEqual([]);
+    expect(followUp?.deicticChoices?.values).toEqual(customers);
+  });
+
+  // The persisted member set already records the business entity for a result
+  // whose display column is `name`. Keying prior values only by display column
+  // discarded it, so the resolver could not find the customer values it had.
+  it('resolves prior member sets by their business entity, not just the display column', () => {
+    const customers = ['Mr. Matthew Meyer', 'Aaron Gardner'];
+    const question = 'what region he belongs to';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_members',
+        turns: [{
+          id: 'turn_members',
+          question: 'who are the top customers',
+          result: {
+            columns: ['name', 'lifetime_spend'],
+            memberSets: [{
+              version: 1,
+              entity: 'customer',
+              displayColumn: 'name',
+              displayValues: customers,
+            }],
+          },
+        }],
+      },
+    } as AgentRunRequest, question);
+
+    // Two candidates under the customer entity: still a question, not a guess.
+    expect(followUp?.deicticChoices).toMatchObject({ dimension: 'customer', values: customers });
+    expect(followUp?.filters).toBeUndefined();
+  });
+
+  // Turn 4 of the reported journey. Naming the member outright is the one case
+  // with no ambiguity left to resolve.
+  it('binds the named member exactly when the question quotes one of ten displayed people', () => {
+    const customers = [
+      'Mr. Matthew Meyer', 'Aaron Gardner', 'Angela Moyer', 'Ryan Byrd', 'Ronnie Knight',
+      'Brittany Barrera', 'Jose Fox', 'Rodney Gonzalez', 'Jeffrey Love', 'Lori Butler',
+    ];
+    const question = 'which region "Mr. Matthew Meyer" belongs to';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_named',
+        turns: [{
+          id: 'turn_named',
+          question: 'who are the top customers',
+          result: {
+            columns: ['customer_name', 'lifetime_spend'],
+            dimensionValues: { customer_name: customers },
+          },
+        }],
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp?.memberBindings).toEqual([expect.objectContaining({
+      values: ['Mr. Matthew Meyer'],
+      source: 'prior_result',
+      confidence: 'exact',
+      sourceTurnId: 'turn_named',
+    })]);
+  });
+
   it('asks which product was meant instead of binding the first prior row', () => {
     // The prior answer showed TWO products. "this product" does not identify
     // one of them, and silently filtering on whichever sorted first invents an

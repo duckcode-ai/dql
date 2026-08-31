@@ -84,11 +84,14 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
   }
   const config = loadProjectConfig(projectRoot);
   const host = flags.host ?? process.env.DQL_HOST ?? '127.0.0.1';
-  const askAgentRuntimeMode = resolveAskAgentRuntimeMode(flags.askRuntimeMode);
+  // Validate the flag here so a typo fails before a server starts, but pass it
+  // through UNRESOLVED: resolving an absent flag to the default would outrank
+  // the project's own `agent.askRuntimeMode` and make the config key dead.
+  if (flags.askRuntimeMode !== undefined) resolveAskAgentRuntimeMode(flags.askRuntimeMode);
   const { port, url } = await startProjectRuntime(projectRoot, {
     preferredPort: flags.port ?? config.preview?.port ?? 3474,
     host,
-    askAgentRuntimeMode,
+    askAgentRuntimeMode: flags.askRuntimeMode as AskAgentRuntimeMode | undefined,
   });
 
   // Auto-open only on loopback. In a container or on a remote host, opening

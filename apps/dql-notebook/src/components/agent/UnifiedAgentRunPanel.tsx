@@ -6670,7 +6670,8 @@ function askFailureOrigin(run: AgentRun): string {
         || (typeof payload?.executionError === 'string' && payload.executionError.trim().length > 0));
     if (typedExecutionFailure || legacyExecutionFailure) return 'execution';
     if (payload?.providerFailure?.code === 'orchestration_budget_exhausted'
-      || payload?.providerFailure?.code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') return 'orchestration_budget';
+      || payload?.providerFailure?.code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED'
+      || payload?.refusalCode === 'orchestration_budget_exhausted') return 'orchestration_budget';
     if (payload?.providerFailure || payload?.refusalCode === 'provider_error') return 'provider';
     // Without these two, every refusal that is not a modeling gap fell through
     // to `unknown` — so the already-written ambiguity and retrieval-gap cards

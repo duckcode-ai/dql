@@ -175,6 +175,14 @@ export function buildConversationSnapshot(
       // attached — the reported "when I ask a different question it doesn't give
       // the right solution". `reduceWorkingState` already clears these on shift;
       // this path only cleared `filters`.
+      //
+      // A blocked turn deliberately does NOT fold into working state
+      // (`turn-trust.ts`), so `topicKey` here still describes the last turn
+      // that actually answered. That is correct and must stay: when a
+      // misclassified follow-up used to fail, every retry compared against the
+      // same stale key and shifted again, which read like an unrecoverable
+      // loop. The defect was the classification, not the retention — do not
+      // "fix" it by folding failed turns into the topic.
       workingState = {
         ...workingState,
         filters: [],
@@ -462,7 +470,65 @@ function classifyQuestionRelation(state: ConversationWorkingState, question: str
   // plans to carry actual signal. Narrowing the classifier as well was belt and
   // braces that cost genuine follow-ups their context.
   const onlyRefinement = plan.dimensionTerms.length === 0 && plan.metricTerms.length === 0 && plan.entities.length === 0;
-  return onlyRefinement ? 'refinement' : 'shift';
+  if (onlyRefinement) return 'refinement';
+  // An ATTRIBUTE LOOKUP about the previous answer is not a new topic, even
+  // though it reads like one. "what region he belongs to" and
+  // `which region "Mr. Matthew Meyer" belongs to` each contribute a dimension
+  // term ("region") the prior topic never carried, so the overlap rule above
+  // scored zero and called it a shift — and a shift discards the entire
+  // follow-up context, including the member set the question is ABOUT. The
+  // subject is unchanged; only the requested attribute is new. Refinement is
+  // the truthful label, and it is what keeps the prior result reachable.
+  if (questionNamesPriorResultValue(question, state.lastResultDimensionValues)) return 'refinement';
+  if (carriesAnaphoricReference(question)) return 'refinement';
+  return 'shift';
+}
+
+/**
+ * Does the question point back with a pronoun or demonstrative? Deliberately
+ * NARROWER than `referencesPriorTurn`: the additive connectives that belong
+ * there ("and", "now", "also", "about") appear in plenty of self-contained
+ * questions, and this predicate runs against questions that already carry
+ * their own analytical vocabulary. "revenue and orders by month" must stay a
+ * shift; "what region he belongs to" must not.
+ */
+function carriesAnaphoricReference(question: string): boolean {
+  return /\b(it|its|he|him|his|she|her|hers|they|them|their|theirs|this|that|these|those|same)\b/i.test(question);
+}
+
+/**
+ * Does the question quote a value the previous answer actually displayed?
+ * A named member is the strongest possible signal that the turn is about the
+ * prior result, and it is the one case where the user has removed all
+ * ambiguity — dropping the context here is what turned an answerable
+ * `which region "Mr. Matthew Meyer" belongs to` into an unbounded search.
+ */
+function questionNamesPriorResultValue(
+  question: string,
+  priorValues: Record<string, string[]> | undefined,
+): boolean {
+  if (!priorValues) return false;
+  const haystack = normalizeConversationValue(question);
+  if (!haystack) return false;
+  for (const values of Object.values(priorValues)) {
+    for (const value of values) {
+      // Short values ("NY", "A") collide with ordinary words; require enough
+      // signal that a whole-string containment is really a member reference.
+      const needle = normalizeConversationValue(value);
+      if (needle.length < 4) continue;
+      if (haystack.includes(needle)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Fold a displayed value and a question onto the same comparison surface.
+ * Mirrors the host-side value normalizer so `Mr. Matthew Meyer` in a result
+ * matches `"Mr. Matthew Meyer"` typed with quotes and odd spacing.
+ */
+function normalizeConversationValue(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 /**
@@ -486,7 +552,12 @@ function standsAloneAsNewQuestion(question: string): boolean {
  * context", independent of whether the planner recognised any vocabulary.
  */
 function referencesPriorTurn(question: string): boolean {
-  return /\b(it|its|that|this|those|these|them|their|there|same|above|previous|prior|instead|also|too|and|now|next|then|plus|about)\b/i.test(question);
+  // Third-person personal pronouns belong here for the same reason "it" and
+  // "them" do: they have no referent inside the question. Their absence made
+  // "what region he belongs to" read as a self-contained new topic, which
+  // discarded the very answer the pronoun pointed at. Every other deictic
+  // module in the codebase already lists them.
+  return /\b(it|its|he|him|his|she|her|hers|they|theirs|that|this|those|these|them|their|there|same|above|previous|prior|instead|also|too|and|now|next|then|plus|about)\b/i.test(question);
 }
 
 function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {

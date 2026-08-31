@@ -94,6 +94,65 @@ describe('topic shift clears carried context', () => {
     })!;
     expect(snapshot.topicRelation).toBe('shift');
   });
+
+  // The reported regression. "who are the top customers" answered, then
+  // "what region he belongs to" was classified a SHIFT — five words, opening
+  // with an interrogative, and no deictic token the classifier recognised,
+  // because third-person pronouns were missing from `referencesPriorTurn`.
+  // A shift discards the whole follow-up context, so the member the pronoun
+  // referred to was gone before the router ran, and the turn died as
+  // "Not enough context to answer safely". Rephrasing could never recover:
+  // the retry compared against the same retained topic key and shifted again.
+  it('keeps context for an attribute question carrying a third-person pronoun', () => {
+    const { store, threadId } = threadWithAnsweredTurn();
+    for (const question of [
+      'what region he belongs to',
+      'which region he belongs to',
+      'what region does she belong to',
+      'which region do they belong to',
+    ]) {
+      const snapshot = buildConversationSnapshot(store, threadId, { question })!;
+      expect(snapshot.topicRelation, question).not.toBe('shift');
+      expect(JSON.stringify(snapshot.workingState ?? {}), question).toContain('customer');
+    }
+  });
+
+  // Turn 4 of the reported journey. Naming the member outright removes ALL
+  // ambiguity, and is the one case where dropping the prior result is most
+  // clearly wrong — yet it shifted too (seven words, leading "which", no
+  // recognised deictic token), which sent the run hunting without a binding
+  // until it burned its dispatch budget.
+  it('keeps context when the question names a value the prior answer displayed', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-topic-named-'));
+    dirs.push(root);
+    const store = new ConversationStore(join(root, 'conversations.sqlite'));
+    const threadId = store.createThread({ surface: 'ask' }).id;
+    advanceThreadState(store, threadId, store.appendTurn(threadId, {
+      ...ANSWERED,
+      result: {
+        columns: ['customer_name', 'lifetime_spend'],
+        rowCount: 10,
+        dimensionValues: { customer_name: ['Mr. Matthew Meyer', 'Aaron Gardner', 'Angela Moyer'] },
+      },
+    }));
+
+    const snapshot = buildConversationSnapshot(store, threadId, {
+      question: 'which region "Mr. Matthew Meyer" belongs to',
+    })!;
+    expect(snapshot.topicRelation).toBe('refinement');
+    expect(snapshot.workingState).toBeDefined();
+  });
+
+  // The narrow anaphora rule must not swallow genuinely new questions just
+  // because they contain a common connective. Only pronouns and
+  // demonstratives keep a question attached to the prior topic.
+  it('still shifts on a new question that merely contains a connective', () => {
+    const { store, threadId } = threadWithAnsweredTurn();
+    const snapshot = buildConversationSnapshot(store, threadId, {
+      question: 'How many warehouse shipments and delivery routes were delayed?',
+    })!;
+    expect(snapshot.topicRelation).toBe('shift');
+  });
 });
 
 describe('isFilterOnlyRefinement requires evidence of sameness', () => {

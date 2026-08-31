@@ -52,10 +52,13 @@ const EXPECTED_TEST_FILES = 154;
 // regressions, including model-qualified MetricFlow time-capability identity
 // coverage, including immutable certified-completeness reload and semantic
 // execution-readiness regressions, plus the exact-certified fast-path
-// lifecycle/provenance regression, total 2,261 non-skipped
+// lifecycle/provenance regression, plus the pronoun/named-member follow-up
+// continuity regressions (third-person topic classification, prior-result
+// member clarification, unmodeled-dimension truthfulness, and honest
+// orchestration-budget labelling), total 2,268 non-skipped
 // tests; a
 // future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2261;
+const EXPECTED_TESTS = 2268;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

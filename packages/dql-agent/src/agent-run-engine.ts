@@ -498,8 +498,15 @@ export interface AgentRunRequest {
    * conversation thread before the Ask runtime frames the question.
    */
   priorResultMemberBinding?: AgentRunPriorResultMemberBindingV1;
-  /** Host-only terminal diagnostic when a selected result cannot be re-bound. */
-  selectedResultBindingGap?: { code: string; message: string };
+  /**
+   * Host-only terminal diagnostic when a selected result cannot be re-bound.
+   *
+   * `options` carries the members the reference could have meant. An ambiguous
+   * singular reference is answerable the moment the user says which one they
+   * meant, so a gap that can offer choices becomes a clarification rather than
+   * a dead end.
+   */
+  selectedResultBindingGap?: { code: string; message: string; options?: AgentRunClarificationOption[] };
   /**
    * When `question` is a clarification continuation, the user's ORIGINAL
    * analytical question. Used for artifact naming and planning so the
@@ -811,7 +818,7 @@ export interface AgentRouteExecutorResult {
    * decline (`model_declined`) or grounding gap without inspecting prose. Absent
    * for any successful answer.
    */
-  answerRefusalCode?: 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked' | 'execution_error';
+  answerRefusalCode?: 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'orchestration_budget_exhausted' | 'policy_blocked' | 'execution_error';
   artifacts?: AgentRunArtifact[];
   evaluations?: AgentRunEvaluation[];
   nextActions?: AgentRunNextAction[];

@@ -121,7 +121,7 @@ import {
   type SemanticFilterValueBinding,
   type SemanticMemberSelection,
 } from './semantic-bridge/compose.js';
-import { runAgenticToolLoop } from './agentic/tool-loop.js';
+import { runAgenticToolLoopDetailed } from './agentic/tool-loop.js';
 import type { AgenticSqlExecutionCapabilityV1 } from './agentic/sql-authorization.js';
 import { buildSemanticStageTools } from './agentic/toolset.js';
 import { deriveAgenticTrust, type CompiledSemanticRecord } from './agentic/answer-contract.js';
@@ -217,7 +217,7 @@ export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'sema
  * from `ambiguous`: an attribution/export/proof policy is a metadata decision,
  * not a request for the analyst to rewrite an otherwise clear question.
  */
-export type AnswerRefusalCode = 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked' | 'execution_error';
+export type AnswerRefusalCode = 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'orchestration_budget_exhausted' | 'policy_blocked' | 'execution_error';
 export type AnalysisDepth = CascadeAnalysisDepth;
 
 /**
@@ -529,7 +529,14 @@ export interface AgentRefusalDetails {
     | 'semantic_runtime_required'
     | SemanticFanoutProbeFailureCodeV1
     /** DQL's own run budget stopped the turn; the AI provider did not fail. */
-    | 'orchestration_budget_exhausted';
+    | 'orchestration_budget_exhausted'
+    /**
+     * DQL declined to START another call it predicted would not fit in the
+     * remaining budget. Distinct from an exhausted clock: it can fire seconds
+     * into a run with most of the budget unspent, so sharing the "ran out of
+     * time" wording sent readers to debug latency instead of the estimate.
+     */
+    | 'RUN_DEADLINE_INSUFFICIENT';
   message: string;
   offending?: SqlContextValidationOffending;
 }
@@ -2450,6 +2457,43 @@ export function renderContextValidationRefusalForUser(
         ? `I could not prepare a governed query yet: ${machineError.replace(/\s*Use inspect_metadata_context[^.]*\.\s*$/i, '').trim()}`
         : 'I could not prepare a governed query from the retrieved metadata. Name the specific metric or table and how to break it down, and I can generate a review-required draft.';
   }
+}
+
+/**
+ * Did validation fail because something the USER asked for is not modeled?
+ *
+ * "What region does he belong to" against a warehouse with no customer→region
+ * path fails as `unknown_column: region`. Reported as a grounding gap that
+ * reads "Not enough context to answer safely", which is untrue and unhelpful:
+ * no amount of extra context will produce a column the business has never
+ * modeled, and the user is left to guess whether to rephrase, re-ask, or give
+ * up. The truthful answer names the gap and offers the way forward.
+ *
+ * Deliberately narrow. A column the MODEL invented is a grounding failure and
+ * must keep its existing code — the distinction between "you asked for
+ * something we don't have" and "the draft referenced something that isn't
+ * there" is the whole safety value of this classification.
+ */
+function requestedDimensionModelingGap(
+  code: SqlContextValidationCode | undefined,
+  offending: SqlContextValidationOffending | undefined,
+  requestedTerms: string[],
+): string | undefined {
+  if (code !== 'unknown_column' && code !== 'unknown_relation') return undefined;
+  const identifier = offending?.column ?? offending?.relation;
+  if (!identifier) return undefined;
+  const canonical = (value: string): string => value
+    .split(/[.:]/).pop()!
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const target = canonical(identifier);
+  if (!target) return undefined;
+  const requested = requestedTerms
+    .map(canonical)
+    .filter((term) => term.length > 2);
+  const matched = requested.find((term) => term === target
+    || target.split(' ').includes(term)
+    || term.split(' ').includes(target));
+  return matched ? identifier.split(/[.:]/).pop() : undefined;
 }
 
 function refusalCodeForValidation(code: SqlContextValidationCode | undefined): AnswerRefusalCode {
@@ -4882,9 +4926,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         confidence: 0,
         text,
         answer: text,
-        refusalCode: 'provider_error',
+        // DQL stopping itself is not the provider failing. Reporting both as
+        // `provider_error` put "The AI provider did not respond" above a body
+        // that said the opposite, and sent the reader to check provider health
+        // for a run that ended on an internal ceiling.
+        refusalCode: admissionDeclined || orchestrationBudget ? 'orchestration_budget_exhausted' : 'provider_error',
         refusalDetails: {
-          code: orchestrationBudget ? 'orchestration_budget_exhausted' : 'provider_error',
+          code: admissionDeclined
+            ? 'RUN_DEADLINE_INSUFFICIENT'
+            : orchestrationBudget ? 'orchestration_budget_exhausted' : 'provider_error',
           message: orchestrationBudget ? `${text} (${(err as Error).message})` : text,
         },
         citations: [],
@@ -5636,12 +5686,22 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // Business-language chat text; the validator's machine message (with
     // relation ids and tool guidance for the repair prompt) stays in
     // refusalDetails + validationWarnings for the Inspect surface.
-    const text = renderContextValidationRefusalForUser(
+    // A dimension the user explicitly asked for that the business has not
+    // modeled is a modeling gap, not a retrieval gap. Say so, and say what
+    // would let the question be answered.
+    const unmodeledRequestedDimension = requestedDimensionModelingGap(
       contextValidation.code,
-      contextValidation.error,
-      input.followUp?.memberBindings,
-      contextValidation.aggregationSafetyProof?.issueCodes,
+      contextValidation.offending,
+      [...questionPlan.dimensionTerms, ...(input.followUp?.dimensions ?? [])],
     );
+    const text = unmodeledRequestedDimension
+      ? `"${unmodeledRequestedDimension}" is not modeled. Which governed dimension should I use instead?`
+      : renderContextValidationRefusalForUser(
+        contextValidation.code,
+        contextValidation.error,
+        input.followUp?.memberBindings,
+        contextValidation.aggregationSafetyProof?.issueCodes,
+      );
     const analysisPlan = buildAnalysisPlan({
       question,
       intent,
@@ -5663,7 +5723,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       reviewStatus: 'none',
       confidence: 0.15,
       text,
-      refusalCode: refusalCodeForValidation(contextValidation.code),
+      refusalCode: unmodeledRequestedDimension
+        ? 'modeling_gap'
+        : refusalCodeForValidation(contextValidation.code),
       refusalDetails: {
         code: contextValidation.code ?? 'insufficient_context',
         message: contextValidation.error,
@@ -10668,7 +10730,7 @@ async function generateProposalWithOptionalTools(input: {
   // provider implements generateWithTools (Claude/OpenAI), and an equivalent text
   // protocol otherwise (subscription-CLI passthrough, Ollama). This is what gives
   // every provider — not just the two API ones — a real tool-driven Stage B.
-  return runAgenticToolLoop(input.provider, [...input.messages], tools, {
+  const result = await runAgenticToolLoopDetailed(input.provider, [...input.messages], tools, {
     ...options,
     toolPolicy,
     maxToolCalls: toolBudget.maxToolCalls,
@@ -10678,7 +10740,27 @@ async function generateProposalWithOptionalTools(input: {
       if (sink) sink.push(evidenceToolCallFromEvent(event, sink.length + 1));
     },
   });
+  // The tool loop converts a budget stop into a TERMINAL RESULT rather than
+  // rethrowing, so the reason reached this caller as an empty string and the
+  // run reported "the model declined to propose SQL" — blaming the model for
+  // a ceiling DQL imposed on itself. The plain-generation branch above throws
+  // these, so rethrow here too and let one handler label them honestly.
+  const budgetStop = PROPOSAL_BUDGET_STOP_CODES[result.stop ?? ''];
+  if (budgetStop) {
+    throw Object.assign(new Error(`The Ask runtime stopped before a query was settled (${result.stop}).`), { code: budgetStop });
+  }
+  return result.text;
 }
+
+/**
+ * Tool-loop terminal reasons that mean DQL stopped itself, mapped back to the
+ * dispatch codes the answer loop's provider-failure handler understands.
+ */
+const PROPOSAL_BUDGET_STOP_CODES: Record<string, string | undefined> = {
+  provider_dispatch_budget_exhausted: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
+  run_soft_target_exceeded: 'RUN_SOFT_TARGET_EXCEEDED',
+  run_deadline_insufficient: 'RUN_DEADLINE_INSUFFICIENT',
+};
 
 interface DeepGeneratedProposalCandidate {
   raw: string;

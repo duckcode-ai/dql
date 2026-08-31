@@ -62,6 +62,7 @@ const FAILED_REFUSAL_CODES = new Set([
   'model_declined',
   'policy_blocked',
   'provider_error',
+  'orchestration_budget_exhausted',
   'execution_error',
 ]);
 

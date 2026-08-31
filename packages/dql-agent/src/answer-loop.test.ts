@@ -6435,6 +6435,92 @@ describe("answer (block-first loop)", () => {
     );
   });
 
+  // Turn 4 of the reported journey surfaced as "The AI provider did not
+  // respond" — while the card body underneath it said the provider had NOT
+  // failed. DQL had stopped the run on its own ceiling. Reporting an internal
+  // budget stop as a provider outage sends people to check provider health
+  // for a system that was working fine.
+  it("reports DQL's own budget ceiling as a budget stop, not a provider outage", async () => {
+    for (const [code, expectedDetail] of [
+      ["PROVIDER_DISPATCH_BUDGET_EXHAUSTED", "orchestration_budget_exhausted"],
+      ["RUN_SOFT_TARGET_EXCEEDED", "orchestration_budget_exhausted"],
+      ["RUN_DEADLINE_INSUFFICIENT", "RUN_DEADLINE_INSUFFICIENT"],
+    ] as const) {
+      const provider: AgentProvider = {
+        name: "claude",
+        async available() { return true; },
+        async generate() {
+          throw Object.assign(new Error(`stopped: ${code}`), { code });
+        },
+      };
+      const question = "who are the top customers";
+      const result = await answer({ question, provider, kg, contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "analytics.dim_customers",
+          name: "dim_customers",
+          source: "dbt manifest",
+          columns: [{ name: "name", type: "VARCHAR" }, { name: "lifetime_spend", type: "DECIMAL" }],
+          rank: 1,
+          score: 80,
+          reason: "selected customer dimension",
+        },
+      ], { metricTerms: ["lifetime spend"], dimensionTerms: ["customer"] }) });
+
+      expect(result.kind, code).toBe("no_answer");
+      expect(result.refusalCode, code).toBe("orchestration_budget_exhausted");
+      expect(result.refusalDetails?.code, code).toBe(expectedDetail);
+      // The headline and the body must agree: DQL stopped this, not the provider.
+      expect(result.text, code).toContain("The AI provider did not fail");
+    }
+  });
+
+  // The reported journey's terminal turn. "What region does he belong to"
+  // against a warehouse with no customer-to-region path failed validation on
+  // an unknown `region` column and was reported as "Not enough context to
+  // answer safely" — which is untrue and actionless. No amount of extra
+  // context produces a column the business never modeled. Name the gap.
+  it("reports a dimension the USER asked for and the business has not modeled as a modeling gap", async () => {
+    const provider = new StubProvider(
+      "Draft the attribute lookup.\n\n" +
+        "```sql\nSELECT region FROM analytics.dim_customers\n```\n\n" +
+        "Viz: table",
+    );
+    const question = "what region does Mr. Matthew Meyer belong to?";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "analytics.dim_customers",
+          name: "dim_customers",
+          source: "dbt manifest",
+          columns: [
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "name", type: "VARCHAR" },
+            { name: "lifetime_spend", type: "DECIMAL" },
+          ],
+          rank: 1,
+          score: 80,
+          reason: "selected customer dimension",
+        },
+      ], {
+        metricTerms: [],
+        dimensionTerms: ["region"],
+      }),
+      executeGeneratedSql: async (sql) => ({ columns: [], rows: [], rowCount: 0, sql }),
+    });
+
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("modeling_gap");
+    // Truthful, and it says what would let the question be answered.
+    expect(result.text).toContain("is not modeled");
+    expect(result.text).toContain("region");
+    expect(result.text).not.toContain("Not enough context");
+    // The machine detail is preserved for the trace either way.
+    expect(result.refusalDetails).toMatchObject({ code: "unknown_column" });
+  });
+
   it("rejects provider SQL that selects unknown columns from a joined CTE before execution", async () => {
     const provider = new StubProvider(
       "Draft diagnostic SQL.\n\n" +

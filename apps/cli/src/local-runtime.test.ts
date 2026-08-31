@@ -96,6 +96,8 @@ import {
   formatLocalQueryRuntimeError,
   hydratePersistedPriorResultMemberBinding,
   hydratePersistedSelectedResultBinding,
+  readProjectAskRuntimeMode,
+  resolveAskAgentRuntimeMode,
   getConnectorInstallStatuses,
   assertConnectionNodeCompatibility,
   ensureConnectorInstalledForStartup,
@@ -4120,6 +4122,153 @@ describe('agent run runtime API', () => {
     expect(request.hostRequirementSeed).toBeUndefined();
   });
 
+  // The V2 runtime was fully implemented but unreachable: `authoritative_v2`
+  // could only be selected by typing a flag on one command, so a canary could
+  // not survive a restart and no other Ask surface could enter it at all.
+  describe('project-selected Ask runtime mode', () => {
+    const dirs: string[] = [];
+    afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+
+    function projectWithConfig(config: unknown): string {
+      const root = mkdtempSync(join(tmpdir(), 'dql-ask-mode-'));
+      dirs.push(root);
+      writeFileSync(join(root, 'dql.config.json'), JSON.stringify(config));
+      return root;
+    }
+
+    it('reads agent.askRuntimeMode from the project config', () => {
+      const root = projectWithConfig({ agent: { askRuntimeMode: 'authoritative_v2' } });
+      expect(readProjectAskRuntimeMode(root)).toBe('authoritative_v2');
+      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('authoritative_v2');
+    });
+
+    it('keeps shadow_v2 as the default when the project says nothing', () => {
+      const root = projectWithConfig({ agent: {} });
+      expect(readProjectAskRuntimeMode(root)).toBeUndefined();
+      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('shadow_v2');
+    });
+
+    it('lets a CLI flag override the project config, and the config override the default', () => {
+      const root = projectWithConfig({ agent: { askRuntimeMode: 'authoritative_v2' } });
+      // This mirrors the precedence `startLocalServer` applies:
+      // CLI flag > project config > default.
+      const selected = (flag: string | undefined): string =>
+        resolveAskAgentRuntimeMode(flag ?? readProjectAskRuntimeMode(root));
+
+      expect(selected('legacy_v1')).toBe('legacy_v1');
+      expect(selected(undefined)).toBe('authoritative_v2');
+    });
+
+    it('fails loudly on a misspelled mode rather than silently serving another one', () => {
+      const root = projectWithConfig({ agent: { askRuntimeMode: 'authoritative-v2' } });
+      expect(() => resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toThrow(/Invalid Ask runtime mode/);
+    });
+
+    it('treats an unreadable or malformed config as no selection at all', () => {
+      const root = mkdtempSync(join(tmpdir(), 'dql-ask-mode-bad-'));
+      dirs.push(root);
+      writeFileSync(join(root, 'dql.config.json'), '{ not json');
+      expect(readProjectAskRuntimeMode(root)).toBeUndefined();
+      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('shadow_v2');
+    });
+  });
+
+  // The reported journey's second turn. Ten customers were on screen and the
+  // user asked "what region he belongs to". The resolver correctly refuses to
+  // guess which of the ten was meant — but with nothing carrying that
+  // ambiguity forward, the run dead-ended as "Not enough context to answer
+  // safely". It must ask instead, and it must offer the members it found.
+  it('turns an ambiguous prior-result pronoun into a member clarification, not a dead end', () => {
+    const customers = [
+      'Mr. Matthew Meyer', 'Aaron Gardner', 'Angela Moyer', 'Ryan Byrd', 'Ronnie Knight',
+      'Brittany Barrera', 'Jose Fox', 'Rodney Gonzalez', 'Jeffrey Love', 'Lori Butler',
+    ];
+    const request = {
+      question: 'what region he belongs to',
+      requestedMode: 'ask',
+      threadId: 'thread-ambiguous-pronoun',
+      conversationContext: {
+        threadId: 'thread-ambiguous-pronoun',
+        conversationEnvelope: { threadId: 'thread-ambiguous-pronoun' },
+        activeTurnId: 'turn-top-customers',
+        turns: [{
+          id: 'turn-top-customers',
+          question: 'who are the top customers',
+          route: 'certified_answer',
+          trustLabel: 'certified',
+          runStatus: 'completed',
+          result: {
+            columns: ['name', 'customer_type', 'lifetime_spend'],
+            dimensionValues: { name: customers, customer_type: ['returning'] },
+            measureColumns: ['lifetime_spend'],
+            resultFingerprint: 'd'.repeat(64),
+          },
+        }],
+      },
+    } as AgentRunRequest;
+
+    hydratePersistedPriorResultMemberBinding(request);
+
+    expect(request.priorResultMemberBinding).toBeUndefined();
+    expect(request.selectedResultBindingGap).toMatchObject({
+      code: 'PRIOR_RESULT_MEMBER_AMBIGUOUS',
+      message: 'The previous answer listed 10 names. Which one did you mean?',
+    });
+    // Every offered option must be one of the people actually displayed.
+    const options = request.selectedResultBindingGap?.options ?? [];
+    expect(options.length).toBe(8);
+    for (const option of options) {
+      expect(customers).toContain(option.label);
+      expect(option.question).toContain(option.label);
+    }
+    // A categorical attribute of the entity is never a member identity.
+    expect(JSON.stringify(options)).not.toContain('returning');
+  });
+
+  // Turn 4: the user names the member outright. There is nothing left to ask,
+  // and the binding must carry the real display column rather than the entity
+  // noun — a compiler handed "customer" reinterprets it as a new grouping.
+  it('binds a named prior member to the display column the result actually had', () => {
+    const request = {
+      question: 'which region "Mr. Matthew Meyer" belongs to',
+      requestedMode: 'ask',
+      threadId: 'thread-named-member',
+      conversationContext: {
+        threadId: 'thread-named-member',
+        conversationEnvelope: { threadId: 'thread-named-member' },
+        activeTurnId: 'turn-top-customers',
+        turns: [{
+          id: 'turn-top-customers',
+          question: 'who are the top customers',
+          route: 'certified_answer',
+          trustLabel: 'certified',
+          runStatus: 'completed',
+          result: {
+            columns: ['customer_name', 'lifetime_spend'],
+            dimensionValues: { customer_name: ['Mr. Matthew Meyer', 'Aaron Gardner'] },
+            memberSets: [{
+              version: 1,
+              entity: 'customer',
+              displayColumn: 'customer_name',
+              displayValues: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+            }],
+            resultFingerprint: 'e'.repeat(64),
+          },
+        }],
+      },
+    } as AgentRunRequest;
+
+    hydratePersistedPriorResultMemberBinding(request);
+
+    expect(request.selectedResultBindingGap).toBeUndefined();
+    expect(request.priorResultMemberBinding).toMatchObject({
+      version: 1,
+      displayDimension: 'customer_name',
+      values: ['Mr. Matthew Meyer'],
+      sourceTurnId: 'turn-top-customers',
+    });
+  });
+
   it('AGT-011 strips forged structured-selection envelopes at HTTP ingress', () => {
     const parsed = parseAgentRunRequestBody({
       question: 'show total CCU count',
@@ -6538,6 +6687,159 @@ block "customer_profile" {
       expect(executeQuery.mock.calls[0]?.[0]).toMatch(/ORDER BY lifetime_spend DESC, customer_name\s+LIMIT 10/i);
       expect(payload.run.artifacts?.[0]?.payload?.result?.rowCount).toBe(10);
       expect(payload.run.artifacts?.[0]?.payload?.dqlArtifact?.parameterValues ?? {}).toEqual({});
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  /**
+   * The reported four-turn journey, end to end over the real HTTP surface and
+   * a real persisted conversation thread.
+   *
+   *   1. "who are the top customers"                    → answered
+   *   2. "what region he belongs to"                    → "Not enough context to answer safely"
+   *   3. "which region he belongs to"                   → the same, every time
+   *   4. `which region "Mr. Matthew Meyer" belongs to`  → "The AI provider did not respond"
+   *
+   * Turns 2-4 never reached query construction at all: a pronoun-blind topic
+   * classifier scored each one a NEW TOPIC, and a shift discards the whole
+   * follow-up context — including the ten customers the question was about.
+   * This proves the context now survives the classifier and reaches the
+   * host binder, which is what turns each of those dead ends into either an
+   * answerable turn or an honest question.
+   */
+  it('carries the prior answer through a pronoun follow-up journey instead of blocking on every turn', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-followup-journey-'));
+    tempDirs.push(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce', 'blocks'), { recursive: true });
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'blocks', 'customer_profile.dql'), `// dql-format: 1
+
+block "customer_profile" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  description = "Customer lifetime profile. One row per customer."
+  owner = "analytics@jaffle.shop"
+  tags = ["customer", "profile", "lifetime-value"]
+  pattern = "entity_profile"
+  grain = "one row per customer"
+  entities = ["customer"]
+  terms = ["Customer", "Revenue", "Order"]
+  outputs = ["customer_name", "customer_type", "count_lifetime_orders", "lifetime_spend"]
+  dimensions = ["customer_name", "customer_type"]
+  allowedFilters = ["customer_name"]
+  sourceSystems = ["dbt:customers"]
+  replacementFor = []
+  reviewCadence = "monthly"
+  llmContext = "Use for a complete customer profile."
+  examples = [
+    { question = "Give me the complete profile for Matthew Meyer." }
+  ]
+
+  query = """
+    SELECT
+      customer_name,
+      customer_type,
+      count_lifetime_orders,
+      lifetime_spend
+    FROM dim_customers
+    ORDER BY lifetime_spend DESC, customer_name
+    LIMIT 10
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'jaffle-shop',
+      connections: { default: { driver: 'file' } },
+    }, null, 2));
+
+    const customers = [
+      'Mr. Matthew Meyer', 'Aaron Gardner', 'Angela Moyer', 'Ryan Byrd', 'Ronnie Knight',
+      'Brittany Barrera', 'Jose Fox', 'Rodney Gonzalez', 'Jeffrey Love', 'Lori Butler',
+    ];
+    const executeQuery = vi.fn(async () => ({
+      columns: ['customer_name', 'customer_type', 'count_lifetime_orders', 'lifetime_spend'],
+      rows: customers.map((customer_name, index) => ({
+        customer_name,
+        customer_type: 'returning',
+        count_lifetime_orders: 33 - index,
+        lifetime_spend: 3089.8 - index * 50,
+      })),
+      rowCount: customers.length,
+    }));
+    // No provider is needed to prove the point: every turn below must resolve
+    // its conversational meaning deterministically, before any model call.
+    const planner: AgentProvider = {
+      name: 'ollama',
+      available: async () => true,
+      generate: async () => { throw Object.assign(new Error('no provider in this test'), { code: 'ETIMEDOUT' }); },
+    };
+
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        askAnalyticalPlannerProviderFactory: () => planner,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const threadResponse = await fetch(`${base}/api/agent/threads`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ surface: 'ask' }),
+      });
+      const { thread } = await threadResponse.json() as { thread: { id: string } };
+      const ask = async (question: string): Promise<any> => {
+        const response = await fetch(`${base}/api/agent-runs`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, requestedMode: 'ask', threadId: thread.id }),
+        });
+        const payload = await response.json() as { run: any };
+        expect(response.status, JSON.stringify(payload)).toBe(201);
+        return payload.run;
+      };
+
+      // Turn 1 — the answer the whole journey depends on.
+      const first = await ask('who are the top customers');
+      expect(first.artifacts?.[0]?.payload?.result?.rowCount).toBe(10);
+
+      // Turns 2 and 3 — a bare pronoun over ten people. The turn must not be
+      // treated as a new topic, and it must not silently bind a member.
+      for (const question of ['what region he belongs to', 'which region he belongs to']) {
+        const run = await ask(question);
+        // The turn is bound to the previous answer, not treated as a fresh
+        // question that happens to mention a region.
+        expect(run.conversationBinding, question).toBe('prior_result');
+        // Ambiguous over ten people, so it asks — and offers the people it
+        // found rather than dead-ending or silently picking one.
+        expect(run.status, question).toBe('needs_clarification');
+        const options: Array<{ label?: string }> = run.routeDecision?.clarificationOptions
+          ?? run.artifacts?.[0]?.payload?.clarificationOptions ?? [];
+        expect(options.map((option) => option.label), question).toEqual(customers.slice(0, 8));
+        expect(JSON.stringify(run), question).not.toContain('Not enough context to answer safely');
+        expect(JSON.stringify(run), question).not.toContain('The AI provider did not respond');
+      }
+
+      // Turn 4 — the member is named outright, so nothing is ambiguous. The
+      // run must not die on an exhausted dispatch budget mislabelled as a
+      // provider outage.
+      const fourth = await ask('which region "Mr. Matthew Meyer" belongs to');
+      expect(fourth.conversationBinding).toBe('prior_result');
+      // Nothing is ambiguous once the member is named, so this must NOT
+      // re-ask the same question the user just answered by naming someone.
+      expect(JSON.stringify(fourth)).not.toContain('Which one did you mean?');
+      expect(JSON.stringify(fourth)).not.toContain('The AI provider did not respond');
+
+      // The prior answer stayed reachable for every follow-up: the thread
+      // still holds the ten customers, and no failed turn poisoned it.
+      const threadsResponse = await fetch(`${base}/api/agent/threads/${thread.id}`);
+      const threadPayload = await threadsResponse.json() as { turns?: Array<{ question: string }> };
+      expect((threadPayload.turns ?? []).map((turn) => turn.question)).toContain('who are the top customers');
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }

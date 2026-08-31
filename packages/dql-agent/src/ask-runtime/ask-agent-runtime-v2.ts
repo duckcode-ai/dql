@@ -387,6 +387,13 @@ export interface AskConversationContextV2 {
   selectedMemberBinding?: string;
   clarificationId?: string;
   availableResultHandleIds: string[];
+  /**
+   * Members an ambiguous prior-result reference could have meant, when the
+   * host found candidates but could not choose between them. The analyst
+   * offers these in a clarification instead of guessing; they are display
+   * labels the user already saw, never new identity.
+   */
+  ambiguousMemberLabels?: string[];
 }
 
 /** Agent proposal is identifiers and an intended next tool only, never SQL/trust. */
@@ -2230,6 +2237,11 @@ export function createAskAgentRuntimeV2(options: AskAgentRuntimeOptionsV2): AskA
           reason: 'The selected prior result could not be rebound, so one specific member selection is required.',
           clarifyingQuestion: request.selectedResultBindingGap.message,
           requiresClarification: true,
+          // The members the reference could have meant, when the host resolved
+          // candidates but could not choose between them.
+          ...(request.selectedResultBindingGap.options?.length
+            ? { clarificationOptions: request.selectedResultBindingGap.options }
+            : {}),
           askAgentV2Decision: v2Decision,
         };
       }
@@ -2308,6 +2320,9 @@ function createState(
       selectedMemberBinding: request.selectedResultBinding?.value,
       clarificationId: request.selectedEvidenceId,
       availableResultHandleIds: request.priorResultMemberBinding?.values.map((value, index) => `member:${index}:${fingerprint(value)}`) ?? [],
+      ...(request.selectedResultBindingGap?.options?.length
+        ? { ambiguousMemberLabels: request.selectedResultBindingGap.options.map((option) => option.label).slice(0, 8) }
+        : {}),
     },
     observations: evidence ? [] : [{
       version: 1,
@@ -2488,7 +2503,13 @@ function fingerprint(value: string): string {
 function classifyTurnV2(request: AgentRunRequest): AskTurnClassV2 {
   if (request.requestedMode === 'research') return 'research';
   if (request.selectedEvidenceId || request.clarificationSourceQuestion) return 'clarification_response';
-  if (request.selectedResultBinding || request.priorResultMemberBinding) return 'prior_result';
+  // An AMBIGUOUS prior-result reference is still a prior-result turn. The host
+  // resolves candidates it cannot choose between into this gap; classifying
+  // the turn as fresh analytics would frame the clarification as a brand-new
+  // question and lose the very result it is asking about.
+  if (request.selectedResultBinding || request.priorResultMemberBinding || request.selectedResultBindingGap) {
+    return 'prior_result';
+  }
   const question = request.question.toLowerCase();
   // "What is revenue for each customer?" is a grouped analytical request,
   // not a metadata definition. Definition routing stays warehouse-free only

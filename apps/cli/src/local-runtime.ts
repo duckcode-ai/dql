@@ -863,6 +863,33 @@ export function resolveAskAgentRuntimeMode(
   );
 }
 
+/**
+ * The project's persisted Ask runtime mode, from `agent.askRuntimeMode` in
+ * `dql.config.json`.
+ *
+ * Without this, `authoritative_v2` was reachable only by typing a flag on one
+ * command (`dql notebook`), so a canary could not survive a restart and no
+ * other Ask surface — `dql serve`, `dql preview`, `dql agent ask` — could
+ * enter it at all. An operator selecting a rollout mode is making a project
+ * decision, and it should persist like one.
+ *
+ * Precedence is CLI flag > project config > default. The default stays
+ * `shadow_v2`: a rollout control that turns itself on is not a rollout
+ * control.
+ */
+export function readProjectAskRuntimeMode(projectRoot: string): unknown {
+  try {
+    const raw = readFileSync(join(projectRoot, 'dql.config.json'), 'utf-8');
+    const parsed = JSON.parse(raw) as { agent?: { askRuntimeMode?: unknown } };
+    return parsed?.agent && typeof parsed.agent === 'object'
+      ? (parsed.agent as { askRuntimeMode?: unknown }).askRuntimeMode
+      : undefined;
+  } catch {
+    // An unreadable or malformed config must not silently choose a mode.
+    return undefined;
+  }
+}
+
 /** One-time local capability lifetime. It is never persisted or sent to a provider. */
 export const CLI_ASK_TRACE_CAPABILITY_TTL_MS = 30_000;
 
@@ -1904,7 +1931,7 @@ function terminalFallbackReasonForAnswer(answer: AgentAnswer): string | undefine
 
 /** A user-facing terminal heading must follow the producer's typed boundary. */
 export function terminalFailureTitleForAnswer(
-  answer: Pick<AgentAnswer, 'refusalCode' | 'analyticalFailure'>,
+  answer: Pick<AgentAnswer, 'refusalCode' | 'analyticalFailure' | 'refusalDetails'>,
 ): string {
   if (answer.analyticalFailure?.phase === 'compilation') {
     return 'DQL could not compile the frozen plan';
@@ -1915,12 +1942,20 @@ export function terminalFailureTitleForAnswer(
   if (answer.analyticalFailure?.phase === 'result_validation') {
     return 'The query result did not match the frozen plan';
   }
+  // A precise cause recorded in the details must win over the coarse code.
+  // The switch below cannot distinguish DQL declining to start a call from a
+  // clock that genuinely ran out, and titling both as a provider outage sent
+  // readers to debug the wrong system.
+  if (answer.refusalDetails?.code === 'RUN_DEADLINE_INSUFFICIENT') {
+    return 'DQL stopped before starting another AI call';
+  }
   switch (answer.refusalCode) {
     case 'policy_blocked': return 'Blocked by a governance policy';
     case 'modeling_gap': return 'Not modeled yet';
     case 'grounding_gap': return 'Not enough context to answer safely';
     case 'model_declined': return 'The assistant declined to answer';
     case 'provider_error': return 'The AI provider did not respond';
+    case 'orchestration_budget_exhausted': return 'DQL stopped at its own orchestration budget';
     case 'execution_error': return 'The selected query did not complete on the current connection';
     case 'ambiguous': return 'Needs one detail before running';
     default: return 'No answer was produced';
@@ -2746,7 +2781,28 @@ export function hydratePersistedPriorResultMemberBinding(request: AgentRunReques
 
   const rawBinding = followUp.memberBindings?.find((binding) =>
     binding.source === 'prior_result' && binding.values.length > 0);
-  if (!rawBinding) return;
+  if (!rawBinding) {
+    // An ambiguous singular reference over several displayed members is a
+    // question for the user, not a failure. The resolver deliberately declines
+    // to guess which of ten customers "he" meant; turning that into a typed
+    // gap here makes the run ask, instead of dead-ending as "not enough
+    // context" — the answer was one tap away the whole time.
+    const choices = followUp.deicticChoices;
+    if (choices && choices.values.length > 1) {
+      const options = choices.values.slice(0, 8).map((value) => ({
+        id: `member:${choices.dimension}:${value}`,
+        label: value,
+        kind: 'member',
+        question: `${request.question} (${value})`,
+      }));
+      request.selectedResultBindingGap = {
+        code: 'PRIOR_RESULT_MEMBER_AMBIGUOUS',
+        message: `The previous answer listed ${choices.values.length} ${humanizePriorMemberDimension(choices.dimension)}. Which one did you mean?`,
+        options,
+      };
+    }
+    return;
+  }
   const values = [...new Set(rawBinding.values
     .map((value) => value.trim())
     .filter(Boolean))].slice(0, 24);
@@ -2755,8 +2811,17 @@ export function hydratePersistedPriorResultMemberBinding(request: AgentRunReques
   // deictic language. Recover the persisted display field (`customer_name`)
   // when available so the compiler binds an actual qualified dimension rather
   // than reinterpreting an entity noun as a new broad grouping.
-  const displayDimension = Object.entries(followUp.priorResultValues ?? {})
-    .find(([, candidateValues]) => values.every((value) => candidateValues.includes(value)))?.[0]
+  // Prior values are now keyed by BOTH the display column and the business
+  // entity, so a plain scan can return the entity noun ("customer") when the
+  // real column ("customer_name") is sitting right beside it. Prefer a key the
+  // result actually had — binding to the noun makes the compiler reinterpret it
+  // as a new broad grouping.
+  const displayCandidates = Object.entries(followUp.priorResultValues ?? {})
+    .filter(([, candidateValues]) => values.every((value) => candidateValues.includes(value)))
+    .map(([key]) => key);
+  const priorColumns = new Set(followUp.priorResultColumns ?? []);
+  const displayDimension = displayCandidates.find((key) => priorColumns.has(key))
+    ?? displayCandidates[0]
     ?? rawBinding.dimension;
   if (!displayDimension) return;
 
@@ -2775,6 +2840,19 @@ export function hydratePersistedPriorResultMemberBinding(request: AgentRunReques
     ...seedWithPriorResultMemberBinding(seed, priorResultMemberBinding),
     sourceQuestion: request.question,
   };
+}
+
+/**
+ * Plural, human label for the dimension an ambiguous reference could bind to.
+ * The dimension may be a business entity ("customer") or, when the prior
+ * answer displayed a bare name column, that column ("name") — both read
+ * correctly pluralized.
+ */
+function humanizePriorMemberDimension(dimension: string): string {
+  const leaf = dimension.split(/[.:]/).pop() ?? dimension;
+  const words = leaf.replace(/[_-]+/g, ' ').trim().toLowerCase();
+  const last = words.split(' ').filter(Boolean).pop() ?? words;
+  return last.endsWith('s') ? last : `${last}s`;
 }
 
 /** Best-effort: persist a completed run as a conversation turn (never throws). */
@@ -4663,9 +4741,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // Validate before creating listeners, project state, or a connection.  A
   // malformed embedding/CLI option must fail safely rather than silently
   // starting an ambiguous rollout mode.
-  const askAgentRuntimeMode = resolveAskAgentRuntimeMode(opts.askAgentRuntimeMode, {
-    legacyFallback: opts.askAnalystRuntimeMode !== undefined,
-  });
+  // CLI flag wins; otherwise the project's persisted choice; otherwise the
+  // default. Validation stays here so a typo in either source fails at startup
+  // rather than silently serving an unintended rollout mode.
+  const askAgentRuntimeMode = resolveAskAgentRuntimeMode(
+    opts.askAgentRuntimeMode ?? readProjectAskRuntimeMode(projectRoot),
+    { legacyFallback: opts.askAnalystRuntimeMode !== undefined },
+  );
   const projectWatcherFactory: typeof watch = opts.projectWatcherFactory ?? watch;
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const loopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
@@ -7845,6 +7927,15 @@ function analyticalFailureSummary(
       && !isExecutionFailure
       && !governedAnswer.analyticalFailure;
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
+    // An exhausted orchestration budget is as terminal as a provider failure:
+    // the run has already spent what it was allowed to spend, so retrying the
+    // same question inside the same run cannot succeed. It used to be labelled
+    // `provider_error` and so was caught by `isProviderError`; splitting the
+    // code out honestly requires carrying the same terminal standing with it,
+    // or a run with no budget left would fall through to pre-freeze recovery
+    // and try again with nothing to try with.
+    const isOrchestrationBudgetExhausted = governedAnswer.kind === 'no_answer'
+      && governedAnswer.refusalCode === 'orchestration_budget_exhausted';
     const isAnalyticalFailure = Boolean(governedAnswer.analyticalFailure);
     // AGT-004: a rejected attribution/export/proof policy is a deliberate
     // governance boundary, not an ambiguous user question and not a repairable
@@ -7852,7 +7943,8 @@ function analyticalFailureSummary(
     // more provider calls retrying the same incompatible candidate.
     const isPolicyBlocked = (governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'policy_blocked')
       || semanticAggregationBlocked;
-    const isTerminalFailure = v2TerminalFailure || isProviderError || isExecutionFailure || isAnalyticalFailure || isPolicyBlocked;
+    const isTerminalFailure = v2TerminalFailure || isProviderError || isOrchestrationBudgetExhausted
+      || isExecutionFailure || isAnalyticalFailure || isPolicyBlocked;
     // The model tried to compose a governed query and declined despite having usable
     // context (e.g. it wasn't confident about a multi-table join). The answer loop
     // has already spent its one evidence-aware repair. Keep this terminal and
@@ -12029,8 +12121,27 @@ function analyticalFailureSummary(
     });
   };
 
+  /**
+   * One retrieval build per Ask request, shared by both runtimes.
+   *
+   * In shadow mode V2 builds evidence, discards its decision, and delegates to
+   * V1 — which builds evidence again from the identical request object. The
+   * context pack was already memoized, but candidate binding, relationship-path
+   * hashing and the workspace bridge were redone every turn for a result
+   * nothing consumed. Keyed by request identity (each turn constructs exactly
+   * one), so nothing is shared across turns and no snapshot is held open.
+   */
+  const agentRunEvidenceByRequest = new WeakMap<AgentRunRequest, Promise<AgentRetrievalEvidence>>();
+  const memoizedAgentRunEvidence = (request: AgentRunRequest): Promise<AgentRetrievalEvidence> => {
+    const existing = agentRunEvidenceByRequest.get(request);
+    if (existing) return existing;
+    const built = buildAgentRunEvidence(request);
+    agentRunEvidenceByRequest.set(request, built);
+    return built;
+  };
+
   const buildRankedAgentRunCatalogContext = async (request: AgentRunRequest): Promise<string> => {
-    const evidence = await buildAgentRunEvidence(request);
+    const evidence = await memoizedAgentRunEvidence(request);
     return evidence.candidates.map((candidate) => {
       const detail = candidate.definition ? `: ${candidate.definition}` : '';
       return `- ${candidate.id} [${candidate.trustTier}; ${candidate.compatibility}]${detail}`;
@@ -12204,7 +12315,7 @@ function analyticalFailureSummary(
         throw error;
       }
     },
-    getEvidence: buildAgentRunEvidence,
+    getEvidence: memoizedAgentRunEvidence,
     getCatalogContext: buildRankedAgentRunCatalogContext,
   });
   // Cold runtime-value indexes are common immediately after a project opens.
@@ -12311,7 +12422,7 @@ function analyticalFailureSummary(
   // deterministic candidate verifier own business interpretation.
   const askAnalystRuntimeV1 = createAskAnalystRuntimeV1({
     mode: opts.askAnalystRuntimeMode ?? 'authoritative',
-    getEvidence: buildAgentRunEvidence,
+    getEvidence: memoizedAgentRunEvidence,
     compilerBroker: agentRunCompilerBroker,
     probeLiteralGrounding: probeAskLiteralGrounding,
     // Test/offline hosts may explicitly opt out of a provider meaning call.
@@ -12387,7 +12498,13 @@ function analyticalFailureSummary(
     ? askAnalystRuntimeV1
     : createAskAgentRuntimeV2({
       mode: askAgentRuntimeMode,
-      getEvidence: buildAgentRunEvidence,
+      // Shadow mode builds V2's evidence and then delegates to V1, which
+      // builds it again from the SAME request object — a second candidate
+      // binding, relationship-path hash and workspace bridge per turn, all
+      // for a decision shadow throws away. The context pack was already
+      // memoized; this memoizes the rest of the build so observing V2 costs
+      // one retrieval, not two.
+      getEvidence: memoizedAgentRunEvidence,
       legacyRouter: askAnalystRuntimeV1,
     });
 

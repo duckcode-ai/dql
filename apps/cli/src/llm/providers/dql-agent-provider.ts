@@ -11,6 +11,7 @@ import {
   type ProviderFailureDiagnosticV1,
 } from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
+import { buildAskV2AnalystSystemPrompt } from './ask-v2-analyst-prompt.js';
 import {
   ClaudeProvider,
   KGStore,
@@ -1642,7 +1643,16 @@ function createAskV2LaneHandler(
         type: 'object', properties: {}, additionalProperties: false,
       }, async () => {
         observe('inspect_conversation_result', 'eligible', 'trusted_conversation_context', { candidateIds: state.conversation.availableResultHandleIds, origin: 'retrieval' });
-        return { selectedMemberId: state.conversation.selectedMemberId, selectedMemberBinding: state.conversation.selectedMemberBinding, availableResultHandleIds: state.conversation.availableResultHandleIds };
+        return {
+          selectedMemberId: state.conversation.selectedMemberId,
+          selectedMemberBinding: state.conversation.selectedMemberBinding,
+          availableResultHandleIds: state.conversation.availableResultHandleIds,
+          // The members an ambiguous reference could have meant, so the
+          // analyst can ask which one instead of guessing or giving up.
+          ...(state.conversation.ambiguousMemberLabels?.length
+            ? { ambiguousMemberLabels: state.conversation.ambiguousMemberLabels }
+            : {}),
+        };
       }),
       safeTool('inspect_business_context', 'Inspect retrieved business definitions and context without executing a warehouse query.', {
         type: 'object', properties: {}, additionalProperties: false,
@@ -2833,7 +2843,7 @@ function createAskV2LaneHandler(
     let loop: Awaited<ReturnType<typeof runAgenticToolLoopDetailed>>;
     try {
       loop = await runAgenticToolLoopDetailed(terminalAwareProvider, [
-        { role: 'system', content: 'Use only the supplied canonical Ask tools. First inspect context. Choose certified, then semantic, then governed relational/DQL, then review-required exploratory SQL. For a semantic time question, compile_and_run_semantic must include both an admitted timeDimensionId and its declared timeGrain. Never write SQL outside validate_and_run_sql. Do not claim a result until a run tool returns executed.' },
+        { role: 'system', content: buildAskV2AnalystSystemPrompt(state) },
         { role: 'user', content: input.question },
       ], tools, {
         ...(input.signal ? { signal: input.signal } : {}),
@@ -3608,13 +3618,17 @@ function askV2NoAnswer(
     certification: 'analyst_review_required',
     reviewStatus: 'analyst_review_required',
     // A physical-dispatch ceiling is provider/runtime control, not missing
-    // business evidence.  Project it as a provider failure for old readers so
-    // no legacy cascade turns it into ANALYTICAL_COVERAGE_GAP.
-    refusalCode: dispatchBudget || kind === 'provider_failure'
-      ? 'provider_error'
-      : kind === 'execution_failure'
-        ? 'execution_error'
-        : 'grounding_gap',
+    // business evidence, and it is not the provider failing either. It carries
+    // its own terminal code so the card can say what actually stopped the run;
+    // `isTerminalFailure` admits it explicitly, so no legacy cascade turns it
+    // into ANALYTICAL_COVERAGE_GAP.
+    refusalCode: dispatchBudget
+      ? 'orchestration_budget_exhausted'
+      : kind === 'provider_failure'
+        ? 'provider_error'
+        : kind === 'execution_failure'
+          ? 'execution_error'
+          : 'grounding_gap',
     text,
     answer: text,
     citations: [],
@@ -6267,27 +6281,6 @@ function resolveAgentFollowUpContextRaw(
     context.outputColumns,
   );
   const priorResultRef = priorResultRefFromTurn(activeTurn, activeResult, priorResultColumns);
-  // The prior turn's actual rows, so a follow-up that computes ACROSS what was
-  // already shown ("show only the top 3", "of these, the average") is answered
-  // from those rows instead of a fresh warehouse query.
-  //
-  // `answer-loop.ts` declared `followUp.priorResult` and `tryCrossResultAnswer`
-  // read it, but NOTHING ever populated it — the cross-result path was dead in
-  // the repository. The turn already persists everything it needs: `columns`,
-  // the bounded `rowsSample`, `measureColumns` and the full `rowCount`.
-  const priorSampleRows = Array.isArray(activeResult?.rowsSample)
-    ? (activeResult.rowsSample as unknown[]).filter((row): row is unknown[] => Array.isArray(row))
-    : [];
-  const priorResultRowCount = typeof activeResult?.rowCount === 'number' ? activeResult.rowCount : undefined;
-  const priorMeasureColumns = arrayValue(activeResult?.measureColumns);
-  const priorResult = priorResultColumns?.length && priorSampleRows.length > 0
-    ? {
-        columns: priorResultColumns,
-        rows: priorSampleRows,
-        ...(priorMeasureColumns?.length ? { measureColumns: priorMeasureColumns } : {}),
-        ...(priorResultRowCount !== undefined ? { rowCount: priorResultRowCount } : {}),
-      }
-    : undefined;
   const priorDqlArtifact = cleanDqlArtifactReference(activeTurn?.dqlArtifact) ?? cleanDqlArtifactReference(context.dqlArtifact);
   const resolvedReferences = resolveConversationReferences(question, turns, priorResultValues);
   const focusedPriorResultValues = resolvedReferences.valuesByDimension ?? priorResultValues;
@@ -6355,7 +6348,6 @@ function resolveAgentFollowUpContextRaw(
         )
       : undefined,
     priorResultColumns: relativeComparison ? undefined : priorResultColumns,
-    ...(priorResult && !relativeComparison ? { priorResult } : {}),
     priorResultValues: focusedPriorResultValues,
     priorResultRef: relativeComparison ? undefined : priorResultRef,
     priorDqlArtifact: relativeComparison ? undefined : priorDqlArtifact,
@@ -6954,20 +6946,34 @@ function resolveDeicticDimensions(question: string, priorValues: Record<string, 
   if (
     dims.length === 0
     && /\b(?:they|their|them)\b[^.?!]{0,48}\b(?:buy|bought|purchase|purchased|order|ordered|spend|spent|use|used)\b/.test(lower)
-    && valuesForPriorDimension(priorValues, 'customer').length > 0
-  ) dims.push('customer');
+  ) {
+    if (valuesForPriorDimension(priorValues, 'customer').length > 0) dims.push('customer');
+    else {
+      const nameColumn = personNameFallbackDimension(priorValues);
+      if (nameColumn) dims.push(nameColumn);
+    }
+  }
   // Singular people pronouns are common in conversational analytical follow-ups
   // ("what region does he belong to?", "what is her segment?"). Resolve them
   // against the prior result's typed customer values, preserving the same
   // ambiguity guard used by "this customer". This is intentionally limited to
   // a person-like prior dimension; a pronoun must never make us guess a product
   // or metric member from the first row.
-  if (dims.length === 0
-    && /\b(?:he|she|him|his|her|hers)\b/.test(lower)
-    && valuesForPriorDimension(priorValues, 'customer').length > 0) {
-    dims.push('customer');
+  if (dims.length === 0 && /\b(?:he|she|him|his|her|hers)\b/.test(lower)) {
+    if (valuesForPriorDimension(priorValues, 'customer').length > 0) dims.push('customer');
+    else {
+      const nameColumn = personNameFallbackDimension(priorValues);
+      if (nameColumn) dims.push(nameColumn);
+    }
   }
-  if (dims.length === 0 && /\b(?:it|its|they|their|them|he|she|him|his|her|hers|this|these|those|that|same|above|previous|prior)\b/.test(lower)) {
+  // Singular people pronouns are deliberately EXCLUDED from this broad
+  // fallback. `singlePriorValueDimension` returns a whole dimension, and
+  // `resolveDeicticFilters` then binds every value in it — so "what region he
+  // belongs to" over a ten-row answer silently filtered on all ten people at
+  // once, with no clarification and no sign anything had been assumed. A
+  // singular reference resolves above or becomes an ambiguity for the user to
+  // settle; it must never widen into the entire prior population.
+  if (dims.length === 0 && /\b(?:it|its|they|their|them|this|these|those|that|same|above|previous|prior)\b/.test(lower)) {
     const single = singlePriorValueDimension(priorValues);
     if (single) dims.push(single);
   }
@@ -6987,6 +6993,10 @@ function resolveSingularDeicticDimension(question: string, priorValues: Record<s
   for (const [pattern, dim] of candidates) {
     if (pattern.test(lower) && valuesForPriorDimension(priorValues, dim).length) return dim;
   }
+  // A person pronoun over a result whose only people column is a bare `name`.
+  // Returning the column here keeps the ambiguity guard intact: the caller
+  // still collects every candidate and asks which one was meant.
+  if (/\b(?:he|she|him|his|her|hers)\b/.test(lower)) return personNameFallbackDimension(priorValues);
   return undefined;
 }
 
@@ -6994,7 +7004,63 @@ function valuesForPriorDimension(values: Record<string, string[]>, dim: string):
   const aliases = [dim, `${dim}_name`];
   if (dim === 'product') aliases.push('sku');
   if (dim === 'category') aliases.push('product_type', 'category_name');
-  return Array.from(new Set(aliases.flatMap((alias) => values[alias] ?? []))).filter(Boolean);
+  const exact = aliases.flatMap((alias) => values[alias] ?? []);
+  // Exact alias matching alone is too literal for real result sets: keys here
+  // are raw result column names, so `customer_display_name` and `top_customer`
+  // both identify customers while matching none of the aliases above. Fold
+  // every key that normalizes to the same business dimension AND actually
+  // names members of it.
+  const normalized = Object.entries(values)
+    .filter(([key]) => normalizePriorValueDimension(key) === dim && namesMembersOf(key, dim))
+    .flatMap(([, dimensionValues]) => dimensionValues);
+  return Array.from(new Set([...exact, ...normalized])).filter(Boolean);
+}
+
+/**
+ * Words that mark a column as describing an attribute OF an entity rather than
+ * listing the entity's members.
+ */
+const NON_IDENTITY_COLUMN_WORDS = new Set([
+  'id', 'ids', 'key', 'keys', 'code', 'type', 'types', 'status', 'tier', 'segment',
+  'category', 'group', 'class', 'level', 'flag', 'count', 'total', 'sum', 'avg',
+  'revenue', 'spend', 'amount', 'value', 'score', 'rank', 'date', 'at', 'ts',
+]);
+
+/**
+ * Does this column list MEMBERS of `dim`, rather than an attribute of them?
+ *
+ * `customer_type` normalizes to the customer dimension but holds "returning" —
+ * a segment label, not a person. Binding it as a member filter is precisely
+ * the silent wrong answer this resolver exists to prevent, so a column whose
+ * remaining words describe an attribute is not a source of member identities.
+ * Ids are excluded for the same reason the persistence layer excludes them:
+ * they are not a display surface a user can recognise or choose between.
+ */
+function namesMembersOf(key: string, dim: string): boolean {
+  const words = key.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+  const residual = words.filter((word) => word !== dim && word !== `${dim}s`);
+  return !residual.some((word) => NON_IDENTITY_COLUMN_WORDS.has(word));
+}
+
+/**
+ * The display column of a prior result that plainly holds person names, for
+ * use only when no business-entity key resolved.
+ *
+ * A certified block that outputs a bare `name` column defeats both alias and
+ * normalized matching: `name` describes no entity on its own. That is the
+ * exact shape behind the reported failure — ten named customers on screen,
+ * and "what region he belongs to" resolving to nothing. Restricted to a
+ * singular person reference and to a single unambiguous name-like column, so
+ * a pronoun can still never conjure a product or metric member.
+ */
+function personNameFallbackDimension(priorValues: Record<string, string[]>): string | undefined {
+  for (const entity of ['customer', 'account', 'user'] as const) {
+    if (valuesForPriorDimension(priorValues, entity).length > 0) return undefined;
+  }
+  const nameColumns = Object.keys(priorValues)
+    .filter((key) => /(^|[_\s-])(full[_\s-]?)?name$/i.test(key.trim()))
+    .filter((key) => (priorValues[key] ?? []).length > 0);
+  return nameColumns.length === 1 ? nameColumns[0] : undefined;
 }
 
 function pluralPriorResultEntity(question: string): 'customer' | 'account' | 'product' | 'user' | undefined {
@@ -7047,8 +7113,20 @@ function memberSetValuesByDimension(
   sets: ConversationResultMemberSetV1[] | undefined,
 ): Record<string, string[]> | undefined {
   if (!sets?.length) return undefined;
-  const values = Object.fromEntries(sets.map((set) => [set.displayColumn, set.displayValues]));
-  return Object.keys(values).length > 0 ? values : undefined;
+  // Key each set under BOTH its display column and its business entity.
+  //
+  // The entity was already resolved when the turn was persisted (a `name`
+  // column on a customer result is recorded as entity `customer`). Keying only
+  // by `displayColumn` threw that away, so a resolver asking for the values of
+  // dimension `customer` found nothing whenever the result happened to display
+  // `name` rather than `customer_name` — no pronoun binding, and worse, no
+  // ambiguity candidates either, so the "which one did you mean?" question
+  // could never be asked. Merge rather than overwrite: two sets can share an
+  // entity.
+  return mergePriorResultValues(
+    ...sets.map((set) => ({ [set.displayColumn]: set.displayValues })),
+    ...sets.map((set) => ({ [set.entity]: set.displayValues })),
+  );
 }
 
 function mergePriorResultValues(
