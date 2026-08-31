@@ -6040,6 +6040,55 @@ describe('semantic capability reference resolution', () => {
     })).toBeUndefined();
   });
 
+  // MetricFlow declares a join by naming the same entity `primary` on the
+  // model that owns it and `foreign` on the model pointing at it. Both are
+  // admitted and both answer to the label, so an idiomatic semantic layer made
+  // every breakdown by that entity unanswerable.
+  it('prefers the model that owns an entity over one that only references it', () => {
+    const owning = {
+      ...customerName,
+      id: 'semantic:uncategorized:entity:customers.customer',
+      qualifiedId: 'semantic:uncategorized:entity:customers.customer',
+      semanticObjectType: 'entity' as const,
+      name: 'customer',
+      aliases: [],
+      primaryEntity: 'customer',
+    };
+    const referencing = {
+      ...owning,
+      id: 'semantic:uncategorized:entity:orders.customer',
+      qualifiedId: 'semantic:uncategorized:entity:orders.customer',
+      primaryEntity: 'order',
+    };
+    const both = new Map([
+      [owning.id, { ...handle(owning.id, 'customer', ['dimension']), fingerprint: fingerprintFor(owning) }],
+      [referencing.id, { ...handle(referencing.id, 'customer', ['dimension']), fingerprint: fingerprintFor(referencing) }],
+    ]);
+    expect(__test__.resolveV2SemanticCapabilityReference({
+      reference: 'customer', role: 'dimension', candidates: [referencing, owning], capabilities: both,
+    })).toBe(owning.id);
+  });
+
+  it('stays ambiguous when two models both merely reference the entity', () => {
+    const a = {
+      ...customerName,
+      id: 'semantic:uncategorized:entity:orders.customer',
+      qualifiedId: 'semantic:uncategorized:entity:orders.customer',
+      semanticObjectType: 'entity' as const,
+      name: 'customer',
+      aliases: [],
+      primaryEntity: 'order',
+    };
+    const b = { ...a, id: 'semantic:uncategorized:entity:items.customer', qualifiedId: 'semantic:uncategorized:entity:items.customer', primaryEntity: 'item' };
+    const both = new Map([
+      [a.id, { ...handle(a.id, 'customer', ['dimension']), fingerprint: fingerprintFor(a) }],
+      [b.id, { ...handle(b.id, 'customer', ['dimension']), fingerprint: fingerprintFor(b) }],
+    ]);
+    expect(__test__.resolveV2SemanticCapabilityReference({
+      reference: 'customer', role: 'dimension', candidates: [a, b], capabilities: both,
+    })).toBeUndefined();
+  });
+
   it('never resolves a label no admitted candidate claims', () => {
     expect(__test__.resolveV2SemanticCapabilityReference({
       reference: 'region', role: 'dimension', candidates: [customerName], capabilities,

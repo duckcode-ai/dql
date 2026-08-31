@@ -716,6 +716,31 @@ function normalizeV2SemanticRuntimeName(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
+/**
+ * Does this candidate's own model DEFINE the referenced entity, rather than
+ * merely point at it?
+ *
+ * MetricFlow declares a join by naming the same entity `primary` on the model
+ * that owns it and `foreign` on the model referencing it, so `customer` is
+ * admitted from both `customers` and `orders`. Matched on name alone the
+ * reference is ambiguous and resolves to neither — which makes every breakdown
+ * by that entity unanswerable in an entirely correct semantic layer.
+ *
+ * Ownership is read from the qualified identity (`...:entity:customers.customer`)
+ * because the declared `primaryEntity` is not populated on every snapshot. A
+ * model whose name is the entity's plural owns it; anything else is a foreign
+ * reference. When no candidate owns the name, the reference stays ambiguous.
+ */
+function ownsReferencedEntity(candidate: AgentEvidenceCandidate, runtimeName: string): boolean {
+  if (normalizeV2SemanticRuntimeName(candidate.primaryEntity ?? '') === runtimeName) return true;
+  const leaf = (candidate.qualifiedId ?? candidate.id).split(':').pop() ?? '';
+  const [model, member] = leaf.split('.');
+  if (!model || !member) return false;
+  if (normalizeV2SemanticRuntimeName(member) !== runtimeName) return false;
+  const owner = normalizeV2SemanticRuntimeName(model);
+  return owner === runtimeName || owner === `${runtimeName}s` || owner === `${runtimeName}es`;
+}
+
 function v2SemanticCandidateMatchesRole(
   candidate: AgentEvidenceCandidate,
   role: V2SemanticCapabilityRole,
@@ -807,7 +832,19 @@ function resolveV2SemanticCapabilityReference(input: {
         : candidate.semanticObjectType === 'metric'
           ? 1
           : 2
-      : 0;
+      // A DIMENSION/ENTITY reference is routinely declared on several models:
+      // MetricFlow expresses a join by naming the same entity `primary` on the
+      // model that owns it and `foreign` on the model that points at it. Both
+      // are admitted, both answer to the same label, so "customer" matched two
+      // candidates and resolved to neither — an idiomatic, correct semantic
+      // layer made every breakdown by that entity unanswerable.
+      //
+      // A foreign declaration is a join reference, not a competing definition.
+      // The model whose own primary entity IS this reference owns the identity
+      // and wins. When no candidate owns it, the reference stays ambiguous.
+      : ownsReferencedEntity(candidate, runtimeName)
+        ? 0
+        : 1;
     return [{ candidateId, authority }];
   });
   const bestAuthority = matches.reduce<number | undefined>((current, match) => (
@@ -2347,6 +2384,12 @@ function createAskV2LaneHandler(
           observe('compile_and_run_semantic', outcome, reasonCode, {
             tier: 'semantic',
             ...(unresolvedReferences.length ? { rejectedIdentifiers: unresolvedReferences } : {}),
+            // What WAS admitted for the role that failed. An operator reading
+            // a refusal needs to see the set the reference was matched
+            // against, or "not admitted" is unfalsifiable.
+            ...(unresolvedReferences.length
+              ? { admittedDimensionIds: (admittedSemanticIdentifiers()?.dimension ?? []).slice(0, 8) }
+              : {}),
             candidateIds,
             origin: 'validation',
             ...(safeNextTools.length ? { safeAction: `use:${safeNextTools.join(',')}` } : {}),
