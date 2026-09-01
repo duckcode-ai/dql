@@ -2405,11 +2405,25 @@ function createAskV2LaneHandler(
           // the admitted set; withholding it serves no safety purpose,
           // because these are exactly the IDs it already agreed to accept.
           const admissible = reasonCode === 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT'
+            || reasonCode.startsWith('SEMANTIC_TIME_')
             ? admittedSemanticIdentifiers()
             : undefined;
           return {
             ...denied('compile_and_run_semantic', reasonCode, safeNextTools),
             ...(admissible ? { admittedIdentifiers: admissible } : {}),
+            // A time axis is only usable together with a grain it declares,
+            // so naming the axis without its grains just moves the refusal.
+            ...(admissible
+              ? {
+                admittedTimeDimensions: visibleCandidates()
+                  .filter((candidate) => v2SemanticCandidateMatchesRole(candidate, 'time_dimension'))
+                  .slice(0, 8)
+                  .map((candidate) => ({
+                    id: v2CandidateId(candidate),
+                    timeGrains: (candidate.timeGrains ?? []).slice(0, 8),
+                  })),
+              }
+              : {}),
             ...(admissible && unresolvedReferences.length
               ? {
                 rejectedIdentifiers: unresolvedReferences,
@@ -2488,7 +2502,29 @@ function createAskV2LaneHandler(
         }
         if (timeReferenceAmbiguous) return semanticPreFreeze('ambiguous', 'SEMANTIC_TIME_DIMENSION_AMBIGUOUS', metricIds);
         if (timeReferenceIncompatible) return semanticPreFreeze('ineligible', 'SEMANTIC_TIME_DIMENSION_INCOMPATIBLE', metricIds);
-        if (!normalizedTime.ok) return semanticPreFreeze('ineligible', normalizedTime.reasonCode);
+        // A time refusal must say which time axes ARE bindable and at what
+        // grain. Told only that its choice was invalid, the model re-sends a
+        // different guess and the turn dies on budget with the query never
+        // attempted — even though a valid axis was sitting in the snapshot.
+        if (!normalizedTime.ok) {
+          // Offer a same-tier correction ONCE. The host now hands back the
+          // admitted axes with their declared grains, so a first miss is
+          // genuinely fixable — but a second identical failure means this
+          // metric has no time axis the request can bind, and repeating the
+          // call just spends the budget the lower tiers needed. After that,
+          // send the analyst down the ladder.
+          const alreadyFailedOnTime = state.observations.some((observation) => (
+            observation.tool === 'compile_and_run_semantic'
+            && typeof observation.reasonCode === 'string'
+            && observation.reasonCode.startsWith('SEMANTIC_TIME_')
+          ));
+          return semanticPreFreeze(
+            'ineligible',
+            normalizedTime.reasonCode,
+            semanticCandidateIds,
+            alreadyFailedOnTime ? ['inspect_relational_context'] : ['compile_and_run_semantic'],
+          );
+        }
         if (explicitTimeRequirement.requiresDeclaredFiscalCalendar && (
           !hasDeclaredFiscalCalendar
           || !fiscalDateRoleId
@@ -3054,7 +3090,14 @@ function createAskV2LaneHandler(
         // the parser cannot even read as a tool call.
         textToolContract: buildAskV2TextToolContract,
         maxToolCalls: limits?.maxToolCalls ?? (state.turnClass === 'research' ? 24 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 8 : 4),
-        maxProviderDispatches: limits?.maxProviderDispatches ?? (state.turnClass === 'research' ? 12 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 6 : 2),
+        // A compound question — a time filter, a metric and a breakdown — costs
+        // an inspection per tier, at least one compile attempt, and a reserved
+        // send for finish_answer. At six the narration turn was the one that
+        // got cut: the query had already executed and validated, and the user
+        // was shown "stopped at its own orchestration budget" instead of the
+        // rows DQL was holding. Ten matches the run-level ceiling so the two
+        // budgets cannot disagree about how much room the analyst really has.
+        maxProviderDispatches: limits?.maxProviderDispatches ?? (state.turnClass === 'research' ? 12 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 10 : 2),
         // The kernel owns current availability. Native transports evaluate it
         // before each API tool declaration; text transports receive the same
         // update after every observation. This reserves a final *LLM action*

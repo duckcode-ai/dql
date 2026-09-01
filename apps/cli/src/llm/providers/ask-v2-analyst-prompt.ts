@@ -137,7 +137,8 @@ export function buildAskV2AnalystSystemPrompt(state: AskAgentStateV4): string {
   sections.push([
     'ONLY BIND TIME WHEN THE QUESTION ASKS FOR IT. "Revenue by month", "last quarter" and "the trend" are time',
     'questions; "who are the top customers by revenue" is not. When the question does ask for time, send both an',
-    'admitted timeDimensionId AND its declared timeGrain — a time dimension without its grain is refused. When it',
+    'admitted timeDimensionId AND a grain that THAT axis declares — take both from the same admittedTimeDimensions',
+    'entry, because a grain declared on a different axis is refused just as a made-up one is. When it',
     'does not, omit both fields entirely rather than supplying a default: an unnecessary time binding is refused',
     'just as firmly as a wrong one, and it costs the same turn.',
   ].join(' '));
