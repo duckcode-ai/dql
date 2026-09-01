@@ -219,7 +219,15 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
   // The same rule as the group-by repair applies: leaf-name equality, then
   // fewest entity hops; a tie is genuinely ambiguous and stays unchanged so
   // MetricFlow's own resolver error names the choices.
-  const qualifiedRequest = request.savedQuery ? request : (() => {
+  // Qualification requires an extra synchronous `mf list dimensions` spawn.
+  // On a large manifest that cold start can consume the entire Ask deadline,
+  // so pay it ONLY when something actually needs qualifying: a WHERE filter
+  // on a bare dimension name (a hard parse error without qualification).
+  // Bare group-bys and order-bys survive via MetricFlow's own suggestion
+  // repair below at no extra cost on the happy path.
+  const needsQualification = (request.filters ?? []).some((filter) =>
+    filter.dimension && !filter.dimension.includes('__') && filter.dimension !== 'metric_time');
+  const qualifiedRequest = request.savedQuery || !needsQualification ? request : (() => {
     const qualified = listMetricFlowDimensions({
       projectRoot: request.projectRoot,
       ...(request.dbtProjectPath ? { dbtProjectPath: request.dbtProjectPath } : {}),
