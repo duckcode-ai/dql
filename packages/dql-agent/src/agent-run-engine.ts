@@ -418,6 +418,16 @@ export interface AgentRunRequest {
    */
   hostRequirementSeed?: AnalyticalRequirementSeedV1;
   /**
+   * Host-only exact-existence probe over the project's allowlisted physical
+   * columns (`agent.runtimeValueGrounding`). Public JSON parsers must never
+   * hydrate this; the local server attaches it so the host-first binder can
+   * ground a member literal without a provider dispatch.
+   */
+  probeAllowlistedLiteral?: (literal: string) => Promise<{
+    status: 'matched' | 'no_match' | 'ambiguous' | 'disabled' | 'unavailable';
+    matches: Array<{ relation: string; column: string; canonicalValue: string }>;
+  }>;
+  /**
    * Host-only shape continuity from one completed, result-backed Ask turn.
    * HTTP/MCP parsers must never accept this: it is emitted only after the
    * local conversation store proves the source turn and result fingerprint.

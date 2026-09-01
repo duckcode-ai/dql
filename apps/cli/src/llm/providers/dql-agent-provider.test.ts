@@ -421,7 +421,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
       id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
       semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
     };
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
     const state = askV2State([metric]);
 
@@ -465,7 +465,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
       id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
       semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 0.9, matchReasons: ['exact'], compatibility: 'compatible',
     };
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
     const executeCertifiedBlock = vi.fn(async () => ({ columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 }));
     const state = askV2State([certified, metric]);
@@ -552,7 +552,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
       { version: 1 as const, id: 'choice:net', label: 'Net revenue', candidateIds: [first.qualifiedId!], resultFingerprint: 'sha256:net' },
       { version: 1 as const, id: 'choice:gross', label: 'Gross revenue', candidateIds: [second.qualifiedId!], resultFingerprint: 'sha256:gross' },
     ];
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
     const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 5 })({
       question: 'show revenue',
@@ -589,7 +589,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
       id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
       semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
     };
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
     const calls: AgentMessage[][] = [];
     let index = 0;
@@ -2486,7 +2486,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
       relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
     };
     const state = askV2State([metric]);
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
     const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
       question: 'Show revenue using the revenue semantic metric',
@@ -6123,7 +6123,7 @@ describe('V2 semantic time-window enforcement', () => {
   const question = 'Can you give me the last two month with high revenue by customer name';
 
   it('injects host-computed window bounds and honors orderBy', async () => {
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: ['customer_name', 'revenue'], rows: [{ customer_name: 'Ada', revenue: 1 }], rowCount: 1 }));
     const state = askV2State([windowMetric, customerName, orderedAt]);
 
@@ -6162,7 +6162,7 @@ describe('V2 semantic time-window enforcement', () => {
     // Superseded refusal: with exactly one available axis the HOST completes
     // the binding rather than refusing — the model omitted time args on a
     // window-only question, which is exactly what the prompt asks of it.
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
     const state = askV2State([windowMetric, customerName, orderedAt]);
 
@@ -6188,7 +6188,7 @@ describe('V2 semantic time-window enforcement', () => {
   });
 
   it('refuses a windowed compile when NO time axis exists anywhere', async () => {
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const state = askV2State([windowMetric, customerName]);
 
     await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 4 })({
@@ -6222,7 +6222,7 @@ describe('V2 semantic time-window enforcement', () => {
       ...windowMetric,
       id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', name: 'revenue',
     };
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const state = askV2State([windowMetric, rivalRevenue, customerName, orderedAt]);
     await __test__.createAskV2LaneHandler(state, { maxToolCalls: 6, maxProviderDispatches: 4 })({
       question: 'top customers by revenue',
@@ -6331,7 +6331,7 @@ describe('host-completed window axis', () => {
       timeGrains: ['day', 'week', 'month', 'quarter', 'year'],
       relevanceScore: 0.5, matchReasons: ['metric-declared time axis'], compatibility: 'compatible',
     };
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: ['customer_name', 'revenue'], rows: [{ customer_name: 'Ada', revenue: 1 }], rowCount: 1 }));
     const state = askV2State([metricWithAxis, orderedAtAxis]);
 
@@ -6438,7 +6438,7 @@ describe('host-first semantic execution', () => {
   };
 
   it('executes an unambiguous ranking with ZERO provider dispatches', async () => {
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: ['customer_name', 'revenue'], rows: [{ customer_name: 'Ada', revenue: 9 }], rowCount: 1 }));
     const providerCalls: string[] = [];
     const provider: AgentProvider = {
@@ -6487,7 +6487,7 @@ describe('host-first semantic execution', () => {
       timeGrains: ['day', 'month'],
       relevanceScore: 0.5, matchReasons: ['declared axis'], compatibility: 'compatible',
     };
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const execute = vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 }));
     const provider: AgentProvider = {
       name: 'ollama',
@@ -6516,12 +6516,131 @@ describe('host-first semantic execution', () => {
     expect(result?.appliedTimeWindow?.endExclusive).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
+  it('binds a clarified prior-result member deterministically and executes with ZERO dispatches', async () => {
+    // The user clicked "Mr. Matthew Meyer" in a host-issued clarification.
+    // That selection is server truth — asking a provider to transcribe it
+    // back into a filter argument is what killed these turns in production
+    // (the model answered in prose twice and the loop refused it).
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 42 }], rowCount: 1 }));
+    const provider: AgentProvider = {
+      name: 'ollama',
+      async available() { return true; },
+      async generate() { throw new Error('deterministic member binding must not consult the provider'); },
+    };
+    const state = askV2State([metric, customerName], 'clarification_response');
+    state.conversation = {
+      version: 2,
+      availableResultHandleIds: [],
+      clarificationId: 'member:customer:Mr. Matthew Meyer',
+    };
+
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'how much his total revenue? (Mr. Matthew Meyer)',
+      provider,
+      askAgentV2Workspace: askV2Workspace([metric, customerName]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(answer.result?.rowCount).toBe(1);
+    const selection = (compile.mock.calls[0] as unknown[])[0] as { filters?: Array<{ dimension: string; operator: string; values: string[] }> };
+    expect(selection.filters).toEqual([
+      { dimension: 'customer_name', operator: '=', values: ['Mr. Matthew Meyer'] },
+    ]);
+  });
+
+  it('grounds a free literal through the allowlist probe and binds the canonical spelling', async () => {
+    const productType: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:products.product_type',
+      qualifiedId: 'semantic:uncategorized:dimension:products.product_type',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic', name: 'product_type',
+      semanticModel: 'products',
+      relevanceScore: 0.7, matchReasons: ['filter term'], compatibility: 'compatible',
+    };
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 7 }], rowCount: 1 }));
+    const probe = vi.fn(async (literal: string) => ({
+      status: 'matched' as const,
+      matches: [{ relation: 'dev.products', column: 'product_type', canonicalValue: literal === 'beverage' ? 'beverage' : 'unexpected' }],
+    }));
+    const provider: AgentProvider = {
+      name: 'ollama',
+      async available() { return true; },
+      async generate() { throw new Error('probe-grounded binding must not consult the provider'); },
+    };
+    const candidates = [metric, productType];
+    const state = askV2State(candidates);
+
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'total revenue on the beverage category',
+      provider,
+      askAgentV2Workspace: askV2Workspace(candidates),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+      probeAllowlistedLiteral: probe,
+    } as never);
+
+    expect(probe).toHaveBeenCalledWith('beverage');
+    expect(compile).toHaveBeenCalledOnce();
+    expect(answer.result?.rowCount).toBe(1);
+    const selection = (compile.mock.calls[0] as unknown[])[0] as { filters?: Array<{ dimension: string; operator: string; values: string[] }> };
+    expect(selection.filters).toEqual([
+      { dimension: 'product_type', operator: '=', values: ['beverage'] },
+    ]);
+  });
+
+  it('falls to the analyst when the probe cannot prove the literal', async () => {
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
+    const generate = vi.fn(async () => '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```');
+    const probe = vi.fn(async () => ({ status: 'no_match' as const, matches: [] }));
+    const provider: AgentProvider = { name: 'ollama', async available() { return true; }, generate };
+    const candidates = [metric, customerName];
+    const state = askV2State(candidates);
+
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 4, maxProviderDispatches: 2 })({
+      question: 'total revenue for customer Ronnie Knight',
+      provider,
+      askAgentV2Workspace: askV2Workspace(candidates),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
+      probeAllowlistedLiteral: probe,
+    } as never);
+
+    // No proof for the value: the host must NOT invent a filter.
+    expect(compile).not.toHaveBeenCalled();
+    expect(generate).toHaveBeenCalled();
+  });
+
+  it('names an unmodeled requested term instead of "not enough context"', async () => {
+    // "region" exists nowhere in the governed model. The truthful terminal
+    // names the term and the governed alternatives; the generic grounding
+    // message reads as a system failure and hides the actual fix.
+    const generate = vi.fn(async () => 'The customer belongs to the western region.');
+    const provider: AgentProvider = { name: 'ollama', async available() { return true; }, generate };
+    const candidates = [metric, customerName];
+    const state = askV2State(candidates);
+
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 4, maxProviderDispatches: 2 })({
+      question: 'show revenue by region',
+      provider,
+      askAgentV2Workspace: askV2Workspace(candidates),
+      semanticQueryCompiler: vi.fn(async () => ({ sql: 'select 1', engine: 'native' as const })),
+      executeGeneratedSql: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
+    } as never);
+
+    expect(answer.refusalCode).toBe('modeling_gap');
+    expect(answer.text).toContain('"region" is not modeled');
+    expect(answer.text).toContain('customer_name');
+  });
+
   it('falls back to the analyst when the measure is AMBIGUOUS (the large-repo case)', async () => {
     const secondRevenue: AgentEvidenceCandidate = {
       ...metric,
       id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', name: 'revenue',
     };
-    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const compile = vi.fn(async (selection: { filters?: Array<{ values?: unknown[] }> }) => ({ sql: `select 1 as revenue /* ${(selection.filters ?? []).flatMap((f) => f.values ?? []).join(' ')} */`, engine: 'native' as const }));
     const generate = vi.fn(async () => '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```');
     const provider: AgentProvider = { name: 'ollama', async available() { return true; }, generate };
     const state = askV2State([metric, secondRevenue, customerName]);

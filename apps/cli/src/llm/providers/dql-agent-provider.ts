@@ -2678,6 +2678,30 @@ function createAskV2LaneHandler(
           );
         }
         const semanticEngine = resolvedEngine.engine;
+        // The native composer cannot join another model to apply a member
+        // filter — and, worse, it used to DROP the filter silently and ship
+        // the grand total as the member's number. Refuse BEFORE the plan
+        // freezes so the exploratory tier (which can express the join)
+        // remains reachable. MetricFlow handles cross-model filters itself.
+        if (semanticEngine === 'native' && semanticFilters.length > 0) {
+          const metricModels = new Set((resolveCandidates(metricIds ?? [], (candidate) =>
+            v2SemanticCandidateMatchesRole(candidate, 'metric')) ?? [])
+            .map((candidate) => (candidate.semanticModel ?? '').toLowerCase())
+            .filter(Boolean));
+          const crossModelFilterIds = (resolveCandidates(filterIds, (candidate) =>
+            v2SemanticCandidateMatchesRole(candidate, 'filter_dimension')) ?? [])
+            .filter((candidate) => {
+              const model = (candidate.semanticModel ?? '').toLowerCase();
+              return model && metricModels.size > 0 && !metricModels.has(model);
+            })
+            .map((candidate) => v2CandidateId(candidate));
+          if (crossModelFilterIds.length > 0) {
+            return {
+              ...semanticPreFreeze('ineligible', 'SEMANTIC_FILTER_ENGINE_UNSUPPORTED', crossModelFilterIds, ['validate_and_run_sql']),
+              usage: 'The native semantic engine cannot apply a filter from another model. Express this member filter through governed SQL (validate_and_run_sql) instead; the query was not compiled.',
+            };
+          }
+        }
         // Older text/native transcripts can still send an `engine` field from
         // the pre-V2 contract. It is intentionally ignored: the immutable
         // capability above has already selected the only host-approved engine.
@@ -2893,6 +2917,44 @@ function createAskV2LaneHandler(
               safeAction: 'inspect_execution_target',
             });
             return denied('compile_and_run_semantic', executionFailure.reasonCode);
+          }
+          // ── FAIL-CLOSED FILTER PROOF ─────────────────────────────────────
+          // A composer that cannot express a requested filter (for example a
+          // cross-model member filter on the native engine) may silently drop
+          // it — and the grand total then ships labeled as one member's
+          // number, the worst wrongness there is. Every requested filter
+          // value (member equality and host window bounds) must appear in
+          // the compiled SQL, or the query does not run. Both governed
+          // engines inline literal values; if a future engine parameterizes
+          // them, extend this proof rather than weakening it.
+          const compiledSqlText = String(compiled.sql ?? '').toLowerCase();
+          const requiredFilterLiterals = [
+            ...semanticFilters.map((filter) => String(filter.value)),
+            ...windowFilters.flatMap((filter) => filter.values.map(String)),
+          ].filter((literal) => literal.trim().length > 0);
+          const droppedFilterLiterals = requiredFilterLiterals
+            .filter((literal) => !compiledSqlText.includes(literal.toLowerCase()));
+          if (droppedFilterLiterals.length > 0) {
+            observe('compile_and_run_semantic', 'ineligible', 'SEMANTIC_FILTER_NOT_COMPILED', {
+              tier: 'semantic',
+              candidateIds: selectedCandidateIds,
+              origin: 'validation',
+              safeAction: 'use:validate_and_run_sql',
+            });
+            // The plan froze at authorization, so no other tier can legally
+            // run this turn. End it honestly rather than letting the loop
+            // spend the budget on post-freeze denials.
+            finishAskAgentV2Turn(state, {
+              version: 2,
+              kind: 'execution_failure',
+              reasonCode: 'SEMANTIC_FILTER_NOT_COMPILED',
+              origin: 'validation',
+              safeAction: 'use:validate_and_run_sql',
+            });
+            return {
+              ...denied('compile_and_run_semantic', 'SEMANTIC_FILTER_NOT_COMPILED', ['validate_and_run_sql']),
+              usage: `The selected semantic engine compiled this query WITHOUT ${droppedFilterLiterals.length} required filter value(s); it was not executed, because the unfiltered total would be presented as the filtered answer. Express the filter through governed SQL instead.`,
+            };
           }
           try {
             const result = await input.executeGeneratedSql(compiled.sql);
@@ -3309,10 +3371,75 @@ function createAskV2LaneHandler(
     // loop below remains the path for genuine ambiguity, and any host-first
     // miss falls through to it with the inspection observations as a head
     // start.
+    // When the loop found no executable path, check whether the reason is
+    // simply that the user asked for a field this project has never modeled.
+    // "Not enough context" for an unmodeled term reads as a system failure;
+    // the truthful answer names the term and the governed alternatives.
+    const requestedUnmodeledTerm = (): { term: string; admitted: string[] } | undefined => {
+      const plan = buildAnalysisQuestionPlan(input.question);
+      const requirements = buildAnalyticalRequirementSet({ question: input.question });
+      // A "dimension term" can actually be a member VALUE ("beverage
+      // revenue" filters product_type, it does not group by a beverage
+      // field). Values never appear in metadata names, so they must not be
+      // declared unmodeled — only terms the parser did NOT also read as a
+      // filter literal qualify.
+      const literalish = new Set([
+        ...requirements.memberTerms.map((term) => String(term).toLowerCase().trim()),
+        ...(plan.requestedShape.filters ?? []).map((term) => String(term).toLowerCase().trim()),
+      ]);
+      const terms = [...new Set([...(plan.dimensionTerms ?? []), ...requirements.dimensions])]
+        .map((term) => String(term).trim())
+        .filter((term) => Boolean(term)
+          && !literalish.has(term.toLowerCase())
+          // A time noun is a grain served by any admitted time axis, not a
+          // field of its own; "by month" must never read as unmodeled.
+          && !/^(?:day|week|month|quarter|year|season|period)s?$/i.test(term)
+          // The lexical by-phrase extractor can emit run-together noise
+          // ("month_using_the_revenue_semantic_metric"). Only a clean one- or
+          // two-word business noun is a claim worth refusing over.
+          && /^[a-z]+(?: [a-z]+)?$/i.test(term)
+          // "product revenue" asks for a revenue VARIANT, not a product
+          // grouping: a term directly qualifying a measure word is measure
+          // vocabulary and must not be declared unmodeled.
+          && !requirements.measures.some((measure) =>
+            input.question.toLowerCase().includes(`${term.toLowerCase()} ${measure.toLowerCase()}`)));
+      const all = visibleCandidates();
+      const roles: V2SemanticCapabilityRole[] = ['dimension', 'metric', 'time_dimension', 'filter_dimension'];
+      const unresolved = terms.filter((term) => {
+        const lower = term.toLowerCase();
+        const snake = lower.replace(/\s+/g, '_');
+        if (roles.some((role) => resolveV2SemanticCapabilityReference({
+          reference: snake, role, candidates: all, capabilities: workspace?.semanticCapabilities,
+        }))) return false;
+        const containedInCandidates = all.some((candidate) =>
+          (candidate.name ?? '').toLowerCase().includes(lower)
+          || (candidate.aliases ?? []).some((alias) => alias.toLowerCase().includes(lower))
+          || (candidate.sourceObjects ?? []).some((source) => source.toLowerCase().includes(lower)));
+        // A term can be modeled through a JOIN rather than a retained card:
+        // an admitted relationship path to the customers model proves
+        // "customer" even when no customer card was retained.
+        const containedInPaths = (state.relationshipPathHandles ?? []).some((handle) =>
+          handle.id.toLowerCase().includes(lower)
+          || (handle.edgeIds ?? []).some((edge) => edge.toLowerCase().includes(lower))
+          || (handle.candidateIds ?? []).some((id) => id.toLowerCase().includes(lower)));
+        return !containedInCandidates && !containedInPaths;
+      });
+      if (unresolved.length === 0) return undefined;
+      const admitted = [...new Set(all
+        .filter((candidate) => v2SemanticCandidateMatchesRole(candidate, 'dimension'))
+        .map((candidate) => candidate.semanticRuntimeName ?? candidate.name))].slice(0, 6);
+      return { term: unresolved[0]!, admitted };
+    };
     const hostFirst = !state.exactCertifiedCandidateId
       && state.tierStates?.certified?.status !== 'complete'
-      && (state.turnClass === 'analytics' || state.turnClass === 'prior_result')
-      ? deriveHostFirstSemanticArgs(input.question, visibleCandidates(), workspace?.semanticCapabilities)
+      && (state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response')
+      ? await deriveHostFirstSemanticArgs({
+        question: input.question,
+        candidates: visibleCandidates(),
+        capabilities: workspace?.semanticCapabilities,
+        ...(parseV2TrustedMemberSelection(state) ? { trustedMemberSelection: parseV2TrustedMemberSelection(state) } : {}),
+        ...(input.probeAllowlistedLiteral ? { probeAllowlistedLiteral: input.probeAllowlistedLiteral } : {}),
+      })
       : undefined;
     if (hostFirst) {
       try {
@@ -3335,6 +3462,46 @@ function createAskV2LaneHandler(
         // refusal) now guide the analyst loop instead of being rediscovered.
       } catch {
         // A host-first fault must never cost the turn; the loop still runs.
+      }
+      // A terminal minted during the host-first attempt (for example the
+      // fail-closed filter proof after the plan froze) ends the turn here:
+      // every later tool call would only be denied post-freeze.
+      if (state.terminalOutcome?.kind === 'execution_failure') {
+        return askV2NoAnswer(
+          input,
+          'execution_failure',
+          state.terminalOutcome.reasonCode,
+          state.terminalOutcome.origin,
+          state.terminalOutcome.safeAction,
+        );
+      }
+    }
+    // A grouping term that resolves to NOTHING in the snapshot — no
+    // capability in any role, no candidate name or alias even containing it
+    // — cannot be fixed by any number of provider dispatches. Refuse before
+    // the first one, naming the term and the governed alternatives, instead
+    // of letting the analyst guess identifiers until the budget dies. This
+    // runs after the host-first attempt: a turn the host executed never
+    // needed the term to resolve.
+    if (!state.terminalOutcome
+      && (state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response')) {
+      const unmodeled = requestedUnmodeledTerm();
+      if (unmodeled) {
+        observeAskAgentV2Tool(state, {
+          version: 1,
+          tool: 'finish_answer',
+          outcome: 'ineligible',
+          reasonCode: 'ASK_V2_REQUESTED_TERM_UNMODELED',
+          candidateIds: [],
+          origin: 'validation',
+        });
+        finishAskAgentV2Turn(state, {
+          version: 2,
+          kind: 'gap',
+          reasonCode: 'ASK_V2_REQUESTED_TERM_UNMODELED',
+          origin: 'validation',
+        });
+        return askV2NoAnswer(input, 'gap', 'ASK_V2_REQUESTED_TERM_UNMODELED', 'validation', undefined, unmodeled);
       }
     }
     let loop: Awaited<ReturnType<typeof runAgenticToolLoopDetailed>>;
@@ -3610,7 +3777,7 @@ function createAskV2LaneHandler(
       });
       return askV2NoAnswer(input, 'gap', 'ASK_V2_TOOL_PROGRESSION_REQUIRED', 'agent_control');
     }
-    return askV2NoAnswer(input, 'gap', 'ASK_V2_NO_EXECUTABLE_TOOL_RESULT', 'tool');
+    return askV2NoAnswer(input, 'gap', 'ASK_V2_NO_EXECUTABLE_TOOL_RESULT', 'tool', undefined, requestedUnmodeledTerm());
   };
 }
 
@@ -4094,6 +4261,7 @@ function askV2NoAnswer(
   reasonCode: string,
   origin: NonNullable<AgentAnswer['askAgentV2Outcome']>['origin'],
   safeActionOverride?: string,
+  modelingGap?: { term: string; admitted: string[] },
 ): AgentAnswer {
   const dispatchBudget = kind === 'budget_exhausted' && reasonCode === 'ASK_PROVIDER_DISPATCH_BUDGET_EXHAUSTED';
   const semanticToolContract = reasonCode === 'SEMANTIC_ENGINE_UNAVAILABLE';
@@ -4118,8 +4286,12 @@ function askV2NoAnswer(
     : kind === 'provider_failure'
     ? 'The AI provider could not complete this Ask step. Check provider readiness, then retry.'
     : kind === 'execution_failure'
-      ? 'The selected governed query did not complete on the current connection. Review the connection and trace, then retry.'
-      : 'DQL could not complete a safe analytical tool path from the current metadata snapshot.';
+      ? reasonCode === 'SEMANTIC_FILTER_NOT_COMPILED'
+        ? 'The governed semantic engine could not apply the required member filter, and DQL refused to run the unfiltered query in its place. Ask through a certified block or governed SQL, or enable the MetricFlow runtime for cross-model filters.'
+        : 'The selected governed query did not complete on the current connection. Review the connection and trace, then retry.'
+      : modelingGap
+        ? `"${modelingGap.term}" is not modeled in this project's governed data, so no query can compute it.${modelingGap.admitted.length ? ` Governed groupings available: ${modelingGap.admitted.join(', ')}.` : ''} Ask with one of those instead, or model "${modelingGap.term}" and re-sync.`
+        : 'DQL could not complete a safe analytical tool path from the current metadata snapshot.';
   return {
     kind: 'no_answer',
     sourceTier: 'no_answer',
@@ -4136,7 +4308,9 @@ function askV2NoAnswer(
         ? 'provider_error'
         : kind === 'execution_failure'
           ? 'execution_error'
-          : 'grounding_gap',
+          : modelingGap
+            ? 'modeling_gap'
+            : 'grounding_gap',
     text,
     answer: text,
     citations: [],
@@ -4192,24 +4366,26 @@ function deterministicAskV2ResultNarration(completed: AskV2CompletedExecution): 
  * literal member filters) returns undefined and the analyst loop decides.
  * The host never guesses; it only transcribes what has a single answer.
  */
-function deriveHostFirstSemanticArgs(
-  question: string,
-  candidates: readonly AgentEvidenceCandidate[],
-  capabilities: ReadonlyMap<string, AskSemanticCapabilityHandleV1> | undefined,
-): { metricIds: string[]; dimensionIds?: string[]; orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>; limit?: number } | undefined {
+async function deriveHostFirstSemanticArgs(input: {
+  question: string;
+  candidates: readonly AgentEvidenceCandidate[];
+  capabilities: ReadonlyMap<string, AskSemanticCapabilityHandleV1> | undefined;
+  /**
+   * Server-trusted member selection from a prior-result clarification: the
+   * user clicked a value the host itself displayed. Binding it is
+   * transcription, never a guess.
+   */
+  trustedMemberSelection?: { dimensionReferences: string[]; value: string };
+  /** Host probe over the operator's explicit column allowlist. */
+  probeAllowlistedLiteral?: AnswerLoopInput['probeAllowlistedLiteral'];
+}): Promise<{ metricIds: string[]; dimensionIds?: string[]; filters?: Array<{ dimensionId: string; value: string }>; orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>; limit?: number } | undefined> {
+  const { question, candidates, capabilities } = input;
   if (!capabilities || capabilities.size === 0) return undefined;
   const requirements = buildAnalyticalRequirementSet({ question });
   const plan = buildAnalysisQuestionPlan(question);
   // Shapes the deterministic composer cannot express go to the analyst.
   if (plan.requestedShape.topN?.scope === 'per_group') return undefined;
   if (requirements.time?.grain) return undefined;
-  if (requirements.memberTerms.length > 0) return undefined;
-  // The time window rides in requestedShape.filters too — it is handled by
-  // the window pipeline inside the compile tool, not by member filters. Only
-  // a NON-time filter (a member value the binder cannot ground) bails.
-  const nonTimeFilters = (plan.requestedShape.filters ?? [])
-    .filter((term) => !parseAnalyticalTimeWindow(String(term)));
-  if (nonTimeFilters.length > 0) return undefined;
   if (requirements.measures.length === 0) return undefined;
 
   // Requirement terms are business English ("customer name"); runtime names
@@ -4222,6 +4398,73 @@ function deriveHostFirstSemanticArgs(
     }
     return undefined;
   };
+
+  // ── Member/filter literals ────────────────────────────────────────────
+  // A literal is bindable only through PROOF: either the user selected the
+  // value from a host-displayed prior result (trusted selection), or the
+  // host's allowlist probe found the exact value in exactly one approved
+  // physical column that maps to exactly one admitted semantic dimension.
+  // Anything else — no proof, two proofs, conflicting values — goes to the
+  // analyst loop. The time window is NOT a member literal: it is handled by
+  // the window pipeline inside the compile tool.
+  const normalizeLiteral = (value: string): string => value.toLowerCase().replace(/\s+/g, ' ').trim();
+  const literalTerms = [...new Set([
+    ...requirements.memberTerms.map(String),
+    ...(plan.requestedShape.filters ?? [])
+      .map(String)
+      .filter((term) => !parseAnalyticalTimeWindow(term)),
+  ].map(normalizeLiteral).filter(Boolean))];
+  // Terms that are the same literal in different casings collapse to one.
+  const coveredLiterals = new Set<string>();
+  const filters: Array<{ dimensionId: string; value: string }> = [];
+  const addFilter = (dimensionId: string, value: string): boolean => {
+    const existing = filters.find((filter) => filter.dimensionId === dimensionId);
+    // Two different values on one '=' dimension cannot be expressed here.
+    if (existing) return normalizeLiteral(existing.value) === normalizeLiteral(value);
+    filters.push({ dimensionId, value });
+    return true;
+  };
+  const trusted = input.trustedMemberSelection;
+  const trustedNormalized = trusted ? normalizeLiteral(trusted.value) : undefined;
+  for (const literal of literalTerms) {
+    if (coveredLiterals.has(literal)) continue;
+    // (a) the user's clicked prior-result selection covers this literal.
+    if (trusted && trustedNormalized && (trustedNormalized === literal || trustedNormalized.includes(literal))) {
+      const dimensionId = trusted.dimensionReferences
+        .map((reference) => resolve(reference, 'filter_dimension'))
+        .find(Boolean);
+      if (!dimensionId) return undefined;
+      if (!addFilter(dimensionId, trusted.value)) return undefined;
+      coveredLiterals.add(literal);
+      continue;
+    }
+    // (b) exact-existence proof from the operator's column allowlist.
+    if (!input.probeAllowlistedLiteral) return undefined;
+    let probe: Awaited<ReturnType<NonNullable<AnswerLoopInput['probeAllowlistedLiteral']>>>;
+    try {
+      probe = await input.probeAllowlistedLiteral(literal);
+    } catch {
+      return undefined;
+    }
+    if (probe.status !== 'matched' || probe.matches.length !== 1) return undefined;
+    const match = probe.matches[0]!;
+    const relationLeaf = (match.relation.split('.').pop() ?? match.relation).replace(/["'`]/g, '').toLowerCase();
+    // The physical column proves the VALUE; the semantic snapshot must
+    // still prove the FIELD: exactly one admitted dimension whose runtime
+    // name and owning model match the probed column's identity.
+    const owningDimensions = candidates.filter((candidate) =>
+      v2SemanticCandidateMatchesRole(candidate, 'filter_dimension')
+      && (candidate.semanticRuntimeName ?? candidate.name) === match.column
+      && (
+        (candidate.semanticModel ?? '').toLowerCase() === relationLeaf
+        || (candidate.sourceObjects ?? []).some((source) => source.toLowerCase().includes(relationLeaf))
+      ));
+    if (owningDimensions.length !== 1) return undefined;
+    const dimensionId = resolve(v2CandidateId(owningDimensions[0]!), 'filter_dimension');
+    if (!dimensionId) return undefined;
+    if (!addFilter(dimensionId, match.canonicalValue)) return undefined;
+    coveredLiterals.add(literal);
+  }
 
   const metricIds: string[] = [];
   for (const measure of requirements.measures.slice(0, 4)) {
@@ -4251,11 +4494,37 @@ function deriveHostFirstSemanticArgs(
   return {
     metricIds,
     ...(dimensionIds.length ? { dimensionIds } : {}),
+    ...(filters.length ? { filters } : {}),
     ...(topN ? {
       orderBy: [{ name: metricIds[0]!, direction }],
       limit: topN.n,
     } : {}),
   };
+}
+
+/**
+ * The server-trusted member selection carried by a clarified prior-result
+ * turn. `selectedMemberId`/`selectedMemberBinding` come from the persisted
+ * result binding; the `member:<entity>:<value>` clarification id is the
+ * click itself. Neither is provider input.
+ */
+function parseV2TrustedMemberSelection(
+  state: AskAgentStateV4,
+): { dimensionReferences: string[]; value: string } | undefined {
+  const conversation = state.conversation;
+  if (!conversation) return undefined;
+  const memberId = typeof conversation.selectedMemberId === 'string' ? conversation.selectedMemberId.trim() : '';
+  const memberValue = typeof conversation.selectedMemberBinding === 'string' ? conversation.selectedMemberBinding.trim() : '';
+  if (memberId && memberValue) {
+    return { dimensionReferences: [memberId], value: memberValue };
+  }
+  const clarification = typeof conversation.clarificationId === 'string' ? conversation.clarificationId : '';
+  const parsed = /^member:([^:]+):(.+)$/.exec(clarification);
+  if (!parsed) return undefined;
+  const entity = parsed[1]!.trim();
+  const value = parsed[2]!.trim();
+  if (!entity || !value) return undefined;
+  return { dimensionReferences: [`${entity}_name`, entity], value };
 }
 
 function askV2ExecutedAnswer(
@@ -6009,6 +6278,11 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                   return executeAtSqlBoundary(() => req.executeGeneratedSql!(...args));
                 }
               : undefined,
+            // Host-owned allowlist literal probe: read-only, value-bounded,
+            // and consumed only by the host-first binder — no snapshot or
+            // SQL-boundary guard is needed because it can never execute a
+            // provider-authored query.
+            ...(req.probeAllowlistedLiteral ? { probeAllowlistedLiteral: req.probeAllowlistedLiteral } : {}),
             prepareExploratorySqlExecution: req.prepareExploratorySqlExecution
               ? async (sql, ...args) => {
                   guardSnapshot();

@@ -276,6 +276,16 @@ export interface AgentRunRequest {
   executeCertifiedBlock?: (block: KGNode, invocation?: CertifiedBlockInvocationInput) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string, artifact?: AgentDqlArtifactReference) => Promise<AgentResultPayload>;
   /**
+   * Server-only exact-existence probe over the project's allowlisted
+   * physical columns (`agent.runtimeValueGrounding`). Clients never supply
+   * this; the host-first binder uses it to ground a member literal without
+   * a provider dispatch.
+   */
+  probeAllowlistedLiteral?: (literal: string) => Promise<{
+    status: 'matched' | 'no_match' | 'ambiguous' | 'disabled' | 'unavailable';
+    matches: Array<{ relation: string; column: string; canonicalValue: string }>;
+  }>;
+  /**
    * Server-only freeze for a router-selected exploratory proposal. The client
    * never supplies this callback or the returned opaque capability.
    */

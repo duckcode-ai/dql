@@ -6870,6 +6870,56 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             throw error;
           }
         },
+        // Bounded host probe over the operator's explicit column allowlist.
+        // It answers ONE question — "does this exact literal exist in an
+        // allowlisted column, and how is it spelled there?" — so the
+        // host-first binder can ground a member filter without spending a
+        // provider dispatch. Values never reach the model: the canonical
+        // spelling is bound host-side into an equality filter.
+        probeAllowlistedLiteral: async (literal: string) => {
+          const grounding = resolveAgentRuntimeValueGrounding(projectConfig);
+          if (grounding.mode !== 'safe_automatic' || grounding.searchSafeColumns.size === 0) {
+            return { status: 'disabled' as const, matches: [] };
+          }
+          const trimmed = typeof literal === 'string' ? literal.trim() : '';
+          if (trimmed.length < 2 || trimmed.length > 200) return { status: 'no_match' as const, matches: [] };
+          let probeConnection: ConnectionConfig;
+          try {
+            probeConnection = await resolveAgentRunExecutionConnection(request);
+          } catch {
+            return { status: 'unavailable' as const, matches: [] };
+          }
+          const matches: Array<{ relation: string; column: string; canonicalValue: string }> = [];
+          for (const entry of [...grounding.searchSafeColumns].slice(0, 8)) {
+            const segments = entry.split('.');
+            if (segments.length < 3) continue;
+            const column = segments[segments.length - 1]!;
+            const relation = segments.slice(0, -1).join('.');
+            if (!isAgentValueProbeColumn({ name: column })) continue;
+            try {
+              const result = await withAgentValueProbeTimeout(
+                executor.executeQuery(
+                  buildAgentCanonicalValueProbeSql(relation, column, trimmed, probeConnection),
+                  [],
+                  runtimeVariables({}),
+                  probeConnection,
+                ),
+                2_000,
+              );
+              const values = uniqueStrings(result.rows.flatMap(valueProbeRowValues)).slice(0, 2);
+              if (values.length === 1) {
+                matches.push({ relation, column, canonicalValue: values[0]! });
+              } else if (values.length > 1) {
+                // Two distinct stored spellings of one literal: ambiguity, not proof.
+                return { status: 'ambiguous' as const, matches: [] };
+              }
+            } catch {
+              // A probe failure is absence of proof, never proof of absence.
+            }
+          }
+          if (matches.length === 1) return { status: 'matched' as const, matches };
+          return { status: matches.length > 1 ? 'ambiguous' as const : 'no_match' as const, matches: [] };
+        },
         prepareExploratorySqlExecution,
         prepareAskV2ExploratorySqlExecution,
         executeAgenticGeneratedSql: async (capability, sql, artifact) => {
@@ -11361,10 +11411,11 @@ function analyticalFailureSummary(
       // DECLARE their time axes in the snapshot's own capability contract, so
       // admitting those declared axes is a targeted snapshot-local admission,
       // not an invention.
-      const timeRequirement = buildAnalyticalRequirementSet({
+      const bridgeRequirements = buildAnalyticalRequirementSet({
         question: request.question,
         parsedIntent: evidence.parsedIntent,
-      }).time;
+      });
+      const timeRequirement = bridgeRequirements.time;
       const declaredTimeAxisCandidates = timeRequirement
         ? (() => {
           const existingIds = new Set(evidence.candidates.map((candidate) => candidate.qualifiedId ?? candidate.id));
@@ -11401,10 +11452,69 @@ function analyticalFailureSummary(
           return [...synthesized.values()].slice(0, 8);
         })()
         : [];
+      // A member literal ("Ronnie Knight", "beverage") gives retrieval no
+      // lexical handle on the DIMENSION that holds it — the value lives in
+      // rows, not metadata. When the operator has explicitly allowlisted a
+      // column for value grounding, its semantic dimension is an authorized
+      // binding target by definition, so admit it whenever the question
+      // carries a literal. Bounded by the allowlist itself (max 8).
+      const groundingPolicyForMembers = resolveAgentRuntimeValueGrounding(projectConfig);
+      const questionCarriesLiteral = bridgeRequirements.memberTerms.length > 0
+        || (buildAnalysisQuestionPlan(request.question).requestedShape.filters ?? []).length > 0;
+      const allowlistedMemberDimensionCandidates: AgentEvidenceCandidate[] =
+        groundingPolicyForMembers.mode === 'safe_automatic' && questionCarriesLiteral
+          ? (() => {
+            try {
+              const lease = acquireActiveKnowledgeSnapshot(projectRoot);
+              try {
+                if (lease.snapshotId !== pack.knowledgeLens.snapshotId) return [];
+                const semanticDimensions = lease.catalog.listAllObjects({ objectTypes: ['semantic_dimension'] });
+                const existing = new Set(evidence.candidates.map((candidate) => candidate.qualifiedId ?? candidate.id));
+                const synthesized: AgentEvidenceCandidate[] = [];
+                for (const entry of [...groundingPolicyForMembers.searchSafeColumns].slice(0, 8)) {
+                  const segments = entry.split('.');
+                  if (segments.length < 3) continue;
+                  const column = segments[segments.length - 1]!;
+                  const tableLeaf = segments[segments.length - 2]!;
+                  const object = semanticDimensions.find((candidate) =>
+                    candidate.name.toLowerCase() === `${tableLeaf}.${column}`.toLowerCase());
+                  if (!object) continue;
+                  const payload = object.payload ?? {};
+                  const id = typeof payload.registryQualifiedId === 'string' && payload.registryQualifiedId
+                    ? payload.registryQualifiedId
+                    : object.objectKey;
+                  if (existing.has(id) || synthesized.some((candidate) => (candidate.qualifiedId ?? candidate.id) === id)) continue;
+                  const localId = typeof payload.localId === 'string' && payload.localId ? payload.localId : column;
+                  synthesized.push({
+                    id,
+                    qualifiedId: id,
+                    kind: 'semantic_member',
+                    semanticObjectType: 'dimension',
+                    trustTier: 'semantic',
+                    name: localId,
+                    semanticRuntimeName: localId,
+                    semanticModel: typeof payload.semanticModel === 'string' && payload.semanticModel
+                      ? payload.semanticModel
+                      : tableLeaf,
+                    relevanceScore: 0.5,
+                    matchReasons: ['operator-allowlisted member dimension admitted for the question literal'],
+                    compatibility: 'compatible',
+                  });
+                }
+                return synthesized.slice(0, 8);
+              } finally {
+                lease.release();
+              }
+            } catch {
+              // A missing snapshot cannot widen the evidence; retrieval stands.
+              return [];
+            }
+          })()
+          : [];
       const boundEvidence: AgentRetrievalEvidence = {
         ...evidence,
-        ...(declaredTimeAxisCandidates.length
-          ? { candidates: [...evidence.candidates, ...declaredTimeAxisCandidates].slice(0, 128) }
+        ...(declaredTimeAxisCandidates.length || allowlistedMemberDimensionCandidates.length
+          ? { candidates: [...evidence.candidates, ...declaredTimeAxisCandidates, ...allowlistedMemberDimensionCandidates].slice(0, 128) }
           : {}),
         relationshipPathHandles,
       };
@@ -42840,6 +42950,38 @@ export function buildAgentValueProbeSql(
  * search above, this returns no values: the caller learns only whether the
  * current literal exists exactly once on this approved field.
  */
+/**
+ * Case-insensitive existence probe that also returns the canonical stored
+ * spelling, so a host-bound equality filter matches the warehouse casing
+ * ("ronnie knight" typed, "Ronnie Knight" stored). LIMIT 2 detects two
+ * distinct stored spellings — that is ambiguity, not proof.
+ */
+export function buildAgentCanonicalValueProbeSql(
+  relation: string,
+  column: string,
+  literal: string,
+  connection: ConnectionConfig,
+): string {
+  const normalized = literal.toLowerCase().replace(/\s+/g, ' ').trim();
+  const quotedRelation = quoteAgentRelation(relation, connection);
+  const identifier = quoteAgentIdentifier(column, connection);
+  const castValue = `LOWER(CAST(${identifier} AS ${agentTextCastType(connection.driver)}))`;
+  // Word-boundary containment in addition to equality: users name people
+  // without honorifics ("Matthew Meyer" for the stored "Mr. Matthew Meyer").
+  // DISTINCT + LIMIT 2 keeps this proof-grade — two stored values containing
+  // the term is ambiguity and binds nothing.
+  const exact = `${castValue} = ${sqlStringLiteral(normalized)}`;
+  const wordSuffix = `${castValue} LIKE ${sqlStringLiteral(`% ${normalized}`)}`;
+  const wordPrefix = `${castValue} LIKE ${sqlStringLiteral(`${normalized} %`)}`;
+  const wordInner = `${castValue} LIKE ${sqlStringLiteral(`% ${normalized} %`)}`;
+  return [
+    `SELECT DISTINCT ${identifier} AS dql_literal_value`,
+    `FROM ${quotedRelation}`,
+    `WHERE ${identifier} IS NOT NULL AND (${exact} OR ${wordSuffix} OR ${wordPrefix} OR ${wordInner})`,
+    'LIMIT 2',
+  ].join('\n');
+}
+
 export function buildAgentExactValueProbeSql(
   table: AgentSchemaTable,
   column: string,

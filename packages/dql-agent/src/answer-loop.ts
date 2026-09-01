@@ -2216,6 +2216,19 @@ export interface AnswerLoopInput {
    */
   executeGeneratedSql?: (sql: string, artifact?: DqlArtifactReference) => Promise<AgentResultPayload>;
   /**
+   * Host-owned exact-existence probe over the project's explicitly
+   * allowlisted physical columns (`agent.runtimeValueGrounding`). Given one
+   * question literal it returns which allowlisted columns hold that exact
+   * value (case-insensitively) plus the canonical stored spelling — nothing
+   * else: no rows, no neighboring values, and never any provider egress. The
+   * host-first binder uses it to ground a member filter deterministically;
+   * anything other than exactly one match falls back to the analyst loop.
+   */
+  probeAllowlistedLiteral?: (literal: string) => Promise<{
+    status: 'matched' | 'no_match' | 'ambiguous' | 'disabled' | 'unavailable';
+    matches: Array<{ relation: string; column: string; canonicalValue: string }>;
+  }>;
+  /**
    * Host-only capability minting for a router-selected exploratory proposal.
    * The loop calls this only after its own SQL/context validation has passed;
    * the returned opaque capability is consumed immediately by the execution

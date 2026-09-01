@@ -211,6 +211,50 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
   const resolvedCli = resolveMetricFlowCli(request.projectRoot);
   const bin = resolvedCli?.bin ?? process.env.DQL_METRICFLOW_BIN ?? process.env.METRICFLOW_BIN ?? 'mf';
   const mode = metricFlowCompileMode(resolvedCli?.version ?? '');
+  // MetricFlow's WHERE templates hard-require entity-qualified names
+  // ("product__product_type"); a bare "product_type" is a parse ERROR (and,
+  // in older paths, a silently dropped filter). DQL's semantic layer speaks
+  // bare dimension names, so pre-qualify every filter and group-by from
+  // MetricFlow's OWN dimension list for these metrics — cached per manifest.
+  // The same rule as the group-by repair applies: leaf-name equality, then
+  // fewest entity hops; a tie is genuinely ambiguous and stays unchanged so
+  // MetricFlow's own resolver error names the choices.
+  const qualifiedRequest = request.savedQuery ? request : (() => {
+    const qualified = listMetricFlowDimensions({
+      projectRoot: request.projectRoot,
+      ...(request.dbtProjectPath ? { dbtProjectPath: request.dbtProjectPath } : {}),
+      ...(request.profilesDir ? { profilesDir: request.profilesDir } : {}),
+      metrics: request.metrics,
+    });
+    if (qualified.length === 0) return request;
+    const qualify = (name: string | undefined): string | undefined => {
+      if (!name || name.includes('__') || name === 'metric_time') return name;
+      const matches = qualified.filter((dimension) => dimension.qualifiedName.split('__').pop() === name);
+      if (matches.length === 0) return name;
+      const byHops = [...matches].sort((a, b) => a.qualifiedName.split('__').length - b.qualifiedName.split('__').length);
+      const fewest = byHops[0].qualifiedName.split('__').length;
+      return byHops.filter((dimension) => dimension.qualifiedName.split('__').length === fewest).length === 1
+        ? byHops[0].qualifiedName
+        : name;
+    };
+    return {
+      ...request,
+      dimensions: request.dimensions.map((dimension) => qualify(dimension) ?? dimension),
+      ...(request.timeDimension
+        ? { timeDimension: { ...request.timeDimension, name: qualify(request.timeDimension.name) ?? request.timeDimension.name } }
+        : {}),
+      ...(request.filters
+        ? {
+          filters: request.filters.map((filter) => filter.dimension
+            ? { ...filter, dimension: qualify(filter.dimension) ?? filter.dimension }
+            : filter),
+        }
+        : {}),
+      ...(request.orderBy
+        ? { orderBy: request.orderBy.map((order) => ({ ...order, name: qualify(order.name) ?? order.name })) }
+        : {}),
+    };
+  })();
   const spawn = (spawnRequest: MetricFlowQueryRequest) => {
     const args = buildMetricFlowArgs(spawnRequest, mode);
     return {
@@ -227,7 +271,7 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
       }),
     };
   };
-  let { args, result } = spawn(request);
+  let { args, result } = spawn(qualifiedRequest);
 
   if (result.error) {
     if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -246,7 +290,7 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
     // On a group-by resolution failure MetricFlow lists the valid qualified
     // names — adopt its own suggestion and retry ONCE rather than surfacing a
     // wall of resolver errors for a question that has an exact governed answer.
-    const repaired = repairMetricFlowGroupBy(request, `${stderr}\n${stdout}`);
+    const repaired = repairMetricFlowGroupBy(qualifiedRequest, `${stderr}\n${stdout}`);
     if (repaired) {
       const retry = spawn(repaired);
       if (!retry.result.error && retry.result.status === 0) {
@@ -375,6 +419,15 @@ function buildMetricFlowArgs(request: MetricFlowQueryRequest, mode: MetricFlowCo
 }
 
 function buildWhereClauses(filters: NonNullable<MetricFlowQueryRequest['filters']>): string[] {
+  // MetricFlow's Dimension() template takes exactly TWO segments
+  // (entity__dimension); additional hops ride in entity_path. The group-by
+  // CLI flag accepts the full multi-hop spelling, the where template does not.
+  const dimensionRef = (name: string): string => {
+    const segments = name.split('__');
+    if (segments.length <= 2) return `Dimension('${name}')`;
+    const path = segments.slice(0, -2).map((hop) => `'${hop}'`).join(', ');
+    return `Dimension('${segments.slice(-2).join('__')}', entity_path=[${path}])`;
+  };
   return filters.flatMap((filter) => {
     if (filter.expression?.trim()) return [filter.expression.trim()];
     if (!filter.dimension || !filter.operator) return [];
@@ -383,25 +436,37 @@ function buildWhereClauses(filters: NonNullable<MetricFlowQueryRequest['filters'
       ? value
       : `'${value.replace(/'/g, "''")}'`;
     const first = values[0] ?? '';
+    // Producers spell comparison operators both ways ('=' from the governed
+    // Ask compile tool, 'equals' from blocks). An unknown operator must never
+    // silently drop the clause — the Ask boundary now refuses to execute a
+    // query whose filter vanished — so accept both spellings here.
     switch (filter.operator) {
       case 'equals':
+      case '=':
+      case '==':
         return values.length <= 1
-          ? [`{{ Dimension('${filter.dimension}') }} = ${quote(first)}`]
-          : [`{{ Dimension('${filter.dimension}') }} IN (${values.map(quote).join(', ')})`];
+          ? [`{{ ${dimensionRef(filter.dimension)} }} = ${quote(first)}`]
+          : [`{{ ${dimensionRef(filter.dimension)} }} IN (${values.map(quote).join(', ')})`];
       case 'not_equals':
-        return [`{{ Dimension('${filter.dimension}') }} != ${quote(first)}`];
+      case '!=':
+      case '<>':
+        return [`{{ ${dimensionRef(filter.dimension)} }} != ${quote(first)}`];
       case 'in':
-        return values.length > 0 ? [`{{ Dimension('${filter.dimension}') }} IN (${values.map(quote).join(', ')})`] : [];
+        return values.length > 0 ? [`{{ ${dimensionRef(filter.dimension)} }} IN (${values.map(quote).join(', ')})`] : [];
       case 'not_in':
-        return values.length > 0 ? [`{{ Dimension('${filter.dimension}') }} NOT IN (${values.map(quote).join(', ')})`] : [];
+        return values.length > 0 ? [`{{ ${dimensionRef(filter.dimension)} }} NOT IN (${values.map(quote).join(', ')})`] : [];
       case 'gt':
-        return [`{{ Dimension('${filter.dimension}') }} > ${quote(first)}`];
+      case '>':
+        return [`{{ ${dimensionRef(filter.dimension)} }} > ${quote(first)}`];
       case 'gte':
-        return [`{{ Dimension('${filter.dimension}') }} >= ${quote(first)}`];
+      case '>=':
+        return [`{{ ${dimensionRef(filter.dimension)} }} >= ${quote(first)}`];
       case 'lt':
-        return [`{{ Dimension('${filter.dimension}') }} < ${quote(first)}`];
+      case '<':
+        return [`{{ ${dimensionRef(filter.dimension)} }} < ${quote(first)}`];
       case 'lte':
-        return [`{{ Dimension('${filter.dimension}') }} <= ${quote(first)}`];
+      case '<=':
+        return [`{{ ${dimensionRef(filter.dimension)} }} <= ${quote(first)}`];
       default:
         return [];
     }
