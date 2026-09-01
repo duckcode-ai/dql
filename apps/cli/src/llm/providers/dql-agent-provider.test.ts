@@ -6465,6 +6465,57 @@ describe('host-first semantic execution', () => {
     expect(selection.limit).toBe(10);
   });
 
+  it('restores projected columns and stamps the applied window on a zero-row windowed result', async () => {
+    // The adapter loses its header row when zero rows return, which starved
+    // the deterministic facts renderer of even the "zero rows" claim. The
+    // host composed the selection, so it declares the projected columns and
+    // the window it applied — the answer can then say WHAT period was empty.
+    const metricWithAxis: AgentEvidenceCandidate = {
+      ...metric,
+      analyticalCapability: {
+        timeDimensions: [{
+          dimensionId: 'semantic:uncategorized:dimension:order_item.metric_time',
+          role: 'metric_time',
+          supportedGrains: ['day', 'month'],
+        }],
+      } as never,
+    };
+    const metricTimeAxis: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:order_item.metric_time',
+      qualifiedId: 'semantic:uncategorized:dimension:order_item.metric_time',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic', name: 'metric_time',
+      timeGrains: ['day', 'month'],
+      relevanceScore: 0.5, matchReasons: ['declared axis'], compatibility: 'compatible',
+    };
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 }));
+    const provider: AgentProvider = {
+      name: 'ollama',
+      async available() { return true; },
+      async generate() { throw new Error('zero-dispatch path must not consult the provider'); },
+    };
+    const candidates = [metricWithAxis, customerName, metricTimeAxis];
+    const state = askV2State(candidates);
+
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'top customers by highest revenue for the last two months',
+      provider,
+      askAgentV2Workspace: askV2Workspace(candidates),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    const result = answer.result as (NonNullable<typeof answer.result> & {
+      appliedTimeWindow?: { expression: string; startInclusive: string; endExclusive: string };
+    }) | undefined;
+    expect(result?.rowCount).toBe(0);
+    expect(result?.columns).toEqual(['customer_name', 'revenue']);
+    expect(result?.appliedTimeWindow?.expression).toBe('last 2 months');
+    expect(result?.appliedTimeWindow?.startInclusive).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(result?.appliedTimeWindow?.endExclusive).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
   it('falls back to the analyst when the measure is AMBIGUOUS (the large-repo case)', async () => {
     const secondRevenue: AgentEvidenceCandidate = {
       ...metric,

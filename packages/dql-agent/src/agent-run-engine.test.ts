@@ -901,6 +901,131 @@ describe("AgentRunEngine", () => {
     expect(run.answer).not.toContain('Untrusted executor prose.');
   });
 
+  it('narrates a zero-row windowed V2 result with the exact applied dates instead of the fact-less fallback', async () => {
+    // A zero-row window answer used to read "no fact-linked narrative was
+    // retained" — indistinguishable from a failure. The applied window rides
+    // on the result payload, so the deterministic facts renderer can say WHAT
+    // period matched nothing.
+    const candidateId = 'certified:customer_profile';
+    const state = {
+      version: 4,
+      mode: 'authoritative_v2',
+      turnClass: 'analytics',
+      snapshotId: 'snapshot:v2-window-empty',
+      sourceFingerprint: 'source:v2-window-empty',
+      retainedCandidateIds: [candidateId],
+      initialCandidateIds: [candidateId],
+      expansionCandidateIds: [],
+      relationshipPathHandles: [],
+      conversation: { version: 2, availableResultHandleIds: [] },
+      observations: [],
+      tierStates: {
+        certified: {
+          version: 1,
+          status: 'complete',
+          candidateIds: [candidateId],
+          reasonCode: 'CERTIFIED_COMPLETE_FOR_REQUEST',
+        },
+      },
+      exactCertifiedCandidateId: candidateId,
+    } satisfies AskAgentStateV4;
+    const decision: IntentDecision = {
+      action: 'answer',
+      confidence: 1,
+      followsUp: false,
+      source: 'heuristic',
+      reason: 'The host captured one complete certified candidate from the immutable snapshot.',
+      askAgentV2Decision: { version: 2, mode: 'authoritative_v2', state },
+    };
+    const executeCertified = vi.fn(({ request }: { request: { askAgentV2ExecutionCapability?: AskV2ExecutionCapabilityV1 } }) => {
+      observeAskAgentV2Tool(state, {
+        version: 1,
+        tool: 'run_certified',
+        outcome: 'eligible',
+        tier: 'certified',
+        reasonCode: 'ASK_V2_EXECUTION_AUTHORIZED',
+        candidateIds: [candidateId],
+        planId: 'ask-v2:certified:window-empty',
+        executionAuthorized: true,
+        inputFingerprint: 'sha256:v2-window-empty',
+        origin: 'freeze',
+      });
+      observeAskAgentV2Tool(state, {
+        version: 1,
+        tool: 'run_certified',
+        outcome: 'executed',
+        tier: 'certified',
+        reasonCode: 'CERTIFIED_EXECUTED',
+        candidateIds: [candidateId],
+        planId: 'ask-v2:certified:window-empty',
+        origin: 'execution',
+      });
+      finishAskAgentV2Turn(state, {
+        version: 2,
+        kind: 'finish_answer',
+        reasonCode: 'CERTIFIED_EXECUTED',
+        origin: 'execution',
+      });
+      const result = {
+        columns: ['customer_name', 'revenue'],
+        rows: [],
+        rowCount: 0,
+        resultFingerprint: 'result:v2-window-empty',
+        answerTier: 'certified_block',
+        appliedTimeWindow: {
+          expression: 'last 2 months',
+          startInclusive: '2026-07-01',
+          endExclusive: '2026-09-01',
+        },
+      };
+      const askAgentV2ExecutionReceipt = mintAskV2ExecutionReceiptV1({
+        state,
+        capability: request.askAgentV2ExecutionCapability,
+        result,
+      });
+      return {
+        status: 'completed' as const,
+        trustState: 'certified' as const,
+        answerTier: 'certified_block',
+        answer: 'Untrusted executor prose.',
+        result,
+        askAgentV2Outcome: {
+          version: 2 as const,
+          kind: 'finish_answer' as const,
+          reasonCode: 'CERTIFIED_EXECUTED',
+          origin: 'execution' as const,
+        },
+        ...(askAgentV2ExecutionReceipt ? { askAgentV2ExecutionReceipt } : {}),
+        artifacts: [{
+          id: 'answer:v2-window-empty',
+          kind: 'answer' as const,
+          title: 'Customer profile',
+          trustState: 'certified' as const,
+          payload: {
+            result,
+          },
+        }],
+      };
+    });
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-v2-window-empty',
+      now: fixedClock(),
+      router: { decide: () => decision },
+      executors: { certified_answer: executeCertified },
+    });
+
+    const run = await engine.run({ question: 'top customers by revenue for the last two months', requestedMode: 'ask' });
+
+    expect(executeCertified).toHaveBeenCalledTimes(1);
+    expect(run.status).toBe('completed');
+    expect(run.businessAnswer).toMatchObject({ mode: 'facts_only' });
+    expect(run.answer).toContain('last 2 months');
+    expect(run.answer).toContain('2026-07-01');
+    expect(run.answer).toContain('no matching rows in that period');
+    expect(run.answer).not.toContain('no fact-linked narrative');
+    expect(run.answer).not.toContain('Untrusted executor prose.');
+  });
+
   it('AGT-047 rejects forged, stale, legacy, and pre-freeze V2 receipts before they can bypass generic gates', async () => {
     const candidateId = 'certified:customer_profile';
     const result = {

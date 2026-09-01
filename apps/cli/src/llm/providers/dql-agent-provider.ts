@@ -2888,7 +2888,36 @@ function createAskV2LaneHandler(
           }
           try {
             const result = await input.executeGeneratedSql(compiled.sql);
-            completed = { tier: 'semantic', result: { ...result, trustState: 'governed', answerTier: 'semantic_metric', semanticTrace: compiled.trace } };
+            // A zero-row adapter result loses its header row, and with it
+            // the downstream contract: the deterministic fact renderer needs
+            // columns to state even "zero rows", and the reader deserves the
+            // shape of the answer they asked for. The host composed the
+            // selection, so the projected columns are known without a single
+            // returned row.
+            const projectedColumns = Array.isArray(result.columns) && result.columns.length > 0
+              ? result.columns
+              : [
+                ...(selection.dimensions ?? []),
+                ...(selection.timeDimension ? [selection.timeDimension.name] : []),
+                ...selection.metrics,
+              ];
+            completed = {
+              tier: 'semantic',
+              result: {
+                ...result,
+                columns: projectedColumns,
+                trustState: 'governed',
+                answerTier: 'semantic_metric',
+                semanticTrace: compiled.trace,
+                ...(requiredWindow && windowBounds && windowFilters.length ? {
+                  appliedTimeWindow: {
+                    expression: requiredWindow.expression,
+                    startInclusive: windowBounds.startInclusive.slice(0, 10),
+                    endExclusive: windowBounds.endExclusive.slice(0, 10),
+                  },
+                } : {}),
+              },
+            };
             observe('compile_and_run_semantic', 'executed', 'SEMANTIC_RESULT_VALIDATED', { tier: 'semantic', candidateIds: selectedCandidateIds, origin: 'execution', planId: state.resolvedPlan?.id });
             return { executed: true, tier: 'semantic', rowCount: result.rowCount, engine: compiled.engine };
           } catch {

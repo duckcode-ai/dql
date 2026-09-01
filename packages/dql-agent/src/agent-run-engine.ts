@@ -4600,7 +4600,7 @@ interface AuthoritativeExecutedAnswerArtifactV1 {
 
 interface DeterministicResultFactV1 {
   factId: string;
-  kind: 'result_scope' | 'result_row';
+  kind: 'result_scope' | 'result_row' | 'result_window';
   resultFingerprint: string;
   rowIndex?: number;
   values?: Record<string, unknown>;
@@ -4774,6 +4774,20 @@ function deterministicResultFactProjection(input: {
     columns,
     ...(canonical.truncated ? { truncated: true } : {}),
   };
+  // The applied window is host-computed at the execution boundary and rides
+  // on the result payload itself — never provider prose. Without it, a
+  // truthful zero-row window answer is indistinguishable from a failure.
+  const rawWindow = objectRecordForResultFacts(rawResult.appliedTimeWindow);
+  const appliedTimeWindow = rawWindow
+    && stringForResultFacts(rawWindow.expression)
+    && stringForResultFacts(rawWindow.startInclusive)
+    && stringForResultFacts(rawWindow.endExclusive)
+    ? {
+      expression: stringForResultFacts(rawWindow.expression)!,
+      startInclusive: stringForResultFacts(rawWindow.startInclusive)!,
+      endExclusive: stringForResultFacts(rawWindow.endExclusive)!,
+    }
+    : undefined;
   const facts: DeterministicResultFactV1[] = [
     {
       factId: deterministicResultFactId(canonical.resultFingerprint, 'scope', scopeDetails),
@@ -4782,6 +4796,13 @@ function deterministicResultFactProjection(input: {
       details: scopeDetails,
       provenance,
     },
+    ...(appliedTimeWindow ? [{
+      factId: deterministicResultFactId(canonical.resultFingerprint, 'window', appliedTimeWindow),
+      kind: 'result_window' as const,
+      resultFingerprint: canonical.resultFingerprint,
+      details: appliedTimeWindow,
+      provenance,
+    }] : []),
     ...rows.map((values, rowIndex) => ({
       factId: deterministicResultFactId(canonical.resultFingerprint, `row:${rowIndex}`, values),
       kind: 'result_row' as const,
@@ -4820,11 +4841,22 @@ function deterministicResultNarrative(input: {
   columns: string[];
 }): DeterministicResultNarrativeV1 {
   const scope = input.factSet.facts[0]!;
+  const windowFact = input.factSet.facts.find((fact) => fact.kind === 'result_window');
+  const windowText = windowFact
+    ? `${String(windowFact.details?.expression)} (${String(windowFact.details?.startInclusive)} through ${String(windowFact.details?.endExclusive)}, end exclusive)`
+    : undefined;
   const claims: DeterministicResultNarrativeV1['claims'] = [{
     claimId: 'claim:result_scope',
     factIds: [scope.factId],
     text: `The query returned ${input.rowCount.toLocaleString()} row${input.rowCount === 1 ? '' : 's'} across ${input.columns.length.toLocaleString()} column${input.columns.length === 1 ? '' : 's'}${input.truncated ? '; the returned rows are truncated.' : '.'}`,
   }];
+  if (windowFact && windowText && input.returnedRowCount > 0) {
+    claims.push({
+      claimId: 'claim:result_window',
+      factIds: [windowFact.factId],
+      text: `Rows are filtered to ${windowText}.`,
+    });
+  }
   const rowFacts = input.factSet.facts
     .filter((fact): fact is DeterministicResultFactV1 & { rowIndex: number; values: Record<string, unknown> } =>
       fact.kind === 'result_row' && fact.rowIndex !== undefined && Boolean(fact.values),
@@ -4849,10 +4881,16 @@ function deterministicResultNarrative(input: {
     });
   }
   if (rowFacts.length === 0 && input.returnedRowCount === 0) {
+    // A LIMIT truncates surplus rows; returning zero therefore proves the
+    // window itself matched nothing. Naming the exact dates turns "failure"
+    // into "true and actionable": the reader can see at once whether their
+    // data simply ends before the requested period.
     claims.push({
       claimId: 'claim:no_returned_rows',
-      factIds: [scope.factId],
-      text: 'The query completed with zero returned rows.',
+      factIds: windowFact ? [scope.factId, windowFact.factId] : [scope.factId],
+      text: windowFact && windowText
+        ? `The query returned no rows for the requested window ${windowText} — the governed source holds no matching rows in that period.`
+        : 'The query completed with zero returned rows.',
     });
   }
   return {

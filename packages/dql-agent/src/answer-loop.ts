@@ -1982,6 +1982,13 @@ export interface AgentResultPayload {
    */
   truncated?: boolean;
   /**
+   * The host-computed time window applied as range filters on this execution.
+   * Recorded so the deterministic facts renderer can state WHICH period a
+   * result covers — a zero-row answer without its window reads as failure
+   * instead of a true "nothing between these dates".
+   */
+  appliedTimeWindow?: { expression: string; startInclusive: string; endExclusive: string };
+  /**
    * Host-side notes about this execution — for example that the reusable DQL
    * block could not be rebuilt. These never mean the RESULT is wrong.
    */
