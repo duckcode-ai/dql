@@ -6095,3 +6095,265 @@ describe('semantic capability reference resolution', () => {
     })).toBeUndefined();
   });
 });
+
+/**
+ * The reported T1 question, end to end through the V2 tool lane: a bounded
+ * time window must reach the compiled query as HOST-computed date bounds, the
+ * ranking must carry an ORDER BY, and a windowed question with no bound time
+ * axis must be refused with the axes that would work — never compiled as an
+ * unfiltered all-time query.
+ */
+describe('V2 semantic time-window enforcement', () => {
+  const windowMetric: AgentEvidenceCandidate = {
+    id: 'semantic:metric:order_item.revenue', qualifiedId: 'semantic:metric:order_item.revenue', kind: 'semantic_metric',
+    semanticObjectType: 'metric', trustTier: 'semantic', name: 'revenue',
+    relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+  };
+  const customerName: AgentEvidenceCandidate = {
+    id: 'semantic:uncategorized:dimension:customers.customer_name', qualifiedId: 'semantic:uncategorized:dimension:customers.customer_name',
+    kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic', name: 'customer_name',
+    relevanceScore: 0.9, matchReasons: ['entity label'], compatibility: 'compatible',
+  };
+  const orderedAt: AgentEvidenceCandidate = {
+    id: 'semantic:uncategorized:dimension:order_items.ordered_at', qualifiedId: 'semantic:uncategorized:dimension:order_items.ordered_at',
+    kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic', name: 'ordered_at',
+    timeGrains: ['day', 'week', 'month', 'quarter', 'year'],
+    relevanceScore: 0.8, matchReasons: ['time axis'], compatibility: 'compatible',
+  };
+  const question = 'Can you give me the last two month with high revenue by customer name';
+
+  it('injects host-computed window bounds and honors orderBy', async () => {
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['customer_name', 'revenue'], rows: [{ customer_name: 'Ada', revenue: 1 }], rowCount: 1 }));
+    const state = askV2State([windowMetric, customerName, orderedAt]);
+
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question,
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:order_item.revenue"],"dimensionIds":["semantic:uncategorized:dimension:customers.customer_name"],"timeDimensionId":"semantic:uncategorized:dimension:order_items.ordered_at","timeGrain":"month","orderBy":[{"name":"revenue","direction":"desc"}],"limit":10}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"Done."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([windowMetric, customerName, orderedAt]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    const selection = (compile.mock.calls[0] as unknown[])[0] as {
+      filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+      orderBy?: Array<{ name: string; direction: string }>;
+      limit?: number;
+    };
+    // The window arrived as two host-owned range filters on the bound axis.
+    const rangeFilters = (selection.filters ?? []).filter((f) => f.dimension === 'ordered_at');
+    expect(rangeFilters.map((f) => f.operator).sort()).toEqual(['gte', 'lt']);
+    for (const filter of rangeFilters) {
+      expect(filter.values[0]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+    // The ranking is ordered — no more unordered LIMIT row lottery.
+    expect(selection.orderBy).toEqual([{ name: 'revenue', direction: 'desc' }]);
+    expect(selection.limit).toBe(10);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('completes the window through the sole available axis when the model omits time args', async () => {
+    // Superseded refusal: with exactly one available axis the HOST completes
+    // the binding rather than refusing — the model omitted time args on a
+    // window-only question, which is exactly what the prompt asks of it.
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
+    const state = askV2State([windowMetric, customerName, orderedAt]);
+
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question,
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:order_item.revenue"],"dimensionIds":["semantic:uncategorized:dimension:customers.customer_name"]}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"Done."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([windowMetric, customerName, orderedAt]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    const selection = (compile.mock.calls[0] as unknown[])[0] as {
+      filters?: Array<{ dimension: string; operator: string }>;
+    };
+    expect((selection.filters ?? []).filter((f) => f.dimension === 'ordered_at').map((f) => f.operator).sort())
+      .toEqual(['gte', 'lt']);
+  });
+
+  it('refuses a windowed compile when NO time axis exists anywhere', async () => {
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const state = askV2State([windowMetric, customerName]);
+
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 4 })({
+      question,
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:order_item.revenue"],"dimensionIds":["semantic:uncategorized:dimension:customers.customer_name"]}}\n```',
+        'no more calls',
+      ]),
+      askAgentV2Workspace: askV2Workspace([windowMetric, customerName]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
+    } as never);
+
+    // The unfiltered all-time query must never compile.
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic',
+        reasonCode: 'SEMANTIC_TIME_WINDOW_UNBOUND',
+      }),
+    ]));
+  });
+
+  it('rejects an orderBy naming a field the call did not select', async () => {
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const state = askV2State([windowMetric, customerName, orderedAt]);
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 6, maxProviderDispatches: 4 })({
+      question: 'top customers by revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:order_item.revenue"],"orderBy":[{"name":"profit","direction":"desc"}],"limit":10}}\n```',
+        'stop',
+      ]),
+      askAgentV2Workspace: askV2Workspace([windowMetric, customerName, orderedAt]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
+    } as never);
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reasonCode: 'SEMANTIC_ORDER_FIELD_NOT_SELECTED' }),
+    ]));
+  });
+});
+
+/**
+ * MetricFlow renders a dimension as `entity__name`; model files qualify it as
+ * `model.name`. A model that just read MetricFlow-shaped cards echoes those
+ * spellings back — refusing them rejected the exact field the snapshot had
+ * admitted. The qualifier must still AGREE: `orders__ordered_at` may never
+ * resolve to `order_items.ordered_at`.
+ */
+describe('MetricFlow-shaped reference resolution', () => {
+  const customerName = {
+    id: 'semantic:uncategorized:dimension:customers.customer_name',
+    qualifiedId: 'semantic:uncategorized:dimension:customers.customer_name',
+    kind: 'semantic_member' as const,
+    semanticObjectType: 'dimension' as const,
+    trustTier: 'semantic' as const,
+    name: 'customer_name',
+    aliases: [],
+    relevanceScore: 1,
+    matchReasons: ['entity label'],
+    compatibility: 'compatible' as const,
+  };
+  const capabilitiesFor = (...candidates: Array<typeof customerName>) => new Map(candidates.map((candidate) => [candidate.id, {
+    version: 1 as const,
+    candidateId: candidate.id,
+    runtimeName: candidate.name,
+    engines: [],
+    roles: ['dimension' as const, 'filter_dimension' as const],
+    fingerprint: askV2SemanticCandidateAuthorityFingerprint(candidate),
+    isCurrent: () => true,
+  }]));
+
+  it('resolves entity__name and model.name spellings to the admitted candidate', () => {
+    for (const reference of ['customer__customer_name', 'customers.customer_name', 'customer_name']) {
+      expect(__test__.resolveV2SemanticCapabilityReference({
+        reference, role: 'dimension', candidates: [customerName], capabilities: capabilitiesFor(customerName),
+      }), reference).toBe(customerName.id);
+    }
+  });
+
+  it('never lets a mismatched qualifier grab another model\'s field', () => {
+    const ordersOrderedAt = {
+      ...customerName,
+      id: 'semantic:uncategorized:dimension:order_items.ordered_at',
+      qualifiedId: 'semantic:uncategorized:dimension:order_items.ordered_at',
+      name: 'ordered_at',
+    };
+    expect(__test__.resolveV2SemanticCapabilityReference({
+      reference: 'products__ordered_at',
+      role: 'dimension',
+      candidates: [ordersOrderedAt],
+      capabilities: capabilitiesFor(ordersOrderedAt),
+    })).toBeUndefined();
+  });
+});
+
+/**
+ * A window-only requirement ("last two months …", no grain grouping) needs an
+ * axis to FILTER on, not to group by — and the metric declares its own axes.
+ * With exactly one compatible axis the HOST completes the binding; demanding
+ * the model name an axis the question never mentioned fed the invalid-grain
+ * retry loop until the budget died.
+ */
+describe('host-completed window axis', () => {
+  it('applies the window through the sole metric-declared axis with no model time args', async () => {
+    const metricWithAxis: AgentEvidenceCandidate = {
+      id: 'semantic:metric:order_item.revenue', qualifiedId: 'semantic:metric:order_item.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'revenue',
+      analyticalCapability: {
+        metricId: 'semantic:metric:order_item.revenue',
+        semanticModelId: 'semantic:uncategorized:model:order_item',
+        measureIds: [], primaryEntityId: 'order_item',
+        defaultResultGrainId: 'order_item', resultGrainIds: ['order_item'],
+        aggregation: 'sum',
+        additivity: { entities: 'additive', time: 'additive' },
+        dimensions: [],
+        timeDimensions: [{
+          dimensionId: 'semantic:uncategorized:dimension:order_items.ordered_at',
+          role: 'time', supportedGrains: ['day', 'week', 'month', 'quarter', 'year'],
+        }],
+        operations: [], supportedOutputKinds: [],
+      } as never,
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const orderedAtAxis: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:order_items.ordered_at', qualifiedId: 'semantic:uncategorized:dimension:order_items.ordered_at',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic', name: 'ordered_at',
+      timeGrains: ['day', 'week', 'month', 'quarter', 'year'],
+      relevanceScore: 0.5, matchReasons: ['metric-declared time axis'], compatibility: 'compatible',
+    };
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['customer_name', 'revenue'], rows: [{ customer_name: 'Ada', revenue: 1 }], rowCount: 1 }));
+    const state = askV2State([metricWithAxis, orderedAtAxis]);
+
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'Can you give me the last two month with high revenue by customer name',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:order_item.revenue"],"orderBy":[{"name":"revenue","direction":"desc"}],"limit":10}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"Done."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metricWithAxis, orderedAtAxis]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    const selection = (compile.mock.calls[0] as unknown[])[0] as {
+      filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+      timeDimension?: unknown;
+    };
+    // The window applied through the host-completed axis…
+    const rangeFilters = (selection.filters ?? []).filter((f) => f.dimension === 'ordered_at');
+    expect(rangeFilters.map((f) => f.operator).sort()).toEqual(['gte', 'lt']);
+    // …without forcing a time GROUPING the question never asked for.
+    expect(selection.timeDimension).toBeUndefined();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reasonCode: 'SEMANTIC_TIME_WINDOW_HOST_COMPLETED' }),
+    ]));
+  });
+});

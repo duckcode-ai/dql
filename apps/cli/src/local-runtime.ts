@@ -11330,8 +11330,56 @@ function analyticalFailureSummary(
           candidateIds: candidatePathIds(path.leftRelation, path.rightRelation),
         } : handle;
       });
+      // A question that restricts WHEN needs a bindable time axis — but
+      // retrieval ranks lexically, and "last two months" shares no words with
+      // `ordered_at`. When no retained candidate can play the time role, the
+      // window is unanswerable no matter what the analyst does: every
+      // timeDimensionId it tries is unresolvable, and the turn dies as
+      // "time dimension invalid" with nothing to bind. The retained metrics
+      // DECLARE their time axes in the snapshot's own capability contract, so
+      // admitting those declared axes is a targeted snapshot-local admission,
+      // not an invention.
+      const timeRequirement = buildAnalyticalRequirementSet({
+        question: request.question,
+        parsedIntent: evidence.parsedIntent,
+      }).time;
+      const hasTimeAxisCandidate = evidence.candidates.some((candidate) =>
+        askV2ExecutableSemanticRoles(candidate)?.includes('time_dimension'));
+      const declaredTimeAxisCandidates = timeRequirement && !hasTimeAxisCandidate
+        ? (() => {
+          const existingIds = new Set(evidence.candidates.map((candidate) => candidate.qualifiedId ?? candidate.id));
+          const synthesized = new Map<string, AgentEvidenceCandidate>();
+          for (const candidate of evidence.candidates) {
+            if (candidate.kind !== 'semantic_metric') continue;
+            for (const axis of candidate.analyticalCapability?.timeDimensions ?? []) {
+              const id = axis.dimensionId?.trim();
+              if (!id || existingIds.has(id) || synthesized.has(id)) continue;
+              const leaf = (id.split(':').pop() ?? id).split('.').pop() ?? id;
+              synthesized.set(id, {
+                id,
+                qualifiedId: id,
+                kind: 'semantic_member',
+                semanticObjectType: 'dimension',
+                trustTier: 'semantic',
+                name: leaf,
+                timeGrains: (axis.supportedGrains ?? []).slice(0, 8),
+                ...(candidate.analyticalCapability?.semanticModelId
+                  ? { semanticModel: candidate.analyticalCapability.semanticModelId }
+                  : {}),
+                relevanceScore: 0.5,
+                matchReasons: ['metric-declared time axis admitted for the requested time clause'],
+                compatibility: 'compatible',
+              });
+            }
+          }
+          return [...synthesized.values()].slice(0, 4);
+        })()
+        : [];
       const boundEvidence: AgentRetrievalEvidence = {
         ...evidence,
+        ...(declaredTimeAxisCandidates.length
+          ? { candidates: [...evidence.candidates, ...declaredTimeAxisCandidates].slice(0, 128) }
+          : {}),
         relationshipPathHandles,
       };
       // The manifest and retrieval-catalog snapshot IDs intentionally live

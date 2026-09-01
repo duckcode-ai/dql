@@ -12,6 +12,7 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
 import { buildAskV2AnalystSystemPrompt, buildAskV2TextToolContract } from './ask-v2-analyst-prompt.js';
+import { resolvePlanTimeRange, type AnalyticalTimeWindowV1 } from '@duckcodeailabs/dql-agent';
 import {
   ClaudeProvider,
   KGStore,
@@ -821,12 +822,38 @@ function resolveV2SemanticCapabilityReference(input: {
     if (uniqueAliases.length === 1) return uniqueAliases[0];
   }
 
-  const runtimeName = normalizeV2SemanticRuntimeName(reference);
+  // MetricFlow itself renders a dimension as `entity__name` and a model file
+  // qualifies it as `model.name`. A model that has just read MetricFlow-shaped
+  // cards echoes those spellings back; refusing them as unknown identifiers
+  // rejected exactly the field the snapshot admitted. Resolution works on the
+  // LEAF name; the qualifier (when present) must agree with the candidate's
+  // own identity so `orders__ordered_at` can never grab `order_items.ordered_at`.
+  const qualifierSplit = /__|\./.test(reference) ? reference.split(/__|\./) : undefined;
+  const leafReference = qualifierSplit ? qualifierSplit[qualifierSplit.length - 1]! : reference;
+  const referenceQualifier = qualifierSplit && qualifierSplit.length > 1
+    ? normalizeV2SemanticRuntimeName(qualifierSplit[qualifierSplit.length - 2]!)
+    : undefined;
+  const runtimeName = normalizeV2SemanticRuntimeName(leafReference);
   const matches = input.candidates.flatMap((candidate) => {
     const candidateId = v2CandidateId(candidate);
     const capability = input.capabilities!.get(candidateId);
     if (!v2SemanticCapabilityMatchesCandidate(capability, candidate, input.role)
       || normalizeV2SemanticRuntimeName(capability.runtimeName) !== runtimeName) return [];
+    if (referenceQualifier) {
+      const identity = normalizeV2SemanticRuntimeName(candidateId);
+      const owner = normalizeV2SemanticRuntimeName(candidate.semanticModel ?? candidate.primaryEntity ?? '');
+      const identityLeafModel = (() => {
+        const leaf = candidateId.split(':').pop() ?? '';
+        const parts = leaf.split('.');
+        return parts.length > 1 ? normalizeV2SemanticRuntimeName(parts[parts.length - 2]!) : '';
+      })();
+      const qualifierAgrees = owner === referenceQualifier
+        || identityLeafModel === referenceQualifier
+        || identityLeafModel === `${referenceQualifier}s`
+        || identity.includes(`:${referenceQualifier}.`)
+        || identity.includes(`${referenceQualifier}s.`);
+      if (!qualifierAgrees) return [];
+    }
     const authority = input.role === 'metric'
       ? candidate.kind === 'semantic_metric'
         ? 0
@@ -870,6 +897,10 @@ function resolveV2SemanticCapabilityReference(input: {
   // host already admitted for this role, and only when exactly one candidate
   // claims it. Ambiguity stays ambiguous, and nothing outside the admitted set
   // becomes reachable — so this widens what can be SAID, never what can be RUN.
+  // A qualified reference whose qualifier agrees with no candidate must stay
+  // unresolved — the label fallback below matches by LEAF name, and letting
+  // `products__ordered_at` reach it would hand back another model's field.
+  if (referenceQualifier) return undefined;
   const aliasMatches = [...new Set(input.candidates.flatMap((candidate) => {
     const candidateId = v2CandidateId(candidate);
     const capability = input.capabilities!.get(candidateId);
@@ -891,6 +922,12 @@ type V2RequestedTimeGrain = 'day' | 'week' | 'month' | 'quarter' | 'year';
 interface V2ExplicitTimeRequirement {
   grain?: V2RequestedTimeGrain;
   fiscalPeriod?: string;
+  /**
+   * A bounded window the answer must be restricted to. Carried so the HOST
+   * can compute the concrete date bounds and inject them as range filters —
+   * the analyst binds WHICH time axis, never the window's values.
+   */
+  window?: AnalyticalTimeWindowV1;
   /** A fiscal token is not a reason to invent a calendar or date role. */
   requiresDeclaredFiscalCalendar: boolean;
 }
@@ -904,6 +941,7 @@ function v2ExplicitTimeRequirement(question: string): V2ExplicitTimeRequirement 
   const time = buildAnalyticalRequirementSet({ question }).time;
   return {
     ...(time?.grain ? { grain: time.grain } : {}),
+    ...(time?.window ? { window: time.window } : {}),
     ...(time?.fiscalPeriod ? { fiscalPeriod: time.fiscalPeriod } : {}),
     requiresDeclaredFiscalCalendar: time?.requiresDeclaredFiscalCalendar === true,
   };
@@ -2519,7 +2557,22 @@ function createAskV2LaneHandler(
         // grain. Told only that its choice was invalid, the model re-sends a
         // different guess and the turn dies on budget with the query never
         // attempted — even though a valid axis was sitting in the snapshot.
-        if (!normalizedTime.ok) {
+        // For a WINDOW-ONLY requirement (no grain grouping asked), the model's
+        // time args are advisory: the axis exists to carry the host's window
+        // filter, and the host can complete that binding itself. Refusing on a
+        // mis-spelled axis here sent every such turn into an invalid-axis
+        // retry loop — the model kept "helpfully" naming time axes for a
+        // question that never asked it to. Ignore the bad args, record that,
+        // and let host completion pick the sole metric-declared axis below.
+        const windowOnlyTimeArgsIgnored = !normalizedTime.ok
+          && Boolean(explicitTimeRequirement.window)
+          && !explicitTimeRequirement.grain;
+        if (windowOnlyTimeArgsIgnored) {
+          observe('compile_and_run_semantic', 'eligible', 'SEMANTIC_TIME_ARGS_IGNORED_FOR_WINDOW', {
+            tier: 'semantic', candidateIds: semanticCandidateIds, origin: 'validation',
+          });
+        }
+        if (!normalizedTime.ok && !windowOnlyTimeArgsIgnored) {
           // Offer a same-tier correction ONCE. The host now hands back the
           // admitted axes with their declared grains, so a first miss is
           // genuinely fixable — but a second identical failure means this
@@ -2636,7 +2689,7 @@ function createAskV2LaneHandler(
             metricIds,
             dimensionIds,
             timeDimensionId: timeId ?? '',
-            timeGrain: normalizedTime.timeGrain ?? '',
+            timeGrain: (normalizedTime.ok ? normalizedTime.timeGrain : undefined) ?? '',
             ...(explicitTimeRequirement.requiresDeclaredFiscalCalendar ? {
               fiscalCalendar: {
                 id: fiscalCalendar!.id,
@@ -2694,6 +2747,63 @@ function createAskV2LaneHandler(
           }
           resolvedOrderBy.push({ name: matched.runtimeName, direction });
         }
+        // A required WINDOW needs a bound time axis, and its concrete date
+        // values are computed by the HOST — the analyst binds which axis,
+        // never the dates. Without this, "last two months" could compile as
+        // an unfiltered all-time query and no gate would know.
+        const requiredWindow = explicitTimeRequirement.window;
+        const windowBounds = requiredWindow
+          ? resolvePlanTimeRange(requiredWindow.expression, new Date())
+          : undefined;
+        // A window-only requirement needs an axis to FILTER on, not to group
+        // by — and the metric itself declares its time axes. When exactly one
+        // compatible axis exists, the host completes the binding: demanding
+        // that the model name an axis the question never mentioned only fed
+        // the grain/dimension-invalid retry loop until the budget died.
+        const hostCompletedWindowAxis = requiredWindow && windowBounds
+          && timeCapabilities.length === 0
+          && !explicitTimeRequirement.grain
+          ? (() => {
+            const axes = compatibleTimeResolution.candidates;
+            if (axes.length !== 1) return undefined;
+            const axisId = v2CandidateId(axes[0]!);
+            const handle = semanticCapabilities?.get(axisId);
+            return handle && handle.candidateId === axisId && handle.isCurrent() ? handle : undefined;
+          })()
+          : undefined;
+        if (hostCompletedWindowAxis) {
+          observe('compile_and_run_semantic', 'eligible', 'SEMANTIC_TIME_WINDOW_HOST_COMPLETED', {
+            tier: 'semantic', candidateIds: [hostCompletedWindowAxis.candidateId], origin: 'validation',
+          });
+        }
+        if (requiredWindow && windowBounds && timeCapabilities.length === 0 && !hostCompletedWindowAxis) {
+          observe('compile_and_run_semantic', 'ineligible', 'SEMANTIC_TIME_WINDOW_UNBOUND', {
+            tier: 'semantic', candidateIds: selectedCandidateIds, origin: 'validation',
+            safeAction: 'use:compile_and_run_semantic',
+          });
+          const admitted = admittedSemanticIdentifiers();
+          return {
+            ...denied('compile_and_run_semantic', 'SEMANTIC_TIME_WINDOW_UNBOUND', ['compile_and_run_semantic']),
+            usage: `The question restricts results to "${requiredWindow.expression}". Re-send with a timeDimensionId (and its declared timeGrain) so the host can apply that window.`,
+            ...(admitted ? { admittedIdentifiers: admitted } : {}),
+            admittedTimeDimensions: visibleCandidates()
+              .filter((candidate) => v2SemanticCandidateMatchesRole(candidate, 'time_dimension'))
+              .slice(0, 8)
+              .map((candidate) => ({
+                id: v2CandidateId(candidate),
+                timeGrains: (candidate.timeGrains ?? []).slice(0, 8),
+              })),
+          };
+        }
+        const windowAxisRuntimeName = timeCapabilities.length > 0
+          ? timeCapabilities[0]!.runtimeName
+          : hostCompletedWindowAxis?.runtimeName;
+        const windowFilters = requiredWindow && windowBounds && windowAxisRuntimeName
+          ? [
+            { dimension: windowAxisRuntimeName, operator: 'gte', values: [windowBounds.startInclusive.slice(0, 10)] },
+            { dimension: windowAxisRuntimeName, operator: 'lt', values: [windowBounds.endExclusive.slice(0, 10)] },
+          ]
+          : [];
         const selection = {
           metrics: metricCapabilities.map((handle) => handle.runtimeName),
           ...(semanticEngine ? { engine: semanticEngine } : {}),
@@ -2701,15 +2811,19 @@ function createAskV2LaneHandler(
           ...(timeCapabilities.length ? {
             timeDimension: {
               name: timeCapabilities[0]!.runtimeName,
-              granularity: normalizedTime.timeGrain!,
+              granularity: (normalizedTime.ok ? normalizedTime.timeGrain : undefined)!,
             },
           } : {}),
-          ...(filterCapabilities.length ? {
-            filters: filterCapabilities.map((handle, index) => ({
-              dimension: handle.runtimeName,
-              operator: '=',
-              values: [String(semanticFilters[index]!.value)],
-            })),
+          ...(filterCapabilities.length || windowFilters.length ? {
+            filters: [
+              ...filterCapabilities.map((handle, index) => ({
+                dimension: handle.runtimeName,
+                operator: '=',
+                values: [String(semanticFilters[index]!.value)],
+              })),
+              // Host-owned window bounds; provider input cannot supply these.
+              ...windowFilters,
+            ],
           } : {}),
           ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
           ...(resolvedOrderBy.length ? { orderBy: resolvedOrderBy } : {}),

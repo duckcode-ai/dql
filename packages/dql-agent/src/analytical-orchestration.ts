@@ -13,6 +13,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { parseAnalyticalTimeWindow } from './requirement-clauses.js';
 import type { AgentRunTelemetryV1, DqlArtifactExecutionReceipt } from '@duckcodeailabs/dql-core';
 
 export const ANALYTICAL_ORCHESTRATION_CONTRACT_VERSION = 1 as const;
@@ -239,14 +240,57 @@ export interface AnalyticalRequirementSetV1 {
     limit: number;
     /** True means the reader did not specify a count and DQL assumed 10. */
     defaultedLimit: boolean;
+    /** Per-group top-N ("top 2 per month") vs one overall ranking. */
+    scope?: 'overall' | 'per_group';
   };
   time?: {
     role: 'time_axis' | 'time_filter';
     grain?: 'day' | 'week' | 'month' | 'quarter' | 'year';
+    /**
+     * A bounded period the answer must be restricted to. This clause was
+     * previously UNREPRESENTABLE: "last two months" had no slot anywhere in
+     * the requirement layer, so it degraded into a grouping dimension while
+     * its count was misread as a row limit. A window is a restriction on
+     * WHEN, independent of whether the answer also groups by a grain.
+     */
+    window?: AnalyticalTimeWindowV1;
     fiscalPeriod?: string;
     /** A fiscal token is not executable until a declared calendar binds it. */
     requiresDeclaredFiscalCalendar: boolean;
   };
+  /**
+   * Where each clause came from, so runtime re-derivation can refresh a
+   * clause read from the current question without silently deleting one the
+   * user established earlier in the conversation or via a clarification.
+   */
+  clauseMeta?: {
+    time?: RequirementClauseMetaV1;
+    ranking?: RequirementClauseMetaV1;
+  };
+}
+
+/** A typed time restriction; `expression` is the canonical resolver input. */
+export interface AnalyticalTimeWindowV1 {
+  version: 1;
+  kind: 'relative' | 'absolute' | 'named_period';
+  /** Canonical digits form accepted by `resolvePlanTimeRange`, e.g. "last 2 months". */
+  expression: string;
+  relative?: {
+    count: number;
+    unit: 'day' | 'week' | 'month' | 'quarter' | 'year';
+    /** True = complete calendar periods; false = trailing from now. */
+    complete: boolean;
+  };
+  absolute?: { startInclusive: string; endExclusive: string };
+  namedPeriod?: string;
+}
+
+export type RequirementClauseProvenance = 'question' | 'inherited' | 'clarification' | 'defaulted';
+
+export interface RequirementClauseMetaV1 {
+  provenance: RequirementClauseProvenance;
+  required: boolean;
+  sourceTurnId?: string;
 }
 
 /**
@@ -410,7 +454,13 @@ export function buildAnalyticalRequirementSeedV1(input: {
         ...requirements.entityDisplayTerms,
       ])],
       filters,
-      ...(parsed?.timeRange ? { timeRange: parsed.timeRange } : {}),
+      // The typed window is the host's own reading of the question and wins
+      // over a retrieval refinement. Its canonical expression is exactly the
+      // input `resolvePlanTimeRange` accepts, so populating it is what makes
+      // that (previously never-called) resolver finally produce timeBounds.
+      ...(requirements.time?.window
+        ? { timeRange: requirements.time.window.expression }
+        : parsed?.timeRange ? { timeRange: parsed.timeRange } : {}),
       ...(requirements.time?.grain
         ? { timeGrain: requirements.time.grain }
         : parsed?.timeGrain ? { timeGrain: parsed.timeGrain } : {}),
@@ -482,8 +532,17 @@ export function currentQuestionGroundedParsedIntent(
     const normalized = normalizeRequirementTerm(value ?? '');
     if (!normalized) return false;
     if (groundedTerm(normalized)) return true;
-    return /^(?:last|previous|past) \d+ (?:day|days|week|weeks|month|months|quarter|quarters|year|years)$/.test(normalized)
-      && normalizeRequirementTerm(question).includes(normalized);
+    if (!/^(?:last|previous|past) (?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve) (?:day|days|week|weeks|month|months|quarter|quarters|year|years)$/.test(normalized)) return false;
+    // The question may spell the count ("last two months") while the parsed
+    // range uses digits ("last 2 months"). Both spell the same window; ground
+    // on the digit-normalized forms so the wording difference cannot unground
+    // a range the question itself established.
+    const digits = (value2: string): string => value2
+      .replace(/\bone\b/g, '1').replace(/\btwo\b/g, '2').replace(/\bthree\b/g, '3')
+      .replace(/\bfour\b/g, '4').replace(/\bfive\b/g, '5').replace(/\bsix\b/g, '6')
+      .replace(/\bseven\b/g, '7').replace(/\beight\b/g, '8').replace(/\bnine\b/g, '9')
+      .replace(/\btwelve\b/g, '12').replace(/\bten\b/g, '10');
+    return digits(normalizeRequirementTerm(question)).includes(digits(normalized));
   };
   const measures = (parsedIntent.measures ?? []).filter(groundedTerm);
   const dimensions = (parsedIntent.dimensions ?? []).filter(groundedTerm);
@@ -2093,10 +2152,15 @@ export function buildAnalyticalRequirementSet(input: {
     ? Number(ranking[2])
     : leadingOrdinalRanking?.[1] ? Number(leadingOrdinalRanking[1])
     : wordRankingLimit ? explicitWordLimit[wordRankingLimit] : undefined;
-  const time = grain || fiscalPeriod
+  // A bounded window is a restriction on WHEN, distinct from grouping grain.
+  // It gets its own typed clause; without one, "last two months" had nowhere
+  // to live and silently vanished between the question and the query.
+  const window = parseAnalyticalTimeWindow(question);
+  const time = grain || fiscalPeriod || window
     ? {
         role: grain ? 'time_axis' as const : 'time_filter' as const,
         ...(grain ? { grain: grain as NonNullable<AnalyticalRequirementSetV1['time']>['grain'] } : {}),
+        ...(window ? { window } : {}),
         ...(fiscalPeriod ? { fiscalPeriod } : {}),
         requiresDeclaredFiscalCalendar: Boolean(fiscalPeriod),
       }

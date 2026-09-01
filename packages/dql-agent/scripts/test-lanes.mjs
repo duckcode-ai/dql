@@ -38,7 +38,7 @@ const REQUIRED_TEST_FILES = [
 // Keep this audited set explicit: new Ask analytical-frame and observability
 // regressions must participate in the same serial package gate rather than
 // being silently omitted from the receipt audit.
-const EXPECTED_TEST_FILES = 154;
+const EXPECTED_TEST_FILES = 155;
 // Keep the aggregate receipt exact. The current Ask routing, semantic-proof,
 // trace, product-category, exploratory-output, governed-proof, compound
 // metric-binding, V6 decision-story, V2 continuation persistence, and the
@@ -58,10 +58,11 @@ const EXPECTED_TEST_FILES = 154;
 // orchestration-budget labelling), plus the V2 lane response-contract and
 // narrowed-tool-availability regressions, plus the time-window-vs-row-limit
 // parser table and the executed-ranking-clause (invented/unordered limit)
-// coverage, total 2,280 non-skipped
+// coverage, plus the typed time-window clause (requirement-clauses) suite,
+// total 2,287 non-skipped
 // tests; a
 // future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2280;
+const EXPECTED_TESTS = 2287;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
