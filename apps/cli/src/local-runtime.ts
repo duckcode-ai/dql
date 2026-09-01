@@ -346,6 +346,7 @@ import {
   projectEmbeddingProvider,
   isHashedEmbeddingProvider,
   clearProjectEmbeddingCache,
+  setProcessDefaultEmbeddingProvider,
   upgradeVectorIndexForProject,
   openMetadataCatalog,
   type DomainContextEnvelope,
@@ -4777,6 +4778,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const gitRoot = await resolveGitRoot(projectRoot);
   if (gitRoot) ensureLocalRuntimeGitignore(projectRoot);
   let projectConfig = loadProjectConfig(projectRoot);
+  // The served project's embedder becomes the process default so EVERY
+  // retrieval surface — catalog, SQL-lane hybrid ranking, conversation
+  // matching — measures similarity with the same provider the index was
+  // built with. Before this, library call sites without a project root fell
+  // back to hashed embeddings while the catalog itself was semantic.
+  setProcessDefaultEmbeddingProvider(projectEmbeddingProvider(projectRoot));
   // This opaque value lets the Ask browser cache distinguish a newly started
   // project/runtime on the same browser origin without exposing `projectRoot`.
   const conversationProjectIdentity = askConversationProjectIdentity(projectRoot);
@@ -19306,6 +19313,8 @@ function analyticalFailureSummary(
         clearProjectEmbeddingCache(projectRoot);
         invalidateAgentProjectState(projectRoot);
         const resolved = projectEmbeddingProvider(projectRoot);
+        // Keep the process-wide default in step with the edited setting.
+        setProcessDefaultEmbeddingProvider(resolved);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           ok: true,

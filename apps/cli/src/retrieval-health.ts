@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import {
   defaultAgentRunSqlitePath,
   defaultMetadataPath,
-  envEmbeddingProvider,
+  projectEmbeddingProvider,
   readAgentRunStoreHealth,
   readMetadataCatalogHealth,
   type AgentRunStoreHealth,
@@ -57,7 +57,10 @@ export function resolveRetrievalHealthStatus(input: {
 
   let providerId = 'hashed-token-v1';
   try {
-    providerId = envEmbeddingProvider().id;
+    // Report the provider the PROJECT resolves to — the same resolution the
+    // catalog indexes with. Reporting the env-only resolver here claimed
+    // "hashed fallback" on projects whose config had semantic embeddings on.
+    providerId = projectEmbeddingProvider(input.projectRoot).id;
   } catch { /* keep the deterministic default */ }
   const semantic = !providerId.startsWith('hashed-token');
   if (!semantic) {

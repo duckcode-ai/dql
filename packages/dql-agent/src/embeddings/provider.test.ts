@@ -13,6 +13,7 @@ import {
   hybridRank,
   probeLocalOllamaEmbeddings,
   resolveEmbeddingProvider,
+  setProcessDefaultEmbeddingProvider,
   type EmbeddingFetch,
   type ProbeFetch,
   type EmbeddingProvider,
@@ -182,6 +183,29 @@ describe('local-first embeddings (W3.1)', () => {
 
   it('offline (no config) stays on the deterministic hashed provider', () => {
     expect(resolveEmbeddingProvider(embeddingOptionsFromEnv({})).id).toBe('hashed-token-v1');
+  });
+
+  it('a registered process default wins over hashed when the environment is silent, and env still wins over it', () => {
+    // The served project's configured embedder must reach library call sites
+    // that have no project root (conversation matching, SQL-lane ranking) —
+    // otherwise the catalog is semantic while every other similarity check is
+    // lexical, and the product answers with two different notions of meaning.
+    const projectProvider: EmbeddingProvider = {
+      id: 'ollama:project-configured', dimensions: 3,
+      embed: async (texts) => texts.map(() => [1, 0, 0]),
+    };
+    try {
+      setProcessDefaultEmbeddingProvider(projectProvider);
+      expect(envEmbeddingProvider({})).toBe(projectProvider);
+      // An explicit environment override remains the operator's escape hatch.
+      clearEnvEmbeddingProviderCache();
+      expect(envEmbeddingProvider({ DQL_OLLAMA_EMBED_URL: 'http://localhost:11434' }).id).toContain('ollama:');
+      expect(envEmbeddingProvider({ DQL_OLLAMA_EMBED_URL: 'http://localhost:11434' })).not.toBe(projectProvider);
+    } finally {
+      setProcessDefaultEmbeddingProvider(undefined);
+      clearEnvEmbeddingProviderCache();
+    }
+    expect(envEmbeddingProvider({}).id).toBe('hashed-token-v1');
   });
 
   it('reuses the environment-selected provider so corpus vectors stay cached between questions', () => {

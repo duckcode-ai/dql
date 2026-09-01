@@ -1469,6 +1469,7 @@ export {
   HashedTokenEmbeddingProvider,
   defaultEmbeddingProvider,
   envEmbeddingProvider,
+  setProcessDefaultEmbeddingProvider,
   resolveEmbeddingProvider,
   cosineSimilarity,
   hybridRank,

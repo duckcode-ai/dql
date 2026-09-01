@@ -2456,12 +2456,20 @@ function createAskV2LaneHandler(
           // the admitted set; withholding it serves no safety purpose,
           // because these are exactly the IDs it already agreed to accept.
           const admissible = reasonCode === 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT'
+            || reasonCode === 'SEMANTIC_FILTERS_INVALID'
             || reasonCode.startsWith('SEMANTIC_TIME_')
             ? admittedSemanticIdentifiers()
             : undefined;
           return {
             ...denied('compile_and_run_semantic', reasonCode, safeNextTools),
             ...(admissible ? { admittedIdentifiers: admissible } : {}),
+            // A bare "filters invalid" is equally unactionable: the model has
+            // no way to know it sent the wrong SHAPE. Spell the contract out
+            // once and the next call can be the corrected one instead of a
+            // surrender to finish_answer.
+            ...(reasonCode === 'SEMANTIC_FILTERS_INVALID' ? {
+              usage: 'filters must be an array (max 8) of {"dimensionId": "<admitted dimension id>", "value": <string|number|boolean>} — one entry per dimension, no operator/values keys. Take dimensionId from admittedIdentifiers verbatim.',
+            } : {}),
             // A time axis is only usable together with a grain it declares,
             // so naming the axis without its grains just moves the refusal.
             ...(admissible

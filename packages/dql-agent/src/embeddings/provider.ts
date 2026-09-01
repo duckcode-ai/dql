@@ -410,10 +410,30 @@ function envEmbeddingProviderKey(options: EmbeddingResolveOptions): string {
   });
 }
 
+/**
+ * The provider a host registered for this whole process — normally the one
+ * the served project configured in `dql.config.json`.
+ *
+ * Retrieval call sites deep in the library (conversation matching, SQL-lane
+ * hybrid ranking) have no project root to resolve settings from, so they fell
+ * back to env-or-hashed even while the catalog itself was indexed with a real
+ * embedder — one product with two different notions of similarity. A local
+ * server serves exactly one project, so a process default is sound; explicit
+ * environment configuration still wins as the operator override.
+ */
+let processDefaultEmbeddingProvider: EmbeddingProvider | undefined;
+
+export function setProcessDefaultEmbeddingProvider(provider: EmbeddingProvider | undefined): void {
+  processDefaultEmbeddingProvider = provider;
+}
+
 export function envEmbeddingProvider(
   env: Record<string, string | undefined> = process.env,
 ): EmbeddingProvider {
   const options = embeddingOptionsFromEnv(env);
+  if (Object.keys(options).length === 0 && processDefaultEmbeddingProvider) {
+    return processDefaultEmbeddingProvider;
+  }
   const key = envEmbeddingProviderKey(options);
   if (cachedEnvEmbeddingProvider?.key !== key) {
     cachedEnvEmbeddingProvider = { key, provider: resolveEmbeddingProvider(options) };
