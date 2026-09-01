@@ -11358,15 +11358,19 @@ function analyticalFailureSummary(
         question: request.question,
         parsedIntent: evidence.parsedIntent,
       }).time;
-      const hasTimeAxisCandidate = evidence.candidates.some((candidate) =>
-        askV2ExecutableSemanticRoles(candidate)?.includes('time_dimension'));
-      const declaredTimeAxisCandidates = timeRequirement && !hasTimeAxisCandidate
+      const declaredTimeAxisCandidates = timeRequirement
         ? (() => {
           const existingIds = new Set(evidence.candidates.map((candidate) => candidate.qualifiedId ?? candidate.id));
           const synthesized = new Map<string, AgentEvidenceCandidate>();
           for (const candidate of evidence.candidates) {
             if (candidate.kind !== 'semantic_metric') continue;
-            for (const axis of candidate.analyticalCapability?.timeDimensions ?? []) {
+            const declaredAxes = candidate.analyticalCapability?.timeDimensions ?? [];
+            // Compatibility is PER METRIC: a retained `customers` time axis
+            // proves nothing for an `order_item` metric, whose window can only
+            // bind to its OWN declared axes. Skip only metrics that already
+            // have one of their declared axes retained.
+            if (declaredAxes.some((axis) => existingIds.has(axis.dimensionId?.trim() ?? ''))) continue;
+            for (const axis of declaredAxes) {
               const id = axis.dimensionId?.trim();
               if (!id || existingIds.has(id) || synthesized.has(id)) continue;
               const leaf = (id.split(':').pop() ?? id).split('.').pop() ?? id;
@@ -11387,7 +11391,7 @@ function analyticalFailureSummary(
               });
             }
           }
-          return [...synthesized.values()].slice(0, 4);
+          return [...synthesized.values()].slice(0, 8);
         })()
         : [];
       const boundEvidence: AgentRetrievalEvidence = {

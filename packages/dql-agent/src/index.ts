@@ -2050,3 +2050,5 @@ export {
   type SqlAuthorizationReferences,
   type IdentifierEvidence,
 } from './agentic/sql-authorization.js';
+
+export { parseAnalyticalTimeWindow } from './requirement-clauses.js';

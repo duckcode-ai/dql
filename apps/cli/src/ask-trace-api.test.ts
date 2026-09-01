@@ -2311,9 +2311,13 @@ describe('local Ask trace API errors (OBS-009)', () => {
     expect(body.run.status, JSON.stringify(body.run)).toBe('needs_review');
     expect(body.run.trustState).toBe('review_required');
     expect(body.run.telemetry?.sqlExecutions).toBe(1);
-    // `finish_answer` is a host terminal control tool. The planner must not
-    // receive a sixth transport turn after the validated semantic result.
-    expect(dispatch).toBe(5);
+    // Host-first semantic execution: every clause of this question binds to
+    // exactly one admitted capability, so the HOST calls its own governed
+    // tools and the planner is never dispatched at all. The scripted
+    // transcript above remains as the fallback path's contract; the invariant
+    // it protected — no transport turn after the validated result — is
+    // trivially upheld at zero.
+    expect(dispatch).toBe(0);
     // The real local compiler receives its runtime names from the immutable
     // capability map. The opaque provider evidence ID must never leak into
     // MetricFlow/dbt SQL or be reinterpreted through the V1 plan.

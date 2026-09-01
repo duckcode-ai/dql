@@ -12,7 +12,7 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
 import { buildAskV2AnalystSystemPrompt, buildAskV2TextToolContract } from './ask-v2-analyst-prompt.js';
-import { resolvePlanTimeRange, type AnalyticalTimeWindowV1 } from '@duckcodeailabs/dql-agent';
+import { parseAnalyticalTimeWindow, resolvePlanTimeRange, type AnalyticalTimeWindowV1 } from '@duckcodeailabs/dql-agent';
 import {
   ClaudeProvider,
   KGStore,
@@ -2765,8 +2765,41 @@ function createAskV2LaneHandler(
           && !explicitTimeRequirement.grain
           ? (() => {
             const axes = compatibleTimeResolution.candidates;
-            if (axes.length !== 1) return undefined;
-            const axisId = v2CandidateId(axes[0]!);
+            // One compatible axis: no decision exists. Several: the metric's
+            // OWN capability contract may declare which axis is its default —
+            // authored snapshot metadata, not a guess. Only when the authored
+            // declarations also leave more than one does this stay a real
+            // choice for the analyst.
+            const declaredAxisIds = new Set((metricsForTime ?? []).flatMap((candidate) =>
+              (candidate.analyticalCapability?.timeDimensions ?? [])
+                .map((axis) => axis.dimensionId?.trim())
+                .filter((id): id is string => Boolean(id))));
+            let narrowed = axes.length === 1
+              ? axes
+              : axes.filter((axis) => declaredAxisIds.has(v2CandidateId(axis)));
+            // A metric commonly declares BOTH its physical axis (ordered_at)
+            // and MetricFlow's canonical aggregation-time alias (metric_time).
+            // These are the SAME axis for a plain window filter, so preferring
+            // the declared default — and failing that, metric_time itself,
+            // which MetricFlow defines as "the metric's own aggregation time"
+            // and accepts unqualified — is adapter semantics, not a guess.
+            if (narrowed.length > 1) {
+              const defaultAxisIds = new Set((metricsForTime ?? []).flatMap((candidate) =>
+                (candidate.analyticalCapability?.timeDimensions ?? [])
+                  .filter((axis) => (axis.defaultFor?.length ?? 0) > 0)
+                  .map((axis) => axis.dimensionId?.trim())
+                  .filter((id): id is string => Boolean(id))));
+              const preferred = narrowed.filter((axis) => defaultAxisIds.has(v2CandidateId(axis)));
+              if (preferred.length >= 1) narrowed = preferred;
+            }
+            if (narrowed.length > 1) {
+              const metricTime = narrowed.filter((axis) => (
+                ((v2CandidateId(axis).split(':').pop() ?? '').split('.').pop() ?? '') === 'metric_time'
+              ));
+              if (metricTime.length === 1) narrowed = metricTime;
+            }
+            if (narrowed.length !== 1) return undefined;
+            const axisId = v2CandidateId(narrowed[0]!);
             const handle = semanticCapabilities?.get(axisId);
             return handle && handle.candidateId === axisId && handle.isCurrent() ? handle : undefined;
           })()
@@ -3227,6 +3260,46 @@ function createAskV2LaneHandler(
         },
       } : {}),
     };
+    // ── HOST-FIRST SEMANTIC EXECUTION ────────────────────────────────────
+    // The evidence from 120 live runs: turns the host executed directly
+    // succeeded; turns that asked the model to transcribe host-known bindings
+    // into tool arguments died burning the dispatch budget on spelling —
+    // wrong identifier forms, wrong grains, wrong axes — each refusal costing
+    // one slow provider round trip. When the typed requirement resolves every
+    // clause to exactly ONE admitted binding, there is no decision left for a
+    // model to make: the host calls its own governed tools directly — same
+    // admission, same freeze, same gates, zero provider calls. The analyst
+    // loop below remains the path for genuine ambiguity, and any host-first
+    // miss falls through to it with the inspection observations as a head
+    // start.
+    const hostFirst = !state.exactCertifiedCandidateId
+      && state.tierStates?.certified?.status !== 'complete'
+      && (state.turnClass === 'analytics' || state.turnClass === 'prior_result')
+      ? deriveHostFirstSemanticArgs(input.question, visibleCandidates(), workspace?.semanticCapabilities)
+      : undefined;
+    if (hostFirst) {
+      try {
+        const toolByName = (name: string) => tools.find((tool) => tool.name === name);
+        await toolByName('inspect_certified_candidates')?.run({});
+        await toolByName('inspect_semantic_candidates')?.run({});
+        const compiled = await toolByName('compile_and_run_semantic')?.run(hostFirst) as { executed?: boolean; rowCount?: number } | undefined;
+        if (compiled?.executed && completed) {
+          const rowCount = typeof compiled.rowCount === 'number' ? compiled.rowCount : completed.result.rowCount;
+          await toolByName('finish_answer')?.run({
+            answer: `The governed semantic query executed and returned ${rowCount} row${rowCount === 1 ? '' : 's'}.`,
+          });
+          if (completed && state.observations.some((observation) => (
+            observation.tool === 'finish_answer' && observation.reasonCode === 'ASK_V2_RESULT_NARRATED'
+          ))) {
+            return askV2ExecutedAnswer(input, completed, finalText ?? '');
+          }
+        }
+        // Not executed: the observations recorded above (including any typed
+        // refusal) now guide the analyst loop instead of being rediscovered.
+      } catch {
+        // A host-first fault must never cost the turn; the loop still runs.
+      }
+    }
     let loop: Awaited<ReturnType<typeof runAgenticToolLoopDetailed>>;
     try {
       loop = await runAgenticToolLoopDetailed(terminalAwareProvider, [
@@ -4070,6 +4143,82 @@ function deterministicAskV2ResultNarration(completed: AskV2CompletedExecution): 
     ? ` across ${columns} returned column${columns === 1 ? '' : 's'}`
     : '';
   return `The validated ${tier} query completed with ${rows} row${rows === 1 ? '' : 's'}${columnClause}. The validated result is retained below.`;
+}
+
+/**
+ * Bind the question's typed clauses to admitted candidates, deterministically.
+ *
+ * Returns compile_and_run_semantic arguments ONLY when every clause resolves
+ * to exactly one admitted binding — one metric per measure term, one dimension
+ * per grouping term, an unambiguous ranking. Anything ambiguous, ungrounded,
+ * or beyond the composer's shape (per-group top-N, explicit grain grouping,
+ * literal member filters) returns undefined and the analyst loop decides.
+ * The host never guesses; it only transcribes what has a single answer.
+ */
+function deriveHostFirstSemanticArgs(
+  question: string,
+  candidates: readonly AgentEvidenceCandidate[],
+  capabilities: ReadonlyMap<string, AskSemanticCapabilityHandleV1> | undefined,
+): { metricIds: string[]; dimensionIds?: string[]; orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>; limit?: number } | undefined {
+  if (!capabilities || capabilities.size === 0) return undefined;
+  const requirements = buildAnalyticalRequirementSet({ question });
+  const plan = buildAnalysisQuestionPlan(question);
+  // Shapes the deterministic composer cannot express go to the analyst.
+  if (plan.requestedShape.topN?.scope === 'per_group') return undefined;
+  if (requirements.time?.grain) return undefined;
+  if (requirements.memberTerms.length > 0) return undefined;
+  // The time window rides in requestedShape.filters too — it is handled by
+  // the window pipeline inside the compile tool, not by member filters. Only
+  // a NON-time filter (a member value the binder cannot ground) bails.
+  const nonTimeFilters = (plan.requestedShape.filters ?? [])
+    .filter((term) => !parseAnalyticalTimeWindow(String(term)));
+  if (nonTimeFilters.length > 0) return undefined;
+  if (requirements.measures.length === 0) return undefined;
+
+  // Requirement terms are business English ("customer name"); runtime names
+  // are snake_case ("customer_name"). Both spell the same field — try the
+  // spellings, never different MEANINGS. Ambiguity still returns undefined.
+  const resolve = (reference: string, role: V2SemanticCapabilityRole): string | undefined => {
+    for (const variant of [...new Set([reference, reference.trim().replace(/\s+/g, '_')])]) {
+      const resolved = resolveV2SemanticCapabilityReference({ reference: variant, role, candidates, capabilities });
+      if (resolved) return resolved;
+    }
+    return undefined;
+  };
+
+  const metricIds: string[] = [];
+  for (const measure of requirements.measures.slice(0, 4)) {
+    const resolved = resolve(measure, 'metric');
+    if (!resolved) return undefined;
+    if (!metricIds.includes(resolved)) metricIds.push(resolved);
+  }
+  if (metricIds.length === 0) return undefined;
+
+  const dimensionIds: string[] = [];
+  const rawGroupingTerms = [...new Set([
+    ...requirements.entityDisplayTerms,
+    ...requirements.dimensions,
+  ])].filter((term) => !/^(?:day|week|month|quarter|year|season|period)s?$/i.test(term.trim()));
+  // "customer" and "customer name" name the same grouping; the display form
+  // is the executable one. Keep only the display form when both appear.
+  const groupingTerms = rawGroupingTerms.filter((term) =>
+    !rawGroupingTerms.some((other) => other !== term && other.startsWith(`${term} `)));
+  for (const term of groupingTerms.slice(0, 6)) {
+    const resolved = resolve(term, 'dimension');
+    if (!resolved) return undefined;
+    if (!dimensionIds.includes(resolved)) dimensionIds.push(resolved);
+  }
+
+  const topN = plan.requestedShape.topN;
+  const direction = plan.requestedShape.rankingDirection === 'bottom' ? 'asc' as const : 'desc' as const;
+  return {
+    metricIds,
+    ...(dimensionIds.length ? { dimensionIds } : {}),
+    ...(topN ? {
+      orderBy: [{ name: metricIds[0]!, direction }],
+      limit: topN.n,
+    } : {}),
+  };
 }
 
 function askV2ExecutedAnswer(

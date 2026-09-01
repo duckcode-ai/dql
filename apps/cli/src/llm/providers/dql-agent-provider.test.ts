@@ -6215,8 +6215,15 @@ describe('V2 semantic time-window enforcement', () => {
   });
 
   it('rejects an orderBy naming a field the call did not select', async () => {
+    // A second admitted revenue metric keeps the HOST-FIRST binder out (it
+    // never chooses between two meanings), so the scripted model call is the
+    // one that reaches the tool — with its illegal orderBy.
+    const rivalRevenue: AgentEvidenceCandidate = {
+      ...windowMetric,
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', name: 'revenue',
+    };
     const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
-    const state = askV2State([windowMetric, customerName, orderedAt]);
+    const state = askV2State([windowMetric, rivalRevenue, customerName, orderedAt]);
     await __test__.createAskV2LaneHandler(state, { maxToolCalls: 6, maxProviderDispatches: 4 })({
       question: 'top customers by revenue',
       provider: textToolProvider([
@@ -6225,7 +6232,7 @@ describe('V2 semantic time-window enforcement', () => {
         '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:order_item.revenue"],"orderBy":[{"name":"profit","direction":"desc"}],"limit":10}}\n```',
         'stop',
       ]),
-      askAgentV2Workspace: askV2Workspace([windowMetric, customerName, orderedAt]),
+      askAgentV2Workspace: askV2Workspace([windowMetric, rivalRevenue, customerName, orderedAt]),
       semanticQueryCompiler: compile,
       executeGeneratedSql: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
     } as never);
@@ -6407,5 +6414,78 @@ describe('shape-continuation follow-ups', () => {
       } as AgentRunRequest, question);
       expect(followUp?.kind, question).not.toBe('drilldown');
     }
+  });
+});
+
+/**
+ * Host-first semantic execution: when every clause of the question resolves
+ * to exactly ONE admitted binding, the host calls its own governed tools and
+ * the provider is never dispatched. When ANY clause is ambiguous — the
+ * large-repo case that killed the old deterministic planner — the host
+ * refuses to guess and the analyst loop decides. Determinism only where no
+ * decision exists; intelligence wherever one does.
+ */
+describe('host-first semantic execution', () => {
+  const metric: AgentEvidenceCandidate = {
+    id: 'semantic:metric:order_item.revenue', qualifiedId: 'semantic:metric:order_item.revenue', kind: 'semantic_metric',
+    semanticObjectType: 'metric', trustTier: 'semantic', name: 'revenue',
+    relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+  };
+  const customerName: AgentEvidenceCandidate = {
+    id: 'semantic:uncategorized:dimension:customers.customer_name', qualifiedId: 'semantic:uncategorized:dimension:customers.customer_name',
+    kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic', name: 'customer_name',
+    relevanceScore: 0.9, matchReasons: ['entity label'], compatibility: 'compatible',
+  };
+
+  it('executes an unambiguous ranking with ZERO provider dispatches', async () => {
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['customer_name', 'revenue'], rows: [{ customer_name: 'Ada', revenue: 9 }], rowCount: 1 }));
+    const providerCalls: string[] = [];
+    const provider: AgentProvider = {
+      name: 'ollama',
+      async available() { return true; },
+      async generate() { providerCalls.push('generate'); return 'should never be called'; },
+    };
+    const state = askV2State([metric, customerName]);
+
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'who are the top customers by highest revenue',
+      provider,
+      askAgentV2Workspace: askV2Workspace([metric, customerName]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(providerCalls).toEqual([]);
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(answer.result?.rowCount).toBe(1);
+    const selection = (compile.mock.calls[0] as unknown[])[0] as { orderBy?: unknown; limit?: number };
+    expect(selection.orderBy).toEqual([{ name: 'revenue', direction: 'desc' }]);
+    expect(selection.limit).toBe(10);
+  });
+
+  it('falls back to the analyst when the measure is AMBIGUOUS (the large-repo case)', async () => {
+    const secondRevenue: AgentEvidenceCandidate = {
+      ...metric,
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', name: 'revenue',
+    };
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const generate = vi.fn(async () => '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```');
+    const provider: AgentProvider = { name: 'ollama', async available() { return true; }, generate };
+    const state = askV2State([metric, secondRevenue, customerName]);
+
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 4, maxProviderDispatches: 2 })({
+      question: 'who are the top customers by highest revenue',
+      provider,
+      askAgentV2Workspace: askV2Workspace([metric, secondRevenue, customerName]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
+    } as never);
+
+    // Two admitted metrics claim "revenue": the host must NOT pick one.
+    // The provider (the intelligence) is consulted instead.
+    expect(generate).toHaveBeenCalled();
+    expect(compile).not.toHaveBeenCalled();
   });
 });
