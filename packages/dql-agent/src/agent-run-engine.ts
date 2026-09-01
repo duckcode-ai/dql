@@ -5115,6 +5115,12 @@ const UNMODELED_STOP_WORDS = new Set([
   'for', 'from', 'with', 'and', 'or', 'of', 'in', 'on', 'at', 'to', 'by', 'per', 'each',
   'me', 'my', 'our', 'his', 'her', 'their', 'them', 'they', 'he', 'she', 'it', 'that', 'this',
   'show', 'list', 'give', 'find', 'tell', 'belongs', 'belong', 'get', 'top', 'most', 'many',
+  // Generic request nouns: "what is the % DOD ACM value?" asks for a metric's
+  // VALUE, it does not ask for a field named "value". Declaring these
+  // unmodeled turned ordinary phrasings into false refusals on large repos.
+  'value', 'values', 'info', 'information', 'detail', 'details', 'data', 'datas',
+  'number', 'numbers', 'figure', 'figures', 'result', 'results', 'stats', 'statistics',
+  'total', 'totals', 'current', 'latest', 'overall', 'summary', 'breakdown', 'highest', 'lowest',
 ]);
 
 /** The identifier leaves the snapshot actually admitted, as plain labels. */

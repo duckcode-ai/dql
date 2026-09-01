@@ -3394,6 +3394,9 @@ function createAskV2LaneHandler(
           // A time noun is a grain served by any admitted time axis, not a
           // field of its own; "by month" must never read as unmodeled.
           && !/^(?:day|week|month|quarter|year|season|period)s?$/i.test(term)
+          // Generic request nouns ("the % DOD ACM value", "the revenue info")
+          // name HOW the user wants the answer, not a field to resolve.
+          && !/^(?:value|info|information|detail|data|number|figure|result|stat|statistic|total|summary|breakdown)s?$/i.test(term)
           // The lexical by-phrase extractor can emit run-together noise
           // ("month_using_the_revenue_semantic_metric"). Only a clean one- or
           // two-word business noun is a claim worth refusing over.
