@@ -77,3 +77,30 @@ describe('window in the requirement contract', () => {
     expect(requirements.ranking).toBeUndefined();
   });
 });
+
+import { splitAnalyticalTasks } from './analytical-orchestration.js';
+
+/**
+ * "… and give me top 5 rows" is a ranking clause of the same request, not an
+ * independent question. Splitting it minted a task titled "give me top 5
+ * rows" that could never resolve, and the phantom task spent the dispatch
+ * budget the real question needed.
+ */
+describe('shape clauses never become tasks', () => {
+  it('keeps the reported compound question as one task', () => {
+    expect(splitAnalyticalTasks('I need last two months highest revenue and give me top 5 rows'))
+      .toEqual(['I need last two months highest revenue and give me top 5 rows']);
+  });
+
+  it('folds shape-only fragments across separators too', () => {
+    expect(splitAnalyticalTasks('show revenue by customer? give me the top 10'))
+      .toEqual(['show revenue by customer and give me the top 10']);
+  });
+
+  it('still splits genuinely independent questions', () => {
+    expect(splitAnalyticalTasks('who are the top customers? what customer type is Wesley Jenkins'))
+      .toEqual(['who are the top customers', 'what customer type is Wesley Jenkins']);
+    expect(splitAnalyticalTasks('show revenue by month and give me top 5 products'))
+      .toEqual(['show revenue by month and give me top 5 products'.split(' and give')[0], 'give me top 5 products'].map(s=>s.trim()));
+  });
+});

@@ -59,10 +59,10 @@ const EXPECTED_TEST_FILES = 155;
 // narrowed-tool-availability regressions, plus the time-window-vs-row-limit
 // parser table and the executed-ranking-clause (invented/unordered limit)
 // coverage, plus the typed time-window clause (requirement-clauses) suite,
-// total 2,287 non-skipped
+// plus the shape-clause task-merge regressions, total 2,290 non-skipped
 // tests; a
 // future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2287;
+const EXPECTED_TESTS = 2290;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

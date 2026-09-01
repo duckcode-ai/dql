@@ -11823,7 +11823,15 @@ function analyticalFailureSummary(
         // run_certified→denied until the deadline. Never take the lock the
         // proof would forbid. The plan here is the pack's — built WITH the
         // conversation follow-up — so an inherited shape also gates the claim.
+        // A certified block executes its AUTHORED query verbatim; it has no
+        // way to apply a dynamic time window. When the question restricts
+        // WHEN ("since last two months"), a block that ignores that clause is
+        // answering a different question — `customer_profile` served LIFETIME
+        // spend for a two-month ask and the window vanished silently. The
+        // semantic tier applies windows; send it there.
+        const requestedTimeWindow = buildAnalyticalRequirementSet({ question: request.question }).time?.window;
         const certifiedCompleteCandidateIds = fitCompleteCandidateIds.filter((candidateId) => {
+          if (requestedTimeWindow) return false;
           if (!pack.questionPlan.requestedShape.topN) return true;
           const handle = certifiedArtifacts.get(candidateId);
           const block = handle && typeof handle === 'object' && (handle as AskCertifiedArtifactHandleV1).version === 1
@@ -11846,7 +11854,9 @@ function analyticalFailureSummary(
               : undefined,
           });
         });
-        const certifiedTopNDemoted = fitCompleteCandidateIds.length > 0 && certifiedCompleteCandidateIds.length === 0;
+        const certifiedWindowDemoted = Boolean(requestedTimeWindow) && fitCompleteCandidateIds.length > 0;
+        const certifiedTopNDemoted = !certifiedWindowDemoted
+          && fitCompleteCandidateIds.length > 0 && certifiedCompleteCandidateIds.length === 0;
         // Preserve direct authored-question evidence separately for receipts
         // and the strict legacy path. Authoritative V2 may also use an
         // implicit authored ranking when this bridge exposes exactly one
@@ -11886,9 +11896,11 @@ function analyticalFailureSummary(
             candidateIds: certifiedCompleteCandidateIds,
             reasonCode: certifiedCompleteCandidateIds.length > 0
               ? 'CERTIFIED_COMPLETE_FOR_REQUEST'
-              : certifiedTopNDemoted
-                ? 'CERTIFIED_TOPN_UNPROVEN'
-                : certifiedArtifacts.size > 0 ? 'CERTIFIED_CONTEXT_ONLY' : 'CERTIFIED_UNAVAILABLE',
+              : certifiedWindowDemoted
+                ? 'CERTIFIED_TIME_WINDOW_UNPROVEN'
+                : certifiedTopNDemoted
+                  ? 'CERTIFIED_TOPN_UNPROVEN'
+                  : certifiedArtifacts.size > 0 ? 'CERTIFIED_CONTEXT_ONLY' : 'CERTIFIED_UNAVAILABLE',
             ...(certifiedCompleteCandidateIds.length > 0 ? { safeNextTools: ['run_certified'] } : {}),
           },
           semantic: {

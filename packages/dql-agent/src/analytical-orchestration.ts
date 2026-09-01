@@ -2745,7 +2745,38 @@ export function splitAnalyticalTasks(question: string): string[] {
   const parts = (asked.length > 0 ? asked : raw)
     .map((part) => part.replace(leadingJunk, '').replace(trailingJunk, '').trim())
     .filter(Boolean);
-  return parts.length > 0 ? parts : [question.trim()];
+  // "… and give me top 5 rows" is a RANKING CLAUSE of the request before it,
+  // not an independent question — it names no measure, no entity, nothing to
+  // ask about on its own. Splitting it minted a task titled "give me top 5
+  // rows" that could never resolve, and the phantom task then spent the
+  // dispatch budget the real question needed. A fragment that is nothing but
+  // shape vocabulary folds back into its predecessor.
+  const merged: string[] = [];
+  for (const part of parts) {
+    if (merged.length > 0 && isPureShapeClause(part)) {
+      merged[merged.length - 1] = `${merged[merged.length - 1]} and ${part}`;
+      continue;
+    }
+    merged.push(part);
+  }
+  return merged.length > 0 ? merged : [question.trim()];
+}
+
+/**
+ * Does this fragment carry ONLY result-shape vocabulary (ranking, limit,
+ * projection), with no subject of its own? Checked by removal: strip the
+ * shape words, counts and connectives; a real question leaves a residue.
+ */
+function isPureShapeClause(fragment: string): boolean {
+  const lower = fragment.toLowerCase();
+  if (!/\b(?:top|bottom|first|last|highest|lowest|limit|rows?|results?)\b/.test(lower)) return false;
+  const residue = lower
+    .replace(/\b(?:and|then|please|give|me|show|list|just|only|the|a|an|top|bottom|first|last|highest|lowest|best|worst|limit|it|to|of|them|rows?|results?|records?|entries|items?|values?)\b/g, ' ')
+    .replace(/\b(?:one|two|three|four|five|six|seven|eight|nine|ten|twelve)\b/g, ' ')
+    .replace(/\d+/g, ' ')
+    .replace(/[^a-z]+/g, ' ')
+    .trim();
+  return residue.length === 0;
 }
 
 export function buildAnalyticalTaskGraph(input: {
