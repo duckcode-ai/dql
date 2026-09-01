@@ -7687,7 +7687,24 @@ function isDrilldownFollowUp(question: string, _priorTerms: string[] = []): bool
   // It still has no authority without a completed host-persisted result; the
   // local runtime checks that boundary before it can preserve prior shape.
   const explicitResultProjectionAugmentation = /\b(?:add|include|also\s+(?:show|include))\s+(?:the\s+)?[a-z][a-z0-9_ -]{0,48}\s+(?:here|there|too|as\s+well)\b/.test(lower);
-  if (!deicticDrilldown && !explicitPriorResultOperation && !explicitResultProjectionAugmentation && !(explicitDrillVerb && (hasDeicticReference || resultStateReference))) return false;
+  // A drill verb with NO NEW SUBJECT is a shape continuation of the answer
+  // on screen: "can you split by month" names no measure and no entity of its
+  // own, so there is nothing else it could be about. Requiring a deictic word
+  // here dropped the entire conversation — the certified `monthly_revenue`
+  // block then claimed the turn against an EMPTY plan (its fit vacuously
+  // exact), answering a different question than the one being refined. A
+  // question that brings its own measure or entity keeps today's strictness.
+  const plan = buildAnalysisQuestionPlan(question);
+  const bringsOwnSubject = plan.metricTerms.length > 0 || plan.entities.length > 0;
+  // The verb must also have NO explicit object: "split by month" refines what
+  // is on screen, while "split shipments by warehouse" names its own subject
+  // even when that noun is outside the parser's vocabulary.
+  const objectlessDrill = /\b(?:splits?|slices?|group)\s*(?:it|this|that|them|these|those)?\s*by\b/.test(lower)
+    || /\bbreak\s*(?:it|this|that|them)?\s*down\s+by\b/.test(lower);
+  const shapeContinuation = objectlessDrill && !bringsOwnSubject;
+  if (!deicticDrilldown && !explicitPriorResultOperation && !explicitResultProjectionAugmentation
+    && !shapeContinuation
+    && !(explicitDrillVerb && (hasDeicticReference || resultStateReference))) return false;
   // Bare definitions should not inherit a prior result merely because they
   // contain a pronoun. An explicit result operation remains authoritative.
   return explicitPriorResultOperation || explicitResultProjectionAugmentation || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower);

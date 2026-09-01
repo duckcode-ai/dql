@@ -6357,3 +6357,55 @@ describe('host-completed window axis', () => {
     ]));
   });
 });
+
+/**
+ * T2 of the reported journey. "can you split by month" names no measure and
+ * no entity of its own — it can only be about the answer on screen. Requiring
+ * a deictic word dropped the whole conversation and let a certified block
+ * claim the turn against an EMPTY plan. A question that brings its own
+ * subject keeps today's strictness.
+ */
+describe('shape-continuation follow-ups', () => {
+  it('carries the prior shape for a drill verb with no new subject', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'can you split by month' }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_t1',
+        turns: [{
+          id: 'turn_t1',
+          question: 'Can you give me the last two month with high revenue by customer name',
+          requestedMeasures: ['revenue'],
+          requestedDimensions: ['customer_name'],
+          result: {
+            columns: ['customer_name', 'revenue'],
+            dimensionValues: { customer_name: ['Ada', 'Grace'] },
+            measureColumns: ['revenue'],
+          },
+        }],
+      },
+    } as AgentRunRequest, 'can you split by month');
+
+    expect(followUp?.kind).toBe('drilldown');
+    expect(followUp?.dimensions).toEqual(expect.arrayContaining(['customer_name', 'month']));
+    expect(followUp?.priorMeasures).toEqual(expect.arrayContaining(['revenue']));
+  });
+
+  it('keeps a question with its own subject fresh', () => {
+    for (const question of ['show revenue by region', 'split shipments by warehouse', 'how many orders per store']) {
+      const followUp = __test__.followUpFromConversationContext({
+        provider: 'ollama',
+        projectRoot: '/tmp/x',
+        messages: [{ role: 'user', content: question }],
+        conversationContext: {
+          sourceQuestion: 'who are the top customers',
+          resultColumns: ['customer_name', 'revenue'],
+          resultDimensionValues: { customer_name: ['Ada'] },
+        },
+      } as AgentRunRequest, question);
+      expect(followUp?.kind, question).not.toBe('drilldown');
+    }
+  });
+});
