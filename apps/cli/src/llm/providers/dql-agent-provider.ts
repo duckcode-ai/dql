@@ -1749,6 +1749,34 @@ function createAskV2LaneHandler(
           ...(relationshipPathIds.length ? { relationshipPathIds } : {}),
         });
         if (!allowed.ok) {
+          // NEVER-DEAD-END CONCESSION. The progression rule exists to stop a
+          // model from finishing without trying the executable tiers — but a
+          // model that has inspected them and TWICE chosen to finish rather
+          // than write exploratory SQL it cannot ground has made an honest
+          // judgment (observed live: certified empty + semantic unavailable
+          // on a 3,373-model repo; sonnet declined to invent Snowflake SQL
+          // and the kernel burned the whole dispatch budget re-denying).
+          // Concede on the SECOND identical denial: close the turn as a
+          // typed gap. No SQL runs, no prose is trusted; the reader gets an
+          // honest refusal in 3 dispatches instead of a timeout in 6.
+          if (name === 'finish_answer'
+            && allowed.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED'
+            && !completed
+            && state.observations.some((observation) =>
+              observation.tool === 'finish_answer'
+              && observation.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED')) {
+            observe('finish_answer', 'ineligible', 'ASK_V2_REMAINING_TIERS_DECLINED', {
+              origin: 'agent_control',
+              ...(allowed.safeNextTools?.length ? { safeAction: `use:${allowed.safeNextTools.join(',')}` } : {}),
+            });
+            finishAskAgentV2Turn(state, {
+              version: 2,
+              kind: 'gap',
+              reasonCode: 'ASK_V2_REMAINING_TIERS_DECLINED',
+              origin: 'agent_control',
+            });
+            return { finished: true, conceded: true, reasonCode: 'ASK_V2_REMAINING_TIERS_DECLINED' };
+          }
           const clarificationPreFreeze = name === 'request_clarification'
             && (allowed.reasonCode === 'ASK_V2_CLARIFICATION_NOT_MATERIALLY_AMBIGUOUS'
               || allowed.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED');
@@ -3086,7 +3114,22 @@ function createAskV2LaneHandler(
             ? 'GOVERNED_RELATIONAL_IDENTIFIER_OR_PATH_NOT_ADMITTED'
             : 'GOVERNED_RELATIONAL_EXECUTION_UNAVAILABLE';
           observe('compile_and_run_dql', 'ineligible', reason, { tier: 'governed_relational', candidateIds: selectedCandidateIds, origin: 'validation' });
-          return denied('compile_and_run_dql', reason);
+          // A bare "not admitted" is unactionable — the model guessed wrong
+          // IDs once and will guess again until the budget dies. Name the
+          // admitted relational identifiers and path handles verbatim, the
+          // same teaching contract the semantic tier's refusals carry.
+          const admittedRelational = visibleCandidates()
+            .filter(relationLike)
+            .slice(0, 16)
+            .map((candidate) => v2CandidateId(candidate));
+          return {
+            ...denied('compile_and_run_dql', reason),
+            ...(reason === 'GOVERNED_RELATIONAL_IDENTIFIER_OR_PATH_NOT_ADMITTED' ? {
+              admittedRelationalIds: admittedRelational,
+              admittedRelationshipPathIds: state.relationshipPathHandles.slice(0, 8).map((path) => path.id),
+              usage: 'Re-send compile_and_run_dql using measureIds/dimensionIds/expectedOutputIds from admittedRelationalIds verbatim and relationshipPathIds from admittedRelationshipPathIds. Invented identifiers are never admitted.',
+            } : {}),
+          };
         }
         // The local host mints a V2-only authorization before compiling the
         // DQL program.  This is the frozen boundary: the compiler and
@@ -3197,7 +3240,22 @@ function createAskV2LaneHandler(
         if (!outputs || !validation.ok || (!v2Prepare && !legacyPrepare) || !input.executeAgenticGeneratedSql) {
           const reason = !outputs ? 'EXPLORATORY_OUTPUT_IDENTIFIER_NOT_ADMITTED' : validation.ok ? 'EXPLORATORY_EXECUTION_CAPABILITY_UNAVAILABLE' : 'EXPLORATORY_SQL_VALIDATION_FAILED';
           observe('validate_and_run_sql', 'ineligible', reason, { tier: 'exploratory_sql', candidateIds: outputIds, origin: 'validation' });
-          return denied('validate_and_run_sql', reason);
+          // Same teaching contract as the semantic/relational refusals: a
+          // model told only "not admitted" guesses identifiers until the
+          // budget dies. Name the admitted output IDs verbatim.
+          const admittedOutputs = reason === 'EXPLORATORY_OUTPUT_IDENTIFIER_NOT_ADMITTED'
+            ? visibleCandidates().slice(0, 24).map((candidate) => v2CandidateId(candidate))
+            : [];
+          return {
+            ...denied('validate_and_run_sql', reason),
+            ...(admittedOutputs.length ? {
+              admittedOutputIds: admittedOutputs,
+              usage: 'Re-send validate_and_run_sql with expectedOutputIds drawn from admittedOutputIds verbatim; each must name a card your SQL actually selects.',
+            } : {}),
+            ...(reason === 'EXPLORATORY_SQL_VALIDATION_FAILED' && !validation.ok && 'reason' in validation && validation.reason ? {
+              usage: String((validation as { reason?: unknown }).reason).slice(0, 400),
+            } : {}),
+          };
         }
         try {
           const selectedCandidateIds = [...new Set(outputIds)];
@@ -3375,7 +3433,7 @@ function createAskV2LaneHandler(
     // simply that the user asked for a field this project has never modeled.
     // "Not enough context" for an unmodeled term reads as a system failure;
     // the truthful answer names the term and the governed alternatives.
-    const requestedUnmodeledTerm = (): { term: string; admitted: string[] } | undefined => {
+    const requestedUnmodeledTerm = async (): Promise<{ term: string; admitted: string[] } | undefined> => {
       const plan = buildAnalysisQuestionPlan(input.question);
       const requirements = buildAnalyticalRequirementSet({ question: input.question });
       // A "dimension term" can actually be a member VALUE ("beverage
@@ -3428,10 +3486,25 @@ function createAskV2LaneHandler(
         return !containedInCandidates && !containedInPaths;
       });
       if (unresolved.length === 0) return undefined;
+      // Retention is a ranking, not the model: a term absent from the 80
+      // retained cards can still be modeled a thousand times over in a large
+      // catalog. Only the HOST's whole-catalog lookup may authorize a
+      // "not modeled" claim; without that proof, no refusal.
+      const catalogCheck = input.catalogTermMentioned;
+      if (!catalogCheck) return undefined;
+      let confirmed: string | undefined;
+      for (const term of unresolved) {
+        try {
+          if (!(await catalogCheck(term))) { confirmed = term; break; }
+        } catch {
+          return undefined;
+        }
+      }
+      if (!confirmed) return undefined;
       const admitted = [...new Set(all
         .filter((candidate) => v2SemanticCandidateMatchesRole(candidate, 'dimension'))
         .map((candidate) => candidate.semanticRuntimeName ?? candidate.name))].slice(0, 6);
-      return { term: unresolved[0]!, admitted };
+      return { term: confirmed, admitted };
     };
     const hostFirst = !state.exactCertifiedCandidateId
       && state.tierStates?.certified?.status !== 'complete'
@@ -3488,7 +3561,7 @@ function createAskV2LaneHandler(
     // needed the term to resolve.
     if (!state.terminalOutcome
       && (state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response')) {
-      const unmodeled = requestedUnmodeledTerm();
+      const unmodeled = await requestedUnmodeledTerm();
       if (unmodeled) {
         observeAskAgentV2Tool(state, {
           version: 1,
@@ -3532,7 +3605,14 @@ function createAskV2LaneHandler(
         // was shown "stopped at its own orchestration budget" instead of the
         // rows DQL was holding. Ten matches the run-level ceiling so the two
         // budgets cannot disagree about how much room the analyst really has.
-        maxProviderDispatches: limits?.maxProviderDispatches ?? (state.turnClass === 'research' ? 12 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 10 : 2),
+        // PHYSICAL sends, not logical round trips: a wrapper provider (the
+        // claude-code/codex passthrough) spends TWO physical sends per
+        // logical turn, so a cap of 10 gave those providers only five turns —
+        // the cold big-repo discovery ladder alone costs five, leaving zero
+        // room to apply a taught refusal. Sixteen restores eight logical
+        // turns for wrappers; 1:1 text providers are still bounded by the
+        // tool-call ceiling and the run deadline long before this guard.
+        maxProviderDispatches: limits?.maxProviderDispatches ?? (state.turnClass === 'research' ? 12 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 24 : 4),
         // The kernel owns current availability. Native transports evaluate it
         // before each API tool declaration; text transports receive the same
         // update after every observation. This reserves a final *LLM action*
@@ -3772,6 +3852,9 @@ function createAskV2LaneHandler(
         askAgentV2Outcome: { version: 2, kind: 'finish_answer', reasonCode: contextualEvidenceBound ? 'ASK_V2_CONTEXTUAL_ANSWER' : 'ASK_V2_GENERAL_UNGROUNDED_ANSWER', origin: 'narration' },
       };
     }
+    if (state.terminalOutcome?.reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED') {
+      return askV2NoAnswer(input, 'gap', 'ASK_V2_REMAINING_TIERS_DECLINED', 'agent_control');
+    }
     const progress = kernel.toolPolicy();
     if (progress.terminalActionToolNames?.length) {
       observe('finish_answer', 'ineligible', 'ASK_V2_TOOL_PROGRESSION_REQUIRED', {
@@ -3780,7 +3863,7 @@ function createAskV2LaneHandler(
       });
       return askV2NoAnswer(input, 'gap', 'ASK_V2_TOOL_PROGRESSION_REQUIRED', 'agent_control');
     }
-    return askV2NoAnswer(input, 'gap', 'ASK_V2_NO_EXECUTABLE_TOOL_RESULT', 'tool', undefined, requestedUnmodeledTerm());
+    return askV2NoAnswer(input, 'gap', 'ASK_V2_NO_EXECUTABLE_TOOL_RESULT', 'tool', undefined, await requestedUnmodeledTerm());
   };
 }
 
@@ -4294,7 +4377,9 @@ function askV2NoAnswer(
         : 'The selected governed query did not complete on the current connection. Review the connection and trace, then retry.'
       : modelingGap
         ? `"${modelingGap.term}" is not modeled in this project's governed data, so no query can compute it.${modelingGap.admitted.length ? ` Governed groupings available: ${modelingGap.admitted.join(', ')}.` : ''} Ask with one of those instead, or model "${modelingGap.term}" and re-sync.`
-        : 'DQL could not complete a safe analytical tool path from the current metadata snapshot.';
+        : reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED'
+          ? 'No certified block or semantic metric covers this question, and the analyst declined to run unverified exploratory SQL against this snapshot. No query was executed. Use Research for a deeper investigation, certify a block for this question, or name the exact model/columns to query.'
+          : 'DQL could not complete a safe analytical tool path from the current metadata snapshot.';
   return {
     kind: 'no_answer',
     sourceTier: 'no_answer',
@@ -6286,6 +6371,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             // SQL-boundary guard is needed because it can never execute a
             // provider-authored query.
             ...(req.probeAllowlistedLiteral ? { probeAllowlistedLiteral: req.probeAllowlistedLiteral } : {}),
+            ...(req.catalogTermMentioned ? { catalogTermMentioned: req.catalogTermMentioned } : {}),
             prepareExploratorySqlExecution: req.prepareExploratorySqlExecution
               ? async (sql, ...args) => {
                   guardSnapshot();

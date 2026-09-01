@@ -471,6 +471,7 @@ export {
   agentRequestDeadlineMs,
   createAgentRunBudget,
   deadlineScale,
+  setProcessDefaultDeadlineScale,
   AGENT_RUN_USER_CANCEL_CODE,
   createAgentRunCancellationError,
   isAgentRunUserCancellation,

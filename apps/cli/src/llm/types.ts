@@ -285,6 +285,8 @@ export interface AgentRunRequest {
     status: 'matched' | 'no_match' | 'ambiguous' | 'disabled' | 'unavailable';
     matches: Array<{ relation: string; column: string; canonicalValue: string }>;
   }>;
+  /** Server-only whole-catalog term lookup for truthful modeling-gap refusals. */
+  catalogTermMentioned?: (term: string) => Promise<boolean>;
   /**
    * Server-only freeze for a router-selected exploratory proposal. The client
    * never supplies this callback or the returned opaque capability.

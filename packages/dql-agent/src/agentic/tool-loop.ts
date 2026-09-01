@@ -399,6 +399,7 @@ export async function runTextProtocolToolLoopDetailed(
     }
     const requestedCall = parseTextToolCall(text);
     if (!requestedCall) {
+      if (process.env.DQL_DEBUG_TOOL_LOOP) console.error('[tool-loop unparsed]', JSON.stringify(text.slice(0, 400)));
       const policy = livePolicyBeforeDispatch;
       // A live V2 policy can require one concrete next action. A prose reply
       // at this point is neither a valid answer nor a safe terminal: discard

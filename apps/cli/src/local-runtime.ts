@@ -347,6 +347,7 @@ import {
   isHashedEmbeddingProvider,
   clearProjectEmbeddingCache,
   setProcessDefaultEmbeddingProvider,
+  setProcessDefaultDeadlineScale,
   upgradeVectorIndexForProject,
   openMetadataCatalog,
   type DomainContextEnvelope,
@@ -3390,10 +3391,17 @@ export function agentRunProviderDispatchBudgetForMode(
   return {
     // Legacy V1 keeps its existing phase limits.  Authoritative Ask V2 uses
     // the additive agent-control/tool-followup phases below: one initial
-    // control turn plus up to four bounded discovery/execution follow-ups and
-    // one post-result narration control. The run-wide cap remains six
-    // regardless of transport.
-    total: 6,
+    // control turn plus bounded discovery/execution follow-ups and one
+    // post-result narration control.
+    //
+    // The follow-up allowance was four, which on a cold large repo is spent
+    // ENTIRELY on the discovery ladder (two tier inspections + two tier
+    // attempts) — the taught refusals then hand the model the admitted
+    // identifiers with no send remaining to use them, and every such turn
+    // died at "orchestration budget" having done everything right. Nine
+    // follow-ups affords the full ladder plus one corrected retry per
+    // executable tier; the run deadline and per-phase caps still bound cost.
+    total: 12,
     classification: 1,
     meaningResolution: 1,
     planning: 1,
@@ -3402,7 +3410,7 @@ export function agentRunProviderDispatchBudgetForMode(
     narration: 1,
     repair: 1,
     agentControl: 1,
-    toolFollowup: 4,
+    toolFollowup: 9,
   };
 }
 
@@ -4784,6 +4792,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // built with. Before this, library call sites without a project root fell
   // back to hashed embeddings while the catalog itself was semantic.
   setProcessDefaultEmbeddingProvider(projectEmbeddingProvider(projectRoot));
+  // A slow provider needs a longer Ask window, and DQL already knows which
+  // class the active provider is in: a local Ollama model or a
+  // subscription-CLI passthrough costs 10-90s PER DISPATCH, so the default
+  // 45s budget made them structurally unusable and every user rediscovered
+  // DQL_AGENT_DEADLINE_SCALE the hard way. Register the class-appropriate
+  // default; the environment variable still overrides.
+  const syncDeadlineScaleToActiveProvider = () => {
+    // Deterministic tests spin many servers with varied provider fixtures in
+    // one process; a leaked process-wide scale would couple them. Production
+    // servers are one project per process, where this default belongs.
+    if (process.env.VITEST) return;
+    const active = getActiveProvider(projectRoot);
+    const slowLocalOrCli = active === 'ollama' || active === 'claude-code' || active === 'codex';
+    // Hosted APIs still pay real latency on large-repo analyst prompts
+    // (extended thinking, 80-candidate workspaces), so they get headroom
+    // too — just less of it.
+    const hostedApi = active === 'anthropic' || active === 'openai' || active === 'gemini' || active === 'custom-openai';
+    setProcessDefaultDeadlineScale(slowLocalOrCli ? 6 : hostedApi ? 2 : 1);
+  };
+  syncDeadlineScaleToActiveProvider();
   // This opaque value lets the Ask browser cache distinguish a newly started
   // project/runtime on the same browser origin without exposing `projectRoot`.
   const conversationProjectIdentity = askConversationProjectIdentity(projectRoot);
@@ -6919,6 +6947,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           if (matches.length === 1) return { status: 'matched' as const, matches };
           return { status: matches.length > 1 ? 'ambiguous' as const : 'no_match' as const, matches: [] };
+        },
+        // Whole-catalog term lookup: a "not modeled" refusal may only be made
+        // against the full snapshot catalog. The bounded retained set misses
+        // modeled terms routinely at scale (60k+ objects), and refusing from
+        // retention declared "customer" unmodeled on a repo with hundreds of
+        // customer models. Fails OPEN: no proof of absence, no refusal.
+        catalogTermMentioned: async (term: string) => {
+          const trimmed = typeof term === 'string' ? term.trim() : '';
+          if (!trimmed) return true;
+          try {
+            const catalog = openMetadataCatalog(projectRoot);
+            try {
+              const mentioned = catalog.searchObjects({ query: trimmed, limit: 1 }).length > 0;
+              if (process.env.DQL_DEBUG_UNMODELED) console.error('[unmodeled-check]', trimmed, '->', mentioned);
+              return mentioned;
+            } finally {
+              catalog.close();
+            }
+          } catch (error) {
+            if (process.env.DQL_DEBUG_UNMODELED) console.error('[unmodeled-check] threw', trimmed, error instanceof Error ? error.message : String(error));
+            return true;
+          }
         },
         prepareExploratorySqlExecution,
         prepareAskV2ExploratorySqlExecution,
@@ -19260,6 +19310,7 @@ function analyticalFailureSummary(
           reasoningEffort: isReasoningEffortSetting(body.reasoningEffort) ? body.reasoningEffort : undefined,
         });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        syncDeadlineScaleToActiveProvider();
         res.end(serializeJSON({ ok: true, providers }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });

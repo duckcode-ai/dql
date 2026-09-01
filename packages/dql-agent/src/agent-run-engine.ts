@@ -428,6 +428,11 @@ export interface AgentRunRequest {
     matches: Array<{ relation: string; column: string; canonicalValue: string }>;
   }>;
   /**
+   * Host-only whole-catalog term lookup. Retention-bounded evidence must
+   * never authorize a "not modeled" claim on its own.
+   */
+  catalogTermMentioned?: (term: string) => Promise<boolean>;
+  /**
    * Host-only shape continuity from one completed, result-backed Ask turn.
    * HTTP/MCP parsers must never accept this: it is emitted only after the
    * local conversation store proves the source turn and result fingerprint.
@@ -1002,9 +1007,22 @@ const MAX_DEADLINE_MS = 600_000;
  * load-bearing, so scaling keeps them proportional instead of letting one
  * setting invert them.
  */
+/**
+ * Host-registered default scale, set from the ACTIVE provider's latency
+ * class. DQL knows a local Ollama model or a subscription-CLI passthrough
+ * costs 10-90s per dispatch; making every user of a slow provider discover
+ * an environment variable turned that knowledge into a support ticket. An
+ * explicit DQL_AGENT_DEADLINE_SCALE still wins over this default.
+ */
+let processDefaultDeadlineScale = 1;
+
+export function setProcessDefaultDeadlineScale(scale: number): void {
+  processDefaultDeadlineScale = Number.isFinite(scale) ? Math.min(Math.max(scale, 1), 20) : 1;
+}
+
 export function deadlineScale(env: Record<string, string | undefined> = process.env): number {
   const raw = Number(env.DQL_AGENT_DEADLINE_SCALE);
-  if (!Number.isFinite(raw) || raw <= 0) return 1;
+  if (!Number.isFinite(raw) || raw <= 0) return processDefaultDeadlineScale;
   // Bounded: below 1 would tighten a safety deadline someone is relying on.
   return Math.min(Math.max(raw, 1), 20);
 }
@@ -5171,6 +5189,13 @@ function unmodeledRequestAnswer(run: AgentRun): string | undefined {
 }
 
 function deterministicTerminalAnswerForRun(run: AgentRun): string {
+  // An analyst that inspected the executable tiers and explicitly declined
+  // the remaining exploratory path is a specific, actionable outcome — not
+  // a generic grounding gap. Surface the specific sentence.
+  const v2Terminal = run.routeDecision?.askAgentV2Decision?.state?.terminalOutcome;
+  if (v2Terminal?.reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED') {
+    return 'No certified block or semantic metric covers this question, and the analyst declined to run unverified exploratory SQL against this snapshot. No query was executed. Use Research for a deeper investigation, certify a block for this question, or name the exact model/columns to query.';
+  }
   const incident = terminalIncidentForRun(
     run,
     run.routeDecision?.analyticalCascadeDecision?.stopReason,
@@ -6321,7 +6346,7 @@ function refusalCodeSummary(code: string | undefined): string | undefined {
 
 function blockingOutcomeSummary(
   evaluations: AgentRunEvaluation[],
-  result: Pick<AgentRouteExecutorResult, 'answerRefusalCode' | 'answer'>,
+  result: Pick<AgentRouteExecutorResult, 'answerRefusalCode' | 'answer' | 'askAgentV2Outcome'>,
   fallback: string,
 ): string {
   const messages = evaluations
@@ -6334,6 +6359,12 @@ function blockingOutcomeSummary(
   // was blocking and the route's default summary contained "Answered" — it
   // asserted a validation that never ran, and masked deadline/budget/gap
   // terminals behind an invented one.
+  // A V2 terminal that names its own specific outcome beats the coarse
+  // refusal-code sentence: "analyst declined the exploratory tier" is
+  // actionable where "could not ground every part" reads as a system fault.
+  if (result.askAgentV2Outcome?.reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED') {
+    return 'No certified block or semantic metric covers this question, and the analyst declined to run unverified exploratory SQL against this snapshot. No query was executed. Use Research for a deeper investigation, certify a block for this question, or name the exact model/columns to query.';
+  }
   const typed = refusalCodeSummary(result.answerRefusalCode);
   if (typed) return typed;
   return fallback.includes('Answered')

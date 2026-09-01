@@ -2229,6 +2229,13 @@ export interface AnswerLoopInput {
     matches: Array<{ relation: string; column: string; canonicalValue: string }>;
   }>;
   /**
+   * Host-owned full-catalog term lookup. The bounded RETAINED candidate set
+   * can miss a term that IS modeled (routine on a 60k-object catalog), so a
+   * "this term is not modeled" claim may only be made against the whole
+   * snapshot catalog, never against retention.
+   */
+  catalogTermMentioned?: (term: string) => Promise<boolean>;
+  /**
    * Host-only capability minting for a router-selected exploratory proposal.
    * The loop calls this only after its own SQL/context validation has passed;
    * the returned opaque capability is consumed immediately by the execution

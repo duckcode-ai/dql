@@ -6628,11 +6628,38 @@ describe('host-first semantic execution', () => {
       askAgentV2Workspace: askV2Workspace(candidates),
       semanticQueryCompiler: vi.fn(async () => ({ sql: 'select 1', engine: 'native' as const })),
       executeGeneratedSql: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
+      // The HOST's whole-catalog lookup proves absence; retention alone is a
+      // ranking, not the model, and must never authorize this refusal.
+      catalogTermMentioned: async () => false,
     } as never);
 
     expect(answer.refusalCode).toBe('modeling_gap');
     expect(answer.text).toContain('"region" is not modeled');
     expect(answer.text).toContain('customer_name');
+  });
+
+  it('never declares a term unmodeled from retention alone (the 60k-catalog case)', async () => {
+    // On the office-scale repo, "customer" was declared unmodeled because no
+    // retained card contained it — while the catalog held hundreds of
+    // customer models. Catalog-mentioned terms go to the analyst instead.
+    const generate = vi.fn(async () => 'The requested grouping could not be resolved.');
+    const provider: AgentProvider = { name: 'ollama', async available() { return true; }, generate };
+    const candidates = [metric, customerName];
+    const state = askV2State(candidates);
+
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 4, maxProviderDispatches: 2 })({
+      question: 'show revenue by region',
+      provider,
+      askAgentV2Workspace: askV2Workspace(candidates),
+      semanticQueryCompiler: vi.fn(async () => ({ sql: 'select 1', engine: 'native' as const })),
+      executeGeneratedSql: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
+      catalogTermMentioned: async () => true,
+    } as never);
+
+    // The catalog says the term exists somewhere: the analyst is consulted
+    // and no pre-dispatch modeling-gap refusal is minted.
+    expect(generate).toHaveBeenCalled();
+    expect(answer.refusalCode).not.toBe('modeling_gap');
   });
 
   it('falls back to the analyst when the measure is AMBIGUOUS (the large-repo case)', async () => {

@@ -1106,7 +1106,10 @@ export function projectResearchEvidenceLedgerV4(ledger: ResearchEvidenceLedgerV3
 export const ASK_V2_BUDGETS = {
   ask: {
     durationMs: 45_000,
-    providerDispatches: 6,
+    // The cold discovery ladder costs five dispatches before any retry is
+    // possible (two tier inspections, two tier attempts, one finish); six
+    // left zero room to apply a taught refusal's admitted identifiers.
+    providerDispatches: 10,
     toolCalls: 8,
     expansions: 2,
     executions: 2,
