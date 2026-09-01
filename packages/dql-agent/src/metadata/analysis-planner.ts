@@ -1142,7 +1142,7 @@ function removeTemporalFilterDimensionTerms(
   timeTerms: string[],
 ): string[] {
   const relativeTemporalFilter = timeTerms.some((term) =>
-    /^(?:today|yesterday|ytd|mtd|qtd|wtd|(?:last|this|next|previous|prior)\s+)/.test(term));
+    /^(?:today|yesterday|ytd|mtd|qtd|wtd|(?:last|this|next|previous|prior|past)\s+)/.test(term));
   if (!relativeTemporalFilter) return dimensions;
   return dimensions.filter((dimension) => {
     if (!/^(?:day|week|month|quarter|year|season|period)$/.test(dimension)) return true;
@@ -1183,7 +1183,7 @@ function extractFilterTerms(question: string, entities: AnalysisEntityMention[])
       .filter((entity) => entity.source !== 'quoted' || !isQuotedAnalyticalIdentifier(entity.text, question))
       .map((entity) => entity.text),
     ...analyticalValues,
-    ...Array.from(question.matchAll(/\b(?:last|this|next|previous|prior|current)\s+(day|week|month|quarter|year|season)\b/gi)).map((match) => match[0].toLowerCase()),
+    ...Array.from(question.matchAll(/\b(?:last|this|next|previous|prior|current|past)\s+(?:(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|twelve)\s+)?(days?|weeks?|months?|quarters?|years?|seasons?)\b/gi)).map((match) => match[0].toLowerCase()),
   ]).slice(0, 16);
 }
 
@@ -1243,7 +1243,12 @@ function extractTimeTerms(question: string): string[] {
   // Relative determiners are temporal only when followed by a temporal noun.
   // A broad `this \w+` match classified deictic result references such as
   // "this amount" as a time grain and polluted both retrieval and SQL planning.
-  for (const match of question.matchAll(/\b(?:today|yesterday|ytd|mtd|qtd|wtd|(?:last|this|next|previous|prior)\s+(?:(?:fiscal|calendar)\s+)?(?:hours?|days?|weeks?|months?|quarters?|years?|seasons?|periods?)|\d{4})\b/gi)) {
+  //
+  // An optional COUNT is allowed between determiner and noun: "last two
+  // months" and "past 60 days" are windows over time, and requiring adjacency
+  // made them invisible — the window then degraded into a bare `month`
+  // grouping dimension while its count was misread as a row limit.
+  for (const match of question.matchAll(/\b(?:today|yesterday|ytd|mtd|qtd|wtd|(?:last|this|next|previous|prior|past)\s+(?:(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|twelve)\s+)?(?:(?:fiscal|calendar)\s+)?(?:hours?|days?|weeks?|months?|quarters?|years?|seasons?|periods?)|\d{4})\b/gi)) {
     terms.push(match[0].toLowerCase());
   }
   for (const word of ['date', 'day', 'week', 'month', 'quarter', 'year', 'season', 'period']) {
@@ -1373,9 +1378,28 @@ function scalarValueQuestionUsesEntitiesAsMeasures(
     && !/\b(by|per|each|every|top|bottom|rank|ranking|list|which|who|break\s*down|breakdown|split|segment|trend|over time)\b/.test(lower);
 }
 
+/**
+ * "last two months" is a TIME WINDOW, not a ranking. `first` and `last` sit in
+ * the rank-keyword alternation because "first 3 rows" / "last 5 customers" are
+ * genuine limits — but when the counted noun is a unit of time, the phrase
+ * restricts WHEN, not HOW MANY. Treating it as a limit produced the reported
+ * silent wrongness: "last two month with high revenue by customer name" ran as
+ * an unordered LIMIT 2 with no date filter, and the invented limit even
+ * overrode the safe implicit top-10 the ranking words would have earned.
+ */
+const TOP_N_TIME_NOUN_RE = /^\s*(?:days?|weeks?|months?|quarters?|years?|seasons?|periods?|hours?|minutes?)\b/;
+
+function topNCountIsTimeWindow(lower: string, match: RegExpMatchArray): boolean {
+  const keyword = match[0].trim().split(/\s+/)[0];
+  if (keyword !== 'first' && keyword !== 'last') return false;
+  const rest = lower.slice((match.index ?? 0) + match[0].length);
+  return TOP_N_TIME_NOUN_RE.test(rest);
+}
+
 function parseTopN(question: string): RequestedAnswerShape['topN'] | undefined {
   const lower = question.toLowerCase();
-  const numeric = lower.match(/\b(?:top|bottom|first|last)\s+(\d{1,3})\b/);
+  const numericMatch = lower.match(/\b(?:top|bottom|first|last)\s+(\d{1,3})\b/);
+  const numeric = numericMatch && !topNCountIsTimeWindow(lower, numericMatch) ? numericMatch : null;
   const explicitN = numeric ? Number(numeric[1]) : wordNumberFromTopN(lower);
   // A ranking request without a literal N still needs a bounded result contract.
   // Ten is the product's concise table default; this prevents the provider from
@@ -1391,7 +1415,11 @@ function parseTopN(question: string): RequestedAnswerShape['topN'] | undefined {
 
 function hasImplicitRankingRequest(lower: string): boolean {
   return /\b(top|bottom|most|least|highest|lowest|largest|smallest|greatest|best|worst|leading)\b/.test(lower)
-    || hasComparativeMetricRanking(lower);
+    || hasComparativeMetricRanking(lower)
+    // A bounded high/low next to a measure is a ranking ask even without a
+    // rank keyword — direction alone changes nothing unless the implicit
+    // bounded-result default fires with it.
+    || boundedHighLowDirection(lower) !== undefined;
 }
 
 function hasComparativeMetricRanking(lower: string): boolean {
@@ -1417,7 +1445,8 @@ function wordNumberFromTopN(lower: string): number | undefined {
     ten: 10,
   };
   const match = lower.match(/\b(?:top|bottom|first|last)\s+(one|two|three|four|five|six|seven|eight|nine|ten)\b/);
-  return match ? words[match[1]!] : undefined;
+  if (!match || topNCountIsTimeWindow(lower, match)) return undefined;
+  return words[match[1]!];
 }
 
 // A required OUTPUT column is a hard contract on the result shape, so only a short,
@@ -1744,6 +1773,25 @@ function rankingDirectionCompatible(question: string, targetText: string): boole
   return !targetDirection || targetDirection === questionDirection;
 }
 
+/**
+ * "high revenue" / "low margin" are ranking language, but bare `high|low` is
+ * not: "high level overview" and "low priority" rank nothing. Bound the words
+ * to a measure within the same clause, in either order ("high revenue",
+ * "revenue is low"). Without this, "customers with high revenue" earned no
+ * direction and no implicit limit — the plan was literally "limit N, no
+ * order", which executed as an arbitrary unordered LIMIT.
+ */
+const RANKING_MEASURE_WORDS = 'revenue|sales|spend|spending|amount|count|orders?|margin|profit|value|volume|usage|cost|quantity|points?|score|tax|bookings';
+function boundedHighLowDirection(lower: string): 'top' | 'bottom' | undefined {
+  const high = new RegExp(`\\bhigh(?:est)?\\b(?!\\s*(?:-\\s*)?level\\b)(?=[^?.!,;]{0,40}\\b(?:${RANKING_MEASURE_WORDS})\\b)`).test(lower)
+    || new RegExp(`\\b(?:${RANKING_MEASURE_WORDS})\\b(?=[^?.!,;]{0,24}\\bhigh(?:est)?\\b)`).test(lower);
+  const low = new RegExp(`\\blow(?:est)?\\b(?=[^?.!,;]{0,40}\\b(?:${RANKING_MEASURE_WORDS})\\b)`).test(lower)
+    || new RegExp(`\\b(?:${RANKING_MEASURE_WORDS})\\b(?=[^?.!,;]{0,24}\\blow(?:est)?\\b)`).test(lower);
+  if (high && !low) return 'top';
+  if (low && !high) return 'bottom';
+  return undefined;
+}
+
 function rankingDirection(value: string): 'top' | 'bottom' | undefined {
   const lower = value.toLowerCase();
   const bottom = /\b(bottom|worst|lowest|least|fewest|minimum|min|smallest)\b/.test(lower)
@@ -1755,6 +1803,7 @@ function rankingDirection(value: string): 'top' | 'bottom' | undefined {
     || /\b(?:above|over)\b\s+that\s+of\s+[a-z0-9@._'-]+/.test(lower);
   if (bottom && !top) return 'bottom';
   if (top && !bottom) return 'top';
+  if (!top && !bottom) return boundedHighLowDirection(lower);
   return undefined;
 }
 

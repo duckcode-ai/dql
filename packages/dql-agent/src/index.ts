@@ -120,6 +120,7 @@ export {
   ASK_V2_CANONICAL_TOOLS,
   createAskAgentRuntimeV2,
   createAskToolKernelV2,
+  releaseAskV2CertifiedTierLock,
   defaultProviderResultEgressPolicyV2,
   observeAskAgentV2Tool,
   setAskV2TierState,

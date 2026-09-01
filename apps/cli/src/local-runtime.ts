@@ -11763,10 +11763,42 @@ function analyticalFailureSummary(
             .filter((fit) => fit.directQuestionContract)
             .map((fit) => [fit.objectKey, fit.directQuestionContract] as const),
         );
-        const certifiedCompleteCandidateIds = evidence.candidates
+        const fitCompleteCandidateIds = evidence.candidates
           .filter((candidate) => candidate.kind === 'certified_block'
             && [candidate.id, candidate.qualifiedId].some((identity) => identity && certifiedFitKeys.has(identity)))
           .map((candidate) => candidate.qualifiedId ?? candidate.id);
+        // A block is only COMPLETE for a ranking question when it proves the
+        // requested top-N — outer order, direction, and a governed row bound.
+        // Stamping `complete` on fit alone let the fast path lock the certified
+        // tier for a per-group/unproven ranking; the proof then failed
+        // downstream, but the lock had no release, so the turn looped
+        // run_certified→denied until the deadline. Never take the lock the
+        // proof would forbid. The plan here is the pack's — built WITH the
+        // conversation follow-up — so an inherited shape also gates the claim.
+        const certifiedCompleteCandidateIds = fitCompleteCandidateIds.filter((candidateId) => {
+          if (!pack.questionPlan.requestedShape.topN) return true;
+          const handle = certifiedArtifacts.get(candidateId);
+          const block = handle && typeof handle === 'object' && (handle as AskCertifiedArtifactHandleV1).version === 1
+            ? (handle as AskCertifiedArtifactHandleV1).artifact as KGNode
+            : undefined;
+          if (!block) return false;
+          const candidate = evidence.candidates.find((item) => (item.qualifiedId ?? item.id) === candidateId);
+          const exactQuestionMatch = Boolean(candidate
+            && [candidate.id, candidate.qualifiedId]
+              .some((identity) => identity && directCertifiedQuestionContracts.has(identity)));
+          return certifiedBlockProvesRequestedTopN(block, pack.questionPlan, {
+            exactCertifiedQuestionMatch: exactQuestionMatch,
+            uniqueCompleteCertifiedFit: fitCompleteCandidateIds.length === 1,
+            // Match the downstream fast-path proof exactly: a target that can
+            // append a trailing row bound proves the limit host-side even when
+            // the authored SQL has none. Omitting this demoted every fit the
+            // host itself could bound, killing legitimate fast paths.
+            hostEnforcedRowLimit: supportsTrailingAnalyticalRowBound(certifiedExecutionConnection?.driver)
+              ? buildCertifiedBlockInvocationInput(block, pack.questionPlan, request.question).rowLimit
+              : undefined,
+          });
+        });
+        const certifiedTopNDemoted = fitCompleteCandidateIds.length > 0 && certifiedCompleteCandidateIds.length === 0;
         // Preserve direct authored-question evidence separately for receipts
         // and the strict legacy path. Authoritative V2 may also use an
         // implicit authored ranking when this bridge exposes exactly one
@@ -11804,7 +11836,11 @@ function analyticalFailureSummary(
             version: 1,
             status: certifiedCompleteCandidateIds.length > 0 ? 'complete' : certifiedArtifacts.size > 0 ? 'available' : 'unavailable',
             candidateIds: certifiedCompleteCandidateIds,
-            reasonCode: certifiedCompleteCandidateIds.length > 0 ? 'CERTIFIED_COMPLETE_FOR_REQUEST' : certifiedArtifacts.size > 0 ? 'CERTIFIED_CONTEXT_ONLY' : 'CERTIFIED_UNAVAILABLE',
+            reasonCode: certifiedCompleteCandidateIds.length > 0
+              ? 'CERTIFIED_COMPLETE_FOR_REQUEST'
+              : certifiedTopNDemoted
+                ? 'CERTIFIED_TOPN_UNPROVEN'
+                : certifiedArtifacts.size > 0 ? 'CERTIFIED_CONTEXT_ONLY' : 'CERTIFIED_UNAVAILABLE',
             ...(certifiedCompleteCandidateIds.length > 0 ? { safeNextTools: ['run_certified'] } : {}),
           },
           semantic: {

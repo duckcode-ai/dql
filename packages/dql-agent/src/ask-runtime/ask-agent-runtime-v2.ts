@@ -2396,6 +2396,27 @@ function applyHostCertifiedFastPath(state: AskAgentStateV4, request: AgentRunReq
   });
 }
 
+/**
+ * Release a certified tier claim that turned out to be unprovable in flight.
+ *
+ * The fast path narrows the tool policy to `run_certified` and nothing else.
+ * When the downstream admission/proof then refuses that one tool, the policy
+ * used to have no exit: the turn looped run_certified → denied → finish
+ * denied until the deadline, and the user saw a fabricated "validation"
+ * message. The bridge now avoids taking an unprovable claim at all; this
+ * release is the in-flight defense for anything the bridge could not know.
+ */
+export function releaseAskV2CertifiedTierLock(state: AskAgentStateV4, reasonCode: string): void {
+  state.exactCertifiedCandidateId = undefined;
+  if (state.candidatePlan?.intendedTool === 'run_certified') state.candidatePlan = undefined;
+  if (state.controllerTier === 'certified') state.controllerTier = undefined;
+  setAskV2TierState(state, 'certified', {
+    status: 'available',
+    candidateIds: state.tierStates?.certified?.candidateIds ?? [],
+    reasonCode,
+  });
+}
+
 /** Build a safe source-level explanation without persisting source contents. */
 function contextCoverageForWorkspace(
   evidence: AgentRetrievalEvidence | undefined,

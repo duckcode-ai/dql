@@ -693,3 +693,58 @@ describe('follow-up measure carry (sticky-metric fix)', () => {
     expect(plan.metricTerms).toEqual(['total_consumption_units']);
   });
 });
+
+/**
+ * "last two months" is a time window, not a ranking. `last` sits in the rank
+ * keyword set for "last 5 customers", so a counted TIME NOUN after it used to
+ * parse as a row limit: "last two month with high revenue by customer name"
+ * executed as an unordered LIMIT 2 with no date filter and shipped as a
+ * passing answer — the invented limit even overrode the safe implicit top-10
+ * that the ranking words would have earned on their own.
+ */
+describe('time windows are not row limits', () => {
+  it('parses the reported question as a defaulted ranking over a window', () => {
+    const plan = buildAnalysisQuestionPlan('Can you give me the last two month with high revenue by customer name');
+    expect(plan.requestedShape.topN).toEqual({ n: 10, scope: 'per_group' });
+    expect(plan.requestedShape.rankingDirection).toBe('top');
+    expect(plan.timeTerms).toContain('last two month');
+  });
+
+  it('keeps genuine counted rankings', () => {
+    expect(buildAnalysisQuestionPlan('top two customers by revenue').requestedShape.topN)
+      .toEqual({ n: 2, scope: 'overall' });
+    expect(buildAnalysisQuestionPlan('last 5 customers by signup date').requestedShape.topN)
+      .toEqual({ n: 5, scope: 'overall' });
+  });
+
+  it('never turns first/last + count + time noun into a limit', () => {
+    for (const question of [
+      'first 3 weeks of revenue',
+      'revenue for the last 2 months',
+      'orders in the last two quarters',
+      'who are the top customers since last two months?',
+    ]) {
+      const topN = buildAnalysisQuestionPlan(question).requestedShape.topN;
+      expect(topN?.n, question).not.toBe(3);
+      expect(topN?.n, question).not.toBe(2);
+    }
+  });
+
+  it('captures counted relative windows as time terms', () => {
+    expect(buildAnalysisQuestionPlan('revenue for the last 2 months').timeTerms)
+      .toContain('last 2 months');
+    expect(buildAnalysisQuestionPlan('who are the top customers since last two months?').timeTerms)
+      .toContain('last two months');
+  });
+
+  it('reads bounded high/low as ranking language, but not "high level"', () => {
+    const high = buildAnalysisQuestionPlan('customers with high revenue');
+    expect(high.requestedShape.rankingDirection).toBe('top');
+    expect(high.requestedShape.topN).toEqual({ n: 10, scope: 'overall' });
+    const low = buildAnalysisQuestionPlan('products with low sales');
+    expect(low.requestedShape.rankingDirection).toBe('bottom');
+    const overview = buildAnalysisQuestionPlan('give me a high level overview of revenue');
+    expect(overview.requestedShape.rankingDirection).toBeUndefined();
+    expect(overview.requestedShape.topN).toBeUndefined();
+  });
+});

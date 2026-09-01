@@ -976,7 +976,7 @@ function isSnapshotOnlyTimeRange(value: string): boolean {
  * whereas `current month` and `today` require a date role.
  */
 function hasExplicitTemporalFilter(question: string): boolean {
-  return /\b(?:today|yesterday)\b|\b(?:this|current|last|previous)\s+(?:day|week|month|quarter|year)\b|\b(?:month|quarter|year)[ -]to[ -]date\b|\b(?:mtd|qtd|ytd|last year|previous year|year over year|yoy)\b|\bfy\s?\d{2,4}\b|\bfiscal\s+year\s+\d{2,4}\b/i.test(question);
+  return /\b(?:today|yesterday)\b|\b(?:this|current|last|previous|past)\s+(?:(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|twelve)\s+)?(?:day|days|week|weeks|month|months|quarter|quarters|year|years)\b|\b(?:month|quarter|year)[ -]to[ -]date\b|\b(?:mtd|qtd|ytd|last year|previous year|year over year|yoy)\b|\bfy\s?\d{2,4}\b|\bfiscal\s+year\s+\d{2,4}\b/i.test(question);
 }
 
 function extractLimit(question: string): number | undefined {

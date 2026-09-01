@@ -201,3 +201,70 @@ function canonicalResultColumn(value: string): string {
     })
     .join('_');
 }
+
+/**
+ * Clause-level findings comparing an executed statement's ranking clauses
+ * against what the question actually asked.
+ *
+ * The existing top-N check runs in one direction only: it can see a limit the
+ * query ignored, never a limit the query INVENTED. That gap is how "last two
+ * month … by customer name" executed as a bare `LIMIT 2` — a row cap the user
+ * never requested, over rows nothing ordered — and shipped as a passing
+ * answer. Both directions are checked here, on the outermost statement only:
+ * a LIMIT inside a subquery or CTE is the query's own business.
+ */
+export interface ExecutedRankingClauseFindings {
+  /**
+   * The statement caps rows although no top-N was requested. Ordered
+   * truncation is a deterministic, disclosable cap; UNordered truncation is
+   * an arbitrary row lottery that changes what the answer means.
+   */
+  inventedLimit?: { limit: number; ordered: boolean };
+  /** A top-N was requested and a LIMIT executed with no outer ORDER BY. */
+  unorderedLimit?: { limit: number };
+}
+
+export function validateExecutedRankingClauses(
+  plan: Pick<AnalysisQuestionPlan, 'requestedShape'>,
+  sql: string | undefined,
+): ExecutedRankingClauseFindings {
+  if (!sql?.trim()) return {};
+  const clauses = outermostRankingClauses(sql);
+  if (!clauses?.limit) return {};
+  const requested = plan.requestedShape.topN;
+  if (!requested) return { inventedLimit: { limit: clauses.limit, ordered: clauses.hasOrderBy } };
+  if (!clauses.hasOrderBy) return { unorderedLimit: { limit: clauses.limit } };
+  return {};
+}
+
+/** Depth-0 scan for the outermost ORDER BY / LIMIT of the final statement. */
+function outermostRankingClauses(sql: string): { limit?: number; hasOrderBy: boolean } | undefined {
+  let depth = 0;
+  let quote: string | undefined;
+  let hasOrderBy = false;
+  let limit: number | undefined;
+  const lower = sql.toLowerCase();
+  for (let index = 0; index < lower.length; index += 1) {
+    const char = lower[index]!;
+    if (quote) {
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') { quote = char; continue; }
+    if (char === '(') { depth += 1; continue; }
+    if (char === ')') { depth = Math.max(0, depth - 1); continue; }
+    if (depth !== 0) continue;
+    if (lower.startsWith('order', index) && /^order\s+by\b/.test(lower.slice(index)) && boundaryAt(lower, index)) {
+      hasOrderBy = true;
+    }
+    if (lower.startsWith('limit', index) && boundaryAt(lower, index)) {
+      const match = /^limit\s+(\d{1,9})\b/.exec(lower.slice(index));
+      if (match) limit = Number(match[1]);
+    }
+  }
+  return { limit, hasOrderBy };
+}
+
+function boundaryAt(lower: string, index: number): boolean {
+  return index === 0 || !/[a-z0-9_]/.test(lower[index - 1]!);
+}

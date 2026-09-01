@@ -24,7 +24,7 @@ import type {
   AgentRunGates,
   AgentRouteExecutorResult,
 } from "./agent-run-engine.js";
-import { validateAnswerResultShape } from "./answer-shape.js";
+import { validateAnswerResultShape, validateExecutedRankingClauses } from "./answer-shape.js";
 import { analyticalErrorHeadline, type AnalyticalErrorOrigin } from "./analytical-error.js";
 import { buildAnalysisQuestionPlan } from "./metadata/analysis-planner.js";
 
@@ -78,7 +78,7 @@ const BREAKDOWN_INTENT_RE = /\b(by |per |each |breakdown|break down|split|top \d
 // Time-series / window phrasings are inherently multi-row even though they read as
 // scalar ("monthly total revenue", "running total", "month over month"). Excluding
 // them prevents false-positive fan-out flags that would waste a repair on a correct answer.
-const TIME_SERIES_INTENT_RE = /\b(monthly|daily|weekly|quarterly|yearly|hourly|annual|annually|per (?:month|day|week|quarter|year|hour)|running total|cumulative|rolling|month over month|year over year|week over week|mom|yoy|wow|over (?:month|year|week|day|quarter)s?|last \d+ (?:days?|weeks?|months?|quarters?|years?)|for the last \d+)\b/i;
+const TIME_SERIES_INTENT_RE = /\b(monthly|daily|weekly|quarterly|yearly|hourly|annual|annually|per (?:month|day|week|quarter|year|hour)|running total|cumulative|rolling|month over month|year over year|week over week|mom|yoy|wow|over (?:month|year|week|day|quarter)s?|last (?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve) (?:days?|weeks?|months?|quarters?|years?)|for the last (?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve))\b/i;
 
 function looksLikeScalarQuestion(question: string): boolean {
   return SCALAR_INTENT_RE.test(question)
@@ -129,6 +129,53 @@ function semanticCorrectnessEvaluation(
   };
 }
 
+/**
+ * The executed statement's ranking clauses must AGREE with the question.
+ *
+ * A row cap the user never asked for is a silent mutation of the question —
+ * "last two month … by customer name" executed as a bare `LIMIT 2` and shipped
+ * two arbitrary customers as a passing answer. A requested top-N whose LIMIT
+ * has no outer ORDER BY is the same lie in a different suit: LIMIT without
+ * ORDER BY is row lottery, not ranking. Both directions are blocking and carry
+ * no repair: re-planning cannot fix a question that was misread upstream, and
+ * the reader must see that this specific result is not what they asked for.
+ */
+function executedRankingClauseEvaluation(
+  question: string,
+  payload: Record<string, unknown> | undefined,
+): AgentRunEvaluation | undefined {
+  const sql = nonEmptyString(payload?.sql)
+    ?? nonEmptyString(asRecord(payload?.result)?.sql)
+    ?? nonEmptyString(payload?.proposedSql);
+  if (!sql) return undefined;
+  const plan = contextPackQuestionPlan(payload) ?? buildAnalysisQuestionPlan(question);
+  const findings = validateExecutedRankingClauses(plan, sql);
+  if (findings.inventedLimit) {
+    // An ORDERED cap is deterministic truncation (a defensive bound the
+    // compiler may add) — disclose it. An UNordered cap selects arbitrary
+    // rows and silently changes the question — block it.
+    return {
+      id: "answer-invented-limit",
+      label: "Row limit not requested",
+      passed: false,
+      severity: findings.inventedLimit.ordered ? "warning" : "blocking",
+      message: findings.inventedLimit.ordered
+        ? `The executed query truncated the ordered result to ${findings.inventedLimit.limit} rows although the question did not ask for a top-N.`
+        : `The executed query capped the result at ${findings.inventedLimit.limit} arbitrary rows — the question did not ask for a top-N, and nothing ordered the selection.`,
+    };
+  }
+  if (findings.unorderedLimit) {
+    return {
+      id: "answer-unordered-limit",
+      label: "Ranking without an order",
+      passed: false,
+      severity: "blocking",
+      message: `The executed query returned ${findings.unorderedLimit.limit} rows with no ORDER BY, so the selection is arbitrary rather than the requested ranking.`,
+    };
+  }
+  return undefined;
+}
+
 function answerShapeEvaluation(
   question: string,
   payload: Record<string, unknown> | undefined,
@@ -136,6 +183,8 @@ function answerShapeEvaluation(
   const result = asRecord(payload?.result) ?? asRecord(payload?.resultPreview);
   if (!result) return undefined;
   const plan = contextPackQuestionPlan(payload) ?? buildAnalysisQuestionPlan(question);
+  const rankingClauses = executedRankingClauseEvaluation(question, payload);
+  if (rankingClauses) return rankingClauses;
   const validation = validateAnswerResultShape(plan, result);
   const missingOutputs = validation.missingOutputs;
   if (missingOutputs.length > 0) {

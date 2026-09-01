@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateAnswerResultShape } from './answer-shape.js';
+import { validateAnswerResultShape, validateExecutedRankingClauses } from './answer-shape.js';
 import { buildAnalysisQuestionPlan } from './metadata/analysis-planner.js';
 
 describe('validateAnswerResultShape', () => {
@@ -200,5 +200,42 @@ describe('validateAnswerResultShape', () => {
 
     expect(withoutExactExampleBinding.missingOutputs).toContain('food');
     expect(withExactExampleBinding.missingOutputs).toEqual([]);
+  });
+});
+
+/**
+ * The executed statement's ranking clauses must agree with the question. The
+ * old check ran one way only — a limit the query IGNORED — so a limit the
+ * query INVENTED shipped silently, and an unordered LIMIT passed as a ranking.
+ */
+describe('validateExecutedRankingClauses', () => {
+  const planWith = (topN?: { n: number; scope: 'overall' | 'per_group' }) => ({
+    requestedShape: { grain: undefined, dimensions: [], measures: [], requiredOutputs: [], filters: [], topN } as never,
+  }) as never;
+
+  it('flags a limit the question never asked for, distinguishing ordered from arbitrary', () => {
+    expect(validateExecutedRankingClauses(planWith(undefined), 'SELECT name FROM t GROUP BY name LIMIT 2'))
+      .toEqual({ inventedLimit: { limit: 2, ordered: false } });
+    expect(validateExecutedRankingClauses(planWith(undefined), 'SELECT name FROM t ORDER BY revenue DESC LIMIT 500'))
+      .toEqual({ inventedLimit: { limit: 500, ordered: true } });
+  });
+
+  it('flags a requested ranking whose LIMIT has no outer ORDER BY', () => {
+    expect(validateExecutedRankingClauses(planWith({ n: 10, scope: 'overall' }), 'SELECT name FROM t LIMIT 10'))
+      .toEqual({ unorderedLimit: { limit: 10 } });
+  });
+
+  it('accepts an ordered, requested ranking', () => {
+    expect(validateExecutedRankingClauses(planWith({ n: 10, scope: 'overall' }),
+      'SELECT name, revenue FROM t ORDER BY revenue DESC LIMIT 10')).toEqual({});
+  });
+
+  it('ignores limits inside subqueries and quoted strings', () => {
+    expect(validateExecutedRankingClauses(planWith(undefined),
+      "SELECT * FROM (SELECT name FROM t ORDER BY x LIMIT 5) sub WHERE note <> 'limit 3'")).toEqual({});
+  });
+
+  it('does nothing without SQL', () => {
+    expect(validateExecutedRankingClauses(planWith({ n: 5, scope: 'overall' }), undefined)).toEqual({});
   });
 });

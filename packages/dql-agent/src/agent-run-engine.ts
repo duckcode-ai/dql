@@ -2278,8 +2278,20 @@ export class AgentRunEngine {
             result,
             runId,
           );
+          // Run the generic gates for a successful V2 terminal too — but with
+          // their REPAIRS disarmed. Replacing the whole array with the single
+          // terminal receipt meant the answer-shape gate never inspected a V2
+          // result: a run whose executed columns did not match the question's
+          // required outputs shipped as "1 check passed". The repair hooks
+          // stay stripped for the reason documented above — the legacy replan
+          // would discard the validated result — so a failed gate REPORTS
+          // (status/summary see it) without ever re-planning the frozen plan.
           evaluations = acceptedV2TerminalState
-            ? [acceptedAskAgentV2TerminalEvaluation(acceptedV2TerminalState)]
+            ? [
+              ...this.evaluate({ route, request: taskRequest, routeDecision: taskRouteDecision, result, attempt })
+                .map(disarmRepairForV2Terminal),
+              acceptedAskAgentV2TerminalEvaluation(acceptedV2TerminalState),
+            ]
             : this.evaluate({ route, request: taskRequest, routeDecision: taskRouteDecision, result, attempt });
           for (const evaluation of evaluations) {
             emit({
@@ -6149,6 +6161,21 @@ function acceptedAskAgentV2TerminalState(
   return undefined;
 }
 
+/**
+ * Keep a gate's VERDICT while removing its authority to re-plan.
+ *
+ * After an accepted V2 terminal, the frozen plan already executed; the legacy
+ * repair machinery would replan the same artifact, be refused as
+ * POST_FREEZE_REPAIR_REQUIRED, and discard the validated result. The failure
+ * itself must still be visible — that is the entire point of running the
+ * gates — so only the repair hooks are stripped.
+ */
+function disarmRepairForV2Terminal(evaluation: AgentRunEvaluation): AgentRunEvaluation {
+  if (evaluation.passed) return evaluation;
+  const { suggestedRepair: _repair, repairAction: _action, ...reported } = evaluation;
+  return reported;
+}
+
 function acceptedAskAgentV2TerminalEvaluation(boundary: AcceptedAskAgentV2TerminalBoundary): AgentRunEvaluation {
   return {
     id: 'ask-v2-terminal-result',
@@ -6215,20 +6242,49 @@ function computeStepOutcome(
     artifacts,
     stopReason,
     summary: status === "blocked"
-      ? terminalOutcomeMessage ?? blockingOutcomeSummary(evaluations, fallback.summary)
+      ? terminalOutcomeMessage ?? blockingOutcomeSummary(evaluations, result, fallback.summary)
       : result.summary ?? fallback.summary,
     ...(result.answerTier ? { terminalTier: result.answerTier } : {}),
   };
 }
 
-function blockingOutcomeSummary(evaluations: AgentRunEvaluation[], fallback: string): string {
+/**
+ * The sentence a typed refusal code deserves. These are the honest,
+ * user-actionable readings; the coarse code is still what machines branch on.
+ */
+function refusalCodeSummary(code: string | undefined): string | undefined {
+  switch (code) {
+    case 'grounding_gap': return 'DQL could not ground every part of this question in the current metadata snapshot, so no query was accepted.';
+    case 'modeling_gap': return 'Part of this question is not modeled in this project yet, so no governed query can answer it as asked.';
+    case 'ambiguous': return 'One business choice is required before DQL can run this question.';
+    case 'provider_error': return 'The AI provider could not complete this Ask step.';
+    case 'orchestration_budget_exhausted': return 'DQL stopped this run at its own orchestration budget before the question was settled.';
+    case 'policy_blocked': return 'A governance policy blocked this request before execution.';
+    case 'execution_error': return 'The selected governed query did not complete on the current connection.';
+    default: return undefined;
+  }
+}
+
+function blockingOutcomeSummary(
+  evaluations: AgentRunEvaluation[],
+  result: Pick<AgentRouteExecutorResult, 'answerRefusalCode' | 'answer'>,
+  fallback: string,
+): string {
   const messages = evaluations
     .filter((evaluation) => !evaluation.passed && evaluation.severity === 'blocking')
     .map((evaluation) => evaluation.message.trim())
     .filter(Boolean);
-  return messages[0] ?? (fallback.includes('Answered')
-    ? 'The analytical result did not pass its required validation and was not accepted.'
-    : fallback);
+  if (messages[0]) return messages[0];
+  // A typed refusal is the truth this run actually recorded. The old fallback
+  // fabricated "did not pass its required validation" whenever no evaluation
+  // was blocking and the route's default summary contained "Answered" — it
+  // asserted a validation that never ran, and masked deadline/budget/gap
+  // terminals behind an invented one.
+  const typed = refusalCodeSummary(result.answerRefusalCode);
+  if (typed) return typed;
+  return fallback.includes('Answered')
+    ? 'The run stopped before an answer was accepted. Open the trace for the exact boundary.'
+    : fallback;
 }
 
 function consumeRepeatedClarificationSelection(

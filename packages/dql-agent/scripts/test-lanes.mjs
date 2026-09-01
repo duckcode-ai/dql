@@ -56,10 +56,12 @@ const EXPECTED_TEST_FILES = 154;
 // continuity regressions (third-person topic classification, prior-result
 // member clarification, unmodeled-dimension truthfulness, and honest
 // orchestration-budget labelling), plus the V2 lane response-contract and
-// narrowed-tool-availability regressions, total 2,270 non-skipped
+// narrowed-tool-availability regressions, plus the time-window-vs-row-limit
+// parser table and the executed-ranking-clause (invented/unordered limit)
+// coverage, total 2,280 non-skipped
 // tests; a
 // future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2270;
+const EXPECTED_TESTS = 2280;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

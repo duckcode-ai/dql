@@ -51,6 +51,8 @@ export function buildAskV2TextToolContract(
       + ' compile_and_run_dql, or validate_and_run_sql), then call finish_answer to close the turn.',
     '- finish_answer is only for a turn that has already executed or has genuinely exhausted the tiers.'
       + ' If a tool returns ok:false with safeNextTools, call one of those instead.',
+    '- A ranking needs BOTH orderBy and limit in the same call: a limit without an orderBy returns'
+      + ' arbitrary rows, and both are refused when the question asked for no ranking at all.',
     '- Use request_clarification when a choice genuinely changes the result.',
     '- Only reference identifiers a tool has returned to you. Do not invent them.',
     '',

@@ -62,6 +62,7 @@ import {
   runAgenticToolLoopDetailed,
   ASK_V2_BUDGETS,
   createAskToolKernelV2,
+  releaseAskV2CertifiedTierLock,
   setAskV2TierState,
   recordAskV2ResearchLedger,
   evidenceCandidateRoles,
@@ -1861,7 +1862,18 @@ function createAskV2LaneHandler(
                 ? 'CERTIFIED_ARTIFACT_STALE'
                 : 'CERTIFIED_EXECUTOR_UNAVAILABLE';
           observe('run_certified', !candidate || reason === 'CERTIFIED_TUPLE_NOT_PROVEN_BY_SNAPSHOT' ? 'ineligible' : 'unavailable', reason, { candidateIds: candidateId ? [candidateId] : [], tier: 'certified', origin: 'validation' });
-          return denied('run_certified', reason);
+          // The certified tool itself just proved it cannot serve this turn.
+          // If the tier claim (and with it the narrowed run_certified-only
+          // policy) is still standing, holding it can only loop the model
+          // into the same denial until the deadline. Release, so the policy
+          // recomputes and the semantic/relational ladder becomes reachable.
+          if (state.exactCertifiedCandidateId || state.tierStates?.certified?.status === 'complete') {
+            releaseAskV2CertifiedTierLock(state, reason);
+          }
+          return {
+            ...denied('run_certified', reason),
+            safeNextTools: ['inspect_semantic_candidates', 'compile_and_run_semantic'],
+          };
         }
         try {
           if (!handle.isCurrent()) {
@@ -1981,6 +1993,7 @@ function createAskV2LaneHandler(
           timeDimensionId: { type: 'string', description: 'Required with timeGrain for an explicit time question; use one admitted opaque time-dimension ID.' },
           timeGrain: { type: 'string', enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'Required with timeDimensionId when the question asks for a time grain. It must be declared by that exact admitted time dimension.' },
           filters: { type: 'array', items: { type: 'object', properties: { dimensionId: { type: 'string' }, value: { type: ['string', 'number', 'boolean'] } }, required: ['dimensionId', 'value'], additionalProperties: false }, maxItems: 8 },
+          orderBy: { type: 'array', maxItems: 2, items: { type: 'object', properties: { name: { type: 'string' }, direction: { type: 'string', enum: ['asc', 'desc'] } }, required: ['name', 'direction'], additionalProperties: false }, description: 'Sort for a ranking. Each name must be one of the selected metric/dimension IDs or their runtime names. A limit without an orderBy returns arbitrary rows.' },
           limit: { type: 'integer', minimum: 1, maximum: 10000 }, repair: { type: 'boolean' },
         }, required: ['metricIds'], additionalProperties: false,
       }, async (args) => {
@@ -2654,6 +2667,33 @@ function createAskV2LaneHandler(
           repair,
         });
         if (!authorization.ok) return denied('compile_and_run_semantic', authorization.reasonCode);
+        // An orderBy may reference only fields this very call selected. Every
+        // top-N through this tool used to be an UNORDERED LIMIT — the schema
+        // had no way to express a sort, so "top customers by revenue" ran as
+        // a row lottery. Resolution accepts the admitted opaque ID or the
+        // capability's runtime name; anything else is a typed denial rather
+        // than silently unsorted output.
+        const requestedOrderBy = Array.isArray(args.orderBy) ? args.orderBy.slice(0, 2) : [];
+        const selectedForOrder = [...metricCapabilities, ...dimensionCapabilities, ...timeCapabilities];
+        const resolvedOrderBy: Array<{ name: string; direction: 'asc' | 'desc' }> = [];
+        for (const entry of requestedOrderBy) {
+          if (!entry || typeof entry !== 'object') continue;
+          const rawName = typeof (entry as { name?: unknown }).name === 'string' ? (entry as { name: string }).name.trim() : '';
+          const direction = (entry as { direction?: unknown }).direction === 'asc' ? 'asc' as const : 'desc' as const;
+          const matched = selectedForOrder.find((handle) =>
+            handle.runtimeName === rawName || handle.candidateId === rawName);
+          if (!matched) {
+            observe('compile_and_run_semantic', 'ineligible', 'SEMANTIC_ORDER_FIELD_NOT_SELECTED', {
+              tier: 'semantic', candidateIds: selectedCandidateIds, origin: 'validation',
+              safeAction: 'use:compile_and_run_semantic',
+            });
+            return {
+              ...denied('compile_and_run_semantic', 'SEMANTIC_ORDER_FIELD_NOT_SELECTED', ['compile_and_run_semantic']),
+              usage: 'orderBy names must come from the metricIds/dimensionIds selected in this same call.',
+            };
+          }
+          resolvedOrderBy.push({ name: matched.runtimeName, direction });
+        }
         const selection = {
           metrics: metricCapabilities.map((handle) => handle.runtimeName),
           ...(semanticEngine ? { engine: semanticEngine } : {}),
@@ -2672,6 +2712,7 @@ function createAskV2LaneHandler(
             })),
           } : {}),
           ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+          ...(resolvedOrderBy.length ? { orderBy: resolvedOrderBy } : {}),
         };
         try {
           const compiled = await input.semanticQueryCompiler(selection);
