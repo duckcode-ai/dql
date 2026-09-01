@@ -7479,12 +7479,27 @@ function analyticalFailureSummary(
           .filter(({ answer, error }) => !error && answer && answer.kind !== 'no_answer')
           .map(({ answer }) => trustStateForAgentAnswer(answer!)),
       );
+      // `needs_clarification` is a question TO THE USER, and the conversation
+      // treats it as one: the next message becomes a "clarification reply"
+      // and this turn's text is stitched into the composed question. Stamping
+      // it on a run whose children all died on budget/execution turned the
+      // FAILURE PROSE into a pending clarification — the user's re-ask came
+      // back wearing the old error as its own words, split into phantom
+      // tasks, and nothing executed. Only a child that actually asked for a
+      // choice makes the aggregate a clarification; everything else is a
+      // block that says what failed.
+      const anyChildAsksClarification = childResults.some(({ answer, error }) => !error && answer
+        && (answer.refusalCode === 'ambiguous' || (answer.clarificationOptions?.length ?? 0) > 0));
       return {
         summary: completedCount === outcomes.length
           ? `Answered ${completedCount} analytical clauses.`
           : `Answered ${completedCount} of ${outcomes.length} analytical clauses; the remaining clauses need review.`,
         answer: answerText,
-        status: completedCount === outcomes.length ? 'completed' : completedCount > 0 ? 'needs_review' : 'needs_clarification',
+        status: completedCount === outcomes.length
+          ? 'completed'
+          : completedCount > 0
+            ? 'needs_review'
+            : anyChildAsksClarification ? 'needs_clarification' : 'blocked',
         // The parent is only as trustworthy as its weakest SUCCESSFUL child.
         // Completion is not proof: the previous rule stamped `governed` on a
         // parent assembled from review-required generated SQL.

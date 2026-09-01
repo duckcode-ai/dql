@@ -135,7 +135,12 @@ export function isLikelyClarificationReply(value: string): boolean {
     const plan = buildAnalysisQuestionPlan(normalized);
     const hasMeasure = plan.metricTerms.length > 0;
     const hasSubject = plan.entities.length > 0 || plan.dimensionTerms.length > 0;
-    if ((hasMeasure && hasSubject) || plan.entities.length >= 2) return false;
+    // A measure paired with a time window or a ranking is a complete request
+    // even without a recognized entity noun: "I need last two months highest
+    // revenue and give me top 5 rows" is a fresh ask, and treating it as a
+    // terse clarification reply stitched the previous turn's text into it.
+    const hasWindowOrRanking = plan.timeTerms.length > 0 || Boolean(plan.requestedShape.topN);
+    if ((hasMeasure && (hasSubject || hasWindowOrRanking)) || plan.entities.length >= 2) return false;
   }
   return true;
 }
