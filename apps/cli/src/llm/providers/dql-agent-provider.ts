@@ -11,7 +11,7 @@ import {
   type ProviderFailureDiagnosticV1,
 } from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
-import { buildAskV2AnalystSystemPrompt, buildAskV2TextToolContract } from './ask-v2-analyst-prompt.js';
+import { buildAskV2AnalystSystemPrompt, buildAskV2TextToolContract, buildAskV2ResponseJsonSchema } from './ask-v2-analyst-prompt.js';
 import { parseAnalyticalTimeWindow, resolvePlanTimeRange, type AnalyticalTimeWindowV1 } from '@duckcodeailabs/dql-agent';
 import {
   ClaudeProvider,
@@ -4044,6 +4044,15 @@ function createAskV2LaneHandler(
         // invites a raw-SQL final answer, which this lane cannot accept and
         // the parser cannot even read as a tool call.
         textToolContract: buildAskV2TextToolContract,
+        // Every legal reply in this lane is a tool call, so transports that can
+        // constrain output are told the shape instead of being asked politely.
+        responseJsonSchema: buildAskV2ResponseJsonSchema(tools),
+        // The analyst turn had no token ceiling or effort of its own: native
+        // transports fell back to a 1024-token cap that cannot hold a tool call
+        // plus a business answer, and the CLI ignored effort entirely. The
+        // model itself stays the provider's own configured choice.
+        ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+        maxTokens: 8192,
         maxToolCalls: limits?.maxToolCalls ?? (state.turnClass === 'research' ? 24 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 8 : 4),
         // A compound question — a time filter, a metric and a breakdown — costs
         // an inspection per tier, at least one compile attempt, and a reserved
@@ -4059,7 +4068,22 @@ function createAskV2LaneHandler(
         // room to apply a taught refusal. Sixteen restores eight logical
         // turns for wrappers; 1:1 text providers are still bounded by the
         // tool-call ceiling and the run deadline long before this guard.
-        maxProviderDispatches: limits?.maxProviderDispatches ?? (state.turnClass === 'research' ? 12 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 24 : 4),
+        // ONE AUTHORITY FOR PHYSICAL SENDS.
+        //
+        // Four separate limits could stop a turn and none knew what the others
+        // had left, so the loop reserved a final narration send against a cap
+        // of 24 while the server ledger actually cut the run at 10 — the
+        // reserve never fired and the turn died mid-discovery instead of
+        // narrating a result it was holding. The server ledger is the only cap
+        // that is really enforced (agentControl 1 + toolFollowup 9 + narration
+        // 1), so the loop is told that number and its reserve logic finally
+        // describes reality.
+        maxProviderDispatches: limits?.maxProviderDispatches
+          ?? (state.turnClass === 'research'
+            ? ASK_V2_BUDGETS.research.providerDispatches
+            : state.turnClass === 'analytics' || state.turnClass === 'prior_result'
+              ? ASK_V2_BUDGETS.ask.providerDispatches
+              : ASK_V2_BUDGETS.contextual.providerDispatches),
         // The kernel owns current availability. Native transports evaluate it
         // before each API tool declaration; text transports receive the same
         // update after every observation. This reserves a final *LLM action*

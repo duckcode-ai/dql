@@ -1498,6 +1498,9 @@ export type {
 } from "./grounding/value-index.js";
 export {
   ClaudeProvider,
+  runAnthropicNativeToolLoop,
+  type AnthropicToolLoopTransport,
+  anthropicToolLoopPost,
   OpenAIProvider,
   GeminiProvider,
   OllamaProvider,

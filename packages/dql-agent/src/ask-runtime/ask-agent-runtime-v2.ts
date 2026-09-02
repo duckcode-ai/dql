@@ -1110,9 +1110,10 @@ export function projectResearchEvidenceLedgerV4(ledger: ResearchEvidenceLedgerV3
 export const ASK_V2_BUDGETS = {
   ask: {
     durationMs: 45_000,
-    // The cold discovery ladder costs five dispatches before any retry is
-    // possible (two tier inspections, two tier attempts, one finish); six
-    // left zero room to apply a taught refusal's admitted identifiers.
+    // PHYSICAL sends, and the number the server ledger actually enforces
+    // (one agent-control turn + nine tool follow-ups). The transport loop
+    // reserves its final send for narration against this figure, so the two
+    // budgets can no longer disagree about how much room a turn really has.
     providerDispatches: 10,
     toolCalls: 8,
     expansions: 2,

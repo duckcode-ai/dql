@@ -4,9 +4,14 @@ import { URL } from 'node:url';
 import {
   completeProviderHttpDispatch,
   prepareProviderHttpDispatch,
+  runAnthropicNativeToolLoop,
+  anthropicToolLoopPost,
   type AgentProvider,
   type AgentMessage,
+  type AgentToolDefinition,
+  type NativeToolLoopResult,
   type ProviderRunOptions,
+  type ProviderToolLoopOptions,
 } from '@duckcodeailabs/dql-agent';
 import {
   getClaudeCredentials,
@@ -348,6 +353,69 @@ export class ClaudeOAuthProvider implements AgentProvider {
   /** Typed, redacted context for a false `available()` result. */
   getReadinessFailure(): Error | undefined {
     return this.readinessFailure;
+  }
+
+  /**
+   * NATIVE TOOL CALLING ON A SUBSCRIPTION.
+   *
+   * Without this the governed Ask loop had to fall back to its text protocol
+   * for every subscription user: one fenced-JSON tool call per turn, the whole
+   * transcript re-serialized and re-sent each time, tool arguments validated
+   * only after the fact. The subscription endpoint is the same Messages API the
+   * API-key provider already drives natively — it differs in how the request is
+   * authorized, not in what it can do — so the loop is shared and the
+   * difference stays here.
+   *
+   * The static prefix (the Claude Code preamble and the analyst system prompt)
+   * is marked cacheable: it is identical on every turn of a turn-heavy loop,
+   * and the prompt-caching beta is already enabled on this transport.
+   */
+  async generateWithTools(
+    messages: AgentMessage[],
+    tools: AgentToolDefinition[],
+    options: ProviderToolLoopOptions = {},
+  ): Promise<NativeToolLoopResult> {
+    const accessToken = await this.manager.getAccessToken();
+    if (!accessToken) {
+      // No usable subscription credential: fall back exactly as generate()
+      // does. The CLI transport has no native tool protocol, so the caller's
+      // text loop takes over from here.
+      if (claudeOAuthConnected(this.projectRoot)) {
+        const cliFallback = this.cliFallbackProvider();
+        if (await cliFallback.available()) return cliFallback.generate(messages, options);
+      }
+      throw new Error('Your Claude subscription session expired. Open Settings → Claude subscription and click "Sign in with Claude" again.');
+    }
+    if (tools.length === 0) return this.generate(messages, options);
+    const userId = generateUserId(this.manager.getEmail() || undefined);
+    const maxTokens = options.maxTokens ?? this.maxTokens;
+    return runAnthropicNativeToolLoop({
+      label: 'claude (subscription)',
+      endpoint: 'https://api.anthropic.com/v1/messages',
+      defaultModel: this.defaultModel,
+      // The shared loop's API-key default of 1024 is far too small for a
+      // turn that must emit a tool call AND a business answer; a truncated
+      // tool_use is indistinguishable from prose to any caller.
+      defaultMaxTokens: maxTokens,
+      headers: () => ({
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Anthropic-Version': '2023-06-01',
+        'Anthropic-Beta': ANTHROPIC_OAUTH_BETAS,
+      }),
+      // The subscription API requires the Claude Code preamble as the first
+      // system block. Marking the prefix ephemeral lets the unchanged analyst
+      // prompt be served from cache on every follow-up turn.
+      buildSystem: (text) => [
+        { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
+        ...(text ? [{ type: 'text', text, cache_control: { type: 'ephemeral' } }] : []),
+      ],
+      reasoning: (_model, runOptions) => ({
+        thinking: thinkingFor(runOptions.reasoningEffort, runOptions.maxTokens ?? maxTokens),
+        metadata: { user_id: userId },
+      }),
+      post: anthropicToolLoopPost,
+    }, messages, tools, options);
   }
 
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {

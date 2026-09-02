@@ -125,6 +125,17 @@ export interface ProviderRunOptions {
    * it to reopen planning or route selection.
    */
   retryOfAttemptIndex?: number;
+  /**
+   * The exact JSON shape the caller will accept back, for transports that can
+   * CONSTRAIN generation rather than merely request a format.
+   *
+   * A text-protocol lane parses the model's reply as JSON and treats anything
+   * unparseable as prose — which, in a lane where every legal response is a
+   * tool call, ends the turn with nothing run. Where the transport supports
+   * schema-constrained output, a malformed reply stops being possible instead
+   * of being handled. Providers without that capability ignore this.
+   */
+  responseJsonSchema?: Record<string, unknown>;
 }
 
 export interface AgentToolDefinition {

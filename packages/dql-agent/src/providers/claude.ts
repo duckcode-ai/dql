@@ -36,7 +36,7 @@ function isEffortRejection(status: number, body: string): boolean {
  * gateway that doesn't accept it despite our capability gate), retry once WITHOUT
  * the effort field so the turn degrades gracefully instead of failing.
  */
-async function postMessages(
+export async function postMessages(
   url: string,
   headers: Record<string, string>,
   baseBody: Record<string, unknown>,
@@ -158,275 +158,20 @@ export class ClaudeProvider implements AgentProvider {
       throw new Error('claude: ANTHROPIC_API_KEY is not set');
     }
     if (tools.length === 0) return this.generate(messages, options);
-
-    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
-    const turns: Array<Record<string, unknown>> = messages
-      .filter((m) => m.role !== 'system')
-      .map((m) => ({ role: m.role, content: m.content }));
-    const model = options.model ?? this.defaultModel;
-    const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
-    const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? DEFAULT_PROVIDER_DISPATCH_LIMIT));
-    const requestedToolBudget = Math.max(0, Math.min(dispatchLimit <= 2 ? 4 : 30, options.maxToolCalls ?? 8));
-    // The V2 controller can reserve the last physical provider send for one
-    // host-approved terminal action. Preserve the legacy native-loop budget
-    // semantics when no live policy is supplied.
-    const dynamicToolPolicy = Boolean(options.getCurrentToolPolicy);
-    const ordinaryToolBudget = dynamicToolPolicy
-      ? Math.min(requestedToolBudget, Math.max(0, dispatchLimit - 1))
-      : requestedToolBudget;
-    let toolCallsUsed = 0;
-    let lastText = '';
-    let dispatches = 0;
-    const requiresPostExecutionFinish = dynamicToolPolicy
-      && tools.some((tool) => tool.name === 'finish_answer');
-    let requiredActionSignature = '';
-    let requiredActionProseRetries = 0;
-    const dispatch = {
-      operation: 'generate_with_tools' as const,
-      options,
-      nextAttempt: () => ++dispatches,
-    };
-
-    const forcedFinal = async (): Promise<string> => {
-      const finalRes = await postMessages(
-        `${this.baseUrl}/v1/messages`,
-        {
-          'x-api-key': this.apiKey!,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
-        },
-        {
-          model,
-          max_tokens: options.maxTokens ?? 1024,
-          temperature: options.temperature ?? 0.2,
-          system: system || undefined,
-          messages: turns,
-        },
-        anthropicReasoning(model, options),
-        dispatch,
-      );
-      if (!finalRes.ok) return '';
-      const finalJson = (await finalRes.json()) as {
-        content?: Array<{ type: string; text?: string }>;
-      };
-      const blocks = finalJson.content ?? [];
-      if (blocks.some((block) => block.type === 'tool_use')) return '';
-      return blocks.filter((block) => block.type === 'text').map((block) => block.text ?? '').join('').trim();
-    };
-
-    for (;;) {
-      const currentPolicy = nativeToolPolicy(options, tools);
-      const nextRequiredActionSignature = [...currentPolicy.terminalActionToolNames].sort().join('|');
-      if (nextRequiredActionSignature !== requiredActionSignature) {
-        requiredActionSignature = nextRequiredActionSignature;
-        requiredActionProseRetries = 0;
-      }
-      const narrationControlRound = currentPolicy.terminalActionToolNames.has('finish_answer');
-      // A clarification is its own host terminal; only a selected execution
-      // action consumes the final post-result narration reserve.
-      const terminalExecutionAction = [...currentPolicy.terminalActionToolNames]
-        .some((name) => !isAskV2TerminalControlTool(name));
-      const reservePostExecutionNarration = requiresPostExecutionFinish && terminalExecutionAction;
-      // Keep the last physical tool-followup for the controller-selected
-      // execution action and the final physical send for finish/narration.
-      // This is host-owned progress accounting only; the model still chooses
-      // among the snapshot-bound terminal tools the kernel exposes.
-      const finalExecutionActionRound = !narrationControlRound
-        && dispatches >= Math.max(0, dispatchLimit - (reservePostExecutionNarration ? 2 : 1));
-      const terminalActionRound = dynamicToolPolicy
-        && currentPolicy.terminalActionToolNames.size > 0
-        && (toolCallsUsed >= ordinaryToolBudget
-          || (narrationControlRound ? dispatches >= dispatchLimit - 1 : finalExecutionActionRound));
-      if (dynamicToolPolicy && toolCallsUsed >= ordinaryToolBudget && !terminalActionRound) {
-        return forcedFinal();
-      }
-      const roundTools = terminalActionRound
-        ? currentPolicy.tools.filter((tool) => currentPolicy.terminalActionToolNames.has(tool.name))
-        : currentPolicy.tools;
-      const roundToolMap = new Map(roundTools.map((tool) => [tool.name, tool]));
-      const roundToolDefs = roundTools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        input_schema: tool.inputSchema,
-      }));
-      const roundSystem = [system, currentPolicy.instruction].filter((value): value is string => Boolean(value)).join('\n\n') || undefined;
-      let res: Response;
-      try {
-        res = await postMessages(
-          `${this.baseUrl}/v1/messages`,
-          {
-            'x-api-key': this.apiKey,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json',
-          },
-          {
-            model,
-            max_tokens: options.maxTokens ?? 1024,
-            temperature: options.temperature ?? 0.2,
-            system: roundSystem,
-            messages: turns,
-            tools: roundToolDefs,
-            ...(dynamicToolPolicy && currentPolicy.terminalActionToolNames.size === 1
-              ? { tool_choice: { type: 'tool', name: [...currentPolicy.terminalActionToolNames][0]! } }
-              : {}),
-          },
-          anthropicReasoning(model, options),
-          dispatch,
-        );
-      } catch (error) {
-        const terminal = nativeToolLoopStopForError(error, toolCallsUsed);
-        if (terminal) return terminal;
-        throw error;
-      }
-      if (!res.ok) {
-        const body = await res.text().catch(() => res.statusText);
-        throw new Error(`claude: ${res.status} ${body}`);
-      }
-      const json = (await res.json()) as {
-        content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
-      };
-      const blocks = json.content ?? [];
-      const text = blocks
-        .filter((block) => block.type === 'text')
-        .map((block) => block.text ?? '')
-        .join('');
-      const toolUses = blocks.filter((block): block is { type: string; id: string; name: string; input?: unknown } =>
-        block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string'
-      );
-      if (toolUses.length === 0) {
-        // Do not let prose bypass a host-required V2 execution/terminal
-        // action. The next send exposes only the narrowed safe action.
-        if (dynamicToolPolicy && currentPolicy.terminalActionToolNames.size > 0) {
-          // No retry may be invented after the last admitted physical send.
-          // Preserve that as a budget terminal (and retain a validated
-          // result); `invalid_tool_response` is reserved for two ignored
-          // narrowed actions while a retry remained available.
-          if (dispatches >= dispatchLimit) {
-            return nativeToolLoopStop('provider_dispatch_budget_exhausted', '', toolCallsUsed);
-          }
-          if (requiredActionProseRetries >= 1) {
-            return nativeToolLoopStop('invalid_tool_response', '', toolCallsUsed);
-          }
-          requiredActionProseRetries += 1;
-          turns.push({
-            role: 'user',
-            content: `Controller progression required. Call exactly one of: ${[...currentPolicy.terminalActionToolNames].join(', ')}. Do not answer in prose.`,
-          });
-          continue;
-        }
-        if (text) lastText = text;
-        return text || lastText;
-      }
-      if (text) lastText = text;
-      const roundToolBudget = terminalActionRound ? ordinaryToolBudget + 1 : ordinaryToolBudget;
-      const invalidTerminalAction = terminalActionRound && (
-        toolUses.length !== 1 || !currentPolicy.terminalActionToolNames.has(toolUses[0]!.name)
-      );
-      if (invalidTerminalAction || toolCallsUsed + toolUses.length > roundToolBudget) {
-        options.onToolCall?.({
-          name: 'tool_budget_exhausted',
-          input: {
-            requestedToolCalls: toolUses.map((call) => call.name),
-            maxToolCalls: roundToolBudget,
-            toolCallsUsed,
-          },
-          output: { error: `Tool-call budget exhausted after ${toolCallsUsed} call(s).` },
-          isError: true,
-        });
-        if (dynamicToolPolicy) {
-          return nativeToolLoopStop('tool_budget_exhausted', '', toolCallsUsed);
-        }
-        // Graceful final turn: instead of dead-ending on whatever stray text the
-        // model last emitted, ask it to answer NOW from what the prior tool calls
-        // already returned — with `tools` OMITTED from the request so it physically
-        // cannot request another tool and the loop is guaranteed to terminate.
-        turns.push({
-          role: 'user',
-          content: 'Tool budget reached — do not call any more tools. Answer now using only the information the tool calls above already returned, following the required output format.',
-        });
-        try {
-          const finalText = await forcedFinal();
-          if (finalText) return finalText;
-        } catch {
-          // Fall through to the legacy behavior on any final-turn failure.
-        }
-        return lastText || JSON.stringify({
-          summary: `Tool-call budget exhausted after ${toolCallsUsed} call(s).`,
-        });
-      }
-
-      turns.push({ role: 'assistant', content: blocks });
-      const toolResults: Array<Record<string, unknown>> = [];
-      for (const call of toolUses) {
-        toolCallsUsed += 1;
-        const tool = roundToolMap.get(call.name) ?? (dynamicToolPolicy ? undefined : toolMap.get(call.name));
-        let output: unknown;
-        let isError = false;
-        let deadlineStop: NativeToolLoopResult | undefined;
-        const toolStartedAt = Date.now();
-        if (!tool) {
-          output = { error: `Unknown tool: ${call.name}` };
-          isError = true;
-        } else {
-          try {
-            assertMayStartToolCall(options, call.name);
-            output = await tool.run(call.input ?? {});
-          } catch (err) {
-            const code = toolLoopErrorCode(err);
-            output = {
-              error: err instanceof Error ? err.message : String(err),
-              ...(code ? { code } : {}),
-            };
-            isError = true;
-            deadlineStop = nativeToolLoopStopForError(err, toolCallsUsed);
-          }
-        }
-        options.onToolCall?.({ name: call.name, input: call.input ?? {}, output, isError, durationMs: Date.now() - toolStartedAt });
-        if (deadlineStop) return deadlineStop;
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: call.id,
-          content: compactToolOutput(output),
-          is_error: isError,
-        });
-        // A completed Ask V2 host control already contains the answer or
-        // stable clarification. A rejected control has no `finished` marker
-        // and must instead become the next controller observation.
-        if (isAskV2TerminalControlTool(call.name) && !isError && isFinishedToolOutput(output)) {
-          return text || lastText;
-        }
-      }
-      if (terminalActionRound) {
-        const terminalCall = toolUses[0];
-        if (terminalCall && isAskV2TerminalControlTool(terminalCall.name)) {
-          return nativeToolLoopStop('tool_budget_exhausted', '', toolCallsUsed);
-        }
-        // A narrowed execution action is not the conversational terminal.
-        // Continue once so the resulting live policy can require and receive
-        // the bounded finish_answer/narration control.
-        if (reservePostExecutionNarration) {
-          turns.push({ role: 'user', content: toolResults });
-          continue;
-        }
-        return text || lastText;
-      }
-      turns.push({ role: 'user', content: toolResults });
-      // Keep the historical short-loop prose final only for static tool
-      // surfaces. Ask V2's live policy uses the last send for a bounded
-      // terminal tool action (for example semantic execution).
-      if (dispatchLimit <= 2 && !dynamicToolPolicy) {
-        try {
-          const finalText = await forcedFinal();
-          return finalText || lastText || JSON.stringify({
-            summary: 'The provider did not return a final answer within the bounded tool round.',
-          });
-        } catch {
-          return lastText || JSON.stringify({
-            summary: 'The provider dispatch budget was exhausted before a final answer.',
-          });
-        }
-      }
-    }
+    return runAnthropicNativeToolLoop({
+      label: 'claude',
+      endpoint: `${this.baseUrl}/v1/messages`,
+      defaultModel: this.defaultModel,
+      defaultMaxTokens: 1024,
+      headers: () => ({
+        'x-api-key': this.apiKey!,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      }),
+      buildSystem: (text) => text || undefined,
+      reasoning: anthropicReasoning,
+      post: postMessages,
+    }, messages, tools, options);
   }
 
   async generateStream(
@@ -577,3 +322,312 @@ export async function consumeSse(
     if (done) break;
   }
 }
+
+
+/**
+ * What one Anthropic transport must supply to drive the shared native tool
+ * loop. Everything else — turn management, tool_result plumbing, policy
+ * narrowing, budget accounting — is identical and lives in the loop.
+ */
+export interface AnthropicToolLoopTransport {
+  /** Used in error text so a failure names the transport a user configured. */
+  label: string;
+  endpoint: string;
+  defaultModel: string;
+  defaultMaxTokens: number;
+  headers(): Record<string, string>;
+  /** Plain string for API-key transports; a system block array for OAuth. */
+  buildSystem(text: string | undefined): unknown;
+  reasoning(model: string, options: ProviderRunOptions): Record<string, unknown>;
+  post(
+    url: string,
+    headers: Record<string, string>,
+    baseBody: Record<string, unknown>,
+    reasoning: Record<string, unknown>,
+    dispatch: { operation: ProviderDispatchOperation; options: ProviderRunOptions; nextAttempt(): number },
+  ): Promise<Response>;
+}
+
+/**
+ * The Anthropic native tool loop, shared by every Claude transport.
+ *
+ * Two transports speak this protocol: the API-key provider and the
+ * subscription OAuth provider. They differ only in where the request goes,
+ * which headers authorize it, how the system prompt is shaped, and how
+ * reasoning effort is expressed — never in how the conversation is driven.
+ * Keeping the loop in one place is what lets a subscription user get native
+ * tool calling (one round trip per turn, server-side argument validation,
+ * cacheable prefix) instead of a text protocol that re-ships the whole
+ * transcript to a fresh process every time.
+ */
+export async function runAnthropicNativeToolLoop(
+transport: AnthropicToolLoopTransport,
+messages: AgentMessage[],
+tools: AgentToolDefinition[],
+options: ProviderToolLoopOptions = {},
+): Promise<NativeToolLoopResult> {
+
+  const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const turns: Array<Record<string, unknown>> = messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => ({ role: m.role, content: m.content }));
+  const model = options.model ?? transport.defaultModel;
+  const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
+  const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? DEFAULT_PROVIDER_DISPATCH_LIMIT));
+  const requestedToolBudget = Math.max(0, Math.min(dispatchLimit <= 2 ? 4 : 30, options.maxToolCalls ?? 8));
+  // The V2 controller can reserve the last physical provider send for one
+  // host-approved terminal action. Preserve the legacy native-loop budget
+  // semantics when no live policy is supplied.
+  const dynamicToolPolicy = Boolean(options.getCurrentToolPolicy);
+  const ordinaryToolBudget = dynamicToolPolicy
+    ? Math.min(requestedToolBudget, Math.max(0, dispatchLimit - 1))
+    : requestedToolBudget;
+  let toolCallsUsed = 0;
+  let lastText = '';
+  let dispatches = 0;
+  const requiresPostExecutionFinish = dynamicToolPolicy
+    && tools.some((tool) => tool.name === 'finish_answer');
+  let requiredActionSignature = '';
+  let requiredActionProseRetries = 0;
+  const dispatch = {
+    operation: 'generate_with_tools' as const,
+    options,
+    nextAttempt: () => ++dispatches,
+  };
+
+  const forcedFinal = async (): Promise<string> => {
+    const finalRes = await transport.post(
+      transport.endpoint,
+      transport.headers(),
+      {
+        model,
+        max_tokens: options.maxTokens ?? transport.defaultMaxTokens,
+        temperature: options.temperature ?? 0.2,
+        system: transport.buildSystem(system) as never,
+        messages: turns,
+      },
+      transport.reasoning(model, options),
+      dispatch,
+    );
+    if (!finalRes.ok) return '';
+    const finalJson = (await finalRes.json()) as {
+      content?: Array<{ type: string; text?: string }>;
+    };
+    const blocks = finalJson.content ?? [];
+    if (blocks.some((block) => block.type === 'tool_use')) return '';
+    return blocks.filter((block) => block.type === 'text').map((block) => block.text ?? '').join('').trim();
+  };
+
+  for (;;) {
+    const currentPolicy = nativeToolPolicy(options, tools);
+    const nextRequiredActionSignature = [...currentPolicy.terminalActionToolNames].sort().join('|');
+    if (nextRequiredActionSignature !== requiredActionSignature) {
+      requiredActionSignature = nextRequiredActionSignature;
+      requiredActionProseRetries = 0;
+    }
+    const narrationControlRound = currentPolicy.terminalActionToolNames.has('finish_answer');
+    // A clarification is its own host terminal; only a selected execution
+    // action consumes the final post-result narration reserve.
+    const terminalExecutionAction = [...currentPolicy.terminalActionToolNames]
+      .some((name) => !isAskV2TerminalControlTool(name));
+    const reservePostExecutionNarration = requiresPostExecutionFinish && terminalExecutionAction;
+    // Keep the last physical tool-followup for the controller-selected
+    // execution action and the final physical send for finish/narration.
+    // This is host-owned progress accounting only; the model still chooses
+    // among the snapshot-bound terminal tools the kernel exposes.
+    const finalExecutionActionRound = !narrationControlRound
+      && dispatches >= Math.max(0, dispatchLimit - (reservePostExecutionNarration ? 2 : 1));
+    const terminalActionRound = dynamicToolPolicy
+      && currentPolicy.terminalActionToolNames.size > 0
+      && (toolCallsUsed >= ordinaryToolBudget
+        || (narrationControlRound ? dispatches >= dispatchLimit - 1 : finalExecutionActionRound));
+    if (dynamicToolPolicy && toolCallsUsed >= ordinaryToolBudget && !terminalActionRound) {
+      return forcedFinal();
+    }
+    const roundTools = terminalActionRound
+      ? currentPolicy.tools.filter((tool) => currentPolicy.terminalActionToolNames.has(tool.name))
+      : currentPolicy.tools;
+    const roundToolMap = new Map(roundTools.map((tool) => [tool.name, tool]));
+    const roundToolDefs = roundTools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.inputSchema,
+    }));
+    const roundSystem = [system, currentPolicy.instruction].filter((value): value is string => Boolean(value)).join('\n\n') || undefined;
+    let res: Response;
+    try {
+      res = await transport.post(
+        transport.endpoint,
+        transport.headers(),
+        {
+          model,
+          max_tokens: options.maxTokens ?? transport.defaultMaxTokens,
+          temperature: options.temperature ?? 0.2,
+          system: transport.buildSystem(roundSystem) as never,
+          messages: turns,
+          tools: roundToolDefs,
+          ...(dynamicToolPolicy && currentPolicy.terminalActionToolNames.size === 1
+            ? { tool_choice: { type: 'tool', name: [...currentPolicy.terminalActionToolNames][0]! } }
+            : {}),
+        },
+        transport.reasoning(model, options),
+        dispatch,
+      );
+    } catch (error) {
+      const terminal = nativeToolLoopStopForError(error, toolCallsUsed);
+      if (terminal) return terminal;
+      throw error;
+    }
+    if (!res.ok) {
+      const body = await res.text().catch(() => res.statusText);
+      throw new Error(`${transport.label}: ${res.status} ${body}`);
+    }
+    const json = (await res.json()) as {
+      content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
+    };
+    const blocks = json.content ?? [];
+    const text = blocks
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text ?? '')
+      .join('');
+    const toolUses = blocks.filter((block): block is { type: string; id: string; name: string; input?: unknown } =>
+      block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string'
+    );
+    if (toolUses.length === 0) {
+      // Do not let prose bypass a host-required V2 execution/terminal
+      // action. The next send exposes only the narrowed safe action.
+      if (dynamicToolPolicy && currentPolicy.terminalActionToolNames.size > 0) {
+        // No retry may be invented after the last admitted physical send.
+        // Preserve that as a budget terminal (and retain a validated
+        // result); `invalid_tool_response` is reserved for two ignored
+        // narrowed actions while a retry remained available.
+        if (dispatches >= dispatchLimit) {
+          return nativeToolLoopStop('provider_dispatch_budget_exhausted', '', toolCallsUsed);
+        }
+        if (requiredActionProseRetries >= 1) {
+          return nativeToolLoopStop('invalid_tool_response', '', toolCallsUsed);
+        }
+        requiredActionProseRetries += 1;
+        turns.push({
+          role: 'user',
+          content: `Controller progression required. Call exactly one of: ${[...currentPolicy.terminalActionToolNames].join(', ')}. Do not answer in prose.`,
+        });
+        continue;
+      }
+      if (text) lastText = text;
+      return text || lastText;
+    }
+    if (text) lastText = text;
+    const roundToolBudget = terminalActionRound ? ordinaryToolBudget + 1 : ordinaryToolBudget;
+    const invalidTerminalAction = terminalActionRound && (
+      toolUses.length !== 1 || !currentPolicy.terminalActionToolNames.has(toolUses[0]!.name)
+    );
+    if (invalidTerminalAction || toolCallsUsed + toolUses.length > roundToolBudget) {
+      options.onToolCall?.({
+        name: 'tool_budget_exhausted',
+        input: {
+          requestedToolCalls: toolUses.map((call) => call.name),
+          maxToolCalls: roundToolBudget,
+          toolCallsUsed,
+        },
+        output: { error: `Tool-call budget exhausted after ${toolCallsUsed} call(s).` },
+        isError: true,
+      });
+      if (dynamicToolPolicy) {
+        return nativeToolLoopStop('tool_budget_exhausted', '', toolCallsUsed);
+      }
+      // Graceful final turn: instead of dead-ending on whatever stray text the
+      // model last emitted, ask it to answer NOW from what the prior tool calls
+      // already returned — with `tools` OMITTED from the request so it physically
+      // cannot request another tool and the loop is guaranteed to terminate.
+      turns.push({
+        role: 'user',
+        content: 'Tool budget reached — do not call any more tools. Answer now using only the information the tool calls above already returned, following the required output format.',
+      });
+      try {
+        const finalText = await forcedFinal();
+        if (finalText) return finalText;
+      } catch {
+        // Fall through to the legacy behavior on any final-turn failure.
+      }
+      return lastText || JSON.stringify({
+        summary: `Tool-call budget exhausted after ${toolCallsUsed} call(s).`,
+      });
+    }
+
+    turns.push({ role: 'assistant', content: blocks });
+    const toolResults: Array<Record<string, unknown>> = [];
+    for (const call of toolUses) {
+      toolCallsUsed += 1;
+      const tool = roundToolMap.get(call.name) ?? (dynamicToolPolicy ? undefined : toolMap.get(call.name));
+      let output: unknown;
+      let isError = false;
+      let deadlineStop: NativeToolLoopResult | undefined;
+      const toolStartedAt = Date.now();
+      if (!tool) {
+        output = { error: `Unknown tool: ${call.name}` };
+        isError = true;
+      } else {
+        try {
+          assertMayStartToolCall(options, call.name);
+          output = await tool.run(call.input ?? {});
+        } catch (err) {
+          const code = toolLoopErrorCode(err);
+          output = {
+            error: err instanceof Error ? err.message : String(err),
+            ...(code ? { code } : {}),
+          };
+          isError = true;
+          deadlineStop = nativeToolLoopStopForError(err, toolCallsUsed);
+        }
+      }
+      options.onToolCall?.({ name: call.name, input: call.input ?? {}, output, isError, durationMs: Date.now() - toolStartedAt });
+      if (deadlineStop) return deadlineStop;
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: call.id,
+        content: compactToolOutput(output),
+        is_error: isError,
+      });
+      // A completed Ask V2 host control already contains the answer or
+      // stable clarification. A rejected control has no `finished` marker
+      // and must instead become the next controller observation.
+      if (isAskV2TerminalControlTool(call.name) && !isError && isFinishedToolOutput(output)) {
+        return text || lastText;
+      }
+    }
+    if (terminalActionRound) {
+      const terminalCall = toolUses[0];
+      if (terminalCall && isAskV2TerminalControlTool(terminalCall.name)) {
+        return nativeToolLoopStop('tool_budget_exhausted', '', toolCallsUsed);
+      }
+      // A narrowed execution action is not the conversational terminal.
+      // Continue once so the resulting live policy can require and receive
+      // the bounded finish_answer/narration control.
+      if (reservePostExecutionNarration) {
+        turns.push({ role: 'user', content: toolResults });
+        continue;
+      }
+      return text || lastText;
+    }
+    turns.push({ role: 'user', content: toolResults });
+    // Keep the historical short-loop prose final only for static tool
+    // surfaces. Ask V2's live policy uses the last send for a bounded
+    // terminal tool action (for example semantic execution).
+    if (dispatchLimit <= 2 && !dynamicToolPolicy) {
+      try {
+        const finalText = await forcedFinal();
+        return finalText || lastText || JSON.stringify({
+          summary: 'The provider did not return a final answer within the bounded tool round.',
+        });
+      } catch {
+        return lastText || JSON.stringify({
+          summary: 'The provider dispatch budget was exhausted before a final answer.',
+        });
+      }
+    }
+  }
+}
+
+/** The shared Anthropic POST helper, including the effort-rejection retry. */
+export const anthropicToolLoopPost = postMessages;

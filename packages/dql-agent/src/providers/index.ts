@@ -34,6 +34,7 @@ export type {
 export { streamOrGenerate } from './types.js';
 export { DEFAULT_PROVIDER_DISPATCH_LIMIT, prepareProviderHttpDispatch, completeProviderHttpDispatch, fetchProviderHttpDispatch } from './dispatch.js';
 export { ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider, normalizeAnthropicBaseUrl, normalizeGeminiBaseUrl };
+export { runAnthropicNativeToolLoop, anthropicToolLoopPost, type AnthropicToolLoopTransport } from './claude.js';
 export type { ReasoningEffort, GeminiReasoningStyle, ThinkingMode } from './reasoning-effort.js';
 export {
   REASONING_EFFORTS,

@@ -217,6 +217,17 @@ export class ClaudeCodeCliProvider implements AgentProvider {
     const system = typeof prepared.system === 'string' ? prepared.system : '';
     const prompt = typeof prepared.prompt === 'string' ? prepared.prompt : '';
     const model = typeof prepared.model === 'string' ? prepared.model : undefined;
+    // Constrain the reply's SHAPE where the CLI can do it. The governed lane
+    // parses every response as JSON; an unparseable reply is not a recoverable
+    // error there, it is a turn that ends having run nothing. With a schema the
+    // CLI cannot return a shape the caller will reject.
+    const responseSchema = options.responseJsonSchema
+      ? JSON.stringify(options.responseJsonSchema)
+      : undefined;
+    // Effort was accepted by every other Claude transport and silently dropped
+    // by this one, so a run configured for deep reasoning quietly got the
+    // default on the slowest provider in the product.
+    const effort = options.reasoningEffort;
     const args = [
       '-p',
       '--output-format', 'json',
@@ -226,6 +237,8 @@ export class ClaudeCodeCliProvider implements AgentProvider {
       '--strict-mcp-config',            // ignore any ambient MCP config
       '--no-session-persistence',
       ...(model ? ['--model', model] : []),
+      ...(effort ? ['--effort', effort] : []),
+      ...(responseSchema ? ['--json-schema', responseSchema] : []),
       ...(system ? ['--system-prompt', system] : []),
     ];
     // Isolated cwd so no project CLAUDE.md / .claude settings leak into the completion.

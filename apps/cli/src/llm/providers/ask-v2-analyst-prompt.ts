@@ -163,3 +163,34 @@ export function buildAskV2AnalystSystemPrompt(state: AskAgentStateV4): string {
 
   return sections.join('\n\n');
 }
+
+/**
+ * The exact JSON shape of a legal V2 analyst reply.
+ *
+ * Every legal response in this lane is a tool call. Where a transport can be
+ * given the shape up front (the Claude Code CLI's `--json-schema`), a
+ * malformed reply becomes impossible rather than a turn that ends with nothing
+ * executed. Transports without that capability ignore it and the text contract
+ * above still asks for the same thing.
+ */
+export function buildAskV2ResponseJsonSchema(
+  tools: readonly AgentToolDefinition[],
+): Record<string, unknown> {
+  return {
+    type: 'object',
+    properties: {
+      tool: {
+        type: 'string',
+        enum: tools.map((tool) => tool.name),
+        description: 'The single tool to call this turn.',
+      },
+      input: {
+        type: 'object',
+        description: "Arguments for that tool, matching its declared parameters.",
+        additionalProperties: true,
+      },
+    },
+    required: ['tool', 'input'],
+    additionalProperties: false,
+  };
+}

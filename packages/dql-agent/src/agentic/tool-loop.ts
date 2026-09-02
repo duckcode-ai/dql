@@ -488,7 +488,14 @@ export async function runTextProtocolToolLoopDetailed(
     messages.push({ role: 'assistant', content: text });
     messages.push({ role: 'user', content: renderObservation(call.name, output) });
     const progressInstruction = renderCurrentToolPolicy(options, tools);
-    if (progressInstruction) messages.push({ role: 'system', content: progressInstruction });
+    // A per-turn availability update belongs WHERE IT HAPPENED. Claude-family
+    // transports flatten every system message into one system prompt, so
+    // pushing these as `system` collected all of them, out of order, ahead of
+    // the conversation — the model could not tell which update was current and
+    // kept proposing tools that had already been withdrawn. As a user-role
+    // controller message it stays attached to the observation it follows, for
+    // every transport.
+    if (progressInstruction) messages.push({ role: 'user', content: progressInstruction });
 
     // A *completed* terminal host control carries its final answer or stable
     // clarification in the tool result.  Do not spend another provider send
