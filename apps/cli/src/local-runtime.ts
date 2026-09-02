@@ -8493,6 +8493,11 @@ function analyticalFailureSummary(
               { id: 'research-gap', label: 'Research missing metadata coverage', route: 'research', artifactKind: 'research_run' },
             ]
       : [
+          // The next thing a reader wants is rarely "create a DQL draft" — it
+          // is another question about the answer in front of them. These are
+          // derived from the result's own columns and the plan that produced
+          // it, so every suggestion is one this project can actually answer.
+          ...resultAwareFollowUpQuestions(governedAnswer, request.question),
           { id: 'create-block', label: governedAnswer.dqlArtifact ? 'Review DQL draft' : 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
           { id: 'research-gap', label: 'Research deeper', route: 'research' },
           ...(runnableSql ? [{
@@ -37466,6 +37471,57 @@ function agentResultToSynthesisPreview(result: AgentAnswer['result']): Synthesiz
 }
 
 /** Up to three example questions built from real catalog blocks (falls back to generic asks). */
+/**
+ * The questions this answer invites next, derived from the answer itself.
+ *
+ * Ask's follow-up chips were three fixed routes — draft a block, research
+ * deeper, insert SQL — which is a menu of authoring tools, not a conversation.
+ * A person looking at "top accounts by net ARR" wants to break it down, bound
+ * it in time, or focus on the leader. These are built from the result's own
+ * columns and the executed plan, so a suggestion is only offered when the
+ * project can actually answer it; the UI submits the label verbatim as the
+ * next question (the `suggest-question-*` convention it already understands).
+ */
+function resultAwareFollowUpQuestions(
+  answer: { result?: { columns?: unknown } | undefined },
+  question: string,
+): AgentRunNextAction[] {
+  const columns = Array.isArray(answer.result?.columns)
+    ? (answer.result!.columns as unknown[]).flatMap((column) => (typeof column === 'string' ? [column] : []))
+    : [];
+  if (columns.length === 0) return [];
+  const asked = question.toLowerCase();
+  const humanize = (column: string): string => column.replace(/_/g, ' ').trim();
+  const looksTemporal = (column: string): boolean =>
+    /(?:^|_)(?:date|day|week|month|quarter|year|period|time|_at|_on)(?:_|$)/i.test(column);
+  const looksMeasure = (column: string): boolean =>
+    /(?:^|_)(?:arr|mrr|revenue|amount|count|total|sum|value|spend|cost|rate|score|margin)(?:_|$)/i.test(column);
+  const looksCategorical = (column: string): boolean =>
+    !looksTemporal(column) && !looksMeasure(column)
+    && !/(?:^|_)(?:id|key|sk|uuid)(?:_|$)/i.test(column);
+
+  const suggestions: string[] = [];
+  // A breakdown the answer does not already have.
+  const breakdown = columns.find((column) => looksCategorical(column)
+    && !asked.includes(humanize(column).toLowerCase()));
+  if (breakdown) suggestions.push(`Break this down by ${humanize(breakdown)}`);
+  // A time view, when the source carries time and the question did not ask.
+  const temporal = columns.find(looksTemporal);
+  if (temporal && !/\b(?:month|quarter|year|week|day|trend|over time|last|since)\b/.test(asked)) {
+    suggestions.push(`Show this by ${humanize(temporal)} over time`);
+  }
+  // The measure's own movement, when there is a measure to move.
+  const measure = columns.find(looksMeasure);
+  if (measure && !/\b(?:compare|versus|vs\.?|change|growth|prior|previous)\b/.test(asked)) {
+    suggestions.push(`Compare ${humanize(measure)} to the previous period`);
+  }
+  return suggestions.slice(0, 3).map((label, index) => ({
+    id: `suggest-question-${index + 1}`,
+    label,
+    route: 'generated_answer' as const,
+  }));
+}
+
 function buildConversationSuggestions(projectRoot: string, kind: ConversationalKind): string[] {
   if (kind === 'gratitude' || kind === 'answer_explanation') return [];
   let names: string[] = [];

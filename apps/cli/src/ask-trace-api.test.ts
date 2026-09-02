@@ -1425,7 +1425,9 @@ describe('local Ask trace API errors (OBS-009)', () => {
     });
     expect(body.run.businessAnswer?.factIds?.length).toBeGreaterThan(0);
     expect(body.run.answer).toContain('Brittany Barrera');
-    expect(body.run.answer).toContain('2701.72');
+    // Money reads as money for a business reader; the true value is still the
+    // one shown, and a forged value still must not appear.
+    expect(body.run.answer).toContain('$2,701.72');
     expect(body.run.answer).not.toContain('FORGED STALE CUSTOMER');
     expect(body.run.answer).not.toContain('999999');
     const traceId = body.run.traceReference?.traceId;

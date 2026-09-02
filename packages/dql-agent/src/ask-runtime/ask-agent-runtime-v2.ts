@@ -2669,7 +2669,14 @@ function classifyTurnV2(request: AgentRunRequest): AskTurnClassV2 {
   if (/\b(what is|define|definition|meaning of|explain)\b/.test(question)
     && /\b(metric|measure|dimension|model|block|revenue|customer)\b/.test(question)
     && !analyticalShape) return 'definition';
-  if (/\b(why|business context|background|how does|tell me about)\b/.test(question) && !/\b(top|by |revenue|count|sum|average|sales|customer|product|region)\b/.test(question)) return 'business_context';
+  // "Why did it drop?" asked about an answer already on screen is a question
+  // about DATA, and the contextual class forbids execution — so the one
+  // follow-up a person most naturally asks could never be answered. Business
+  // context is for a question asked cold, with no result to explain.
+  const continuesAnAnsweredTurn = Boolean(request.conversationContext || request.history?.length);
+  if (/\b(why|business context|background|how does|tell me about)\b/.test(question)
+    && !continuesAnAnsweredTurn
+    && !/\b(top|by |revenue|count|sum|average|sales|customer|product|region)\b/.test(question)) return 'business_context';
   if (/^(hi|hello|thanks|thank you|what can you do)\b/.test(question.trim())) return 'general';
   return 'analytics';
 }

@@ -4060,7 +4060,16 @@ function createAskV2LaneHandler(
         // model itself stays the provider's own configured choice.
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         maxTokens: 8192,
-        maxToolCalls: limits?.maxToolCalls ?? (state.turnClass === 'research' ? 24 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 8 : 4),
+        // A clarification REPLY is the same analytical work as the question it
+        // answers — it has to walk the same tier ladder — but it was budgeted
+        // as a contextual aside at four calls, below the cold ladder's cost.
+        // The user answered the question DQL asked and then watched the turn
+        // run out of room.
+        maxToolCalls: limits?.maxToolCalls ?? (state.turnClass === 'research'
+          ? 24
+          : state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response'
+            ? 8
+            : 4),
         // A compound question — a time filter, a metric and a breakdown — costs
         // an inspection per tier, at least one compile attempt, and a reserved
         // send for finish_answer. At six the narration turn was the one that
@@ -4088,7 +4097,7 @@ function createAskV2LaneHandler(
         maxProviderDispatches: limits?.maxProviderDispatches
           ?? (state.turnClass === 'research'
             ? ASK_V2_BUDGETS.research.providerDispatches
-            : state.turnClass === 'analytics' || state.turnClass === 'prior_result'
+            : state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response'
               ? ASK_V2_BUDGETS.ask.providerDispatches
               : ASK_V2_BUDGETS.contextual.providerDispatches),
         // The kernel owns current availability. Native transports evaluate it

@@ -4617,7 +4617,9 @@ function runtimeWorkspaceToolsForRun(
 const RESULT_FACT_MAX_ROWS = 10;
 const RESULT_FACT_MAX_COLUMNS = 12;
 const RESULT_FACT_MAX_VALUE_CHARS = 1_024;
-const RESULT_FACT_NARRATIVE_ROWS = 5;
+// A "top 10" answer that enumerates five rows is not the answer that was
+// asked for. The projection retains ten rows; narrate all of them.
+const RESULT_FACT_NARRATIVE_ROWS = 10;
 
 interface AuthoritativeExecutedAnswerArtifactV1 {
   artifact: AgentRunArtifact;
@@ -4628,7 +4630,7 @@ interface AuthoritativeExecutedAnswerArtifactV1 {
 
 interface DeterministicResultFactV1 {
   factId: string;
-  kind: 'result_scope' | 'result_row' | 'result_window';
+  kind: 'result_scope' | 'result_row' | 'result_window' | 'result_aggregate';
   resultFingerprint: string;
   rowIndex?: number;
   values?: Record<string, unknown>;
@@ -4816,6 +4818,16 @@ function deterministicResultFactProjection(input: {
       endExclusive: stringForResultFacts(rawWindow.endExclusive)!,
     }
     : undefined;
+  // WHAT THE ROWS ADD UP TO.
+  //
+  // A reader asking "top customers by net ARR" wants the leader, roughly what
+  // they are worth, and how concentrated the top of the list is. The projection
+  // could state only that N rows came back and then recite them — every number
+  // present, no number meaning anything. These aggregates are computed here,
+  // deterministically, over the SAME canonical rows the row facts cite, so a
+  // narrative can say something true about the shape of the answer without any
+  // model inventing arithmetic.
+  const aggregate = deterministicResultAggregate(columns, canonical.rows);
   const facts: DeterministicResultFactV1[] = [
     {
       factId: deterministicResultFactId(canonical.resultFingerprint, 'scope', scopeDetails),
@@ -4829,6 +4841,13 @@ function deterministicResultFactProjection(input: {
       kind: 'result_window' as const,
       resultFingerprint: canonical.resultFingerprint,
       details: appliedTimeWindow,
+      provenance,
+    }] : []),
+    ...(aggregate ? [{
+      factId: deterministicResultFactId(canonical.resultFingerprint, 'aggregate', aggregate),
+      kind: 'result_aggregate' as const,
+      resultFingerprint: canonical.resultFingerprint,
+      details: aggregate as unknown as Record<string, unknown>,
       provenance,
     }] : []),
     ...rows.map((values, rowIndex) => ({
@@ -4860,6 +4879,108 @@ function deterministicResultFactProjection(input: {
   return { factSet, narrative };
 }
 
+/**
+ * The measure column an answer is really about, and what its values add up to.
+ *
+ * Deliberately conservative: it reports only what the returned rows literally
+ * contain — a total, the largest value, the leader's share of that total. It
+ * computes no rates, no growth, no comparison to a period nobody asked for.
+ * Everything here is checkable against the row facts beside it.
+ */
+interface DeterministicResultAggregateV1 {
+  measureColumn: string;
+  labelColumn?: string;
+  total: number;
+  maximum: number;
+  minimum: number;
+  rowsAggregated: number;
+  /** The label of the row holding `maximum`, when the result has one. */
+  leaderLabel?: string;
+  /** Leader's share of the total, 0..1, only when the total is positive. */
+  leaderShare?: number;
+}
+
+/**
+ * Render a measure the way a business reader expects to see it.
+ *
+ * A governed answer used to print `1234567.89` and `0.0731`, which is
+ * technically the value and practically unreadable — the reader has to do the
+ * formatting the product should have done. The column's own name is the only
+ * signal used, and no value is ever rounded away: money and counts keep two
+ * and zero decimals respectively because that is what they mean, and anything
+ * unrecognized is printed with thousands separators and nothing else.
+ */
+function deterministicResultMeasureText(value: number, column: string): string {
+  if (!Number.isFinite(value)) return String(value);
+  const name = column.toLowerCase();
+  if (/(?:^|_)(?:pct|percent|percentage|rate|share|ratio)(?:_|$)/.test(name)) {
+    // A stored fraction and a stored percentage are both common; only the
+    // clearly fractional range is scaled, so 0.42 reads as 42% and 42 as 42%.
+    const percent = Math.abs(value) <= 1 ? value * 100 : value;
+    return `${percent.toFixed(1)}%`;
+  }
+  if (/(?:^|_)(?:arr|mrr|revenue|amount|cost|spend|price|value|sales|margin|bookings|acv|tcv)(?:_|$)/.test(name)) {
+    return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+  }
+  if (Number.isInteger(value)) return value.toLocaleString('en-US');
+  return value.toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+
+function deterministicResultAggregate(
+  columns: string[],
+  rows: ReadonlyArray<Record<string, unknown>>,
+): DeterministicResultAggregateV1 | undefined {
+  if (rows.length === 0 || columns.length === 0) return undefined;
+  const numericColumn = (column: string): boolean => {
+    let numeric = 0;
+    let present = 0;
+    for (const row of rows) {
+      const value = row[column];
+      if (value === null || value === undefined) continue;
+      present += 1;
+      if (typeof value === 'number' && Number.isFinite(value)) numeric += 1;
+    }
+    // An identifier column is numeric too; require that it is mostly numbers
+    // AND that the column is not obviously a key.
+    return present > 0 && numeric === present && !/(?:^|_)(?:id|key|number|year|month|day)(?:_|$)/i.test(column);
+  };
+  // Prefer the LAST numeric column: a ranking result puts its measure there,
+  // after the label it is ranked by.
+  const measureColumn = [...columns].reverse().find(numericColumn);
+  if (!measureColumn) return undefined;
+  const labelColumn = columns.find((column) => column !== measureColumn
+    && rows.some((row) => typeof row[column] === 'string' && String(row[column]).trim()));
+  let total = 0;
+  let maximum = Number.NEGATIVE_INFINITY;
+  let minimum = Number.POSITIVE_INFINITY;
+  let rowsAggregated = 0;
+  let leaderLabel: string | undefined;
+  for (const row of rows) {
+    const value = row[measureColumn];
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    rowsAggregated += 1;
+    total += value;
+    minimum = Math.min(minimum, value);
+    if (value > maximum) {
+      maximum = value;
+      const label = labelColumn ? row[labelColumn] : undefined;
+      leaderLabel = typeof label === 'string' && label.trim() ? label : undefined;
+    }
+  }
+  if (rowsAggregated === 0) return undefined;
+  const rounded = (value: number): number => Number(value.toFixed(4));
+  return {
+    measureColumn,
+    ...(labelColumn ? { labelColumn } : {}),
+    total: rounded(total),
+    maximum: rounded(maximum),
+    minimum: rounded(minimum),
+    rowsAggregated,
+    ...(leaderLabel ? { leaderLabel } : {}),
+    ...(total > 0 ? { leaderShare: Number((maximum / total).toFixed(4)) } : {}),
+  };
+}
+
 function deterministicResultNarrative(input: {
   question: string;
   factSet: DeterministicResultFactSetV1;
@@ -4878,6 +4999,36 @@ function deterministicResultNarrative(input: {
     factIds: [scope.factId],
     text: `The query returned ${input.rowCount.toLocaleString()} row${input.rowCount === 1 ? '' : 's'} across ${input.columns.length.toLocaleString()} column${input.columns.length === 1 ? '' : 's'}${input.truncated ? '; the returned rows are truncated.' : '.'}`,
   }];
+  // LEAD WITH WHAT THE ANSWER MEANS.
+  //
+  // A row count is a fact about the query, not about the business. When the
+  // result has a measure, say what it totals and who leads it before reciting
+  // rows — that is the sentence a reader actually needed, and every number in
+  // it comes from the aggregate fact it cites.
+  const aggregateFact = input.factSet.facts.find((fact) => fact.kind === 'result_aggregate');
+  const aggregate = aggregateFact?.details as unknown as DeterministicResultAggregateV1 | undefined;
+  if (aggregateFact && aggregate) {
+    const measureLabel = humanizeResultColumn(aggregate.measureColumn);
+    const totalText = deterministicResultMeasureText(aggregate.total, aggregate.measureColumn);
+    const parts = [aggregate.rowsAggregated === 1
+      // With a single row there is nothing to total: saying so would be
+      // arithmetic theatre. State the value itself.
+      ? `${measureLabel} is ${totalText}.`
+      : `Across the ${aggregate.rowsAggregated.toLocaleString()} returned rows, ${measureLabel} totals ${totalText}.`];
+    // A leader is only meaningful against other rows.
+    if (aggregate.leaderLabel && aggregate.rowsAggregated > 1) {
+      const leaderText = deterministicResultMeasureText(aggregate.maximum, aggregate.measureColumn);
+      const shareText = aggregate.leaderShare !== undefined
+        ? ` — ${(aggregate.leaderShare * 100).toFixed(1)}% of the returned total`
+        : '';
+      parts.push(`${aggregate.leaderLabel} leads with ${leaderText}${shareText}.`);
+    }
+    claims.push({
+      claimId: 'claim:result_aggregate',
+      factIds: [aggregateFact.factId],
+      text: parts.join(' '),
+    });
+  }
   if (windowFact && windowText && input.returnedRowCount > 0) {
     claims.push({
       claimId: 'claim:result_window',
@@ -4898,7 +5049,9 @@ function deterministicResultNarrative(input: {
     const label = labelColumn ? deterministicResultDisplayValue(values[labelColumn]) : undefined;
     const details = input.columns
       .filter((column) => column !== labelColumn && values[column] !== undefined)
-      .map((column) => `${humanizeResultColumn(column)}: ${deterministicResultDisplayValue(values[column])}`);
+      .map((column) => `${humanizeResultColumn(column)}: ${typeof values[column] === 'number'
+        ? deterministicResultMeasureText(values[column] as number, column)
+        : deterministicResultDisplayValue(values[column])}`);
     const text = label
       ? `${rankedQuestion ? 'Returned result' : 'Result'} ${fact.rowIndex + 1}: ${label}${details.length > 0 ? ` — ${details.join('; ')}` : ''}.`
       : `Returned result ${fact.rowIndex + 1}${details.length > 0 ? `: ${details.join('; ')}` : '.'}`;

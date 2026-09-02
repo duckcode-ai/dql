@@ -593,7 +593,8 @@ describe("AgentRunEngine", () => {
       cascade: { selectedTier: 'semantic', planFrozen: true },
       connection: { attempted: true },
       execution: { attempts: 1 },
-      facts: { factCount: 2, resultFingerprint: 'result:revenue-42' },
+      // scope + one row + the aggregate over that row's measure column.
+      facts: { factCount: 3, resultFingerprint: 'result:revenue-42' },
       safeNextAction: 'none',
       story: expect.arrayContaining([
         expect.objectContaining({ stage: 'freeze', status: 'completed' }),
@@ -608,12 +609,16 @@ describe("AgentRunEngine", () => {
         understood: { questionKind: 'aggregation', measureCount: 1, hasBoundFilter: true },
         planning: { mode: 'deterministic_binding', plannerCalls: 0, verification: 'valid' },
         route: { selectedTier: 'semantic', tierAttemptCount: 2, planFrozen: true, reviewRequired: false },
-        outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 2, narration: 'fact_bound' },
+        outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 3, narration: 'fact_bound' },
       },
     });
-    expect(run.businessAnswer?.factIds).toHaveLength(2);
+    // scope, aggregate, and the single returned row.
+    expect(run.businessAnswer?.factIds).toHaveLength(3);
     expect(run.answer).toContain('Brittany Barrera');
     expect(run.answer).toContain('42');
+    // The answer now states what the measure IS, with business formatting,
+    // rather than only how many rows came back.
+    expect(run.answer).toContain('Revenue is $42.00');
     expect(run.answer).not.toContain('Untrusted arbitrary prose');
     expect(store.get(run.id)?.diagnosticReceiptV5).toEqual(run.diagnosticReceiptV5);
     expect(planner.plan).not.toHaveBeenCalled();
@@ -886,7 +891,7 @@ describe("AgentRunEngine", () => {
       diagnosticReceiptV8: {
         mode: 'authoritative_v2',
         terminalOutcome: { kind: 'finish_answer', reasonCode: 'CERTIFIED_EXECUTED' },
-        outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 2 },
+        outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 3 },
       },
     });
     expect(run.evaluations).toEqual(expect.arrayContaining([
