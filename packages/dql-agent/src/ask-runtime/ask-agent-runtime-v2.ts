@@ -1496,6 +1496,31 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         instruction: 'The frozen execution target did not match the compiler result. Do not call another tool or choose another route.',
       };
     }
+    // A FROZEN PLAN THAT FAILED, WITH NO REPAIR LEFT, IS OVER.
+    //
+    // The route cannot change after freeze and the one repair is spent, so
+    // every remaining execution tool can only be denied — and a controller
+    // that keeps trying spends the rest of the turn, and the user's minute, on
+    // guaranteed refusals before the budget wall ends it. Closing with a typed
+    // answer is both faster and more honest: the query ran, the warehouse
+    // refused it, and that is what the reader needs to be told.
+    if (state.resolvedPlan?.frozen
+      && repairs >= (state.turnClass === 'research' ? ASK_V2_BUDGETS.research.repairs : ASK_V2_BUDGETS.ask.repairs)
+      && state.observations.some((observation) => (
+        observation.outcome === 'error' && executionToolTier[observation.tool] !== undefined
+      ))
+      && !hasExecutedTool()) {
+      return {
+        allowedToolNames: ['finish_answer'],
+        instruction: 'The frozen plan executed and failed, and its one repair is spent. Call finish_answer and report what was attempted'
+          + ' and why it could not complete. Do not choose another route or retry.',
+        // Deliberately NOT a terminal narration action. The reserved narration
+        // send exists to narrate a VALIDATED RESULT and is refused without
+        // one; naming it here would make the honest failure close unsendable,
+        // which is the opposite of closing honestly. Restricting the allowed
+        // set to finish_answer is already the whole constraint.
+      };
+    }
     if (hasExecutedTool()) {
       return {
         allowedToolNames: ['finish_answer'],

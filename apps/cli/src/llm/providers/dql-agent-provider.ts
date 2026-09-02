@@ -1788,6 +1788,23 @@ function createAskV2LaneHandler(
       return unique;
     };
     /**
+     * The candidate IDs the HOST must see for a set of model-supplied
+     * references.
+     *
+     * The model may legally write `<relation>.<column>`; the host's execution
+     * closure knows only the relation's own admitted ID. Normalizing here is
+     * what keeps the widened vocabulary from reaching any authorization gate:
+     * downstream, a column reference is indistinguishable from having named
+     * the relation, which is exactly what it means.
+     */
+    const hostCandidateIds = (rawIds: string[]): string[] => {
+      const resolved = rawIds.flatMap((id) => {
+        const match = resolveAdmittedReference(id);
+        return match ? [v2CandidateId(match.candidate)] : [];
+      });
+      return [...new Set(resolved)];
+    };
+    /**
      * The relation vocabulary a governed-relational or exploratory-SQL call
      * may draw from: every admitted relation, and for each the columns the
      * catalog proved it has. This is what a refusal must hand back — a bare
@@ -3385,7 +3402,7 @@ function createAskV2LaneHandler(
         const dimensionIds = v2StringArray(args.dimensionIds, 16);
         const outputIds = v2StringArray(args.expectedOutputIds, 24);
         const pathIds = v2StringArray(args.relationshipPathIds, 8);
-        const selectedCandidateIds = [...new Set([...measureIds, ...dimensionIds, ...outputIds])];
+        const selectedCandidateIds = hostCandidateIds([...measureIds, ...dimensionIds, ...outputIds]);
         const selected = resolveCandidates([...measureIds, ...dimensionIds, ...outputIds]);
         const selectedPaths = state.relationshipPathHandles.filter((path) => pathIds.includes(path.id));
         const allowedPaths = new Set(state.relationshipPathHandles.map((path) => path.id));
@@ -3485,7 +3502,7 @@ function createAskV2LaneHandler(
             ? await v2DqlAuthorizer!({
                 version: 2,
                 candidateIds: selectedCandidateIds,
-                expectedOutputIds: outputIds,
+                expectedOutputIds: hostCandidateIds(outputIds),
                 relationshipPathIds: pathIds,
                 snapshotId: state.snapshotId,
                 planFingerprint: bindingFingerprint,
@@ -3508,7 +3525,7 @@ function createAskV2LaneHandler(
                 version: 2,
                 artifact,
                 candidateIds: selectedCandidateIds,
-                expectedOutputIds: outputIds,
+                expectedOutputIds: hostCandidateIds(outputIds),
                 relationshipPathIds: pathIds,
                 snapshotId: state.snapshotId,
                 planFingerprint: bindingFingerprint,
@@ -3570,7 +3587,9 @@ function createAskV2LaneHandler(
           };
         }
         try {
-          const selectedCandidateIds = [...new Set(outputIds)];
+          // The host closure gate is given the RELATIONS these outputs belong
+          // to; a column reference is not a separate admitted object.
+          const selectedCandidateIds = hostCandidateIds(outputIds);
           const repair = args.repair === true;
           const bindingFingerprint = v2ExecutionBindingFingerprint({
             state,
@@ -3582,7 +3601,7 @@ function createAskV2LaneHandler(
             ? await v2Prepare({
                 version: 2,
                 sql,
-                expectedOutputIds: outputIds,
+                expectedOutputIds: selectedCandidateIds,
                 selectedCandidateIds,
                 snapshotId: state.snapshotId,
                 planFingerprint: bindingFingerprint,
@@ -3720,11 +3739,23 @@ function createAskV2LaneHandler(
     // tool returns, but keep the boundary at this higher layer as well: a
     // transport wrapper must never send another planner request after the
     // validated result and its narration have both been recorded.
-    const terminalNarrationReady = () => Boolean(completed && state.observations.some((observation) => (
+    /**
+     * The host already holds this turn's final answer, so no further provider
+     * send can change it.
+     *
+     * This guarded only the narrated-result case, which left the honest
+     * failure close unguarded: after a frozen plan failed, the host accepted
+     * `finish_answer`, recorded its terminal — and the transport kept
+     * dispatching, spending four more provider round trips on a turn that was
+     * already over. An accepted finish is an accepted finish; the only
+     * distinction that matters here is whether the host has one.
+     */
+    const terminalNarrationReady = () => state.observations.some((observation) => (
       observation.tool === 'finish_answer'
       && observation.outcome === 'eligible'
-      && observation.reasonCode === 'ASK_V2_RESULT_NARRATED'
-    )));
+      && (observation.reasonCode === 'ASK_V2_RESULT_NARRATED'
+        || observation.reasonCode === 'ASK_V2_CONTEXTUAL_ANSWER')
+    ));
     const terminalAwareProvider: AgentProvider = {
       name: input.provider.name,
       available: () => input.provider.available(),

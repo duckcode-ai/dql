@@ -210,7 +210,7 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         model: options.model ?? this.defaultModel,
         system: flattened.system,
         prompt: flattened.prompt,
-        options: { tools: false, maxTurns: 1, permissionMode: 'dontAsk', sessionPersistence: false },
+        options: { tools: false, maxTurns: options.responseJsonSchema ? 6 : 1, permissionMode: 'dontAsk', sessionPersistence: false },
       },
     } as const;
     const prepared = prepareProviderHttpDispatch(dispatch);
@@ -228,11 +228,19 @@ export class ClaudeCodeCliProvider implements AgentProvider {
     // by this one, so a run configured for deep reasoning quietly got the
     // default on the slowest provider in the product.
     const effort = options.reasoningEffort;
+    // `--max-turns 1` exists to stop the CLI running an agentic loop of its
+    // own, not to bound DQL's conversation — that is the tool loop's job.
+    // Structured output is implemented as an internal tool call, so a schema
+    // request legitimately needs turns of its own; at one turn the CLI exits
+    // `error_max_turns` with an empty stderr, which surfaced as an
+    // unexplained "provider could not complete this step". `--tools ''` still
+    // denies it every real tool, so the extra allowance buys no capability.
+    const maxTurns = responseSchema ? '6' : '1';
     const args = [
       '-p',
       '--output-format', 'json',
       '--tools', '',                    // pure text generation, no tool/file access
-      '--max-turns', '1',
+      '--max-turns', maxTurns,
       '--permission-mode', 'dontAsk',
       '--strict-mcp-config',            // ignore any ambient MCP config
       '--no-session-persistence',
