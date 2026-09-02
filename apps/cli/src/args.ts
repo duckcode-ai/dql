@@ -100,6 +100,15 @@ export interface CLIFlags {
   minGroundedNarration?: number;
   /** `dql agent eval --min-refusal-recall <0..1>` — fail below this share of must-refuse cases that refused. */
   minRefusalRecall?: number;
+  /**
+   * `dql agent eval --max-provider-dispatches <n>` — fail when the worst
+   * question needed more physical provider round trips than this. Answer
+   * quality bought with extra round trips is not free: on a subscription
+   * transport each one is a process spawn and tens of seconds of waiting.
+   */
+  maxProviderDispatches?: number;
+  /** `dql agent eval --max-latency-p95-ms <ms>` — fail above this p95 for answerable cases. */
+  maxLatencyP95Ms?: number;
   /** `dql eval --no-examples` — skip manifest block examples, score yaml cases only. */
   noExamples?: boolean;
   /** `dql eval --init` — write a starter eval/golden.yaml template into the project. */
@@ -298,6 +307,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === '--max-false-refusal' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.maxFalseRefusal = value;
+    } else if (arg === '--max-provider-dispatches' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0) flags.maxProviderDispatches = value;
+    } else if (arg === '--max-latency-p95-ms' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value > 0) flags.maxLatencyP95Ms = value;
     } else if (arg === '--min-refusal-recall' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minRefusalRecall = value;

@@ -1,0 +1,10 @@
+{
+  "project": "bigrepo-arr",
+  "manifestVersion": 3,
+  "modeling": { "mode": "dbt-first" },
+  "connections": {
+    "default": { "driver": "duckdb", "filepath": ":memory:" }
+  },
+  "dbt": { "projectDir": ".", "manifestPath": "target/manifest.json" },
+  "agent": { "askRuntimeMode": "authoritative_v2" }
+}

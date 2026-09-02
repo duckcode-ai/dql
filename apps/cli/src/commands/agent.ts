@@ -1066,6 +1066,12 @@ interface AgentEvalResult {
   validationCode?: string;
   trace: AgentEvalTraceStage[];
   toolCalls: number;
+  /**
+   * Physical provider round trips. Tool calls are cheap; dispatches are the
+   * cost a person waits for, and the budget the recorded big-repo failures
+   * actually exhausted. Undefined on drivers that do not persist telemetry.
+   */
+  providerDispatchCount?: number;
   judgeScore?: number;
   judgePass?: boolean;
   /**
@@ -1336,6 +1342,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         followUp: Boolean(testCase.followUp),
         draftSaved,
         toolCalls: runtimeProjection?.toolCallCount ?? result.evidence?.toolCalls?.length ?? 0,
+        ...(runtimeProjection ? { providerDispatchCount: runtimeProjection.providerDispatchCount } : {}),
         expected: testCase.expected,
         validationCode: evaluation.validationCode,
         trace: buildEvalTrace({
@@ -1374,6 +1381,8 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
     maxWrongCertified: (flags as { maxWrongCertified?: number }).maxWrongCertified ?? null,
     maxFalseRefusal: (flags as { maxFalseRefusal?: number }).maxFalseRefusal ?? null,
     minRefusalRecall: (flags as { minRefusalRecall?: number }).minRefusalRecall ?? null,
+    maxProviderDispatches: (flags as { maxProviderDispatches?: number }).maxProviderDispatches ?? null,
+    maxLatencyP95Ms: (flags as { maxLatencyP95Ms?: number }).maxLatencyP95Ms ?? null,
     minGroundedNarration: (flags as { minGroundedNarration?: number }).minGroundedNarration ?? null,
   };
   const thresholdsPassed = agentEvalThresholdsPass(metrics, thresholds);
@@ -1423,6 +1432,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   console.log(`Tool requirement pass rate: ${formatRate(metrics.tool_requirement_pass_rate)}`);
   console.log(`Tool-observed case count: ${metrics.tool_observed_case_count}`);
   console.log(`Average tool calls: ${metrics.avg_tool_calls}`);
+  console.log(`Provider dispatches: avg ${metrics.avg_provider_dispatches}, worst ${metrics.max_provider_dispatches}`);
   console.log(`Wrong certified count: ${metrics.wrong_certified_count}`);
   console.log(`Draft saved count: ${metrics.draft_saved_count}`);
   if (thresholds.minToolRequirement !== null) {
@@ -1729,6 +1739,13 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
     draft_saved_count: results.filter((result) => result.draftSaved).length,
     tool_observed_case_count: results.filter((result) => result.toolCalls > 0).length,
     avg_tool_calls: average(toolCallCounts),
+    /**
+     * Physical provider round trips per question. The number that actually
+     * bounds a turn on the slowest transports, and the one the recorded
+     * big-repo failures exhausted.
+     */
+    avg_provider_dispatches: average(results.map((result) => result.providerDispatchCount ?? 0)),
+    max_provider_dispatches: results.reduce((worst, result) => Math.max(worst, result.providerDispatchCount ?? 0), 0),
     // Runtime runs only report this when the persisted router recorded an
     // explicit retrieval count. Treat absent evidence as unknown, not as an
     // invented empty context pack.
@@ -1749,6 +1766,10 @@ function agentEvalThresholdsPass(
     maxFalseRefusal?: number | null;
     minRefusalRecall?: number | null;
     minGroundedNarration?: number | null;
+    /** Ceiling on physical provider round trips for the worst question. */
+    maxProviderDispatches?: number | null;
+    /** Ceiling on p95 wall clock for answerable questions, in milliseconds. */
+    maxLatencyP95Ms?: number | null;
   },
 ): boolean {
   // A rate threshold with no applicable cases (metric === null) is vacuously
@@ -1759,7 +1780,13 @@ function agentEvalThresholdsPass(
   // answerable case was scored, which is "unknown", not "perfect".
   const ceilingOk = (metric: number | null, max: number | null | undefined): boolean =>
     max === null || max === undefined || metric === null || metric <= max;
-  return rateOk(metrics.grounded_narration_rate, thresholds.minGroundedNarration)
+  // A cost ceiling is only meaningful when something was measured; zero
+  // dispatches means no run reached a provider, which is not "fast".
+  const costOk = (metric: number | null | undefined, max: number | null | undefined): boolean =>
+    max === null || max === undefined || metric === null || metric === undefined || metric <= max;
+  return costOk(metrics.max_provider_dispatches, thresholds.maxProviderDispatches)
+    && costOk(metrics.latency_p95_answerable_ms, thresholds.maxLatencyP95Ms)
+    && rateOk(metrics.grounded_narration_rate, thresholds.minGroundedNarration)
     && rateOk(metrics.tool_requirement_pass_rate, thresholds.minToolRequirement)
     && rateOk(metrics.execution_match_rate, thresholds.minExecutionMatch)
     && rateOk(metrics.judge_pass_rate, thresholds.minJudgePass)

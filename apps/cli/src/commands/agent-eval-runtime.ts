@@ -58,6 +58,16 @@ export interface RuntimeDrivenRun {
   /** Provider/tool count recorded by persisted runtime telemetry. */
   toolCallCount: number;
   /**
+   * PHYSICAL provider round trips for the run.
+   *
+   * Tool calls are cheap and dispatches are not: on a subscription transport
+   * one dispatch is a process spawn and tens of seconds of wall clock, and the
+   * recorded big-repo failures were dispatch exhaustion, not tool exhaustion.
+   * A quality gain bought with three extra round trips per question is a
+   * regression for the person waiting, so it is measured and gateable.
+   */
+  providerDispatchCount: number;
+  /**
    * OBS-008: compact receipt evidence only. Evaluation never opens the trace
    * store or treats a trace as answer authority.
    */
@@ -154,6 +164,7 @@ export function projectRuntimeRun(run: AgentRun): RuntimeDrivenRun {
     conversational: run.route === 'conversation' || run.answerKind === 'conversational',
     meaningResolved: Boolean(run.routeDecision?.meaningResolution),
     toolCallCount: run.telemetry?.toolCalls ?? 0,
+    providerDispatchCount: run.telemetry?.providerRoundTrips ?? 0,
     ...(typeof retrievalCandidateCount === 'number' ? { retrievalCandidateCount } : {}),
     ...(sourceCoverage ? { sourceCoverage } : {}),
     ...(run.routeDecision?.terminalOutcome ? { terminalOutcome: run.routeDecision.terminalOutcome } : {}),
