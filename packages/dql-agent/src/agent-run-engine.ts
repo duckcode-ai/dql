@@ -4910,6 +4910,23 @@ interface DeterministicResultAggregateV1 {
  * and zero decimals respectively because that is what they mean, and anything
  * unrecognized is printed with thousands separators and nothing else.
  */
+/**
+ * Make a stored label readable without changing what it says.
+ *
+ * A month grouping arrived as `"2024-09-01T00:00:00.000Z"` — wrapping quotes
+ * and a midnight timestamp that no reader asked about — which is the value
+ * exactly, and unreadable. Only the presentation changes: the underlying fact
+ * still carries the original string, so nothing that verifies against it moves.
+ */
+function deterministicResultDisplayText(value: string): string {
+  const unquoted = value.length >= 2 && value.startsWith('"') && value.endsWith('"')
+    ? value.slice(1, -1)
+    : value;
+  // An ISO instant at exactly midnight UTC is a date, not a moment.
+  const midnight = /^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.000)?Z?$/.exec(unquoted);
+  return midnight ? midnight[1]! : unquoted;
+}
+
 function deterministicResultMeasureText(value: number, column: string): string {
   if (!Number.isFinite(value)) return String(value);
   const name = column.toLowerCase();
@@ -4944,10 +4961,18 @@ function deterministicResultAggregate(
     // AND that the column is not obviously a key.
     return present > 0 && numeric === present && !/(?:^|_)(?:id|key|number|year|month|day)(?:_|$)/i.test(column);
   };
-  // Prefer the LAST numeric column: a ranking result puts its measure there,
-  // after the label it is ranked by.
-  const measureColumn = [...columns].reverse().find(numericColumn);
-  if (!measureColumn) return undefined;
+  // WHICH NUMBER IS THE ANSWER ABOUT?
+  //
+  // A result carrying both `gross_revenue` and `order_count` has two honest
+  // totals, and only one of them is what the question was about. Prefer a
+  // column that names a business measure; a count is a fact about the rows,
+  // not usually the subject. Failing that, the last numeric column — a
+  // ranking puts its measure after the label it ranks.
+  const numericColumns = columns.filter(numericColumn);
+  if (numericColumns.length === 0) return undefined;
+  const businessMeasure = numericColumns.find((column) =>
+    /(?:^|_)(?:arr|mrr|revenue|amount|spend|cost|price|value|sales|margin|bookings|acv|tcv|total)(?:_|$)/i.test(column));
+  const measureColumn = businessMeasure ?? numericColumns[numericColumns.length - 1]!;
   const labelColumn = columns.find((column) => column !== measureColumn
     && rows.some((row) => typeof row[column] === 'string' && String(row[column]).trim()));
   let total = 0;
@@ -5167,7 +5192,7 @@ function deterministicResultHash(value: unknown): string {
 
 function deterministicResultDisplayValue(value: unknown): string {
   if (value === null) return 'null';
-  if (typeof value === 'string') return value;
+  if (typeof value === 'string') return deterministicResultDisplayText(value);
   if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'not-a-number';
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   return typeof value === 'undefined' ? 'undefined' : String(value);
