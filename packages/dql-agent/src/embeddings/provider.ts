@@ -502,3 +502,36 @@ function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(1, value));
 }
+
+/**
+ * Rebuild the provider that wrote a vector index, from the id recorded beside
+ * it.
+ *
+ * An index is only searchable by the embedder that built it, and provider ids
+ * are structured (`cached:resilient:ollama:nomic-embed-text`), so the id is
+ * enough to reconstruct one. Without this, a project that re-embedded with a
+ * local model in one process answered every later question with an empty
+ * vector lane, because an unconfigured project resolves to the hashed default
+ * and the two ids never match.
+ *
+ * Returns undefined for an id this build cannot reconstruct — an OpenAI index
+ * needs a key that is not ours to invent — leaving the caller's own resolution
+ * in place.
+ */
+export function embeddingProviderFromIndexedId(
+  indexedProviderId: string,
+  options: { ollamaEndpoint?: string } = {},
+): EmbeddingProvider | undefined {
+  const ollama = /(?:^|:)ollama:(.+)$/.exec(indexedProviderId);
+  if (ollama) {
+    const model = ollama[1]!.trim();
+    if (!model) return undefined;
+    return resolveEmbeddingProvider({
+      ollamaEndpoint: options.ollamaEndpoint
+        ?? process.env.DQL_OLLAMA_EMBED_URL
+        ?? 'http://127.0.0.1:11434',
+      ollamaModel: model,
+    });
+  }
+  return undefined;
+}

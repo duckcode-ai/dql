@@ -14,6 +14,7 @@ import {
   defaultAgentRunSqlitePath,
   defaultMetadataPath,
   projectEmbeddingProvider,
+  indexedVectorProviderId,
   readAgentRunStoreHealth,
   readMetadataCatalogHealth,
   type AgentRunStoreHealth,
@@ -64,10 +65,16 @@ export function resolveRetrievalHealthStatus(input: {
 
   let providerId = 'hashed-token-v1';
   try {
-    // Report the provider the PROJECT resolves to — the same resolution the
-    // catalog indexes with. Reporting the env-only resolver here claimed
-    // "hashed fallback" on projects whose config had semantic embeddings on.
-    providerId = projectEmbeddingProvider(input.projectRoot).id;
+    // Report the provider the INDEX was built with, falling back to the one
+    // the project resolves to.
+    //
+    // Two earlier versions of this line were each wrong in a way that made the
+    // report actively misleading: the env-only resolver claimed "hashed
+    // fallback" on projects configured for real embeddings, and the project
+    // resolver claimed the same on a project whose index had ALREADY been
+    // re-embedded by the background upgrade. Retrieval reads the index, so the
+    // index is what doctor should describe.
+    providerId = indexedVectorProviderId(input.projectRoot) ?? projectEmbeddingProvider(input.projectRoot).id;
   } catch { /* keep the deterministic default */ }
   const semantic = !providerId.startsWith('hashed-token');
   let embeddingUpgrade: string | undefined;

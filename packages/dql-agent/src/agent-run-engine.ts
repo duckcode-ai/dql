@@ -4515,7 +4515,15 @@ function attachAskAgentV2RuntimeReceipt(run: AgentRun): void {
   if (hasExecutedResult) {
     attachDeterministicResultFacts(run);
     run.businessAnswer = businessAnswerForRun(run);
-    run.answer = run.businessAnswer.answer;
+    // A narration that was VERIFIED against these same facts is not a
+    // presentation detail to be overwritten by the deterministic join. It
+    // passed the check that exists to make it safe, so replacing it here
+    // silently discarded the one thing the extra provider turn bought.
+    const verifiedNarration = run.narrationIntegrityReceipt?.outcome === 'success'
+      && run.narrationIntegrityReceipt.mode === 'verified_facts'
+      && typeof run.answer === 'string'
+      && run.answer.trim().length > 0;
+    if (!verifiedNarration) run.answer = run.businessAnswer.answer;
   }
   // The V2 receipt has no row/prompt payload.  It may nevertheless state the
   // count of accepted fact identities only after an actual result boundary.
@@ -4770,6 +4778,25 @@ function authoritativeExecutedAnswerArtifactsForRun(run: AgentRun): Authoritativ
   });
   const resultFingerprints = new Set(candidates.map((candidate) => candidate.resultFingerprint));
   return resultFingerprints.size === 1 ? candidates : [];
+}
+
+/**
+ * The host's own facts about an executed result, before any narrator sees it.
+ *
+ * Exported because an ordinary Ask decides whether to narrate BEFORE the run
+ * receipt is assembled, and that decision needs the fact set to exist: without
+ * it, narration was planned as "nothing to narrate" for every governed answer
+ * and the setting could never take effect. Same projection, same bounds, no
+ * provider — the caller simply gets to ask earlier.
+ */
+export function deterministicResultFactsForAnswer(input: {
+  artifactId: string;
+  trustState: AgentRunTrustState;
+  question: string;
+  result: unknown;
+  answerTier?: string;
+}): { factSet: DeterministicResultFactSetV1; narrative: DeterministicResultNarrativeV1 } | undefined {
+  return deterministicResultFactProjection(input);
 }
 
 function deterministicResultFactProjection(input: {

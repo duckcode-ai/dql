@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -163,10 +164,58 @@ export class ClaudeCodeCliProvider implements AgentProvider {
   private readonly defaultModel?: string;
   private readonly processRunner: SubscriptionCliProcessRunner;
 
+  /** Open CLI sessions, keyed by the server-owned conversation handle. */
+  private readonly sessions = new Map<string, { sessionId: string; sentMessageCount: number }>();
+
   constructor(opts: { command?: string; model?: string; runProcess?: SubscriptionCliProcessRunner } = {}) {
     this.command = opts.command ?? 'claude';
     this.defaultModel = opts.model;
     this.processRunner = opts.runProcess ?? runProcess;
+  }
+
+  /**
+   * Decide whether this send continues an open CLI session, and how much of the
+   * transcript it still has to carry.
+   *
+   * Resuming is only safe while the transcript GROWS by appending: a caller
+   * that rewrote earlier turns would have the session remember a conversation
+   * that no longer exists, so any shrink or unexpected count restarts the
+   * session with the full text rather than silently diverging.
+   */
+  private resolveSession(
+    options: ProviderRunOptions,
+    messages: AgentMessage[],
+  ): { sessionId: string; resumed: boolean; sentMessageCount: number; commit: (count: number) => void } | undefined {
+    const conversationId = options.conversationId;
+    // OFF BY DEFAULT, ON THE EVIDENCE.
+    //
+    // Resuming was expected to cut latency by not re-sending the transcript.
+    // Measured on a 3,373-model project it does not: six runs of one question
+    // came in at 38-53s resuming and 44-47s re-sending, inside the noise. The
+    // cost of this transport is the model's own time per dispatch, not the
+    // bytes. Since resuming also leaves session state on disk where
+    // `--no-session-persistence` left none, it stays opt-in until a
+    // measurement justifies it. It still saves tokens, which is why the code
+    // remains rather than being deleted.
+    if (!conversationId || process.env.DQL_SUBSCRIPTION_CLI_SESSION !== 'on') return undefined;
+    const existing = this.sessions.get(conversationId);
+    const usable = existing && existing.sentMessageCount > 0 && messages.length > existing.sentMessageCount;
+    const sessionId = existing?.sessionId ?? randomUUID();
+    const entry = existing ?? { sessionId, sentMessageCount: 0 };
+    this.sessions.set(conversationId, entry);
+    // Bound the map: one entry per live turn, and turns end.
+    if (this.sessions.size > 32) {
+      const oldest = this.sessions.keys().next().value;
+      if (oldest !== undefined && oldest !== conversationId) this.sessions.delete(oldest);
+    }
+    return {
+      sessionId,
+      resumed: Boolean(usable),
+      sentMessageCount: usable ? entry.sentMessageCount : 0,
+      commit: (count: number) => {
+        entry.sentMessageCount = count;
+      },
+    };
   }
 
   /** Installed AND logged in (checked via `claude auth status --json`). */
@@ -200,7 +249,18 @@ export class ClaudeCodeCliProvider implements AgentProvider {
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {
     // A run whose deadline already fired must not spawn a doomed child process.
     throwIfAlreadyCancelled(options.signal);
-    const flattened = flattenMessages(messages);
+    // RESUME THE TURN INSTEAD OF RE-TELLING IT.
+    //
+    // Every dispatch used to re-send the entire flattened transcript — system
+    // prompt, 24 opening cards, every prior observation — so a turn's fifth
+    // tool follow-up paid for the first four all over again. The CLI can hold
+    // a session, so a continued turn sends only what is new. `--session-id`
+    // opens one, `--resume` continues it, and `DQL_SUBSCRIPTION_CLI_SESSION=off`
+    // returns to re-sending everything if a CLI build ever misbehaves.
+    const session = this.resolveSession(options, messages);
+    const flattened = session?.resumed
+      ? flattenMessages(messages.slice(session.sentMessageCount))
+      : flattenMessages(messages);
     const dispatch = {
       provider: this.name,
       operation: 'generate',
@@ -243,7 +303,11 @@ export class ClaudeCodeCliProvider implements AgentProvider {
       '--max-turns', maxTurns,
       '--permission-mode', 'dontAsk',
       '--strict-mcp-config',            // ignore any ambient MCP config
-      '--no-session-persistence',
+      ...(session
+        ? session.resumed
+          ? ['--resume', session.sessionId]
+          : ['--session-id', session.sessionId]
+        : ['--no-session-persistence']),
       ...(model ? ['--model', model] : []),
       ...(effort ? ['--effort', effort] : []),
       ...(responseSchema ? ['--json-schema', responseSchema] : []),
@@ -286,6 +350,14 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         throw new Error(`Claude Code CLI not found. Install it (https://claude.com/claude-code) and run \`claude /login\`, or switch to an API-key provider. (${res.spawnError.message})`);
       }
       if (res.code !== 0) {
+        // A resume can fail for reasons that have nothing to do with this
+        // request: the session expired, the CLI was upgraded, the store was
+        // cleared. Losing the turn over an optimisation would be the worst
+        // possible trade, so drop the session and say the whole thing again.
+        if (session?.resumed) {
+          this.sessions.delete(options.conversationId!);
+          return this.generate(messages, options);
+        }
         throw new Error(`Claude Code exited before producing an answer${res.stderr ? `: ${res.stderr.trim()}` : '.'}`);
       }
       const parsed = parseClaudeResult(res.stdout);
@@ -300,6 +372,7 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         throw new Error(`claude returned an error: ${message}`);
       }
       completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: 'ok' });
+      if (session) session.commit(messages.length);
       return parsed.text;
     } catch (error) {
       const cancelled = options.signal?.aborted || (error instanceof Error && error.name === 'AbortError');

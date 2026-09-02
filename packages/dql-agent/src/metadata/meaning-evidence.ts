@@ -1796,13 +1796,20 @@ function stringArray(value: unknown): string[] {
 }
 
 /**
- * How many columns the host RETAINS for a relation candidate. The provider
- * card shows only the first forty of these; the rest exist so
- * `describe_relation` can serve the real vocabulary of a wide fact table
- * without a second catalog round trip. A 436-column mart is normal in an
- * enterprise warehouse, so the ceiling is generous.
+ * How many columns the host RETAINS for a relation candidate. The provider card
+ * shows only the first forty of these; the rest exist so `describe_relation`
+ * can serve the real vocabulary of a wide fact table without a second catalog
+ * round trip, and so a "<relation>.<column>" identifier can be PROVEN.
+ *
+ * Three hundred sounded generous and was not. GitLab's `mart_crm_opportunity`
+ * carries 436 columns with `net_arr` at position 377, so the single measure
+ * every revenue question on that mart needs sat outside the cap: the analyst
+ * named it, the host could not prove it, and the turn died insisting on a
+ * column that genuinely exists. Retention is in-memory metadata the prompt
+ * never sees, so the ceiling belongs where a pathological table stops rather
+ * than where a normal wide one does.
  */
-const MAX_CARD_RELATION_COLUMNS = 300;
+const MAX_CARD_RELATION_COLUMNS = 2_000;
 
 /**
  * Read the catalog object's documented columns. dbt models, dbt sources, and

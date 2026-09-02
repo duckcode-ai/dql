@@ -20,7 +20,7 @@ import { listProviderSettings } from '../settings/provider-settings.js';
 import { describeNpmInvocation, resolveNpmInvocation } from '../npm-runtime.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from '../version-status.js';
 import { resolveRetrievalHealthStatus } from '../retrieval-health.js';
-import { getSemanticRuntimeStatus } from '../semantic-runtime.js';
+import { getSemanticRuntimeStatus, explainMissingSemanticRuntime } from '../semantic-runtime.js';
 import { isGovernedSourceFile, isLegacyBroadDqlIgnore } from '../git-contract.js';
 
 interface Check {
@@ -1062,9 +1062,32 @@ async function checkSemanticExecutionRuntime(projectRoot: string, semanticConfig
     const metrics = result.layer.listMetrics();
     const composable = metrics.filter((metric) => result.layer!.canComposeMetric(metric.name)).length;
     const runtimeOnly = metrics.length - composable;
-    const summary = `engine=${runtime.active}, metrics=${metrics.length} (${composable} native-composable, ${runtimeOnly} need a full semantic runtime)`;
+    // The two causes that make a metric fail with no visible reason: `mf` not
+    // resolving on the SERVER's PATH (a shell alias does not count), and a dbt
+    // profiles target whose fingerprint differs from the active DQL connection
+    // — a different role or warehouse silently yields "semantic engine
+    // unavailable" and nothing in the product said so.
+    const adapterDetail = runtime.adapters
+      .filter((adapter) => adapter.id !== 'native')
+      .map((adapter) => `${adapter.id}=${adapter.ready ? 'ready' : adapter.configured ? 'configured but not ready' : 'not configured'}`)
+      .join(', ');
+    const runtimeCause = runtime.active === 'native' && runtimeOnly > 0
+      ? await explainMissingSemanticRuntime(projectRoot).catch(() => null)
+      : null;
+    const summary = [
+      `engine=${runtime.active}`,
+      `metrics=${metrics.length} (${composable} native-composable, ${runtimeOnly} need a full semantic runtime)`,
+      adapterDetail || undefined,
+    ].filter(Boolean).join(', ');
     if (runtimeOnly === 0 || runtime.active !== 'native') {
       return { name: 'Semantic execution runtime', ok: true, detail: summary };
+    }
+    if (runtimeCause) {
+      return {
+        name: 'Semantic execution runtime',
+        ok: false,
+        detail: `${summary}. ${runtimeCause}`,
+      };
     }
     return {
       name: 'Semantic execution runtime',

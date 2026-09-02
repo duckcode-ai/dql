@@ -2619,7 +2619,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
     ]));
   });
 
-  it('requires earlier tier inspection before a SQL-first tool request', async () => {
+  it('walks the tier ladder before a SQL-first tool request, at the host\'s expense not the analyst\'s', async () => {
     const column: AgentEvidenceCandidate = {
       id: 'sql:column:orders.revenue', qualifiedId: 'sql:column:orders.revenue', kind: 'sql_column',
       trustTier: 'exploratory', name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
@@ -2634,8 +2634,24 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
       askAgentV2Workspace: askV2Workspace([column]),
     } as never);
 
+    // The invariant is that no tier is SKIPPED, not that the analyst pays for
+    // discovering it. Certified, semantic and relational are all host-owned
+    // evidence here, so the host inspects them itself and the SQL request is
+    // then judged on its own merits. Before this, the analyst spent three of
+    // its own dispatches learning what the host already knew, and on a cold
+    // large repo that was the entire budget.
+    const ladder = state.observations.map((observation) => observation.tool);
+    expect(ladder.slice(0, 3)).toEqual([
+      'inspect_certified_candidates',
+      'inspect_semantic_candidates',
+      'inspect_relational_context',
+    ]);
     expect(state.observations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tool: 'validate_and_run_sql', outcome: 'denied', reasonCode: 'EARLIER_TIER_INSPECTION_REQUIRED' }),
+      expect.objectContaining({ tool: 'validate_and_run_sql' }),
+    ]));
+    // And it is never ADMITTED on a snapshot whose SQL does not validate.
+    expect(state.observations).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'validate_and_run_sql', outcome: 'executed' }),
     ]));
   });
 
@@ -2904,17 +2920,17 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
 
     const result = await __test__.createAskV2LaneHandler(state, {
       maxToolCalls: 8,
-      // Three inspections, four tool proposals, and the final evidence-bound
-      // narration each consume a controller send. Keep the provider ceiling
-      // above that test choreography; the tool ceiling remains the contract
-      // under test.
+      // Four tool proposals and the final evidence-bound narration each consume
+      // a controller send. Keep the provider ceiling above that test
+      // choreography; the tool ceiling remains the contract under test.
       maxProviderDispatches: 10,
     })({
       question: 'show order count by customer',
+      // The tier ladder is no longer scripted here: certified, semantic and
+      // relational are host-owned evidence the host now inspects itself before
+      // the first dispatch, so an analyst that repeated them would simply be
+      // told they are redundant. What this test is about starts below.
       provider: textToolProvider([
-        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
-        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
-        '```json\n{"tool":"inspect_relational_context","input":{}}\n```',
         `\`\`\`json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"from orders | summarize order_count = count()","measureIds":["dbt:model:orders"],"expectedOutputIds":["dbt:model:orders"],"relationshipPathIds":["${admittedPathId}"]}}\n\`\`\``,
         // This attempt widens the immutable relationship closure. It must be
         // denied before the host is asked to mint a second capability.

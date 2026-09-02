@@ -442,6 +442,12 @@ export interface AskToolObservationV1 {
   samePlanRepair?: boolean;
   retryable?: boolean;
   safeAction?: string;
+  /**
+   * The HOST performed this inspection itself, before or instead of asking the
+   * analyst to spend a turn on it. It is evidence, not an analyst action, so it
+   * never consumes the tool budget.
+   */
+  hostObserved?: boolean;
   /** Wall-clock duration of the physical tool/host boundary, never prompt text. */
   durationMs?: number;
   /** Content-free correlations for input/output payloads where the host has one. */
@@ -1107,6 +1113,18 @@ export function projectResearchEvidenceLedgerV4(ledger: ResearchEvidenceLedgerV3
   };
 }
 
+/**
+ * How many times one describe tool may be called in a turn.
+ *
+ * Describing is read-only catalog metadata and costs no execution, but it does
+ * cost a provider round trip, so it needs a ceiling rather than a ban. Four
+ * turned out to be a licence to browse: a turn described one mart, described it
+ * again, described a second relation, described the first once more, and hit
+ * the run deadline having executed nothing. Two is enough to correct a wrong
+ * column guess and search a wide mart once, and leaves the turn room to answer.
+ */
+export const ASK_V2_DESCRIBE_CALLS_PER_TOOL = 2;
+
 export const ASK_V2_BUDGETS = {
   ask: {
     durationMs: 45_000,
@@ -1193,6 +1211,13 @@ function askV2ObservationConsumesToolBudget(
   priorObservations: readonly AskToolObservationV1[] = [],
 ): boolean {
   if (observation.executionAuthorized) return false;
+  // Evidence the HOST gathered for itself is not the analyst's spend. The tool
+  // budget bounds what the model asks for; pre-inspecting the tiers the host
+  // already knows costs no dispatch, so charging the analyst for it simply
+  // took away the turns it needed to use what it had just been told. `origin`
+  // cannot carry this: an inspection the ANALYST calls is recorded as
+  // retrieval too.
+  if (observation.hostObserved === true) return false;
   if (observation.reasonCode === 'ASK_V2_REDUNDANT_INSPECTION') return false;
   if (observation.reasonCode === 'SEMANTIC_TIME_BINDING_COMPLETED') return false;
   if (ASK_V2_INSPECTION_TOOLS.has(observation.tool)
@@ -1494,6 +1519,38 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
       return {
         allowedToolNames: [],
         instruction: 'The frozen execution target did not match the compiler result. Do not call another tool or choose another route.',
+      };
+    }
+    // A DESCRIBED RELATION IS FOR USING, NOT FOR REPORTING.
+    //
+    // The recovery worked and then stopped one step short: an identifier was
+    // refused, describe_relation handed back the relation's real columns, and
+    // the analyst — still offered finish_answer — closed the turn with a
+    // contextual apology while holding exactly what it had asked for. The
+    // description is not an answer, so for one turn it is not an exit either.
+    if (!hasExecutedTool()
+      && !state.resolvedPlan?.frozen
+      && state.observations.some((observation) => (
+        observation.tool === 'describe_relation' && observation.outcome === 'eligible'
+      ))
+      && state.observations.some((observation) => ASK_V2_VOCABULARY_GAP_REASON_CODES.has(observation.reasonCode))
+      // Only while a run tool can still succeed; an exhausted turn must close.
+      && executionAttempts < maxExecutions
+      && toolCalls < maxTools - 1) {
+      const runTool: AskToolNameV2 = state.controllerTier === 'certified'
+        ? 'run_certified'
+        : state.controllerTier === 'semantic'
+          ? 'compile_and_run_semantic'
+          : state.controllerTier === 'exploratory_sql'
+            ? 'validate_and_run_sql'
+            : 'compile_and_run_dql';
+      return {
+        allowedToolNames: [runTool, 'describe_relation', 'request_clarification'],
+        terminalActionToolNames: [runTool],
+        instruction: `You now have the relation's real column names. Send ${runTool} using them —`
+          + ' for compile_and_run_dql that means a relationalPlan whose every id is "<relation>.<column>",'
+          + ' for validate_and_run_sql it means expectedOutputIds in the same form. Describing a relation is'
+          + ' not an answer, so do not close the turn on it.',
       };
     }
     // A frozen plan whose program could not run still has one honest move
@@ -1862,9 +1919,19 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         && input.expansion === true
         && (expansions >= ASK_V2_BUDGETS.ask.expansions
           || state.expansionCandidateIds.slice(expansions * 12, (expansions + 1) * 12).length === 0);
+      // The "a repeated inspector reveals nothing new" rule holds for the
+      // PARAMETERLESS inspectors, whose whole output is fixed by the snapshot.
+      // It is false for the describe tools: each call names a different
+      // relation, metric, or column search, and blocking the second one made
+      // the analyst describe one 436-column mart, fail to find its column, and
+      // give up with no way to look again. Bounded repetition, not none.
+      const describeTools = new Set<AskToolNameV2>(['describe_relation', 'describe_metric']);
+      const describeCalls = state.observations.filter((observation) => observation.tool === tool).length;
       const repeatedImmutableInspection = inspectionTools.has(tool)
         && tool !== 'inspect_ask_context'
-        && hasToolObservation(tool);
+        && (describeTools.has(tool)
+          ? describeCalls >= ASK_V2_DESCRIBE_CALLS_PER_TOOL
+          : hasToolObservation(tool));
       if (repeatedInitialContext || emptyOrExhaustedExpansion || repeatedImmutableInspection) {
         const progress = toolPolicy();
         return {
@@ -2422,6 +2489,30 @@ export interface AskAgentRuntimeOptionsV2 {
  * tuple or choose a compiler.  That choice is made by the bounded provider
  * tool runtime after it sees the immutable candidate workspace.
  */
+/**
+ * Name the plan a follow-up is continuing.
+ *
+ * `priorPlanId` has been on the conversation contract since V2 shipped and was
+ * never written, so a receipt could not say which answer a follow-up followed,
+ * and nothing downstream could treat a shape continuation as an edit of a
+ * known-good plan. The persisted artifact name is the stable handle the host
+ * already keeps for the turn that executed.
+ */
+function askV2PriorPlanId(conversationContext: unknown): string | undefined {
+  if (!conversationContext || typeof conversationContext !== 'object') return undefined;
+  const context = conversationContext as Record<string, unknown>;
+  const followUp = context.followUp && typeof context.followUp === 'object'
+    ? context.followUp as Record<string, unknown>
+    : undefined;
+  const artifact = (followUp?.priorDqlArtifact ?? context.dqlArtifact);
+  if (artifact && typeof artifact === 'object') {
+    const name = (artifact as Record<string, unknown>).name;
+    if (typeof name === 'string' && name.trim()) return name.trim();
+  }
+  const turnId = context.sourceTurnId ?? context.sourceRunId;
+  return typeof turnId === 'string' && turnId.trim() ? turnId.trim() : undefined;
+}
+
 export function createAskAgentRuntimeV2(options: AskAgentRuntimeOptionsV2): AskAgentRuntimeV2 {
   // Serving defaults to shadow until an operator explicitly enables the
   // canary.  V2 can observe an Ask in shadow, but it must never replace the
@@ -2545,6 +2636,12 @@ function createState(
     conversation: {
       version: 2,
       sourceTurnId: request.trustedTaskAnchor?.sourceTurnId,
+      // The plan the previous turn actually executed. It was declared on this
+      // contract from the start and never populated, so a receipt could not say
+      // which answer a follow-up was continuing, and nothing downstream could
+      // treat a shape continuation as an edit of a known-good plan.
+      priorPlanId: askV2PriorPlanId(request.conversationContext)
+        ?? request.trustedTaskAnchor?.sourceTurnId,
       selectedMemberId: request.selectedResultBinding?.canonicalColumn,
       selectedMemberBinding: request.selectedResultBinding?.value,
       clarificationId: request.selectedEvidenceId,

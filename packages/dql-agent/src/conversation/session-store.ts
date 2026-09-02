@@ -287,9 +287,17 @@ export class ConversationStore {
     this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`).run();
   }
 
-  createThread(input: { surface?: string; title?: string; notebookPath?: string } = {}): ConversationThread {
+  createThread(input: { id?: string; surface?: string; title?: string; notebookPath?: string } = {}): ConversationThread {
     const now = new Date().toISOString();
-    const id = `thr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    // A caller may NAME a thread. `dql agent ask --thread my-session` is
+    // documented as continuing a conversation, but nothing ever created the
+    // thread, so every turn was dropped on the floor and each follow-up
+    // started from zero. Naming is not new authority: an id that can be
+    // supplied to read and append to a thread can equally open one.
+    const named = typeof input.id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/.test(input.id.trim())
+      ? input.id.trim()
+      : undefined;
+    const id = named ?? `thr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const thread: ConversationThread = {
       id,
       surface: input.surface?.trim() || 'notebook',

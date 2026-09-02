@@ -2580,6 +2580,13 @@ describe('dbt-first onboarding runtime API', () => {
   });
 
   it('previews, drift-checks, and applies dbt-first config without copying dbt semantics', async () => {
+    // This asserts a metric composes NATIVELY, which is only true when no
+    // MetricFlow CLI is available to prefer. It silently depended on the
+    // developer's PATH: installing `mf` — the very thing you do to work on the
+    // semantic runtime — flipped the engine to metricflow-cli and failed a
+    // test about dbt config. Pin the runtime the assertion is about.
+    const previousMetricFlowBin = process.env.DQL_METRICFLOW_BIN;
+    process.env.DQL_METRICFLOW_BIN = join(tmpdir(), 'dql-absent-metricflow-bin');
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-onboarding-dbt-'));
     tempDirs.push(projectRoot);
     mkdirSync(join(projectRoot, 'target'), { recursive: true });
@@ -2718,6 +2725,8 @@ describe('dbt-first onboarding runtime API', () => {
       expect(status.preparation).toMatchObject({ id: applied.jobId, status: 'completed' });
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+      if (previousMetricFlowBin === undefined) delete process.env.DQL_METRICFLOW_BIN;
+      else process.env.DQL_METRICFLOW_BIN = previousMetricFlowBin;
     }
   });
 

@@ -1536,10 +1536,20 @@ function v2ExecutionFailureFromError(
  * priority, compiler/executor boundaries, and trusted receipts.  It never
  * searches the mutable KG or reads a V1 precomputed route/plan.
  */
+/**
+ * A per-turn nonce for the transport conversation handle.
+ *
+ * Two turns over the same immutable snapshot are still two conversations: a
+ * shared handle would let the second resume the first's session and inherit a
+ * transcript it never sent.
+ */
+let v2TurnConversationCounter = 0;
+
 function createAskV2LaneHandler(
   state: AskAgentStateV4,
   limits?: { maxToolCalls?: number; maxProviderDispatches?: number },
 ) {
+  const v2TurnConversationNonce = `${Date.now().toString(36)}:${(v2TurnConversationCounter += 1)}`;
   return async (input: AnswerLoopInput): Promise<AgentAnswer> => {
     // Reapply immutable Tier 1 tuple truth before a reloaded state creates a
     // kernel or exposes a tool policy.  A persisted lower controllerTier is
@@ -1786,6 +1796,17 @@ function createAskV2LaneHandler(
       ...state.observations
         .filter((item) => item.tool === 'inspect_ask_context')
         .flatMap((item) => item.candidateIds),
+      // Describing a relation admits it. Expansion serves the next twelve
+      // retained cards BY POSITION, so a relation the model can name — and
+      // that retrieval already put in the retained snapshot — was unreachable
+      // unless it happened to fall in that window: the analyst asked for
+      // mart_arr, was told it was not admitted, and gave up while mart_arr sat
+      // in the same snapshot. A targeted, model-directed expansion is strictly
+      // better evidence than a positional one, and the candidate still had to
+      // come from the immutable retained set to get here.
+      ...state.observations
+        .filter((item) => item.tool === 'describe_relation' && item.outcome === 'eligible')
+        .flatMap((item) => item.candidateIds),
     ]);
     const visibleCandidates = () => (workspace?.candidates ?? [])
       .filter((candidate) => visibleIds().has(v2CandidateId(candidate)));
@@ -1837,27 +1858,49 @@ function createAskV2LaneHandler(
      */
     const relationColumnNames = (candidate: AgentEvidenceCandidate): Set<string> =>
       new Set((candidate.columns ?? []).map((column) => column.name.trim().toLowerCase()).filter(Boolean));
+    const retainedCandidates = () => (workspace?.candidates ?? [])
+      .filter((candidate) => state.retainedCandidateIds.includes(v2CandidateId(candidate)));
     const resolveAdmittedReference = (
       rawId: string,
+      scope: 'visible' | 'retained' = 'visible',
     ): { candidate: AgentEvidenceCandidate; column?: string } | undefined => {
       const id = rawId.trim();
       if (!id) return undefined;
-      const visible = visibleCandidates();
+      const visible = scope === 'retained' ? retainedCandidates() : visibleCandidates();
       const byId = new Map(visible.map((candidate) => [v2CandidateId(candidate), candidate] as const));
+      // Resolve the "<relation>.<column>" reading FIRST when it holds.
+      //
+      // A column card's own id is literally `<relation>.<column>`, so the
+      // exact-id lookup below hits that card and returns a candidate with no
+      // column attached — which is not what a plan asked for. Live, a plan over
+      // `mart_arr_all.arr` was refused three times running because the id
+      // matched a column card instead of resolving to the relation plus its
+      // column. The dotted reading is only preferred when the relation part
+      // actually resolves to something carrying that column, so a semantic id
+      // that merely contains dots cannot be captured by it.
+      const relationColumn = ((): { candidate: AgentEvidenceCandidate; column: string } | undefined => {
+        const separator = id.lastIndexOf('.');
+        if (separator <= 0 || separator === id.length - 1) return undefined;
+        const relationRef = id.slice(0, separator);
+        const column = id.slice(separator + 1);
+        const relation = byId.get(relationRef)
+          ?? visible.find((candidate) => candidate.name === relationRef)
+          ?? visible.find((candidate) => candidate.name.toLowerCase() === relationRef.toLowerCase());
+        // Only a relation carries columns; a metric or dimension card that
+        // happens to contain a dot must not become a pseudo-relation.
+        if (!relation || !relationColumnNames(relation).has(column.trim().toLowerCase())) return undefined;
+        return { candidate: relation, column };
+      })();
+      if (relationColumn) return relationColumn;
       const exact = byId.get(id);
       if (exact) return { candidate: exact };
-      const separator = id.lastIndexOf('.');
-      if (separator <= 0 || separator === id.length - 1) return undefined;
-      const relationRef = id.slice(0, separator);
-      const column = id.slice(separator + 1);
-      const relation = byId.get(relationRef)
-        ?? visible.find((candidate) => candidate.name === relationRef)
-        ?? visible.find((candidate) => candidate.name.toLowerCase() === relationRef.toLowerCase());
-      if (!relation) return undefined;
-      // Only a relation carries columns; a metric or dimension card that
-      // happens to contain a dot must not become a pseudo-relation.
-      if (!relationColumnNames(relation).has(column.trim().toLowerCase())) return undefined;
-      return { candidate: relation, column };
+      // A relation may be named rather than identified. `describe_relation`
+      // says so in its own schema, and a model that reads a card's `name` uses
+      // it — but a bare name has no dot, so it fell straight past the
+      // "<relation>.<column>" reading above and resolved to nothing at all.
+      const byName = visible.find((candidate) => candidate.name === id)
+        ?? visible.find((candidate) => candidate.name.toLowerCase() === id.toLowerCase());
+      return byName ? { candidate: byName } : undefined;
     };
     const resolveCandidates = (ids: string[], predicate?: (candidate: AgentEvidenceCandidate) => boolean): AgentEvidenceCandidate[] | undefined => {
       if (ids.length === 0 || !workspace) return undefined;
@@ -1895,9 +1938,17 @@ function createAskV2LaneHandler(
      * catalog proved it has. This is what a refusal must hand back — a bare
      * "not admitted" costs a turn and teaches nothing.
      */
-    const admittedRelationVocabulary = (limit = 12): Array<Record<string, unknown>> =>
-      visibleCandidates()
+    const admittedRelationVocabulary = (limit = 12): Array<Record<string, unknown>> => {
+      // A relation the analyst has already DESCRIBED comes first. The list is
+      // bounded, and on a crowded workspace the relation it just asked about
+      // fell off the end — so the refusal answered a question it had not asked
+      // and it went on naming columns from somewhere else.
+      const described = new Set(state.observations
+        .filter((observation) => observation.tool === 'describe_relation' && observation.outcome === 'eligible')
+        .flatMap((observation) => observation.candidateIds));
+      return visibleCandidates()
         .filter((candidate) => (candidate.columns?.length ?? 0) > 0)
+        .sort((left, right) => Number(described.has(v2CandidateId(right))) - Number(described.has(v2CandidateId(left))))
         .slice(0, limit)
         .map((candidate) => ({
           id: v2CandidateId(candidate),
@@ -1907,7 +1958,9 @@ function createAskV2LaneHandler(
           ...(candidate.columnCount && candidate.columnCount > Math.min(40, candidate.columns?.length ?? 0)
             ? { columnCount: candidate.columnCount }
             : {}),
+          ...(described.has(v2CandidateId(candidate)) ? { youDescribedThis: true } : {}),
         }));
+    };
     /**
      * When a "<relation>.<column>" reference fails, the column is usually
      * close: a model asked mart_crm_opportunity for `sales_segment` when the
@@ -3345,9 +3398,12 @@ function createAskV2LaneHandler(
           // reference: this reads catalog metadata the workspace already
           // admits, and proves nothing about the column.
           const separator = requested.lastIndexOf('.');
+          // Resolve against the RETAINED snapshot, not only the visible cards:
+          // this tool is the discovery step, and refusing a relation retrieval
+          // already found is the dead end it exists to prevent.
           const resolved = requested
-            ? resolveAdmittedReference(requested)
-              ?? (separator > 0 ? resolveAdmittedReference(requested.slice(0, separator)) : undefined)
+            ? resolveAdmittedReference(requested, 'retained')
+              ?? (separator > 0 ? resolveAdmittedReference(requested.slice(0, separator), 'retained') : undefined)
             : undefined;
           const candidate = resolved?.candidate;
           // A relation is a thing with columns. Refusing anything else keeps
@@ -3607,7 +3663,13 @@ function createAskV2LaneHandler(
             24,
           )
           : v2StringArray(args.expectedOutputIds, 24);
-        const pathIds = v2StringArray(args.relationshipPathIds, 8);
+        // A composed plan is single-relation by construction, so it has no join
+        // to prove. Carrying the model's relationshipPathIds into it could only
+        // fail it: the closure check asks whether every selected relation sits
+        // on a selected path, and a relation that needs no path never does.
+        // Live, that turned a perfectly good plan over mart_arr_all into
+        // "identifier or path not admitted", three times in a row.
+        const pathIds = relationalPlan ? [] : v2StringArray(args.relationshipPathIds, 8);
         if (relationalPlan) {
           // Compose before admission fingerprinting so a plan that cannot be
           // written at all is refused with the reason, not with a governance
@@ -3622,6 +3684,13 @@ function createAskV2LaneHandler(
           const relations = [...new Set(resolvedReferences
             .map((entry) => (entry.resolved ? v2CandidateId(entry.resolved.candidate) : undefined))
             .filter((id): id is string => Boolean(id)))];
+          if (process.env.DQL_DEBUG_EXECUTION_ERROR && (unresolved.length > 0 || relations.length !== 1)) {
+            console.error('[DQL_DEBUG plan]', JSON.stringify({
+              references: references.map((reference) => reference.id),
+              unresolved,
+              relations,
+            }));
+          }
           if (unresolved.length > 0 || relations.length !== 1) {
             const reason = unresolved.length > 0
               ? 'GOVERNED_RELATIONAL_IDENTIFIER_OR_PATH_NOT_ADMITTED'
@@ -3639,8 +3708,24 @@ function createAskV2LaneHandler(
                 }
                 : { relationsInPlan: relations.slice(0, 8) }),
               admittedRelations: admittedRelationVocabulary(),
+              // A relation retrieval already found, but that did not make the
+              // visible cards, is reachable through describe_relation. Naming
+              // it here is the difference between one more call and giving up.
+              ...(() => {
+                const visible = new Set(visibleCandidates().map((candidate) => v2CandidateId(candidate)));
+                const describable = unresolved
+                  .flatMap((id) => {
+                    const separator = id.lastIndexOf('.');
+                    const relationRef = separator > 0 ? id.slice(0, separator) : id;
+                    const candidate = resolveAdmittedReference(relationRef, 'retained')?.candidate;
+                    return candidate && !visible.has(v2CandidateId(candidate)) ? [v2CandidateId(candidate)] : [];
+                  });
+                const unique = [...new Set(describable)].slice(0, 6);
+                return unique.length ? { describableRelations: unique } : {};
+              })(),
               usage: unresolved.length > 0
                 ? 'Every relationalPlan id must be "<relation>.<column>" naming a column of one admitted relation (see admittedRelations).'
+                  + ' Any id in describableRelations is in this snapshot but not yet on a card — call describe_relation on it to admit it.'
                   + ' Use describe_relation for the full column list of one relation.'
                 : 'A governed relational plan covers exactly one admitted relation. Pick the one relation that already carries every column you need,'
                   + ' or use validate_and_run_sql for a shape that must span relations.',
@@ -4243,11 +4328,50 @@ function createAskV2LaneHandler(
       if (certifiedCandidates.length === 0 && !executableMetricPossible) {
         try {
           const preInspect = (name: string) => tools.find((tool) => tool.name === name);
+          // Everything recorded from here to the end of this block is the
+          // host's own evidence, so mark it: an inspection the analyst never
+          // asked for must not be charged to the analyst's tool budget.
+          const beforePreInspection = state.observations.length;
           if (!state.observations.some((observation) => observation.tool === 'inspect_certified_candidates')) {
             await preInspect('inspect_certified_candidates')?.run({});
           }
           if (!state.observations.some((observation) => observation.tool === 'inspect_semantic_candidates')) {
             await preInspect('inspect_semantic_candidates')?.run({});
+          }
+          // Relational context is host-owned evidence too. A single-relation
+          // plan needs no relationship path, so requiring the analyst to spend
+          // a dispatch discovering that there are none bought nothing: the
+          // host already knows, and the inspection is free here.
+          //
+          // Recorded directly rather than through the tool wrapper: the wrapper
+          // asks the kernel whether the ANALYST may call this yet, and at this
+          // point in the ladder the answer is no — so routing the host's own
+          // inspection through it produced a `denied` observation, left the
+          // requirement unmet, and taught the model that a tool it needs is
+          // refused.
+          if (!state.observations.some((observation) => observation.tool === 'inspect_relational_context')) {
+            // Retained, not visible: the host is reporting what RETRIEVAL
+            // proved for this snapshot, and a relation that did not make the
+            // initial cards is still relational evidence the host holds.
+            const relationalCandidates = retainedCandidates().filter((candidate) => candidate.kind === 'dql_modeling'
+              || candidate.kind === 'dbt_model'
+              || candidate.kind === 'dbt_source'
+              || candidate.kind === 'sql_table'
+              || candidate.kind === 'sql_column');
+            observeAskAgentV2Tool(state, {
+              version: 1,
+              tool: 'inspect_relational_context',
+              outcome: relationalCandidates.length || state.relationshipPathHandles.length ? 'eligible' : 'unavailable',
+              reasonCode: relationalCandidates.length || state.relationshipPathHandles.length
+                ? 'relationship_paths_available'
+                : 'relationship_paths_empty',
+              candidateIds: relationalCandidates.slice(0, 24).map(v2CandidateId),
+              origin: 'retrieval',
+              hostObserved: true,
+            });
+          }
+          for (let index = beforePreInspection; index < state.observations.length; index += 1) {
+            state.observations[index] = { ...state.observations[index]!, hostObserved: true };
           }
         } catch {
           // A pre-inspection fault costs nothing: the analyst can still run
@@ -4327,13 +4451,75 @@ function createAskV2LaneHandler(
           };
         }
         if (followUp.priorResultSetUnavailable) brief.previousResultSetUnavailable = true;
+        // THE PRIOR TURN'S EXECUTABLE PLAN, not a prose summary of it.
+        //
+        // The artifact the previous turn executed records the admitted
+        // identifiers it used, so a shape continuation ("now break that down by
+        // month") can be an EDIT of a known-good plan instead of a fresh
+        // derivation. Without it the analyst re-chose from scratch: a
+        // net-arr-by-account ranking became a different measure on a different
+        // relation, and the follow-up quietly answered a different question.
+        const priorPlan = followUp.priorDqlArtifact;
+        const priorRelation = [...(priorPlan?.metrics ?? []), ...(priorPlan?.dimensions ?? [])]
+          .map((id) => {
+            const separator = id.lastIndexOf('.');
+            return separator > 0 ? id.slice(0, separator) : undefined;
+          })
+          .find((relation): relation is string => Boolean(relation));
+        if (priorPlan && (priorPlan.metrics?.length || priorPlan.dimensions?.length)) {
+          brief.previousPlan = {
+            ...(priorRelation ? { relation: priorRelation } : {}),
+            ...(priorPlan.metrics?.length ? { measureIds: priorPlan.metrics.slice(0, 8) } : {}),
+            ...(priorPlan.dimensions?.length ? { dimensionIds: priorPlan.dimensions.slice(0, 16) } : {}),
+            ...(typeof followUp.priorLimit === 'number' ? { limit: followUp.priorLimit } : {}),
+          };
+        }
         if (Object.keys(brief).length === 0) return undefined;
         return 'This turn continues the previous answer. Host-recorded facts about it '
           + '(authoritative — do not re-derive them from the question text):\n'
-          + JSON.stringify(brief);
+          + JSON.stringify(brief)
+          + (brief.previousPlan
+            ? '\nWhen this question changes the SHAPE of that answer (a different breakdown, a'
+              + ' narrower filter, another ordering), send a relationalPlan that EDITS previousPlan:'
+              + ' keep its relation and its measureIds, and change only what the question actually'
+              + ' changes. Choosing a different relation or measure answers a different question than'
+              + ' the one the user is following up on.'
+            : '');
       })();
+      // PIN THE PRIOR PLAN'S RELATION BEFORE THE FIRST DISPATCH.
+      //
+      // A follow-up runs its own retrieval, so the relation the previous answer
+      // used is often not among this turn's cards. The analyst then does the
+      // right thing — sends a plan editing the prior relation — and is refused
+      // for naming an identifier that is in the snapshot but not on a card. It
+      // recovered with describe_relation and then gave up, two dispatches spent
+      // to end where it started. Admitting the prior relation up front costs
+      // nothing: it is bounded by the same retained snapshot describe_relation
+      // would have admitted it from.
+      const priorPlanRelationId = ((): string | undefined => {
+        const priorArtifact = input.followUp?.priorDqlArtifact;
+        const priorIds = [...(priorArtifact?.metrics ?? []), ...(priorArtifact?.dimensions ?? [])];
+        for (const id of priorIds) {
+          const separator = id.lastIndexOf('.');
+          const relationRef = separator > 0 ? id.slice(0, separator) : id;
+          const candidate = resolveAdmittedReference(relationRef, 'retained')?.candidate;
+          if (candidate) return v2CandidateId(candidate);
+        }
+        return undefined;
+      })();
+      if (priorPlanRelationId && !visibleIds().has(priorPlanRelationId)) {
+        observeAskAgentV2Tool(state, {
+          version: 1,
+          tool: 'describe_relation',
+          outcome: 'eligible',
+          reasonCode: 'RELATION_DESCRIBED',
+          candidateIds: [priorPlanRelationId],
+          origin: 'retrieval',
+        });
+      }
       const openingCards = (workspace?.candidates ?? [])
-        .filter((candidate) => state.initialCandidateIds.includes(v2CandidateId(candidate)))
+        .filter((candidate) => state.initialCandidateIds.includes(v2CandidateId(candidate))
+          || v2CandidateId(candidate) === priorPlanRelationId)
         .map((candidate) => v2SafeCard(candidate, workspace));
       if (openingCards.length > 0) {
         // Recorded as an inspection so the receipt, the kernel's redundancy
@@ -4394,6 +4580,14 @@ function createAskV2LaneHandler(
         // model itself stays the provider's own configured choice.
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         maxTokens: 8192,
+        // One identity for the whole turn, so a transport that can hold a
+        // conversation open sends only the new observation on each follow-up
+        // instead of re-transmitting the system prompt, the opening cards and
+        // every earlier observation. Scoped to this snapshot and this turn: it
+        // cannot outlive either, and it carries no permission.
+        ...(state.snapshotId
+          ? { conversationId: `ask-v2:${state.snapshotId}:${v2TurnConversationNonce}` }
+          : {}),
         // A clarification REPLY is the same analytical work as the question it
         // answers — it has to walk the same tier ladder — but it was budgeted
         // as a contextual aside at four calls, below the cold ladder's cost.

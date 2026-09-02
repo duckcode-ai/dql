@@ -36,7 +36,16 @@ export function runMetricFlow(
     };
     let child;
     try {
-      child = spawn(bin, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      // `mf` is a Python entry point that spawns work of its own, so killing
+      // it alone can leave a grandchild running — and holding this stdio pipe
+      // open. Its own process group is what makes the kill below reach the
+      // whole tree.
+      child = spawn(bin, args, {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+      });
     } catch (error) {
       finish({ status: null, stdout: '', stderr: '', error: error as NodeJS.ErrnoException });
       return;
@@ -45,19 +54,41 @@ export function runMetricFlow(
     const stderr: string[] = [];
     let timedOut = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    /** Signal the whole process group, falling back to the child alone. */
+    const signalTree = (signal: NodeJS.Signals): void => {
+      try {
+        if (typeof child.pid === 'number') process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        try { child.kill(signal); } catch { /* already gone */ }
+      }
+    };
+    /**
+     * Stop waiting, having asked the tree to stop.
+     *
+     * The promise used to settle only on `close`, which fires when the process
+     * exits AND its stdio closes. A surviving grandchild holds that pipe, so a
+     * timeout signalled the compiler and then waited forever anyway — the exact
+     * hang the timeout was added to prevent. The deadline is the answer; the
+     * child's own exit is no longer required to reach it.
+     */
+    const abandon = (): void => {
+      signalTree('SIGTERM');
+      killTimer = setTimeout(() => signalTree('SIGKILL'), 2_000);
+      if (killTimer.unref) killTimer.unref();
+      finish({ status: null, stdout: stdout.join(''), stderr: stderr.join(''), timedOut });
+    };
     const timer = options.timeoutMs
       ? setTimeout(() => {
         timedOut = true;
-        try { child.kill('SIGTERM'); } catch { /* already gone */ }
-        killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, 2_000);
+        abandon();
       }, options.timeoutMs)
       : undefined;
     // A cancelled Ask must actually stop the compiler it started.
-    const onAbort = (): void => { try { child.kill('SIGTERM'); } catch { /* already gone */ } };
+    const onAbort = (): void => { abandon(); };
     options.signal?.addEventListener('abort', onAbort);
     const cleanup = (): void => {
       if (timer) clearTimeout(timer);
-      if (killTimer) clearTimeout(killTimer);
       options.signal?.removeEventListener('abort', onAbort);
     };
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk.toString()));
@@ -109,6 +140,13 @@ export interface MetricFlowQueryRequest {
   savedQuery?: string;
   /** The run's deadline/cancellation, so a compile cannot outlive its Ask. */
   signal?: AbortSignal;
+  /**
+   * Cap this compile below the module default. A run whose own deadline is
+   * shorter than the compiler's has no use for the longer one, and a caller
+   * that knows it is on a small manifest should not have to wait two minutes
+   * to learn the runtime is wedged.
+   */
+  timeoutMs?: number;
 }
 
 export function managedMetricFlowRuntimeRoot(projectRoot: string): string {
@@ -403,7 +441,10 @@ export async function compileMetricFlowQuery(request: MetricFlowQueryRequest): P
       args,
       result: await runMetricFlow(bin, args, {
         cwd: dbtRoot,
-        timeoutMs: METRICFLOW_COMPILE_TIMEOUT_MS,
+        timeoutMs: Math.min(
+          METRICFLOW_COMPILE_TIMEOUT_MS,
+          request.timeoutMs && request.timeoutMs > 0 ? request.timeoutMs : METRICFLOW_COMPILE_TIMEOUT_MS,
+        ),
         ...(request.signal ? { signal: request.signal } : {}),
         env: {
           ...process.env,

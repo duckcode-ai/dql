@@ -107,6 +107,16 @@ export interface ProviderRunOptions {
    */
   dispatchPhase?: import('@duckcodeailabs/dql-core').ProviderDispatchPhaseV1;
   /**
+   * Server-owned identity for the sequence of sends that make up ONE turn.
+   *
+   * A transport that can hold a conversation open uses it to send only the new
+   * observation instead of re-transmitting the whole transcript on every tool
+   * follow-up. It is an efficiency handle and nothing else: it grants no tool,
+   * route, or egress permission, and a provider that cannot resume sessions
+   * ignores it entirely.
+   */
+  conversationId?: string;
+  /**
    * Server-owned sub-phase for the bounded analytical planner. It exists only
    * to distinguish one initial proposal from one verifier-directed targeted
    * revision at the local egress ledger; providers cannot use it to select a

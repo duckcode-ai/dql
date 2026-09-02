@@ -64,6 +64,95 @@ describe('MetricFlow compile wrapper', () => {
     expect(hasMetricFlowCli()).toBe(true);
   });
 
+  /**
+   * The office freeze: `mf query` ran through `spawnSync` with no timeout, so a
+   * single slow compile blocked Node's event loop and the whole server stopped
+   * answering — diagnostics showed zero provider, tool and SQL activity for
+   * ~45s because nothing at all could run. These three assertions are the
+   * properties that failure needed: the compile yields, a deadline can end it,
+   * and a cancelled run does not leave a child behind.
+   */
+  it('yields the event loop while MetricFlow runs', async () => {
+    mkdirSync(join(tmpDir, 'target'), { recursive: true });
+    writeFileSync(join(tmpDir, 'target', 'semantic_manifest.json'), '{}', 'utf-8');
+    const bin = join(tmpDir, 'mf');
+    writeFileSync(
+      bin,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--version" ]; then printf "%s\\n" "mf, version 0.13.0"; exit 0; fi',
+        'sleep 1',
+        'printf "%s\\n" "SELECT 1"',
+      ].join('\n'),
+      'utf-8',
+    );
+    chmodSync(bin, 0o755);
+    process.env.DQL_METRICFLOW_BIN = bin;
+
+    let ticks = 0;
+    const ticker = setInterval(() => { ticks += 1; }, 50);
+    try {
+      await compileMetricFlowQuery({ projectRoot: tmpDir, metrics: ['revenue'], dimensions: [] });
+    } finally {
+      clearInterval(ticker);
+    }
+    // A blocking spawnSync would have starved the timer completely.
+    expect(ticks).toBeGreaterThan(2);
+  });
+
+  it('ends a compile that outlives its timeout instead of hanging the run', async () => {
+    mkdirSync(join(tmpDir, 'target'), { recursive: true });
+    writeFileSync(join(tmpDir, 'target', 'semantic_manifest.json'), '{}', 'utf-8');
+    const bin = join(tmpDir, 'mf');
+    writeFileSync(
+      bin,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--version" ]; then printf "%s\\n" "mf, version 0.13.0"; exit 0; fi',
+        'sleep 30',
+      ].join('\n'),
+      'utf-8',
+    );
+    chmodSync(bin, 0o755);
+    process.env.DQL_METRICFLOW_BIN = bin;
+    const started = Date.now();
+    await expect(compileMetricFlowQuery({
+      projectRoot: tmpDir,
+      metrics: ['revenue'],
+      dimensions: [],
+      timeoutMs: 300,
+    })).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('ends a compile when the run is cancelled', async () => {
+    mkdirSync(join(tmpDir, 'target'), { recursive: true });
+    writeFileSync(join(tmpDir, 'target', 'semantic_manifest.json'), '{}', 'utf-8');
+    const bin = join(tmpDir, 'mf');
+    writeFileSync(
+      bin,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--version" ]; then printf "%s\\n" "mf, version 0.13.0"; exit 0; fi',
+        'sleep 30',
+      ].join('\n'),
+      'utf-8',
+    );
+    chmodSync(bin, 0o755);
+    process.env.DQL_METRICFLOW_BIN = bin;
+    const controller = new AbortController();
+    const pending = compileMetricFlowQuery({
+      projectRoot: tmpDir,
+      metrics: ['revenue'],
+      dimensions: [],
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 200);
+    const started = Date.now();
+    await expect(pending).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
   it('keeps the legacy compile flag for older user-managed runtimes', () => {
     expect(metricFlowCompileMode('mf, version 0.13.0')).toBe('explain');
     expect(metricFlowCompileMode('mf, version 0.12.2')).toBe('legacy-compile');

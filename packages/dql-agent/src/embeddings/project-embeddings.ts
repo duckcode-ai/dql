@@ -114,3 +114,92 @@ export function clearProjectEmbeddingCache(projectRoot?: string): void {
   if (projectRoot) cache.delete(projectRoot);
   else cache.clear();
 }
+
+export interface EmbeddingAutoUpgradeResult {
+  /** What retrieval will now use. */
+  providerId: string;
+  /** True only when the vector index was actually re-embedded by this call. */
+  upgraded: boolean;
+  /** Why nothing changed, when nothing changed. */
+  reason?:
+    | 'configured'
+    | 'test_environment'
+    | 'disabled'
+    | 'no_local_model'
+    | 'already_current'
+    | 'reembed_failed'
+    | 'error';
+  /** The local model adopted, when one was. */
+  model?: string;
+}
+
+/**
+ * Adopt local Ollama embeddings for a project when the machine already serves
+ * them, re-embedding the vector index in the same step.
+ *
+ * The hashed provider is a token hash: it matches shared words and nothing
+ * else, so "customer accounts" cannot find a model documented as "billing
+ * entities" however good the ranking is. It was every project's default
+ * because switching it off needed an environment variable no product surface
+ * mentioned.
+ *
+ * This lives here, rather than inline in the server, because the server was
+ * the ONLY caller — so `dql agent ask` and `dql agent reindex` kept running
+ * lexical retrieval on a machine with `nomic-embed-text` already pulled, and
+ * the vector lane contributed zero candidates to every CLI answer.
+ *
+ * Re-embedding is not optional: `searchVectorObjects` returns NOTHING when the
+ * requested provider disagrees with the index's, so upgrading the provider
+ * without upgrading the index makes retrieval strictly worse. Both move
+ * together or neither does.
+ */
+export async function autoUpgradeProjectEmbeddings(
+  projectRoot: string,
+  deps: {
+    probeLocalOllamaEmbeddings: () => Promise<{ endpoint: string; model: string } | null | undefined>;
+    upgradeVectorIndexForProject: (
+      projectRoot: string,
+      provider: EmbeddingProvider,
+    ) => Promise<{ upgraded: boolean; providerId: string }>;
+    setProcessDefaultEmbeddingProvider: (provider: EmbeddingProvider | undefined) => void;
+  },
+): Promise<EmbeddingAutoUpgradeResult> {
+  try {
+    // Never inside a test run: the probe touches the network and the upgrade
+    // rewrites the vector index, either of which would make a suite's
+    // retrieval results depend on whether the developer happens to be running
+    // Ollama. Same rule the deadline auto-scale follows.
+    if (process.env.VITEST) return { providerId: 'hashed-token-v1', upgraded: false, reason: 'test_environment' };
+    const configured = readProjectEmbeddingSettings(projectRoot);
+    // An explicit project setting or environment override is the user's
+    // decision and is never second-guessed.
+    if (configured.provider
+      || process.env.DQL_OLLAMA_EMBED_URL
+      || process.env.DQL_OPENAI_API_KEY) {
+      return { providerId: configured.provider ?? 'configured', upgraded: false, reason: 'configured' };
+    }
+    if (process.env.DQL_EMBEDDINGS_AUTODETECT === 'off') {
+      return { providerId: 'hashed-token-v1', upgraded: false, reason: 'disabled' };
+    }
+    const local = await deps.probeLocalOllamaEmbeddings();
+    if (!local) return { providerId: 'hashed-token-v1', upgraded: false, reason: 'no_local_model' };
+    const provider = resolveEmbeddingProvider({ ollamaEndpoint: local.endpoint, ollamaModel: local.model });
+    const upgrade = await deps.upgradeVectorIndexForProject(projectRoot, provider);
+    if (!upgrade.upgraded && upgrade.providerId !== provider.id) {
+      // Could not re-embed (model pulled but not serving, disk, etc.). Stay on
+      // the index the catalog actually holds rather than silently emptying the
+      // vector lane.
+      return { providerId: upgrade.providerId, upgraded: false, reason: 'reembed_failed' };
+    }
+    deps.setProcessDefaultEmbeddingProvider(provider);
+    return {
+      providerId: provider.id,
+      upgraded: upgrade.upgraded,
+      model: local.model,
+      ...(upgrade.upgraded ? {} : { reason: 'already_current' as const }),
+    };
+  } catch {
+    // Retrieval must start regardless; hashed remains a working default.
+    return { providerId: 'hashed-token-v1', upgraded: false, reason: 'error' };
+  }
+}

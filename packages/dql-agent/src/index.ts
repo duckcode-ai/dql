@@ -475,8 +475,17 @@ export {
   AGENT_RUN_USER_CANCEL_CODE,
   createAgentRunCancellationError,
   isAgentRunUserCancellation,
+  deterministicResultFactsForAnswer,
 } from "./agent-run-engine.js";
 export type { FileAgentRunStoreOptions } from "./agent-run-engine.js";
+export {
+  verifyAskNarration,
+  renderAskNarrationBrief,
+  verifiableNumbersFromFacts,
+  ASK_NARRATION_SYSTEM_PROMPT,
+  type AskNarrationFactSetV1,
+  type AskNarrationVerification,
+} from "./ask-result-narration.js";
 export {
   readMetadataCatalogHealth,
   readAgentRunStoreHealth,
@@ -1146,12 +1155,15 @@ export {
   validateSqlAgainstLocalContext,
 } from "./metadata/sql-context-validation.js";
 export { upgradeVectorIndexForProject, awaitVectorIndexUpgrade } from "./metadata/catalog.js";
+export { indexedVectorProviderId } from "./metadata/catalog-indexed-provider.js";
 export {
   projectEmbeddingProvider,
   readProjectEmbeddingSettings,
   isHashedEmbeddingProvider,
   clearProjectEmbeddingCache,
+  autoUpgradeProjectEmbeddings,
   type ProjectEmbeddingSettings,
+  type EmbeddingAutoUpgradeResult,
 } from "./embeddings/project-embeddings.js";
 export {
   applyGroundingExpansion,
@@ -1476,6 +1488,7 @@ export {
   cosineSimilarity,
   hybridRank,
   probeLocalOllamaEmbeddings,
+  embeddingProviderFromIndexedId,
 } from "./embeddings/provider.js";
 export type {
   EmbeddingProvider,

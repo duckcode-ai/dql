@@ -46,6 +46,13 @@ import {
   defaultKgPath,
   defaultMemoryPath,
   reindexProject,
+  autoUpgradeProjectEmbeddings,
+  probeLocalOllamaEmbeddings,
+  upgradeVectorIndexForProject,
+  setProcessDefaultEmbeddingProvider,
+  isHashedEmbeddingProvider,
+  projectEmbeddingProvider,
+  readProjectEmbeddingSettings,
   loadSkills,
   pickProvider,
   answer,
@@ -827,9 +834,33 @@ function printCanonicalCliAskRun(run: AgentThreadRun, threadId?: string): void {
  * reference. The CLI only supplies user intent and an optional host-minted
  * surface capability.
  */
+/**
+ * Say so when this project is answering from a token-hash index.
+ *
+ * Re-embedding a 63k-object catalog takes minutes, so `ask` must never do it —
+ * but staying silent about it is how a machine with `nomic-embed-text` already
+ * pulled kept serving lexical-only retrieval, and every "it cannot find my
+ * model" report looked like a ranking bug instead of an unbuilt index. One
+ * line, once, naming the command that fixes it.
+ */
+let lexicalRetrievalWarned = false;
+function warnWhenRetrievalIsLexicalOnly(projectRoot: string): void {
+  if (lexicalRetrievalWarned || process.env.VITEST) return;
+  try {
+    if (readProjectEmbeddingSettings(projectRoot).provider) return;
+    if (!isHashedEmbeddingProvider(projectEmbeddingProvider(projectRoot))) return;
+    lexicalRetrievalWarned = true;
+    console.error('DQL: retrieval is using the token-hash index (lexical matching only).'
+      + ' Run `dql agent reindex` to embed with a local model, if one is installed.');
+  } catch {
+    // A warning must never be the reason an answer does not happen.
+  }
+}
+
 export async function runCanonicalCliAsk(question: string, threadId: string | undefined, flags: CLIFlags): Promise<void> {
   const projectRoot = findProjectRoot(process.cwd());
   const format = (flags as { format?: string }).format;
+  if (format !== 'json') warnWhenRetrievalIsLexicalOnly(projectRoot);
   const { runtimeBase, close, askTraceCapability: embeddedCapability } = await resolveAgentRuntime(projectRoot, flags);
   try {
     const askTraceCapability = embeddedCapability ?? await requestLoopbackCliAskTraceCapability(runtimeBase);
@@ -947,13 +978,33 @@ function recordCliQueryRun(
 async function runReindex(rest: string[], flags: CLIFlags): Promise<void> {
   const projectRoot = findProjectRoot(resolve(rest[0] ?? process.cwd()));
   const stats = await reindexProject(projectRoot);
+  // Re-embedding a large catalog with a real model takes minutes, so it can
+  // only belong to the one command whose whole job is building the index. The
+  // server does it in the background and `ask` only reports it; leaving it out
+  // of `reindex` too is why a machine with nomic-embed-text pulled kept
+  // answering from a token-hash index.
+  const embeddings = (flags as { embeddings?: string }).embeddings === 'off'
+    ? { providerId: 'hashed-token-v1', upgraded: false, reason: 'disabled' as const }
+    : await autoUpgradeProjectEmbeddings(projectRoot, {
+      probeLocalOllamaEmbeddings,
+      upgradeVectorIndexForProject,
+      setProcessDefaultEmbeddingProvider,
+    });
   if ((flags as { format?: string }).format === 'json') {
-    console.log(JSON.stringify({ ok: true, ...stats }, null, 2));
+    console.log(JSON.stringify({ ok: true, ...stats, embeddings }, null, 2));
     return;
   }
   const kgStatus = stats.kgRebuilt ? 'KG rebuilt' : 'KG fresh';
   const catalogStatus = stats.metadataRefreshed ? 'metadata refreshed' : 'metadata fresh';
   console.log(`  ✓ ${kgStatus}; ${catalogStatus} — ${stats.nodes} nodes, ${stats.edges} edges, ${stats.skills} skill(s).`);
+  if (embeddings.upgraded) {
+    console.log(`  ✓ Semantic retrieval re-embedded with local Ollama (${embeddings.model}).`);
+  } else if (embeddings.reason === 'no_local_model') {
+    console.log('  · Embeddings: token-hash fallback (lexical only). Install Ollama and pull an embedding'
+      + ' model such as nomic-embed-text, then rerun, for meaning-based retrieval.');
+  } else if (embeddings.reason === 'reembed_failed') {
+    console.log('  · Embeddings: kept the existing index — the local model answered the probe but could not embed.');
+  }
 }
 
 async function runFeedback(rest: string[], flags: CLIFlags): Promise<void> {

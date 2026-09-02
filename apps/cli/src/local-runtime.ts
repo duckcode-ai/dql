@@ -340,11 +340,17 @@ import {
   type EnrichedContent,
   type BuildFromPromptResult,
   reindexProject,
+  deterministicResultFactsForAnswer,
+  verifyAskNarration,
+  renderAskNarrationBrief,
+  ASK_NARRATION_SYSTEM_PROMPT,
+  type AskNarrationFactSetV1,
   invalidateAgentProjectState,
   recordAgentRuntimeVersion,
   resolveDomainContextEnvelope,
   projectEmbeddingProvider,
   readProjectEmbeddingSettings,
+  autoUpgradeProjectEmbeddings,
   probeLocalOllamaEmbeddings,
   resolveEmbeddingProvider,
   isHashedEmbeddingProvider,
@@ -1718,18 +1724,72 @@ export type AgentNarrationAnswer =
  * semantic run look like Research. Only an explicit Research request may run
  * this optional, fact-checked narration stage.
  */
+export type OrdinaryAskNarrationPolicy = 'off' | 'gaps_only' | 'always';
+
+/**
+ * `agent.narration.ordinaryAsk` — whether an ordinary Ask spends one extra
+ * provider turn writing its answer from the host's fact set.
+ *
+ * Default `off`: measured on the subscription CLI transport that turn costs
+ * roughly as much wall clock as the query itself, and the deterministic
+ * narrative already states the headline, the leader and the share. It is a
+ * setting rather than a hard rule because a team that values the prose more
+ * than the seconds should be able to say so.
+ */
+function readOrdinaryAskNarrationPolicy(projectRoot: string): OrdinaryAskNarrationPolicy {
+  const fromEnv = process.env.DQL_ASK_NARRATION;
+  const accepted = new Set(['off', 'gaps_only', 'always']);
+  if (fromEnv && accepted.has(fromEnv)) return fromEnv as OrdinaryAskNarrationPolicy;
+  try {
+    const configPath = join(projectRoot, 'dql.config.json');
+    if (!existsSync(configPath)) return 'off';
+    const raw = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    const agent = raw.agent && typeof raw.agent === 'object' ? raw.agent as Record<string, unknown> : {};
+    const narration = agent.narration && typeof agent.narration === 'object'
+      ? agent.narration as Record<string, unknown>
+      : {};
+    const value = narration.ordinaryAsk;
+    return typeof value === 'string' && accepted.has(value) ? value as OrdinaryAskNarrationPolicy : 'off';
+  } catch {
+    return 'off';
+  }
+}
+
 export function planAgentRunNarration(
   governedAnswer: AgentNarrationAnswer,
   context: {
     requestedMode?: AgentRunRequestedMode;
     providerAvailable: boolean;
     rowEgress: ProviderResultRowEgressPolicy;
+    /** `agent.narration.ordinaryAsk`; absent means off. */
+    ordinaryAskNarration?: OrdinaryAskNarrationPolicy;
+    /** The host projected its own deterministic facts for this answer. */
+    hostFactsAvailable?: boolean;
   },
 ): AgentNarrationPlan {
   // A refusal is not narrated. It owes the user a reason or a clarifying
   // question, which is the clarification lane's job, not the narrator's.
   if (governedAnswer.kind === 'no_answer') return { mode: 'skip', reason: 'no_answer' };
-  if (context.requestedMode !== 'research') return { mode: 'skip', reason: 'ordinary_ask' };
+  if (context.requestedMode !== 'research') {
+    // AN ORDINARY ASK MAY NARRATE ITS OWN FACTS — AND ONLY ITS FACTS.
+    //
+    // The blanket skip was right about the danger and wrong about the remedy:
+    // sending result ROWS to a second narrator would change the egress receipt
+    // and make a governed answer look like Research. Sending the host's own
+    // computed FACT SET does neither. Every sentence is checked back against
+    // that fact set and the deterministic narrative remains the floor, so the
+    // worst case is the answer the reader gets today.
+    const policy = context.ordinaryAskNarration ?? 'off';
+    const eligible = policy === 'always'
+      || (policy === 'gaps_only' && governedAnswer.certification !== 'certified');
+    if (!eligible) return { mode: 'skip', reason: 'ordinary_ask' };
+    if (!context.providerAvailable) return { mode: 'skip', reason: 'no_provider' };
+    if (!governedAnswer.analyticalFacts && !context.hostFactsAvailable) {
+      return { mode: 'skip', reason: 'nothing_to_narrate' };
+    }
+    // maxRows 0 is the whole point: the narrator reads facts, never rows.
+    return { mode: 'verified_facts', maxRows: 0 };
+  }
   if (!context.providerAvailable) return { mode: 'skip', reason: 'no_provider' };
   const maxRows = Math.max(0, context.rowEgress.maxNarrationRows);
   // The fact set is the strongest grounding available: every sentence can be
@@ -2865,7 +2925,15 @@ function humanizePriorMemberDimension(dimension: string): string {
 function recordConversationTurn(store: ConversationStore | null, threadId: string | undefined, run: AgentRun): void {
   if (!store || !threadId) return;
   try {
-    if (!store.getThread(threadId)) return;
+    if (!store.getThread(threadId)) {
+      // Open the named thread rather than discarding the turn. `dql agent ask
+      // --thread <id>` documents itself as continuing a conversation, but the
+      // CLI never created the thread and this guard then dropped every turn —
+      // so a follow-up reached the analyst with no prior plan, no prior
+      // measures, and no binding, and answered a different question.
+      store.createThread({ id: threadId, surface: 'cli' });
+      if (!store.getThread(threadId)) return;
+    }
     const turn = store.appendTurn(threadId, conversationTurnInputFromRun(run));
     // Fold the turn into the thread's working state + rolling summary — but
     // ONLY for turns that produced a real answer. A failed/blocked/no-answer
@@ -3367,6 +3435,7 @@ export interface AgentRunProviderDispatchBudget {
  */
 export function agentRunProviderDispatchBudgetForMode(
   requestedMode: AgentRunRequestedMode | undefined,
+  options: { ordinaryAskNarration?: boolean } = {},
 ): AgentRunProviderDispatchBudget {
   if (requestedMode === 'research') {
     return {
@@ -3411,7 +3480,13 @@ export function agentRunProviderDispatchBudgetForMode(
     planning: 1,
     planningRevision: 1,
     generationGroup: 1,
-    narration: 1,
+    // An authoritative V2 turn already labels its final `finish_answer`
+    // control as narration, so the single slot is spent before a post-run
+    // narrator can send anything: enabling narration without this produced
+    // "budget exhausted after 1 physical attempts" every time. The second slot
+    // exists only while the setting asks for it, and `total` still bounds the
+    // run.
+    narration: options.ordinaryAskNarration ? 2 : 1,
     repair: 1,
     agentControl: 1,
     toolFollowup: 9,
@@ -4811,33 +4886,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // built with, so upgrading the provider without upgrading the index would
   // make retrieval strictly worse. Both move together or neither does.
   void (async () => {
-    try {
-      // Never inside a test run: the probe touches the network and the upgrade
-      // rewrites the vector index, either of which would make a suite's
-      // retrieval results depend on whether the developer happens to have
-      // Ollama running. Same rule the deadline auto-scale follows.
-      if (process.env.VITEST) return;
-      const configured = readProjectEmbeddingSettings(projectRoot);
-      // An explicit project setting or environment override is the user's
-      // decision and is never second-guessed.
-      if (configured.provider
-        || process.env.DQL_OLLAMA_EMBED_URL
-        || process.env.DQL_OPENAI_API_KEY
-        || process.env.DQL_EMBEDDINGS_AUTODETECT === 'off') return;
-      const local = await probeLocalOllamaEmbeddings();
-      if (!local) return;
-      const provider = resolveEmbeddingProvider({ ollamaEndpoint: local.endpoint, ollamaModel: local.model });
-      const upgrade = await upgradeVectorIndexForProject(projectRoot, provider);
-      if (!upgrade.upgraded && upgrade.providerId !== provider.id) {
-        // Could not re-embed (model pulled but not serving, disk, etc.). Stay
-        // on the index the catalog actually holds rather than silently
-        // emptying the vector lane.
-        return;
-      }
-      setProcessDefaultEmbeddingProvider(provider);
-      console.log(`DQL: semantic retrieval enabled with local Ollama embeddings (${local.model}).`);
-    } catch {
-      // Retrieval must start regardless; hashed remains a working default.
+    const upgrade = await autoUpgradeProjectEmbeddings(projectRoot, {
+      probeLocalOllamaEmbeddings,
+      upgradeVectorIndexForProject,
+      setProcessDefaultEmbeddingProvider,
+    });
+    if (upgrade.model && upgrade.providerId !== 'hashed-token-v1') {
+      console.log(`DQL: semantic retrieval enabled with local Ollama embeddings (${upgrade.model}).`);
     }
   })();
   // A slow provider needs a longer Ask window, and DQL already knows which
@@ -8203,13 +8258,34 @@ function analyticalFailureSummary(
     // Do not even initialize a narration transport for ordinary Ask. This
     // preserves the one-meaning-call contract and ensures the provider egress
     // ledger contains only physical dispatches that actually occurred.
-    const narrationProvider = request.requestedMode === 'research'
+    const ordinaryAskNarration = readOrdinaryAskNarrationPolicy(projectRoot);
+    let deterministicAskFacts: AskNarrationFactSetV1 | undefined;
+    // Compute the host's facts BEFORE deciding whether to narrate. The run
+    // receipt attaches them later, which is too late for a decision that
+    // depends on their existence: without this every ordinary Ask planned as
+    // "nothing to narrate" and the setting could never take effect.
+    if (ordinaryAskNarration !== 'off'
+      && request.requestedMode !== 'research'
+      && !governedAnswer.analyticalFacts
+      && governedAnswer.result) {
+      const projected = deterministicResultFactsForAnswer({
+        artifactId: `ask:${runId}`,
+        trustState: governedAnswer.certification === 'certified' ? 'certified' : 'review_required',
+        question: request.question,
+        result: governedAnswer.result,
+        ...(governedAnswer.route?.tier ? { answerTier: governedAnswer.route.tier } : {}),
+      });
+      if (projected) deterministicAskFacts = projected.factSet;
+    }
+    const narrationProvider = request.requestedMode === 'research' || ordinaryAskNarration !== 'off'
       ? await createBlockStudioAssistProvider(projectRoot).catch(() => null)
       : null;
     const narrationPlan = planAgentRunNarration(governedAnswer, {
       requestedMode: request.requestedMode,
       providerAvailable: Boolean(narrationProvider),
       rowEgress,
+      ordinaryAskNarration,
+      ...(deterministicAskFacts ? { hostFactsAvailable: true } : {}),
     });
     const narrationMaxRows = narrationPlan.mode === 'skip' ? 0 : narrationPlan.maxRows;
     const preview = agentResultToSynthesisPreview(governedAnswer.result);
@@ -8293,7 +8369,43 @@ function analyticalFailureSummary(
       });
       try {
         const frame = governedAnswer.resolvedAnalyticalPlan?.analyticalFrame;
-        if (narrationPlan.mode === 'verified_facts' && governedAnswer.analyticalFacts && frame) {
+        if (narrationPlan.mode === 'verified_facts' && deterministicAskFacts && !governedAnswer.analyticalFacts) {
+          // ORDINARY ASK: the host's own facts, and nothing else, leave here.
+          //
+          // The research narrator wants an analytical GRAPH fact set that an
+          // ordinary governed answer never builds. Rather than mint a fake
+          // graph identity to reuse it, this path sends the deterministic fact
+          // brief and checks the reply mechanically: every number must be one
+          // the host computed, no causal claim, no claim of absence. A single
+          // failure ships the deterministic text instead, so the worst case of
+          // enabling narration is the answer the reader already had.
+          const brief = renderAskNarrationBrief({ question: request.question, factSet: deterministicAskFacts });
+          // One send, and one only. The research narrator streams and may
+          // retry; an ordinary Ask has a single narration dispatch in its
+          // ledger, so a second physical attempt is refused and the whole
+          // narration is lost to a budget error rather than a bad sentence.
+          const drafted = await narrationProvider.generate(
+            [
+              { role: 'system', content: ASK_NARRATION_SYSTEM_PROMPT },
+              { role: 'user', content: brief },
+            ],
+            { ...narrationDispatchOptions(deterministicAskFacts.facts.length), maxProviderDispatches: 1 },
+          );
+          const verification = verifyAskNarration({ text: drafted ?? '', factSet: deterministicAskFacts });
+          if (process.env.DQL_ORCHESTRATOR_TRACE && !verification.ok) {
+            console.warn(`[dql] narration rejected: ${verification.failures.join(',')}`
+              + `${verification.unverified.length ? ` unverified=${verification.unverified.join(' ')}` : ''}`);
+          }
+          narrationSource = verification.ok ? 'llm' : 'deterministic';
+          narrationIntegrityReceipt = {
+            ...narrationIntegrityReceipt,
+            mode: 'verified_facts',
+            outcome: verification.ok ? 'success' : 'deterministic_fallback',
+            factCount: deterministicAskFacts.facts.length,
+            validationFailures: verification.failures,
+          };
+          if (verification.ok) synthesizedAnswer = (drafted ?? '').trim();
+        } else if (narrationPlan.mode === 'verified_facts' && governedAnswer.analyticalFacts && frame) {
           // The fact set is the grounding contract: the model drafts, and every
           // claim is resolved against a fact id before it can reach the user.
           const composed = await composeVerifiedAnalyticalNarrative({
@@ -8365,6 +8477,9 @@ function analyticalFailureSummary(
         narrationTrace.settle('ok');
       } catch (error) {
         narrationTrace.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
+        if (process.env.DQL_ORCHESTRATOR_TRACE) {
+          console.warn(`[dql] narration failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
         // Keep the governed draft on any narration failure.
         synthesizedAnswer = undefined;
         narrationIntegrityReceipt = {
@@ -18506,7 +18621,9 @@ function analyticalFailureSummary(
             });
             parsed.request!.signal = parsed.request!.runBudget.hardSignal;
             const runProviderEvidence = new RunScopedProviderDispatchEvidence(
-              agentRunProviderDispatchBudgetForMode(parsed.request!.requestedMode),
+              agentRunProviderDispatchBudgetForMode(parsed.request!.requestedMode, {
+                ordinaryAskNarration: readOrdinaryAskNarrationPolicy(projectRoot) !== 'off',
+              }),
               parsed.request!.runBudget,
               resolveProviderResultRowEgressPolicy({
                 projectSetting: projectConfig?.agent?.providerResultRowEgress,

@@ -88,6 +88,7 @@ import type { QuestionScope } from '../hints/types.js';
 import { buildFtsMatch, sanitizeFtsQuery } from '../memory/fts-query.js';
 import {
   cosineSimilarity,
+  embeddingProviderFromIndexedId,
   envEmbeddingProvider,
   HashedTokenEmbeddingProvider,
   type EmbeddingProvider,
@@ -1372,6 +1373,7 @@ export async function retrieveMetadataSnapshotCandidates(
         limit: Math.min(limit, 24),
         provider: input.embeddingProvider
           ?? (input.projectRoot ? projectEmbeddingProvider(input.projectRoot) : undefined),
+        resolveIndexedProvider: (indexedProviderId) => embeddingProviderFromIndexedId(indexedProviderId),
       });
       vectorObjects = vector.candidates.filter(isEligible);
       return vectorObjects.map((object) => ({
@@ -3503,10 +3505,29 @@ export class MetadataCatalog {
     domains?: string[];
     limit?: number;
     provider?: EmbeddingProvider;
+    /**
+     * Rebuild the embedder an index was written with, when the caller only had
+     * the offline default to offer. Injected so this module stays free of
+     * provider construction.
+     */
+    resolveIndexedProvider?: (indexedProviderId: string) => EmbeddingProvider | undefined;
   }): Promise<MetadataVectorSearchResult> {
     const indexedProviderId = this.state('vector_provider') ?? DEFAULT_VECTOR_PROVIDER.id;
     const indexedDimensions = Number(this.state('vector_dimensions') ?? DEFAULT_VECTOR_PROVIDER.dimensions);
-    const provider = options.provider ?? DEFAULT_VECTOR_PROVIDER;
+    // An index knows which embedder built it, and only that embedder can read
+    // it. When the caller asks with the offline hashed default — which is what
+    // an unconfigured project resolves to — while the index was built by a real
+    // model, honouring the request returns ZERO candidates and the vector lane
+    // silently disappears. That is exactly what happened after a background
+    // upgrade re-embedded the index in one process: every later process asked
+    // for hashed and got nothing. Prefer the index's own embedder, and let a
+    // caller that deliberately named a real provider still disagree loudly.
+    const requested = options.provider ?? DEFAULT_VECTOR_PROVIDER;
+    const provider = requested.id !== indexedProviderId
+      && requested.id === DEFAULT_VECTOR_PROVIDER.id
+      && options.resolveIndexedProvider
+      ? options.resolveIndexedProvider(indexedProviderId) ?? requested
+      : requested;
     if (provider.id !== indexedProviderId) {
       return {
         providerId: indexedProviderId,

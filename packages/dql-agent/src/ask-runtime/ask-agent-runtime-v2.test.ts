@@ -4,6 +4,7 @@ import {
   askAgentV2WorkspaceMatches,
   createAskAgentRuntimeV2,
   createAskToolKernelV2,
+  ASK_V2_DESCRIBE_CALLS_PER_TOOL,
   defaultProviderResultEgressPolicyV2,
   materializeAskV2WorkspaceTierTruth,
   projectResearchEvidenceLedgerV4,
@@ -607,6 +608,37 @@ describe('Ask V2 tool kernel', () => {
       safeNextTools: ['compile_and_run_semantic'],
     });
     expect(kernel.state.resolvedPlan).toBeUndefined();
+  });
+
+  it('lets the describe tools be called again with different arguments, up to their ceiling', () => {
+    // The parameterless inspectors are fixed by the snapshot, so repeating one
+    // reveals nothing. describe_relation is not one of those: each call names a
+    // different relation or column search. Refusing the second call made the
+    // analyst describe one 436-column mart, fail to find its column, and give
+    // up — with the only tool that could have corrected it now closed.
+    const kernel = createAskToolKernelV2(state());
+    for (let call = 0; call < ASK_V2_DESCRIBE_CALLS_PER_TOOL; call += 1) {
+      expect(kernel.canCall('describe_relation').ok, `call ${call + 1}`).toBe(true);
+      kernel.observe({
+        version: 1,
+        tool: 'describe_relation',
+        outcome: 'eligible',
+        reasonCode: 'RELATION_DESCRIBED',
+        candidateIds: [customer.id],
+        origin: 'retrieval',
+      });
+    }
+    expect(kernel.canCall('describe_relation')).toMatchObject({ ok: false, reasonCode: 'ASK_V2_REDUNDANT_INSPECTION' });
+    // A parameterless inspector still gets exactly one call.
+    kernel.observe({
+      version: 1,
+      tool: 'inspect_conversation_result',
+      outcome: 'eligible',
+      reasonCode: 'trusted_conversation_context',
+      candidateIds: [],
+      origin: 'retrieval',
+    });
+    expect(kernel.canCall('inspect_conversation_result')).toMatchObject({ ok: false, reasonCode: 'ASK_V2_REDUNDANT_INSPECTION' });
   });
 
   it('lets a frozen plan that could not run descend once to review-required SQL, and only once', () => {
