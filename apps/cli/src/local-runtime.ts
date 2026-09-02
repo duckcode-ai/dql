@@ -508,6 +508,7 @@ import {
   type RedactedProviderSettings,
 } from './settings/provider-settings.js';
 import { ClaudeCodeCliProvider, CodexCliProvider } from './providers/subscription-cli.js';
+import { createFailoverProvider } from './providers/failover-provider.js';
 import {
   ClaudeOAuthManager,
   ClaudeOAuthProvider,
@@ -2020,7 +2021,9 @@ export function terminalFailureTitleForAnswer(
     case 'modeling_gap': return 'Not modeled yet';
     case 'grounding_gap': return 'Not enough context to answer safely';
     case 'model_declined': return 'The assistant declined to answer';
-    case 'provider_error': return 'The AI provider did not respond';
+    // A headline is what the reader sees first. Naming our transport tells them
+    // nothing about their question and nothing they can act on.
+    case 'provider_error': return 'Could not finish working this one out';
     case 'orchestration_budget_exhausted': return 'DQL stopped at its own orchestration budget';
     case 'execution_error': return 'The selected query did not complete on the current connection';
     case 'ambiguous': return 'Needs one detail before running';
@@ -37372,8 +37375,29 @@ async function createBlockStudioAssistProvider(
   // baseline reproduced that: the same question blocked on one run and answered
   // on the next, and zero cassettes were written.
   const wrapped = applyEvalCassette(provider, projectRoot);
-  if (options.availability === 'defer') return wrapped;
-  return await wrapped.available() ? wrapped : null;
+  // A project may enable several providers. Until now DQL used exactly one and
+  // a turn died with it, so an expired Claude login ended every question while
+  // a working Codex or Ollama sat idle. Governance is untouched: the same host
+  // decides, freezes and validates — only the transport carrying the
+  // conversation can change, and only on a genuine fault.
+  const alternates = requestedProvider
+    // An explicitly requested provider is a choice, not a default. Honour it.
+    ? []
+    : settings
+      .filter((candidate) => candidate.id !== selected.id && isUsable(candidate))
+      .map((candidate) => ({
+        id: candidate.id,
+        create: () => createBlockStudioAssistProvider(projectRoot, candidate.id, { availability: 'defer' }),
+      }));
+  const resilient = alternates.length > 0
+    ? createFailoverProvider(wrapped, alternates, {
+      onFailover: (event) => console.warn(
+        `DQL: ${event.from} could not answer, continued on ${event.to}. (${event.reason})`,
+      ),
+    })
+    : wrapped;
+  if (options.availability === 'defer') return resilient;
+  return await resilient.available() ? resilient : null;
 }
 
 type AskPlannerPreflightError = Error & {

@@ -5393,6 +5393,54 @@ function unmodeledRequestAnswer(run: AgentRun): string | undefined {
       : '');
 }
 
+/**
+ * The governed assets this run actually retrieved, as business labels.
+ *
+ * V2 keeps its admitted candidates on its own state, which `modeledFieldLabels`
+ * (written for the V1 analyst state) never reads — so on an authoritative run
+ * the host knew exactly which relations and metrics it had found and still told
+ * the reader nothing.
+ */
+function askV2RetrievedAssetLabels(run: AgentRun): string[] {
+  const state = run.routeDecision?.askAgentV2Decision?.state;
+  const ids = [
+    ...(state?.initialCandidateIds ?? []),
+    ...(state?.observations ?? []).flatMap((observation) => observation.candidateIds ?? []),
+  ];
+  const labels = ids.map((id) => {
+    const leaf = id.split(':').pop() ?? id;
+    return (leaf.split('.').pop() ?? leaf).replace(/_/g, ' ').trim().toLowerCase();
+  }).filter((label) => label.length > 2 && !/^\d/.test(label));
+  return [...new Set(labels)];
+}
+
+/**
+ * NEVER HAND A READER AN INFRASTRUCTURE SENTENCE.
+ *
+ * "The AI provider could not complete this Ask step. Check provider readiness"
+ * is written for whoever runs the server. The person who asked about beverage
+ * revenue cannot act on it, and it says nothing about their question — while
+ * the run is still holding everything retrieval proved: the relations, the
+ * metrics, the certified blocks it considered.
+ *
+ * This is the floor under every failure. It states plainly that the question
+ * was not answered, names the governed assets that came closest, and never
+ * claims the data is absent — retrieval finding nothing and a transport
+ * failing are different things, and only the reader can decide what to ask
+ * next.
+ */
+function lastResortAnswerForRun(run: AgentRun, cause: 'provider' | 'budget'): string {
+  const assets = askV2RetrievedAssetLabels(run).slice(0, 6);
+  const opening = cause === 'provider'
+    ? 'I could not finish working this question out — the assistant step did not complete, so no query was run.'
+    : 'I ran out of room to work this question out before a query was accepted.';
+  const closing = 'Nothing about your data has been ruled out: this run did not reach a query.'
+    + ' Asking again usually works, and naming the exact field or metric you want makes it certain.';
+  return assets.length > 0
+    ? `${opening} What I had found so far for it: ${assets.join(', ')}. ${closing}`
+    : `${opening} ${closing}`;
+}
+
 function deterministicTerminalAnswerForRun(run: AgentRun): string {
   // An analyst that inspected the executable tiers and explicitly declined
   // the remaining exploratory path is a specific, actionable outcome — not
@@ -5409,7 +5457,7 @@ function deterministicTerminalAnswerForRun(run: AgentRun): string {
     case 'CONNECTION_NOT_CONFIGURED':
       return 'No database connection is configured yet. Add an approved connection, then retry this question.';
     case 'PROVIDER_FAILURE':
-      return 'The AI provider could not complete this Ask step. Check provider readiness, then retry.';
+      return lastResortAnswerForRun(run, 'provider');
     case 'COMPILATION_FAILED':
       return 'DQL selected a governed plan but could not compile it for the current target. Review the semantic target, then retry.';
     case 'RESULT_CONTRACT_MISMATCH':
@@ -6541,7 +6589,7 @@ function refusalCodeSummary(code: string | undefined): string | undefined {
     case 'grounding_gap': return 'DQL could not ground every part of this question in the current metadata snapshot, so no query was accepted.';
     case 'modeling_gap': return 'Part of this question is not modeled in this project yet, so no governed query can answer it as asked.';
     case 'ambiguous': return 'One business choice is required before DQL can run this question.';
-    case 'provider_error': return 'The AI provider could not complete this Ask step.';
+    case 'provider_error': return 'This question was not worked out to a query, so nothing about the data has been ruled out.';
     case 'orchestration_budget_exhausted': return 'DQL stopped this run at its own orchestration budget before the question was settled.';
     case 'policy_blocked': return 'A governance policy blocked this request before execution.';
     case 'execution_error': return 'The selected governed query did not complete on the current connection.';

@@ -27,7 +27,47 @@ function anthropicReasoning(model: string, options: ProviderRunOptions): Record<
 
 /** A 400 whose body implicates the effort/output_config field — safe to retry without it. */
 function isEffortRejection(status: number, body: string): boolean {
-  return status === 400 && /output_config|effort|unexpected|unsupported|unrecognized|not\s+supported/i.test(body);
+  return status === 400
+    && /output_config|effort|unexpected|unsupported|unrecognized|not\s+supported|thinking|temperature/i.test(body);
+}
+
+/**
+ * Extended thinking and a custom temperature cannot be sent together.
+ *
+ * The Messages API accepts `temperature` only at 1 while thinking is enabled,
+ * and rejects the request outright otherwise. Every Ask turn on a subscription
+ * transport carries both — a reasoning effort from the run and a temperature
+ * from the caller — so every one of them 400'd, and the user saw "The AI
+ * provider could not complete this Ask step" for a question that was perfectly
+ * well formed. Thinking is the deliberate, per-run setting; the temperature is
+ * a default. The default gives way.
+ */
+/**
+ * Models this process has seen retire `temperature`. Process-local and
+ * additive: the worst a stale entry costs is a request without an optional
+ * sampling field.
+ */
+const MODELS_REJECTING_SAMPLING = new Set<string>();
+
+/** Every optional sampling control, removed together. */
+function withoutSamplingFields(body: Record<string, unknown>): Record<string, unknown> {
+  const { temperature, top_p: topP, top_k: topK, ...rest } = body;
+  void temperature; void topP; void topK;
+  return rest;
+}
+
+function withoutConflictingSampling(
+  baseBody: Record<string, unknown>,
+  reasoning: Record<string, unknown>,
+): Record<string, unknown> {
+  const thinking = reasoning.thinking;
+  const enabled = Boolean(thinking)
+    && typeof thinking === 'object'
+    && (thinking as { type?: unknown }).type === 'enabled';
+  if (!enabled || !('temperature' in baseBody)) return baseBody;
+  const { temperature, top_p: topP, top_k: topK, ...rest } = baseBody;
+  void temperature; void topP; void topK;
+  return rest;
 }
 
 /**
@@ -63,9 +103,34 @@ export async function postMessages(
       },
     });
   };
-  const res = await send({ ...baseBody, ...reasoning });
-  if (res.ok || Object.keys(reasoning).length === 0) return res;
+  const model = typeof baseBody.model === 'string' ? baseBody.model : '';
+  const opening = MODELS_REJECTING_SAMPLING.has(model)
+    ? withoutSamplingFields(baseBody)
+    : withoutConflictingSampling(baseBody, reasoning);
+  const res = await send({ ...opening, ...reasoning });
+  if (res.ok) return res;
   const peek = await res.clone().text().catch(() => '');
+  // STRIP EXACTLY WHAT THE API NAMED, THEN TRY ONCE MORE.
+  //
+  // Models retire sampling controls on their own schedule, and a rejected
+  // OPTIONAL field should never cost a turn: `claude-sonnet-5` answers
+  // "`temperature` is deprecated for this model", and DQL sent temperature on
+  // every dispatch, so every question that reached this transport failed with
+  // "the AI provider could not complete this Ask step". Dropping the field the
+  // error names is a smaller, more honest degradation than dropping the
+  // reasoning config the run asked for.
+  if (res.status === 400 && /temperature|top_p|top_k/i.test(peek)) {
+    // Remember it. A model that has retired `temperature` will reject it on
+    // every dispatch, and paying a doomed round trip each time doubled the
+    // wall clock of every turn on this transport.
+    const model = typeof baseBody.model === 'string' ? baseBody.model : '';
+    if (model) MODELS_REJECTING_SAMPLING.add(model);
+    const retried = await send({ ...withoutSamplingFields(baseBody), ...reasoning });
+    if (retried.ok || Object.keys(reasoning).length === 0) return retried;
+    const retryPeek = await retried.clone().text().catch(() => '');
+    return isEffortRejection(retried.status, retryPeek) ? send(withoutSamplingFields(baseBody)) : retried;
+  }
+  if (Object.keys(reasoning).length === 0) return res;
   if (!isEffortRejection(res.status, peek)) return res;
   return send(baseBody);
 }
@@ -454,6 +519,22 @@ options: ProviderToolLoopOptions = {},
       input_schema: tool.inputSchema,
     }));
     const roundSystem = [system, currentPolicy.instruction].filter((value): value is string => Boolean(value)).join('\n\n') || undefined;
+    // THE MESSAGES API'S OWN PRECONDITIONS, HONOURED BEFORE SENDING.
+    //
+    // Extended thinking may not be combined with a forced `tool_choice`, and a
+    // forced tool choice is exactly what the kernel asks for when it narrows to
+    // one terminal action. Sending both 400s the request, which on this
+    // transport meant the LAST step of a turn — the one that would have
+    // produced the answer — could never be sent. Reasoning is the request's
+    // optional part; the tool the host requires is not.
+    const forcesToolChoice = dynamicToolPolicy && currentPolicy.terminalActionToolNames.size === 1;
+    const roundReasoning = ((): Record<string, unknown> => {
+      const reasoning = transport.reasoning(model, options);
+      if (!forcesToolChoice) return reasoning;
+      const { thinking, ...rest } = reasoning;
+      void thinking;
+      return rest;
+    })();
     let res: Response;
     try {
       res = await transport.post(
@@ -466,11 +547,11 @@ options: ProviderToolLoopOptions = {},
           system: transport.buildSystem(roundSystem) as never,
           messages: turns,
           tools: roundToolDefs,
-          ...(dynamicToolPolicy && currentPolicy.terminalActionToolNames.size === 1
+          ...(forcesToolChoice
             ? { tool_choice: { type: 'tool', name: [...currentPolicy.terminalActionToolNames][0]! } }
             : {}),
         },
-        transport.reasoning(model, options),
+        roundReasoning,
         dispatch,
       );
     } catch (error) {

@@ -242,6 +242,17 @@ export interface AnalyticalRequirementSetV1 {
   priorResultMemberBinding?: AnalyticalPriorResultMemberBindingV1;
   /** Explicit projection fields are requirements, not optional prompt hints. */
   outputTerms?: string[];
+  /**
+   * Words the reader put in FRONT of a measure that no requirement kept.
+   *
+   * "beverage revenue" reduces to the measure `revenue`, and the qualifier is
+   * gone before anything downstream can see it — so the host bound plain
+   * revenue, executed, and reported total revenue as beverage revenue. A
+   * dropped qualifier is not a harmless simplification; it is a different
+   * question. Recording it lets the deterministic path refuse to answer one
+   * question as though it were another.
+   */
+  unboundMeasureQualifiers?: string[];
   /** `individual` requests a row-level relation rather than an aggregate. */
   grain?: 'individual' | 'aggregate';
   ranking?: {
@@ -2060,6 +2071,49 @@ function explicitRankingMeasureTerms(
  * LLM interpretation: unknown business phrases remain available to the normal
  * bounded meaning resolver instead of being guessed here.
  */
+/**
+ * Words the reader placed immediately before a measure that no requirement
+ * kept.
+ *
+ * "beverage revenue" normalizes to the measure `revenue`, and the qualifier
+ * vanishes at parse time — so the deterministic path bound plain revenue, ran
+ * it, and presented total revenue as beverage revenue. The reader had no way
+ * to tell. This finds that word again by looking at the question itself.
+ *
+ * Deliberately narrow. Aggregation words ("total revenue"), comparators
+ * ("highest revenue"), time words ("monthly revenue") and determiners do not
+ * change WHICH measure is meant, so they are not qualifiers. What remains is a
+ * business noun that does: beverage, food, net, gross, recurring.
+ */
+const MEASURE_QUALIFIER_STOPWORDS = new Set([
+  'the', 'a', 'an', 'this', 'that', 'these', 'those', 'my', 'our', 'their', 'his', 'her', 'its',
+  'total', 'sum', 'average', 'avg', 'mean', 'median', 'count', 'number', 'amount', 'overall',
+  'highest', 'lowest', 'top', 'bottom', 'most', 'least', 'best', 'worst', 'largest', 'smallest',
+  'daily', 'weekly', 'monthly', 'quarterly', 'yearly', 'annual', 'cumulative',
+  'and', 'or', 'with', 'by', 'per', 'for', 'of', 'in', 'on', 'at', 'to', 'from', 'is', 'was', 'are',
+  'more', 'less', 'much', 'many', 'what', 'which', 'who', 'whose', 'give', 'show', 'me', 'us',
+  'customer', 'customers', 'account', 'accounts', 'client', 'clients', 'product', 'products',
+]);
+
+export function unboundMeasureQualifierTerms(question: string, measures: readonly string[]): string[] {
+  if (measures.length === 0) return [];
+  const words = question.toLowerCase().match(/[a-z][a-z0-9_]*/g) ?? [];
+  // Every token any retained measure already accounts for.
+  const covered = new Set(measures.flatMap((measure) => measure.toLowerCase().split(/[^a-z0-9]+/)).filter(Boolean));
+  const qualifiers: string[] = [];
+  for (const measure of measures) {
+    const head = measure.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).at(0);
+    if (!head) continue;
+    for (let index = 1; index < words.length; index += 1) {
+      if (words[index] !== head) continue;
+      const previous = words[index - 1]!;
+      if (covered.has(previous) || MEASURE_QUALIFIER_STOPWORDS.has(previous) || previous.length < 3) continue;
+      qualifiers.push(previous);
+    }
+  }
+  return [...new Set(qualifiers)].slice(0, 4);
+}
+
 export function buildAnalyticalRequirementSet(input: {
   question: string;
   parsedIntent?: Partial<{
@@ -2193,6 +2247,9 @@ export function buildAnalyticalRequirementSet(input: {
       ...currentQuestionLiteralMemberTerms(question),
     ]),
     ...(explicitOutputTerms(question).length > 0 ? { outputTerms: explicitOutputTerms(question) } : {}),
+    ...(unboundMeasureQualifierTerms(question, measures).length > 0
+      ? { unboundMeasureQualifiers: unboundMeasureQualifierTerms(question, measures) }
+      : {}),
     ...(/\bindividual\b/i.test(question) ? { grain: 'individual' as const } : {}),
     ...(ranking
       ? {

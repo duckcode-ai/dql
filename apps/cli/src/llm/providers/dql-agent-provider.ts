@@ -2209,7 +2209,12 @@ function createAskV2LaneHandler(
       safeTool('run_certified', 'Run one snapshot-bound certified block with optional scalar bindings. The artifact is immutable and cannot be re-searched.', {
         type: 'object', properties: {
           candidateId: { type: 'string' },
-          bindings: { type: 'object', additionalProperties: { type: ['string', 'number', 'boolean', 'null'] } },
+          // A UNION type is legal JSON Schema and rejected by the Messages API's
+          // tool validator, which 400s the WHOLE request — so a transport that
+          // sends tools natively could never send this one, and every question
+          // needing the analyst loop died as "the AI provider could not
+          // complete this Ask step". The host coerces the bound value anyway.
+          bindings: { type: 'object', additionalProperties: { type: 'string' } },
           repair: { type: 'boolean' },
         }, required: ['candidateId'], additionalProperties: false,
       }, async (args) => {
@@ -2400,7 +2405,9 @@ function createAskV2LaneHandler(
           dimensionIds: { type: 'array', items: { type: 'string' }, maxItems: 16 },
           timeDimensionId: { type: 'string', description: 'Required with timeGrain for an explicit time question; use one admitted opaque time-dimension ID.' },
           timeGrain: { type: 'string', enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'Required with timeDimensionId when the question asks for a time grain. It must be declared by that exact admitted time dimension.' },
-          filters: { type: 'array', items: { type: 'object', properties: { dimensionId: { type: 'string' }, value: { type: ['string', 'number', 'boolean'] } }, required: ['dimensionId', 'value'], additionalProperties: false }, maxItems: 8 },
+          // Single concrete type: see the note on `bindings` above. A union
+          // here made every native tool dispatch fail before it was sent.
+          filters: { type: 'array', items: { type: 'object', properties: { dimensionId: { type: 'string' }, value: { type: 'string' } }, required: ['dimensionId', 'value'], additionalProperties: false }, maxItems: 8 },
           orderBy: { type: 'array', maxItems: 2, items: { type: 'object', properties: { name: { type: 'string' }, direction: { type: 'string', enum: ['asc', 'desc'] } }, required: ['name', 'direction'], additionalProperties: false }, description: 'Sort for a ranking. Each name must be one of the selected metric/dimension IDs or their runtime names. A limit without an orderBy returns arbitrary rows.' },
           limit: { type: 'integer', minimum: 1, maximum: 10000 }, repair: { type: 'boolean' },
         }, required: ['metricIds'], additionalProperties: false,
@@ -3619,8 +3626,19 @@ function createAskV2LaneHandler(
                   properties: {
                     id: { type: 'string' },
                     operator: { type: 'string', enum: ASK_V2_RELATIONAL_OPERATOR_NAMES },
-                    value: {},
-                    values: { type: 'array', maxItems: 24 },
+                    // Single, concrete types only. An empty schema (`{}`), an
+                    // array without `items`, and a UNION type are all legal
+                    // JSON Schema and all rejected by the Messages API's tool
+                    // validator — which 400s the entire request, losing every
+                    // tool in it, so the turn ends with no answer at all. The
+                    // host quotes and escapes the literal either way, so a
+                    // string here costs nothing.
+                    value: { type: 'string' },
+                    values: {
+                      type: 'array',
+                      maxItems: 24,
+                      items: { type: 'string' },
+                    },
                   },
                   required: ['id', 'operator'], additionalProperties: false,
                 },
@@ -5496,6 +5514,16 @@ async function deriveHostFirstSemanticArgs(input: {
   if (plan.requestedShape.topN?.scope === 'per_group') return undefined;
   if (requirements.time?.grain) return undefined;
   if (requirements.measures.length === 0) return undefined;
+  // A QUALIFIER THE PARSER DROPPED IS A DIFFERENT QUESTION.
+  //
+  // "beverage revenue" reduces to the measure `revenue`, so this path saw one
+  // perfectly resolvable measure, bound it, executed, and presented TOTAL
+  // revenue as beverage revenue — with no dispatch, no refusal, and nothing in
+  // the answer to suggest the word had been ignored. The deterministic path is
+  // for questions it can answer exactly; a lost qualifier means this is not one
+  // of them, so hand it to the analyst, which can see the beverage-specific
+  // metric and certified block that exist for precisely this question.
+  if ((requirements.unboundMeasureQualifiers?.length ?? 0) > 0) return undefined;
 
   // Requirement terms are business English ("customer name"); runtime names
   // are snake_case ("customer_name"). Both spell the same field — try the
