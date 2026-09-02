@@ -1608,6 +1608,55 @@ function createAskV2LaneHandler(
         ? choices
         : [];
     };
+    /**
+     * Clarification the host can honour without a pre-issued semantic choice
+     * set.
+     *
+     * The analyst is told to ask rather than guess, and then had nowhere to
+     * ask: the only accepted choices were semantic-tier ambiguity records the
+     * host does not currently mint, so every honest question became a refusal
+     * that cost a dispatch. These two sources restore the ability to ask while
+     * keeping the host the author of every option:
+     *
+     *  1. Two or more ADMITTED CANDIDATES the analyst proposes as rivals. The
+     *     ids must already be admitted, so this cannot introduce a new object;
+     *     the labels are re-bound to the host's own card names.
+     *  2. The members a deictic reference could have meant, which the host
+     *     itself computed when it hydrated the follow-up.
+     *
+     * The analyst supplies only ids. It never authors a label, a value, or an
+     * option the snapshot does not contain.
+     */
+    const hostValidatedClarificationChoices = (
+      requestedIds: string[],
+    ): Array<{ id: string; label: string; candidateIds: string[] }> => {
+      const unique = [...new Set(requestedIds.map((id) => id.trim()).filter(Boolean))];
+      if (unique.length < 2 || unique.length > 8) return [];
+      // Source 1: admitted rival candidates.
+      const asCandidates = unique.map((id) => resolveAdmittedReference(id)?.candidate);
+      if (asCandidates.every((candidate) => Boolean(candidate))) {
+        const resolved = asCandidates as AgentEvidenceCandidate[];
+        const ids = resolved.map((candidate) => v2CandidateId(candidate));
+        if (new Set(ids).size !== ids.length) return [];
+        return resolved.map((candidate, index) => ({
+          id: unique[index]!,
+          label: candidate.name,
+          candidateIds: [v2CandidateId(candidate)],
+        }));
+      }
+      // Source 2: host-computed members for an ambiguous prior-result
+      // reference, addressed as `member:<dimension>:<value>`.
+      const deictic = input.followUp?.deicticChoices;
+      if (deictic?.values?.length) {
+        const allowed = new Map<string, string>(
+          deictic.values.map((value) => [`member:${deictic.dimension}:${value}`, value]),
+        );
+        if (unique.every((id) => allowed.has(id))) {
+          return unique.map((id) => ({ id, label: allowed.get(id)!, candidateIds: [] }));
+        }
+      }
+      return [];
+    };
     const authorizeExecution = (input: {
       tool: Extract<AskToolNameV2, 'run_certified' | 'compile_and_run_semantic' | 'compile_and_run_dql' | 'validate_and_run_sql'>;
       tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
@@ -1879,6 +1928,13 @@ function createAskV2LaneHandler(
         }
       },
     });
+    // A tool that can only ever refuse is worse than no tool: it is advertised
+    // in the contract, the model reasonably calls it to resolve a member, and
+    // the turn pays a dispatch and a tool-budget slot for a guaranteed denial.
+    // `search_values` has no bound adapter in this build, so it is withheld
+    // rather than dangled. Member grounding still happens host-side through
+    // the allowlisted literal probe.
+    const valueSearchAdapterBound = false;
     const tools: AgentToolDefinition[] = [
       safeTool('inspect_ask_context', 'Inspect safe, role-balanced cards from the immutable Ask snapshot. Use expand only when initial cards are insufficient.', {
         type: 'object', properties: { expand: { type: 'boolean' } }, additionalProperties: false,
@@ -3562,7 +3618,17 @@ function createAskV2LaneHandler(
         const options = Array.isArray(args.options) ? args.options.slice(0, 8).flatMap((option) => option && typeof option === 'object' && typeof (option as Record<string, unknown>).id === 'string' && typeof (option as Record<string, unknown>).label === 'string'
           ? [{ id: String((option as Record<string, unknown>).id), label: String((option as Record<string, unknown>).label) }]
           : []) : [];
-        const issued = materialClarificationChoices();
+        const preIssued = materialClarificationChoices();
+        const issued: Array<{ id: string; label: string; candidateIds: string[] }> = preIssued.length
+          ? preIssued.map((choice) => ({ id: choice.id, label: choice.label, candidateIds: [...choice.candidateIds] }))
+          : hostValidatedClarificationChoices(
+            Array.isArray(args.options)
+              ? args.options.flatMap((option) => (option && typeof option === 'object'
+                && typeof (option as Record<string, unknown>).id === 'string'
+                ? [String((option as Record<string, unknown>).id)]
+                : []))
+              : [],
+          );
         const issuedIds = new Set(issued.map((choice) => choice.id));
         const requestedIds = options.map((option) => option.id);
         const requestedUniqueIds = new Set(requestedIds);
@@ -3641,7 +3707,7 @@ function createAskV2LaneHandler(
         finalText = answer;
         return { finished: true, hasResult: Boolean(completed), evidenceIds: selectedBusinessEvidence };
       }),
-    ];
+    ].filter((tool) => tool.name !== 'search_values' || valueSearchAdapterBound);
     // `finish_answer` is an authoritative host control boundary.  Text-only
     // provider adapters normally stop in the agent loop immediately after the
     // tool returns, but keep the boundary at this higher layer as well: a
@@ -3808,6 +3874,46 @@ function createAskV2LaneHandler(
     // of letting the analyst guess identifiers until the budget dies. This
     // runs after the host-first attempt: a turn the host executed never
     // needed the term to resolve.
+    // THE HOST DOES NOT MAKE THE ANALYST DISCOVER WHAT THE HOST ALREADY KNOWS.
+    //
+    // The tier ladder required an inspection of certified and semantic before
+    // any relational or SQL tool would run — two provider dispatches, on this
+    // transport thirty to sixty seconds, spent learning something the
+    // immutable workspace had already settled before the turn began: there are
+    // no certified blocks, and no metric any engine can execute. Running those
+    // two inspections in-process records exactly the observations the tools
+    // would have produced (same code, same reason codes, same tier states) and
+    // gives the analyst its first real move on the first dispatch. It is only
+    // ever a shortcut through a foregone conclusion: if either tier could
+    // plausibly execute, the analyst still inspects and chooses it itself.
+    if (!state.terminalOutcome
+      && !hostFirst
+      && (state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response')) {
+      const certifiedCandidates = visibleCandidates()
+        .filter((candidate) => candidate.kind === 'certified_block' && candidate.trustTier === 'certified');
+      const executableMetricPossible = visibleCandidates().some((candidate) => {
+        const id = v2CandidateId(candidate);
+        const handle = workspace?.semanticCapabilities?.get(id);
+        return askV2ExecutableSemanticRoles(candidate)?.includes('metric') === true
+          && handle?.candidateId === id
+          && handle.roles.includes('metric')
+          && Boolean(handle.selectedEngine ?? (handle.engines.length === 1 ? handle.engines[0] : undefined));
+      });
+      if (certifiedCandidates.length === 0 && !executableMetricPossible) {
+        try {
+          const preInspect = (name: string) => tools.find((tool) => tool.name === name);
+          if (!state.observations.some((observation) => observation.tool === 'inspect_certified_candidates')) {
+            await preInspect('inspect_certified_candidates')?.run({});
+          }
+          if (!state.observations.some((observation) => observation.tool === 'inspect_semantic_candidates')) {
+            await preInspect('inspect_semantic_candidates')?.run({});
+          }
+        } catch {
+          // A pre-inspection fault costs nothing: the analyst can still run
+          // both inspections itself on its own dispatches.
+        }
+      }
+    }
     if (!state.terminalOutcome
       && (state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response')) {
       const unmodeled = await requestedUnmodeledTerm();

@@ -4811,6 +4811,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // make retrieval strictly worse. Both move together or neither does.
   void (async () => {
     try {
+      // Never inside a test run: the probe touches the network and the upgrade
+      // rewrites the vector index, either of which would make a suite's
+      // retrieval results depend on whether the developer happens to have
+      // Ollama running. Same rule the deadline auto-scale follows.
+      if (process.env.VITEST) return;
       const configured = readProjectEmbeddingSettings(projectRoot);
       // An explicit project setting or environment override is the user's
       // decision and is never second-guessed.
