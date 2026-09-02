@@ -137,6 +137,15 @@ export interface AgentEvidenceCandidate {
    */
   dataType?: string;
   dimensions?: string[];
+  /**
+   * Physical columns of a relation candidate, as retrieved from the immutable
+   * catalog. This is the vocabulary a governed-relational or exploratory-SQL
+   * plan is built from: without it the planner can name the table and nothing
+   * inside it. Bounded on the card; `columnCount` reports the true total and
+   * `describe_relation` serves the rest.
+   */
+  columns?: Array<{ name: string; type?: string; description?: string }>;
+  columnCount?: number;
   timeGrains?: string[];
   requiredParameters?: string[];
   sourceObjects?: string[];

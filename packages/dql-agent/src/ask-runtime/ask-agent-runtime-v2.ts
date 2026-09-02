@@ -43,7 +43,9 @@ export type AskToolNameV2 =
   | 'run_certified'
   | 'inspect_semantic_candidates'
   | 'compile_and_run_semantic'
+  | 'describe_metric'
   | 'inspect_relational_context'
+  | 'describe_relation'
   | 'compile_and_run_dql'
   | 'validate_and_run_sql'
   | 'search_values'
@@ -58,7 +60,9 @@ export const ASK_V2_CANONICAL_TOOLS: readonly AskToolNameV2[] = [
   'run_certified',
   'inspect_semantic_candidates',
   'compile_and_run_semantic',
+  'describe_metric',
   'inspect_relational_context',
+  'describe_relation',
   'compile_and_run_dql',
   'validate_and_run_sql',
   'search_values',
@@ -1170,6 +1174,12 @@ const ASK_V2_INSPECTION_TOOLS = new Set<AskToolNameV2>([
   'inspect_certified_candidates',
   'inspect_semantic_candidates',
   'inspect_relational_context',
+  // Describing an admitted relation or metric is retrieval over evidence the
+  // snapshot already contains. It cannot execute, cannot widen the snapshot,
+  // and is the move that turns a guessed identifier into a real one — so it
+  // is an inspection in every sense that matters to the kernel.
+  'describe_relation',
+  'describe_metric',
 ]);
 
 /**
@@ -1177,13 +1187,38 @@ const ASK_V2_INSPECTION_TOOLS = new Set<AskToolNameV2>([
  * action to take.  It cannot discover new snapshot evidence, so it must not
  * consume the logical V2 tool budget (including after receipt reload).
  */
-function askV2ObservationConsumesToolBudget(observation: AskToolObservationV1): boolean {
-  return !observation.executionAuthorized
-    && observation.reasonCode !== 'ASK_V2_REDUNDANT_INSPECTION'
-    && observation.reasonCode !== 'SEMANTIC_TIME_BINDING_COMPLETED'
-    && !(ASK_V2_INSPECTION_TOOLS.has(observation.tool)
-      && observation.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED');
+function askV2ObservationConsumesToolBudget(
+  observation: AskToolObservationV1,
+  priorObservations: readonly AskToolObservationV1[] = [],
+): boolean {
+  if (observation.executionAuthorized) return false;
+  if (observation.reasonCode === 'ASK_V2_REDUNDANT_INSPECTION') return false;
+  if (observation.reasonCode === 'SEMANTIC_TIME_BINDING_COMPLETED') return false;
+  if (ASK_V2_INSPECTION_TOOLS.has(observation.tool)
+    && observation.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED') return false;
+  // The FIRST refusal that hands back a real vocabulary is the moment the
+  // controller learns what this snapshot admits — it is the teaching turn, not
+  // wasted work, and charging it means a controller that corrects itself
+  // perfectly still runs out of budget. Every later repeat of the same lesson
+  // is charged normally, so this cannot become a way to retry forever.
+  if (ASK_V2_TEACHING_REFUSAL_REASON_CODES.has(observation.reasonCode)
+    && !priorObservations.some((prior) => ASK_V2_TEACHING_REFUSAL_REASON_CODES.has(prior.reasonCode))) {
+    return false;
+  }
+  return true;
 }
+
+/**
+ * Refusals whose payload names the admitted identifiers (see the lane's
+ * teaching contracts). They tell a controller precisely how to succeed next
+ * turn, which only helps if it still has a turn left.
+ */
+const ASK_V2_TEACHING_REFUSAL_REASON_CODES = new Set<string>([
+  'EXPLORATORY_OUTPUT_IDENTIFIER_NOT_ADMITTED',
+  'GOVERNED_RELATIONAL_IDENTIFIER_OR_PATH_NOT_ADMITTED',
+  'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT',
+  'SEMANTIC_FILTERS_INVALID',
+]);
 
 function initialKernelCounters(state: AskAgentStateV4): {
   toolCalls: number;
@@ -1205,6 +1240,9 @@ function initialKernelCounters(state: AskAgentStateV4): {
     clarifications: 0,
   };
   const authorizedAttempts = new Set<string>();
+  // Budget rules that depend on what came before must see the same prefix a
+  // live run saw, so a reloaded receipt counts exactly what the turn counted.
+  const seenObservations: AskToolObservationV1[] = [];
   for (const observation of state.observations) {
     // The host authorization observation is internal to the one tool call;
     // it must not consume a second LLM tool budget after a process reload.
@@ -1212,7 +1250,8 @@ function initialKernelCounters(state: AskAgentStateV4): {
     // execution evidence. It must not consume the logical tool budget on a
     // reload; live transport policy already prevents it from becoming a
     // second discovery round.
-    if (askV2ObservationConsumesToolBudget(observation)) initial.toolCalls += 1;
+    if (askV2ObservationConsumesToolBudget(observation, seenObservations)) initial.toolCalls += 1;
+    seenObservations.push(observation);
     if (executionTools.has(observation.tool)) {
       const attemptKey = `${observation.tool}:${observation.planId ?? observation.inputFingerprint ?? observation.reasonCode}:${observation.samePlanRepair === true ? 'repair' : 'initial'}`;
       if (observation.executionAuthorized) {
@@ -1333,6 +1372,8 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
   };
 
   const hasToolObservation = (tool: AskToolNameV2): boolean => state.observations.some((observation) => observation.tool === tool);
+  /** Whether a bounded same-snapshot card expansion is still available. */
+  const expansionsRemain = (): boolean => expansions < ASK_V2_BUDGETS.ask.expansions;
   /**
    * The initial provider package already contains the immutable role-balanced
    * cards and atomic relationship-path handles. `inspect_ask_context` may
@@ -1353,6 +1394,91 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
     observation.outcome === 'executed' && executionToolTier[observation.tool] !== undefined
   ));
   const analyticalTurn = (): boolean => state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'research';
+  /**
+   * A refusal that means "you named something this snapshot does not admit".
+   *
+   * These are the only refusals a controller can act on by LEARNING rather
+   * than by choosing a different tier: the tier was right, the vocabulary was
+   * wrong. Treating them like any other denial is what produced the recorded
+   * dead end — the policy kept offering exactly the two run tools that had
+   * just refused the same invented identifiers, so every remaining dispatch
+   * was spent re-guessing until the budget died.
+   */
+  const ASK_V2_VOCABULARY_GAP_REASON_CODES = new Set<string>([
+    'EXPLORATORY_OUTPUT_IDENTIFIER_NOT_ADMITTED',
+    'EXPLORATORY_SQL_VALIDATION_FAILED',
+    'GOVERNED_RELATIONAL_IDENTIFIER_OR_PATH_NOT_ADMITTED',
+    'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT',
+    'CERTIFIED_CANDIDATE_NOT_ADMITTED_TO_SNAPSHOT',
+  ]);
+  const lastVocabularyGapIndex = (): number => {
+    for (let index = state.observations.length - 1; index >= 0; index -= 1) {
+      const observation = state.observations[index]!;
+      if (ASK_V2_VOCABULARY_GAP_REASON_CODES.has(observation.reasonCode)) return index;
+    }
+    return -1;
+  };
+  /** Discovery that can actually close a vocabulary gap, not mere re-reading. */
+  const VOCABULARY_RECOVERY_TOOLS = new Set<AskToolNameV2>([
+    'describe_relation',
+    'describe_metric',
+    'inspect_ask_context',
+  ]);
+  const vocabularyRecoveryAttempted = (): boolean => {
+    const gapIndex = lastVocabularyGapIndex();
+    if (gapIndex < 0) return false;
+    return state.observations
+      .slice(gapIndex + 1)
+      .some((observation) => VOCABULARY_RECOVERY_TOOLS.has(observation.tool));
+  };
+  /**
+   * Reopen discovery after a vocabulary gap.
+   *
+   * The controller keeps every execution tool the tier ladder allows, and
+   * additionally regains the three moves that can turn a guess into a real
+   * identifier. Once it has actually tried one of them, `finish_answer` is
+   * added too: a controller that looked and found nothing usable must be able
+   * to say so as a typed gap instead of spending the budget on refusals.
+   */
+  const withVocabularyRecovery = (policy: {
+    allowedToolNames: AskToolNameV2[];
+    instruction?: string;
+    terminalActionToolNames?: AskToolNameV2[];
+  }): {
+    allowedToolNames: AskToolNameV2[];
+    instruction?: string;
+    terminalActionToolNames?: AskToolNameV2[];
+  } => {
+    if (lastVocabularyGapIndex() < 0) return policy;
+    const recovered = vocabularyRecoveryAttempted();
+    const added: AskToolNameV2[] = [
+      'describe_relation',
+      'describe_metric',
+      ...(!hasToolObservation('inspect_ask_context') || expansionsRemain() ? ['inspect_ask_context' as const] : []),
+      ...(recovered ? ['finish_answer' as const] : []),
+    ];
+    const allowedToolNames = [...new Set([...policy.allowedToolNames, ...added])];
+    return {
+      ...policy,
+      allowedToolNames,
+      instruction: [
+        policy.instruction,
+        'An identifier you sent was not admitted. Call describe_relation on an admitted relation to see its real columns'
+        + ' (or describe_metric for a metric\'s compatible dimensions), then re-send the execution tool using those exact names.'
+        + (recovered
+          ? ' If nothing admitted can express the question, call finish_answer and name precisely what is missing.'
+          : ''),
+      ].filter(Boolean).join(' '),
+      // The recovery inspectors are deliberately NOT terminal actions: a
+      // transport forcing a final action must still force a real execution or
+      // a typed finish, never another look.
+      ...(policy.terminalActionToolNames?.length
+        ? { terminalActionToolNames: recovered
+          ? [...new Set([...policy.terminalActionToolNames, 'finish_answer' as const])]
+          : policy.terminalActionToolNames }
+        : {}),
+    };
+  };
   const toolPolicy = (): {
     allowedToolNames: AskToolNameV2[];
     instruction?: string;
@@ -1475,20 +1601,20 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         };
       }
       if (recovery.length > 0) {
-        return {
+        return withVocabularyRecovery({
           allowedToolNames: recovery,
           instruction: recovery.includes('request_clarification')
             ? 'The selected tier requires the host-issued material clarification. Do not inspect another tier.'
             : `Correct the same selected ${committedTier} tool arguments now. Do not inspect another tier or answer in prose.`,
           terminalActionToolNames: recovery,
-        };
+        });
       }
       if (committedState?.status !== 'unavailable' && committedState?.status !== 'ineligible' && committedState?.status !== 'ambiguous') {
-        return {
+        return withVocabularyRecovery({
           allowedToolNames: [committedExecutionTool],
           instruction: `The controller selected the eligible ${committedTier} tier from the immutable snapshot. Call ${committedExecutionTool} now with admitted IDs; do not inspect another tier or answer in prose.`,
           terminalActionToolNames: [committedExecutionTool],
-        };
+        });
       }
     }
     // A semantic inspection gives the model all metric/time compatibility
@@ -1514,13 +1640,13 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
       const relationalAlternatives = hasInitialRelationshipClosure()
         ? ['compile_and_run_dql', 'validate_and_run_sql'] as AskToolNameV2[]
         : [];
-      return {
+      return withVocabularyRecovery({
         allowedToolNames: ['compile_and_run_semantic', ...relationalAlternatives],
         instruction: relationalAlternatives.length
           ? 'Certified is not complete. Execute the highest compatible tier now: use compile_and_run_semantic when the selected metric/dimensions are compatible; otherwise use admitted path-bound compile_and_run_dql, or review-required SQL only when DQL cannot prove the tuple. Do not repeat inspection.'
           : 'Certified is not complete and compatible semantic evidence is inspected. Call compile_and_run_semantic now with admitted IDs; do not repeat inspection.',
         terminalActionToolNames: ['compile_and_run_semantic', ...relationalAlternatives],
-      };
+      });
     }
     if (certifiedInspected && semanticInspected && semanticState?.status === 'ambiguous'
       && issuedMaterialClarificationChoices().length >= 2) {
@@ -1538,11 +1664,11 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
     }
     if (certifiedInspected && semanticInspected && semanticState?.status === 'ambiguous'
       && relationalInspected && relationalAvailable) {
-      return {
+      return withVocabularyRecovery({
         allowedToolNames: ['compile_and_run_dql', 'validate_and_run_sql'],
-        instruction: 'Semantic meanings remain unresolved without a host-issued material clarification. Execute the admitted governed relational plan when it proves the tuple, otherwise validate one review-required SQL proposal; do not repeat inspection.',
+        instruction: 'Semantic meanings remain unresolved without a host-issued material clarification. Execute the admitted governed relational plan when it proves the tuple, otherwise validate one review-required SQL proposal.',
         terminalActionToolNames: ['compile_and_run_dql', 'validate_and_run_sql'],
-      };
+      });
     }
     if (certifiedInspected && !semanticInspected) {
       return {
@@ -1565,11 +1691,11 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
     }
     if (certifiedInspected && semanticInspected && (semanticState?.status === 'unavailable' || semanticState?.status === 'ineligible') && relationalInspected) {
       if (relationalState?.status === 'complete') {
-        return {
+        return withVocabularyRecovery({
           allowedToolNames: ['compile_and_run_dql'],
           instruction: 'Certified and semantic tiers cannot execute and the host proves a complete governed relational tuple. Compile admitted DQL next.',
           terminalActionToolNames: ['compile_and_run_dql'],
-        };
+        });
       }
       if (relationalState?.status === 'available') {
         // Availability means the snapshot has relationship evidence, not
@@ -1577,25 +1703,25 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         // controller may choose a path-bound DQL program, or safely validate
         // exploratory SQL against the same admitted closure. Only a complete
         // earlier tier can forbid that lower route.
-        return {
+        return withVocabularyRecovery({
           allowedToolNames: ['compile_and_run_dql', 'validate_and_run_sql'],
           instruction: 'Certified and semantic tiers cannot execute. Governed relational evidence is available but not complete for this request: choose admitted DQL when it proves the tuple, otherwise validate one review-required SQL proposal against the admitted closure.',
           terminalActionToolNames: ['compile_and_run_dql', 'validate_and_run_sql'],
-        };
+        });
       }
       if (relationalAvailable) {
-        return {
+        return withVocabularyRecovery({
           allowedToolNames: ['compile_and_run_dql', 'validate_and_run_sql'],
-          instruction: 'Certified and semantic tiers cannot execute. The immutable initial snapshot already supplied an admitted relationship closure: execute path-bound DQL when it proves the tuple, otherwise validate one review-required SQL proposal. Do not repeat inspection.',
+          instruction: 'Certified and semantic tiers cannot execute. The immutable initial snapshot already supplied an admitted relationship closure: execute path-bound DQL when it proves the tuple, otherwise validate one review-required SQL proposal.',
           terminalActionToolNames: ['compile_and_run_dql', 'validate_and_run_sql'],
-        };
+        });
       }
       if (relationalState?.status === 'unavailable' || relationalState?.status === 'ineligible') {
-        return {
+        return withVocabularyRecovery({
           allowedToolNames: ['validate_and_run_sql'],
           instruction: 'Earlier governed tiers are unavailable or ineligible. Validate one read-only SQL proposal against the admitted exploratory closure.',
           terminalActionToolNames: ['validate_and_run_sql'],
-        };
+        });
       }
     }
     // Snapshot retrieval is immutable. Do not let an analytical controller
@@ -1616,17 +1742,17 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
     ].filter((tool): tool is AskToolNameV2 => Boolean(tool));
     if (remainingInspectors.length) {
       return {
-        allowedToolNames: remainingInspectors,
+        allowedToolNames: [...remainingInspectors, 'describe_relation', 'describe_metric'],
         instruction: 'Inspect only the remaining analytical tier evidence from this immutable snapshot. Do not repeat context or business inspection; after the required tier evidence is available, execute or return a typed clarification/denial.',
       };
     }
-    return {
+    return withVocabularyRecovery({
       // An analytical turn cannot finish as ungrounded prose before a tool
       // produces a validated result or a typed clarification/gap.
       allowedToolNames: all.filter((tool) => tool !== 'finish_answer' && tool !== 'request_clarification'
         && tool !== 'inspect_ask_context' && tool !== 'inspect_business_context'
         && tool !== 'inspect_conversation_result'),
-    };
+    });
   };
 
   const controllerTier = (): AskExecutionTierV2 | undefined => {
@@ -1813,7 +1939,7 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
       // A host-only semantic argument completion is emitted inside the same
       // physical tool call before authorization. Preserve it in V8 without
       // double-charging the provider tool budget.
-      if (askV2ObservationConsumesToolBudget(observation)) toolCalls += 1;
+      if (askV2ObservationConsumesToolBudget(observation, state.observations)) toolCalls += 1;
       const executionTier = executionToolTier[observation.tool];
       const tier = executionTier ?? inspectionToolTier[observation.tool] ?? observation.tier;
       if (tier) {

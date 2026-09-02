@@ -8693,9 +8693,32 @@ function selectRankedMetadataObjects(ranked: RankedMetadataObject[], limit: numb
   return selected.sort((a, b) => a.rank - b.rank);
 }
 
+/**
+ * A semantic dimension the semantic layer SYNTHESIZED from a physical column,
+ * rather than one an author declared in a semantic model.
+ *
+ * When a dbt project has no top-level metrics, the provider falls back to a
+ * per-model column inventory and every documented column becomes a
+ * `semantic_dimension`. On a 3,000-model warehouse that is tens of thousands
+ * of objects which are, factually, duplicates of the `dbt_column` objects
+ * beside them — but they outrank the real dbt model and column rows, so a
+ * question about ARR retrieved a wall of synthesized `*_arr` dimensions and
+ * pushed the actual ARR mart out of the window. They are still legitimate
+ * evidence; they are simply not better evidence than the thing they were
+ * copied from. Authored dimensions (from a real semantic model) are untouched.
+ */
+function isSynthesizedColumnDimension(row: MetadataObject): boolean {
+  if (row.objectType !== 'semantic_dimension') return false;
+  const payload = row.payload as { provenance?: unknown; certification?: unknown } | undefined;
+  return payload?.provenance === 'dbt dbt_column' && payload?.certification === 'ai_generated';
+}
+
 function scoreMetadataObject(row: MetadataObject, terms: string[]): number {
   let score = row.score ? row.score * 10 : 0;
   score += Math.max(0, 44 - objectPriority(row) * 2);
+  // Rank a synthesized column-dimension below the dbt model and column it was
+  // derived from, so real relations keep their place in the retrieval window.
+  if (isSynthesizedColumnDimension(row)) score -= 18;
   if (row.status === 'certified') score += 36;
   if (row.status === 'approved') score += 24;
   if (row.status === 'draft') score -= 8;

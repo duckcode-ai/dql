@@ -94,9 +94,19 @@ export function buildAskV2AnalystSystemPrompt(state: AskAgentStateV4): string {
 
     [
       'WHEN A TOOL RETURNS ok:false, READ safeNextTools AND CALL ONE OF THEM ON YOUR NEXT TURN.',
-      'That field is the host telling you the one move that can still succeed. Never repeat a call that was just',
-      'refused — repeating it cannot change the answer and spends the budget the working path needed.',
-      'A refused finish_answer means the turn is NOT finished: you have not yet reached a tier that can execute.',
+      'That field is the host telling you which moves can still succeed. Never re-send a call with the SAME arguments that',
+      'were just refused — nothing about the snapshot changed, so it will be refused again and the budget the working path',
+      'needed is gone. Re-sending the same tool with CORRECTED arguments is not a repeat; it is the intended recovery.',
+    ].join(' '),
+
+    [
+      'AN IDENTIFIER THAT WAS NOT ADMITTED IS A VOCABULARY PROBLEM, AND IT HAS A FIXED CURE.',
+      'A refusal naming admittedRelations, admittedIdentifiers or admittedOutputIds means the tier was right and the names',
+      'were wrong. Do not guess a second spelling. Call describe_relation on the relation you intend to query — it returns',
+      'every column the catalog recorded — or describe_metric to see which dimensions a metric can actually be grouped by.',
+      'Then re-send the execution tool using those exact names. A column of an admitted relation is written',
+      '"<relation-id>.<column>". Only when nothing admitted can express the question should you call finish_answer and say',
+      'precisely which field is missing.',
     ].join(' '),
 
     [
@@ -121,9 +131,10 @@ export function buildAskV2AnalystSystemPrompt(state: AskAgentStateV4): string {
     ].join(' '),
 
     [
-      'ASK ONE GOOD QUESTION RATHER THAN GUESSING. When a reference could mean several things, call request_clarification',
-      'with the concrete choices you found. One precise question is a good answer; a silently chosen member is a wrong',
-      'answer the user cannot see. Ask at most once, and only when the choice genuinely changes the result.',
+      'ASK ONE GOOD QUESTION RATHER THAN GUESSING — but only when the host has offered you the choice. request_clarification',
+      'is accepted when a tool result hands you concrete alternatives (a materially ambiguous set, or an ambiguousReference',
+      'in the conversation context). Outside that, an ambiguity you cannot resolve is reported through finish_answer, naming',
+      'what was ambiguous. A silently chosen member is a wrong answer the user cannot see.',
     ].join(' '),
   ];
 

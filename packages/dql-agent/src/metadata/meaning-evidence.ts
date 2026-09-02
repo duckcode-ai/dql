@@ -25,6 +25,24 @@ import type { KnowledgeLens } from '../domain-context.js';
 export type MetadataEvidenceClass = 'certified' | 'semantic' | 'sql';
 export type MetadataEvidenceTrust = 'certified' | 'semantic' | 'governed_sql' | 'exploratory';
 
+/**
+ * One physical column of a retrieved relation.
+ *
+ * A relation card used to arrive with its identity and no vocabulary: the
+ * catalog object carries `payload.columns`, the SQL validator checks against
+ * those very columns, and yet nothing between the two ever showed them to the
+ * planner. A model holding `mart_arr` could name the table and then had to
+ * guess `customer_account_name` — which every tier refused. Carrying the
+ * columns on the card closes that gap without widening any authority: the
+ * host still proves the column belongs to the relation before it is
+ * admissible, and the compiler still validates the finished query.
+ */
+export interface RelationColumnFactV1 {
+  name: string;
+  type?: string;
+  description?: string;
+}
+
 export interface MetadataMeaningCandidate {
   objectKey: string;
   qualifiedId: string;
@@ -44,6 +62,13 @@ export interface MetadataMeaningCandidate {
   semanticRuntimeName?: string;
   /** Source-authored semantic/member or physical column type. */
   dataType?: string;
+  /**
+   * Physical columns of a relation card, straight from the immutable catalog
+   * object. Bounded for transport; `columnCount` reports the true total so a
+   * planner knows when it is looking at a prefix.
+   */
+  columns?: RelationColumnFactV1[];
+  columnCount?: number;
   relevanceReasons: string[];
   compatibilityFacts: string[];
   businessShape: {
@@ -662,6 +687,8 @@ function agentCandidateFromMeaning(
       dataType: candidate.dataType,
       primaryEntity: candidate.businessShape.entities[0],
       dimensions: dimensionLookupAliases(candidate.businessShape.dimensions),
+      ...(candidate.columns?.length ? { columns: candidate.columns } : {}),
+      ...(candidate.columnCount ? { columnCount: candidate.columnCount } : {}),
       timeGrains: candidate.businessShape.timeGrains,
       requiredParameters: candidate.businessShape.parameters,
       sourceObjects: candidate.businessShape.sourceRelations,
@@ -1537,6 +1564,7 @@ function candidateCard(
     const normalized = normalizeText(role);
     return normalized === 'geography' || normalized === 'geographic';
   });
+  const relationColumns = relationColumnFacts(payload);
   const compatibilityFacts = uniqueStrings([
     // Carry only authored, snapshot-local compatibility facts. Consumers use
     // these as typed declarations, never as fuzzy lexical aliases.
@@ -1572,6 +1600,11 @@ function candidateCard(
     // capability data. It must never become a fuzzy retrieval alias.
     ...(semanticRuntimeName ? { semanticRuntimeName } : {}),
     ...(dataType ? { dataType } : {}),
+    // The catalog already holds every documented column of a relation. A card
+    // that withholds them forces the planner to invent identifiers, so carry a
+    // bounded prefix plus the honest total.
+    ...(relationColumns.length ? { columns: relationColumns.slice(0, MAX_CARD_RELATION_COLUMNS) } : {}),
+    ...(relationColumns.length ? { columnCount: relationColumns.length } : {}),
     relevanceReasons,
     compatibilityFacts,
     businessShape: {
@@ -1760,6 +1793,48 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
     : [];
+}
+
+/**
+ * How many columns the host RETAINS for a relation candidate. The provider
+ * card shows only the first forty of these; the rest exist so
+ * `describe_relation` can serve the real vocabulary of a wide fact table
+ * without a second catalog round trip. A 436-column mart is normal in an
+ * enterprise warehouse, so the ceiling is generous.
+ */
+const MAX_CARD_RELATION_COLUMNS = 300;
+
+/**
+ * Read the catalog object's documented columns. dbt models, dbt sources, and
+ * runtime tables all serialize them the same way; anything else has none.
+ */
+function relationColumnFacts(payload: Record<string, unknown>): RelationColumnFactV1[] {
+  const raw = payload.columns;
+  if (!Array.isArray(raw)) return [];
+  const facts: RelationColumnFactV1[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry === 'string') {
+      const name = entry.trim();
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      facts.push({ name });
+      continue;
+    }
+    const row = recordValue(entry);
+    if (!row) continue;
+    const name = firstString(row.name, row.column, row.columnName)?.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const type = firstString(row.type, row.dataType, row.data_type);
+    const description = truncate(firstString(row.description), 120);
+    facts.push({
+      name,
+      ...(type ? { type } : {}),
+      ...(description ? { description } : {}),
+    });
+  }
+  return facts;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {

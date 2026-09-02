@@ -28,7 +28,7 @@ export interface ProjectEmbeddingSettings {
   baseUrl?: string;
 }
 
-function readProjectEmbeddingSettings(projectRoot: string): ProjectEmbeddingSettings {
+export function readProjectEmbeddingSettings(projectRoot: string): ProjectEmbeddingSettings {
   const configPath = join(projectRoot, 'dql.config.json');
   if (!existsSync(configPath)) return {};
   try {

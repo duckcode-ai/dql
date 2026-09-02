@@ -782,15 +782,94 @@ function jsonCandidates(raw: string): string[] {
   return out;
 }
 
+/**
+ * How much of a tool observation reaches the model.
+ *
+ * A hard slice through JSON is the worst possible bound: it cuts mid-token,
+ * breaks the structure, and silently drops whatever sorted last — which, for a
+ * card inspection, is the tail of the very identifier list the model is
+ * required to quote verbatim. Discovery results therefore get a larger budget
+ * and, when they still exceed it, are shrunk FIELD BY FIELD (prose first,
+ * identifiers last) so the result stays valid JSON and keeps the part that
+ * matters.
+ */
+const OBSERVATION_BUDGET_BYTES = 8_000;
+const DISCOVERY_OBSERVATION_BUDGET_BYTES = 24_000;
+const DISCOVERY_TOOLS = new Set([
+  'inspect_ask_context',
+  'inspect_certified_candidates',
+  'inspect_semantic_candidates',
+  'inspect_relational_context',
+  'inspect_business_context',
+  'describe_relation',
+  'describe_metric',
+]);
+
+/**
+ * Drop the most expendable prose from a card-bearing payload, in order, until
+ * it fits. Identifiers, usage guidance and column names are never removed —
+ * losing those is what makes an observation useless.
+ */
+function shrinkObservationPayload(output: unknown, budget: number): unknown {
+  const serialized = (value: unknown): number => {
+    try { return JSON.stringify(value)?.length ?? 0; } catch { return Number.MAX_SAFE_INTEGER; }
+  };
+  if (serialized(output) <= budget) return output;
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return output;
+  const record = { ...(output as Record<string, unknown>) };
+  const cards = Array.isArray(record.cards) ? [...record.cards] as unknown[] : undefined;
+  const trimCards = (mutate: (card: Record<string, unknown>) => void): void => {
+    if (!cards) return;
+    for (let index = 0; index < cards.length; index += 1) {
+      const card = cards[index];
+      if (card && typeof card === 'object' && !Array.isArray(card)) {
+        const next = { ...(card as Record<string, unknown>) };
+        mutate(next);
+        cards[index] = next;
+      }
+    }
+    record.cards = cards;
+  };
+  // 1. Definitions are the largest field and the least load-bearing.
+  trimCards((card) => { delete card.definition; });
+  if (serialized(record) <= budget) return record;
+  // 2. Compatibility prose and relationship narration.
+  trimCards((card) => { delete card.compatibilityFacts; delete card.relationshipEvidence; });
+  if (serialized(record) <= budget) return record;
+  // 3. Column descriptions, then column type annotations.
+  trimCards((card) => {
+    if (!Array.isArray(card.columns)) return;
+    card.columns = (card.columns as unknown[]).map((column) => (
+      column && typeof column === 'object' && !Array.isArray(column)
+        ? { name: (column as Record<string, unknown>).name }
+        : column
+    ));
+  });
+  if (serialized(record) <= budget) return record;
+  // 4. Finally drop whole cards from the tail, recording how many, so the
+  //    model knows it is looking at a prefix rather than the whole snapshot.
+  if (cards && cards.length > 1) {
+    let kept = cards.length;
+    while (kept > 1 && serialized({ ...record, cards: cards.slice(0, kept) }) > budget) kept -= 1;
+    if (kept < cards.length) {
+      record.cards = cards.slice(0, kept);
+      record.cardsOmitted = cards.length - kept;
+      record.cardsOmittedNote = 'Call inspect_ask_context with expand for the remaining admitted cards.';
+    }
+  }
+  return record;
+}
+
 function renderObservation(name: string, output: unknown): string {
+  const budget = DISCOVERY_TOOLS.has(name) ? DISCOVERY_OBSERVATION_BUDGET_BYTES : OBSERVATION_BUDGET_BYTES;
   let body: string;
   try {
-    body = JSON.stringify(output);
+    body = JSON.stringify(shrinkObservationPayload(output, budget)) ?? '';
   } catch {
     body = String(output);
   }
-  // Bound the observation so a large tool result can't blow the context window.
-  if (body.length > 8000) body = `${body.slice(0, 8000)}… (truncated)`;
+  // A last-resort bound for a payload no structural shrink could reach.
+  if (body.length > budget) body = `${body.slice(0, budget)}… (truncated)`;
   return `Observation from ${name}:\n\`\`\`json\n${body}\n\`\`\``;
 }
 

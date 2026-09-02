@@ -591,6 +591,22 @@ function v2SafeCard(
         return unique.length ? { compatibleDimensionIds: unique } : {};
       })()
       : {}),
+    // A relation the planner cannot describe is a relation it cannot query.
+    // The catalog knows these columns and the SQL validator already checks
+    // against them; showing them is what lets a query be built instead of
+    // guessed. `describe_relation` serves the full list when this prefix is
+    // not enough.
+    ...(candidate.columns?.length
+      ? {
+        columns: candidate.columns.slice(0, 40).map((column) => ({
+          name: column.name,
+          ...(column.type ? { type: column.type } : {}),
+        })),
+        ...(candidate.columnCount && candidate.columnCount > Math.min(40, candidate.columns.length)
+          ? { columnCount: candidate.columnCount, columnsTruncated: true }
+          : {}),
+      }
+      : {}),
     ...(candidate.timeGrains?.length ? { timeGrains: candidate.timeGrains.slice(0, 8) } : {}),
     ...(candidate.sourceObjects?.length ? { sourceObjects: candidate.sourceObjects.slice(0, 12) } : {}),
     ...(candidate.relationshipEvidence?.length ? { relationshipEvidence: candidate.relationshipEvidence.slice(0, 8) } : {}),
@@ -1672,13 +1688,75 @@ function createAskV2LaneHandler(
       }
       return Object.keys(byRole).length > 0 ? byRole : undefined;
     };
+    /**
+     * Resolve one model-supplied identifier against the admitted workspace.
+     *
+     * Two forms are legal. The first is a card ID exactly as a tool returned
+     * it. The second is `<relation>.<column>` — a column of an admitted
+     * relation, where `<relation>` may be the relation's card ID or its plain
+     * name. That second form is not a loosening of admission: the host proves
+     * the column is one the immutable catalog recorded for that exact relation
+     * before accepting it, and every downstream gate still receives the
+     * RELATION's own admitted ID. It exists because a relation card without a
+     * usable column vocabulary leaves a planner nothing to say but a guess,
+     * and a guess is refused every time.
+     */
+    const relationColumnNames = (candidate: AgentEvidenceCandidate): Set<string> =>
+      new Set((candidate.columns ?? []).map((column) => column.name.trim().toLowerCase()).filter(Boolean));
+    const resolveAdmittedReference = (
+      rawId: string,
+    ): { candidate: AgentEvidenceCandidate; column?: string } | undefined => {
+      const id = rawId.trim();
+      if (!id) return undefined;
+      const visible = visibleCandidates();
+      const byId = new Map(visible.map((candidate) => [v2CandidateId(candidate), candidate] as const));
+      const exact = byId.get(id);
+      if (exact) return { candidate: exact };
+      const separator = id.lastIndexOf('.');
+      if (separator <= 0 || separator === id.length - 1) return undefined;
+      const relationRef = id.slice(0, separator);
+      const column = id.slice(separator + 1);
+      const relation = byId.get(relationRef)
+        ?? visible.find((candidate) => candidate.name === relationRef)
+        ?? visible.find((candidate) => candidate.name.toLowerCase() === relationRef.toLowerCase());
+      if (!relation) return undefined;
+      // Only a relation carries columns; a metric or dimension card that
+      // happens to contain a dot must not become a pseudo-relation.
+      if (!relationColumnNames(relation).has(column.trim().toLowerCase())) return undefined;
+      return { candidate: relation, column };
+    };
     const resolveCandidates = (ids: string[], predicate?: (candidate: AgentEvidenceCandidate) => boolean): AgentEvidenceCandidate[] | undefined => {
       if (ids.length === 0 || !workspace) return undefined;
-      const byId = new Map(visibleCandidates().map((candidate) => [v2CandidateId(candidate), candidate] as const));
-      const resolved = ids.map((id) => byId.get(id));
+      const resolved = ids.map((id) => resolveAdmittedReference(id)?.candidate);
       if (resolved.some((candidate) => !candidate) || (predicate && resolved.some((candidate) => !predicate(candidate!)))) return undefined;
-      return resolved as AgentEvidenceCandidate[];
+      // A column reference resolves to its relation, so several selected
+      // columns of one table collapse to that single admitted candidate. The
+      // execution closure is the relation either way.
+      const unique: AgentEvidenceCandidate[] = [];
+      for (const candidate of resolved as AgentEvidenceCandidate[]) {
+        if (!unique.some((entry) => v2CandidateId(entry) === v2CandidateId(candidate))) unique.push(candidate);
+      }
+      return unique;
     };
+    /**
+     * The relation vocabulary a governed-relational or exploratory-SQL call
+     * may draw from: every admitted relation, and for each the columns the
+     * catalog proved it has. This is what a refusal must hand back — a bare
+     * "not admitted" costs a turn and teaches nothing.
+     */
+    const admittedRelationVocabulary = (limit = 12): Array<Record<string, unknown>> =>
+      visibleCandidates()
+        .filter((candidate) => (candidate.columns?.length ?? 0) > 0)
+        .slice(0, limit)
+        .map((candidate) => ({
+          id: v2CandidateId(candidate),
+          name: candidate.name,
+          ...(candidate.sourceObjects?.length ? { relation: candidate.sourceObjects[0] } : {}),
+          columns: (candidate.columns ?? []).slice(0, 40).map((column) => column.name),
+          ...(candidate.columnCount && candidate.columnCount > Math.min(40, candidate.columns?.length ?? 0)
+            ? { columnCount: candidate.columnCount }
+            : {}),
+        }));
     const inspected = (tool: AskToolNameV2) => {
       if (tool === 'inspect_relational_context') {
         // The initial immutable context response includes the bounded atomic
@@ -2009,6 +2087,15 @@ function createAskV2LaneHandler(
               : suppliedSemanticState?.status === 'complete'
                 ? 'complete' as const
                 : 'available' as const;
+        // "No metric is admitted" and "a metric is admitted but no engine can
+        // run it" are different facts with different cures — one is a modeling
+        // or retrieval gap, the other is a runtime configuration problem — and
+        // reporting both as SEMANTIC_ENGINE_UNAVAILABLE sent every reader
+        // looking for a broken MetricFlow that was never involved. On a
+        // project with no dbt metrics at all, the honest answer is that this
+        // snapshot admitted no metric.
+        const admittedMetricCard = candidates.some((candidate) =>
+          askV2ExecutableSemanticRoles(candidate)?.includes('metric') === true);
         const semanticReasonCode = ids.length === 0
           ? 'SEMANTIC_CANDIDATES_EMPTY'
           : !hostExecutionReady
@@ -2018,7 +2105,7 @@ function createAskV2LaneHandler(
               : suppliedSemanticState?.status === 'unavailable' || suppliedSemanticState?.status === 'ineligible'
                 ? suppliedSemanticState.reasonCode
             : !executableMetric
-              ? 'SEMANTIC_ENGINE_UNAVAILABLE'
+              ? (admittedMetricCard ? 'SEMANTIC_ENGINE_UNAVAILABLE' : 'SEMANTIC_METRICS_NOT_ADMITTED')
               : suppliedSemanticState?.reasonCode ?? 'SEMANTIC_CANDIDATES_AVAILABLE';
         setAskV2TierState(state, 'semantic', {
           status: semanticStatus,
@@ -2044,6 +2131,12 @@ function createAskV2LaneHandler(
         const admitted = admittedSemanticIdentifiers();
         return {
           cards: candidates.map((candidate) => v2SafeCard(candidate, workspace)),
+          ...(semanticReasonCode === 'SEMANTIC_METRICS_NOT_ADMITTED'
+            ? {
+              note: 'This snapshot admitted semantic dimensions but no executable metric, so the semantic tier cannot answer.'
+                + ' Continue with governed relational or review-required SQL over an admitted relation.',
+            }
+            : {}),
           // The exact identifiers compile_and_run_semantic accepts, by role.
           // A card's `dimensions` are human labels; these are the IDs.
           ...(admitted ? { admittedIdentifiers: admitted } : {}),
@@ -3032,6 +3125,145 @@ function createAskV2LaneHandler(
           return denied('compile_and_run_semantic', executionFailure.reasonCode);
         }
       }),
+      safeTool(
+        'describe_relation',
+        'Describe one admitted relation: every column the catalog recorded for it, plus the relationship paths it participates in.'
+        + ' Call this before writing DQL or SQL so you use real column names instead of guessing.',
+        {
+          type: 'object',
+          properties: { candidateId: { type: 'string', minLength: 1, description: 'An admitted relation card ID, or the relation name exactly as a card reported it.' } },
+          required: ['candidateId'],
+          additionalProperties: false,
+        },
+        async (args) => {
+          const requested = typeof args.candidateId === 'string' ? args.candidateId.trim() : '';
+          const resolved = requested ? resolveAdmittedReference(requested) : undefined;
+          const candidate = resolved?.candidate;
+          // A relation is a thing with columns. Refusing anything else keeps
+          // this tool from becoming a second, weaker card renderer.
+          if (!candidate || (candidate.columns?.length ?? 0) === 0) {
+            observe('describe_relation', 'ineligible', 'RELATION_NOT_ADMITTED', {
+              candidateIds: requested ? [requested] : [], origin: 'retrieval',
+            });
+            return {
+              ...denied('describe_relation', 'RELATION_NOT_ADMITTED'),
+              admittedRelations: admittedRelationVocabulary(),
+              usage: 'Pass candidateId from admittedRelations verbatim. Only a relation with catalog columns can be described.',
+            };
+          }
+          const id = v2CandidateId(candidate);
+          const columns = (candidate.columns ?? []).slice(0, 200).map((column) => ({
+            name: column.name,
+            ...(column.type ? { type: column.type } : {}),
+            ...(column.description ? { description: column.description } : {}),
+          }));
+          const relatedPaths = state.relationshipPathHandles
+            .filter((path) => (path.candidateIds ?? []).includes(id))
+            .slice(0, 8)
+            .map((path) => ({ id: path.id, edgeIds: path.edgeIds }));
+          observe('describe_relation', 'eligible', 'RELATION_DESCRIBED', { candidateIds: [id], origin: 'retrieval' });
+          return {
+            id,
+            name: candidate.name,
+            ...(candidate.definition ? { definition: candidate.definition } : {}),
+            ...(candidate.sourceObjects?.length ? { relation: candidate.sourceObjects[0] } : {}),
+            columns,
+            columnCount: candidate.columnCount ?? columns.length,
+            ...(columns.length < (candidate.columnCount ?? columns.length) ? { columnsTruncated: true } : {}),
+            ...(relatedPaths.length ? { relationshipPathHandles: relatedPaths } : {}),
+            usage: 'Reference these columns as "' + id + '.<column>" in expectedOutputIds/measureIds/dimensionIds,'
+              + ' and by their plain name inside SQL. Columns not listed here are not admitted for this relation.',
+          };
+        },
+      ),
+      safeTool(
+        'describe_metric',
+        'Describe one admitted semantic metric: the dimensions it can be grouped by, their queryable grains, and the dimensions that are'
+        + ' NOT reachable from it and why. Use it before compile_and_run_semantic when a breakdown may not be compatible.',
+        {
+          type: 'object',
+          properties: { candidateId: { type: 'string', minLength: 1, description: 'An admitted semantic metric candidate ID.' } },
+          required: ['candidateId'],
+          additionalProperties: false,
+        },
+        async (args) => {
+          const requested = typeof args.candidateId === 'string' ? args.candidateId.trim() : '';
+          const candidate = requested ? resolveAdmittedReference(requested)?.candidate : undefined;
+          const isMetric = Boolean(candidate)
+            && (candidate!.kind === 'semantic_metric'
+              || candidate!.semanticObjectType === 'metric'
+              || candidate!.semanticObjectType === 'measure');
+          if (!candidate || !isMetric) {
+            observe('describe_metric', 'ineligible', 'SEMANTIC_METRIC_NOT_ADMITTED', {
+              candidateIds: requested ? [requested] : [], origin: 'retrieval',
+            });
+            return {
+              ...denied('describe_metric', 'SEMANTIC_METRIC_NOT_ADMITTED'),
+              ...(admittedSemanticIdentifiers() ? { admittedIdentifiers: admittedSemanticIdentifiers() } : {}),
+              usage: 'Pass candidateId of an admitted semantic metric verbatim.',
+            };
+          }
+          const id = v2CandidateId(candidate);
+          const runtimeName = candidate.semanticRuntimeName ?? candidate.name;
+          const layer = input.semanticLayer;
+          if (!layer) {
+            // The card still carries the compatibility the snapshot captured.
+            observe('describe_metric', 'eligible', 'SEMANTIC_METRIC_DESCRIBED', { candidateIds: [id], origin: 'retrieval' });
+            return {
+              id,
+              name: candidate.name,
+              ...(candidate.definition ? { definition: candidate.definition } : {}),
+              compatibleDimensions: (candidate.dimensions ?? []).slice(0, 60),
+              ...(candidate.timeGrains?.length ? { timeGrains: candidate.timeGrains } : {}),
+              usage: 'Group only by dimensions listed here, using an admitted dimension candidate ID.',
+            };
+          }
+          // In-process compatibility over the FULL semantic layer, memoized by
+          // metric set. A card can only show the dimensions retrieval happened
+          // to admit; a metric with sixty reachable dimensions deserves better
+          // than that accident. No subprocess and no warehouse call.
+          let compatible: Array<{ name: string; qualifiedName?: string; grains?: string[] }> = [];
+          let incompatible: Array<{ name: string; reason: string }> = [];
+          try {
+            const explained = layer.explainCompatibleDimensions([runtimeName]);
+            compatible = explained.compatible.slice(0, 80).map((dimension) => ({
+              name: dimension.name,
+              ...(dimension.qualifiedName ? { qualifiedName: dimension.qualifiedName } : {}),
+              ...((dimension as { granularities?: string[] }).granularities?.length
+                ? { grains: (dimension as { granularities?: string[] }).granularities!.slice(0, 8) }
+                : {}),
+            }));
+            incompatible = explained.incompatible.slice(0, 24).map((entry) => ({ name: entry.name, reason: entry.reason }));
+          } catch {
+            compatible = (candidate.dimensions ?? []).slice(0, 60).map((name) => ({ name }));
+          }
+          // Name the admitted candidate ID for each compatible dimension when
+          // one exists: that is the only spelling compile_and_run_semantic
+          // accepts, and a display label that reads like an ID is exactly what
+          // used to be refused.
+          const withIds = compatible.map((dimension) => {
+            const dimensionId = resolveV2SemanticCapabilityReference({
+              reference: dimension.qualifiedName ?? dimension.name,
+              role: 'dimension',
+              candidates: workspace?.candidates ?? [],
+              capabilities: workspace?.semanticCapabilities,
+            });
+            return { ...dimension, ...(dimensionId ? { dimensionId } : {}) };
+          });
+          observe('describe_metric', 'eligible', 'SEMANTIC_METRIC_DESCRIBED', { candidateIds: [id], origin: 'retrieval' });
+          return {
+            id,
+            name: candidate.name,
+            ...(candidate.definition ? { definition: candidate.definition } : {}),
+            ...(candidate.aggregation ? { aggregation: candidate.aggregation } : {}),
+            compatibleDimensions: withIds,
+            ...(incompatible.length ? { incompatibleDimensions: incompatible } : {}),
+            ...(candidate.timeGrains?.length ? { timeGrains: candidate.timeGrains } : {}),
+            usage: 'Pass dimensionId values to compile_and_run_semantic. A dimension listed without a dimensionId is reachable'
+              + ' for this metric but not admitted in this snapshot, so it cannot be selected this turn.',
+          };
+        },
+      ),
       safeTool('inspect_relational_context', 'Inspect admitted qualified relation/column cards and atomic relationship path handles.', {
         type: 'object', properties: {}, additionalProperties: false,
       }, async () => {
@@ -3126,8 +3358,11 @@ function createAskV2LaneHandler(
             ...denied('compile_and_run_dql', reason),
             ...(reason === 'GOVERNED_RELATIONAL_IDENTIFIER_OR_PATH_NOT_ADMITTED' ? {
               admittedRelationalIds: admittedRelational,
+              admittedRelations: admittedRelationVocabulary(),
               admittedRelationshipPathIds: state.relationshipPathHandles.slice(0, 8).map((path) => path.id),
-              usage: 'Re-send compile_and_run_dql using measureIds/dimensionIds/expectedOutputIds from admittedRelationalIds verbatim and relationshipPathIds from admittedRelationshipPathIds. Invented identifiers are never admitted.',
+              usage: 'Re-send compile_and_run_dql using measureIds/dimensionIds/expectedOutputIds that are admitted card IDs or'
+                + ' "<relation>.<column>" naming a column of an admitted relation (see admittedRelations), and relationshipPathIds'
+                + ' from admittedRelationshipPathIds. Use describe_relation for the full column list of one relation.',
             } : {}),
           };
         }
@@ -3246,14 +3481,28 @@ function createAskV2LaneHandler(
           const admittedOutputs = reason === 'EXPLORATORY_OUTPUT_IDENTIFIER_NOT_ADMITTED'
             ? visibleCandidates().slice(0, 24).map((candidate) => v2CandidateId(candidate))
             : [];
+          // The validator names the exact offending relation or column. Reading
+          // a field it does not have ("reason") meant every SQL-validation
+          // refusal arrived bare, so the model re-sent the same query with no
+          // way to know what was wrong.
+          const validationDetail = !validation.ok
+            ? {
+              ...('error' in validation && typeof validation.error === 'string' ? { error: validation.error.slice(0, 400) } : {}),
+              ...('code' in validation && typeof validation.code === 'string' ? { validationCode: validation.code } : {}),
+              ...('offending' in validation && validation.offending ? { offending: validation.offending } : {}),
+            }
+            : {};
           return {
             ...denied('validate_and_run_sql', reason),
             ...(admittedOutputs.length ? {
               admittedOutputIds: admittedOutputs,
-              usage: 'Re-send validate_and_run_sql with expectedOutputIds drawn from admittedOutputIds verbatim; each must name a card your SQL actually selects.',
+              admittedRelations: admittedRelationVocabulary(),
+              usage: 'Every expectedOutputIds entry must be an admitted card ID, or "<relation>.<column>" naming a column of an admitted relation'
+                + ' (see admittedRelations). Use describe_relation to see every column of one relation.',
             } : {}),
-            ...(reason === 'EXPLORATORY_SQL_VALIDATION_FAILED' && !validation.ok && 'reason' in validation && validation.reason ? {
-              usage: String((validation as { reason?: unknown }).reason).slice(0, 400),
+            ...(reason === 'EXPLORATORY_SQL_VALIDATION_FAILED' ? {
+              ...validationDetail,
+              usage: 'Correct the SQL to reference only relations and columns proven above, then re-send validate_and_run_sql once.',
             } : {}),
           };
         }
@@ -3582,8 +3831,100 @@ function createAskV2LaneHandler(
     }
     let loop: Awaited<ReturnType<typeof runAgenticToolLoopDetailed>>;
     try {
+      // THE WORKSPACE TRAVELS WITH THE QUESTION.
+      //
+      // The kernel's policy was written believing "the initial provider
+      // package already contains the immutable role-balanced cards" — and for
+      // the research lane it does. For an ordinary analytical turn it never
+      // did: the first dispatch carried the system prompt and the question and
+      // nothing else. A model asked to use only identifiers a tool returned,
+      // holding zero identifiers, has exactly two moves — spend a dispatch on
+      // an inspection, or guess. It guessed, and every tier refused the guess.
+      // Sending the cards the host already selected costs nothing (they are
+      // the same bytes inspect_ask_context would return) and removes a whole
+      // round trip from every question.
+      // WHAT THE LAST ANSWER WAS.
+      //
+      // A follow-up is not a new question with fewer words. "Now split that by
+      // month" only means anything next to the measure, the members and the
+      // shape of the answer that preceded it — all of which the host already
+      // holds and, until now, never sent. The analyst received five words and
+      // a fresh workspace and had to re-derive an intent it was never told.
+      // These are the host's own typed conversation facts, not model memory:
+      // values stay bounded and the member binding remains host-authoritative.
+      const conversationBrief = ((): string | undefined => {
+        const followUp = input.followUp;
+        if (!followUp) return undefined;
+        const brief: Record<string, unknown> = {};
+        if (followUp.sourceQuestion) brief.previousQuestion = followUp.sourceQuestion;
+        if (followUp.priorMeasures?.length) brief.previousMeasures = followUp.priorMeasures.slice(0, 6);
+        if (followUp.dimensions?.length) brief.previousBreakdowns = followUp.dimensions.slice(0, 6);
+        if (followUp.filters?.length) brief.previousFilters = followUp.filters.slice(0, 8);
+        if (followUp.priorResultColumns?.length) brief.previousResultColumns = followUp.priorResultColumns.slice(0, 16);
+        if (typeof followUp.priorLimit === 'number') brief.previousRowLimit = followUp.priorLimit;
+        if (followUp.sourceBlockName) brief.previousCertifiedBlock = followUp.sourceBlockName;
+        // Members the host has already bound are authoritative; the analyst
+        // must not re-choose them, and naming them stops it from asking.
+        const boundMembers = (followUp.memberBindings ?? [])
+          .slice(0, 6)
+          .map((binding) => ({
+            dimension: binding.dimension,
+            values: binding.values.slice(0, 8),
+            confidence: binding.confidence,
+          }));
+        if (boundMembers.length) brief.boundMembers = boundMembers;
+        if (followUp.deicticChoices?.values?.length) {
+          brief.ambiguousReference = {
+            dimension: followUp.deicticChoices.dimension,
+            options: followUp.deicticChoices.values.slice(0, 8),
+          };
+        }
+        if (followUp.priorResultSetUnavailable) brief.previousResultSetUnavailable = true;
+        if (Object.keys(brief).length === 0) return undefined;
+        return 'This turn continues the previous answer. Host-recorded facts about it '
+          + '(authoritative — do not re-derive them from the question text):\n'
+          + JSON.stringify(brief);
+      })();
+      const openingCards = (workspace?.candidates ?? [])
+        .filter((candidate) => state.initialCandidateIds.includes(v2CandidateId(candidate)))
+        .map((candidate) => v2SafeCard(candidate, workspace));
+      if (openingCards.length > 0) {
+        // Recorded as an inspection so the receipt, the kernel's redundancy
+        // guard, and the tool-policy ladder all agree the controller has
+        // already seen this package.
+        observeAskAgentV2Tool(state, {
+          version: 1,
+          tool: 'inspect_ask_context',
+          outcome: 'eligible',
+          reasonCode: 'initial_snapshot_context',
+          candidateIds: state.initialCandidateIds,
+          origin: 'retrieval',
+        });
+      }
+      const openingContext = openingCards.length > 0
+        ? JSON.stringify({
+          snapshotId: state.snapshotId,
+          cards: openingCards,
+          relationshipPathHandles: state.relationshipPathHandles
+            .slice(0, 8)
+            .map((path) => ({
+              id: path.id,
+              edgeIds: path.edgeIds,
+              ...(path.candidateIds?.length ? { candidateIds: path.candidateIds } : {}),
+            })),
+        })
+        : undefined;
       loop = await runAgenticToolLoopDetailed(terminalAwareProvider, [
         { role: 'system', content: buildAskV2AnalystSystemPrompt(state) },
+        ...(openingContext
+          ? [{
+            role: 'user' as const,
+            content: 'Admitted context from the immutable snapshot for this question. These are the only identifiers you may reference;'
+              + ' call describe_relation for a relation\'s full column list, or inspect_ask_context with expand for more cards.\n'
+              + openingContext,
+          }]
+          : []),
+        ...(conversationBrief ? [{ role: 'user' as const, content: conversationBrief }] : []),
         { role: 'user', content: input.question },
       ], tools, {
         ...(input.signal ? { signal: input.signal } : {}),

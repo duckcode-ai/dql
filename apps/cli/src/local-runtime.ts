@@ -344,6 +344,9 @@ import {
   recordAgentRuntimeVersion,
   resolveDomainContextEnvelope,
   projectEmbeddingProvider,
+  readProjectEmbeddingSettings,
+  probeLocalOllamaEmbeddings,
+  resolveEmbeddingProvider,
   isHashedEmbeddingProvider,
   clearProjectEmbeddingCache,
   setProcessDefaultEmbeddingProvider,
@@ -4792,6 +4795,45 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // built with. Before this, library call sites without a project root fell
   // back to hashed embeddings while the catalog itself was semantic.
   setProcessDefaultEmbeddingProvider(projectEmbeddingProvider(projectRoot));
+  // ZERO-CONFIG SEMANTIC RETRIEVAL.
+  //
+  // The hashed provider is a token hash: it matches shared words and nothing
+  // else, so "customer accounts" cannot find a model documented as "billing
+  // entities" no matter how good the ranking is. It was the default for every
+  // project because turning it off required an environment variable no product
+  // surface mentioned. When the machine already runs Ollama with an embedding
+  // model pulled, use it — the data stays local, and a warehouse question
+  // finally matches on meaning.
+  //
+  // Re-embedding the index is not optional here: `searchVectorObjects` returns
+  // NOTHING when the requested provider disagrees with the one the index was
+  // built with, so upgrading the provider without upgrading the index would
+  // make retrieval strictly worse. Both move together or neither does.
+  void (async () => {
+    try {
+      const configured = readProjectEmbeddingSettings(projectRoot);
+      // An explicit project setting or environment override is the user's
+      // decision and is never second-guessed.
+      if (configured.provider
+        || process.env.DQL_OLLAMA_EMBED_URL
+        || process.env.DQL_OPENAI_API_KEY
+        || process.env.DQL_EMBEDDINGS_AUTODETECT === 'off') return;
+      const local = await probeLocalOllamaEmbeddings();
+      if (!local) return;
+      const provider = resolveEmbeddingProvider({ ollamaEndpoint: local.endpoint, ollamaModel: local.model });
+      const upgrade = await upgradeVectorIndexForProject(projectRoot, provider);
+      if (!upgrade.upgraded && upgrade.providerId !== provider.id) {
+        // Could not re-embed (model pulled but not serving, disk, etc.). Stay
+        // on the index the catalog actually holds rather than silently
+        // emptying the vector lane.
+        return;
+      }
+      setProcessDefaultEmbeddingProvider(provider);
+      console.log(`DQL: semantic retrieval enabled with local Ollama embeddings (${local.model}).`);
+    } catch {
+      // Retrieval must start regardless; hashed remains a working default.
+    }
+  })();
   // A slow provider needs a longer Ask window, and DQL already knows which
   // class the active provider is in: a local Ollama model or a
   // subscription-CLI passthrough costs 10-90s PER DISPATCH, so the default

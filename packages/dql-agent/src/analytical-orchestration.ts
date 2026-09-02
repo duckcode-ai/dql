@@ -200,6 +200,17 @@ export type EvidenceCandidateRoleV1 =
   | 'time_dimension'
   | 'member'
   | 'relationship'
+  /**
+   * A physical relation whose OWN columns cover part of what was asked.
+   *
+   * Relations could previously only play `context`, which satisfies no role
+   * quota, so a wide mart carrying both the measure and the entity label lost
+   * its place to whichever narrow column fragment happened to score higher —
+   * and the one table that could answer the question was never shown. A
+   * relation earns this role only by evidence: a documented column of its own
+   * matching a requested term.
+   */
+  | 'relation'
   | 'context';
 
 /**
@@ -1663,6 +1674,8 @@ export type RoleBalancedEvidenceCandidate = {
   /** Source-authored semantic or physical value type when the snapshot has it. */
   dataType?: string;
   dimensions?: string[];
+  /** Documented physical columns; the evidence behind the `relation` role. */
+  columns?: Array<{ name: string; type?: string; description?: string }>;
   timeGrains?: string[];
   relationshipEvidence?: string[];
   /**
@@ -2352,15 +2365,45 @@ export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate)
     if (temporalCandidate && role === 'categorical_dimension') continue;
     roles.add(role);
   }
+  // A relation with documented columns is a queryable thing in its own right,
+  // not merely ambient context. The role is unconditional here; the selector
+  // decides whether THIS relation's columns match THIS request.
+  if ((candidate.kind === 'dbt_model' || candidate.kind === 'sql_table' || candidate.kind === 'dbt_source')
+    && (candidate.columns?.length ?? 0) > 0) roles.add('relation');
   if (candidate.kind === 'sql_column' || candidate.kind === 'dbt_model' || candidate.kind === 'sql_table') roles.add('context');
   if (roles.size === 0) roles.add('context');
   return [...roles];
 }
 
+/**
+ * Does this relation's OWN column vocabulary cover one of the requested terms?
+ *
+ * "net arr by customer account" is answered by a table that has a net-ARR
+ * column and an account-name column. Judging that table by its name and
+ * description alone — which is all the selector could see — is why the one
+ * relation that could answer the question ranked below a support report whose
+ * title happened to contain the same word.
+ */
+function relationColumnsMatchTerms(
+  candidate: RoleBalancedEvidenceCandidate,
+  terms: string[],
+): boolean {
+  const columns = candidate.columns;
+  if (!columns?.length || terms.length === 0) return false;
+  const normalizedColumns = uniqueRequirementTerms(columns.map((column) => column.name));
+  return terms.some((term) => {
+    const needle = term.trim();
+    if (needle.length < 3) return false;
+    return normalizedColumns.some((column) => column === needle
+      || column.includes(needle)
+      || needle.includes(column));
+  });
+}
+
 function candidateMatchesTerms(
   candidate: RoleBalancedEvidenceCandidate,
   terms: string[],
-  options: { categoricalDimension?: boolean } = {},
+  options: { categoricalDimension?: boolean; relationColumns?: boolean } = {},
 ): boolean {
   if (terms.length === 0) return false;
   const identity = uniqueRequirementTerms([
@@ -2371,6 +2414,7 @@ function candidateMatchesTerms(
     ...(candidate.dimensions ?? []),
   ]).join(' ');
   if (terms.some((term) => identity.includes(term) || term.includes(identity))) return true;
+  if (options.relationColumns === true && relationColumnsMatchTerms(candidate, terms)) return true;
   if (options.categoricalDimension === true
     && terms.some((term) => categoricalDimensionTermsMatch(term, identity))) return true;
   return options.categoricalDimension === true
@@ -2505,6 +2549,15 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     if (selected.length < max && !selected.some((item) => item.id === candidate.id)) selected.push(candidate);
   };
   const categoricalTerms = categoricalDimensionRequirementTerms(input.requirements);
+  // A relation is judged against everything the question asked for, because a
+  // single table often supplies the measure AND the label AND the breakdown.
+  const relationTerms = uniqueRequirementTerms([
+    ...(input.requirements.ranking?.metricTerms ?? []),
+    ...input.requirements.measures,
+    ...input.requirements.entityTerms,
+    ...input.requirements.entityDisplayTerms,
+    ...categoricalTerms,
+  ]);
   const servesRequestedRole = (candidate: T): boolean => {
     const roles = evidenceCandidateRoles(candidate);
     const metricTerms = input.requirements.ranking?.metricTerms.length
@@ -2529,6 +2582,7 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       && candidateHasSafeValueForMemberTerms(candidate, input.requirements.memberTerms)) return true;
     if (roles.includes('relationship')
       && (input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0)) return true;
+    if (roles.includes('relation') && relationColumnsMatchTerms(candidate, relationTerms)) return true;
     return false;
   };
   for (const candidate of ranked.filter((candidate) => candidate.exactMatch)) {
@@ -2538,7 +2592,13 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     if (input.pinOnly && !servesRequestedRole(candidate)) continue;
     add(candidate);
   }
-  const required: Array<{ role: EvidenceCandidateRoleV1; terms: string[]; limit: number; categorical?: boolean }> = [
+  const required: Array<{
+    role: EvidenceCandidateRoleV1;
+    terms: string[];
+    limit: number;
+    categorical?: boolean;
+    relationColumns?: boolean;
+  }> = [
     // An explicit ranking measure is never displaced by correlated metric
     // variants. Two cards leave room for a compatible canonical/alias pair.
     { role: 'metric', terms: input.requirements.ranking?.metricTerms.length ? input.requirements.ranking.metricTerms : input.requirements.measures, limit: 2 },
@@ -2550,8 +2610,18 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     { role: 'time_dimension', terms: input.requirements.time ? [input.requirements.time.grain ?? 'time'] : [], limit: 2 },
     { role: 'member', terms: input.requirements.memberTerms, limit: 2 },
     { role: 'relationship', terms: input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0 ? ['relationship'] : [], limit: 2 },
+    // A physical relation whose own columns cover the requested measure or
+    // entity is the shortest path to a governed-relational or exploratory
+    // answer, and it is the card a planner most needs when no metric exists.
+    // Three slots: enough for a fact table, a dimension table and one rival.
+    {
+      role: 'relation',
+      terms: relationTerms,
+      limit: 3,
+      relationColumns: true,
+    },
   ];
-  for (const { role, terms, limit, categorical } of required) {
+  for (const { role, terms, limit, categorical, relationColumns } of required) {
     // No requested categorical dimension means that high-scoring arbitrary
     // members are noise, not a role reservation. This is the subtle path that
     // used to admit Account Owner and Sentiment immediately after Account Name.
@@ -2589,7 +2659,10 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       // hit. For all other roles, prefer an identity matching the requested
       // business term but retain a role candidate when the request is terse.
       if (terms.length > 0 && !safePhysicalMember
-        && !candidateMatchesTerms(candidate, terms, { categoricalDimension: categorical === true })
+        && !candidateMatchesTerms(candidate, terms, {
+          categoricalDimension: categorical === true,
+          relationColumns: relationColumns === true,
+        })
         && role !== 'time_dimension' && role !== 'relationship' && role !== 'entity_label') continue;
       add(candidate);
       admitted += 1;

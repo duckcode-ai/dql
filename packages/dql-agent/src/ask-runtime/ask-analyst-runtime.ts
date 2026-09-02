@@ -2698,6 +2698,10 @@ function plannerRequiredTermsForRole(
       return [...requirements.memberTerms];
     case 'time_dimension':
     case 'relationship':
+    // A relation is admitted on the strength of its own columns, which the
+    // retrieval selector already proved. There is no separate phrase the
+    // planner must additionally bind for it.
+    case 'relation':
     case 'context':
       return [];
   }

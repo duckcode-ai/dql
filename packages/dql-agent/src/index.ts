@@ -1148,6 +1148,7 @@ export {
 export { upgradeVectorIndexForProject, awaitVectorIndexUpgrade } from "./metadata/catalog.js";
 export {
   projectEmbeddingProvider,
+  readProjectEmbeddingSettings,
   isHashedEmbeddingProvider,
   clearProjectEmbeddingCache,
   type ProjectEmbeddingSettings,
