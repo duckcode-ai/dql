@@ -29,13 +29,66 @@ import type { AgentToolDefinition, AskAgentStateV4 } from '@duckcodeailabs/dql-a
  * zero tool calls recorded. Every legal V2 response is a tool call, so this
  * contract offers exactly that and names the tool that ends the turn.
  */
+/**
+ * Render one tool argument the way the model has to send it.
+ *
+ * The text protocol used to publish parameter NAMES only, and the response
+ * schema declares `input` as an opaque object, so on every non-native
+ * transport a nested argument was invisible: a model told a tool takes
+ * "relationalPlan" cannot know it holds measures with aggregations. It filled
+ * in what it could guess and the query came back missing its breakdown. Types,
+ * enums, required-ness, and two levels of nesting are exactly what makes the
+ * difference between a guessed call and a correct one.
+ */
+function askV2SchemaSignature(schema: unknown, depth = 0): string {
+  if (!schema || typeof schema !== 'object') return '';
+  const node = schema as Record<string, unknown>;
+  const enumValues = Array.isArray(node.enum)
+    ? node.enum.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  if (enumValues.length > 0) {
+    const shown = enumValues.slice(0, 8).join('|');
+    return `:${shown}${enumValues.length > 8 ? '|…' : ''}`;
+  }
+  const type = typeof node.type === 'string' ? node.type : undefined;
+  if (type === 'array') {
+    const items = askV2SchemaSignature(node.items, depth);
+    return `[]${items}`;
+  }
+  if (type === 'object' && depth < 2) {
+    const properties = node.properties && typeof node.properties === 'object'
+      ? node.properties as Record<string, unknown>
+      : undefined;
+    if (!properties) return ':object';
+    const required = new Set(Array.isArray(node.required)
+      ? node.required.filter((entry): entry is string => typeof entry === 'string')
+      : []);
+    const fields = Object.entries(properties).slice(0, 12)
+      .map(([name, value]) => `${name}${required.has(name) ? '!' : ''}${askV2SchemaSignature(value, depth + 1)}`);
+    return `{${fields.join(', ')}}`;
+  }
+  if (type === 'object') return ':object';
+  if (type === 'integer' || type === 'number') return ':num';
+  if (type === 'boolean') return ':bool';
+  if (type === 'string') return ':str';
+  return '';
+}
+
 export function buildAskV2TextToolContract(
   tools: readonly AgentToolDefinition[],
   maxToolCalls: number,
 ): string {
   const toolLines = tools.map((tool) => {
-    const props = (tool.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
-    const params = props ? Object.keys(props).join(', ') : '';
+    const schema = tool.inputSchema as { properties?: Record<string, unknown>; required?: unknown } | undefined;
+    const props = schema?.properties;
+    const required = new Set(Array.isArray(schema?.required)
+      ? schema.required.filter((entry): entry is string => typeof entry === 'string')
+      : []);
+    const params = props
+      ? Object.entries(props)
+        .map(([name, value]) => `${name}${required.has(name) ? '!' : ''}${askV2SchemaSignature(value)}`)
+        .join(', ')
+      : '';
     return `- ${tool.name}(${params}): ${tool.description}`;
   });
   return [
@@ -55,6 +108,9 @@ export function buildAskV2TextToolContract(
       + ' arbitrary rows, and both are refused when the question asked for no ranking at all.',
     '- Use request_clarification when a choice genuinely changes the result.',
     '- Only reference identifiers a tool has returned to you. Do not invent them.',
+    '',
+    'Argument signatures below use ! for required, [] for a list, {} for an object,'
+      + ' and a|b for the allowed values. Send every field the question needs, not only the required ones.',
     '',
     'Available tools:',
     ...toolLines,
@@ -82,6 +138,15 @@ export function buildAskV2AnalystSystemPrompt(state: AskAgentStateV4): string {
       '3. Governed relational/DQL — when the semantic layer cannot express the shape but the relationships are proven.',
       '4. Exploratory SQL — the last resort, always labelled review-required.',
       'Do not skip a tier because a lower one looks easier, and do not force a higher tier that does not fit.',
+    ].join(' '),
+
+    [
+      'YOU DO NOT WRITE THE GOVERNED PROGRAM; YOU DECIDE ITS SHAPE. compile_and_run_dql takes a relationalPlan —',
+      'measures (each with an aggregation such as sum or count), dimensions, filters, ordering, and a row bound — where',
+      'every id is an admitted card ID or "<relation>.<column>" naming a column of an admitted relation. DQL writes and',
+      'validates the program from that plan. One plan covers one relation, because a mart already carries its joins;',
+      'when a shape genuinely needs several relations, that is what validate_and_run_sql is for. Do not hand',
+      'compile_and_run_dql raw SQL: it is not a SQL tool, and SQL sent there cannot run.',
     ].join(' '),
 
     [

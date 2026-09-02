@@ -351,7 +351,15 @@ export async function runTextProtocolToolLoopDetailed(
       requiredActionSignature = nextRequiredActionSignature;
       requiredActionProseRetries = 0;
     }
-    const narrationControlRound = livePolicyBeforeDispatch.terminalActionToolNames.has('finish_answer');
+      // A required `finish_answer` is not always narration. The kernel also
+    // requires it to CLOSE a turn that never executed — a declined tier, an
+    // exhausted ladder — and the host's egress guard rejects a narration
+    // dispatch that carries no validated result. Labelling that close
+    // "narration" turned an orderly refusal into a hard provider failure, so
+    // when the host installs a phase resolver, it decides.
+    const hostDispatchPhase = options.resolvePhysicalDispatchPhase?.({ operation: 'generate', attemptIndex: 1 });
+    const narrationControlRound = livePolicyBeforeDispatch.terminalActionToolNames.has('finish_answer')
+      && (!options.resolvePhysicalDispatchPhase || hostDispatchPhase === 'narration');
     // Only an execution action needs a second, post-result finish/narration
     // send. A host-issued clarification is itself the terminal control, so
     // reserving a phantom narration slot would prematurely reject a malformed
@@ -541,6 +549,8 @@ export async function runTextProtocolToolLoopDetailed(
           ? {
             ...runOptions,
             dispatchPhase: policy.terminalActionToolNames.has('finish_answer')
+              && (!options.resolvePhysicalDispatchPhase
+                || options.resolvePhysicalDispatchPhase({ operation: 'generate', attemptIndex: 1 }) === 'narration')
               ? 'narration' as const
               : 'tool_followup' as const,
           }

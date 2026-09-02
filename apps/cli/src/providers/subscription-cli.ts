@@ -276,6 +276,9 @@ export class ClaudeCodeCliProvider implements AgentProvider {
       // A mid-flight cancellation SIGTERMed the child; surface the exact abort
       // reason (e.g. the run deadline's TimeoutError), never a parse error.
       throwIfAlreadyCancelled(options.signal);
+      if (process.env.DQL_DEBUG_PROVIDER_CLI) {
+        console.error('[DQL_DEBUG cli]', JSON.stringify({ code: res.code, timedOut: res.timedOut, stderr: res.stderr.slice(0, 800), stdout: res.stdout.length > 1600 ? `${res.stdout.slice(0, 400)}…${res.stdout.slice(-1200)}` : res.stdout }));
+      }
       if (res.timedOut) {
         throw new Error(`Claude Code did not respond within ${Math.round(resolveSubscriptionCliTimeoutMs() / 1_000)} seconds. Retry, choose a faster model, or increase DQL_SUBSCRIPTION_CLI_TIMEOUT_MS.`);
       }

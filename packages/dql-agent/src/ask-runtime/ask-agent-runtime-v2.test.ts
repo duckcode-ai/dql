@@ -609,6 +609,81 @@ describe('Ask V2 tool kernel', () => {
     expect(kernel.state.resolvedPlan).toBeUndefined();
   });
 
+  it('lets a frozen plan that could not run descend once to review-required SQL, and only once', () => {
+    // A freeze must stop the analyst from trading up to a better-looking route
+    // after seeing a result. It must not strand a turn whose frozen program
+    // will not compile at all: on a 3,373-model warehouse that turn spent every
+    // remaining dispatch on guaranteed denials and answered nothing. Exploratory
+    // SQL is the LOWEST tier and its answers are labelled review-required, so
+    // descending to it cannot launder trust — which is why it is the one route
+    // change a freeze allows.
+    const kernel = createAskToolKernelV2(state());
+    kernel.observe({
+      version: 1,
+      tool: 'compile_and_run_dql',
+      tier: 'governed_relational',
+      outcome: 'eligible',
+      reasonCode: 'ASK_V2_EXECUTION_AUTHORIZED',
+      candidateIds: [customer.id],
+      planId: 'ask-v2:governed:test',
+      inputFingerprint: 'sha256:frozen-governed-plan',
+      executionAuthorized: true,
+    });
+    expect(kernel.state.resolvedPlan).toMatchObject({ frozen: true, tier: 'governed_relational' });
+
+    // Before the frozen tier has failed, the route is still closed.
+    expect(kernel.canCall('validate_and_run_sql', { candidateIds: [customer.id] }))
+      .toEqual({ ok: false, reasonCode: 'POST_FREEZE_ROUTE_CHANGE_DENIED' });
+
+    kernel.observe({
+      version: 1,
+      tool: 'compile_and_run_dql',
+      tier: 'governed_relational',
+      outcome: 'error',
+      reasonCode: 'GOVERNED_RELATIONAL_EXECUTION_FAILED',
+      candidateIds: [customer.id],
+      planId: 'ask-v2:governed:test',
+      origin: 'validation',
+    });
+
+    // Now the descent is available, and the policy names it rather than
+    // leaving the analyst to discover it by guessing.
+    expect(kernel.canCall('validate_and_run_sql', { candidateIds: [customer.id] })).toEqual({ ok: true });
+    const policy = kernel.toolPolicy();
+    expect(policy.allowedToolNames).toContain('validate_and_run_sql');
+    expect(policy.instruction).toContain('review-required SQL');
+
+    // Moving UP after the same failure stays denied: only the lowest tier is
+    // reachable, and only downward.
+    expect(kernel.canCall('compile_and_run_semantic', { candidateIds: [revenue.id] }))
+      .toEqual({ ok: false, reasonCode: 'POST_FREEZE_ROUTE_CHANGE_DENIED' });
+
+    // One descent only. Once exploratory SQL has been authorized, a second
+    // route change is refused however that attempt failed.
+    kernel.observe({
+      version: 1,
+      tool: 'validate_and_run_sql',
+      tier: 'exploratory_sql',
+      outcome: 'eligible',
+      reasonCode: 'EXPLORATORY_EXECUTION_AUTHORIZED',
+      candidateIds: [customer.id],
+      planId: 'ask-v2:exploratory:descent',
+      inputFingerprint: 'sha256:descent',
+      executionAuthorized: true,
+    });
+    kernel.observe({
+      version: 1,
+      tool: 'validate_and_run_sql',
+      tier: 'exploratory_sql',
+      outcome: 'error',
+      reasonCode: 'EXPLORATORY_EXECUTION_FAILED',
+      candidateIds: [customer.id],
+      planId: 'ask-v2:exploratory:descent',
+      origin: 'execution',
+    });
+    expect(kernel.canCall('compile_and_run_dql', { candidateIds: [customer.id] }).ok).toBe(false);
+  });
+
   it('AGT-050 freezes at host execution authorization: cross-tier replacement and mutation are denied, with exactly one same-plan repair after terminal execution failure', () => {
     const kernel = createAskToolKernelV2(state());
     const bindingFingerprint = 'sha256:frozen-exploratory-plan';

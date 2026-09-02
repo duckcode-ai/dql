@@ -1496,6 +1496,49 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         instruction: 'The frozen execution target did not match the compiler result. Do not call another tool or choose another route.',
       };
     }
+    // A frozen plan whose program could not run still has one honest move
+    // left, and the model will not find it by guessing: name it. Without this
+    // the turn spends its remaining dispatches on repair/route denials and
+    // dies at the budget wall with nothing to show.
+    if (state.resolvedPlan?.frozen
+      && state.resolvedPlan.tier !== 'exploratory_sql'
+      && !hasExecutedTool()
+      && state.observations.some((observation) => (
+        observation.outcome === 'error'
+        && executionToolTier[observation.tool] === state.resolvedPlan!.tier
+      ))
+      && !state.observations.some((observation) => (
+        observation.tool === 'validate_and_run_sql'
+        && (observation.outcome === 'executed' || observation.executionAuthorized === true)
+      ))) {
+      return {
+        allowedToolNames: ['validate_and_run_sql', 'describe_relation', 'finish_answer'],
+        instruction: 'The frozen plan failed to run. The route cannot move up, but you may write the query once as'
+          + ' review-required SQL with validate_and_run_sql — send expectedOutputIds as "<relation>.<column>" for every'
+          + ' column the SQL reads. Use describe_relation first if you need the real column names, or finish_answer to'
+          + ' report what was attempted.',
+      };
+    }
+    // A frozen plan at the LOWEST tier that failed has no descent to offer, so
+    // the only real moves are its one same-plan repair and closing. Leaving the
+    // full tool set on the table meant the analyst spent every remaining
+    // dispatch discovering, one denial at a time, that nothing else was
+    // reachable — nine round trips to answer nothing. Name the two moves.
+    if (state.resolvedPlan?.frozen
+      && state.resolvedPlan.tier === 'exploratory_sql'
+      && !hasExecutedTool()
+      && repairs < (state.turnClass === 'research' ? ASK_V2_BUDGETS.research.repairs : ASK_V2_BUDGETS.ask.repairs)
+      && state.observations.some((observation) => (
+        observation.outcome === 'error'
+        && executionToolTier[observation.tool] === 'exploratory_sql'
+      ))) {
+      return {
+        allowedToolNames: ['validate_and_run_sql', 'describe_relation', 'finish_answer'],
+        instruction: 'The frozen SQL failed to run. You have exactly one repair: re-send validate_and_run_sql with'
+          + ' repair:true and the SAME admitted identifiers, correcting only what the error named. Use describe_relation'
+          + ' to check a column first, or finish_answer to report what was attempted. No other route is reachable.',
+      };
+    }
     // A FROZEN PLAN THAT FAILED, WITH NO REPAIR LEFT, IS OVER.
     //
     // The route cannot change after freeze and the one repair is spent, so
@@ -1871,7 +1914,38 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         // is the actionable reason for a lower-tier request; a higher-tier
         // replacement remains a post-freeze route-change denial.
         if (state.resolvedPlan?.frozen && state.resolvedPlan.tier !== tier) {
-          return { ok: false, reasonCode: 'POST_FREEZE_ROUTE_CHANGE_DENIED' };
+          // ONE DESCENT, WHEN THE FROZEN PLAN CANNOT RUN AT ALL.
+          //
+          // The freeze exists so a compiler or warehouse result cannot talk the
+          // analyst into a different, better-looking route. It was never meant
+          // to strand a turn whose frozen program will not compile: the model
+          // then spends every remaining dispatch on guaranteed denials, and the
+          // user waits two minutes for "did not complete". Descending to
+          // review-required exploratory SQL is the one move that cannot launder
+          // trust — it is the LOWEST tier, and its answers are labelled for
+          // review — so it is the only route change allowed after a freeze, and
+          // only once, and only after the frozen tier actually failed.
+          const frozenTier = state.resolvedPlan.tier;
+          const frozenTierFailed = state.observations.some((observation) => (
+            observation.outcome === 'error'
+            && executionToolTier[observation.tool] === frozenTier
+          ));
+          const alreadyDescended = state.observations.some((observation) => (
+            observation.tool === 'validate_and_run_sql'
+            && (observation.outcome === 'executed' || observation.executionAuthorized === true)
+          ));
+          const descentAvailable = tier === 'exploratory_sql'
+            && frozenTier !== 'exploratory_sql'
+            && frozenTierFailed
+            && !alreadyDescended
+            && !hasExecutedTool()
+            && executionAttempts < maxExecutions;
+          if (!descentAvailable) return { ok: false, reasonCode: 'POST_FREEZE_ROUTE_CHANGE_DENIED' };
+          // The freeze is itself the proof that the earlier tiers were worked
+          // through — re-inspecting them to reach the lowest one would spend
+          // the dispatches this concession exists to save.
+          if (executionAttempts >= maxExecutions) return { ok: false, reasonCode: 'ASK_EXECUTION_BUDGET_EXHAUSTED' };
+          return { ok: true };
         }
         // Once the host has authorized a plan, the only permissible second
         // attempt is the explicitly-marked same-plan repair below.  Do not

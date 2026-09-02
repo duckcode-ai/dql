@@ -75,6 +75,17 @@ export interface SqlContextValidationOptions {
    * guard does not reject relations it already asked the model to use.
    */
   runtimeSchema?: RuntimeSchemaTable[];
+  /**
+   * Whether the retrieval-time "clarify before generating" gate still applies.
+   *
+   * That gate asks a pre-generation question: is the context rich enough to
+   * choose a safe table, metric and grain, or should the user be asked first?
+   * Once a V2 plan is FROZEN it is the wrong question — the analyst has already
+   * chosen among admitted identifiers and the host has authorized them, so the
+   * gate can only refuse a query it already approved the parts of. Identifier,
+   * relation, column, join and aggregation proofs below are unaffected.
+   */
+  enforceGenerationReadiness?: boolean;
 }
 
 const SQL_ALIAS_STOPWORDS = new Set([
@@ -167,7 +178,8 @@ export function validateSqlAgainstLocalContext(
       ? aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns, aggregationSafetyProof)
       : { ok: true, ...base };
   }
-  if (contextPack?.routeDecision?.route === 'clarify' && shouldClarifyBeforeGeneration({
+  if (options.enforceGenerationReadiness !== false
+    && contextPack?.routeDecision?.route === 'clarify' && shouldClarifyBeforeGeneration({
     intent: contextPack.routeDecision.intent,
     routeDecision: contextPack.routeDecision,
     schemaContextCount: options.runtimeSchema?.length ?? 0,

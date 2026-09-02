@@ -12,6 +12,12 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
 import { buildAskV2AnalystSystemPrompt, buildAskV2TextToolContract, buildAskV2ResponseJsonSchema } from './ask-v2-analyst-prompt.js';
+import {
+  composeAskV2RelationalProgram,
+  ASK_V2_RELATIONAL_AGGREGATION_NAMES,
+  ASK_V2_RELATIONAL_OPERATOR_NAMES,
+  type AskV2RelationalPlanV1,
+} from './ask-v2-relational-program.js';
 import { parseAnalyticalTimeWindow, resolvePlanTimeRange, type AnalyticalTimeWindowV1 } from '@duckcodeailabs/dql-agent';
 import {
   ClaudeProvider,
@@ -640,6 +646,75 @@ function selectV2SemanticEngine(input: {
     return { ok: false, outcome: 'ineligible', reasonCode: 'SEMANTIC_ENGINE_UNAVAILABLE' };
   }
   return { ok: true, engine };
+}
+
+/**
+ * Read the model's relational plan defensively.
+ *
+ * Everything here arrives as free JSON from a language model, so a malformed
+ * entry must degrade to "no plan" rather than to a half-built program: the
+ * caller then refuses with the shape guidance instead of composing SQL from a
+ * plan it only partly understood.
+ */
+function v2RelationalPlan(value: unknown): AskV2RelationalPlanV1 | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const text = (entry: unknown): string | undefined => (typeof entry === 'string' && entry.trim() ? entry.trim() : undefined);
+  const measures = Array.isArray(raw.measures)
+    ? raw.measures.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const measure = entry as Record<string, unknown>;
+      const id = text(measure.id);
+      if (!id) return [];
+      return [{
+        id,
+        ...(text(measure.aggregation) ? { aggregation: text(measure.aggregation)! } : {}),
+        ...(text(measure.alias) ? { alias: text(measure.alias)! } : {}),
+      }];
+    }).slice(0, 8)
+    : [];
+  if (measures.length === 0) return undefined;
+  const dimensions = Array.isArray(raw.dimensions)
+    ? raw.dimensions.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const dimension = entry as Record<string, unknown>;
+      const id = text(dimension.id);
+      if (!id) return [];
+      return [{ id, ...(text(dimension.alias) ? { alias: text(dimension.alias)! } : {}) }];
+    }).slice(0, 16)
+    : [];
+  const filters = Array.isArray(raw.filters)
+    ? raw.filters.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const filter = entry as Record<string, unknown>;
+      const id = text(filter.id);
+      const operator = text(filter.operator);
+      if (!id || !operator) return [];
+      return [{
+        id,
+        operator,
+        ...('value' in filter ? { value: filter.value } : {}),
+        ...(Array.isArray(filter.values) ? { values: filter.values.slice(0, 24) } : {}),
+      }];
+    }).slice(0, 8)
+    : [];
+  const orderRaw = raw.orderBy && typeof raw.orderBy === 'object' && !Array.isArray(raw.orderBy)
+    ? raw.orderBy as Record<string, unknown>
+    : undefined;
+  const orderBy = orderRaw
+    ? {
+      ...(text(orderRaw.reference) ? { reference: text(orderRaw.reference)! } : {}),
+      ...(text(orderRaw.direction) ? { direction: text(orderRaw.direction)! } : {}),
+    }
+    : undefined;
+  const limit = typeof raw.limit === 'number' && Number.isInteger(raw.limit) && raw.limit > 0 ? raw.limit : undefined;
+  return {
+    measures,
+    ...(dimensions.length ? { dimensions } : {}),
+    ...(filters.length ? { filters } : {}),
+    ...(orderBy && Object.keys(orderBy).length ? { orderBy } : {}),
+    ...(limit ? { limit } : {}),
+  };
 }
 
 function v2StringArray(value: unknown, max = 24): string[] {
@@ -1429,6 +1504,16 @@ function v2PlanFingerprint(input: {
  * rejection must not be flattened into a generic warehouse failure, which
  * would incorrectly suggest that retrying can widen a frozen plan.
  */
+/**
+ * The one sentence a refused execution owes the analyst: what actually broke.
+ * Bounded and message-only — a host stack or SQL text never leaves the host.
+ */
+function v2BoundedFailureDetail(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : undefined;
+  const trimmed = message?.replace(/\s+/g, ' ').trim();
+  return trimmed ? trimmed.slice(0, 400) : undefined;
+}
+
 function v2ExecutionFailureFromError(
   error: unknown,
   fallback: string,
@@ -1823,6 +1908,37 @@ function createAskV2LaneHandler(
             ? { columnCount: candidate.columnCount }
             : {}),
         }));
+    /**
+     * When a "<relation>.<column>" reference fails, the column is usually
+     * close: a model asked mart_crm_opportunity for `sales_segment` when the
+     * relation carries `parent_crm_account_sales_segment`. Listing the
+     * admitted relations alone left it to read hundreds of names and it gave
+     * up instead. Naming the near misses turns a two-step recovery
+     * (describe, then re-send) into one.
+     */
+    const nearMissColumns = (rawId: string, limit = 6): string[] => {
+      const separator = rawId.lastIndexOf('.');
+      if (separator <= 0) return [];
+      const relationRef = rawId.slice(0, separator);
+      const requestedColumn = rawId.slice(separator + 1).toLowerCase();
+      const relation = resolveAdmittedReference(relationRef)?.candidate
+        ?? visibleCandidates().find((candidate) => candidate.name.toLowerCase() === relationRef.toLowerCase());
+      if (!relation?.columns?.length || !requestedColumn) return [];
+      const parts = requestedColumn.split('_').filter((part) => part.length > 2);
+      const scored = relation.columns
+        .map((column) => {
+          const name = column.name.toLowerCase();
+          let score = 0;
+          if (name === requestedColumn) score += 10;
+          if (name.includes(requestedColumn) || requestedColumn.includes(name)) score += 5;
+          for (const part of parts) if (name.includes(part)) score += 2;
+          return { name: column.name, score };
+        })
+        .filter((entry) => entry.score > 0)
+        .sort((left, right) => right.score - left.score)
+        .slice(0, limit);
+      return scored.map((entry) => `${v2CandidateId(relation)}.${entry.name}`);
+    };
     const inspected = (tool: AskToolNameV2) => {
       if (tool === 'inspect_relational_context') {
         // The initial immutable context response includes the bounded atomic
@@ -3207,17 +3323,32 @@ function createAskV2LaneHandler(
       }),
       safeTool(
         'describe_relation',
-        'Describe one admitted relation: every column the catalog recorded for it, plus the relationship paths it participates in.'
-        + ' Call this before writing DQL or SQL so you use real column names instead of guessing.',
+        'Describe one admitted relation: the columns the catalog recorded for it, plus the relationship paths it participates in.'
+        + ' Call this before writing DQL or SQL so you use real column names instead of guessing. An enterprise mart can carry'
+        + ' hundreds of columns, so pass match to search them by name — "arr", "stage", "segment" — instead of reading the whole list.',
         {
           type: 'object',
-          properties: { candidateId: { type: 'string', minLength: 1, description: 'An admitted relation card ID, or the relation name exactly as a card reported it.' } },
+          properties: {
+            candidateId: { type: 'string', minLength: 1, description: 'An admitted relation card ID, or the relation name exactly as a card reported it.' },
+            match: { type: 'string', minLength: 1, maxLength: 60, description: 'Return only columns whose name contains this text.' },
+          },
           required: ['candidateId'],
           additionalProperties: false,
         },
         async (args) => {
           const requested = typeof args.candidateId === 'string' ? args.candidateId.trim() : '';
-          const resolved = requested ? resolveAdmittedReference(requested) : undefined;
+          const match = typeof args.match === 'string' ? args.match.trim().toLowerCase() : '';
+          // Describing a relation must not require already knowing one of its
+          // columns. A model that guessed "<relation>.<column>" wrong was
+          // refused by the very tool whose job is to correct that guess, so it
+          // had nowhere left to go. Fall back to the relation part of a dotted
+          // reference: this reads catalog metadata the workspace already
+          // admits, and proves nothing about the column.
+          const separator = requested.lastIndexOf('.');
+          const resolved = requested
+            ? resolveAdmittedReference(requested)
+              ?? (separator > 0 ? resolveAdmittedReference(requested.slice(0, separator)) : undefined)
+            : undefined;
           const candidate = resolved?.candidate;
           // A relation is a thing with columns. Refusing anything else keeps
           // this tool from becoming a second, weaker card renderer.
@@ -3232,7 +3363,15 @@ function createAskV2LaneHandler(
             };
           }
           const id = v2CandidateId(candidate);
-          const columns = (candidate.columns ?? []).slice(0, 200).map((column) => ({
+          // A wide mart is the normal case here, not the exception: a listing
+          // capped at 200 of 436 columns silently hides the very column the
+          // question needs. Searching the whole retained set is what makes a
+          // relation of that width usable at all.
+          const allColumns = candidate.columns ?? [];
+          const matched = match
+            ? allColumns.filter((column) => column.name.toLowerCase().includes(match))
+            : allColumns;
+          const columns = matched.slice(0, 200).map((column) => ({
             name: column.name,
             ...(column.type ? { type: column.type } : {}),
             ...(column.description ? { description: column.description } : {}),
@@ -3248,11 +3387,16 @@ function createAskV2LaneHandler(
             ...(candidate.definition ? { definition: candidate.definition } : {}),
             ...(candidate.sourceObjects?.length ? { relation: candidate.sourceObjects[0] } : {}),
             columns,
-            columnCount: candidate.columnCount ?? columns.length,
-            ...(columns.length < (candidate.columnCount ?? columns.length) ? { columnsTruncated: true } : {}),
+            ...(match ? { match, matchedColumnCount: matched.length } : {}),
+            columnCount: candidate.columnCount ?? allColumns.length,
+            ...(columns.length < matched.length ? { columnsTruncated: true } : {}),
             ...(relatedPaths.length ? { relationshipPathHandles: relatedPaths } : {}),
-            usage: 'Reference these columns as "' + id + '.<column>" in expectedOutputIds/measureIds/dimensionIds,'
-              + ' and by their plain name inside SQL. Columns not listed here are not admitted for this relation.',
+            usage: 'Reference these columns as "' + id + '.<column>" in a relationalPlan id or in expectedOutputIds,'
+              + ' and by their plain name inside SQL. Now re-send the run tool with the corrected identifiers —'
+              + ' describing a relation is not an answer.'
+              + (columns.length < allColumns.length
+                ? ' This relation has more columns than are shown; call describe_relation again with match to search the rest.'
+                : ''),
           };
         },
       ),
@@ -3387,21 +3531,162 @@ function createAskV2LaneHandler(
             + ' and relationshipPathIds from admittedRelationshipPathIds. A card\'s "name" is a label, not an identifier.',
         };
       }),
-      safeTool('compile_and_run_dql', 'Compile one DQL program only from admitted qualified IDs and atomic relationship path handles, then execute it as governed relational.', {
+      safeTool('compile_and_run_dql', 'Choose the governed relational shape and DQL writes and executes the program for you. Send relationalPlan: measures (each with an aggregation), dimensions, filters, ordering, and a row bound. EVERY id must be "<relation>.<column>" — a bare relation ID is not a measure or a dimension, and one plan covers one relation. This tool never accepts SQL.', {
         type: 'object', properties: {
+          relationalPlan: {
+            type: 'object',
+            properties: {
+              measures: {
+                type: 'array', minItems: 1, maxItems: 8,
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    aggregation: { type: 'string', enum: ASK_V2_RELATIONAL_AGGREGATION_NAMES },
+                    alias: { type: 'string' },
+                  },
+                  required: ['id'], additionalProperties: false,
+                },
+              },
+              dimensions: {
+                type: 'array', maxItems: 16,
+                items: {
+                  type: 'object',
+                  properties: { id: { type: 'string' }, alias: { type: 'string' } },
+                  required: ['id'], additionalProperties: false,
+                },
+              },
+              filters: {
+                type: 'array', maxItems: 8,
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    operator: { type: 'string', enum: ASK_V2_RELATIONAL_OPERATOR_NAMES },
+                    value: {},
+                    values: { type: 'array', maxItems: 24 },
+                  },
+                  required: ['id', 'operator'], additionalProperties: false,
+                },
+              },
+              orderBy: {
+                type: 'object',
+                properties: { reference: { type: 'string' }, direction: { type: 'string', enum: ['asc', 'desc'] } },
+                additionalProperties: false,
+              },
+              limit: { type: 'integer', minimum: 1, maximum: 1000 },
+            },
+            required: ['measures'], additionalProperties: false,
+          },
           dqlProgram: { type: 'string', minLength: 1, maxLength: 30000 },
-          measureIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 },
+          measureIds: { type: 'array', items: { type: 'string' }, maxItems: 8 },
           dimensionIds: { type: 'array', items: { type: 'string' }, maxItems: 16 },
           relationshipPathIds: { type: 'array', items: { type: 'string' }, maxItems: 8 },
-          expectedOutputIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 24 }, repair: { type: 'boolean' },
-        }, required: ['dqlProgram', 'measureIds', 'expectedOutputIds'], additionalProperties: false,
+          expectedOutputIds: { type: 'array', items: { type: 'string' }, maxItems: 24 }, repair: { type: 'boolean' },
+        }, required: [], additionalProperties: false,
       }, async (args) => {
         if (!requireInspections('compile_and_run_dql', ['inspect_certified_candidates', 'inspect_semantic_candidates', 'inspect_relational_context'])) return denied('compile_and_run_dql', 'REQUIRED_TIER_INSPECTION_MISSING');
-        const program = typeof args.dqlProgram === 'string' ? args.dqlProgram.trim() : '';
-        const measureIds = v2StringArray(args.measureIds, 8);
-        const dimensionIds = v2StringArray(args.dimensionIds, 16);
-        const outputIds = v2StringArray(args.expectedOutputIds, 24);
+        // A relational plan names decisions; the host turns them into the
+        // executable artifact. When one is present it is authoritative, and
+        // the binding arrays are derived from it so the frozen closure and
+        // the composed program can never describe different queries.
+        const relationalPlan = v2RelationalPlan(args.relationalPlan);
+        const planFilterIds = relationalPlan?.filters?.map((filter) => filter.id) ?? [];
+        let program = typeof args.dqlProgram === 'string' ? args.dqlProgram.trim() : '';
+        const measureIds = relationalPlan
+          ? v2StringArray(relationalPlan.measures.map((measure) => measure.id), 8)
+          : v2StringArray(args.measureIds, 8);
+        const dimensionIds = relationalPlan
+          ? v2StringArray([...(relationalPlan.dimensions ?? []).map((dimension) => dimension.id), ...planFilterIds], 16)
+          : v2StringArray(args.dimensionIds, 16);
+        const outputIds = relationalPlan
+          ? v2StringArray(
+            v2StringArray(args.expectedOutputIds, 24).length > 0
+              ? v2StringArray(args.expectedOutputIds, 24)
+              : [...(relationalPlan.dimensions ?? []).map((dimension) => dimension.id), ...relationalPlan.measures.map((measure) => measure.id)],
+            24,
+          )
+          : v2StringArray(args.expectedOutputIds, 24);
         const pathIds = v2StringArray(args.relationshipPathIds, 8);
+        if (relationalPlan) {
+          // Compose before admission fingerprinting so a plan that cannot be
+          // written at all is refused with the reason, not with a governance
+          // code that implies the identifiers were wrong.
+          const references = [
+            ...relationalPlan.measures.map((measure) => ({ role: 'measure' as const, id: measure.id, aggregation: measure.aggregation, alias: measure.alias })),
+            ...(relationalPlan.dimensions ?? []).map((dimension) => ({ role: 'dimension' as const, id: dimension.id, alias: dimension.alias })),
+            ...(relationalPlan.filters ?? []).map((filter) => ({ role: 'filter' as const, id: filter.id, operator: filter.operator, value: filter.value, values: filter.values })),
+          ];
+          const resolvedReferences = references.map((reference) => ({ reference, resolved: resolveAdmittedReference(reference.id) }));
+          const unresolved = resolvedReferences.filter((entry) => !entry.resolved?.column).map((entry) => entry.reference.id);
+          const relations = [...new Set(resolvedReferences
+            .map((entry) => (entry.resolved ? v2CandidateId(entry.resolved.candidate) : undefined))
+            .filter((id): id is string => Boolean(id)))];
+          if (unresolved.length > 0 || relations.length !== 1) {
+            const reason = unresolved.length > 0
+              ? 'GOVERNED_RELATIONAL_IDENTIFIER_OR_PATH_NOT_ADMITTED'
+              : 'GOVERNED_RELATIONAL_PLAN_SPANS_RELATIONS';
+            observe('compile_and_run_dql', 'ineligible', reason, { tier: 'governed_relational', candidateIds: [...measureIds, ...dimensionIds], origin: 'validation' });
+            return {
+              ...denied('compile_and_run_dql', reason),
+              ...(unresolved.length > 0
+                ? {
+                  unresolvedIdentifiers: unresolved.slice(0, 12),
+                  ...(() => {
+                    const suggestions = [...new Set(unresolved.flatMap((id) => nearMissColumns(id)))].slice(0, 12);
+                    return suggestions.length ? { didYouMean: suggestions } : {};
+                  })(),
+                }
+                : { relationsInPlan: relations.slice(0, 8) }),
+              admittedRelations: admittedRelationVocabulary(),
+              usage: unresolved.length > 0
+                ? 'Every relationalPlan id must be "<relation>.<column>" naming a column of one admitted relation (see admittedRelations).'
+                  + ' Use describe_relation for the full column list of one relation.'
+                : 'A governed relational plan covers exactly one admitted relation. Pick the one relation that already carries every column you need,'
+                  + ' or use validate_and_run_sql for a shape that must span relations.',
+            };
+          }
+          const relationCandidate = resolvedReferences[0]!.resolved!.candidate;
+          const columnOf = (id: string): string => resolvedReferences.find((entry) => entry.reference.id === id)!.resolved!.column!;
+          const orderReference = relationalPlan.orderBy?.reference;
+          const orderAlias = orderReference
+            ? (resolveAdmittedReference(orderReference)?.column
+              ?? relationalPlan.measures.find((measure) => measure.alias === orderReference)?.alias
+              ?? orderReference)
+            : undefined;
+          const composition = composeAskV2RelationalProgram({
+            relation: relationCandidate.name,
+            measures: relationalPlan.measures.map((measure) => ({
+              column: columnOf(measure.id),
+              ...(measure.aggregation ? { aggregation: measure.aggregation } : {}),
+              ...(measure.alias ? { alias: measure.alias } : {}),
+            })),
+            dimensions: (relationalPlan.dimensions ?? []).map((dimension) => ({
+              column: columnOf(dimension.id),
+              ...(dimension.alias ? { alias: dimension.alias } : {}),
+            })),
+            filters: (relationalPlan.filters ?? []).map((filter) => ({
+              column: columnOf(filter.id),
+              operator: filter.operator,
+              ...('value' in filter ? { value: filter.value } : {}),
+              ...(filter.values ? { values: filter.values } : {}),
+            })),
+            ...(relationalPlan.orderBy
+              ? { orderBy: { ...(orderAlias ? { alias: orderAlias } : {}), ...(relationalPlan.orderBy.direction ? { direction: relationalPlan.orderBy.direction } : {}) } }
+              : {}),
+            ...(relationalPlan.limit ? { limit: relationalPlan.limit } : {}),
+            description: input.question || 'Governed relational program composed from admitted identifiers.',
+          });
+          if (!composition.ok) {
+            observe('compile_and_run_dql', 'ineligible', composition.reasonCode, { tier: 'governed_relational', candidateIds: [...measureIds, ...dimensionIds], origin: 'validation' });
+            return {
+              ...denied('compile_and_run_dql', composition.reasonCode),
+              detail: composition.detail,
+              admittedRelations: admittedRelationVocabulary(),
+            };
+          }
+          program = composition.composed.program;
+        }
         const selectedCandidateIds = hostCandidateIds([...measureIds, ...dimensionIds, ...outputIds]);
         const selected = resolveCandidates([...measureIds, ...dimensionIds, ...outputIds]);
         const selectedPaths = state.relationshipPathHandles.filter((path) => pathIds.includes(path.id));
@@ -3538,11 +3823,21 @@ function createAskV2LaneHandler(
           return { executed: true, tier: 'governed_relational', rowCount: result.rowCount, relationshipPathIds: pathIds };
         } catch (error) {
           executionFailure = v2ExecutionFailureFromError(error, 'GOVERNED_RELATIONAL_EXECUTION_FAILED');
+          if (process.env.DQL_DEBUG_EXECUTION_ERROR) console.error('[DQL_DEBUG governed]', JSON.stringify({ message: v2BoundedFailureDetail(error), selectedCandidateIds, outputIds, program: program.slice(0, 700) }));
           observe('compile_and_run_dql', 'error', executionFailure.reasonCode, { tier: 'governed_relational', candidateIds: selectedCandidateIds, relationshipPathIds: pathIds, origin: executionFailure.origin, planId: state.resolvedPlan?.id });
-          return denied('compile_and_run_dql', executionFailure.reasonCode);
+          // A bare reason code cannot be repaired. Every other refusal in this
+          // lane names what was wrong; an execution failure was the one that
+          // did not, so a compile error read as "the warehouse said no" and
+          // the same query came back unchanged until the budget died.
+          return {
+            ...denied('compile_and_run_dql', executionFailure.reasonCode),
+            ...(v2BoundedFailureDetail(error) ? { detail: v2BoundedFailureDetail(error) } : {}),
+            usage: 'Send relationalPlan and DQL writes the program for you: measures with an aggregation, dimensions,'
+              + ' filters, ordering, and a row bound, each id an admitted card ID or "<relation>.<column>".',
+          };
         }
       }),
-      safeTool('validate_and_run_sql', 'Validate one read-only SQL proposal against admitted output IDs, mint a one-use capability, and execute it as review-required.', {
+      safeTool('validate_and_run_sql', 'Validate one read-only SQL proposal, mint a one-use capability, and execute it as review-required. expectedOutputIds are the ADMITTED IDENTIFIERS the SQL reads — "<relation>.<column>" for each column it touches — never the aliases the SELECT returns.', {
         type: 'object', properties: { sql: { type: 'string', minLength: 1, maxLength: 30000 }, expectedOutputIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 24 }, repair: { type: 'boolean' } }, required: ['sql', 'expectedOutputIds'], additionalProperties: false,
       }, async (args) => {
         if (!requireInspections('validate_and_run_sql', ['inspect_certified_candidates', 'inspect_semantic_candidates', 'inspect_relational_context'])) return denied('validate_and_run_sql', 'REQUIRED_TIER_INSPECTION_MISSING');
@@ -3577,8 +3872,9 @@ function createAskV2LaneHandler(
             ...(admittedOutputs.length ? {
               admittedOutputIds: admittedOutputs,
               admittedRelations: admittedRelationVocabulary(),
-              usage: 'Every expectedOutputIds entry must be an admitted card ID, or "<relation>.<column>" naming a column of an admitted relation'
-                + ' (see admittedRelations). Use describe_relation to see every column of one relation.',
+              usage: 'expectedOutputIds names the ADMITTED IDENTIFIERS this SQL reads, not the aliases it returns:'
+                + ' send "<relation>.<column>" for each column the query touches (see admittedRelations), never the SELECT alias.'
+                + ' Use describe_relation to see every column of one relation.',
             } : {}),
             ...(reason === 'EXPLORATORY_SQL_VALIDATION_FAILED' ? {
               ...validationDetail,
@@ -3625,7 +3921,14 @@ function createAskV2LaneHandler(
         } catch (error) {
           executionFailure = v2ExecutionFailureFromError(error, 'EXPLORATORY_EXECUTION_FAILED');
           observe('validate_and_run_sql', 'error', executionFailure.reasonCode, { tier: 'exploratory_sql', candidateIds: outputIds, origin: executionFailure.origin, planId: state.resolvedPlan?.id });
-          return denied('validate_and_run_sql', executionFailure.reasonCode);
+          if (process.env.DQL_DEBUG_EXECUTION_ERROR) console.error('[DQL_DEBUG sql]', JSON.stringify({ message: v2BoundedFailureDetail(error), sql: sql.slice(0, 900), outputIds }));
+          // A warehouse or gate rejection the model cannot read is a rejection
+          // it will re-send unchanged. Name it, the same way every identifier
+          // refusal in this lane already does.
+          return {
+            ...denied('validate_and_run_sql', executionFailure.reasonCode),
+            ...(v2BoundedFailureDetail(error) ? { detail: v2BoundedFailureDetail(error) } : {}),
+          };
         }
       }),
       safeTool('search_values', 'Search one host-approved value index to resolve a member. It never reads result rows.', {
@@ -4153,6 +4456,7 @@ function createAskV2LaneHandler(
       const code = error && typeof error === 'object' && 'code' in error
         ? (error as { code?: unknown }).code
         : undefined;
+      if (process.env.DQL_DEBUG_PROVIDER_CLI) console.error('[DQL_DEBUG control]', JSON.stringify({ code, message: v2BoundedFailureDetail(error) }));
       const reasonCode = code === 'RUN_SOFT_TARGET_EXCEEDED' || code === 'RUN_DEADLINE_INSUFFICIENT'
         ? code
         : 'ASK_V2_PROVIDER_AGENT_CONTROL_FAILED';
@@ -4222,7 +4526,12 @@ function createAskV2LaneHandler(
       });
       return askV2NoAnswer(input, 'gap', semanticValidationObservation.reasonCode, 'validation');
     };
-    if (loop.stop !== 'final') {
+    // A transport stop AFTER the host already accepted a terminal finish is
+    // not a failure of this turn — the turn was over. Reporting it as one
+    // replaced an accepted close with "the AI provider could not complete this
+    // Ask step", which blames the provider for the host's own bookkeeping and
+    // hides the real, typed reason the turn ended.
+    if (loop.stop !== 'final' && !terminalNarrationReady()) {
       const reasonCode = loop.stop === 'tool_budget_exhausted'
         ? 'ASK_TOOL_BUDGET_EXHAUSTED'
         : loop.stop === 'provider_dispatch_budget_exhausted'

@@ -625,6 +625,7 @@ import {
   type DatasetSource,
 } from "./notebook-datasets.js";
 import { prepareBlockInvocation } from './block-invocation.js';
+import { boundAgentSchemaColumns, mergeAgentSchemaCompleteness } from './ask-schema-context.js';
 
 export const APP_SOURCE_REUSABLE_TAG = 'app-source';
 const NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT = 500;
@@ -13194,8 +13195,31 @@ function analyticalFailureSummary(
       const closureValidation = validateAuthorizedSqlReferences(executableSql, metadata.askV2Closure.contextPack, {
         ...(activeConnection.driver ? { dialect: activeConnection.driver } : {}),
         runtimeSchema: metadata.qualifiedSchemaContext,
+        // The plan is frozen and host-authorized by the time it reaches here.
+        // Re-asking "should we have clarified first?" can only refuse a query
+        // whose identifiers this host already admitted.
+        enforceGenerationReadiness: false,
       });
       if (!closureValidation.ok) {
+        // The closure gate is the hardest failure in Ask to diagnose from a
+        // trace, because the receipt records only the typed reason. This
+        // opt-in dump names the offending relation/column and the column lists
+        // the gate actually held, which is what tells a wide-warehouse false
+        // rejection apart from a genuinely wrong query.
+        if (process.env.DQL_DEBUG_EXECUTION_ERROR) {
+          console.error('[DQL_DEBUG closure]', JSON.stringify({
+            code: (closureValidation as { code?: string }).code,
+            error: (closureValidation as { error?: string }).error,
+            offending: (closureValidation as { offending?: unknown }).offending,
+            referencedRelations: closureValidation.referencedRelations,
+            allowed: metadata.askV2Closure.contextPack.allowedSqlContext.relations
+              .map((relation) => ({ relation: relation.relation, completeness: relation.columnCompleteness, columnCount: relation.columns.length }))
+              .slice(0, 6),
+            runtimeSchema: (metadata.qualifiedSchemaContext ?? [])
+              .map((table) => ({ relation: table.relation, completeness: table.columnCompleteness, columnCount: table.columns.length }))
+              .slice(0, 6),
+          }));
+        }
         throw analyticalError('The governed DQL program referenced a relation or column outside its immutable V2 closure, so it was not executed.', {
           origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
         });
@@ -37483,13 +37507,14 @@ function agentResultToSynthesisPreview(result: AgentAnswer['result']): Synthesiz
  * next question (the `suggest-question-*` convention it already understands).
  */
 function resultAwareFollowUpQuestions(
-  answer: { result?: { columns?: unknown } | undefined },
+  answer: { result?: { columns?: unknown; rows?: unknown } | undefined },
   question: string,
 ): AgentRunNextAction[] {
   const columns = Array.isArray(answer.result?.columns)
     ? (answer.result!.columns as unknown[]).flatMap((column) => (typeof column === 'string' ? [column] : []))
     : [];
   if (columns.length === 0) return [];
+  const rows = Array.isArray(answer.result?.rows) ? answer.result!.rows as unknown[] : [];
   const asked = question.toLowerCase();
   const humanize = (column: string): string => column.replace(/_/g, ' ').trim();
   const looksTemporal = (column: string): boolean =>
@@ -37501,10 +37526,26 @@ function resultAwareFollowUpQuestions(
     && !/(?:^|_)(?:id|key|sk|uuid)(?:_|$)/i.test(column);
 
   const suggestions: string[] = [];
-  // A breakdown the answer does not already have.
-  const breakdown = columns.find((column) => looksCategorical(column)
-    && !asked.includes(humanize(column).toLowerCase()));
-  if (breakdown) suggestions.push(`Break this down by ${humanize(breakdown)}`);
+  // A categorical column in the result IS the grouping the answer already
+  // used, so offering to "break this down by" it proposes the query the reader
+  // just ran. What actually moves the conversation on is the leading member of
+  // that grouping — a value the reader can already see in this answer.
+  const grouping = columns.find(looksCategorical);
+  const leadingMember = grouping
+    ? (() => {
+      const index = columns.indexOf(grouping);
+      const first = rows[0];
+      const value = Array.isArray(first)
+        ? first[index]
+        : first && typeof first === 'object'
+          ? (first as Record<string, unknown>)[grouping]
+          : undefined;
+      return typeof value === 'string' && value.trim() && value.length <= 60 ? value.trim() : undefined;
+    })()
+    : undefined;
+  if (leadingMember && !asked.includes(leadingMember.toLowerCase())) {
+    suggestions.push(`Focus on ${leadingMember}`);
+  }
   // A time view, when the source carries time and the question did not ask.
   const temporal = columns.find(looksTemporal);
   if (temporal && !/\b(?:month|quarter|year|week|day|trend|over time|last|since)\b/.test(asked)) {
@@ -42197,22 +42238,24 @@ function buildAgentSchemaContextFromContextPack(
   const byRelation = new Map<string, AgentSchemaTable>();
   const objectsByKey = new Map(contextPack.objects.map((object) => [object.objectKey, object]));
 
+  const boundColumns = (
+    columns: AgentSchemaTable['columns'],
+    declared: AgentSchemaTable['columnCompleteness'],
+  ) => boundAgentSchemaColumns(columns, declared, dedupeAgentSchemaColumns);
   const upsert = (table: AgentSchemaTable) => {
     if (!table.relation || !table.name) return;
     const key = table.relation.toLowerCase();
     const existing = byRelation.get(key);
     if (!existing) {
-      byRelation.set(key, {
-        ...table,
-        columns: dedupeAgentSchemaColumns(table.columns).slice(0, 80),
-      });
+      byRelation.set(key, { ...table, ...boundColumns(table.columns, table.columnCompleteness) });
       return;
     }
+    const mergedCompleteness = mergeAgentSchemaCompleteness(existing.columnCompleteness, table.columnCompleteness);
     byRelation.set(key, {
       ...existing,
       description: existing.description ?? table.description,
       source: existing.source === table.source ? existing.source : 'local metadata catalog',
-      columns: dedupeAgentSchemaColumns([...existing.columns, ...table.columns]).slice(0, 80),
+      ...boundColumns([...existing.columns, ...table.columns], mergedCompleteness),
     });
   };
 
@@ -42330,6 +42373,9 @@ function metadataObjectToAgentSchemaTable(object: MetadataObject): AgentSchemaTa
       schema: relation ? relation.split('.').slice(-2, -1)[0] : undefined,
       name: relation ? relation.split('.').at(-1) ?? model : model,
       source: 'local metadata catalog',
+      // One column object is one column of a relation, never the relation's
+      // whole column list — say so, or the merge below inherits a false claim.
+      columnCompleteness: 'partial',
       columns: [{
         name: object.name,
         type: metadataPayloadString(object, 'type'),
@@ -42348,6 +42394,10 @@ function metadataObjectToAgentSchemaTable(object: MetadataObject): AgentSchemaTa
   const schema = metadataPayloadString(object, 'schema') ?? (relationParts.length >= 2 ? relationParts[relationParts.length - 2] : undefined);
   const name = relationParts.at(-1) ?? object.name;
   const columns = metadataObjectColumns(object);
+  // The catalog knows whether it holds every column of this relation. Dropping
+  // that on the way into the schema context let a bounded projection be read as
+  // proof, and the SQL gate then rejected real columns it had never been shown.
+  const declaredCompleteness = metadataPayloadString(object, 'columnCompleteness');
   return {
     relation,
     schema,
@@ -42355,6 +42405,9 @@ function metadataObjectToAgentSchemaTable(object: MetadataObject): AgentSchemaTa
     description: object.description,
     columns,
     source: 'local metadata catalog',
+    ...(declaredCompleteness === 'complete' || declaredCompleteness === 'partial'
+      ? { columnCompleteness: declaredCompleteness }
+      : {}),
   };
 }
 
