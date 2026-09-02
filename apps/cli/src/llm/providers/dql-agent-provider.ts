@@ -2193,6 +2193,13 @@ function createAskV2LaneHandler(
                 + ' Continue with governed relational or review-required SQL over an admitted relation.',
             }
             : {}),
+          ...(semanticReasonCode === 'SEMANTIC_TARGET_BINDING_MISMATCH'
+            ? {
+              note: 'The semantic engine is installed but is not bound to the warehouse this project executes against,'
+                + ' so its metrics cannot be run here. This is a configuration mismatch, not a missing metric.'
+                + ' Continue with governed relational or review-required SQL, and report the mismatch in your answer.',
+            }
+            : {}),
           // The exact identifiers compile_and_run_semantic accepts, by role.
           // A card's `dimensions` are human labels; these are the IDs.
           ...(admitted ? { admittedIdentifiers: admitted } : {}),

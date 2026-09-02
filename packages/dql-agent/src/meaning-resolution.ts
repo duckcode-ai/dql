@@ -465,6 +465,14 @@ export interface AgentRetrievalEvidence {
       }>;
       physicalSchema?: 'ready' | 'unavailable' | 'unknown';
       targetFingerprint?: string;
+      /**
+       * Why a present, working semantic engine is nonetheless unusable for
+       * this target — most often that dbt's default target and the active DQL
+       * connection resolve to different warehouses. Redacted field names and
+       * values only; never a credential. Reported so a refusal can name the
+       * real cause instead of blaming an engine that is installed and healthy.
+       */
+      semanticTargetBindingMismatch?: string;
     };
   };
 }

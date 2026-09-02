@@ -29,7 +29,7 @@ describe('MetricFlow compile wrapper', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('compiles through mf and extracts SQL from mixed stdout', () => {
+  it('compiles through mf and extracts SQL from mixed stdout', async () => {
     mkdirSync(join(tmpDir, 'target'), { recursive: true });
     writeFileSync(join(tmpDir, 'target', 'semantic_manifest.json'), '{}', 'utf-8');
     const bin = join(tmpDir, 'mf');
@@ -47,7 +47,7 @@ describe('MetricFlow compile wrapper', () => {
     chmodSync(bin, 0o755);
     process.env.DQL_METRICFLOW_BIN = bin;
 
-    const result = compileMetricFlowQuery({
+    const result = await compileMetricFlowQuery({
       projectRoot: tmpDir,
       metrics: ['revenue'],
       dimensions: ['region'],
@@ -70,12 +70,12 @@ describe('MetricFlow compile wrapper', () => {
     expect(metricFlowCompileMode('mf test')).toBe('legacy-compile');
   });
 
-  it('returns a setup error when semantic_manifest.json is missing', () => {
-    expect(() => compileMetricFlowQuery({
+  it('returns a setup error when semantic_manifest.json is missing', async () => {
+    await expect(compileMetricFlowQuery({
       projectRoot: tmpDir,
       metrics: ['revenue'],
       dimensions: [],
-    })).toThrow(MetricFlowUnavailableError);
+    })).rejects.toThrow(MetricFlowUnavailableError);
   });
 
   it('reports a missing MetricFlow executable as unavailable', () => {

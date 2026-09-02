@@ -137,6 +137,12 @@ export interface SemanticRuntimeCompileContext {
   semanticLayer: SemanticLayer;
   driver?: string;
   tableMapping?: Record<string, string>;
+  /**
+   * The run's deadline/cancellation. A semantic compile spawns an external
+   * process; without this the process outlives the question that asked for it
+   * and the run's own deadline cannot stop it.
+   */
+  signal?: AbortSignal;
 }
 
 export interface SemanticRuntimeCompileResult extends ComposeQueryResult {
@@ -1114,7 +1120,7 @@ export async function compileSemanticRuntimeQuery(
         const dbtProjectPath = context.projectConfig.semanticLayer?.provider === 'dbt'
           ? context.projectConfig.semanticLayer.projectPath
           : context.projectConfig.dbt?.projectDir;
-        const compiled = compileMetricFlowQuery({
+        const compiled = await compileMetricFlowQuery({
           projectRoot: context.projectRoot,
           dbtProjectPath,
           profilesDir: context.projectConfig.dbt?.profilesDir,
@@ -1125,6 +1131,7 @@ export async function compileSemanticRuntimeQuery(
           orderBy: runtimeRequest.orderBy,
           limit: runtimeRequest.limit,
           savedQuery: runtimeRequest.savedQuery,
+          ...(context.signal ? { signal: context.signal } : {}),
         });
         return {
           sql: compiled.sql,
@@ -1293,7 +1300,7 @@ export async function describeRuntimeCompatibility(
     const dbtProjectPath = projectConfig?.semanticLayer?.provider === 'dbt'
       ? projectConfig.semanticLayer.projectPath
       : projectConfig?.dbt?.projectDir;
-    const mfDims = listMetricFlowDimensions({ projectRoot, dbtProjectPath, profilesDir: projectConfig?.dbt?.profilesDir, metrics });
+    const mfDims = await listMetricFlowDimensions({ projectRoot, dbtProjectPath, profilesDir: projectConfig?.dbt?.profilesDir, metrics });
     if (mfDims.length > 0) {
       const dimensions: RuntimeCompatibleDimension[] = mfDims.map((mf) => {
         const tail = mf.qualifiedName.split('__').pop()!.toLowerCase();

@@ -132,3 +132,39 @@ function rowString(row: Record<string, unknown>, key: string): string | undefine
   const normalized = String(value).trim();
   return normalized || undefined;
 }
+
+/**
+ * Name the fields on which dbt's default target and the active DQL connection
+ * disagree.
+ *
+ * MetricFlow will only be treated as executable when the two identities match,
+ * because compiling against one warehouse and executing against another is not
+ * a governed answer. When they differ, every metric reports as unrunnable and
+ * the message blames the engine — which is installed and working. Saying which
+ * field differs turns an unfalsifiable "not ready" into a one-line fix.
+ */
+export function describeWarehouseTargetIdentityMismatch(
+  expected: WarehouseTargetIdentityV1,
+  actual: WarehouseTargetIdentityV1,
+  profile?: { profileName?: string; targetName?: string },
+): string {
+  const fields: Array<keyof WarehouseTargetContextV1> = [
+    'account', 'database', 'schema', 'role', 'warehouse', 'catalog',
+  ];
+  const differences = fields.flatMap((field) => {
+    const left = expected.redactedContext[field];
+    const right = actual.redactedContext[field];
+    if (!left && !right) return [];
+    if ((left ?? '').toLowerCase() === (right ?? '').toLowerCase()) return [];
+    return [`${field}: dbt uses ${left ?? '(unset)'}, DQL uses ${right ?? '(unset)'}`];
+  });
+  const where = profile?.profileName && profile?.targetName
+    ? `dbt profile "${profile.profileName}" target "${profile.targetName}"`
+    : 'the dbt default target';
+  if (differences.length === 0) {
+    return `MetricFlow is installed, but ${where} and the active DQL connection resolve to different warehouse identities.`
+      + ' Point the DQL connection at the same target dbt uses, or change dbt\'s default target.';
+  }
+  return `MetricFlow is installed, but ${where} does not match the active DQL connection (${differences.join('; ')}).`
+    + ' A semantic query must compile and execute against the same warehouse, so DQL will not run it until they agree.';
+}

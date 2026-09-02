@@ -603,7 +603,7 @@ import {
   type SemanticRuntimeSettingsInput,
 } from './semantic-runtime-settings.js';
 import { observeWarehouseTargetIdentity } from './semantic-execution/connection-identity.js';
-import { configuredWarehouseTargetIdentity } from './semantic-execution/connection-identity.js';
+import { configuredWarehouseTargetIdentity, describeWarehouseTargetIdentityMismatch } from './semantic-execution/connection-identity.js';
 import { probeAskTierReadinessV1 } from './ask-runtime/readiness.js';
 import {
   executeTargetBoundSemanticQuery,
@@ -6757,6 +6757,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               semanticLayer: semanticLayer!,
               driver: semanticDriver,
               tableMapping: semanticTableMapping,
+              // The compiler runs an external process; give it this run's
+              // deadline so a slow compile is cancelled with the question
+              // instead of outliving it.
+              ...(request.signal ? { signal: request.signal } : {}),
             });
             if (!compiled) {
               const dbtProjectPath = projectConfig.semanticLayer?.provider === 'dbt'
@@ -11255,6 +11259,9 @@ function analyticalFailureSummary(
     const targetConnection = descriptor.target === 'local'
       ? datasetWorkspace.localConnection
       : resolveNamedConnection(descriptor.connectionName);
+    // Recorded when MetricFlow is present but not target-bound, so the refusal
+    // can name the exact disagreement instead of a generic "engine unavailable".
+    let semanticTargetBindingMismatch: string | undefined;
     let targetConfigured = Boolean(targetConnection);
     if (targetConnection) {
       try {
@@ -11312,8 +11319,25 @@ function analyticalFailureSummary(
       const targetBound = adapter.id === 'native'
         ? targetConfigured
         : adapter.id === 'metricflow-cli'
-          ? Boolean(targetIdentity && metricFlowTarget?.expectedTarget
-            && metricFlowTarget.expectedTarget.identityFingerprint === targetIdentity.identityFingerprint)
+          ? (() => {
+            const bound = Boolean(targetIdentity && metricFlowTarget?.expectedTarget
+              && metricFlowTarget.expectedTarget.identityFingerprint === targetIdentity.identityFingerprint);
+            // A silent target mismatch is the hardest semantic failure to
+            // diagnose: MetricFlow is installed and the manifest parses, yet
+            // every metric reports as unexecutable because dbt's default
+            // target and the active DQL connection disagree on something as
+            // small as a role or a warehouse. Record WHICH fields differ so
+            // the refusal and `dql doctor` can say so instead of blaming the
+            // engine.
+            if (!bound && targetIdentity && metricFlowTarget?.expectedTarget) {
+              semanticTargetBindingMismatch = describeWarehouseTargetIdentityMismatch(
+                metricFlowTarget.expectedTarget,
+                targetIdentity,
+                { profileName: metricFlowTarget.profileName, targetName: metricFlowTarget.targetName },
+              );
+            }
+            return bound;
+          })()
           : Boolean(targetIdentity && cloudSettings.executionTargetFingerprint
             && cloudSettings.executionTargetFingerprint === targetIdentity.identityFingerprint);
       return { id: adapter.id, ready: adapter.ready, targetBound };
@@ -11399,6 +11423,8 @@ function analyticalFailureSummary(
       // diagnostic preserves its pre-existing metric readiness semantics.
       ...(askV2SemanticCandidateReadiness.length > 0 ? { askV2SemanticCandidateReadiness } : {}),
       askV2SemanticRuntime,
+      // Present only when a working engine cannot be used against this target.
+      ...(semanticTargetBindingMismatch ? { semanticTargetBindingMismatch } : {}),
     };
     // `agentRunExecutors` is an explicit host-owned execution boundary used
     // by embedders and deterministic local tests. A supplied semantic executor
@@ -12147,7 +12173,9 @@ function analyticalFailureSummary(
             reasonCode: semanticIds.length === 0
               ? 'SEMANTIC_CANDIDATES_EMPTY'
               : advertisedMetricIds.length > 0 && executableMetricIds.length === 0
-                ? 'SEMANTIC_ENGINE_UNAVAILABLE'
+                ? ((readiness as { semanticTargetBindingMismatch?: string } | undefined)?.semanticTargetBindingMismatch
+                  ? 'SEMANTIC_TARGET_BINDING_MISMATCH'
+                  : 'SEMANTIC_ENGINE_UNAVAILABLE')
                 : 'SEMANTIC_CANDIDATES_AVAILABLE',
           },
           governed_relational: {

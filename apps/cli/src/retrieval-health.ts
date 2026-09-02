@@ -30,6 +30,13 @@ export interface DqlRetrievalHealthStatus {
   embeddings: {
     providerId: string;
     semantic: boolean;
+    /**
+     * Present when the machine can do better than the lexical fallback but is
+     * not doing so. "Why is retrieval dumb today" should be answerable at a
+     * glance, and a hashed index on a machine with a real embedder installed
+     * is the most common answer.
+     */
+    upgradeAvailable?: string;
   };
   catalog: MetadataCatalogHealth;
   runStore: AgentRunStoreHealth & { legacyJsonBytes?: number };
@@ -63,8 +70,12 @@ export function resolveRetrievalHealthStatus(input: {
     providerId = projectEmbeddingProvider(input.projectRoot).id;
   } catch { /* keep the deterministic default */ }
   const semantic = !providerId.startsWith('hashed-token');
+  let embeddingUpgrade: string | undefined;
   if (!semantic) {
     warnings.push('Embeddings are the deterministic hashed fallback: paraphrase matching is lexical-only. Run a local Ollama embedding model or set an OpenAI key for semantic recall.');
+    embeddingUpgrade = 'Install an Ollama embedding model (for example `ollama pull nomic-embed-text`) and restart the server:'
+      + ' DQL detects it, switches to it, and re-embeds the index automatically. Set ai.embeddings in dql.config.json to choose'
+      + ' explicitly, or DQL_EMBEDDINGS_AUTODETECT=off to stay on the lexical fallback.';
   }
 
   const catalog = readMetadataCatalogHealth(defaultMetadataPath(input.projectRoot));
@@ -89,7 +100,14 @@ export function resolveRetrievalHealthStatus(input: {
     warnings.push(`Immutable metadata snapshots occupy ${formatBytes(snapshots.totalBytes)} (${snapshots.count} files) — old snapshots are never garbage-collected yet; safe to delete .dql/cache/snapshots.`);
   }
 
-  return { valueGrounding, embeddings: { providerId, semantic }, catalog, runStore, snapshots, warnings };
+  return {
+    valueGrounding,
+    embeddings: { providerId, semantic, ...(embeddingUpgrade ? { upgradeAvailable: embeddingUpgrade } : {}) },
+    catalog,
+    runStore,
+    snapshots,
+    warnings,
+  };
 }
 
 function snapshotStoreStats(dir: string): { count: number; totalBytes: number } {

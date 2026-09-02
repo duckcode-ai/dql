@@ -1,6 +1,85 @@
 import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+
+/**
+ * Run a MetricFlow command without stopping the world.
+ *
+ * `spawnSync` blocks the Node event loop for the entire life of the child. A
+ * MetricFlow cold start on an enterprise semantic manifest is seconds — and on
+ * the largest ones, far longer — during which this process serves no HTTP, no
+ * progress events, and cannot honour its own deadline: the run's AbortSignal
+ * is not even read until the child has already exited. That is the difference
+ * between "the query is taking a while" and "the product froze". An async
+ * spawn keeps the server responsive, lets the run deadline actually cancel a
+ * compile, and bounds a hung binary with a real timeout.
+ */
+export interface MetricFlowSpawnResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: NodeJS.ErrnoException;
+  timedOut?: boolean;
+}
+
+export function runMetricFlow(
+  bin: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number; signal?: AbortSignal },
+): Promise<MetricFlowSpawnResult> {
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = (result: MetricFlowSpawnResult): void => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(result);
+    };
+    let child;
+    try {
+      child = spawn(bin, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) {
+      finish({ status: null, stdout: '', stderr: '', error: error as NodeJS.ErrnoException });
+      return;
+    }
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const timer = options.timeoutMs
+      ? setTimeout(() => {
+        timedOut = true;
+        try { child.kill('SIGTERM'); } catch { /* already gone */ }
+        killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, 2_000);
+      }, options.timeoutMs)
+      : undefined;
+    // A cancelled Ask must actually stop the compiler it started.
+    const onAbort = (): void => { try { child.kill('SIGTERM'); } catch { /* already gone */ } };
+    options.signal?.addEventListener('abort', onAbort);
+    const cleanup = (): void => {
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      options.signal?.removeEventListener('abort', onAbort);
+    };
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk.toString()));
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk.toString()));
+    child.on('error', (error) => {
+      cleanup();
+      finish({ status: null, stdout: stdout.join(''), stderr: stderr.join(''), error: error as NodeJS.ErrnoException, timedOut });
+    });
+    child.on('close', (status) => {
+      cleanup();
+      finish({ status, stdout: stdout.join(''), stderr: stderr.join(''), timedOut });
+    });
+  });
+}
+
+/**
+ * How long a single MetricFlow invocation may run before it is killed.
+ * Generous, because a cold Python start on a large manifest is legitimately
+ * slow — but finite, because an unbounded compile is what froze the server.
+ */
+const METRICFLOW_COMPILE_TIMEOUT_MS = 120_000;
+const METRICFLOW_DIMENSION_TIMEOUT_MS = 30_000;
 
 export type MetricFlowCliSource = 'env' | 'managed' | 'path';
 
@@ -28,6 +107,8 @@ export interface MetricFlowQueryRequest {
   orderBy?: Array<{ name: string; direction?: 'asc' | 'desc' }>;
   limit?: number;
   savedQuery?: string;
+  /** The run's deadline/cancellation, so a compile cannot outlive its Ask. */
+  signal?: AbortSignal;
 }
 
 export function managedMetricFlowRuntimeRoot(projectRoot: string): string {
@@ -101,11 +182,16 @@ interface MetricFlowDimensionListRequest {
   dbtProjectPath?: string;
   profilesDir?: string;
   metrics: string[];
+  /** The run's deadline/cancellation, so a listing cannot outlive its Ask. */
+  signal?: AbortSignal;
 }
 
 // Cache `mf list dimensions` by (binary + metrics-set + semantic_manifest mtime).
 // The UI calls this on every metric toggle and mf cold-start is seconds.
 const metricFlowDimensionCache = new Map<string, MetricFlowDimension[]>();
+/** Recent failed listings, so one broken runtime is not re-probed per question. */
+const metricFlowDimensionMissCache = new Map<string, number>();
+const METRICFLOW_DIMENSION_MISS_TTL_MS = 60_000;
 
 /**
  * Ask MetricFlow itself which dimensions a metric set can be grouped by, via
@@ -115,7 +201,9 @@ const metricFlowDimensionCache = new Map<string, MetricFlowDimension[]>();
  * drift across MetricFlow versions: unrecognized lines are ignored and a parse
  * that yields nothing returns [] so the caller falls back to native.
  */
-export function listMetricFlowDimensions(request: MetricFlowDimensionListRequest): MetricFlowDimension[] {
+export async function listMetricFlowDimensions(
+  request: MetricFlowDimensionListRequest,
+): Promise<MetricFlowDimension[]> {
   const dbtRoot = resolveDbtProjectRoot(request.projectRoot, request.dbtProjectPath);
   const manifestPath = join(dbtRoot, 'target', 'semantic_manifest.json');
   if (!existsSync(manifestPath) || request.metrics.length === 0) return [];
@@ -127,18 +215,30 @@ export function listMetricFlowDimensions(request: MetricFlowDimensionListRequest
   const cacheKey = `${bin}::${mtime}::${[...request.metrics].sort().join(',')}`;
   const cached = metricFlowDimensionCache.get(cacheKey);
   if (cached) return cached;
+  const missedAt = metricFlowDimensionMissCache.get(cacheKey);
+  if (missedAt !== undefined) {
+    if (Date.now() - missedAt < METRICFLOW_DIMENSION_MISS_TTL_MS) return [];
+    metricFlowDimensionMissCache.delete(cacheKey);
+  }
 
   const args = ['list', 'dimensions', '--metrics', request.metrics.join(',')];
-  const result = spawnSync(bin, args, {
+  const result = await runMetricFlow(bin, args, {
     cwd: dbtRoot,
-    encoding: 'utf-8',
-    timeout: 30_000,
+    timeoutMs: METRICFLOW_DIMENSION_TIMEOUT_MS,
+    ...(request.signal ? { signal: request.signal } : {}),
     env: {
       ...process.env,
       ...(request.profilesDir ? { DBT_PROFILES_DIR: resolve(request.projectRoot, request.profilesDir) } : {}),
     },
   });
-  if (result.error || result.status !== 0) return [];
+  if (result.error || result.status !== 0) {
+    // A failed listing used to be re-attempted on EVERY filtered question,
+    // re-paying a full cold start (or a 30s timeout) each time for the same
+    // answer. Remember the miss briefly so one broken run does not become a
+    // per-question tax, while a fixed runtime is still picked up quickly.
+    metricFlowDimensionMissCache.set(cacheKey, Date.now());
+    return [];
+  }
 
   const parsed = parseMetricFlowDimensionList(result.stdout ?? '');
   if (parsed.length > 0) metricFlowDimensionCache.set(cacheKey, parsed);
@@ -200,7 +300,35 @@ export function hasMetricFlowCli(projectRoot?: string): boolean {
   return resolveMetricFlowCli(projectRoot) !== null;
 }
 
-export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricFlowCompileResult {
+/**
+ * Compiled SQL for a request that has already been compiled against this exact
+ * semantic manifest.
+ *
+ * MetricFlow compilation is deterministic: the same metrics, dimensions,
+ * filters, grain and limit against the same manifest produce the same SQL. It
+ * was nonetheless re-derived through a fresh Python cold start every time,
+ * which is the single largest fixed cost in a semantic answer — paid again on
+ * every repeat of a question and on every follow-up that keeps the same shape.
+ * The manifest's mtime is part of the key, so a `dbt parse` invalidates it.
+ */
+const metricFlowCompileCache = new Map<string, MetricFlowCompileResult>();
+const METRICFLOW_COMPILE_CACHE_LIMIT = 64;
+
+function metricFlowCompileCacheKey(bin: string, manifestMtime: string, request: MetricFlowQueryRequest): string {
+  return JSON.stringify([
+    bin,
+    manifestMtime,
+    [...request.metrics].sort(),
+    [...request.dimensions].sort(),
+    request.timeDimension ?? null,
+    request.filters ?? null,
+    request.orderBy ?? null,
+    request.limit ?? null,
+    request.savedQuery ?? null,
+  ]);
+}
+
+export async function compileMetricFlowQuery(request: MetricFlowQueryRequest): Promise<MetricFlowCompileResult> {
   const dbtRoot = resolveDbtProjectRoot(request.projectRoot, request.dbtProjectPath);
   if (!existsSync(join(dbtRoot, 'target', 'semantic_manifest.json'))) {
     throw new MetricFlowUnavailableError(
@@ -211,6 +339,11 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
   const resolvedCli = resolveMetricFlowCli(request.projectRoot);
   const bin = resolvedCli?.bin ?? process.env.DQL_METRICFLOW_BIN ?? process.env.METRICFLOW_BIN ?? 'mf';
   const mode = metricFlowCompileMode(resolvedCli?.version ?? '');
+  let manifestMtime = '';
+  try { manifestMtime = String(statSync(join(dbtRoot, 'target', 'semantic_manifest.json')).mtimeMs); } catch { /* ignore */ }
+  const compileCacheKey = metricFlowCompileCacheKey(bin, manifestMtime, request);
+  const compileCached = metricFlowCompileCache.get(compileCacheKey);
+  if (compileCached) return compileCached;
   // MetricFlow's WHERE templates hard-require entity-qualified names
   // ("product__product_type"); a bare "product_type" is a parse ERROR (and,
   // in older paths, a silently dropped filter). DQL's semantic layer speaks
@@ -227,12 +360,13 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
   // repair below at no extra cost on the happy path.
   const needsQualification = (request.filters ?? []).some((filter) =>
     filter.dimension && !filter.dimension.includes('__') && filter.dimension !== 'metric_time');
-  const qualifiedRequest = request.savedQuery || !needsQualification ? request : (() => {
-    const qualified = listMetricFlowDimensions({
+  const qualifiedRequest = request.savedQuery || !needsQualification ? request : await (async () => {
+    const qualified = await listMetricFlowDimensions({
       projectRoot: request.projectRoot,
       ...(request.dbtProjectPath ? { dbtProjectPath: request.dbtProjectPath } : {}),
       ...(request.profilesDir ? { profilesDir: request.profilesDir } : {}),
       metrics: request.metrics,
+      ...(request.signal ? { signal: request.signal } : {}),
     });
     if (qualified.length === 0) return request;
     const qualify = (name: string | undefined): string | undefined => {
@@ -263,13 +397,14 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
         : {}),
     };
   })();
-  const spawn = (spawnRequest: MetricFlowQueryRequest) => {
+  const runCompile = async (spawnRequest: MetricFlowQueryRequest) => {
     const args = buildMetricFlowArgs(spawnRequest, mode);
     return {
       args,
-      result: spawnSync(bin, args, {
+      result: await runMetricFlow(bin, args, {
         cwd: dbtRoot,
-        encoding: 'utf-8',
+        timeoutMs: METRICFLOW_COMPILE_TIMEOUT_MS,
+        ...(request.signal ? { signal: request.signal } : {}),
         env: {
           ...process.env,
           ...(spawnRequest.profilesDir
@@ -279,7 +414,7 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
       }),
     };
   };
-  let { args, result } = spawn(qualifiedRequest);
+  let { args, result } = await runCompile(qualifiedRequest);
 
   if (result.error) {
     if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -300,7 +435,7 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
     // wall of resolver errors for a question that has an exact governed answer.
     const repaired = repairMetricFlowGroupBy(qualifiedRequest, `${stderr}\n${stdout}`);
     if (repaired) {
-      const retry = spawn(repaired);
+      const retry = await runCompile(repaired);
       if (!retry.result.error && retry.result.status === 0) {
         args = retry.args;
         result = retry.result;
@@ -308,6 +443,12 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
         stderr = retry.result.stderr ?? '';
       }
     }
+  }
+  if (result.timedOut) {
+    throw new MetricFlowUnavailableError(
+      `MetricFlow did not finish compiling within ${Math.round(METRICFLOW_COMPILE_TIMEOUT_MS / 1000)} seconds.`
+      + ' The semantic manifest may be very large or the runtime may be stuck; retry, or run the query through dbt Cloud.',
+    );
   }
   if (result.status !== 0) {
     throw new Error(`MetricFlow compile failed (${result.status}): ${stderr || stdout || 'no output'}`);
@@ -318,12 +459,18 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
     throw new Error('MetricFlow compile completed but no SQL statement was found in stdout.');
   }
 
-  return {
+  const compiled: MetricFlowCompileResult = {
     sql,
     command: [bin, ...args],
     stdout,
     stderr,
   };
+  if (metricFlowCompileCache.size >= METRICFLOW_COMPILE_CACHE_LIMIT) {
+    const oldest = metricFlowCompileCache.keys().next().value;
+    if (oldest !== undefined) metricFlowCompileCache.delete(oldest);
+  }
+  metricFlowCompileCache.set(compileCacheKey, compiled);
+  return compiled;
 }
 
 /**
