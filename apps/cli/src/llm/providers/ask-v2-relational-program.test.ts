@@ -140,3 +140,26 @@ describe('text tool contract', () => {
     expect(contract).toContain('limit:num');
   });
 });
+
+describe('relation quoting', () => {
+  const parses = (program: string): boolean => {
+    const parsed = new Parser(program, '<test>').parse();
+    return parsed.statements.some((statement) => statement.kind === NodeKind.BlockDecl);
+  };
+
+  it('quotes each segment once, respecting a segment the catalog already quoted', () => {
+    const result = composeAskV2RelationalProgram({
+      relation: '"ANALYTICS_PROD".restricted_safe_common_mart_sales.mart_arr_snapshot_bottom_up',
+      measures: [{ column: 'arr', aggregation: 'sum', alias: 'net_arr' }],
+      dimensions: [{ column: 'crm_account_name' }],
+      orderBy: { alias: 'net_arr', direction: 'desc' },
+      limit: 10,
+      description: 'top 10 customer accounts by net arr',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(parses(result.composed.program)).toBe(true);
+    expect(result.composed.sql).toContain('FROM "ANALYTICS_PROD"."restricted_safe_common_mart_sales"."mart_arr_snapshot_bottom_up"');
+    expect(result.composed.sql).not.toContain('"' + '""');
+  });
+});

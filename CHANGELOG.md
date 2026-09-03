@@ -86,6 +86,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - A plan's `orderBy` that names none of the selected fields ("revenue" for
   `drink_revenue`) resolves to the selected field it names, else to the
   measure, instead of freezing an unrunnable plan.
+- A physical relation whose catalog name already carries a quoted segment
+  (Snowflake's `"ANALYTICS_PROD".schema.table`) is quoted once per segment.
+  Wrapping the quoted segment again produced a triple-quoted identifier that
+  ended the composed block's own triple-quoted query, so the parser refused
+  every governed relational program on the enterprise warehouse.
 
 ### The V1 answer loop is gone
 

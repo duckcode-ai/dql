@@ -74,7 +74,19 @@ export const ASK_V2_RELATIONAL_OPERATOR_NAMES = [
 /** A SQL identifier the host itself resolved from the admitted snapshot. */
 /** `dev.customers` is two identifiers; quoting it as one names a table that does not exist. */
 function quoteRelation(relation: string): string {
-  return relation.split('.').filter(Boolean).map(quoteIdentifier).join('.');
+  // A physical name may arrive with a segment the catalog already quoted
+  // ("ANALYTICS_PROD".schema.table on Snowflake). Quote each segment exactly
+  // once: strip the quotes a segment carries, then quote it — never wrap a
+  // quoted segment again, which produced a triple-quoted segment and a parse
+  // error inside the block's own triple-quoted query.
+  const segments = relation.match(/"(?:[^"]|"")*"|[^."]+/g) ?? [relation];
+  return segments
+    .map((segment) => segment.startsWith('"') && segment.endsWith('"') && segment.length >= 2
+      ? segment.slice(1, -1).replace(/""/g, '"')
+      : segment)
+    .filter((segment) => segment.length > 0)
+    .map((segment) => quoteIdentifier(segment))
+    .join('.');
 }
 
 function quoteIdentifier(name: string): string {
