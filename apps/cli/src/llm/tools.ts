@@ -26,6 +26,10 @@ import {
 } from '@duckcodeailabs/dql-agent';
 
 export interface AgentTool {
+  /** Callable when named, never declared to a model (see AgentToolDefinition.hidden). */
+  hidden?: boolean;
+  /** The advertised tool whose admission this hidden tool shares. */
+  aliasOf?: string;
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parse, type DQLManifest, type MetricCapabilityContract } from "@duckcodeailabs/dql-core";
-import { certifiedBlockProvesRequestedTopN, renderContextValidationRefusalForUser, parseProposal, compactSemanticRuntimeFailure, normalizeWarehouseSqlFailure } from "./answer-loop.js";
+import { certifiedBlockProvesRequestedTopN, certifiedBlockDeclaresQualifiers, renderContextValidationRefusalForUser, parseProposal, compactSemanticRuntimeFailure, normalizeWarehouseSqlFailure } from "./answer-loop.js";
 import { analyticalError } from "./analytical-error.js";
 import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
 import type { CertifiedBlockFit } from "./metadata/block-fit.js";
@@ -324,5 +324,16 @@ describe('compactSemanticRuntimeFailure on a live MetricFlow dump', () => {
   it('falls back to the resolver message, not the nag, when no group-by shape matches', () => {
     const text = compactSemanticRuntimeFailure('MetricFlow compile failed (1): ‼️ Warning: A new version of the MetricFlow CLI is available. 💡 Please update by running: $ pip install --upgrade dbt-metricflow ERROR: Got error(s) during query resolution. Error #1: Message: Unable to resolve metric nope.');
     expect(text).toBe('Unable to resolve metric nope.');
+  });
+});
+
+describe('certifiedBlockDeclaresQualifiers', () => {
+  it('binds a qualifier the author declared in tags or outputs, and refuses one only the title carries', () => {
+    const beverage = { tags: ['beverage', 'customer'], declaredOutputs: ['customer_name', 'beverage_revenue'], dimensions: ['customer_name'], entities: ['order_item'] };
+    expect(certifiedBlockDeclaresQualifiers(beverage, ['beverage'])).toBe(true);
+    expect(certifiedBlockDeclaresQualifiers(beverage, ['beverages'])).toBe(true);
+    expect(certifiedBlockDeclaresQualifiers(beverage, ['bcm'])).toBe(false);
+    const topCustomers = { tags: ['ranking'], declaredOutputs: ['customer_name', 'lifetime_spend'] };
+    expect(certifiedBlockDeclaresQualifiers(topCustomers, ['bcm'])).toBe(false);
   });
 });

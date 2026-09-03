@@ -103,7 +103,9 @@ async function runToolLoop(
   effort: 'low' | 'medium' | 'high' | 'xhigh' = 'xhigh',
 ): Promise<void> {
   const messages = [...initialMessages];
-  const toolDefs = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
+  // A hidden tool stays callable by name but is never declared to the model
+  // (the Ask lane's tier handlers behind `propose_plan`).
+  const toolDefs = tools.filter((t) => !t.hidden).map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
 
   for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
     if (signal.aborted) {

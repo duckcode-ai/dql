@@ -55,6 +55,37 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   same-plan repair without the model having to know the flag.
 - An admitted relation card proves its own execution closure when the
   context pack's allowed-SQL list happens not to carry it.
+- Every transport hides the tier handlers. The Claude Code SDK and native
+  SDK loops declared every tool to the model, hidden ones included; a model
+  then called `run_certified` by name until its budget died. Hidden names
+  are also rewritten out of every string a tool returns and out of the
+  opening cards, and a refused hidden certified call is answered with the
+  plan-level guidance instead of a fifth identical denial.
+- Contextual prefill is host evidence. Routing the host's own prior-result
+  and business-context prefill through the analyst's tool gate had the
+  kernel refuse it, and the follow-up lost the one fact it needed: which
+  column the prior-result member came from. It is now recorded directly,
+  and the bound member is carried into a prior-result plan as a filter on
+  its own dimension.
+- A bound member keeps its column. A filter that put a prior-result value
+  on another dimension (`customer_type = 'Ryan Byrd'`) passed the literal
+  proof and shipped a governed null; it is refused before compilation.
+- A plan never broadens a qualified question silently. A plan whose
+  measures, dimensions and filter values bind none of the question's
+  qualifying terms still runs when the analyst bound the term by judgment
+  (`beverage` → `drink_revenue`), but the answer is review-required and says
+  which admitted cards carry the term; the host has no synonym authority to
+  refuse it.
+- A certified block's authored scope counts. `top_beverage_customers`
+  (tags beverage/customer, output `beverage_revenue`, `WHERE is_drink_item`)
+  is now complete for "top customers by beverage": a term the parser read as
+  a grouping is satisfied by an output NAME that declares it, the column's
+  structural words (`item`) are not scope, and a question that entails one
+  of the block's non-structural tags has asked for the scope its WHERE
+  clause implements. The verbatim-example rule still governs filters.
+- A plan's `orderBy` that names none of the selected fields ("revenue" for
+  `drink_revenue`) resolves to the selected field it names, else to the
+  measure, instead of freezing an unrunnable plan.
 
 ### The V1 answer loop is gone
 

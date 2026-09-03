@@ -110,6 +110,7 @@ import {
   type AgentEvidenceCandidate,
   type AgentToolDefinition,
   type AnswerLoopInput,
+  type AgentMessage,
   type KGNode,
 } from '@duckcodeailabs/dql-agent';
 import {
@@ -454,15 +455,28 @@ const ASK_V2_INTERNAL_NAME_RE = /\b(run_certified|compile_and_run_semantic|compi
 function projectAnalystText(text: string): string {
   return text.replace(ASK_V2_INTERNAL_NAME_RE, (name) => ASK_V2_TOOL_ALIASES[name as AskToolNameV2] ?? name);
 }
-/** Rewrite a handler's `safeNextTools` onto the advertised surface. */
-function projectAnalystToolOutput(output: unknown): unknown {
-  if (!output || typeof output !== 'object' || Array.isArray(output)) return output;
+/**
+ * Rewrite a handler's output onto the advertised surface: `safeNextTools`
+ * as a list, and every string (a card's `tool`, a `usage` sentence, an
+ * instruction) by name. A model that is shown a hidden name will call it,
+ * and the kernel will refuse it until the budget dies — observed live with
+ * a certified card that said `run_certified`.
+ */
+function projectAnalystToolOutput(output: unknown, depth = 0): unknown {
+  if (depth > 8 || !output || typeof output !== 'object') {
+    return typeof output === 'string' ? projectAnalystText(output) : output;
+  }
+  if (Array.isArray(output)) return output.map((entry) => projectAnalystToolOutput(entry, depth + 1));
   const record = output as Record<string, unknown>;
-  if (!Array.isArray(record.safeNextTools)) return output;
-  return {
-    ...record,
-    safeNextTools: projectAnalystToolNames(record.safeNextTools.filter((name): name is AskToolNameV2 => typeof name === 'string')),
-  };
+  const projected: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (key === 'safeNextTools' && Array.isArray(value)) {
+      projected[key] = projectAnalystToolNames(value.filter((name): name is AskToolNameV2 => typeof name === 'string'));
+    } else {
+      projected[key] = projectAnalystToolOutput(value, depth + 1);
+    }
+  }
+  return projected;
 }
 
 function v2CanonicalToolName(name: string): AskToolNameV2 {
@@ -1687,6 +1701,8 @@ function createAskV2LaneHandler(
     // be grouped by that dimension"), not a connection fault; the terminal
     // sentence must say so, and the floor may still try the lower tiers.
     let semanticCompileDetail: string | undefined;
+    /** A qualifying term the analyst bound by judgment, not by a card the host could verify. */
+    let unverifiedQualifierBinding: { terms: string[]; mentions: string[] } | undefined;
     /**
      * True only while the host floor is running its own ladder after the
      * analyst's turn. Every kernel call the execution tools make carries it,
@@ -2875,6 +2891,28 @@ function createAskV2LaneHandler(
         const semanticFilters = canonicalFilterResolution.ok
           ? canonicalFilterResolution.filters
           : [];
+        // THE BOUND MEMBER KEEPS ITS COLUMN. A follow-up about a member the
+        // prior result named ("total revenue for Ryan Byrd", a customer_name)
+        // must filter that member's own dimension. Live, the analyst filtered
+        // customer_type = 'Ryan Byrd': the literal appeared in the SQL, the
+        // fail-closed proof passed, and a governed null shipped. The value's
+        // dimension is host knowledge, so a filter that puts the trusted value
+        // on another dimension is refused before compilation.
+        const trustedMember = parseV2TrustedMemberSelection(state);
+        const trustedTail = (reference: string) => reference.split(/[.:]/).at(-1)?.toLowerCase() ?? reference.toLowerCase();
+        const misboundTrustedFilter = trustedMember
+          ? semanticFilters.find((filter) => String(filter.value).trim().toLowerCase() === trustedMember.value.toLowerCase()
+            && !trustedMember.dimensionReferences.some((reference) => trustedTail(reference) === trustedTail(filter.dimensionId)))
+          : undefined;
+        if (misboundTrustedFilter && trustedMember) {
+          observe('compile_and_run_semantic', 'ineligible', 'SEMANTIC_FILTER_DIMENSION_MISMATCH', {
+            tier: 'semantic', candidateIds: [misboundTrustedFilter.dimensionId], origin: 'validation', safeAction: 'use:compile_and_run_semantic',
+          });
+          return {
+            ...denied('compile_and_run_semantic', 'SEMANTIC_FILTER_DIMENSION_MISMATCH', ['compile_and_run_semantic']),
+            usage: `"${trustedMember.value}" is a value of ${trustedMember.dimensionReferences[0]}, not of ${misboundTrustedFilter.dimensionId}. Filter the dimension it belongs to.`,
+          };
+        }
         const filtersBound = normalizedFilters.ok && canonicalFilterResolution.ok;
         const filterIds = semanticFilters.map((filter) => filter.dimensionId);
         const normalizedTime = normalizeV2SemanticTimeBinding({
@@ -4333,7 +4371,20 @@ function createAskV2LaneHandler(
         ...(ASK_V2_TOOL_ALIASES[tool.name as AskToolNameV2]
           ? { hidden: true, aliasOf: ASK_V2_TOOL_ALIASES[tool.name as AskToolNameV2] }
           : {}),
-        run: async (args: Record<string, unknown>) => markAskV2ToolOutput(projectAnalystToolOutput(await tool.run(args))),
+        run: async (args: Record<string, unknown>) => {
+          const output = await tool.run(args);
+          // A model that names a hidden tier handler directly (a transcript
+          // it remembers, a guess) and is refused by the ladder is answered
+          // the way its plan would have been: with the plan-level guidance,
+          // not five identical denials.
+          const denial = output && typeof output === 'object' && !Array.isArray(output) ? output as Record<string, unknown> : undefined;
+          if (tool.name === 'run_certified' && denial?.ok === false && !planDispatchActive
+            && denial.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED'
+            && typeof args.candidateId === 'string') {
+            return markAskV2ToolOutput(await resolveAndRunPlan({ measures: [{ id: args.candidateId }], ...(args.bindings ? { bindings: args.bindings } : {}) }));
+          }
+          return markAskV2ToolOutput(projectAnalystToolOutput(output));
+        },
       }));
     const toolByName = (name: string) => tools.find((tool) => tool.name === name);
     /**
@@ -4421,7 +4472,18 @@ function createAskV2LaneHandler(
      * decides WHICH handler the plan names, and performs any inspection the
      * kernel still wants recorded first (host work, never the analyst's).
      */
+    /** True while the plan dispatcher is driving a tier handler, so an alias fallback cannot re-enter it. */
+    let planDispatchActive = false;
     async function resolveAndRunPlan(raw: unknown): Promise<unknown> {
+      if (planDispatchActive) return { ok: false, reasonCode: 'PLAN_DISPATCH_REENTERED' };
+      planDispatchActive = true;
+      try {
+        return await resolvePlan(raw);
+      } finally {
+        planDispatchActive = false;
+      }
+    }
+    async function resolvePlan(raw: unknown): Promise<unknown> {
       const args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
       const item = (value: unknown): Record<string, unknown> | undefined => (
         value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
@@ -4432,7 +4494,13 @@ function createAskV2LaneHandler(
       const str = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
       type PlanItem = Record<string, unknown> & { id: string };
       const withId = (entries: Record<string, unknown>[]): PlanItem[] => entries.flatMap((entry) => (str(entry.id) ? [{ ...entry, id: str(entry.id)! }] : []));
-      const measures = withId(list(args.measures, 8));
+      // A block or metric named the old way is still a plan.
+      const conveniences = [
+        ...(str(args.candidateId) ? [{ id: str(args.candidateId)! }] : []),
+        ...(str(args.blockId) ? [{ id: str(args.blockId)! }] : []),
+        ...v2StringArray(args.metricIds, 8).map((id) => ({ id })),
+      ];
+      const measures = withId(list(args.measures, 8).length ? list(args.measures, 8) : conveniences);
       const dimensions = withId(list(args.dimensions, 16));
       const filters = withId(list(args.filters, 8));
       const time = item(args.time);
@@ -4461,8 +4529,13 @@ function createAskV2LaneHandler(
       }
       const dispatch = async (name: AskToolNameV2, input: Record<string, unknown>) => {
         const output = await toolByName(name)?.run(input);
+        // Executed on a binding the host could not verify: review-required.
+        if (completed && unverifiedQualifierBinding && (output as { executed?: unknown } | undefined)?.executed === true) {
+          const reason = `the plan binds "${unverifiedQualifierBinding.terms.join('", "')}" by the analyst's judgment; the host could not verify that binding against ${unverifiedQualifierBinding.mentions.slice(0, 3).join(', ')}`;
+          completed = { ...completed, semanticExecutionSafety: { version: 1, status: 'unproven', reason } };
+        }
         return output && typeof output === 'object' && !Array.isArray(output)
-          ? { ...(output as Record<string, unknown>), resolvedTool: name }
+          ? { ...(output as Record<string, unknown>), resolvedTool: name, ...(unverifiedQualifierBinding ? { qualifierJudgment: unverifiedQualifierBinding.terms } : {}) }
           : { resolvedTool: name, output };
       };
       if (sql) {
@@ -4473,6 +4546,58 @@ function createAskV2LaneHandler(
           expectedOutputIds: v2StringArray(sql.reads, 24),
           repair,
         });
+      }
+      // NEVER BROADEN A QUALIFIED QUESTION. "Top customers by beverage" is
+      // not "top customers": a plan whose measures, dimensions and filter
+      // values bind none of the question's qualifying terms is refused, and
+      // the refusal names where the term lives in the admitted snapshot (a
+      // qualified metric, a block, a member value of a dimension) so the
+      // next plan can bind it. The floor and host-first already keep this
+      // rule; the analyst's plan keeps it too. A term no admitted card
+      // mentions at all is an unmodeled term, which its own refusal covers.
+      if (state.turnClass === 'analytics') {
+        const questionPlan = buildAnalysisQuestionPlan(input.question, input.followUp);
+        const QUALIFIER_STOPWORDS = new Set(['each', 'every', 'all', 'total', 'name', 'names', 'top', 'high', 'highest', 'most', 'best']);
+        // Both readings of the question: the measure qualifiers ("beverage
+        // revenue") and the grouping terms ("by beverage").
+        const qualifiers = [...new Set([...questionPlan.unboundQualifiers, ...questionPlan.dimensionTerms])]
+          .map((term) => term.toLowerCase().trim())
+          .filter((term) => term.length >= 3 && !QUALIFIER_STOPWORDS.has(term));
+        if (qualifiers.length > 0) {
+          const words = (value: unknown): string[] => (typeof value === 'string' ? value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean) : []);
+          const cardText = (candidate: AgentEvidenceCandidate): string[] => [
+            candidate.id, candidate.qualifiedId, candidate.name, candidate.definition,
+            candidate.semanticModel, ...(candidate.aliases ?? []), ...(candidate.dimensions ?? []), ...(candidate.sourceObjects ?? []),
+          ].flatMap(words);
+          const selectedIds = [...measures, ...dimensions, ...filters].map((entry) => entry.id);
+          const selectedWords = new Set([
+            ...selectedIds.flatMap((id) => {
+              const candidate = resolveAdmittedReference(id, 'retained')?.candidate;
+              return [...words(id), ...(candidate ? cardText(candidate) : [])];
+            }),
+            ...filters.flatMap((filter) => [...words(str(filter.value)), ...v2StringArray(filter.values, 24).flatMap(words)]),
+            ...words(str(time?.dimensionId)), ...words(str(time?.grain)),
+          ]);
+          const singular = (term: string) => (term.endsWith('ies') ? `${term.slice(0, -3)}y` : term.endsWith('s') && !term.endsWith('ss') ? term.slice(0, -1) : term);
+          const dropped = qualifiers.filter((term) => ![...selectedWords].some((word) => word === term || singular(word) === singular(term)));
+          if (dropped.length > 0) {
+            const mentions = retainedCandidates()
+              .filter((candidate) => dropped.some((term) => cardText(candidate).some((word) => word === term || singular(word) === singular(term))))
+              .slice(0, 6)
+              .map((candidate) => v2CandidateId(candidate));
+            // The plan may still be right — "beverage" is `drink_revenue` to
+            // an analyst who read the cards, and the host has no synonym
+            // authority to say otherwise. So the plan runs, but a binding
+            // the host cannot verify is the analyst's judgment, and the
+            // answer says so: it is labelled review-required, never
+            // presented as governed. A term no admitted card mentions is
+            // the unmodeled-term refusal's business, not this one's.
+            if (mentions.length > 0) {
+              unverifiedQualifierBinding = { terms: dropped, mentions };
+              observe('propose_plan', 'eligible', 'PLAN_QUALIFIER_BOUND_BY_ANALYST_JUDGMENT', { origin: 'validation', candidateIds: mentions.slice(0, 8) });
+            }
+          }
+        }
       }
       const kindOf = (id: string): 'certified' | 'semantic' | 'relational' => {
         const candidate = resolveAdmittedReference(id, 'retained')?.candidate;
@@ -4487,14 +4612,42 @@ function createAskV2LaneHandler(
       const kind = [...kinds][0]!;
       if (kind === 'certified') {
         if (measures.length > 1) return refuse('PLAN_ONE_CERTIFIED_BLOCK', 'A certified plan names exactly one block id.');
-        return dispatch('run_certified', {
+        const output = await dispatch('run_certified', {
           candidateId: measures[0]!.id,
           ...(item(args.bindings) ? { bindings: item(args.bindings) } : {}),
           repair,
-        });
+        }) as Record<string, unknown>;
+        // A block the snapshot did not PROVE for this question is not a
+        // certified answer to it, and re-proposing the same block cannot
+        // make it one. Say so once, and name the other measures instead of
+        // pointing back at the block.
+        if (output.ok === false && (output.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED' || output.reasonCode === 'EARLIER_COMPLETE_TIER_REQUIRED')) {
+          const metrics = visibleCandidates()
+            .filter((candidate) => candidate.kind === 'semantic_metric')
+            .slice(0, 6)
+            .map((candidate) => v2CandidateId(candidate));
+          return {
+            ...output,
+            reasonCode: 'PLAN_CERTIFIED_BLOCK_NOT_PROVEN',
+            safeNextTools: ['propose_plan'],
+            usage: `Block ${measures[0]!.id} is not proven to answer this question as asked (${state.tierStates?.certified?.reasonCode ?? 'no exact certified fit'}). Do not propose it again: propose the measure itself${metrics.length ? ` — a semantic metric such as ${metrics.join(', ')}` : ''} — or "<relation>.<column>" measures with an aggregation.`,
+          };
+        }
+        return output;
       }
       if (kind === 'semantic') {
         const semanticFilters: Array<{ dimensionId: string; value: string }> = [];
+        // A follow-up about the member the prior result named carries that
+        // member as a filter on its own dimension, whether or not the plan
+        // spelled it out; the dimension is host knowledge.
+        const trusted = parseV2TrustedMemberSelection(state);
+        if (trusted && !filters.some((filter) => [str(filter.value), ...v2StringArray(filter.values, 24)].some((value) => value?.toLowerCase() === trusted.value.toLowerCase()))) {
+          const boundDimension = trusted.dimensionReferences
+            .map((reference) => resolveAdmittedReference(reference, 'retained')?.candidate
+              ?? resolveAdmittedReference(`${reference} name`, 'retained')?.candidate)
+            .find((candidate) => candidate && (candidate.kind === 'semantic_member' || candidate.semanticObjectType === 'dimension'));
+          if (boundDimension) filters.push({ id: v2CandidateId(boundDimension), operator: '=', value: trusted.value });
+        }
         for (const filter of filters) {
           const operator = str(filter.operator) ?? '=';
           const values = [...(str(filter.value) ? [str(filter.value)!] : []), ...v2StringArray(filter.values, 24)];
@@ -4503,13 +4656,29 @@ function createAskV2LaneHandler(
           }
           semanticFilters.push({ dimensionId: filter.id, value: values[0]! });
         }
+        // A ranking orders by one of the selected fields. A reference that
+        // names none of them ("revenue" for drink_revenue) is the analyst's
+        // shorthand for the measure, not a request for an unselected field;
+        // resolve it to the selected field it names, else to the measure.
+        const semanticOrderReference = (): string => {
+          const wanted = str(orderBy?.reference)?.toLowerCase();
+          const selected = [...measures.map((measure) => measure.id), ...dimensions.map((dimension) => dimension.id)];
+          if (wanted) {
+            const exact = selected.find((id) => id.toLowerCase() === wanted || id.toLowerCase().endsWith(`.${wanted}`) || id.toLowerCase().endsWith(`:${wanted}`));
+            if (exact) return exact;
+            const tail = (id: string) => id.split(/[.:]/).at(-1)?.toLowerCase() ?? id.toLowerCase();
+            const byTail = selected.find((id) => tail(id) === wanted || tail(id).endsWith(wanted) || wanted.endsWith(tail(id)));
+            if (byTail) return byTail;
+          }
+          return measures[0]!.id;
+        };
         return dispatch('compile_and_run_semantic', {
           metricIds: measures.map((measure) => measure.id),
           ...(dimensions.length ? { dimensionIds: dimensions.map((dimension) => dimension.id) } : {}),
           ...(str(time?.dimensionId) ? { timeDimensionId: str(time?.dimensionId) } : {}),
           ...(str(time?.grain) ? { timeGrain: str(time?.grain)!.toLowerCase() } : {}),
           ...(semanticFilters.length ? { filters: semanticFilters } : {}),
-          ...(str(orderBy?.reference) ? { orderBy: [{ name: str(orderBy?.reference)!, direction: str(orderBy?.direction)?.toLowerCase() === 'asc' ? 'asc' : 'desc' }] } : {}),
+          ...(orderBy ? { orderBy: [{ name: semanticOrderReference(), direction: str(orderBy.direction)?.toLowerCase() === 'asc' ? 'asc' : 'desc' }] } : {}),
           ...(limit ? { limit } : {}),
           repair,
         });
@@ -4550,16 +4719,22 @@ function createAskV2LaneHandler(
       && (observation.reasonCode === 'ASK_V2_RESULT_NARRATED'
         || observation.reasonCode === 'ASK_V2_CONTEXTUAL_ANSWER')
     ));
+    const debugPrompt = (kind: string, messages: readonly AgentMessage[], toolNames?: readonly string[]) => {
+      if (!process.env.DQL_DEBUG_PROMPT) return;
+      console.error('[DQL_DEBUG prompt]', JSON.stringify({ kind, tools: toolNames, messages: messages.map((message) => ({ role: message.role, content: message.content.slice(0, 6000) })) }));
+    };
     const terminalAwareProvider: AgentProvider = {
       name: input.provider.name,
       available: () => input.provider.available(),
       generate: async (...args) => {
         if (terminalNarrationReady()) return finalText ?? '';
+        debugPrompt('generate', args[0]);
         return input.provider.generate(...args);
       },
       ...(input.provider.generateWithTools ? {
         generateWithTools: async (...args: Parameters<NonNullable<AgentProvider['generateWithTools']>>) => {
           if (terminalNarrationReady()) return finalText ?? '';
+          debugPrompt('generateWithTools', args[0], args[1].filter((tool) => !tool.hidden).map((tool) => tool.name));
           return input.provider.generateWithTools!(...args);
         },
       } : {}),
@@ -5260,17 +5435,36 @@ function createAskV2LaneHandler(
       // A contextual turn's evidence is host work too: the business cards
       // and the trusted prior-result bindings are prefilled here, so the
       // analyst's first dispatch can already cite or continue them.
+      // Recorded directly, as host evidence: routing the host's own prefill
+      // through the analyst's tool gate had the kernel refuse it (the ladder
+      // wanted another inspection first), and the follow-up then lost the
+      // one fact it needed — which column the prior-result member came from.
       let contextualEvidence: string | undefined;
       try {
         if (state.turnClass === 'definition' || state.turnClass === 'business_context') {
           if (!state.observations.some((observation) => observation.tool === 'inspect_business_context')) {
-            const cards = await toolByName('inspect_business_context')?.run({});
-            if (cards && typeof cards === 'object') contextualEvidence = `Business context cards (cite their ids as evidenceIds in finish_answer):\n${JSON.stringify(cards)}`;
+            const business = workspace?.businessContext;
+            const cards = business?.cards?.slice(0, 24) ?? [];
+            inspectedBusinessContextIds = cards.map((card) => card.id);
+            observe('inspect_business_context', business?.available ? 'eligible' : 'unavailable', business?.available ? 'business_context_inspected' : 'business_context_empty', {
+              origin: 'retrieval', candidateIds: inspectedBusinessContextIds, hostObserved: true,
+            });
+            if (cards.length) contextualEvidence = `Business context cards (cite their ids as evidenceIds in finish_answer):\n${JSON.stringify(cards)}`;
           }
         } else if (state.turnClass === 'prior_result' || state.turnClass === 'clarification_response') {
           if (!state.observations.some((observation) => observation.tool === 'inspect_conversation_result')) {
-            const bindings = await toolByName('inspect_conversation_result')?.run({});
-            if (bindings && typeof bindings === 'object') contextualEvidence = `Trusted prior-result context for this turn:\n${JSON.stringify(bindings)}`;
+            observe('inspect_conversation_result', 'eligible', 'trusted_conversation_context', {
+              candidateIds: state.conversation.availableResultHandleIds, origin: 'retrieval', hostObserved: true,
+            });
+            const trusted = parseV2TrustedMemberSelection(state);
+            const bindings = {
+              selectedMemberId: state.conversation.selectedMemberId,
+              selectedMemberBinding: state.conversation.selectedMemberBinding,
+              ...(trusted ? { boundMember: trusted, usage: `"${trusted.value}" is a value of ${trusted.dimensionReferences[0]}; a plan that filters on it must filter THAT dimension.` } : {}),
+              availableResultHandleIds: state.conversation.availableResultHandleIds,
+              ...(state.conversation.ambiguousMemberLabels?.length ? { ambiguousMemberLabels: state.conversation.ambiguousMemberLabels } : {}),
+            };
+            contextualEvidence = `Trusted prior-result context for this turn:\n${JSON.stringify(bindings)}`;
           }
         }
       } catch {
@@ -5315,7 +5509,7 @@ function createAskV2LaneHandler(
         });
       }
       const openingContext = openingCards.length > 0
-        ? JSON.stringify({
+        ? JSON.stringify(projectAnalystToolOutput({
           snapshotId: state.snapshotId,
           cards: openingCards,
           relationshipPathHandles: state.relationshipPathHandles
@@ -5325,7 +5519,7 @@ function createAskV2LaneHandler(
               edgeIds: path.edgeIds,
               ...(path.candidateIds?.length ? { candidateIds: path.candidateIds } : {}),
             })),
-        })
+        }))
         : undefined;
       loop = await runAgenticToolLoopDetailed(terminalAwareProvider, [
         { role: 'system', content: buildAskV2AnalystSystemPrompt(state) },

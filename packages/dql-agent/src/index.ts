@@ -337,6 +337,7 @@ export type {
 } from "./skills/defaults.js";
 export {
   certifiedBlockProvesRequestedTopN,
+  certifiedBlockDeclaresQualifiers,
   buildCertifiedBlockInvocationInput,
   parseProposal,
   compactSemanticRuntimeFailure,

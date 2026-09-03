@@ -463,3 +463,27 @@ describe('certifiedTerminationVerdict — the single authority (Slice 2)', () =>
     }).allow).toBe(false);
   });
 });
+
+describe('authored scope of a certified block', () => {
+  const beverage = () => certifiedBlock('top_beverage_customers', {
+    grain: 'one row per customer in the beverage purchase ranking',
+    declaredOutputs: ['customer_name', 'beverage_revenue', 'beverage_orders', 'beverage_product_types'],
+    dimensions: ['customer_name'],
+    tags: ['beverage', 'customer', 'revenue', 'ranking'],
+    examples: ['Who are the top customers by beverage revenue?'],
+    sql: 'select customers.customer_name, sum(order_items.product_price) as beverage_revenue, count(distinct order_items.order_id) as beverage_orders, count(distinct products.product_id) as beverage_product_types from dev.order_items as order_items join dev.products as products on order_items.product_id = products.product_id join dev.orders as orders on order_items.order_id = orders.order_id join dev.customers as customers on orders.customer_id = customers.customer_id where products.is_drink_item = true group by customers.customer_name order by beverage_revenue desc limit 10',
+  });
+
+  it('is complete for "top customers by beverage": the output name declares the term and the tag entails the WHERE scope', () => {
+    const result = fit('top customers by beverage', beverage());
+    expect(result.missingDimensions).toEqual([]);
+    expect(result.reasons?.some((reason) => reason.includes('static scope is not requested'))).toBeFalsy();
+    expect(certifiedFitAllowsTier1(result)).toBe(true);
+  });
+
+  it('stays context-only for the unscoped "top customers": the WHERE scope is not asked for', () => {
+    const result = fit('top customers', beverage());
+    expect(result.reasons?.some((reason) => reason.includes('static scope is not requested'))).toBe(true);
+    expect(certifiedFitAllowsTier1(result)).toBe(false);
+  });
+});

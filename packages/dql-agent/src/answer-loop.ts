@@ -380,6 +380,32 @@ export function buildCertifiedBlockInvocationInput(
   };
 }
 
+
+/**
+ * Does the block's AUTHORED metadata declare every qualifying term of the
+ * question? "Top customers by beverage" is answered by a block whose tags
+ * are ["beverage", "customer", …] and whose outputs include
+ * `beverage_revenue`: the author said what it is about. A title or a
+ * description is not that statement — "Top Customers" matched "top BCM
+ * customers" by title and silently lost BCM — so only tags, declared
+ * outputs, dimensions and entities count.
+ */
+export function certifiedBlockDeclaresQualifiers(
+  block: Pick<KGNode, 'tags' | 'declaredOutputs' | 'outputs' | 'dimensions' | 'entities'>,
+  qualifiers: readonly string[],
+): boolean {
+  const words = (value: unknown): string[] => (typeof value === 'string' ? value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean) : []);
+  const singular = (term: string) => (term.endsWith('ies') ? `${term.slice(0, -3)}y` : term.endsWith('s') && !term.endsWith('ss') ? term.slice(0, -1) : term);
+  const authored = new Set([
+    ...(block.tags ?? []).flatMap(words),
+    ...(block.declaredOutputs ?? []).flatMap(words),
+    ...(block.outputs ?? []).flatMap((output) => words((output as { name?: string }).name)),
+    ...(block.dimensions ?? []).flatMap(words),
+    ...(block.entities ?? []).flatMap(words),
+  ].map(singular));
+  return qualifiers.every((qualifier) => words(qualifier).every((word) => authored.has(singular(word))));
+}
+
 /**
  * Prove that an immutable certified block may satisfy a question-driven
  * overall top-N result contract without conversational planning.  A declared

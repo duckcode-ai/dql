@@ -25,6 +25,9 @@ export interface CertifiedBlockFit {
   inferredContract: boolean;
 }
 
+const STRUCTURAL_SCOPE_WORDS = new Set(['item', 'items', 'flag', 'record', 'row', 'rows', 'active', 'valid', 'current', 'status', 'type', 'id', 'is', 'true', 'false', 'deleted', 'enabled']);
+const GENERIC_TAG_WORDS = new Set(['ranking', 'rank', 'top', 'kpi', 'metric', 'metrics', 'report', 'dashboard', 'certified', 'block', 'summary', 'analysis', 'total', 'count']);
+
 export function requestedShapeFromPlan(plan: AnalysisQuestionPlan): RequestedAnswerShape {
   return plan.requestedShape;
 }
@@ -159,9 +162,16 @@ export function evaluateCertifiedBlockFit(input: {
   const blockMeasures = new Set(block.measures);
   const blockOutputs = new Set(block.outputs);
 
+  // A "dimension" the parser read from "by beverage" may be the qualifier of
+  // the block's own measure: an output named `beverage_revenue` declares, in
+  // the author's words, that the block is the beverage-qualified one. Only
+  // an output NAME counts — a tag or a description is not a column promise.
+  const outputNameDeclares = (token: string) => [...blockOutputs]
+    .some((output) => output.split(/[^a-z0-9]+/).includes(token));
   const missingDimensions = uniqueStrings(requestedDimensions.filter((dimension) =>
     !blockDimensions.has(dimension)
     && !outputHasEntity(blockOutputs, dimension)
+    && !outputNameDeclares(dimension)
     && !uniqueExactExampleMemberToken(input, dimension, block)
   ));
   const missingOutputs = uniqueStrings(requiredOutputs.filter((output) =>
@@ -193,8 +203,14 @@ export function evaluateCertifiedBlockFit(input: {
     || missingMeasures.length === 0;
 
   const unsupportedFilters = unsupportedRequestedFilters(requested, block, input.question);
-  const unentailedScope = [...block.staticScopeTokens]
-    .filter((token) => !questionEntailsScopeToken(input.question, input.plan, requested, token));
+  // The WHERE-derived scope is entailed when the question names it in the
+  // column's words OR in the author's tag words for it.
+  const scopeTagEntailed = [...block.scopeTagTokens]
+    .some((token) => questionEntailsScopeToken(input.question, input.plan, requested, token));
+  const unentailedScope = scopeTagEntailed
+    ? []
+    : [...block.staticScopeTokens]
+      .filter((token) => !questionEntailsScopeToken(input.question, input.plan, requested, token));
   const requestedGrainIsExactExampleMemberNoise = requested.grain
     && uniqueExactExampleMemberToken(input, requested.grain, block);
   const grainMismatch = requested.grain && block.grain && canonicalToken(requested.grain) !== block.grain
@@ -305,6 +321,8 @@ interface BlockShape {
   scopeTokens: Set<string>;
   /** Scope that must be entailed before the block may terminate. */
   staticScopeTokens: Set<string>;
+  /** The author's tags for that scope, in business words (see blockShape). */
+  scopeTagTokens: Set<string>;
   limit?: number;
   relevance: number;
   inferredContract: boolean;
@@ -365,10 +383,29 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
     sql ? extractSqlStaticScope(sql) : '',
   ].filter(Boolean).join(' ');
   const outputScopeTokens = outputs.flatMap((output) => inferredOutputScopeTokens(output));
+  // `is_drink_item = true` scopes the block to drinks; "item" is the column's
+  // structure, not a business scope a question could be asked to entail.
   const staticScopeTokens = new Set([
-    ...tokensFromValue(declaredStaticScopeText).map(canonicalToken).filter(Boolean),
+    ...tokensFromValue(declaredStaticScopeText).map(canonicalToken).filter((token) => Boolean(token) && !STRUCTURAL_SCOPE_WORDS.has(token)),
     ...outputScopeTokens,
   ]);
+  // The author's own words for the block's scope: tags that name neither an
+  // output, a dimension, a measure nor the grain ("beverage" on a block whose
+  // outputs are customer_name and beverage_revenue). A question that entails
+  // one of these has asked for the scope the WHERE clause implements, even
+  // when it spells it differently than the column does.
+  const structuralWords = new Set([
+    ...outputs.flatMap((output) => output.split('_')),
+    ...explicitDimensions.flatMap((dimension) => dimension.split('_')),
+    ...measures.flatMap((measure) => measure.split('_')),
+    ...tokensFromValue(stringValue(payload.grain) ?? stringValue(record.grain) ?? '').map(canonicalToken),
+  ]);
+  const scopeTagTokens = new Set(
+    tokensFromValue([
+      Array.isArray(record.tags) ? (record.tags as unknown[]).filter((item): item is string => typeof item === 'string').join(' ') : '',
+      Array.isArray(payload.tags) ? (payload.tags as unknown[]).filter((item): item is string => typeof item === 'string').join(' ') : '',
+    ].join(' ')).map(canonicalToken).filter((token) => Boolean(token) && !structuralWords.has(token) && !GENERIC_TAG_WORDS.has(token)),
+  );
   const scopeText = [
     stringValue(record.name),
     Array.isArray(record.tags) ? (record.tags as unknown[]).filter((item): item is string => typeof item === 'string').join(' ') : '',
@@ -386,6 +423,7 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
     filters,
     scopeTokens,
     staticScopeTokens,
+    scopeTagTokens,
     limit: sql ? parseSqlLimit(sql) : undefined,
     relevance,
     inferredContract: stringArray(payload.declaredOutputs).length === 0 && stringArray(record.declaredOutputs).length === 0,

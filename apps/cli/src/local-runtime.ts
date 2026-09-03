@@ -225,6 +225,7 @@ import {
   buildAnalysisQuestionPlan,
   buildCertifiedBlockInvocationInput,
   certifiedBlockProvesRequestedTopN,
+  certifiedBlockDeclaresQualifiers,
   buildMeaningEvidencePackage,
   composeSemanticQueryForQuestion,
   aggregationIntegrityIssuesForSql,
@@ -12279,8 +12280,12 @@ function analyticalFailureSummary(
           // exact question, a filtered ask is not complete for any block.
           if (requestedFilters && !exactExampleMatch) return false;
           // "top BCM customers" parsed to "top customers": the block that
-          // answers the latter does not answer the former.
-          if (pack.questionPlan.unboundQualifiers.length > 0 && !exactExampleMatch) return false;
+          // answers the latter does not answer the former — unless the
+          // author declared the qualifier on the block itself (its tags,
+          // outputs, dimensions, entities), which is the author's own
+          // statement that this block is the qualified one.
+          if (pack.questionPlan.unboundQualifiers.length > 0 && !exactExampleMatch
+            && !certifiedBlockDeclaresQualifiers(block, pack.questionPlan.unboundQualifiers)) return false;
           return certifiedBlockProvesRequestedTopN(block, pack.questionPlan, {
             exactCertifiedQuestionMatch: exactExampleMatch,
             uniqueCompleteCertifiedFit: fitCompleteCandidateIds.length === 1,

@@ -120,7 +120,7 @@ async function runOpenAIResponsesAgent(input: {
   }
 
   const sdkTools = [
-    ...tools.map(openAIFunctionTool),
+    ...tools.filter((tool) => !tool.hidden).map(openAIFunctionTool),
     ...openAiMcpTools(remoteMcp.servers),
   ];
   let previousResponseId: string | undefined;
@@ -207,7 +207,7 @@ async function runAnthropicMessagesAgent(input: {
     content: message.content,
   }));
   const toolDefs = [
-    ...tools.map(anthropicClientTool),
+    ...tools.filter((tool) => !tool.hidden).map(anthropicClientTool),
     ...mcp.toolsets,
   ];
 
