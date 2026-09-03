@@ -121,6 +121,8 @@ export {
   createAskAgentRuntimeV2,
   createAskToolKernelV2,
   releaseAskV2CertifiedTierLock,
+  commitAskV2ControllerTier,
+  releaseAskV2ControllerTier,
   defaultProviderResultEgressPolicyV2,
   observeAskAgentV2Tool,
   setAskV2TierState,

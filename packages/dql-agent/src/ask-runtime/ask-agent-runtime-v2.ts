@@ -2422,7 +2422,7 @@ export function materializeAskV2WorkspaceTierTruth(
       delete state.exactCertifiedCandidateId;
       if (state.candidatePlan?.intendedTool === 'run_certified') delete state.candidatePlan;
       if (state.resolvedPlan?.tier === 'certified' && !state.resolvedPlan.frozen) delete state.resolvedPlan;
-      if (state.controllerTier === 'certified') delete state.controllerTier;
+      releaseAskV2ControllerTier(state, 'certified');
     }
   }
 
@@ -2471,7 +2471,7 @@ export function materializeAskV2WorkspaceTierTruth(
         && bridgeCertifiedExecutionAvailable
         && state.controllerTier
         && state.controllerTier !== 'certified') {
-        delete state.controllerTier;
+        releaseAskV2ControllerTier(state);
       }
     }
   }
@@ -2732,10 +2732,44 @@ function applyHostCertifiedFastPath(state: AskAgentStateV4, request: AgentRunReq
  * message. The bridge now avoids taking an unprovable claim at all; this
  * release is the in-flight defense for anything the bridge could not know.
  */
+/**
+ * THE writer of the pre-freeze controller tier.
+ *
+ * Nine call sites used to assign or delete `state.controllerTier` — three
+ * inspectors, a semantic release, two workspace materializations, a lock
+ * release — each with its own idea of when a commitment was allowed. One
+ * rule now: a commitment is made once, before any plan freezes, only for a
+ * tier the host's own tier state proves is executable, and is released only
+ * before a freeze. A frozen plan IS the tier and cannot be overwritten.
+ */
+export function commitAskV2ControllerTier(
+  state: AskAgentStateV4,
+  tier: Exclude<AskExecutionTierV2, 'exploratory_sql'>,
+  proof: { hostExecutable: boolean },
+): boolean {
+  if (state.resolvedPlan?.frozen || state.controllerTier) return false;
+  if (!proof.hostExecutable) return false;
+  const status = state.tierStates?.[tier]?.status;
+  const proven = tier === 'certified'
+    ? status === 'complete'
+    : status === 'available' || status === 'complete';
+  if (!proven) return false;
+  state.controllerTier = tier;
+  return true;
+}
+
+/** Release the pre-freeze commitment to `tier` (or any tier when omitted). */
+export function releaseAskV2ControllerTier(state: AskAgentStateV4, tier?: AskExecutionTierV2): void {
+  if (state.resolvedPlan?.frozen) return;
+  if (!state.controllerTier) return;
+  if (tier && state.controllerTier !== tier) return;
+  delete state.controllerTier;
+}
+
 export function releaseAskV2CertifiedTierLock(state: AskAgentStateV4, reasonCode: string): void {
   state.exactCertifiedCandidateId = undefined;
   if (state.candidatePlan?.intendedTool === 'run_certified') state.candidatePlan = undefined;
-  if (state.controllerTier === 'certified') state.controllerTier = undefined;
+  releaseAskV2ControllerTier(state, 'certified');
   setAskV2TierState(state, 'certified', {
     status: 'available',
     candidateIds: state.tierStates?.certified?.candidateIds ?? [],

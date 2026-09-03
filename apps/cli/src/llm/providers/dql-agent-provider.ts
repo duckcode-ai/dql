@@ -71,6 +71,8 @@ import {
   ASK_V2_BUDGETS,
   createAskToolKernelV2,
   releaseAskV2CertifiedTierLock,
+  commitAskV2ControllerTier,
+  releaseAskV2ControllerTier,
   setAskV2TierState,
   recordAskV2ResearchLedger,
   evidenceCandidateRoles,
@@ -2183,7 +2185,7 @@ function createAskV2LaneHandler(
         const certifiedTier = state.tierStates?.certified;
         const complete = new Set(certifiedTier?.status === 'complete' ? certifiedTier.candidateIds : []);
         const executableComplete = complete.size > 0;
-        if (!state.controllerTier && executableComplete) state.controllerTier = 'certified';
+        commitAskV2ControllerTier(state, 'certified', { hostExecutable: executableComplete });
         const inspectionOutcome = certifiedTier?.status === 'ineligible'
           ? 'ineligible'
           : certifiedTier?.status === 'unavailable'
@@ -2370,9 +2372,9 @@ function createAskV2LaneHandler(
         // proceed through the same snapshot's relational/exploratory path.
         if (!hostExecutionReady || !executableMetric || semanticStatus === 'ambiguous'
           || semanticStatus === 'unavailable' || semanticStatus === 'ineligible') {
-          if (!state.resolvedPlan?.frozen && state.controllerTier === 'semantic') delete state.controllerTier;
-        } else if (!state.controllerTier && (semanticStatus === 'available' || semanticStatus === 'complete')) {
-          state.controllerTier = 'semantic';
+          releaseAskV2ControllerTier(state, 'semantic');
+        } else {
+          commitAskV2ControllerTier(state, 'semantic', { hostExecutable: true });
         }
         observe('inspect_semantic_candidates', semanticStatus === 'available' || semanticStatus === 'complete' ? 'eligible' : semanticStatus, semanticReasonCode, { candidateIds: ids, origin: 'retrieval' });
         const admitted = admittedSemanticIdentifiers();
@@ -2803,10 +2805,9 @@ function createAskV2LaneHandler(
           // unavailable/ineligible semantic capability releases the
           // pre-freeze route so the normal cascade can continue; it never
           // freezes or silently executes a lower tier.
-          if (state.controllerTier === 'semantic'
-            && !safeNextTools.includes('compile_and_run_semantic')
+          if (!safeNextTools.includes('compile_and_run_semantic')
             && !safeNextTools.includes('request_clarification')) {
-            state.controllerTier = undefined;
+            releaseAskV2ControllerTier(state, 'semantic');
           }
           observe('compile_and_run_semantic', outcome, reasonCode, {
             tier: 'semantic',
@@ -3586,9 +3587,7 @@ function createAskV2LaneHandler(
               : 'GOVERNED_RELATIONAL_EXECUTION_UNAVAILABLE'
             : 'GOVERNED_RELATIONAL_CONTEXT_EMPTY',
         });
-        if (!state.controllerTier && hasRelationalEvidence && hasBoundRelationalExecutor) {
-          state.controllerTier = 'governed_relational';
-        }
+        commitAskV2ControllerTier(state, 'governed_relational', { hostExecutable: hasRelationalEvidence && hasBoundRelationalExecutor });
         observe('inspect_relational_context', candidates.length || paths.length ? 'eligible' : 'unavailable', candidates.length || paths.length ? 'relationship_paths_available' : 'relationship_paths_empty', { candidateIds: candidates.map(v2CandidateId), origin: 'retrieval' });
         return {
           cards: candidates.map((candidate) => v2SafeCard(candidate, workspace)),
