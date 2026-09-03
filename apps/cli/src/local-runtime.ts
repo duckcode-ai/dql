@@ -271,7 +271,6 @@ import {
   defaultAgentRunGates,
   createLlmAgentRunPlanner,
   createAskAgentRuntimeV2,
-  createHybridRouter,
   planAnalyticalPath,
   computeResultStats,
   buildDeterministicDashboardStory,
@@ -12841,48 +12840,6 @@ function analyticalFailureSummary(
     },
     getCatalogContext: buildRankedAgentRunCatalogContext,
   });
-
-  // Explicit selections and conversation-only turns remain deterministic;
-  // each fresh natural-language analytical turn gets one bounded candidate-ID
-  // meaning call by default. The legacy/no-evidence category classifier is
-  // separately labelled and cannot coexist with that analytical call. The
-  // rollback is host-owned and cannot be supplied by an HTTP/MCP client.
-  const agentRunCompilerBroker = createHybridRouter({
-    requireMeaningCallForNaturalLanguage: opts.requireMeaningCallForNaturalLanguage ?? true,
-    complete: async ({ system, user, signal, request, phase }) => {
-      const provider = await createBlockStudioAssistProvider(projectRoot);
-      if (!provider) throw new Error('No AI provider configured for meaning resolution.');
-      const dispatchTrace = createRouterInterpretationProviderTrace({
-        request,
-        routerPhase: phase,
-      });
-      try {
-        const response = await provider.generate(
-          [
-            { role: 'system', content: system },
-            { role: 'user', content: user },
-          ],
-          {
-            maxTokens: 600,
-            temperature: 0,
-            // AGT-009/PERF-002: a fresh natural-language Ask gets one bounded
-            // candidate-ID-only interpretation call. A certified exact route
-            // never reaches this callback, preserving its zero-provider path.
-            signal: boundedAgentMeaningSignal(signal),
-            maxProviderDispatches: 1,
-            ...(dispatchTrace?.options ?? {}),
-          },
-        );
-        dispatchTrace?.settle('ok');
-        return response;
-      } catch (error) {
-        dispatchTrace?.settle(signal?.aborted ? 'cancelled' : 'error', error);
-        throw error;
-      }
-    },
-    getEvidence: memoizedAgentRunEvidence,
-    getCatalogContext: buildRankedAgentRunCatalogContext,
-  });
   // Cold runtime-value indexes are common immediately after a project opens.
   // This is deliberately a *single* host-owned exact existence check, not a
   // value-search tool: it may operate only on one already-qualified snapshot
@@ -12895,10 +12852,10 @@ function analyticalFailureSummary(
   // this field.
   const agentRunRouter = createAskAgentRuntimeV2({
     mode: askAgentRuntimeMode,
-    // Non-Ask requests (sql, block, app, modeling, skill) go to the hybrid
-    // router; Ask never does. Same memoized evidence, one retrieval a turn.
+    // Forced non-Ask modes (sql, block, app, modeling, skill) never reach a
+    // router: the engine routes them deterministically itself. Every Ask
+    // request is V2's. One memoized retrieval a turn.
     getEvidence: memoizedAgentRunEvidence,
-    legacyRouter: agentRunCompilerBroker,
   });
 
   // P0: one row per run with retention + old-run compaction. The legacy JSON

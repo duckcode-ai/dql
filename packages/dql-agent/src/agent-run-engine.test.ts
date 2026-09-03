@@ -25,7 +25,6 @@ import {
 } from "./agent-run-engine.js";
 import { defaultAgentRunGates } from "./agent-run-gates.js";
 import { decideAgentAction, type IntentDecision } from "./intent-controller.js";
-import { createHybridRouter } from './router.js';
 import type { AgentEvidenceCandidate } from './meaning-resolution.js';
 import type { AskTraceObserverV1 } from './ask-observability/index.js';
 import {
@@ -4694,119 +4693,6 @@ describe("AgentRunEngine — conversation route", () => {
     });
     expect(run.route).not.toBe('clarify');
     expect(generatedCalls).toBe(1);
-  });
-
-  it('AGT-009/AGT-010/OBS-012 executes the explicit revenue ranking for BCM customers without a second metric clarification', async () => {
-    const capability = (metricId: string): NonNullable<AgentEvidenceCandidate['analyticalCapability']> => ({
-      metricId,
-      measureIds: [`${metricId}:measure`],
-      primaryEntityId: 'semantic:entity:account_revenue',
-      defaultResultGrainId: 'semantic:entity:customer',
-      resultGrainIds: ['semantic:entity:customer'],
-      aggregation: 'sum',
-      additivity: { entities: 'additive', time: 'additive' },
-      dimensions: [{
-        // The native MetricFlow grouping is an exact qualified binding, not a
-        // relationship-path hint. Keep the fixture aligned with the index
-        // contract: `customer_name` is the leaf used in the native group-by.
-        dimensionId: 'semantic:dimension:customer.customer_name',
-        entityId: 'semantic:entity:customer',
-        label: 'Customer Name',
-        aliases: ['customer', 'customer name'],
-        supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
-        relationshipPathIds: ['dql:relationship:account_to_customer'],
-        nativeGroupingReference: 'account__customer__customer_name',
-        nativeGroupingPath: ['account', 'customer'],
-      }],
-      timeDimensions: [],
-      operations: ['filter', 'group', 'rank'],
-      supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
-      executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
-      sourceFingerprint: `sha256:engine-${metricId.replace(/[^a-z0-9]/gi, '')}`,
-    });
-    const metric = (input: {
-      id: string;
-      name: string;
-      aliases: string[];
-      relevanceScore: number;
-    }): AgentEvidenceCandidate => ({
-      id: input.id,
-      qualifiedId: input.id,
-      kind: 'semantic_metric',
-      trustTier: 'semantic',
-      name: input.name,
-      aliases: input.aliases,
-      dimensions: ['semantic:dimension:customer.customer_name'],
-      timeGrains: ['month'],
-      relationshipEvidence: ['dql:relationship:account_to_customer'],
-      relevanceScore: input.relevanceScore,
-      matchReasons: ['synthetic office-shaped ranking fixture'],
-      compatibility: 'compatible',
-      exactMatch: true,
-      analyticalCapability: capability(input.id),
-    });
-    const revenue = metric({
-      id: 'semantic:metric:revenue', name: 'Revenue', aliases: ['revenue'], relevanceScore: 0.75,
-    });
-    const bcm = metric({
-      id: 'semantic:metric:bcm_run_rate', name: 'BCM Run Rate', aliases: ['BCM'], relevanceScore: 0.98,
-    });
-    let semanticCalls = 0;
-    const engine = new AgentRunEngine({
-      idGenerator: () => 'run-office-revenue-ranking',
-      now: fixedClock(),
-      router: createHybridRouter({
-        requireMeaningCallForNaturalLanguage: false,
-        getEvidence: async () => ({
-          snapshotId: 'fixture:office-ask-ai:v1',
-          sourceFingerprint: 'sha256:office-engine-revenue',
-          parsedIntent: { measures: ['BCM', 'revenue'], dimensions: ['customer'], filters: [] },
-          candidates: [
-            revenue,
-            bcm,
-            {
-              id: 'semantic:dimension:customer.customer_name', qualifiedId: 'semantic:dimension:customer.customer_name',
-              kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
-              name: 'Customer Name', aliases: ['customer', 'customer name'], relevanceScore: 0.8,
-              matchReasons: ['synthetic customer display'], compatibility: 'compatible',
-            },
-            {
-              id: 'semantic:entity:customer', qualifiedId: 'semantic:entity:customer',
-              kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
-              name: 'Customer', aliases: ['customer'], relevanceScore: 0.79,
-              matchReasons: ['synthetic customer entity'], compatibility: 'compatible',
-            },
-          ],
-        }),
-      }),
-      executors: {
-        semantic_answer: () => {
-          semanticCalls += 1;
-          return { answer: 'Synthetic semantic result.' };
-        },
-      },
-    });
-
-    const run = await engine.run({
-      question: 'Who are the top BCM customers who have highest revenue?',
-      requestedMode: 'ask',
-    });
-
-    expect(semanticCalls).toBe(1);
-    expect(run.route).toBe('semantic_answer');
-    expect(run.status).not.toBe('needs_clarification');
-    expect(run.routeDecision).toMatchObject({
-      requiresClarification: false,
-      meaningResolution: {
-        recommendedExecutionId: 'semantic:metric:revenue',
-        selectedConceptIds: ['semantic:metric:revenue'],
-        queryIntent: { measures: ['revenue'], order: 'desc', limit: 10 },
-      },
-      analyticalCascadeDecision: {
-        selectedTier: 'semantic',
-        requirements: { ranking: { metricTerms: ['revenue'], defaultedLimit: true, limit: 10 } },
-      },
-    });
   });
 
   it('still asks a clarification that is waiting for its first answer', async () => {

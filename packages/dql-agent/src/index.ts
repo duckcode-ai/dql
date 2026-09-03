@@ -556,17 +556,6 @@ export {
   type LlmAgentRunPlannerOptions,
 } from "./agent-run-planner.js";
 export {
-  buildMeaningSystemPrompt,
-  buildMeaningUserPrompt,
-  bindAskAnalystProgramMeaningV1,
-  compileAskAnalyticalProgramV1,
-  createHybridRouter,
-  parseMeaningResolution,
-  type RouterClassification,
-  type RouterCompletion,
-  type HybridRouterOptions,
-} from "./router.js";
-export {
   buildMeaningEvidencePackage,
   findExplicitEvidenceReference,
   validateMeaningResolution,

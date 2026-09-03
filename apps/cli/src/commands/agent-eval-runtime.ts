@@ -1,8 +1,8 @@
 /**
  * Runtime driver for `dql agent eval`.
  *
- * The in-process driver calls `answer()` directly, which skips
- * `createHybridRouter`, `AgentRunEngine`, `enforceOrdinaryAnalyticalPlanBoundary`
+ * An in-process driver would skip the V2 router, `AgentRunEngine`,
+ * `enforceOrdinaryAnalyticalPlanBoundary`
  * and `defaultAgentRunGates`. Every dead-end this harness exists to measure lives
  * in that skipped half — the router can block before the cascade runs, the engine
  * synthesizes its own modeling-gap block, and the gates declare refusal codes

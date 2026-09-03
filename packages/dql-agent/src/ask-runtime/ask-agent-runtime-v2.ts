@@ -2496,8 +2496,6 @@ export interface AskAgentRuntimeOptionsV2 {
   mode?: AskRuntimeModeV2;
   /** The sole V2 retrieval boundary for an ordinary natural-language turn. */
   getEvidence?: (request: AgentRunRequest) => AgentRetrievalEvidence | undefined | Promise<AgentRetrievalEvidence | undefined>;
-  /** Explicit V1 rollback / shadow comparison only; V2 never uses it after serving. */
-  legacyRouter: AgentRouter;
 }
 
 /**
@@ -2535,8 +2533,16 @@ export function createAskAgentRuntimeV2(options: AskAgentRuntimeOptionsV2): AskA
   return {
     mode,
     async decide(request): Promise<IntentDecision> {
-      // Non-Ask modes (sql, block, app, modeling, skill) keep their router.
-      if (!isAskRequestV2(request)) return options.legacyRouter.decide(request);
+      // Forced non-Ask modes (sql, block, app, modeling, skill) never reach a
+      // router: the engine routes them deterministically before asking one.
+      // Reaching this line is a host wiring fault, and the legacy hybrid
+      // router that used to answer it no longer exists.
+      if (!isAskRequestV2(request)) {
+        throw Object.assign(
+          new Error(`Ask V2 routes Ask requests only; requestedMode "${String(request.requestedMode)}" is routed by the engine.`),
+          { code: 'ASK_V2_NON_ASK_REQUEST' },
+        );
+      }
 
       const turn = classifyAskTurn(request);
       const conversationalKind = turn.conversationalKind;

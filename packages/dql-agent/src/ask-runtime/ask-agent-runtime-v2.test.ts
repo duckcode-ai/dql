@@ -76,8 +76,7 @@ describe('AskAgentRuntimeV2 prior-result continuity', () => {
   // member while presenting the turn as a brand-new question.
   it('classifies an ambiguous prior-result reference as a prior-result turn', async () => {
     const getEvidence = vi.fn(async () => evidence());
-    const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
-    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence, legacyRouter });
+    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence });
 
     const decision = await runtime.decide({
       question: 'what region he belongs to',
@@ -94,8 +93,7 @@ describe('AskAgentRuntimeV2 prior-result continuity', () => {
 
   it('offers no member choices when the host resolved the reference unambiguously', async () => {
     const getEvidence = vi.fn(async () => evidence());
-    const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
-    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence, legacyRouter });
+    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence });
 
     const decision = await runtime.decide({
       question: 'which region "Mr. Matthew Meyer" belongs to',
@@ -111,8 +109,7 @@ describe('AskAgentRuntimeV2 prior-result continuity', () => {
 describe('AskAgentRuntimeV2', () => {
   it('AGT-047 keeps a semantic-incomplete question in the agent tool runtime instead of producing a coverage terminal', async () => {
     const getEvidence = vi.fn(async () => evidence());
-    const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
-    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence, legacyRouter });
+    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence });
 
     const decision = await runtime.decide({
       question: 'show top customers by revenue and region',
@@ -120,7 +117,6 @@ describe('AskAgentRuntimeV2', () => {
     });
 
     expect(getEvidence).toHaveBeenCalledOnce();
-    expect(legacyRouter.decide).not.toHaveBeenCalled();
     expect(decision.action).toBe('answer');
     expect(decision.terminalOutcome).toBeUndefined();
     expect(decision.resolvedAnalyticalPlan).toBeUndefined();
@@ -171,19 +167,15 @@ describe('AskAgentRuntimeV2', () => {
         },
       }),
     };
-    const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
     const runtime = createAskAgentRuntimeV2({
       mode: 'authoritative_v2',
       getEvidence: async (request) => {
         request.askAgentV2Workspace = bridge;
         return evidence([certified]);
       },
-      legacyRouter,
     });
 
     const decision = await runtime.decide({ question: 'who are the top customers', requestedMode: 'ask' });
-
-    expect(legacyRouter.decide).not.toHaveBeenCalled();
     expect(decision.action).toBe('answer');
     expect(decision.askAgentV2Decision?.state).toMatchObject({
       exactCertifiedCandidateId: certified.qualifiedId,
@@ -286,7 +278,6 @@ describe('AskAgentRuntimeV2', () => {
         request.askAgentV2Workspace = bridge;
         return evidence([first, second, revenue]);
       },
-      legacyRouter: { decide: async () => legacyDecision() },
     });
 
     const decision = await runtime.decide({ question: 'show customers by revenue', requestedMode: 'ask' });
@@ -432,7 +423,6 @@ describe('AskAgentRuntimeV2', () => {
     const runtime = createAskAgentRuntimeV2({
       mode: 'authoritative_v2',
       getEvidence: async () => evidence([revenue, ...many]),
-      legacyRouter: { decide: async () => legacyDecision() },
     });
     const decision = await runtime.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
     expect(decision.askAgentV2Decision?.state.retainedCandidateIds).toHaveLength(128);
@@ -459,7 +449,6 @@ describe('AskAgentRuntimeV2', () => {
           ],
         },
       }),
-      legacyRouter: { decide: async () => legacyDecision() },
     });
     const decision = await runtime.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
     const state = decision.askAgentV2Decision!.state;
@@ -474,18 +463,16 @@ describe('AskAgentRuntimeV2', () => {
     expect(JSON.stringify(receipt)).not.toContain('not modeled');
   });
 
-  it('AGT-048 sends only non-Ask modes to the non-Ask router; an Ask never reaches it', async () => {
-    const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
-    const runtime = createAskAgentRuntimeV2({ getEvidence: async () => evidence(), legacyRouter });
-    const sql = await runtime.decide({ question: 'select 1', requestedMode: 'sql' });
-    expect(legacyRouter.decide).toHaveBeenCalledOnce();
-    expect(sql.terminalOutcome?.message).toBe('legacy terminal');
-    await runtime.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
-    expect(legacyRouter.decide).toHaveBeenCalledOnce();
+  it('AGT-048 routes Ask requests only; a forced non-Ask mode is the engine\'s and is refused here', async () => {
+    const runtime = createAskAgentRuntimeV2({ getEvidence: async () => evidence() });
+    await expect(runtime.decide({ question: 'select 1', requestedMode: 'sql' }))
+      .rejects.toMatchObject({ code: 'ASK_V2_NON_ASK_REQUEST' });
+    const ask = await runtime.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
+    expect(ask.askAgentV2Decision).toBeDefined();
   });
 
   it('AGT-052 enters Research only through explicit Research selection', async () => {
-    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence: async () => evidence(), legacyRouter: { decide: async () => legacyDecision() } });
+    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence: async () => evidence() });
     const ordinary = await runtime.decide({ question: 'why did revenue change?', requestedMode: 'ask' });
     const research = await runtime.decide({ question: 'why did revenue change?', requestedMode: 'research' });
     expect(ordinary.action).toBe('answer');
@@ -494,7 +481,7 @@ describe('AskAgentRuntimeV2', () => {
   });
 
   it('AGT-051 preserves a selected result binding as typed prior-result context', async () => {
-    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence: async () => evidence(), legacyRouter: { decide: async () => legacyDecision() } });
+    const runtime = createAskAgentRuntimeV2({ mode: 'authoritative_v2', getEvidence: async () => evidence() });
     const decision = await runtime.decide({
       question: 'which region does Melissa Davis belong to?',
       requestedMode: 'ask',
@@ -509,11 +496,9 @@ describe('AskAgentRuntimeV2', () => {
   });
 
   it('AGT-054 defaults to the authoritative runtime and treats grouped measures as analytics', async () => {
-    const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
-    const runtime = createAskAgentRuntimeV2({ getEvidence: async () => evidence(), legacyRouter });
+    const runtime = createAskAgentRuntimeV2({ getEvidence: async () => evidence() });
     const decision = await runtime.decide({ question: 'what is revenue for each customer?', requestedMode: 'ask' });
     expect(runtime.mode).toBe('authoritative_v2');
-    expect(legacyRouter.decide).not.toHaveBeenCalled();
     expect(decision.askAgentV2Decision?.state.turnClass).toBe('analytics');
   });
 

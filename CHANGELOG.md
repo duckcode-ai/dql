@@ -59,6 +59,19 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   the eval's in-process `--via loop` driver is removed. The Slack bot proxies
   to the runtime at `DQL_RUNTIME_URL` (default `http://127.0.0.1:3474`).
 
+### The hybrid router is gone
+
+- `createHybridRouter` (`router.ts`, 7,255 lines) is deleted with its
+  tests. It was unreachable: the engine routes every forced non-Ask mode
+  (sql, block, app, modeling, skill) deterministically without consulting
+  a router, and every Ask request (`auto`, `ask`, `research`) is the V2
+  runtime's. The V2 runtime no longer takes a `legacyRouter`; a non-Ask
+  request reaching it is reported as a wiring fault. Public exports
+  `createHybridRouter`, `compileAskAnalyticalProgramV1`,
+  `bindAskAnalystProgramMeaningV1`, `buildMeaningSystemPrompt`,
+  `buildMeaningUserPrompt`, `parseMeaningResolution` and the router types
+  are removed.
+
 ### Ask runtime: one runtime, and a floor under it
 
 - `authoritative_v2` is now the default Ask runtime. `shadow_v2` — which built
