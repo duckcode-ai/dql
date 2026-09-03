@@ -86,6 +86,19 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - A plan's `orderBy` that names none of the selected fields ("revenue" for
   `drink_revenue`) resolves to the selected field it names, else to the
   measure, instead of freezing an unrunnable plan.
+- A frozen plan that failed ends the turn. After a frozen semantic plan's
+  compilation failed, every different plan was correctly refused as a
+  post-freeze mutation — and the analyst kept proposing anyway: four
+  denials, seventeen tool calls and forty-two seconds to reach a refusal
+  the first denial already knew. The first denial still teaches (the one
+  permitted same-plan repair is unaffected); a second closes the turn with
+  the execution failure that actually happened.
+- A ranking of entities is labelled, not keyed. A plan that groups by an
+  entity key when the snapshot admits a label for the same entity is
+  rewritten to the label, so "top customers" cannot answer with opaque
+  identifiers. The key is kept when the question asks for the identifier
+  itself, and never replaced by a label the snapshot did not admit.
+- The never-broaden rule covers follow-up turns, not only first questions.
 - An Ask turn is executed once, and its answer is never replaced by a
   second, worse one. The engine's repair loop did not recognise a V2 Ask as
   frozen, so a failing evaluation ran the executor again; the second pass

@@ -1249,6 +1249,73 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
     expect(executeDql).toHaveBeenCalledOnce();
   });
 
+  it('ranks by the admitted entity label, not the opaque key the plan named', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:order_item.drink_revenue', qualifiedId: 'semantic:metric:order_item.drink_revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'order_item.drink_revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const key: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_id', qualifiedId: 'semantic:dimension:customers.customer_id', kind: 'semantic_member',
+      semanticObjectType: 'dimension', trustTier: 'semantic', name: 'customer_id', relevanceScore: 0.8, matchReasons: ['name'], compatibility: 'compatible',
+    };
+    const label: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name', kind: 'semantic_member',
+      semanticObjectType: 'dimension', trustTier: 'semantic', name: 'customer_name', relevanceScore: 0.8, matchReasons: ['name'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric, key, label]);
+    const compile = vi.fn(async (selection: { dimensions?: string[] }) => {
+      expect(selection.dimensions).toEqual(['customers.customer_name']);
+      return { sql: 'select 1 as drink_revenue', engine: 'native' as const };
+    });
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 4, maxProviderDispatches: 3 })({
+      question: 'who are the top customers for beverage product category',
+      provider: textToolProvider([
+        '```json\n{"tool":"propose_plan","input":{"measures":[{"id":"semantic:metric:order_item.drink_revenue"}],"dimensions":[{"id":"semantic:dimension:customers.customer_id"}],"limit":10}}\n```',
+        'Top customers by drink revenue.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, key, label]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: ['customer_name', 'drink_revenue'], rows: [{ customer_name: 'Melissa', drink_revenue: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'propose_plan', reasonCode: 'PLAN_ENTITY_LABEL_SUBSTITUTED' }),
+    ]));
+  });
+
+  it('keeps the key when the question asks for the identifier itself', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:order_item.drink_revenue', qualifiedId: 'semantic:metric:order_item.drink_revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'order_item.drink_revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const key: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_id', qualifiedId: 'semantic:dimension:customers.customer_id', kind: 'semantic_member',
+      semanticObjectType: 'dimension', trustTier: 'semantic', name: 'customer_id', relevanceScore: 0.8, matchReasons: ['name'], compatibility: 'compatible',
+    };
+    const label: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name', kind: 'semantic_member',
+      semanticObjectType: 'dimension', trustTier: 'semantic', name: 'customer_name', relevanceScore: 0.8, matchReasons: ['name'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric, key, label]);
+    const compile = vi.fn(async (selection: { dimensions?: string[] }) => {
+      expect(selection.dimensions).toEqual(['customers.customer_id']);
+      return { sql: 'select 1 as drink_revenue', engine: 'native' as const };
+    });
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 4, maxProviderDispatches: 3 })({
+      question: 'drink revenue by customer id',
+      provider: textToolProvider([
+        '```json\n{"tool":"propose_plan","input":{"measures":[{"id":"semantic:metric:order_item.drink_revenue"}],"dimensions":[{"id":"semantic:dimension:customers.customer_id"}],"limit":10}}\n```',
+        'By customer id.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, key, label]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: ['customer_id', 'drink_revenue'], rows: [{ customer_id: 'x', drink_revenue: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+  });
+
   it('propose_plan refuses a plan that mixes tiers and names the fix', async () => {
     const metric: AgentEvidenceCandidate = {
       id: 'semantic:metric:account_revenue.revenue', qualifiedId: 'semantic:metric:account_revenue.revenue', kind: 'semantic_metric',

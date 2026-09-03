@@ -2273,6 +2273,45 @@ function createAskV2LaneHandler(
             });
             return { finished: true, conceded: true, reasonCode: 'ASK_V2_REMAINING_TIERS_DECLINED' };
           }
+          // A FROZEN PLAN THAT FAILED IS THE END OF THE TURN.
+          // After a frozen plan's execution failed, the kernel refuses every
+          // DIFFERENT plan (post-freeze mutation) — correctly, because the
+          // turn committed to one program. The lane used to let the analyst
+          // keep proposing anyway: four denials, seventeen tool calls, and
+          // forty-two seconds to reach a refusal the first denial already
+          // knew. Close the turn on that first denial with the execution
+          // failure that actually happened.
+          // The FIRST such denial is a teaching refusal: the analyst may still
+          // re-send the SAME plan as its one permitted repair. A second one
+          // means it is proposing different plans against a frozen turn, and
+          // no further proposal can be admitted.
+          const postFreezeCodes = new Set(['POST_FREEZE_PLAN_MUTATION_DENIED', 'POST_FREEZE_ROUTE_CHANGE_DENIED', 'ASK_REPAIR_BUDGET_EXHAUSTED']);
+          const priorPostFreezeDenials = state.observations
+            .filter((observation) => observation.outcome === 'denied' && postFreezeCodes.has(observation.reasonCode ?? '')).length;
+          const postFreezeDeadEnd = Boolean(executionFailure)
+            && postFreezeCodes.has(allowed.reasonCode ?? '')
+            && priorPostFreezeDenials >= 1;
+          if (postFreezeDeadEnd) {
+            observe(name, 'denied', allowed.reasonCode ?? 'ASK_V2_TOOL_DENIED', {
+              origin: 'validation',
+              safeAction: 'retry_same_frozen_plan',
+            });
+            finishAskAgentV2Turn(state, {
+              version: 2,
+              kind: 'execution_failure',
+              reasonCode: executionFailure!.reasonCode,
+              origin: executionFailure!.origin,
+              safeAction: 'retry_same_frozen_plan',
+            });
+            return {
+              ok: false,
+              reasonCode: executionFailure!.reasonCode,
+              tool: name,
+              finished: true,
+              usage: 'This turn froze one plan and that plan failed. A different plan cannot run on this turn;'
+                + ' call finish_answer and say what failed.',
+            };
+          }
           const clarificationPreFreeze = name === 'request_clarification'
             && (allowed.reasonCode === 'ASK_V2_CLARIFICATION_NOT_MATERIALLY_AMBIGUOUS'
               || allowed.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED');
@@ -4603,7 +4642,10 @@ function createAskV2LaneHandler(
       // next plan can bind it. The floor and host-first already keep this
       // rule; the analyst's plan keeps it too. A term no admitted card
       // mentions at all is an unmodeled term, which its own refusal covers.
-      if (state.turnClass === 'analytics') {
+      // A follow-up broadens as easily as a first question — "can you include
+      // the customer name" after a beverage ranking came back as every
+      // customer's lifetime spend — so the rule covers those turns too.
+      if (state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response') {
         const questionPlan = buildAnalysisQuestionPlan(input.question, input.followUp);
         const QUALIFIER_STOPWORDS = new Set(['each', 'every', 'all', 'total', 'name', 'names', 'top', 'high', 'highest', 'most', 'best']);
         // Both readings of the question: the measure qualifiers ("beverage
@@ -4646,6 +4688,48 @@ function createAskV2LaneHandler(
             }
           }
         }
+      }
+      // A RANKING OF PEOPLE IS LABELLED, NOT KEYED.
+      // Grouping "top customers" by a customer KEY answers with opaque UUIDs
+      // — a true table nobody can read, and one a reader will take for a
+      // customer identity. When the snapshot admits a LABEL for the same
+      // entity, the label is what the question meant. The key is never
+      // invented and never dropped silently: the swap is recorded, and it
+      // happens only when the question did not ask for the id itself.
+      const asksForKey = /\b(id|ids|identifier|identifiers|key|keys|uuid)\b/i.test(input.question);
+      const labelForKeyDimension = (id: string): string | undefined => {
+        if (asksForKey) return undefined;
+        const candidate = resolveAdmittedReference(id, 'retained')?.candidate;
+        if (!candidate) return undefined;
+        const roles = evidenceCandidateRoles(candidate);
+        const looksKeyed = roles.includes('entity_key') || /(?:^|[._:])(?:id|key|uuid)s?$/i.test(v2CandidateId(candidate));
+        if (!looksKeyed || roles.includes('entity_label')) return undefined;
+        const family = (value: string) => {
+          const tail = value.split(':').at(-1) ?? value;
+          return tail.includes('.') ? tail.slice(0, tail.lastIndexOf('.')).toLowerCase() : tail.toLowerCase();
+        };
+        const wanted = family(v2CandidateId(candidate));
+        const nameLike = (value: string) => /(?:^|[._:])(?:name|label|title)s?$/i.test(value);
+        const label = retainedCandidates().find((other) => {
+          const otherId = v2CandidateId(other);
+          if (otherId === v2CandidateId(candidate)) return false;
+          if (family(otherId) !== wanted) return false;
+          return evidenceCandidateRoles(other).includes('entity_label') || nameLike(otherId);
+        });
+        // Only an ADMITTED label may be substituted. The metric's capability
+        // contract also names one, but a contract dimension retrieval did not
+        // admit is refused by the compiler as an unadmitted identifier — the
+        // swap would turn a readable-but-keyed answer into no answer at all.
+        return label ? v2CandidateId(label) : undefined;
+      };
+      for (let index = 0; index < dimensions.length; index += 1) {
+        const label = labelForKeyDimension(dimensions[index]!.id);
+        if (!label) continue;
+        observe('propose_plan', 'eligible', 'PLAN_ENTITY_LABEL_SUBSTITUTED', {
+          origin: 'validation',
+          candidateIds: [dimensions[index]!.id, label],
+        });
+        dimensions[index] = { ...dimensions[index]!, id: label };
       }
       const kindOf = (id: string): 'certified' | 'semantic' | 'relational' => {
         const candidate = resolveAdmittedReference(id, 'retained')?.candidate;
