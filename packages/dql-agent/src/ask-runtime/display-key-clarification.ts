@@ -12,12 +12,14 @@
  *
  * It fires narrowly: the question must carry a bare `name`/`names` token, no
  * entity noun that already settles it ("top customer names" is not
- * ambiguous), and a ranking. Two or more distinct rank-entity labels are
- * required; one label, or two ids that render the same words, is not a
- * choice worth a round trip.
+ * ambiguous), and a ranking. The options are the NAME-LIKE rank-entity
+ * dimensions the metric's contract declares (customer name, product name,
+ * location name — not a boolean flag the contract also lets you rank by);
+ * two or more distinct labels are required, or there is no choice worth a
+ * round trip. Retrieval need not have surfaced the dimension cards: the
+ * contract is authored, host-held evidence.
  */
-import { resolveMetricCapabilityDimension } from '../analytical-frame.js';
-import { evidenceCandidateRoles } from '../analytical-orchestration.js';
+import { normalizeMetricCapabilityContract } from '@duckcodeailabs/dql-core';
 import type { AgentEvidenceCandidate } from '../meaning-resolution.js';
 import { buildAnalysisQuestionPlan } from '../metadata/analysis-planner.js';
 
@@ -40,28 +42,22 @@ export interface DisplayKeyClarificationV1 {
 }
 
 const BARE_NAME_TOKEN = /(?:^| )names?(?: |$)/;
-const SETTLING_ENTITY_NOUN = /(?:^| )(?:account|customer|client|product|owner|contact|vendor|supplier|employee|store|region|category)s?(?: |$)/;
+const SETTLING_ENTITY_NOUN = /(?:^| )(?:account|customer|client|product|owner|contact|vendor|supplier|employee|store|location|region|category)s?(?: |$)/;
+const NAME_LIKE_DIMENSION = /(?:^|[ _.:-])(?:name|label|title)s?(?:$|[ _.:-])/;
 
 function normalizeQuestion(question: string): string {
   return question.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+/** The human-readable tail of a dimension id: `…:customers.customer_name` → `Customer Name`. */
 function humanizeLabel(value: string): string {
-  const tail = value.includes('.') ? value.slice(value.lastIndexOf('.') + 1) : value;
+  const afterColon = value.includes(':') ? value.slice(value.lastIndexOf(':') + 1) : value;
+  const tail = afterColon.includes('.') ? afterColon.slice(afterColon.lastIndexOf('.') + 1) : afterColon;
   return tail
     .replace(/[_-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function candidateIdentities(candidate: AgentEvidenceCandidate): string[] {
-  const record = candidate as AgentEvidenceCandidate & { qualifiedId?: string; aliases?: string[] };
-  return [...new Set([
-    candidate.id,
-    ...(typeof record.qualifiedId === 'string' ? [record.qualifiedId] : []),
-    ...(Array.isArray(record.aliases) ? record.aliases.filter((alias: unknown): alias is string => typeof alias === 'string') : []),
-  ].filter((value) => value.trim().length > 0))];
 }
 
 export function deterministicDisplayKeyClarification(input: {
@@ -73,38 +69,37 @@ export function deterministicDisplayKeyClarification(input: {
   const plan = buildAnalysisQuestionPlan(input.question);
   if (!plan.requirements.ranking) return undefined;
 
+  // The first executable metric with an authored capability contract is the
+  // measure the ranking is over; its contract is the only authority on which
+  // dimensions may rank it.
   const metric = input.candidates.find((candidate) => candidate.kind === 'semantic_metric'
     && Boolean(candidate.analyticalCapability)
     && candidate.eligible !== false
     && candidate.compatibility !== 'incompatible');
   if (!metric) return undefined;
+  const capability = normalizeMetricCapabilityContract(metric.analyticalCapability);
+  if (!capability) return undefined;
 
   const seen = new Map<string, DisplayKeyClarificationOptionV1>();
-  for (const candidate of input.candidates) {
-    if (candidate.kind !== 'semantic_member') continue;
-    if (candidate.eligible === false || candidate.compatibility === 'incompatible') continue;
-    if (!evidenceCandidateRoles(candidate).includes('entity_label')) continue;
-    for (const identity of candidateIdentities(candidate)) {
-      const dimension = resolveMetricCapabilityDimension(metric, identity);
-      if (!dimension) continue;
-      // A generic top-N display choice is meaningful only when the metric
-      // itself declares this dimension as a rank entity.
-      if (!dimension.supportedRoles.includes('rank_entity')) break;
-      if (seen.has(dimension.dimensionId)) break;
-      const label = humanizeLabel(dimension.label ?? candidate.name);
-      seen.set(dimension.dimensionId, {
-        id: dimension.dimensionId,
-        label,
-        description: `Use ${label} as the ranking display key.`,
-        question: `${input.question.trim()} — clarification: ${label}`,
-        kind: 'semantic_dimension',
-      });
-      break;
-    }
+  for (const dimension of capability.dimensions) {
+    if (!dimension.supportedRoles.includes('rank_entity')) continue;
+    // "Names" means a name-like display key, not every dimension a metric can
+    // rank by: a boolean flag or a price is not what the question asked for.
+    const identity = `${dimension.dimensionId} ${dimension.label ?? ''}`.toLowerCase();
+    if (!NAME_LIKE_DIMENSION.test(identity)) continue;
+    if (seen.has(dimension.dimensionId)) continue;
+    const label = humanizeLabel(dimension.label ?? dimension.dimensionId);
+    seen.set(dimension.dimensionId, {
+      id: dimension.dimensionId,
+      label,
+      description: `Use ${label} as the ranking display key.`,
+      question: `${input.question.trim()} — clarification: ${label}`,
+      kind: 'semantic_dimension',
+    });
   }
   const options = [...seen.values()]
     .sort((left, right) => left.label.localeCompare(right.label))
-    .slice(0, 3);
+    .slice(0, 4);
   const distinctLabels = new Set(options.map((option) => option.label.toLowerCase()));
   if (options.length < 2 || distinctLabels.size < 2) return undefined;
   return {

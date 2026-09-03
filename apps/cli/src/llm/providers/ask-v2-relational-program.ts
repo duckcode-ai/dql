@@ -255,3 +255,27 @@ export function composeAskV2RelationalProgram(input: {
     composed: { program, sql, relation: input.relation, outputAliases: [...dimensionAliases, ...measureAliases] },
   };
 }
+
+/**
+ * The warehouse name of an admitted relation card.
+ *
+ * A dbt model card is named by its model (`customers`); the program must
+ * name the physical relation (`dev.customers`). Prefer a sibling runtime
+ * card that resolves the same leaf, then a dotted source object, and only
+ * then the bare name.
+ */
+export function v2PhysicalRelationName(
+  candidate: { name: string; sourceObjects?: readonly string[] },
+  admitted: readonly { name: string; kind: string }[],
+): string {
+  const name = candidate.name;
+  if (name.includes('.')) return name;
+  const leaf = (value: string) => value.split('.').filter(Boolean).at(-1) ?? value;
+  const physical = admitted.find((other) => other !== candidate
+    && (other.kind === 'sql_table' || other.kind === 'dbt_source')
+    && other.name.includes('.')
+    && leaf(other.name).toLowerCase() === name.toLowerCase());
+  if (physical) return physical.name;
+  const source = (candidate.sourceObjects ?? []).find((value) => value.includes('.') && leaf(value).toLowerCase() === name.toLowerCase() && !/[{}()]/.test(value));
+  return source ?? name;
+}

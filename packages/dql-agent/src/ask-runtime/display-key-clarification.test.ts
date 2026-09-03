@@ -54,13 +54,13 @@ const CUSTOMER = 'semantic:dimension:customers.customer_name';
 const COMPANY = 'semantic:dimension:companies.company_name';
 
 describe('deterministicDisplayKeyClarification', () => {
-  it('offers the rank-entity display keys the metric declares when the question names no entity', () => {
+  it('offers the name-like rank-entity display keys the metric declares when the question names no entity', () => {
     const clarification = deterministicDisplayKeyClarification({
       question: 'Show the top names by revenue',
       candidates: [
-        revenueMetric([{ id: CUSTOMER, label: 'Customer Name' }, { id: COMPANY, label: 'Company Name' }]),
-        member(CUSTOMER, 'customer name'),
-        member(COMPANY, 'company name'),
+        // The contract alone decides: no dimension cards were retrieved, and a
+        // boolean the contract also ranks by is not a "name".
+        revenueMetric([{ id: CUSTOMER, label: 'Customer Name' }, { id: COMPANY, label: 'Company Name' }, { id: 'semantic:dimension:products.is_drink_item' }]),
       ],
     });
     expect(clarification).toMatchObject({
@@ -94,7 +94,12 @@ describe('deterministicDisplayKeyClarification', () => {
     expect(deterministicDisplayKeyClarification({ question: 'What are the names?', candidates })).toBeUndefined();
     expect(deterministicDisplayKeyClarification({
       question: 'Show the top names by revenue',
-      candidates: [revenueMetric([{ id: CUSTOMER }, { id: COMPANY, rank: false }]), member(CUSTOMER, 'customer name'), member(COMPANY, 'company name')],
+      candidates: [revenueMetric([{ id: CUSTOMER }, { id: COMPANY, rank: false }])],
+    })).toBeUndefined();
+    // Two dimensions that are not name-like are not a display-key choice.
+    expect(deterministicDisplayKeyClarification({
+      question: 'Show the top names by revenue',
+      candidates: [revenueMetric([{ id: 'semantic:dimension:products.is_drink_item' }, { id: 'semantic:dimension:products.product_price' }])],
     })).toBeUndefined();
     expect(deterministicDisplayKeyClarification({
       question: 'Show the top names by revenue',

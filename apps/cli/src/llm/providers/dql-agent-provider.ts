@@ -15,6 +15,7 @@ import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
 import { buildAskV2AnalystSystemPrompt, buildAskV2TextToolContract, buildAskV2ResponseJsonSchema } from './ask-v2-analyst-prompt.js';
 import {
   composeAskV2RelationalProgram,
+  v2PhysicalRelationName,
   ASK_V2_RELATIONAL_AGGREGATION_NAMES,
   ASK_V2_RELATIONAL_OPERATOR_NAMES,
   type AskV2RelationalPlanV1,
@@ -733,19 +734,6 @@ function selectV2SemanticEngine(input: {
  * segment is this model (a runtime-schema or source card), then a qualified
  * source object on the card itself, then the bare name.
  */
-function v2PhysicalRelationName(candidate: AgentEvidenceCandidate, admitted: readonly AgentEvidenceCandidate[]): string {
-  const name = candidate.name;
-  if (name.includes('.')) return name;
-  const leaf = (value: string) => value.split('.').filter(Boolean).at(-1) ?? value;
-  const physical = admitted.find((other) => other !== candidate
-    && (other.kind === 'sql_table' || other.kind === 'dbt_source')
-    && other.name.includes('.')
-    && leaf(other.name).toLowerCase() === name.toLowerCase());
-  if (physical) return physical.name;
-  const source = (candidate.sourceObjects ?? []).find((value) => value.includes('.') && leaf(value).toLowerCase() === name.toLowerCase() && !/[{}()]/.test(value));
-  return source ?? name;
-}
-
 /** Mark a tool output tree as provider metadata (bounded depth; cycles left alone). */
 function markAskV2ToolOutput<T>(value: T, depth = 0, seen = new Set<object>()): T {
   if (value === null || typeof value !== 'object' || depth > 12 || seen.has(value as object)) return value;
@@ -1624,7 +1612,7 @@ function v2ExecutionFailureFromError(
 ): { reasonCode: string; origin: 'execution' | 'validation' } {
   const detail = analyticalErrorDetail(error);
   const code = typeof detail?.code === 'string' && /^[a-z0-9_]+$/i.test(detail.code)
-    ? `ASK_V2_${detail.code.toUpperCase()}`
+    ? (detail.code.toUpperCase().startsWith('ASK_V2_') ? detail.code.toUpperCase() : `ASK_V2_${detail.code.toUpperCase()}`)
     : fallback;
   return {
     reasonCode: code,
@@ -4655,6 +4643,14 @@ function createAskV2LaneHandler(
     // tables; the capability contract says so before any dispatch, so the
     // choice is offered here — never guessed by host-first, never left to the
     // analyst to notice.
+    if (process.env.DQL_DEBUG_DISPLAY_KEY) {
+      console.error('[DQL_DEBUG display-key]', JSON.stringify(visibleCandidates().slice(0, 40).map((candidate) => ({
+        id: v2CandidateId(candidate), kind: candidate.kind, type: candidate.semanticObjectType, name: candidate.name,
+        capability: candidate.analyticalCapability
+          ? (candidate.analyticalCapability as { dimensions?: Array<{ dimensionId: string; supportedRoles: string[]; label?: string }> }).dimensions?.map((dimension) => `${dimension.dimensionId}[${dimension.supportedRoles.join('|')}]`)
+          : undefined,
+      }))));
+    }
     const displayKeyClarification = state.turnClass === 'analytics'
       && !state.exactCertifiedCandidateId
       && state.tierStates?.certified?.status !== 'complete'

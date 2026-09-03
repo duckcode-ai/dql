@@ -1,3 +1,4 @@
+import { v2PhysicalRelationName } from './llm/providers/ask-v2-relational-program.js';
 import type { ProviderDispatchPhaseV1, ProviderEgressPurpose, SemanticAggregationCompilerReceiptV1, SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
 import { terminalTitle } from '@duckcodeailabs/dql-agent';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -6351,6 +6352,43 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         targetFingerprint?: string;
       };
     } | undefined;
+    const withAdmittedRelationCards = (
+      pack: LocalContextPack,
+      admitted: readonly AgentEvidenceCandidate[],
+      ids: readonly string[],
+    ): LocalContextPack => {
+      const wanted = new Set(ids);
+      const relations = admitted
+        .filter((candidate) => wanted.has(candidate.qualifiedId ?? candidate.id)
+          && (candidate.kind === 'dbt_model' || candidate.kind === 'sql_table' || candidate.kind === 'dbt_source')
+          && (candidate.columns?.length ?? 0) > 0)
+        .map((candidate) => {
+          const relation = v2PhysicalRelationName(candidate, admitted);
+          return {
+            relation,
+            name: relation.split('.').at(-1) ?? relation,
+            objectKey: candidate.qualifiedId ?? candidate.id,
+            source: 'ask v2 admitted relation card',
+            columns: (candidate.columns ?? []).map((column) => ({
+              name: column.name,
+              ...(column.type ? { type: column.type } : {}),
+              ...(column.description ? { description: column.description } : {}),
+            })),
+            // A card lists what the catalog recorded; it does not prove the
+            // warehouse has nothing more, so the reference checker stays
+            // lenient for this relation and the program stays review-required.
+            columnCompleteness: 'partial' as const,
+          };
+        });
+      if (relations.length === 0) return pack;
+      return {
+        ...pack,
+        allowedSqlContext: {
+          ...pack.allowedSqlContext,
+          relations: [...pack.allowedSqlContext.relations, ...relations],
+        },
+      };
+    };
     const v2ExecutionWorkspace = (candidateIds: readonly string[], pathIds: readonly string[] = []) => {
       const state = request.askAgentV2State;
       const bridge = request.askAgentV2Workspace;
@@ -6384,7 +6422,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...candidateIds,
         ...paths.flatMap((path) => path?.candidateIds ?? []),
       ])];
-      const scoped = scopeContextPackToExploratoryCandidateClosure(contextPack, closureIds);
+      // THE ADMITTED CARD IS THE AUTHORITY. The context pack's allowed-SQL
+      // relations come from retrieval's own object selection, which is a
+      // different (and smaller) set than the workspace's admitted cards: a
+      // relation the analyst was shown, described, and planned over could
+      // then fail the closure proof only because the pack's list had not
+      // happened to include it. When the pack cannot prove a closure, the
+      // admitted relation cards themselves — with the catalog columns they
+      // carry — supply the relation entries, and the proof is re-run over
+      // that. Nothing outside the admitted snapshot enters.
+      const scoped = scopeContextPackToExploratoryCandidateClosure(contextPack, closureIds)
+        ?? scopeContextPackToExploratoryCandidateClosure(
+          withAdmittedRelationCards(contextPack, workspace.candidates.slice(0, 128), closureIds),
+          closureIds,
+        );
       if (!scoped) return fail('The admitted V2 identifiers did not prove a physical relation closure for execution.');
       return { state, snapshotId, workspace, contextPack, scoped, closureIds, paths: paths as AskRelationshipPathHandleV1[] };
     };
