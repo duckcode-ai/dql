@@ -852,3 +852,76 @@ describe('SqliteAgentRunStore', () => {
     store.close();
   });
 });
+
+describe('content-addressed artifact payloads', () => {
+  const big = () => ({ answer: 'x'.repeat(1_000_000), result: { columns: ['n'], rows: [[1]], rowCount: 1 } });
+  const heavyRun = (id: string, startedAt: string): AgentRun => ({
+    ...run(id, startedAt, 1),
+    artifacts: [{ id: `${id}:answer`, kind: 'answer', title: 'Answer', trustState: 'governed', payload: big() }],
+    // The task step carries its own payload: a listing hydrates task-step
+    // proofs only, so the answer artifact must stay an address there.
+    steps: [{ id: `${id}:step`, askAnalystTaskId: 'task-1', artifacts: [{ id: `${id}:task`, kind: 'answer', title: 'Task', trustState: 'governed', payload: { ...big(), task: true } }] }],
+  } as unknown as AgentRun);
+  const openDb = (path: string) => new (require('better-sqlite3') as typeof import('better-sqlite3'))(path, { readonly: true });
+
+  it('stores a 1 MB payload once, as one blob, and hydrates it back on get', () => {
+    const path = join(tmp(), 'runs.sqlite');
+    const store = new SqliteAgentRunStore({ path });
+    store.save(heavyRun('h1', '2026-07-20T10:00:00Z'));
+    const db = openDb(path);
+    const row = db.prepare('SELECT length(payload_json) AS bytes FROM agent_runs WHERE id = ?').get('h1') as { bytes: number };
+    const blobs = db.prepare('SELECT COUNT(*) AS n FROM agent_run_artifacts').get() as { n: number };
+    db.close();
+    expect(row.bytes).toBeLessThan(20_000);
+    expect(blobs.n).toBe(2);
+    const loaded = store.get('h1')!;
+    expect(loaded.artifacts[0]!.payload).toEqual(big());
+    expect((loaded.steps[0] as { artifacts: Array<{ payload?: unknown }> }).artifacts[0]!.payload).toEqual({ ...big(), task: true });
+    expect(loaded.artifacts[0]!.payloadRef).toMatch(/^sha256:/);
+    store.close();
+  });
+
+  it('shares one blob between runs with the same payload, lists without hydrating, and prunes orphans with retention', () => {
+    const path = join(tmp(), 'runs.sqlite');
+    const store = new SqliteAgentRunStore({ path, maxRuns: 2 });
+    store.save(heavyRun('h1', '2026-07-20T10:00:00Z'));
+    store.save(heavyRun('h2', '2026-07-20T11:00:00Z'));
+    let db = openDb(path);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM agent_run_artifacts').get() as { n: number }).n).toBe(2);
+    db.close();
+    const listed = store.list(5);
+    expect(listed.map((entry) => entry.id)).toEqual(['h2', 'h1']);
+    expect(listed[0]!.artifacts[0]!.payload).toBeUndefined();
+    expect(listed[0]!.artifacts[0]!.payloadRef).toMatch(/^sha256:/);
+    // A third, different run evicts h1; h2 still cites the shared blob, so it stays.
+    store.save({ ...run('h3', '2026-07-20T12:00:00Z', 1), artifacts: [{ id: 'h3:a', kind: 'answer', title: 'A', trustState: 'governed', payload: { answer: 'small' } }] } as unknown as AgentRun);
+    db = openDb(path);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM agent_run_artifacts').get() as { n: number }).n).toBe(3);
+    db.close();
+    // Evicting h2 as well leaves the big blob with no citing run: it is pruned.
+    store.save({ ...run('h4', '2026-07-20T13:00:00Z', 1), artifacts: [{ id: 'h4:a', kind: 'answer', title: 'A', trustState: 'governed', payload: { answer: 'small too' } }] } as unknown as AgentRun);
+    db = openDb(path);
+    const remaining = db.prepare('SELECT bytes FROM agent_run_artifacts ORDER BY bytes DESC').all() as Array<{ bytes: number }>;
+    db.close();
+    expect(remaining.every((blob) => blob.bytes < 10_000)).toBe(true);
+    store.close();
+  });
+
+  it('externalizes rows written before content addressing when the store opens', () => {
+    const path = join(tmp(), 'runs.sqlite');
+    const first = new SqliteAgentRunStore({ path });
+    first.close();
+    const db = new (require('better-sqlite3') as typeof import('better-sqlite3'))(path);
+    const inline = heavyRun('old', '2026-07-20T09:00:00Z');
+    db.prepare('INSERT INTO agent_runs (id, question, route, status, started_at, completed_at, compacted, payload_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)')
+      .run('old', 'q', 'generated_answer', 'completed', inline.startedAt, inline.startedAt, JSON.stringify(inline), inline.startedAt);
+    db.close();
+    const reopened = new SqliteAgentRunStore({ path });
+    const check = openDb(path);
+    const row = check.prepare('SELECT length(payload_json) AS bytes FROM agent_runs WHERE id = ?').get('old') as { bytes: number };
+    check.close();
+    expect(row.bytes).toBeLessThan(20_000);
+    expect(reopened.get('old')!.artifacts[0]!.payload).toEqual(big());
+    reopened.close();
+  });
+});

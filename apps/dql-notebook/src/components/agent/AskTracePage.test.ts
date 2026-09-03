@@ -182,42 +182,6 @@ describe('AskTracePage presentation model', () => {
     expect(markup).not.toContain('sql.execute');
   });
 
-  it('OBS-017 prefers the concise V7 inspector over the noisy advanced decision path', () => {
-    const rootSpan = root();
-    const trace: AskTraceDataV1 = {
-      envelope: {
-        version: 1, traceId: '7'.repeat(32), rootSpanId: rootSpan.spanId, runId: 'run-v7-story', surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question',
-        status: 'completed', recordingStatus: 'complete', startedAt: rootSpan.startedAt, spanCount: 1, candidateDecisionCount: 4, droppedRecordCount: 0,
-      },
-      spans: [rootSpan], candidateDecisions: [], links: [],
-      runtimeDecisionSummary: {
-        version: 2, summaryFingerprint: '7'.repeat(64), runtimeMode: 'authoritative',
-        whatHappened: 'The Ask runtime completed a validated analytical answer.',
-        why: 'One qualified semantic path proved the requested tuple.',
-        impact: 'The result was executed and narrated from validated facts.',
-        nextAction: 'none', programTaskCount: 1, admittedCandidateCount: 8, toolCallCount: 2, executionAttempts: 1,
-      },
-      runtimeReceiptV7: {
-        version: 7,
-        inspector: {
-          understood: { questionKind: 'ranking', conversationBinding: 'prior_result', measureCount: 1, dimensionCount: 1, entityRequested: true, hasBoundFilter: true },
-          evidence: { admittedCandidateCount: 8, roleCount: 3, recoveryAttempted: false },
-          planning: { mode: 'initial_planner', plannerCalls: 1, verification: 'valid' },
-          route: { selectedTier: 'semantic', tierAttemptCount: 2, planFrozen: true, reviewRequired: false },
-          outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 3, narration: 'fact_bound' },
-        },
-      } as never,
-    };
-
-    const markup = renderToStaticMarkup(createElement(TraceDecisionStory, { trace, t: themes.paper, onSelectSpan: () => undefined }));
-    expect(markup).toContain('Evidence');
-    expect(markup).toContain('8 qualified candidates across 3 roles.');
-    expect(markup).toContain('initial planner · 1 planner call · verification valid.');
-    expect(markup).toContain('2 tier attempts · semantic · frozen.');
-    expect(markup).toContain('fact bound.');
-    expect(markup).not.toContain('Decision path');
-  });
-
   it('OBS-017 projects the authoritative V8 tool-runtime story before legacy summaries', () => {
     const rootSpan = root();
     const trace: AskTraceDataV1 = {

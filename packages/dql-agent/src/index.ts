@@ -256,7 +256,6 @@ export type {
   AgentRunDiagnosticReceiptV4,
   AgentRunDiagnosticReceiptV5,
   AgentRunDiagnosticReceiptV6,
-  AgentRunDiagnosticReceiptV7,
   ProviderFailureCauseV1,
   ProviderFailureDiagnosticV1,
   ResearchEvidenceLedgerV1,

@@ -59,6 +59,26 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   the eval's in-process `--via loop` driver is removed. The Slack bot proxies
   to the runtime at `DQL_RUNTIME_URL` (default `http://127.0.0.1:3474`).
 
+### Persisted runs: each artifact payload once, each receipt once
+
+- The SQLite run store is content-addressed: every artifact payload is
+  stored once under the fingerprint of its canonical JSON
+  (`agent_run_artifacts`), the run row keeps `{ id, kind, title,
+  trustState, ref, payloadRef }`, a ref table ties blobs to the runs that
+  cite them, and retention prunes orphans. Two runs with the same payload
+  share one blob; `get` hydrates `payload` back so every reader sees the
+  artifact as written; `list` returns index rows with `payloadRef` only.
+  Rows written before this are externalized in batches as the store opens.
+- Diagnostic receipts live on the run root only. The engine no longer
+  stamps the eight receipt copies into the answer artifact's payload and
+  the runtime no longer re-stamps them after dispatch accounting; the
+  transport projection presents the root receipts on the answer artifact
+  for readers that expect them there, as a view.
+- `diagnosticReceiptV7` (the "concise inspector") is removed: nothing
+  produced it. V1–V6 and V8 remain; unifying them into one receipt type is
+  deliberately out of scope (V5/V6 are still produced by restart recovery
+  and Research roots; V8 is the V2 kernel receipt).
+
 ### The hybrid router is gone
 
 - `createHybridRouter` (`router.ts`, 7,255 lines) is deleted with its

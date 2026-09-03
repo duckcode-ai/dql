@@ -9,6 +9,7 @@
  * a user actually reopens stay complete while history stops growing unbounded.
  */
 import Database from 'better-sqlite3';
+import { canonicalJson, sha256 } from './ask-observability/utils.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -94,6 +95,10 @@ export function slimRunForPersistence<T extends { artifacts?: unknown; steps?: u
   const identity = (artifact: unknown): unknown => {
     const item = record(artifact);
     if (!item) return artifact;
+    // A content address, when the store has minted one, survives: the
+    // payload is one lookup away, and reload rebuilds Research task trust
+    // from it. This function never mints an address itself — an address
+    // without a blob behind it would be a lie.
     const { payload: _payload, ...rest } = item;
     return rest;
   };
@@ -119,8 +124,9 @@ export function slimRunForPersistence<T extends { artifacts?: unknown; steps?: u
     ? run.steps.map((step) => {
       const item = record(step);
       if (!item || !Array.isArray(item.artifacts)) return step;
-      // A Research task step is the one place reload needs the artifacts whole.
-      if (typeof item.askAnalystTaskId === 'string' && item.askAnalystTaskId) return step;
+      // A Research task step used to keep its artifacts whole because reload
+      // rebuilt task trust from them; content addressing keeps every payload
+      // retrievable, so identity is enough here too.
       return { ...item, artifacts: item.artifacts.map(identity) };
     })
     : run.steps;
@@ -174,10 +180,183 @@ export class SqliteAgentRunStore implements AgentRunStore {
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at DESC);
+      CREATE TABLE IF NOT EXISTS agent_run_artifacts (
+        fingerprint TEXT PRIMARY KEY,
+        payload_json TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS agent_run_artifact_refs (
+        run_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        PRIMARY KEY (run_id, fingerprint)
+      );
     `);
     this.finalizeInterruptedRuns();
     if (options.legacyJsonPath) this.migrateLegacyJson(options.legacyJsonPath);
     this.slimOversizedRuns();
+    this.externalizeInlineRows();
+  }
+
+  /**
+   * CONTENT-ADDRESSED ARTIFACT PAYLOADS.
+   *
+   * A run row used to carry every artifact payload inline — the result, the
+   * context pack, the compiled program — and `steps[].artifacts` carried the
+   * same objects again. Each payload is now stored ONCE under the fingerprint
+   * of its canonical JSON (`agent_run_artifacts`), the run keeps
+   * `{ id, kind, title, trustState, ref, payloadRef }`, and a ref table ties
+   * blobs to the runs that cite them so retention can drop orphans. Two runs
+   * that produced the same payload share one blob. `get`/`getProgress`
+   * hydrate `payload` back, so every reader sees the artifact exactly as it
+   * was written; `list` deliberately does not (the index projection strips
+   * payloads anyway).
+   */
+  private externalizeArtifacts<T extends { artifacts?: unknown; steps?: unknown }>(
+    runId: string,
+    run: T,
+  ): T {
+    const blobs = new Map<string, string>();
+    const insertBlob = this.db.prepare('INSERT OR IGNORE INTO agent_run_artifacts (fingerprint, payload_json, bytes, created_at) VALUES (?, ?, ?, ?)');
+    const insertRef = this.db.prepare('INSERT OR IGNORE INTO agent_run_artifact_refs (run_id, fingerprint) VALUES (?, ?)');
+    const externalize = (artifact: unknown): unknown => {
+      if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) return artifact;
+      const item = artifact as Record<string, unknown>;
+      if (item.payload === undefined) return artifact;
+      const json = canonicalJson(item.payload);
+      const ref = sha256(json);
+      blobs.set(ref, json);
+      const { payload: _payload, ...rest } = item;
+      return { ...rest, payloadRef: ref };
+    };
+    const artifacts = Array.isArray(run.artifacts) ? run.artifacts.map(externalize) : run.artifacts;
+    const steps = Array.isArray(run.steps)
+      ? run.steps.map((step) => (step && typeof step === 'object' && !Array.isArray(step) && Array.isArray((step as { artifacts?: unknown }).artifacts)
+        ? { ...(step as Record<string, unknown>), artifacts: ((step as { artifacts: unknown[] }).artifacts).map(externalize) }
+        : step))
+      : run.steps;
+    const now = new Date().toISOString();
+    const write = this.db.transaction(() => {
+      for (const [ref, json] of blobs) {
+        insertBlob.run(ref, json, Buffer.byteLength(json, 'utf8'), now);
+        insertRef.run(runId, ref);
+      }
+    });
+    write();
+    return { ...run, artifacts, steps };
+  }
+
+  /**
+   * Put `payloadRef` back as `payload`; a blob that was retention-pruned
+   * stays absent. `task_steps` hydrates only the artifacts of Research task
+   * steps — the ones reload rebuilds task trust from — which is what an index
+   * listing needs and all it can afford.
+   */
+  private hydrateArtifacts<T extends { artifacts?: unknown; steps?: unknown }>(run: T, scope: 'all' | 'task_steps' = 'all'): T {
+    const refs = new Set<string>();
+    const collect = (artifact: unknown) => {
+      const ref = artifact && typeof artifact === 'object' && !Array.isArray(artifact)
+        ? (artifact as { payloadRef?: unknown }).payloadRef
+        : undefined;
+      if (typeof ref === 'string') refs.add(ref);
+    };
+    const taskStep = (step: unknown): boolean => Boolean(step && typeof step === 'object'
+      && typeof (step as { askAnalystTaskId?: unknown }).askAnalystTaskId === 'string'
+      && (step as { askAnalystTaskId: string }).askAnalystTaskId);
+    if (scope === 'all' && Array.isArray(run.artifacts)) run.artifacts.forEach(collect);
+    if (Array.isArray(run.steps)) {
+      for (const step of run.steps) {
+        if (scope === 'task_steps' && !taskStep(step)) continue;
+        const artifacts = step && typeof step === 'object' ? (step as { artifacts?: unknown }).artifacts : undefined;
+        if (Array.isArray(artifacts)) artifacts.forEach(collect);
+      }
+    }
+    if (refs.size === 0) return run;
+    const payloads = new Map<string, unknown>();
+    const ids = [...refs];
+    for (let offset = 0; offset < ids.length; offset += 200) {
+      const page = ids.slice(offset, offset + 200);
+      const rows = this.db.prepare(
+        `SELECT fingerprint, payload_json FROM agent_run_artifacts WHERE fingerprint IN (${page.map(() => '?').join(', ')})`,
+      ).all(...page) as Array<{ fingerprint: string; payload_json: string }>;
+      for (const row of rows) {
+        try { payloads.set(row.fingerprint, JSON.parse(row.payload_json)); } catch { /* a corrupt blob stays absent */ }
+      }
+    }
+    const hydrate = (artifact: unknown): unknown => {
+      if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) return artifact;
+      const item = artifact as Record<string, unknown>;
+      if (typeof item.payloadRef !== 'string' || item.payload !== undefined) return artifact;
+      return payloads.has(item.payloadRef) ? { ...item, payload: payloads.get(item.payloadRef) } : artifact;
+    };
+    return {
+      ...run,
+      ...(Array.isArray(run.artifacts) ? { artifacts: run.artifacts.map(hydrate) } : {}),
+      ...(Array.isArray(run.steps)
+        ? {
+          steps: run.steps.map((step) => (step && typeof step === 'object' && !Array.isArray(step) && Array.isArray((step as { artifacts?: unknown }).artifacts)
+            ? { ...(step as Record<string, unknown>), artifacts: ((step as { artifacts: unknown[] }).artifacts).map(hydrate) }
+            : step)),
+        }
+        : {}),
+    };
+  }
+
+  /**
+   * Read a stored row. Hydration comes BEFORE normalization: the trust
+   * sanitizers rebuild Research task proofs from step artifact payloads, and
+   * a payload that is still only an address would read as no proof at all.
+   */
+  private readRun(json: string, scope: 'all' | 'task_steps' = 'all'): AgentRun | undefined {
+    let value: unknown;
+    try { value = JSON.parse(json); } catch { return undefined; }
+    if (!isAgentRunRecord(value)) return undefined;
+    return normalizeRunProviderEgressReceipts(this.hydrateArtifacts(value, scope));
+  }
+
+  private readProgress(json: string): AgentRunProgressV1 | undefined {
+    let value: unknown;
+    try { value = JSON.parse(json); } catch { return undefined; }
+    if (!isAgentRunProgressRecord(value)) return undefined;
+    return sanitizeProgressRoleCoverage(this.hydrateArtifacts(value));
+  }
+
+  /**
+   * The persisted form of a run: content-addressed FIRST, so every payload —
+   * including a task step's own — is in the blob table before slimming
+   * reduces the carriers to identity, then slimmed.
+   */
+  private persistedRunJson(run: AgentRun, options: { compacted?: boolean } = {}): string {
+    const externalized = this.externalizeArtifacts(run.id, run);
+    const slim = slimRunForPersistence(externalized);
+    return JSON.stringify(options.compacted ? { ...slim, events: [] } : slim);
+  }
+
+  /**
+   * Rows written before content addressing still carry inline payloads; move
+   * a few of the heaviest out each time the store opens, so an old project
+   * heals without a migration step. Best-effort: a row that cannot be parsed
+   * is left alone.
+   */
+  private externalizeInlineRows(batch = 24): void {
+    try {
+      const rows = this.db.prepare(`
+        SELECT id, payload_json, compacted, completed_at FROM agent_runs
+        WHERE payload_json LIKE '%"payload":%' AND payload_json NOT LIKE '%"payloadRef":%'
+        ORDER BY length(payload_json) DESC LIMIT ?
+      `).all(batch) as Array<{ id: string; payload_json: string; compacted: number; completed_at: string | null }>;
+      if (rows.length === 0) return;
+      const update = this.db.prepare('UPDATE agent_runs SET payload_json = ? WHERE id = ?');
+      for (const row of rows) {
+        if (row.completed_at === null) continue;
+        const run = this.readRun(row.payload_json);
+        if (!run) continue;
+        const json = this.persistedRunJson(run, { compacted: row.compacted === 1 });
+        if (json.length < row.payload_json.length) update.run(json, row.id);
+      }
+    } catch {
+      // A store that cannot be backfilled still serves reads and writes.
+    }
   }
 
   save(run: AgentRun): void {
@@ -202,7 +381,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
       (persistedRun as { status?: string }).status ?? null,
       persistedRun.startedAt,
       (persistedRun as { completedAt?: string }).completedAt ?? null,
-      JSON.stringify(persistedRun),
+      this.persistedRunJson(persistedRun),
       now,
     );
     this.enforceRetention();
@@ -230,32 +409,35 @@ export class SqliteAgentRunStore implements AgentRunStore {
       persistedProgress.question,
       persistedProgress.route ?? 'blocked',
       persistedProgress.lifecycle.startedAt,
-      JSON.stringify(persistedProgress),
+      JSON.stringify(this.externalizeArtifacts(persistedProgress.id, persistedProgress)),
       updatedAt,
     );
   }
 
   get(id: string): AgentRun | undefined {
     const row = this.db.prepare('SELECT payload_json FROM agent_runs WHERE id = ?').get(id) as { payload_json: string } | undefined;
-    return row ? parseRun(row.payload_json) : undefined;
+    return row ? this.readRun(row.payload_json) : undefined;
   }
 
   getProgress(id: string): AgentRunProgressV1 | undefined {
     const row = this.db.prepare('SELECT payload_json FROM agent_runs WHERE id = ? AND completed_at IS NULL').get(id) as { payload_json: string } | undefined;
-    return row ? parseProgress(row.payload_json) : undefined;
+    return row ? this.readProgress(row.payload_json) : undefined;
   }
 
   /**
    * Newest first. `limit` bounds the rows READ, not just the rows returned:
    * parsing every stored run to answer a page of fifty took the server past
-   * its heap on a project with months of history.
+   * its heap on a project with months of history. Artifacts come back
+   * UNHYDRATED — `payloadRef` without `payload` — because a listing is an
+   * index, and hydrating every page's payloads is the memory the limit
+   * exists to avoid. `get(id)` hydrates.
    */
   list(limit?: number): AgentRun[] {
     const rows = (Number.isFinite(limit) && (limit as number) > 0
       ? this.db.prepare('SELECT payload_json FROM agent_runs ORDER BY started_at DESC LIMIT ?').all(Math.floor(limit as number))
       : this.db.prepare('SELECT payload_json FROM agent_runs ORDER BY started_at DESC').all()) as Array<{ payload_json: string }>;
     return rows.flatMap((row) => {
-      const run = parseRun(row.payload_json);
+      const run = this.readRun(row.payload_json, 'task_steps');
       return run ? [run] : [];
     });
   }
@@ -288,7 +470,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
     `);
     const closeAll = this.db.transaction(() => {
       for (const row of rows) {
-        const progress = parseProgress(row.payload_json);
+        const progress = this.readProgress(row.payload_json);
         if (!progress) continue;
         const completedAt = new Date().toISOString();
         const userCancelled = progress.lifecycle.state === 'cancelling'
@@ -408,7 +590,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
             completedAt,
           },
         };
-        update.run(run.route, run.status, completedAt, JSON.stringify(slimRunForPersistence(run)), completedAt, run.id);
+        update.run(run.route, run.status, completedAt, this.persistedRunJson(run), completedAt, run.id);
       }
     });
     closeAll();
@@ -420,6 +602,9 @@ export class SqliteAgentRunStore implements AgentRunStore {
         SELECT id FROM agent_runs ORDER BY started_at DESC LIMIT ?
       )
     `).run(this.maxRuns);
+    // A blob lives as long as one retained run cites it.
+    this.db.prepare('DELETE FROM agent_run_artifact_refs WHERE run_id NOT IN (SELECT id FROM agent_runs)').run();
+    this.db.prepare('DELETE FROM agent_run_artifacts WHERE fingerprint NOT IN (SELECT fingerprint FROM agent_run_artifact_refs)').run();
   }
 
   /**
@@ -437,12 +622,12 @@ export class SqliteAgentRunStore implements AgentRunStore {
     if (stale.length === 0) return;
     const update = this.db.prepare('UPDATE agent_runs SET payload_json = ?, compacted = 1 WHERE id = ?');
     for (const row of stale) {
-      const run = parseRun(row.payload_json);
+      const run = this.readRun(row.payload_json);
       if (!run) {
         update.run(row.payload_json, row.id);
         continue;
       }
-      update.run(JSON.stringify({ ...slimRunForPersistence(run), events: [] }), row.id);
+      update.run(this.persistedRunJson(run, { compacted: true }), row.id);
     }
     this.slimOversizedRuns();
   }
@@ -463,9 +648,9 @@ export class SqliteAgentRunStore implements AgentRunStore {
     if (heavy.length === 0) return;
     const update = this.db.prepare('UPDATE agent_runs SET payload_json = ? WHERE id = ?');
     for (const row of heavy) {
-      const run = parseRun(row.payload_json);
+      const run = this.readRun(row.payload_json);
       if (!run) continue;
-      const slim = JSON.stringify(row.compacted ? { ...slimRunForPersistence(run), events: [] } : slimRunForPersistence(run));
+      const slim = this.persistedRunJson(run, { compacted: row.compacted === 1 });
       if (slim.length < row.payload_json.length) update.run(slim, row.id);
     }
   }
@@ -492,7 +677,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
             (run as { status?: string }).status ?? null,
             run.startedAt,
             (run as { completedAt?: string }).completedAt ?? null,
-            JSON.stringify(slimRunForPersistence(run)),
+            this.persistedRunJson(run),
             now,
           );
         }
@@ -724,14 +909,6 @@ export function defaultAgentRunSqlitePath(projectRoot: string): string {
   return join(projectRoot, '.dql', 'local', 'agent-runs.sqlite');
 }
 
-function parseRun(payload: string): AgentRun | undefined {
-  try {
-    const value = JSON.parse(payload) as unknown;
-    return isAgentRunRecord(value) ? normalizeRunProviderEgressReceipts(value) : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * Durable run JSON is local and therefore untrusted on import/read. Keep an
@@ -790,14 +967,6 @@ function normalizeRunProviderEgressReceipts(run: AgentRun): AgentRun {
   };
 }
 
-function parseProgress(payload: string): AgentRunProgressV1 | undefined {
-  try {
-    const value = JSON.parse(payload) as unknown;
-    return isAgentRunProgressRecord(value) ? sanitizeProgressRoleCoverage(value) : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * V2 role coverage is an observability summary, not a payload lane. Persist

@@ -43,7 +43,6 @@ import {
   buildCoverageGap,
   classifyProviderFailure,
   type AgentRunDiagnosticReceiptV6,
-  type AgentRunDiagnosticReceiptV7,
   type AgentRunDiagnosticReceiptV5,
   type AnalyticalProgram,
   type AskAnalystState,
@@ -260,6 +259,12 @@ export interface AgentRunArtifact {
   trustState: AgentRunTrustState;
   ref?: string;
   payload?: unknown;
+  /**
+   * The content address (`sha256:` of the canonical JSON) of `payload` in
+   * the run store. A persisted run keeps the address and the store hydrates
+   * `payload` on `get`; an index listing carries the address alone.
+   */
+  payloadRef?: string;
 }
 
 export interface AgentRunDiagnosticFailureV1 {
@@ -729,8 +734,7 @@ export interface AgentRun {
   /** Additive retrieval-first Ask story. V1-V5 remain readable. */
   diagnosticReceiptV6?: AgentRunDiagnosticReceiptV6;
   /** Additive concise Ask inspector. V1-V6 remain readable. */
-  diagnosticReceiptV7?: AgentRunDiagnosticReceiptV7;
-  /** Additive V2 tool-runtime receipt. V1-V7 readers remain unchanged. */
+  /** Additive V2 tool-runtime receipt. V1-V6 readers remain unchanged. */
   diagnosticReceiptV8?: AgentRunDiagnosticReceiptV8;
   /** Server-owned Ask rollout mode that produced this run; old runs omit it. */
   askAgentRuntimeMode?: AskRuntimeModeV2;
@@ -1931,7 +1935,7 @@ export class AgentRunEngine {
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
       run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
       attachAskAnalystRuntimeReceipt(run, request.askAgentRuntimeMode);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6, run.diagnosticReceiptV7, run.diagnosticReceiptV8);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt);
       // Observability is deliberately finalized only after the authoritative
       // receipt exists, and before the ordinary run store persists its compact
       // reference. A local trace write failure never changes this outcome.
@@ -2626,7 +2630,7 @@ export class AgentRunEngine {
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
       run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
       attachAskAnalystRuntimeReceipt(run, request.askAgentRuntimeMode);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6, run.diagnosticReceiptV7, run.diagnosticReceiptV8);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt);
       finalizeAgentRunTraceV1(traceObserver, run);
       await checkpointQueue;
       await this.store?.save(run);
@@ -2806,7 +2810,7 @@ export class AgentRunEngine {
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
       run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
       attachAskAnalystRuntimeReceipt(run, request.askAgentRuntimeMode);
-      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6, run.diagnosticReceiptV7, run.diagnosticReceiptV8);
+      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt);
       finalizeAgentRunTraceV1(traceObserver, run);
       await checkpointQueue;
       await this.store?.save(run);
@@ -4454,7 +4458,7 @@ function attachAskAnalystRuntimeReceipt(run: AgentRun, runtimeMode?: AskRuntimeM
   attachAskAgentV2RuntimeReceipt(run);
 }
 
-/** V2's compact receipt is additive and deliberately does not alter V1-V7. */
+/** V2's compact receipt is additive and deliberately does not alter V1-V6. */
 function attachAskAgentV2RuntimeReceipt(run: AgentRun): void {
   const state = run.routeDecision?.askAgentV2Decision?.state;
   if (!state) return;
@@ -5426,72 +5430,6 @@ function providerFailureFromAskAgentV2State(
   };
 }
 
-/** Content-free export boundary for V5 inspector/full-trace receipts. */
-function diagnosticAskAnalystState(state: AskAnalystState): AgentRunDiagnosticReceiptV5['state'] {
-  return {
-    version: 1,
-    mode: state.mode,
-    phase: state.phase,
-    questionFingerprint: state.frame.questionFingerprint,
-    kind: state.frame.kind,
-    requirementCounts: {
-      measures: state.frame.requirements.measures.length,
-      dimensions: state.frame.requirements.dimensions.length,
-      entityTerms: state.frame.requirements.entityTerms.length + state.frame.requirements.entityDisplayTerms.length,
-      members: state.frame.requirements.memberTerms.length,
-      filters: state.program.filters?.length ?? 0,
-    },
-    mission: {
-      mode: state.mission.mode,
-      taskCount: state.mission.tasks.length,
-      deferredTaskCount: state.mission.deferredTasks?.length ?? 0,
-      hypothesisCount: state.mission.hypotheses.length,
-    },
-    workspace: {
-      ...(state.workspace.snapshotId ? { snapshotId: state.workspace.snapshotId } : {}),
-      ...(state.workspace.sourceFingerprint ? { sourceFingerprint: state.workspace.sourceFingerprint } : {}),
-      admittedCandidateCount: state.workspace.admittedCandidateIds.length,
-      excludedCandidateCount: state.workspace.excludedCandidates.length,
-      sourceCoverage: state.workspace.sourceCoverage.map((coverage) => ({
-        source: coverage.source,
-        status: coverage.status,
-        candidateCount: coverage.candidateIds.length,
-      })),
-      tools: state.workspace.tools.map((tool) => ({
-        id: tool.id,
-        kind: tool.kind,
-        status: tool.status,
-        reasonCode: tool.reasonCode,
-      })),
-    },
-    program: {
-      id: state.program.id,
-      taskCount: state.program.taskIds.length,
-      candidateCount: state.program.candidateIds.length,
-      requiredRoles: [...state.program.requiredRoles],
-      outputAssertionCount: state.program.outputs.assertions?.length ?? 0,
-    },
-    ...(state.resolvedPlan ? { resolvedPlan: state.resolvedPlan } : {}),
-    counters: {
-      planningContinuations: state.planningContinuations,
-      toolCalls: state.toolCalls,
-      executionAttempts: state.executionAttempts,
-      repairAttempts: state.repairAttempts,
-    },
-  };
-}
-
-function diagnosticBusinessAnswer(answer: BusinessAnswer): NonNullable<AgentRunDiagnosticReceiptV5['businessAnswer']> {
-  return {
-    version: 1,
-    mode: answer.mode,
-    trustState: answer.trustState,
-    factIds: [...answer.factIds],
-    ...(answer.resultFingerprint ? { resultFingerprint: answer.resultFingerprint } : {}),
-    limitationCount: answer.limitations.length,
-  };
-}
-
 type AskSummaryEvidenceRole = AskDecisionSummaryV1['evidenceByRole'][number]['role'];
 type AskResearchBranchFailureCode = AskResearchBranchSummaryV1['failureReasons'][number]['code'];
 type AskResearchChildTier = AskResearchBranchSummaryV1['availableChildPlans'][number]['tier'];
@@ -6066,45 +6004,24 @@ function receiptFingerprint(value: unknown): string {
 function attachDiagnosticReceipt(
   artifacts: AgentRunArtifact[],
   receipt: AgentRunDiagnosticReceiptV1,
-  receiptV2?: AgentRunDiagnosticReceiptV2,
-  receiptV3?: AgentRunDiagnosticReceiptV3,
-  receiptV4?: AgentRunDiagnosticReceiptV4,
-  receiptV5?: AgentRunDiagnosticReceiptV5,
-  receiptV6?: AgentRunDiagnosticReceiptV6,
-  receiptV7?: AgentRunDiagnosticReceiptV7,
-  receiptV8?: AgentRunDiagnosticReceiptV8,
 ): AgentRunArtifact[] {
-  if (artifacts.length === 0) {
-    if (!receipt.failure) return artifacts;
+  // RECEIPTS LIVE ON THE RUN ROOT, ONCE. They used to be stamped into the
+  // answer artifact's payload as well — eight copies of the same objects on
+  // every run — and the store then had to strip them back out. The transport
+  // projection presents the root receipts on the answer artifact for readers
+  // that expect them there; persistence never carries them twice. A run with
+  // no artifact still gets one blocked diagnostic artifact so its failure
+  // has somewhere to render.
+  if (artifacts.length === 0 && receipt.failure) {
     return [{
       id: `${receipt.runId}:diagnostic`,
       kind: "answer",
       title: "Agent run diagnostics",
       trustState: "blocked",
-      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}), ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}), ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}), ...(receiptV5 ? { diagnosticReceiptV5: receiptV5 } : {}), ...(receiptV6 ? { diagnosticReceiptV6: receiptV6 } : {}), ...(receiptV7 ? { diagnosticReceiptV7: receiptV7 } : {}), ...(receiptV8 ? { diagnosticReceiptV8: receiptV8 } : {}) },
+      payload: { diagnostic: true },
     }];
   }
-  const preferredIndex = Math.max(0, artifacts.findIndex((artifact) => artifact.kind === "answer"));
-  return artifacts.map((artifact, index) => {
-    if (index !== preferredIndex) return artifact;
-    const payload = artifact.payload && typeof artifact.payload === "object" && !Array.isArray(artifact.payload)
-      ? artifact.payload as Record<string, unknown>
-      : {};
-    return {
-      ...artifact,
-      payload: {
-        ...payload,
-        diagnosticReceipt: receipt,
-        ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}),
-        ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}),
-        ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}),
-        ...(receiptV5 ? { diagnosticReceiptV5: receiptV5 } : {}),
-        ...(receiptV6 ? { diagnosticReceiptV6: receiptV6 } : {}),
-        ...(receiptV7 ? { diagnosticReceiptV7: receiptV7 } : {}),
-        ...(receiptV8 ? { diagnosticReceiptV8: receiptV8 } : {}),
-      },
-    };
-  });
+  return artifacts;
 }
 
 /**

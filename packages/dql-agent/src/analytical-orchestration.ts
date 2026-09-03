@@ -1567,49 +1567,6 @@ export interface AgentRunDiagnosticReceiptV6 extends Omit<AgentRunDiagnosticRece
   }>;
 }
 
-/**
- * Additive V7 reader receipt.  V6 remains the detailed, content-free trace
- * record; V7 projects it into the few decisions an analyst needs first:
- * whether the question was understood, whether evidence was sufficient, what
- * the planner/cascade decided, and whether a result was actually narrated.
- * It deliberately carries counts and enum outcomes only—never prompt text,
- * SQL, result rows, provider payloads, candidate labels, or member values.
- */
-export interface AgentRunDiagnosticReceiptV7 extends Omit<AgentRunDiagnosticReceiptV6, 'version'> {
-  version: 7;
-  inspector: {
-    understood: {
-      questionKind: BusinessQuestionFrameV4['kind'];
-      conversationBinding: BusinessQuestionFrameV4['conversation']['binding'];
-      measureCount: number;
-      dimensionCount: number;
-      entityRequested: boolean;
-      hasBoundFilter: boolean;
-    };
-    evidence: {
-      admittedCandidateCount: number;
-      roleCount: number;
-      recoveryAttempted: boolean;
-    };
-    planning: {
-      mode: AskPlanningModeV1;
-      plannerCalls: number;
-      verification: ProgramVerificationFeedbackV1['status'];
-    };
-    route: {
-      selectedTier?: AnalyticalCascadeDecisionV1['selectedTier'];
-      tierAttemptCount: number;
-      planFrozen: boolean;
-      reviewRequired: boolean;
-    };
-    outcome: {
-      connectionAttempted: boolean;
-      executionAttempts: number;
-      factCount: number;
-      narration: 'fact_bound' | 'result_without_facts' | 'not_applicable';
-    };
-  };
-}
 
 /** New runtime values are V2; V1 values remain readable from old JSON runs. */
 export type AskAnalystState = AskAnalystStateV1 | AskAnalystStateV2 | AskAnalystStateV3;

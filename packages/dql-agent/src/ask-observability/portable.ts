@@ -387,7 +387,6 @@ function redactRunReceipt(value: unknown, trace: AskTraceDataV1, profile: AskTra
   );
   const runtimeReceiptV5 = portableRuntimeReceiptV5(record.diagnosticReceiptV5, profile, salt);
   const runtimeReceiptV6 = portableRuntimeReceiptV6(record.diagnosticReceiptV6, profile, salt);
-  const runtimeReceiptV7 = portableRuntimeReceiptV7(record.diagnosticReceiptV7, profile, salt);
   const runtimeReceiptV8 = portableRuntimeReceiptV8(record.diagnosticReceiptV8, profile, salt);
   return {
     version: 1,
@@ -405,7 +404,6 @@ function redactRunReceipt(value: unknown, trace: AskTraceDataV1, profile: AskTra
     ...(terminalGap ? { terminalGap } : {}),
     ...(runtimeReceiptV5 ? { runtimeReceiptV5 } : {}),
     ...(runtimeReceiptV6 ? { runtimeReceiptV6 } : {}),
-    ...(runtimeReceiptV7 ? { runtimeReceiptV7 } : {}),
     ...(runtimeReceiptV8 ? { runtimeReceiptV8 } : {}),
     telemetry: sanitizeTelemetry(record.telemetry),
     fingerprints: {
@@ -724,85 +722,6 @@ function portableRuntimeReceiptV6(value: unknown, profile: AskTraceExportProfile
   };
 }
 
-/**
- * V7 is a count/enum-only first-read projection. Reuse the explicit V6
- * allowlist for inherited fields, then independently allowlist the small
- * inspector rather than copying its object wholesale into a support bundle.
- */
-function portableRuntimeReceiptV7(value: unknown, profile: AskTraceExportProfileV1, salt: string): Record<string, unknown> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const receipt = value as Record<string, unknown>;
-  if (receipt.version !== 7 || typeof receipt.runId !== 'string') return undefined;
-  const base = portableRuntimeReceiptV6({ ...receipt, version: 6 }, profile, salt);
-  if (!base) return undefined;
-  const inspector = receipt.inspector && typeof receipt.inspector === 'object' && !Array.isArray(receipt.inspector)
-    ? receipt.inspector as Record<string, unknown>
-    : undefined;
-  const record = (value: unknown): Record<string, unknown> | undefined =>
-    value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-  const count = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value)
-    ? Math.max(0, Math.min(10_000, Math.floor(value)))
-    : undefined;
-  const understood = record(inspector?.understood);
-  const evidence = record(inspector?.evidence);
-  const planning = record(inspector?.planning);
-  const route = record(inspector?.route);
-  const outcome = record(inspector?.outcome);
-  const allowedKinds = new Set(['conversation', 'definition', 'lookup', 'ranking', 'breakdown', 'comparison', 'drilldown', 'diagnosis', 'research', 'compound', 'clarification', 'aggregation']);
-  const allowedBindings = new Set(['none', 'structured_clarification', 'prior_result', 'task_dependency']);
-  const allowedModes = new Set(['exact_fast_path', 'initial_planner', 'targeted_revision', 'deterministic_binding']);
-  const allowedVerification = new Set(['valid', 'needs_targeted_context', 'ambiguous', 'denied', 'invalid']);
-  const allowedTiers = new Set(['certified', 'semantic', 'governed_relational', 'exploratory_sql', 'clarify_or_gap']);
-  const allowedNarration = new Set(['fact_bound', 'result_without_facts', 'not_applicable']);
-  const safeInspector = understood && evidence && planning && route && outcome
-    && typeof understood.questionKind === 'string' && allowedKinds.has(understood.questionKind)
-    && typeof understood.conversationBinding === 'string' && allowedBindings.has(understood.conversationBinding)
-    && typeof understood.entityRequested === 'boolean' && typeof understood.hasBoundFilter === 'boolean'
-    && typeof evidence.recoveryAttempted === 'boolean'
-    && typeof planning.mode === 'string' && allowedModes.has(planning.mode)
-    && typeof planning.verification === 'string' && allowedVerification.has(planning.verification)
-    && typeof route.planFrozen === 'boolean' && typeof route.reviewRequired === 'boolean'
-    && typeof outcome.connectionAttempted === 'boolean'
-    && typeof outcome.narration === 'string' && allowedNarration.has(outcome.narration)
-    ? {
-        understood: {
-          questionKind: understood.questionKind,
-          conversationBinding: understood.conversationBinding,
-          ...(count(understood.measureCount) !== undefined ? { measureCount: count(understood.measureCount)! } : {}),
-          ...(count(understood.dimensionCount) !== undefined ? { dimensionCount: count(understood.dimensionCount)! } : {}),
-          entityRequested: understood.entityRequested,
-          hasBoundFilter: understood.hasBoundFilter,
-        },
-        evidence: {
-          ...(count(evidence.admittedCandidateCount) !== undefined ? { admittedCandidateCount: count(evidence.admittedCandidateCount)! } : {}),
-          ...(count(evidence.roleCount) !== undefined ? { roleCount: count(evidence.roleCount)! } : {}),
-          recoveryAttempted: evidence.recoveryAttempted,
-        },
-        planning: {
-          mode: planning.mode,
-          ...(count(planning.plannerCalls) !== undefined ? { plannerCalls: count(planning.plannerCalls)! } : {}),
-          verification: planning.verification,
-        },
-        route: {
-          ...(typeof route.selectedTier === 'string' && allowedTiers.has(route.selectedTier) ? { selectedTier: route.selectedTier } : {}),
-          ...(count(route.tierAttemptCount) !== undefined ? { tierAttemptCount: count(route.tierAttemptCount)! } : {}),
-          planFrozen: route.planFrozen,
-          reviewRequired: route.reviewRequired,
-        },
-        outcome: {
-          connectionAttempted: outcome.connectionAttempted,
-          ...(count(outcome.executionAttempts) !== undefined ? { executionAttempts: count(outcome.executionAttempts)! } : {}),
-          ...(count(outcome.factCount) !== undefined ? { factCount: count(outcome.factCount)! } : {}),
-          narration: outcome.narration,
-        },
-      }
-    : undefined;
-  return {
-    ...base,
-    version: 7,
-    ...(safeInspector ? { inspector: safeInspector } : {}),
-  };
-}
 
 /**
  * Keep portable V5 parity with the full local trace without exporting raw Ask

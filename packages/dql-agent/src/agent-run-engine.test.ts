@@ -578,7 +578,8 @@ describe("AgentRunEngine", () => {
     expect(run.diagnosticReceiptV8?.observations).toEqual(expect.arrayContaining([
       expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', tier: 'semantic' }),
     ]));
-    expect(run.artifacts.every((artifact) => artifact.payload.diagnosticReceiptV8 === run.diagnosticReceiptV8)).toBe(true);
+    // Receipts live once, on the run root; no artifact payload carries a copy.
+    expect(run.artifacts.every((artifact) => artifact.payload.diagnosticReceiptV8 === undefined)).toBe(true);
     expect(store.get(run.id)?.diagnosticReceiptV8).toEqual(run.diagnosticReceiptV8);
     expect(JSON.stringify(run.diagnosticReceiptV8)).not.toContain('result:v2-semantic');
   });
@@ -2578,7 +2579,7 @@ describe("AgentRunEngine", () => {
     expect(run.trustState).toBe("blocked");
     expect(run.stopReason).toBe("blocked");
     expect(run.artifacts).toHaveLength(1);
-    expect(run.artifacts[0]?.payload).toMatchObject({
+    expect(run).toMatchObject({
       diagnosticReceipt: {
         failure: { code: "EXECUTION_BLOCKED" },
       },
@@ -2683,9 +2684,9 @@ describe("AgentRunEngine", () => {
         recoverable: true,
       },
     });
-    expect(run.artifacts[0]?.payload).toMatchObject({
-      diagnosticReceipt: { failure: { code: "EXECUTOR_FAILURE" } },
-    });
+    // A run without an artifact still gets one blocked diagnostic artifact to
+    // render its failure; the receipt itself lives on the run root only.
+    expect(run.artifacts[0]).toMatchObject({ kind: "answer", trustState: "blocked", payload: { diagnostic: true } });
   });
 
   it("persists a bounded timeout even when it occurs during retrieval-first routing", async () => {

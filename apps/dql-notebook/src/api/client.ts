@@ -1310,29 +1310,6 @@ export interface AgentRunDiagnosticReceiptV6 extends Omit<AgentRunDiagnosticRece
   }>;
 }
 
-/** Compact Ask inspector. V1-V6 remain readable when this receipt is absent. */
-export interface AgentRunDiagnosticReceiptV7 extends Omit<AgentRunDiagnosticReceiptV6, 'version'> {
-  version: 7;
-  inspector: {
-    understood: {
-      questionKind: string;
-      conversationBinding: string;
-      measureCount: number;
-      dimensionCount: number;
-      entityRequested: boolean;
-      hasBoundFilter: boolean;
-    };
-    evidence: { admittedCandidateCount: number; roleCount: number; recoveryAttempted: boolean };
-    planning: { mode: string; plannerCalls: number; verification: string };
-    route: { selectedTier?: string; tierAttemptCount: number; planFrozen: boolean; reviewRequired: boolean };
-    outcome: {
-      connectionAttempted: boolean;
-      executionAttempts: number;
-      factCount: number;
-      narration: 'fact_bound' | 'result_without_facts' | 'not_applicable';
-    };
-  };
-}
 
 /**
  * Additive V2 Ask-tool receipt.  This intentionally mirrors only the
@@ -1623,8 +1600,6 @@ export interface AskTraceDataV1 {
   runtimeReceiptV5?: AgentRunDiagnosticReceiptV5;
   /** Same redacted V6 decision story returned by the full trace API. */
   runtimeReceiptV6?: AgentRunDiagnosticReceiptV6;
-  /** Same redacted V7 concise inspector returned by the full trace API. */
-  runtimeReceiptV7?: AgentRunDiagnosticReceiptV7;
   /** Same redacted V8 tool-runtime receipt returned by the full trace API. */
   runtimeReceiptV8?: AgentRunDiagnosticReceiptV8;
   /** Server-owned Ask rollout mode joined from the durable run; old traces omit it. */
@@ -1695,7 +1670,6 @@ export interface AgentRun {
   diagnosticReceiptV4?: AgentRunDiagnosticReceiptV4;
   diagnosticReceiptV5?: AgentRunDiagnosticReceiptV5;
   diagnosticReceiptV6?: AgentRunDiagnosticReceiptV6;
-  diagnosticReceiptV7?: AgentRunDiagnosticReceiptV7;
   diagnosticReceiptV8?: AgentRunDiagnosticReceiptV8;
   /** Server-owned rollout mode; this is never client-controlled. */
   askAgentRuntimeMode?: 'authoritative_v2';

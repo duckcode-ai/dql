@@ -894,7 +894,6 @@ export function TraceDecisionStory({ trace, t, onSelectSpan: _onSelectSpan }: { 
   }
   const runtime = trace.runtimeDecisionSummary;
   const runtimeV6 = trace.runtimeReceiptV6;
-  const inspector = trace.runtimeReceiptV7?.inspector;
   if (runtime) {
     const attention = /did not complete|paused|blocked/i.test(runtime.whatHappened);
     const roleCoverage = runtimeV6?.roleCoverage?.length
@@ -902,17 +901,7 @@ export function TraceDecisionStory({ trace, t, onSelectSpan: _onSelectSpan }: { 
       : undefined;
     const planner = runtimeV6?.planning;
     const cascade = runtimeV6?.cascade;
-    const sections: Array<[string, string]> = inspector
-      ? [
-          ['What happened', runtime.whatHappened],
-          ['Why', runtime.why],
-          ['Evidence', `${inspector.evidence.admittedCandidateCount} qualified candidates across ${inspector.evidence.roleCount} role${inspector.evidence.roleCount === 1 ? '' : 's'}${inspector.evidence.recoveryAttempted ? '; one targeted recovery was attempted' : ''}.`],
-          ['Planner', `${inspector.planning.mode.replace(/_/g, ' ')} · ${inspector.planning.plannerCalls} planner call${inspector.planning.plannerCalls === 1 ? '' : 's'} · verification ${inspector.planning.verification.replace(/_/g, ' ')}.`],
-          ['Route', `${inspector.route.tierAttemptCount} tier attempt${inspector.route.tierAttemptCount === 1 ? '' : 's'} · ${inspector.route.selectedTier?.replace(/_/g, ' ') ?? 'no executable tier'}${inspector.route.planFrozen ? ' · frozen' : ' · not frozen'}${inspector.route.reviewRequired ? ' · review required' : ''}.`],
-          ['Answer outcome', `${inspector.outcome.connectionAttempted ? 'connection attempted' : 'no connection attempted'} · ${inspector.outcome.executionAttempts} execution attempt${inspector.outcome.executionAttempts === 1 ? '' : 's'} · ${inspector.outcome.factCount} validated fact${inspector.outcome.factCount === 1 ? '' : 's'} · ${inspector.outcome.narration.replace(/_/g, ' ')}.`],
-          ['Safe next action', safeActionInstruction(runtimeV6?.safeNextAction ?? runtime.nextAction)],
-        ]
-      : [
+    const sections: Array<[string, string]> = [
           ['What happened', runtime.whatHappened],
           ['Why', runtime.why],
           ['Impact', runtime.impact],

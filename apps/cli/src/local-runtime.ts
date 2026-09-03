@@ -396,7 +396,6 @@ import {
   type AgentRunTrustState,
   type AgentRunDiagnosticReceiptV5,
   type AgentRunDiagnosticReceiptV6,
-  type AgentRunDiagnosticReceiptV7,
   type AgentRunDiagnosticReceiptV8,
   type NarrationIntegrityReceiptV1,
   type AgentRouteExecutorResult,
@@ -2949,15 +2948,30 @@ export function slimAgentRunForTransport(run: AgentRun): AgentRun {
     const { steps: _steps, artifacts: _artifacts, ...rest } = record;
     return rest;
   };
-  const artifacts = (run.artifacts ?? []).map((artifact) => {
+  // The persisted run holds each receipt once, on the root. Readers of the
+  // presentation projection (the notebook's inspector, the repair flow) look
+  // for them on the answer artifact, so the projection places the root
+  // receipts there — a view, never a second stored copy.
+  const rootReceipts = {
+    ...(run.diagnosticReceipt ? { diagnosticReceipt: slimReceipt(run.diagnosticReceipt) } : {}),
+    ...(run.diagnosticReceiptV2 ? { diagnosticReceiptV2: run.diagnosticReceiptV2 } : {}),
+    ...(run.diagnosticReceiptV3 ? { diagnosticReceiptV3: run.diagnosticReceiptV3 } : {}),
+    ...(run.diagnosticReceiptV4 ? { diagnosticReceiptV4: run.diagnosticReceiptV4 } : {}),
+    ...(run.diagnosticReceiptV5 ? { diagnosticReceiptV5: run.diagnosticReceiptV5 } : {}),
+    ...(run.diagnosticReceiptV6 ? { diagnosticReceiptV6: run.diagnosticReceiptV6 } : {}),
+    ...(run.diagnosticReceiptV8 ? { diagnosticReceiptV8: run.diagnosticReceiptV8 } : {}),
+  };
+  const receiptArtifactIndex = Math.max(0, (run.artifacts ?? []).findIndex((artifact) => artifact.kind === 'answer'));
+  const artifacts = (run.artifacts ?? []).map((artifact, index) => {
     const payload = agentRunRecord(artifact.payload);
-    if (!payload) return artifact;
-    const { considered: _considered, ...restPayload } = payload;
+    const { considered: _considered, ...restPayload } = payload ?? {};
+    if (!payload && index !== receiptArtifactIndex) return artifact;
     return {
       ...artifact,
       payload: {
         ...restPayload,
-        ...(payload.diagnosticReceipt ? { diagnosticReceipt: slimReceipt(payload.diagnosticReceipt) } : {}),
+        ...(payload?.diagnosticReceipt ? { diagnosticReceipt: slimReceipt(payload.diagnosticReceipt) } : {}),
+        ...(index === receiptArtifactIndex ? rootReceipts : {}),
       },
     };
   });
@@ -4204,51 +4218,17 @@ export function mergeRunScopedProviderDispatchEvidence(
       ? synchronizeResearchRuntimeReceiptV6(run.diagnosticReceiptV6, telemetry, diagnosticReceiptV5)
       : researchRootRuntimeReceiptV6(run, telemetry, diagnosticReceiptV5)
     : run.diagnosticReceiptV6;
-  // V7 is the Ask-only concise inspector. Research retains its dedicated V6
-  // aggregation path; it must not be reshaped into an Ask receipt here.
-  const diagnosticReceiptV7: AgentRunDiagnosticReceiptV7 | undefined = run.requestedMode === 'research'
-    ? undefined
-    : run.diagnosticReceiptV7;
-  // V8 is the V2 tool-runtime receipt. Unlike the V7 compact inspector it is
-  // valid for an explicit Research root as well, because it records only
-  // bounded tool/candidate identities and no branch prose or result data.
   const diagnosticReceiptV8: AgentRunDiagnosticReceiptV8 | undefined = run.diagnosticReceiptV8;
-  const artifacts = run.artifacts.map((artifact) => {
-    if (!artifact.payload || typeof artifact.payload !== 'object' || Array.isArray(artifact.payload)) return artifact;
-    const payload = artifact.payload as Record<string, unknown>;
-    if (!('diagnosticReceipt' in payload)
-      && !('diagnosticReceiptV2' in payload)
-      && !('diagnosticReceiptV3' in payload)
-      && !('diagnosticReceiptV4' in payload)
-      && !('diagnosticReceiptV5' in payload)
-      && !('diagnosticReceiptV6' in payload)
-      && !('diagnosticReceiptV7' in payload)
-      && !('diagnosticReceiptV8' in payload)) return artifact;
-    return {
-      ...artifact,
-      payload: {
-        ...payload,
-        ...(diagnosticReceipt ? { diagnosticReceipt } : {}),
-        diagnosticReceiptV2,
-        ...(run.diagnosticReceiptV3 ? { diagnosticReceiptV3: run.diagnosticReceiptV3 } : {}),
-        ...(run.diagnosticReceiptV4 ? { diagnosticReceiptV4: run.diagnosticReceiptV4 } : {}),
-        ...(diagnosticReceiptV5 ? { diagnosticReceiptV5 } : {}),
-        ...(diagnosticReceiptV6 ? { diagnosticReceiptV6 } : {}),
-        ...(diagnosticReceiptV7 ? { diagnosticReceiptV7 } : {}),
-        ...(diagnosticReceiptV8 ? { diagnosticReceiptV8 } : {}),
-      },
-    };
-  });
+  // Receipts live on the run root only; the transport projection presents
+  // them on the answer artifact for readers that expect them there.
   return {
     ...run,
-    artifacts,
     providerEgressReceipts,
     telemetry,
     ...(diagnosticReceipt ? { diagnosticReceipt } : {}),
     diagnosticReceiptV2,
     ...(diagnosticReceiptV5 ? { diagnosticReceiptV5 } : {}),
     ...(diagnosticReceiptV6 ? { diagnosticReceiptV6 } : {}),
-    ...(diagnosticReceiptV7 ? { diagnosticReceiptV7 } : {}),
     ...(diagnosticReceiptV8 ? { diagnosticReceiptV8 } : {}),
   };
 }
@@ -17599,7 +17579,6 @@ function analyticalFailureSummary(
         ...(run?.diagnosticReceiptV5?.summary ? { runtimeDecisionSummary: run.diagnosticReceiptV5.summary } : {}),
         ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
         ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
-        ...(run?.diagnosticReceiptV7 ? { runtimeReceiptV7: run.diagnosticReceiptV7 } : {}),
         ...(run?.diagnosticReceiptV8 ? { runtimeReceiptV8: run.diagnosticReceiptV8 } : {}),
         ...(run?.askAgentRuntimeMode ? { runtimeMode: run.askAgentRuntimeMode } : {}),
       }));
@@ -17687,7 +17666,6 @@ function analyticalFailureSummary(
         ...(run?.diagnosticReceiptV5?.summary ? { runtimeDecisionSummary: run.diagnosticReceiptV5.summary } : {}),
         ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
         ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
-        ...(run?.diagnosticReceiptV7 ? { runtimeReceiptV7: run.diagnosticReceiptV7 } : {}),
         ...(run?.diagnosticReceiptV8 ? { runtimeReceiptV8: run.diagnosticReceiptV8 } : {}),
         ...(run?.askAgentRuntimeMode ? { runtimeMode: run.askAgentRuntimeMode } : {}),
       }));

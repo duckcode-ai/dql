@@ -47,9 +47,16 @@ describe('what a persisted run weighs', () => {
     expect(slim.events[0]!.payload).toEqual({ question: 'q' });
   });
 
-  it('leaves a Research task step whole, because reload rebuilds task trust from it', () => {
+  it('reduces a Research task step\'s artifacts to identity and keeps a content address the store minted', () => {
     const slim = slimRunForPersistence(run());
-    expect(JSON.stringify(slim.steps[1])).toContain('"blob"');
+    expect(JSON.stringify(slim.steps[1])).not.toContain('"blob"');
+    // The slimmer never mints an address (a blob must stand behind one); the
+    // store externalizes first, and the address it minted survives slimming.
+    const addressed = run();
+    (addressed.steps[1] as { artifacts: Array<Record<string, unknown>> }).artifacts[0] = { ...(addressed.steps[1] as { artifacts: Array<Record<string, unknown>> }).artifacts[0]!, payloadRef: 'sha256:task' };
+    const slimAddressed = slimRunForPersistence(addressed);
+    expect((slimAddressed.steps[1] as { artifacts: Array<{ payloadRef?: string; payload?: unknown }> }).artifacts[0]).toMatchObject({ payloadRef: 'sha256:task' });
+    expect((slimAddressed.steps[1] as { artifacts: Array<{ payload?: unknown }> }).artifacts[0]?.payload).toBeUndefined();
   });
 
   it('touches no other receipt version and no other field', () => {

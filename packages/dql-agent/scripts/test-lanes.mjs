@@ -62,7 +62,7 @@ const EXPECTED_TEST_FILES = 149;
 // plus the shape-clause task-merge regressions, total 2,290 non-skipped
 // tests; a
 // future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 1892;
+const EXPECTED_TESTS = 1894;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
