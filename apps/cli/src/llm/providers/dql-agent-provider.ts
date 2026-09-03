@@ -659,6 +659,30 @@ function selectV2SemanticEngine(input: {
  * caller then refuses with the shape guidance instead of composing SQL from a
  * plan it only partly understood.
  */
+/**
+ * The name a warehouse knows this relation by.
+ *
+ * A dbt model card is named `customers`; the table lives at `dev.customers`.
+ * The composed program used the card name, and on the real jaffle project
+ * DuckDB answered "Table with name customers does not exist! Did you mean
+ * dev.customers?" — a correct plan, refused at the last step for a name the
+ * host already held. Prefer the admitted physical relation whose last
+ * segment is this model (a runtime-schema or source card), then a qualified
+ * source object on the card itself, then the bare name.
+ */
+function v2PhysicalRelationName(candidate: AgentEvidenceCandidate, admitted: readonly AgentEvidenceCandidate[]): string {
+  const name = candidate.name;
+  if (name.includes('.')) return name;
+  const leaf = (value: string) => value.split('.').filter(Boolean).at(-1) ?? value;
+  const physical = admitted.find((other) => other !== candidate
+    && (other.kind === 'sql_table' || other.kind === 'dbt_source')
+    && other.name.includes('.')
+    && leaf(other.name).toLowerCase() === name.toLowerCase());
+  if (physical) return physical.name;
+  const source = (candidate.sourceObjects ?? []).find((value) => value.includes('.') && leaf(value).toLowerCase() === name.toLowerCase() && !/[{}()]/.test(value));
+  return source ?? name;
+}
+
 function v2RelationalPlan(value: unknown): AskV2RelationalPlanV1 | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
@@ -1649,12 +1673,47 @@ function createAskV2LaneHandler(
         ...extra,
       });
     };
-    const denied = (tool: AskToolNameV2, reasonCode: string, safeNextTools?: readonly AskToolNameV2[]) => ({
-      ok: false,
-      reasonCode,
-      tool,
-      ...(safeNextTools?.length ? { safeNextTools: [...new Set(safeNextTools)] } : {}),
-    });
+    const denied = (tool: AskToolNameV2, reasonCode: string, safeNextTools?: readonly AskToolNameV2[]) => {
+      // THE SAME REFUSAL TWICE IS A DEAD END, NOT A HINT. On the real jaffle
+      // project the analyst sent the same measure card to the semantic tool
+      // six times, each refusal pointing it back at the same tool, until the
+      // tool budget died. After two identical refusals the next step is a
+      // different tool, and the refusal says so.
+      const repeats = state.observations.filter((observation) => observation.tool === tool
+        && observation.reasonCode === reasonCode
+        && (observation.outcome === 'ineligible' || observation.outcome === 'denied' || observation.outcome === 'unavailable')).length;
+      if (repeats >= 2) {
+        // A tier that refused the same request twice has no claim on the
+        // policy: release the commitment so the next tier is exposed.
+        const tierOfTool: Partial<Record<AskToolNameV2, 'certified' | 'semantic' | 'governed_relational'>> = {
+          run_certified: 'certified',
+          compile_and_run_semantic: 'semantic',
+          compile_and_run_dql: 'governed_relational',
+        };
+        const tier = tierOfTool[tool];
+        if (tier) {
+          releaseAskV2ControllerTier(state, tier);
+          const current = state.tierStates?.[tier];
+          if (current && current.status !== 'complete') {
+            setAskV2TierState(state, tier, { ...current, status: 'ineligible', reasonCode, safeNextTools: [] });
+          }
+        }
+      }
+      const elsewhere = repeats >= 2
+        ? kernel.toolPolicy().allowedToolNames.filter((name) => name !== tool)
+        : [];
+      const next = repeats >= 2
+        ? (elsewhere.length ? elsewhere : ['finish_answer' as AskToolNameV2])
+        : safeNextTools;
+      return {
+        ok: false,
+        reasonCode,
+        tool,
+        ...(next?.length ? { safeNextTools: [...new Set(next)] } : {}),
+        ...(repeats >= 2 ? { usage: `${tool} has refused this request ${repeats} times with ${reasonCode}; do not send it again. Use ${(next ?? []).join(' or ')}.`
+          + (tool === 'compile_and_run_semantic' ? ' A measure or dimension card is not a metric: compute it with compile_and_run_dql over "<relation>.<column>" ids from the relation cards.' : '') } : {}),
+      };
+    };
     /**
      * A successful execution remains an answer even when the provider cannot
      * complete its final narration/control turn.  Do not replace validated
@@ -3763,7 +3822,7 @@ function createAskV2LaneHandler(
               ?? orderReference)
             : undefined;
           const composition = composeAskV2RelationalProgram({
-            relation: relationCandidate.name,
+            relation: v2PhysicalRelationName(relationCandidate, retainedCandidates()),
             measures: relationalPlan.measures.map((measure) => ({
               column: columnOf(measure.id),
               ...(measure.aggregation ? { aggregation: measure.aggregation } : {}),

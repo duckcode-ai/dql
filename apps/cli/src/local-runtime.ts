@@ -12312,19 +12312,26 @@ function analyticalFailureSummary(
           },
           semantic: {
             version: 1,
-            status: semanticIds.length === 0
+            // A tier the analyst is steered to must be able to EXECUTE: a
+            // snapshot holding measures, entities and dimensions but no metric
+            // is context, not a compile target. Advertising it as available
+            // sent the analyst into six identical refusals of a measure card
+            // on the real jaffle project before the floor could act.
+            status: semanticIds.length === 0 || advertisedMetricIds.length === 0
               ? 'unavailable'
-              : advertisedMetricIds.length > 0 && executableMetricIds.length === 0
+              : executableMetricIds.length === 0
                 ? 'ineligible'
                 : 'available',
             candidateIds: semanticIds,
             reasonCode: semanticIds.length === 0
               ? 'SEMANTIC_CANDIDATES_EMPTY'
-              : advertisedMetricIds.length > 0 && executableMetricIds.length === 0
-                ? ((readiness as { semanticTargetBindingMismatch?: string } | undefined)?.semanticTargetBindingMismatch
-                  ? 'SEMANTIC_TARGET_BINDING_MISMATCH'
-                  : 'SEMANTIC_ENGINE_UNAVAILABLE')
-                : 'SEMANTIC_CANDIDATES_AVAILABLE',
+              : advertisedMetricIds.length === 0
+                ? 'SEMANTIC_NO_METRIC_IN_SNAPSHOT'
+                : executableMetricIds.length === 0
+                  ? ((readiness as { semanticTargetBindingMismatch?: string } | undefined)?.semanticTargetBindingMismatch
+                    ? 'SEMANTIC_TARGET_BINDING_MISMATCH'
+                    : 'SEMANTIC_ENGINE_UNAVAILABLE')
+                  : 'SEMANTIC_CANDIDATES_AVAILABLE',
           },
           governed_relational: {
             version: 1,

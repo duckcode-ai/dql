@@ -72,6 +72,11 @@ export const ASK_V2_RELATIONAL_OPERATOR_NAMES = [
 ];
 
 /** A SQL identifier the host itself resolved from the admitted snapshot. */
+/** `dev.customers` is two identifiers; quoting it as one names a table that does not exist. */
+function quoteRelation(relation: string): string {
+  return relation.split('.').filter(Boolean).map(quoteIdentifier).join('.');
+}
+
 function quoteIdentifier(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
@@ -221,7 +226,7 @@ export function composeAskV2RelationalProgram(input: {
     : undefined;
   const sql = [
     `SELECT ${selectParts.join(', ')}`,
-    `FROM ${quoteIdentifier(input.relation)}`,
+    `FROM ${quoteRelation(input.relation)}`,
     whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '',
     groupParts.length > 0 ? `GROUP BY ${groupParts.join(', ')}` : '',
     orderAlias ? `ORDER BY ${quoteIdentifier(orderAlias)} ${direction}` : '',
