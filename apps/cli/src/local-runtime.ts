@@ -6841,6 +6841,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               sql: governedCompiledSql,
               engine: compiled.engine,
               joins: compiled.joins,
+              tables: compiled.tables,
+              ...(compiled.fanoutProbeSql ? { fanoutProbeSql: compiled.fanoutProbeSql } : {}),
               selection: {
                 ...selection,
                 metrics: compiled.effectiveRequest.metrics,

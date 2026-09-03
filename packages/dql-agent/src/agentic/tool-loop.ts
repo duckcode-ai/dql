@@ -409,6 +409,11 @@ export async function runTextProtocolToolLoopDetailed(
     if (!requestedCall) {
       if (process.env.DQL_DEBUG_TOOL_LOOP) console.error('[tool-loop unparsed]', JSON.stringify(text.slice(0, 400)));
       const policy = livePolicyBeforeDispatch;
+      const adopted = await adoptProseAsFinishNarration(options, tools, policy, text);
+      if (adopted) {
+        toolCalls += 1;
+        return { text, stop: 'final', toolCalls };
+      }
       // A live V2 policy can require one concrete next action. A prose reply
       // at this point is neither a valid answer nor a safe terminal: discard
       // it and spend the next admissible controller send on the host-approved
@@ -707,8 +712,58 @@ export async function runTextProtocolToolLoopDetailed(
  * and retrieval tools may return useful `{ finished: true }`-shaped payloads
  * for their own protocols, but they do not own final answer authority.
  */
-function isAskV2TerminalControlTool(name: string): boolean {
+export function isAskV2TerminalControlTool(name: string): boolean {
   return name === 'finish_answer' || name === 'request_clarification';
+}
+
+/**
+ * A prose reply in the narration phase IS the narration.
+ *
+ * After the host has validated an execution result, the only remaining
+ * controller action is `finish_answer`, whose single argument is the answer
+ * text. Every transport used to discard a model that simply wrote that text
+ * instead of wrapping it in a tool call, then spent one more physical send
+ * asking for the same words in the right envelope — a dispatch that bought
+ * nothing, because the host composes the route, the trust label, and the
+ * facts itself and only ever takes the sentences from the model. So when the
+ * host says this send is the narration phase (a validated result is held and
+ * `finish_answer` is the one admissible action), the prose is handed to the
+ * host's own finish control. Nothing about authority moves: the finish tool
+ * still runs through the kernel, still records ASK_V2_RESULT_NARRATED, and a
+ * turn that never executed is not in the narration phase and is not adopted.
+ *
+ * Returns the finish tool's completed output, or undefined when the prose
+ * cannot be adopted and the caller's ordinary rejection applies.
+ */
+export async function adoptProseAsFinishNarration(
+  options: ProviderToolLoopOptions,
+  tools: readonly AgentToolDefinition[],
+  policy: { allowedToolNames: Set<string>; terminalActionToolNames: Set<string> },
+  text: string,
+): Promise<unknown | undefined> {
+  const narration = text.trim();
+  if (!narration) return undefined;
+  if (policy.terminalActionToolNames.size !== 1 || !policy.terminalActionToolNames.has('finish_answer')) return undefined;
+  if (policy.allowedToolNames.size !== 1 || !policy.allowedToolNames.has('finish_answer')) return undefined;
+  // The host decides whether a validated result exists. Without a resolver
+  // the transport cannot tell a post-result finish from a ladder close, and
+  // a ladder close must not adopt prose as if it were an answer.
+  if (!options.resolvePhysicalDispatchPhase) return undefined;
+  if (options.resolvePhysicalDispatchPhase({ operation: 'generate', attemptIndex: 1 }) !== 'narration') return undefined;
+  const finish = tools.find((tool) => tool.name === 'finish_answer');
+  if (!finish) return undefined;
+  const input = { answer: narration.slice(0, 8000) };
+  const startedAt = Date.now();
+  let output: unknown;
+  let isError = false;
+  try {
+    output = await finish.run(input);
+  } catch (error) {
+    output = { error: error instanceof Error ? error.message : String(error) };
+    isError = true;
+  }
+  notifyToolCall(options, { name: 'finish_answer', input, output, isError, durationMs: Date.now() - startedAt });
+  return !isError && isCompletedAskV2TerminalControlOutput(output) ? output : undefined;
 }
 
 function isCompletedAskV2TerminalControlOutput(value: unknown): boolean {

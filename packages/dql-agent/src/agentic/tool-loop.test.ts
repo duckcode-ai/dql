@@ -382,6 +382,82 @@ describe('runAgenticToolLoop — text protocol (no native tools)', () => {
     expect(finalPrompt).not.toContain('Revenue looks ready');
   });
 
+  it('adopts post-execution prose as the finish narration instead of spending a send to ask for the same words', async () => {
+    let phase: 'execute' | 'narrate' = 'execute';
+    let finished: unknown;
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"compile_and_run_semantic","input":{}}\n```',
+      'Revenue grew 12% month over month, led by beverages.',
+      '```json\n{"tool":"finish_answer","input":{"answer":"never reached"}}\n```',
+    ]);
+    const result = await runTextProtocolToolLoopDetailed(
+      provider,
+      [{ role: 'user', content: 'revenue by month' }],
+      [
+        {
+          name: 'compile_and_run_semantic', description: 'compile admitted semantic selection', inputSchema: { type: 'object' },
+          run: async () => {
+            phase = 'narrate';
+            return { executed: true };
+          },
+        },
+        {
+          name: 'finish_answer', description: 'host-required result narration', inputSchema: { type: 'object' },
+          run: async (args) => {
+            finished = args;
+            return { finished: true, hasResult: true };
+          },
+        },
+      ],
+      {
+        maxToolCalls: 8,
+        maxProviderDispatches: 4,
+        getCurrentToolPolicy: () => phase === 'narrate'
+          ? { allowedToolNames: ['finish_answer'], terminalActionToolNames: ['finish_answer'] }
+          : { allowedToolNames: ['compile_and_run_semantic'], terminalActionToolNames: ['compile_and_run_semantic'] },
+        // The host says the next send is the narration phase only once a
+        // validated result is held.
+        resolvePhysicalDispatchPhase: () => (phase === 'narrate' ? 'narration' : undefined),
+      },
+    );
+
+    expect(result).toMatchObject({ stop: 'final', toolCalls: 2 });
+    expect(provider.calls).toHaveLength(2);
+    expect(finished).toEqual({ answer: 'Revenue grew 12% month over month, led by beverages.' });
+  });
+
+  it('never adopts prose as an answer when no validated result is held', async () => {
+    const provider = new ScriptedTextProvider([
+      'Nothing executed but here is a confident paragraph.',
+      '```json\n{"tool":"finish_answer","input":{"answer":"closing honestly"}}\n```',
+    ]);
+    let finished: unknown;
+    const result = await runTextProtocolToolLoopDetailed(
+      provider,
+      [{ role: 'user', content: 'revenue by month' }],
+      [
+        {
+          name: 'finish_answer', description: 'host-required close', inputSchema: { type: 'object' },
+          run: async (args) => {
+            finished = args;
+            return { finished: true, hasResult: false };
+          },
+        },
+      ],
+      {
+        maxToolCalls: 8,
+        maxProviderDispatches: 4,
+        getCurrentToolPolicy: () => ({ allowedToolNames: ['finish_answer'], terminalActionToolNames: ['finish_answer'] }),
+        // A ladder close is not the narration phase.
+        resolvePhysicalDispatchPhase: () => undefined,
+      },
+    );
+
+    expect(result).toMatchObject({ stop: 'final', toolCalls: 1 });
+    expect(provider.calls).toHaveLength(2);
+    expect(finished).toEqual({ answer: 'closing honestly' });
+  });
+
   it('returns a precise dispatch-budget stop when required semantic action receives prose on the final send', async () => {
     let phase: 'inspect' | 'execute' = 'inspect';
     const provider = new ScriptedTextProvider([

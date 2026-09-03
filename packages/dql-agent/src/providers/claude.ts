@@ -11,6 +11,7 @@ import type {
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
 import { fetchProviderHttpDispatch, providerDispatchLimit } from './dispatch.js';
+import { adoptProseAsFinishNarration } from '../agentic/tool-loop.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 
@@ -575,6 +576,16 @@ options: ProviderToolLoopOptions = {},
       block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string'
     );
     if (toolUses.length === 0) {
+      // Prose in the narration phase is the narration the host asked for.
+      if (dynamicToolPolicy && text && await adoptProseAsFinishNarration(
+        options,
+        tools,
+        { allowedToolNames: new Set(currentPolicy.tools.map((tool) => tool.name)), terminalActionToolNames: currentPolicy.terminalActionToolNames },
+        text,
+      )) {
+        toolCallsUsed += 1;
+        return text;
+      }
       // Do not let prose bypass a host-required V2 execution/terminal
       // action. The next send exposes only the narrowed safe action.
       if (dynamicToolPolicy && currentPolicy.terminalActionToolNames.size > 0) {

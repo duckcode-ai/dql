@@ -226,18 +226,9 @@ export type AnalysisDepth = CascadeAnalysisDepth;
  * not include adapter/warehouse error text: that text can contain credentials,
  * SQL literals, or other operator-only detail.
  */
-export type SemanticFanoutProbeFailureCodeV1 =
-  | 'SEMANTIC_FANOUT_DUPLICATE_KEY'
-  | 'SEMANTIC_FANOUT_PROBE_ERROR'
-  | 'SEMANTIC_FANOUT_PROBE_UNPARSEABLE';
-
-export type SemanticFanoutProbeResultV1 =
-  | { status: 'safe' }
-  | {
-    status: 'blocked';
-    code: SemanticFanoutProbeFailureCodeV1;
-    message: string;
-  };
+import { probeSemanticJoinFanout, type SemanticFanoutProbeFailureCodeV1, type SemanticFanoutProbeResultV1 } from './semantic-bridge/fanout-probe.js';
+export { probeSemanticJoinFanout };
+export type { SemanticFanoutProbeFailureCodeV1, SemanticFanoutProbeResultV1 };
 
 export interface SemanticExecutionTrace {
   version: 1;
@@ -305,6 +296,14 @@ export type SemanticQueryCompiler = (selection: SemanticMemberSelection) => Prom
   engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
   /** Relations the native composer joined; empty for a single-model query. */
   joins?: string[];
+  /** Every relation the native composer read, for the fanout proof's message. */
+  tables?: string[];
+  /**
+   * The native composer's unfiltered join-fanout probe (`base_rows` vs
+   * `joined_rows`); absent for a single-model query and for engines that own
+   * their join semantics. The host runs it before the governed query.
+   */
+  fanoutProbeSql?: string;
   /** The compiler may add deterministic requirements such as metric_time. */
   selection?: SemanticMemberSelection;
   /** Authoring identity, exact runtime binding, adapter, and compiler phases. */
@@ -12319,84 +12318,6 @@ function uniqueAssets(assets: AgentEvidenceAsset[]): AgentEvidenceAsset[] {
     if (!byId.has(asset.nodeId)) byId.set(asset.nodeId, asset);
   }
   return Array.from(byId.values());
-}
-
-/**
- * Execute the semantic layer's fanout probe before a governed native semantic
- * join freezes. A native join that cannot be checked is not a governed-safe
- * join: fail closed with a redacted typed failure instead of executing a query
- * that could multiply aggregates. MetricFlow/dbt Cloud paths have their own
- * compiler guarantees and do not use this native direct-join guard.
- */
-export async function probeSemanticJoinFanout(
-  probeSql: string,
-  joinedTables: string[],
-  executeSql: (sql: string, artifact?: never) => Promise<AgentResultPayload>,
-): Promise<SemanticFanoutProbeResultV1> {
-  try {
-    const payload = await (executeSql as (sql: string) => Promise<AgentResultPayload>)(probeSql);
-    const counts = parseFanoutProbeCounts(payload);
-    if (!counts || counts.base <= 0) {
-      return {
-        status: 'blocked',
-        code: 'SEMANTIC_FANOUT_PROBE_UNPARSEABLE',
-        message: 'DQL did not execute this governed semantic answer because its join-safety probe did not return verifiable row counts. Check the declared relationship or run the metric through MetricFlow / dbt Cloud, then retry.',
-      };
-    }
-    if (counts.joined <= counts.base) return { status: 'safe' };
-    const factor = counts.joined / counts.base;
-    const tables = joinedTables.filter(Boolean).join(', ');
-    return {
-      status: 'blocked',
-      code: 'SEMANTIC_FANOUT_DUPLICATE_KEY',
-      message: [
-        `Blocked a governed semantic answer whose join inflates results: joining ${tables || 'the declared tables'}`,
-        `turned ${counts.base.toLocaleString('en-US')} base rows into ${counts.joined.toLocaleString('en-US')} (×${factor >= 10 ? Math.round(factor) : factor.toFixed(1)}).`,
-        'The declared join key is not unique on the joined side, so every aggregated value would be multiplied.',
-        'Deduplicate the joined model (for example, filter a slowly-changing dimension to current records)',
-        'or execute this metric through MetricFlow / dbt Cloud, then retry. No numbers were shown because they would be wrong.',
-      ].join(' '),
-    };
-  } catch {
-    return {
-      status: 'blocked',
-      code: 'SEMANTIC_FANOUT_PROBE_ERROR',
-      message: 'DQL did not execute this governed semantic answer because it could not verify join fanout before aggregation. Check the declared relationship or run the metric through MetricFlow / dbt Cloud, then retry.',
-    };
-  }
-}
-
-function parseFanoutProbeCounts(payload: AgentResultPayload): { base: number; joined: number } | null {
-  const row = payload.rows?.[0];
-  if (row === undefined || row === null) return null;
-  const toCount = (value: unknown): number | null => {
-    const parsed = typeof value === 'number'
-      ? value
-      : typeof value === 'bigint'
-        ? Number(value)
-        : typeof value === 'string'
-          ? Number(value)
-          : Number.NaN;
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-  };
-  if (Array.isArray(row)) {
-    const base = toCount(row[0]);
-    const joined = toCount(row[1]);
-    return base !== null && joined !== null ? { base, joined } : null;
-  }
-  if (typeof row === 'object') {
-    const record = row as Record<string, unknown>;
-    const lookup = (name: string): number | null => {
-      for (const [key, value] of Object.entries(record)) {
-        if (key.toLowerCase() === name) return toCount(value);
-      }
-      return null;
-    };
-    const base = lookup('base_rows');
-    const joined = lookup('joined_rows');
-    return base !== null && joined !== null ? { base, joined } : null;
-  }
-  return null;
 }
 
 /**

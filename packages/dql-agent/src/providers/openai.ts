@@ -11,6 +11,7 @@ import { consumeSse } from './claude.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
 import { fetchProviderHttpDispatch, providerDispatchLimit } from './dispatch.js';
+import { adoptProseAsFinishNarration } from '../agentic/tool-loop.js';
 
 /**
  * Translate reasoning effort into the Chat Completions `reasoning_effort` param.
@@ -260,6 +261,16 @@ export class OpenAIProvider implements AgentProvider {
 
       const message = extractOpenAIChatMessage(await res.json());
       if (!message.toolCalls.length) {
+        // Prose in the narration phase is the narration the host asked for.
+        if (dynamicToolPolicy && message.content && await adoptProseAsFinishNarration(
+          options,
+          tools,
+          { allowedToolNames: new Set(currentPolicy.tools.map((tool) => tool.name)), terminalActionToolNames: currentPolicy.terminalActionToolNames },
+          message.content,
+        )) {
+          toolCallsUsed += 1;
+          return message.content;
+        }
         // A no-tool/prose reply cannot escape a host-required V2 action.
         // Discard it and re-dispatch while a physical controller send remains.
         if (dynamicToolPolicy && currentPolicy.terminalActionToolNames.size > 0) {

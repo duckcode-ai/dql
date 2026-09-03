@@ -2076,3 +2076,8 @@ export {
 } from './testing/scripted-analyst-provider.js';
 
 export { composeAnswer, terminalTitle, type TerminalAnswerShape, type TerminalIncidentCode, type ComposedAnswer, type HostFloorRefusalReason } from './ask-runtime/compose-answer.js';
+
+export { probeSemanticJoinFanout } from './semantic-bridge/fanout-probe.js';
+export type { SemanticFanoutProbeFailureCodeV1, SemanticFanoutProbeResultV1 } from './semantic-bridge/fanout-probe.js';
+export { deterministicDisplayKeyClarification } from './ask-runtime/display-key-clarification.js';
+export type { DisplayKeyClarificationV1, DisplayKeyClarificationOptionV1 } from './ask-runtime/display-key-clarification.js';

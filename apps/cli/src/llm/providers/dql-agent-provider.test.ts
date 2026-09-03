@@ -680,7 +680,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
     }
   });
 
-  it('requires a host finish after the snapshot-bound certified artifact executes and discards provider prose', async () => {
+  it('adopts provider prose after the snapshot-bound certified artifact executes as the finish narration', async () => {
     const candidate: AgentEvidenceCandidate = {
       id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
       trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
@@ -718,10 +718,10 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
 
     expect(executeCertifiedBlock).toHaveBeenCalledOnce();
     expect(result.result?.answerTier).toBe('certified_block');
-    expect(result.text).toBe('The certified result is ready.');
-    expect(calls).toHaveLength(4);
-    expect(calls[3]!.map((message) => message.content).join('\n')).toContain('Controller progression required');
-    expect(calls[3]!.map((message) => message.content).join('\n')).not.toContain('The certified result is complete.');
+    // The prose IS the narration: the host holds the validated result and
+    // only ever wanted the sentences, so no fourth send asks for them again.
+    expect(result.text).toBe('The certified result is complete.');
+    expect(calls).toHaveLength(3);
     expect(state.observations).toEqual(expect.arrayContaining([
       expect.objectContaining({ tool: 'run_certified', outcome: 'executed', candidateIds: ['block:top-customers'] }),
       expect.objectContaining({ tool: 'finish_answer', outcome: 'eligible', reasonCode: 'ASK_V2_RESULT_NARRATED' }),
@@ -838,7 +838,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
   it.each([
     ['OpenAI', () => new OpenAIProvider({ apiKey: 'test', baseUrl: 'https://example.test/v1', model: 'gpt-test' })],
     ['Claude', () => new ClaudeProvider({ apiKey: 'test', baseUrl: 'https://example.test/anthropic', model: 'claude-test' })],
-  ])('%s preserves a validated certified result when the final native narration turn exhausts its dispatch budget', async (kind, createProvider) => {
+  ])('%s adopts the final native narration turn\'s prose as the finish narration', async (kind, createProvider) => {
     const candidate: AgentEvidenceCandidate = {
       id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
       trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
@@ -896,13 +896,13 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
       expect(send).toBe(2);
       expect(result.kind).toBe('certified');
       expect(result.result).toMatchObject({ rowCount: 1, answerTier: 'certified_block' });
-      expect(result.text).toContain('validated certified query completed with 1 row');
-      expect(result.askAgentV2Outcome).toMatchObject({
-        kind: 'finish_answer',
-        reasonCode: 'ASK_V2_RESULT_PRESERVED_AFTER_NARRATION_FAILURE',
-      });
+      // The narration-phase prose is handed to the host's finish control:
+      // the validated result keeps its route and trust, the model's words
+      // become the narration, and no third send is attempted.
+      expect(result.text).toBe('The query is complete.');
+      expect(result.askAgentV2Outcome).toMatchObject({ kind: 'finish_answer', reasonCode: 'ASK_V2_VALIDATED_RESULT' });
       expect(state.observations).toEqual(expect.arrayContaining([
-        expect.objectContaining({ tool: 'finish_answer', outcome: 'error', reasonCode: 'ASK_PROVIDER_DISPATCH_BUDGET_EXHAUSTED', origin: 'provider' }),
+        expect.objectContaining({ tool: 'finish_answer', outcome: 'eligible', reasonCode: 'ASK_V2_RESULT_NARRATED' }),
       ]));
     } finally {
       vi.unstubAllGlobals();
@@ -1014,6 +1014,124 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
     expect(state.observations).toEqual(expect.arrayContaining([
       expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', candidateIds: ['semantic:metric:account_revenue.revenue'] }),
     ]));
+  });
+
+  it('blocks a native semantic join whose fanout probe proves row multiplication, before any governed execution', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric]);
+    const executed: string[] = [];
+    const result = await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:orders.revenue"]}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"The join multiplies rows, so nothing was shown."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: async () => ({
+        sql: 'select sum(revenue) as revenue from orders left join customers on orders.customer_id = customers.id',
+        engine: 'native' as const,
+        joins: ['customers'],
+        tables: ['orders', 'customers'],
+        fanoutProbeSql: 'select (select count(*) from orders) as base_rows, (select count(*) from orders left join customers on 1=1) as joined_rows',
+      }),
+      executeGeneratedSql: async (sql: string) => {
+        executed.push(sql);
+        return sql.includes('base_rows')
+          ? { columns: ['base_rows', 'joined_rows'], rows: [{ base_rows: 10, joined_rows: 30 }], rowCount: 1 }
+          : { columns: ['revenue'], rows: [{ revenue: 999 }], rowCount: 1 };
+      },
+    } as never);
+
+    // The probe ran; the governed query never did.
+    expect(executed).toHaveLength(1);
+    expect(executed[0]).toContain('base_rows');
+    expect(result.result).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_FANOUT_DUPLICATE_KEY' }),
+    ]));
+  });
+
+  it('labels a native semantic join safe once its fanout probe proves the join does not multiply rows', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric]);
+    const result = await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:orders.revenue"]}}\n```',
+        'Revenue is 999.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: async () => ({
+        sql: 'select sum(revenue) as revenue from orders left join customers on orders.customer_id = customers.id',
+        engine: 'native' as const,
+        joins: ['customers'],
+        tables: ['orders', 'customers'],
+        fanoutProbeSql: 'select 10 as base_rows, 10 as joined_rows',
+      }),
+      executeGeneratedSql: async (sql: string) => (sql.includes('base_rows')
+        ? { columns: ['base_rows', 'joined_rows'], rows: [[10, 10]], rowCount: 1 }
+        : { columns: ['revenue'], rows: [{ revenue: 999 }], rowCount: 1 }),
+    } as never);
+
+    expect(result.result?.answerTier).toBe('semantic_metric');
+    expect(result.semanticExecutionSafety).toMatchObject({ status: 'safe' });
+    expect(result.text).toBe('Revenue is 999.');
+  });
+
+  it('asks which display key to rank by, before any dispatch, when the metric declares several rank entities', async () => {
+    const capability = (dimensions: Array<[string, string]>) => ({
+      metricId: 'semantic:metric:orders.revenue',
+      measureIds: ['semantic:measure:orders.revenue'],
+      primaryEntityId: 'order',
+      defaultResultGrainId: 'scalar',
+      resultGrainIds: ['scalar', 'customer', 'company'],
+      aggregation: 'sum',
+      additivity: { entities: 'additive', time: 'additive' },
+      dimensions: dimensions.map(([dimensionId, label]) => ({
+        dimensionId, entityId: label.toLowerCase().split(' ')[0]!, supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'], label,
+      })),
+      timeDimensions: [],
+      operations: ['filter', 'group', 'rank'],
+      supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
+      executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+      sourceFingerprint: 'sha256:orders-revenue',
+    });
+    const customerName = 'semantic:dimension:customers.customer_name';
+    const companyName = 'semantic:dimension:companies.company_name';
+    const metric = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: capability([[customerName, 'Customer Name'], [companyName, 'Company Name']]),
+    } as AgentEvidenceCandidate;
+    const members = [
+      { id: customerName, qualifiedId: customerName, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic', name: 'customer name', relevanceScore: 0.8, matchReasons: ['name'], compatibility: 'compatible' },
+      { id: companyName, qualifiedId: companyName, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic', name: 'company name', relevanceScore: 0.8, matchReasons: ['name'], compatibility: 'compatible' },
+    ] as AgentEvidenceCandidate[];
+    const state = askV2State([metric, ...members]);
+    const generate = vi.fn(async () => 'never dispatched');
+    const result = await __test__.createAskV2LaneHandler(state)({
+      question: 'Show the top names by revenue',
+      provider: { name: 'ollama', available: async () => true, generate },
+      askAgentV2Workspace: askV2Workspace([metric, ...members]),
+      semanticQueryCompiler: async () => ({ sql: 'select 1', engine: 'native' as const }),
+      executeGeneratedSql: async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(result.refusalCode).toBe('ambiguous');
+    expect(result.clarificationOptions?.map((option) => option.label)).toEqual(['Company Name', 'Customer Name']);
+    expect(result.clarificationOptions?.[1]).toMatchObject({ id: customerName, question: 'Show the top names by revenue — clarification: Customer Name' });
+    expect(state.terminalOutcome).toMatchObject({ kind: 'clarification', reasonCode: 'ASK_V2_DISPLAY_KEY_AMBIGUOUS' });
   });
 
   it('normalizes declared semantic time/filter bindings before freezing the compiler plan', async () => {

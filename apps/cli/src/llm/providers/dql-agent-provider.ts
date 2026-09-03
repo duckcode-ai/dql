@@ -35,6 +35,8 @@ import {
   buildAnalysisQuestionPlan,
   buildCertifiedBlockInvocationInput,
   certifiedBlockProvesRequestedTopN,
+  deterministicDisplayKeyClarification,
+  probeSemanticJoinFanout,
   buildAnalyticalRequirementSet,
   buildLocalContextPack,
   contextRetrievalBudgetForQuestion,
@@ -3406,6 +3408,47 @@ function createAskV2LaneHandler(
               usage: `The selected semantic engine compiled this query WITHOUT ${droppedFilterLiterals.length} required filter value(s); it was not executed, because the unfiltered total would be presented as the filtered answer. Express the filter through governed SQL instead.`,
             };
           }
+          // ── JOIN-FANOUT PROOF ────────────────────────────────────────────
+          // The native composer does not own join semantics. When it joined
+          // several models, its unfiltered probe runs first: a join that
+          // multiplies base rows would multiply every aggregate, and that
+          // number must never be shown. A probe that cannot be evaluated is
+          // not a block — the result runs and carries an `unproven` marker,
+          // which the host labels review-required.
+          const joinedRelations = compiled.joins ?? [];
+          let semanticExecutionSafety: NonNullable<AskV2CompletedExecution['semanticExecutionSafety']>;
+          if (compiled.engine !== 'native') {
+            semanticExecutionSafety = { version: 1, status: 'safe', reason: `${compiled.engine} owns join and aggregation semantics` };
+          } else if (joinedRelations.length === 0) {
+            semanticExecutionSafety = { version: 1, status: 'safe', reason: 'single-model native query; no join could multiply rows' };
+          } else if (!compiled.fanoutProbeSql) {
+            semanticExecutionSafety = { version: 1, status: 'unproven', reason: `native query joined ${joinedRelations.length} relation(s) without a fanout probe` };
+          } else {
+            const probe = await probeSemanticJoinFanout(compiled.fanoutProbeSql, compiled.tables ?? joinedRelations, input.executeGeneratedSql);
+            if (probe.status === 'safe') {
+              semanticExecutionSafety = { version: 1, status: 'safe', reason: `fanout probe proved the ${joinedRelations.length}-relation native join does not multiply rows` };
+            } else if (probe.code === 'SEMANTIC_FANOUT_DUPLICATE_KEY') {
+              observe('compile_and_run_semantic', 'ineligible', probe.code, {
+                tier: 'semantic',
+                candidateIds: selectedCandidateIds,
+                origin: 'validation',
+                safeAction: 'use:validate_and_run_sql',
+              });
+              finishAskAgentV2Turn(state, {
+                version: 2,
+                kind: 'execution_failure',
+                reasonCode: probe.code,
+                origin: 'validation',
+                safeAction: 'use:validate_and_run_sql',
+              });
+              return {
+                ...denied('compile_and_run_semantic', probe.code, ['validate_and_run_sql']),
+                usage: probe.message,
+              };
+            } else {
+              semanticExecutionSafety = { version: 1, status: 'unproven', reason: `fanout probe could not be evaluated (${probe.code})` };
+            }
+          }
           try {
             const result = await input.executeGeneratedSql(compiled.sql);
             // A zero-row adapter result loses its header row, and with it
@@ -3421,14 +3464,9 @@ function createAskV2LaneHandler(
                 ...(selection.timeDimension ? [selection.timeDimension.name] : []),
                 ...selection.metrics,
               ];
-            const joinedRelations = compiled.joins ?? [];
             completed = {
               tier: 'semantic',
-              semanticExecutionSafety: compiled.engine !== 'native'
-                ? { version: 1, status: 'safe', reason: `${compiled.engine} owns join and aggregation semantics` }
-                : joinedRelations.length === 0
-                  ? { version: 1, status: 'safe', reason: 'single-model native query; no join could multiply rows' }
-                  : { version: 1, status: 'unproven', reason: `native query joined ${joinedRelations.length} relation(s) without a fanout probe` },
+              semanticExecutionSafety,
               result: {
                 ...result,
                 columns: projectedColumns,
@@ -4351,6 +4389,39 @@ function createAskV2LaneHandler(
         .map((candidate) => candidate.semanticRuntimeName ?? candidate.name))].slice(0, 6);
       return { term: confirmed, admitted };
     };
+    // THE HOST ASKS WHAT IT CANNOT DECIDE. "The top names by revenue" over a
+    // metric that ranks by customer name AND by product name is two different
+    // tables; the capability contract says so before any dispatch, so the
+    // choice is offered here — never guessed by host-first, never left to the
+    // analyst to notice.
+    const displayKeyClarification = state.turnClass === 'analytics'
+      && !state.exactCertifiedCandidateId
+      && state.tierStates?.certified?.status !== 'complete'
+      ? deterministicDisplayKeyClarification({ question: input.question, candidates: visibleCandidates() })
+      : undefined;
+    if (displayKeyClarification) {
+      observe('request_clarification', 'ambiguous', displayKeyClarification.reasonCode, {
+        tier: 'semantic',
+        candidateIds: [displayKeyClarification.metricId],
+        origin: 'retrieval',
+        hostObserved: true,
+      });
+      finishAskAgentV2Turn(state, {
+        version: 2,
+        kind: 'clarification',
+        reasonCode: displayKeyClarification.reasonCode,
+        origin: 'retrieval',
+      });
+      return {
+        kind: 'no_answer', sourceTier: 'no_answer', certification: 'analyst_review_required', reviewStatus: 'analyst_review_required',
+        refusalCode: 'ambiguous', text: displayKeyClarification.message, answer: displayKeyClarification.message, citations: [], considered: [],
+        clarificationOptions: displayKeyClarification.options.map((option) => ({
+          id: option.id, label: option.label, description: option.description, question: option.question, kind: option.kind,
+        })),
+        contextPack: input.contextPack,
+        askAgentV2Outcome: { version: 2, kind: 'clarification', reasonCode: displayKeyClarification.reasonCode, origin: 'retrieval' },
+      };
+    }
     const hostFirst = !state.exactCertifiedCandidateId
       && state.tierStates?.certified?.status !== 'complete'
       && (state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response')
