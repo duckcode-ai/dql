@@ -375,6 +375,10 @@ function inspectProviderPayload(value: unknown): {
     }
     if (Array.isArray(candidate)) {
       if (providerMetadata.has(candidate)) return;
+      // Every unmarked array is a row container, primitives included: a list
+      // of strings can be a column of member values. A PRODUCER that returns
+      // vocabulary (cards, admitted ids, reason codes) marks its output as
+      // provider metadata; the Ask V2 lane does so for every tool it exposes.
       unsafeContainerCount += 1;
       resultRowCount += candidate.length;
       columnCount = Math.max(columnCount, resultRowColumnCount(candidate));

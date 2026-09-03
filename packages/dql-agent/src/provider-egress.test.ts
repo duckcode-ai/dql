@@ -13,6 +13,7 @@ import {
   redactProviderResultRows,
   boundProviderResultRows,
   resolveProviderResultRowEgressPolicy,
+  markProviderMetadata,
 } from './provider-egress.js';
 
 describe('provider egress guard (SEC-004)', () => {
@@ -291,5 +292,32 @@ describe('provider egress guard (SEC-004)', () => {
     expect(receipt.payloadFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(JSON.stringify(receipt)).not.toContain('provider-model');
     expect(JSON.stringify(receipt)).not.toContain('[REDACTED]');
+  });
+});
+
+describe('marked tool outputs are vocabulary, not rows', () => {
+  // The regression: under a native tool loop every V2 tool result — even
+  // `{ finished: true, evidenceIds: [] }` — was reported to the model as a
+  // blocked row payload, so it never saw the finish and re-called it until
+  // the budget died. The guard keeps its strict reading (a list of strings
+  // can be a column of member values); the producer marks what is vocabulary.
+  const policy = { allowResultRows: false, maxResultRows: 0, purpose: 'answer_generation' as const };
+  const mark = <T,>(value: T): T => {
+    if (value && typeof value === 'object') {
+      if (Array.isArray(value)) markProviderMetadataArray(value); else markProviderMetadata(value as object);
+      for (const nested of Object.values(value as Record<string, unknown>)) mark(nested);
+    }
+    return value;
+  };
+
+  it('lets a marked Ask tool output through', () => {
+    expect(() => assertProviderPayloadAllowed(mark({ finished: true, hasResult: true, evidenceIds: [] }), policy)).not.toThrow();
+    expect(() => assertProviderPayloadAllowed(mark({ executed: true, rowCount: 10, columns: ['a', 'b'] }), policy)).not.toThrow();
+    expect(() => assertProviderPayloadAllowed(mark({ ok: false, safeNextTools: ['compile_and_run_dql'], cards: [{ id: 'a' }] }), policy)).not.toThrow();
+  });
+
+  it('still blocks the same shapes when nobody vouched for them', () => {
+    expect(() => assertProviderPayloadAllowed({ finished: true, evidenceIds: [] }, policy)).toThrow(/row-shaped/);
+    expect(() => assertProviderPayloadAllowed({ rows: [{ customer: 'Ada', revenue: 1 }] }, policy)).toThrow(/row-shaped/);
   });
 });

@@ -1,4 +1,4 @@
-import { composeAnswer, type HostFloorRefusalReason } from '@duckcodeailabs/dql-agent';
+import { composeAnswer, markProviderMetadata, markProviderMetadataArray, type HostFloorRefusalReason } from '@duckcodeailabs/dql-agent';
 import {
   classifyProviderFailure,
   deadlineScale,
@@ -681,6 +681,20 @@ function v2PhysicalRelationName(candidate: AgentEvidenceCandidate, admitted: rea
   if (physical) return physical.name;
   const source = (candidate.sourceObjects ?? []).find((value) => value.includes('.') && leaf(value).toLowerCase() === name.toLowerCase() && !/[{}()]/.test(value));
   return source ?? name;
+}
+
+/** Mark a tool output tree as provider metadata (bounded depth; cycles left alone). */
+function markAskV2ToolOutput<T>(value: T, depth = 0, seen = new Set<object>()): T {
+  if (value === null || typeof value !== 'object' || depth > 12 || seen.has(value as object)) return value;
+  seen.add(value as object);
+  if (Array.isArray(value)) {
+    markProviderMetadataArray(value);
+    for (const item of value) markAskV2ToolOutput(item, depth + 1, seen);
+    return value;
+  }
+  markProviderMetadata(value as object);
+  for (const nested of Object.values(value as Record<string, unknown>)) markAskV2ToolOutput(nested, depth + 1, seen);
+  return value;
 }
 
 function v2RelationalPlan(value: unknown): AskV2RelationalPlanV1 | undefined {
@@ -4203,7 +4217,15 @@ function createAskV2LaneHandler(
         finalText = answer;
         return { finished: true, hasResult: Boolean(completed), evidenceIds: selectedBusinessEvidence };
       }),
-    ].filter((tool) => tool.name !== 'search_values' || valueSearchAdapterBound);
+    ].filter((tool) => tool.name !== 'search_values' || valueSearchAdapterBound)
+      // Every V2 tool answers with HOST vocabulary — cards, admitted ids,
+      // reason codes, row counts — never warehouse rows, which stay on the
+      // host. Say so to the egress guard, which otherwise reads a card list
+      // as a result set and reports the tool call to the model as an error.
+      .map((tool) => ({
+        ...tool,
+        run: async (args: Record<string, unknown>) => markAskV2ToolOutput(await tool.run(args)),
+      }));
     // `finish_answer` is an authoritative host control boundary.  Text-only
     // provider adapters normally stop in the agent loop immediately after the
     // tool returns, but keep the boundary at this higher layer as well: a

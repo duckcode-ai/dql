@@ -18,6 +18,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   rollback mode are deleted. `authoritative_v2` is the only Ask runtime;
   non-Ask modes (sql, block, app, modeling, skill) keep the hybrid router.
   Public exports of the V1 runtime are removed (minor version bump).
+  Still present, deliberately: `answer()` in `answer-loop.ts` (the MCP
+  `query-via-metadata` / `query-via-block` tools run through it), the Ask
+  branches of `router.ts` (reachable only for non-Ask modes), and the V1–V4
+  diagnostic receipts on persisted runs. Those go with the MCP tools' move to
+  the V2 lane and the receipt collapse in a later release.
 - The host floor: when the analyst's turn ends with nothing executed (a spent
   budget, a provider fault, a plan that would not compile, an analyst that
   declined to act), the host walks the tier ladder itself — the proven
@@ -33,6 +38,20 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   sends. The run-scoped dispatch ledger is the one dispatch authority.
 - Persisted runs keep each artifact payload once; the server no longer grows
   ~4 MB per question.
+- Under a native tool loop (Claude OAuth, OpenAI) every Ask tool result —
+  even `{ finished: true }` — was reported to the model as a blocked row
+  payload by the egress guard, so the model never saw its finish and spent
+  the whole budget re-calling it (nine or ten dispatches for a one-metric
+  question). The lane now marks its tool outputs as host vocabulary; the
+  guard keeps its strict reading of unmarked payloads. Live: "beverage
+  revenue" went from 9 dispatches to 2.
+- A composed relational program names the warehouse's physical relation
+  (`"dev"."customers"`, quoted per segment), a refusal repeated twice steers
+  the analyst to the next tier, and a semantic tier with no executable
+  metric is no longer advertised as available.
+- The run index reads only the requested page; stored runs written before
+  slimming are slimmed in place a few at a time (a 1.2 GB history no longer
+  crashes the server when the notebook lists runs).
 - A project with no AI provider configured still gets its certified blocks,
   its exactly-bound semantic metrics and host-composed relational answers:
   the V2 lane runs host-first execution and the floor around an absent
