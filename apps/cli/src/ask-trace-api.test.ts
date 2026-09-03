@@ -2417,6 +2417,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
       run: {
         status?: string;
         telemetry?: { sqlExecutions?: number };
+        trustState?: string;
         routeDecision?: {
           retrievalEvidence?: { candidateTraceMetadata?: Array<{ candidateId?: string; role?: string }> };
           askAgentV2Decision?: { state?: { observations?: Array<{ tool?: string; outcome?: string; candidateIds?: string[] }> } };

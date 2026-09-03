@@ -12197,7 +12197,7 @@ describe('Ask Research baseline continuity', () => {
 });
 
 describe('AI provider settings', () => {
-  it('keeps an explicit provider-selection failure typed and lets Ollama reach physical readiness', () => {
+  it('keeps an explicit provider-selection failure typed and lets Ollama reach physical readiness', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-governed-provider-selection-'));
     tempDirs.push(projectRoot);
 
@@ -12205,13 +12205,13 @@ describe('AI provider settings', () => {
     expect(invalid).toMatchObject({ code: 'MODEL_NOT_FOUND', providerPhase: 'preflight' });
     // Do not silently fall back to a configured/default provider when the user
     // explicitly selected an unknown one.
-    expect(resolveGovernedAnswerRunner(projectRoot, 'not-a-configured-provider')).toBeNull();
+    expect(await resolveGovernedAnswerRunner(projectRoot, 'not-a-configured-provider')).toBeNull();
     // A known local provider gets a runner even without a live daemon so its
     // adapter can report the truthful network preflight cause.
-    expect(resolveGovernedAnswerRunner(projectRoot, 'ollama')).toMatchObject({ provider: 'ollama' });
+    expect(await resolveGovernedAnswerRunner(projectRoot, 'ollama')).toMatchObject({ provider: 'ollama' });
   });
 
-  it('uses an explicit replay cassette for governed Ask when the fixture has no provider settings', () => {
+  it('uses an explicit replay cassette for governed Ask when the fixture has no provider settings', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-governed-cassette-provider-'));
     const cassetteDir = mkdtempSync(join(tmpdir(), 'dql-governed-cassette-store-'));
     const oldDir = process.env.DQL_EVAL_CASSETTE_DIR;
@@ -12227,7 +12227,7 @@ describe('AI provider settings', () => {
       process.env.DQL_EVAL_CASSETTE_DIR = cassetteDir;
       delete process.env.DQL_EVAL_CASSETTE_MODE;
 
-      const governed = resolveGovernedAnswerRunner(projectRoot);
+      const governed = await resolveGovernedAnswerRunner(projectRoot);
       expect(governed?.provider).toBe('anthropic');
       expect(governed?.runner).toBeTruthy();
     } finally {
@@ -12269,7 +12269,7 @@ describe('AI provider settings', () => {
     expect(resolveDefaultLLMProvider(projectRoot)).toBe('openai');
   });
 
-  it('routes governed OpenAI answers through the DQL answer-loop runner, not the native SDK runner', () => {
+  it('routes governed OpenAI answers through the DQL answer-loop runner, not the native SDK runner', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-governed-provider-openai-'));
     tempDirs.push(projectRoot);
 
@@ -12280,13 +12280,13 @@ describe('AI provider settings', () => {
       model: 'gpt-test',
     });
 
-    const governed = resolveGovernedAnswerRunner(projectRoot);
+    const governed = await resolveGovernedAnswerRunner(projectRoot);
     expect(governed?.provider).toBe('openai');
     expect(governed?.runner).toBeTruthy();
     expect(governed?.runner).not.toBe(getRunner('openai'));
   });
 
-  it('routes governed Claude Code answers through the DQL answer-loop runner, not the MCP chat runner', () => {
+  it('routes governed Claude Code answers through the DQL answer-loop runner, not the MCP chat runner', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-governed-provider-claude-code-'));
     tempDirs.push(projectRoot);
 
@@ -12295,7 +12295,7 @@ describe('AI provider settings', () => {
       enabled: true,
     });
 
-    const governed = resolveGovernedAnswerRunner(projectRoot);
+    const governed = await resolveGovernedAnswerRunner(projectRoot);
     expect(governed?.provider).toBe('claude-code');
     expect(governed?.runner).toBeTruthy();
     expect(governed?.runner).not.toBe(getRunner('claude-code'));

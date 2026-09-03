@@ -5749,7 +5749,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // otherwise the old no-provider branch mislabeled every selection failure
     // as authentication.
     const requestedProvider = agentRunWorkspaceValue(request, 'provider');
-    const governed = resolveGovernedAnswerRunner(projectRoot, requestedProvider);
+    const governed = await resolveGovernedAnswerRunner(projectRoot, requestedProvider);
     let resolvedProvider = governed?.provider ?? null;
     let runner = governed?.runner ?? null;
     // Host-only test/embedding seam: authoritative V2's agent-control
@@ -9456,7 +9456,7 @@ function analyticalFailureSummary(
       // The provider that will plan the investigation as hypotheses. Absent or
       // unreachable, `planResearch` keeps its deterministic template, so
       // research never depends on a model being available.
-      const researchPlanner = resolveGovernedAnswerRunner(projectRoot);
+      const researchPlanner = await resolveGovernedAnswerRunner(projectRoot);
       const rawResearchPlannerProvider = researchPlanner
         ? createGovernedTextProvider(researchPlanner.provider as never, projectRoot)
         : undefined;
@@ -15353,7 +15353,7 @@ function analyticalFailureSummary(
       let providerError: string | undefined;
       const generationWarnings: string[] = [];
       if (!generatedSql && !reviewedSql && !input.authoritativeBranch) {
-        const governedResearch = resolveGovernedAnswerRunner(projectRoot);
+        const governedResearch = await resolveGovernedAnswerRunner(projectRoot);
         const resolvedProvider = governedResearch?.provider ?? null;
         const runner = governedResearch?.runner ?? null;
         if (!resolvedProvider || !runner) {
@@ -27955,10 +27955,10 @@ export function resolveDefaultLLMProvider(projectRoot: string): ProviderId | nul
  * answer-loop runner — never the MCP `claudeCodeRunner`, which doesn't emit a governed
  * answer envelope. Everything else uses the Settings-resolved default runner.
  */
-export function resolveGovernedAnswerRunner(
+export async function resolveGovernedAnswerRunner(
   projectRoot: string,
   requestedProvider?: string,
-): { provider: ProviderId; runner: LLMAgentRunner } | null {
+): Promise<{ provider: ProviderId; runner: LLMAgentRunner } | null> {
   // This is intentionally before configuration discovery. It lets the
   // canonical AgentRun preflight distinguish an explicit unknown provider from
   // an absent configuration, while a known-but-unavailable provider still
@@ -27971,25 +27971,13 @@ export function resolveGovernedAnswerRunner(
       runner: createDqlAgentProviderRunner(requestedProvider),
     };
   }
-  // Runtime eval cassettes are an explicit, offline provider source. Resolve
-  // them before Settings because the CI fixture intentionally has no user
-  // provider configuration; otherwise Ask exits at this earlier gate and never
-  // reaches the cassette-wrapped provider used by the answer loop.
-  const cassetteProvider = createEvalCassetteReplayProvider(projectRoot);
-  if (cassetteProvider) {
-    const provider = governedRunnerProviderForCassette(cassetteProvider.name);
-    if (provider) return { provider, runner: createDqlAgentProviderRunner(provider, cassetteProvider) };
-  }
-  const active = getActiveProvider(projectRoot);
-  if (isGovernedAnswerProviderId(active)) {
-    return { provider: active, runner: createDqlAgentProviderRunner(active) };
-  }
-  const resolved = resolveDefaultLLMProvider(projectRoot);
-  if (!resolved) return null;
-  if (isGovernedAnswerProviderId(resolved)) {
-    return { provider: resolved, runner: createDqlAgentProviderRunner(resolved) };
-  }
-  return null;
+  // One selection for every surface: cassette, then the configured providers
+  // with failover. The runner carries the SELECTED transport, so an expired
+  // Claude login no longer ends a governed answer while Codex or Ollama sit
+  // idle; readiness is checked by the runner's own preflight, as before.
+  const selection = await selectAssistProvider(projectRoot, undefined, { availability: 'defer' });
+  if (!selection) return null;
+  return { provider: selection.id, runner: createDqlAgentProviderRunner(selection.id, selection.provider) };
 }
 
 function governedRunnerProviderForCassette(
@@ -37373,13 +37361,32 @@ async function createBlockStudioAssistProvider(
   requestedProvider?: ProviderSettingsId,
   options: { availability?: AssistProviderAvailabilityMode } = {},
 ): Promise<AgentProvider | null> {
+  return (await selectAssistProvider(projectRoot, requestedProvider, options))?.provider ?? null;
+}
+
+/**
+ * THE provider selection. Every surface that needs a model — the governed
+ * Ask runner, Block Studio assist, narration — chooses through this one
+ * function: replay cassette when enabled, else the requested provider, else
+ * the active one, else the first usable one; wrapped for cassettes and, when
+ * nothing was explicitly requested, with failover to the other usable
+ * providers. Returns the settings id alongside the transport so callers keep
+ * naming the provider the user actually configured.
+ */
+async function selectAssistProvider(
+  projectRoot: string,
+  requestedProvider?: ProviderSettingsId,
+  options: { availability?: AssistProviderAvailabilityMode } = {},
+): Promise<{ id: ProviderSettingsId; provider: AgentProvider } | null> {
   // Runtime-driven evals intentionally start from a clean fixture with no user
   // provider settings. When replay cassettes are explicitly enabled, their
   // recorded identity is the authoritative provider and never performs network
   // readiness checks. Normal product startup has no cassette env and follows
   // the unchanged configured-provider path below.
   const cassetteProvider = createEvalCassetteReplayProvider(projectRoot);
-  if (cassetteProvider) return cassetteProvider;
+  if (cassetteProvider) {
+    return { id: plannerProviderSettingsId(cassetteProvider) ?? 'ollama', provider: cassetteProvider };
+  }
   const settings = listProviderSettings(projectRoot);
   const activeProvider = getActiveProvider(projectRoot);
   // Subscription CLI providers (Claude Code / Codex) carry no API key — they're
@@ -37451,8 +37458,8 @@ async function createBlockStudioAssistProvider(
       ),
     })
     : wrapped;
-  if (options.availability === 'defer') return resilient;
-  return await resilient.available() ? resilient : null;
+  if (options.availability === 'defer') return { id: selected.id, provider: resilient };
+  return await resilient.available() ? { id: selected.id, provider: resilient } : null;
 }
 
 type AskPlannerPreflightError = Error & {

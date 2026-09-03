@@ -15,7 +15,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { classifyConversationalTurn, type IntentDecision } from '../intent-controller.js';
+import type { IntentDecision } from '../intent-controller.js';
 import type { AgentRouter, AgentRunRequest } from '../agent-run-engine.js';
 import { buildAnalyticalRequirementSet, evidenceCandidateRoles, selectRoleBalancedMeaningCandidates } from '../analytical-orchestration.js';
 import type { EvidenceCandidateRoleV1 } from '../analytical-orchestration.js';
@@ -27,14 +27,8 @@ import type { AgentEvidenceCandidate, AgentRetrievalEvidence } from '../meaning-
 export type AskRuntimeModeV2 = 'legacy_v1' | 'authoritative_v2';
 
 /** V2 has one turn owner; classification is an LLM/tool-runtime responsibility. */
-export type AskTurnClassV2 =
-  | 'analytics'
-  | 'definition'
-  | 'business_context'
-  | 'prior_result'
-  | 'general'
-  | 'clarification_response'
-  | 'research';
+export type { AskTurnClassV2 } from './turn-classification.js';
+import { classifyAskTurn, isAskRequestV2, type AskTurnClassV2 } from './turn-classification.js';
 
 export type AskToolNameV2 =
   | 'inspect_ask_context'
@@ -2533,7 +2527,8 @@ export function createAskAgentRuntimeV2(options: AskAgentRuntimeOptionsV2): AskA
     async decide(request): Promise<IntentDecision> {
       if (!isAskRequestV2(request) || mode === 'legacy_v1') return options.legacyRouter.decide(request);
 
-      const conversationalKind = classifyConversationalTurn(request.question, Boolean(request.history?.length || request.conversationContext));
+      const turn = classifyAskTurn(request);
+      const conversationalKind = turn.conversationalKind;
       if (conversationalKind) {
         return {
           action: 'converse',
@@ -2546,7 +2541,7 @@ export function createAskAgentRuntimeV2(options: AskAgentRuntimeOptionsV2): AskA
         };
       }
 
-      const turnClass = classifyTurnV2(request);
+      const turnClass = turn.turnClass;
       const evidence = await options.getEvidence?.(request);
       const state = createState(mode, turnClass, request, evidence);
       applyHostCertifiedFastPath(state, request);
@@ -2852,39 +2847,3 @@ function fingerprint(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 16);
 }
 
-function classifyTurnV2(request: AgentRunRequest): AskTurnClassV2 {
-  if (request.requestedMode === 'research') return 'research';
-  if (request.selectedEvidenceId || request.clarificationSourceQuestion) return 'clarification_response';
-  // An AMBIGUOUS prior-result reference is still a prior-result turn. The host
-  // resolves candidates it cannot choose between into this gap; classifying
-  // the turn as fresh analytics would frame the clarification as a brand-new
-  // question and lose the very result it is asking about.
-  if (request.selectedResultBinding || request.priorResultMemberBinding || request.selectedResultBindingGap) {
-    return 'prior_result';
-  }
-  const question = request.question.toLowerCase();
-  // "What is revenue for each customer?" is a grouped analytical request,
-  // not a metadata definition. Definition routing stays warehouse-free only
-  // when the wording has no aggregate, grouping, ranking, or entity shape.
-  const analyticalShape = /\b(top|bottom|highest|lowest|total|count|sum|average|avg|revenue|sales|orders?|customers?|products?|regions?|by|per|each|every|for each|group(?:ed)?|trend|compare|rank)\b/.test(question);
-  if (/\b(what is|define|definition|meaning of|explain)\b/.test(question)
-    && /\b(metric|measure|dimension|model|block|revenue|customer)\b/.test(question)
-    && !analyticalShape) return 'definition';
-  // "Why did it drop?" asked about an answer already on screen is a question
-  // about DATA, and the contextual class forbids execution — so the one
-  // follow-up a person most naturally asks could never be answered. Business
-  // context is for a question asked cold, with no result to explain.
-  const continuesAnAnsweredTurn = Boolean(request.conversationContext || request.history?.length);
-  if (/\b(why|business context|background|how does|tell me about)\b/.test(question)
-    && !continuesAnAnsweredTurn
-    && !/\b(top|by |revenue|count|sum|average|sales|customer|product|region)\b/.test(question)) return 'business_context';
-  if (/^(hi|hello|thanks|thank you|what can you do)\b/.test(question.trim())) return 'general';
-  return 'analytics';
-}
-
-function isAskRequestV2(request: AgentRunRequest): boolean {
-  return request.requestedMode === undefined
-    || request.requestedMode === 'auto'
-    || request.requestedMode === 'ask'
-    || request.requestedMode === 'research';
-}
