@@ -1092,6 +1092,35 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
     ]));
   });
 
+  it('tells the reader what the semantic compiler said, and lets the floor follow a compile failure', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.average_order_value', qualifiedId: 'semantic:metric:orders.average_order_value', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.average_order_value', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric]);
+    const result = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 4, maxProviderDispatches: 3 })({
+      question: 'average order value by location',
+      provider: textToolProvider([
+        '```json\n{"tool":"propose_plan","input":{"measures":[{"id":"semantic:metric:orders.average_order_value"}]}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"It did not compile."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: async () => {
+        throw new Error("metricflow-cli semantic compilation failed: Error #1: Message: The given input does not match any of the available group-by-items for SimpleMetric('average_order_value').\n  Query Input:\n    'location_name'\n  Suggestions:\n    ['location__location_name']");
+      },
+      executeGeneratedSql: async () => ({ columns: ['avg'], rows: [{ avg: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(result.kind).toBe('no_answer');
+    expect(result.text).toContain('MetricFlow could not group average_order_value');
+    expect(result.text).toContain('location__location_name');
+    expect(result.text).not.toContain('did not complete on the current connection');
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'error', reasonCode: 'SEMANTIC_COMPILATION_FAILED', origin: 'validation' }),
+      expect.objectContaining({ reasonCode: 'ASK_V2_HOST_FLOOR_STARTED' }),
+    ]));
+  });
+
   it('propose_plan refuses a plan that mixes tiers and names the fix', async () => {
     const metric: AgentEvidenceCandidate = {
       id: 'semantic:metric:account_revenue.revenue', qualifiedId: 'semantic:metric:account_revenue.revenue', kind: 'semantic_metric',

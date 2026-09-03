@@ -2433,8 +2433,15 @@ function numberField(record: Record<string, unknown> | undefined, key: string): 
  * report link) to the one sentence a business user can act on. The full text is
  * preserved separately in refusalDetails for Inspect.
  */
-export function compactSemanticRuntimeFailure(failure: string): string {
-  const groupBy = /does not match any of the available group-by-items for\s+SimpleMetric\('([^']+)'\)/i.exec(failure);
+export function compactSemanticRuntimeFailure(rawFailure: string): string {
+  // Strip transport prefixes and the CLI's upgrade nag before reading the
+  // resolver's message; neither is the reason the query did not compile.
+  const failure = rawFailure
+    .replace(/^(?:[a-z-]+ semantic compilation failed:\s*)?(?:MetricFlow compile failed \(\d+\):\s*)?/i, '')
+    .replace(/‼️\s*Warning:[^\n]*?dbt-metricflow\s*/g, '')
+    .replace(/💡[^\n]*?dbt-metricflow\s*/g, '')
+    .trim();
+  const groupBy = /does not match any of the available group-by-items for\s+SimpleMetric\(?'?([^'()\s]+)'?\)?/i.exec(failure);
   if (groupBy) {
     const input = /Query Input:\s*\n?\s*['"]?([A-Za-z0-9_.]+)['"]?/.exec(failure)?.[1];
     const suggestions = /Suggestions:\s*\[([^\]]*)\]/.exec(failure)?.[1]
@@ -2445,6 +2452,9 @@ export function compactSemanticRuntimeFailure(failure: string): string {
       'Ask again naming one of those dimensions, or update the semantic model so the join path is unambiguous.',
     ].filter(Boolean).join(' ');
   }
-  const firstLine = failure.split('\n').map((line) => line.trim()).find(Boolean) ?? failure;
+  // "ERROR: Got error(s) during query resolution. Error #1: Message: <the
+  // reason>" — the reason is the part a reader can act on.
+  const message = /Message:\s*([^\n]+)/.exec(failure)?.[1]?.trim();
+  const firstLine = message ?? failure.split('\n').map((line) => line.trim()).find(Boolean) ?? failure;
   return firstLine.length > 300 ? `${firstLine.slice(0, 300)}…` : firstLine;
 }

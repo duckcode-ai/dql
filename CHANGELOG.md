@@ -46,6 +46,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   names by revenue" over a metric whose capability contract declares several
   rank entities is asked, not guessed, before any dispatch; each option
   carries the authored dimension id and the question to resubmit.
+- A semantic compile failure says what the compiler said. "MetricFlow could
+  not group average_order_value by 'location_name' … valid options include
+  location__location_name" replaces "the query did not complete on the
+  current connection"; the failure's origin is validation (nothing reached
+  the warehouse), so the host floor may still walk the lower tiers, and a
+  plan proposed after a frozen plan failed counts as the one admitted
+  same-plan repair without the model having to know the flag.
+- An admitted relation card proves its own execution closure when the
+  context pack's allowed-SQL list happens not to carry it.
 
 ### The V1 answer loop is gone
 

@@ -310,3 +310,19 @@ describe('aggregation refusal names the one check that fired', () => {
     expect(render(undefined)).toBe(text);
   });
 });
+
+describe('compactSemanticRuntimeFailure on a live MetricFlow dump', () => {
+  it('drops the transport prefix and the upgrade nag and names the fix', () => {
+    const live = "metricflow-cli semantic compilation failed: MetricFlow compile failed (1): ‼️ Warning: A new version of the MetricFlow CLI is available. 💡 Please update to version 0.14.0, released 2026-08-19 20:46:17 by running: $ pip install --upgrade dbt-metricflow ERROR: Got error(s) during query resolution. Error #1: Message: The given input does not match any of the available group-by-items for SimpleMetric('average_order_value').\n  Query Input:\n    'location_name'\n  Suggestions:\n    ['location__location_name', 'order_id__location_name']";
+    const text = compactSemanticRuntimeFailure(live);
+    expect(text).toContain('MetricFlow could not group average_order_value by "location_name"');
+    expect(text).toContain('location__location_name');
+    expect(text).not.toContain('Warning');
+    expect(text).not.toContain('pip install');
+  });
+
+  it('falls back to the resolver message, not the nag, when no group-by shape matches', () => {
+    const text = compactSemanticRuntimeFailure('MetricFlow compile failed (1): ‼️ Warning: A new version of the MetricFlow CLI is available. 💡 Please update by running: $ pip install --upgrade dbt-metricflow ERROR: Got error(s) during query resolution. Error #1: Message: Unable to resolve metric nope.');
+    expect(text).toBe('Unable to resolve metric nope.');
+  });
+});

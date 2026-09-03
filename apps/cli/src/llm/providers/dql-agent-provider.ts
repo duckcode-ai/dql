@@ -35,6 +35,7 @@ import {
   buildAnalysisQuestionPlan,
   buildCertifiedBlockInvocationInput,
   certifiedBlockProvesRequestedTopN,
+  compactSemanticRuntimeFailure,
   ASK_V2_CANONICAL_TOOLS,
   advertisedTools,
   deterministicDisplayKeyClarification,
@@ -1680,7 +1681,12 @@ function createAskV2LaneHandler(
     let completed: AskV2CompletedExecution | undefined;
     let clarification: { message: string; options: Array<{ id: string; label: string }> } | undefined;
     let finalText: string | undefined;
-    let executionFailure: { reasonCode: string; origin: 'execution' | 'validation' } | undefined;
+    let executionFailure: { reasonCode: string; origin: 'execution' | 'validation'; detail?: string } | undefined;
+    // What the semantic compiler said, in one sentence a reader can act on.
+    // A compile failure is a modeling/compatibility fact ("this metric cannot
+    // be grouped by that dimension"), not a connection fault; the terminal
+    // sentence must say so, and the floor may still try the lower tiers.
+    let semanticCompileDetail: string | undefined;
     /**
      * True only while the host floor is running its own ladder after the
      * analyst's turn. Every kernel call the execution tools make carries it,
@@ -3542,9 +3548,16 @@ function createAskV2LaneHandler(
           if (process.env.DQL_DEBUG_EXECUTION_ERROR) console.error('[DQL_DEBUG semantic-compile]', JSON.stringify({ message: v2BoundedFailureDetail(error), metrics: selection.metrics, dimensions: selection.dimensions }));
           // Compilation happens after the host has frozen the exact semantic
           // capability. It is therefore a terminal same-plan failure, not a
-          // pre-freeze signal to silently select a different route.
-          executionFailure = { reasonCode: 'SEMANTIC_COMPILATION_FAILED', origin: 'execution' };
-          observe('compile_and_run_semantic', 'error', executionFailure.reasonCode, { tier: 'semantic', candidateIds: selectedCandidateIds, origin: 'execution', planId: state.resolvedPlan?.id });
+          // pre-freeze signal to silently select a different route. Nothing
+          // reached the warehouse, so its origin is validation: the floor may
+          // still walk the lower tiers, and the reader is told what the
+          // compiler said rather than that a connection failed.
+          // Compact the WHOLE message: the actionable part of a MetricFlow
+          // resolver dump sits well past the bounded 400-character detail.
+          const compileMessage = error instanceof Error ? error.message : String(error ?? '');
+          semanticCompileDetail = compileMessage.trim() ? compactSemanticRuntimeFailure(compileMessage).slice(0, 400) : undefined;
+          executionFailure = { reasonCode: 'SEMANTIC_COMPILATION_FAILED', origin: 'validation', ...(semanticCompileDetail ? { detail: semanticCompileDetail } : {}) };
+          observe('compile_and_run_semantic', 'error', executionFailure.reasonCode, { tier: 'semantic', candidateIds: selectedCandidateIds, origin: executionFailure.origin, planId: state.resolvedPlan?.id });
           return denied('compile_and_run_semantic', executionFailure.reasonCode);
         }
       }),
@@ -4426,7 +4439,10 @@ function createAskV2LaneHandler(
       const orderBy = item(args.orderBy);
       const limit = typeof args.limit === 'number' && Number.isInteger(args.limit) && args.limit > 0 ? args.limit : undefined;
       const sql = item(args.sql);
-      const repair = args.repair === true;
+      // A plan proposed after a frozen plan failed IS the repair: the kernel
+      // admits exactly one same-plan repair post-freeze, and the model should
+      // not have to know the flag to use it.
+      const repair = args.repair === true || Boolean(executionFailure);
       const refuse = (reasonCode: string, usage: string) => {
         observe('propose_plan', 'ineligible', reasonCode, { origin: 'validation', candidateIds: measures.map((measure) => measure.id) });
         return { ...denied('propose_plan', reasonCode, ['propose_plan']), usage };
@@ -4721,6 +4737,8 @@ function createAskV2LaneHandler(
           state.terminalOutcome.reasonCode,
           state.terminalOutcome.origin,
           state.terminalOutcome.safeAction,
+          undefined,
+          state.terminalOutcome.reasonCode === 'SEMANTIC_COMPILATION_FAILED' ? semanticCompileDetail : undefined,
         );
       }
     }
@@ -5071,6 +5089,17 @@ function createAskV2LaneHandler(
     const runHostFloor = async (analystAnswer: AgentAnswer): Promise<AgentAnswer | undefined> => {
       if (!floorEligible(analystAnswer) || !floorDeadlineOpen()) return undefined;
       const toolByName = (name: string) => tools.find((tool) => tool.name === name);
+      // A floor refusal after a semantic compile failure keeps the compiler's
+      // sentence in front: "this metric cannot be grouped by that dimension"
+      // is the fact the reader needs; the floor adds what else exists.
+      const withCompileContext = (answer: AgentAnswer): AgentAnswer => {
+        const compileText = analystAnswer.askAgentV2Outcome?.reasonCode === 'SEMANTIC_COMPILATION_FAILED' && semanticCompileDetail
+          ? analystAnswer.text?.trim()
+          : undefined;
+        if (!compileText || !answer.text) return answer;
+        const text = `${compileText} ${answer.text}`;
+        return { ...answer, text, answer: text };
+      };
       hostFloorActive = true;
       try {
         observe('finish_answer', 'ineligible', 'ASK_V2_HOST_FLOOR_STARTED', {
@@ -5119,14 +5148,14 @@ function createAskV2LaneHandler(
             if (answer) return answer;
           } catch { /* fall through */ }
           if (analystAnswer.askAgentV2Outcome?.kind === 'provider_failure') return undefined;
-          return floorRefusal('unbound');
+          return withCompileContext(floorRefusal('unbound'));
         }
         // Rung 4 — an honest refusal that names what is available. Not after
         // a provider fault: the analyst never got its chance, so "nothing
         // binds" would blame the question for the transport. That answer
         // already says nothing about the data has been ruled out.
         if (analystAnswer.askAgentV2Outcome?.kind === 'provider_failure') return undefined;
-        return floorRefusal('refusal' in composed ? composed.refusal : 'unbound');
+        return withCompileContext(floorRefusal('refusal' in composed ? composed.refusal : 'unbound'));
       } finally {
         hostFloorActive = false;
       }
@@ -5513,6 +5542,8 @@ function createAskV2LaneHandler(
           executionFailure.reasonCode === 'SEMANTIC_EXECUTION_TARGET_MISMATCH'
             ? 'inspect_execution_target'
             : undefined,
+          undefined,
+          executionFailure.detail,
         );
       }
       // The engine binding itself is the highest-fidelity terminal incident.
@@ -5596,6 +5627,8 @@ function createAskV2LaneHandler(
         executionFailure.reasonCode === 'SEMANTIC_EXECUTION_TARGET_MISMATCH'
           ? 'inspect_execution_target'
           : undefined,
+        undefined,
+        executionFailure.detail,
       );
     }
     // A final no-tool response after this validation failure retains the same
@@ -6122,7 +6155,13 @@ function askV2NoAnswer(
   origin: NonNullable<AgentAnswer['askAgentV2Outcome']>['origin'],
   safeActionOverride?: string,
   modelingGap?: { term: string; admitted: string[] },
+  detail?: string,
 ): AgentAnswer {
+  if (detail && reasonCode === 'SEMANTIC_COMPILATION_FAILED') {
+    const base = askV2NoAnswer(input, kind, reasonCode, origin, safeActionOverride, modelingGap);
+    const text = `The semantic layer could not compile this question. ${detail}`;
+    return { ...base, text, answer: text };
+  }
   const dispatchBudget = kind === 'budget_exhausted' && reasonCode === 'ASK_PROVIDER_DISPATCH_BUDGET_EXHAUSTED';
   const semanticToolContract = reasonCode === 'SEMANTIC_ENGINE_UNAVAILABLE';
   const semanticExecutionTargetMismatch = reasonCode === 'SEMANTIC_EXECUTION_TARGET_MISMATCH';

@@ -6197,7 +6197,10 @@ function blockingOutcomeSummary(
   // The host floor names what it could and could not bind, and which
   // measures exist. That sentence was written for the reader; the coarse
   // code's sentence was not.
-  if (result.askAgentV2Outcome?.reasonCode?.startsWith('ASK_V2_HOST_FLOOR') && typeof result.answer === 'string' && result.answer.trim()) {
+  // Likewise the semantic compiler's own sentence ("this metric cannot be
+  // grouped by that dimension") over the coarse execution-error sentence.
+  if ((result.askAgentV2Outcome?.reasonCode?.startsWith('ASK_V2_HOST_FLOOR') || result.askAgentV2Outcome?.reasonCode === 'SEMANTIC_COMPILATION_FAILED')
+    && typeof result.answer === 'string' && result.answer.trim()) {
     return result.answer.trim();
   }
   const typed = refusalCodeSummary(result.answerRefusalCode);
