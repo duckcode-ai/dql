@@ -1,3 +1,4 @@
+import { composeAnswer, type HostFloorRefusalReason } from '@duckcodeailabs/dql-agent';
 import {
   classifyProviderFailure,
   deadlineScale,
@@ -4651,18 +4652,7 @@ function createAskV2LaneHandler(
         .slice(0, 5)
         .map((relation) => `${relation.name} (${numericColumnsOf(relation).slice(0, 4).join(', ')})`);
       const asked = (questionPlan.requestedShape.measures[0] ?? questionPlan.metricTerms[0] ?? '').trim();
-      const because = reason === 'filter'
-        ? 'it needs a filter that no governed query here can prove'
-        : reason === 'time'
-          ? 'it needs a time window that no governed query here expresses'
-          : reason.startsWith('qualifier')
-            ? `"${reason.slice('qualifier '.length)}" narrows the measure in a way nothing here models`
-            : reason === 'no measure'
-              ? 'it does not name a measure this project can compute'
-              : asked
-                ? `"${asked}" does not bind to exactly one column of the models retrieved for it`
-                : 'nothing retrieved for it binds exactly';
-      const text = `No governed query was run for this question because ${because}.${admitted.length ? ` Measures available: ${admitted.join('; ')}.` : ''} Name the measure and the model to use, or model it and re-sync.`;
+      const text = composeAnswer({ kind: 'host_floor_refusal', reason: reason as HostFloorRefusalReason, ...(asked ? { asked } : {}), admitted }).text;
       observe('finish_answer', 'ineligible', 'ASK_V2_HOST_FLOOR_UNBOUND', { origin: 'validation', hostObserved: true, safeAction: `floor:${reason}` });
       finishAskAgentV2Turn(state, { version: 2, kind: 'gap', reasonCode: 'ASK_V2_HOST_FLOOR_UNBOUND', origin: 'validation', safeAction: 'name_measure_and_model' });
       return {
@@ -5720,23 +5710,7 @@ function askV2NoAnswer(
       failedBindings: [{ role: 'semantic_engine', reasonCode }],
     })
     : undefined;
-  const text = semanticToolContract
-    ? 'The configured semantic runtime is not ready for the selected snapshot-bound metric. Review semantic adapter readiness, then retry.'
-    : semanticExecutionTargetMismatch
-    ? 'DQL stopped before execution because the compiled semantic query did not match the frozen execution target. Review the execution target and trace; no query was run.'
-    : dispatchBudget
-    ? 'The Ask runtime reached its bounded provider-dispatch limit before it could execute a plan. No query was run. Review the trace, then retry.'
-    : kind === 'provider_failure'
-    ? 'The AI provider could not complete this Ask step. Check provider readiness, then retry.'
-    : kind === 'execution_failure'
-      ? reasonCode === 'SEMANTIC_FILTER_NOT_COMPILED'
-        ? 'The governed semantic engine could not apply the required member filter, and DQL refused to run the unfiltered query in its place. Ask through a certified block or governed SQL, or enable the MetricFlow runtime for cross-model filters.'
-        : 'The selected governed query did not complete on the current connection. Review the connection and trace, then retry.'
-      : modelingGap
-        ? `"${modelingGap.term}" is not modeled in this project's governed data, so no query can compute it.${modelingGap.admitted.length ? ` Governed groupings available: ${modelingGap.admitted.join(', ')}.` : ''} Ask with one of those instead, or model "${modelingGap.term}" and re-sync.`
-        : reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED'
-          ? 'No certified block or semantic metric covers this question, and the analyst declined to run unverified exploratory SQL against this snapshot. No query was executed. Use Research for a deeper investigation, certify a block for this question, or name the exact model/columns to query.'
-          : 'DQL could not complete a safe analytical tool path from the current metadata snapshot.';
+  const text = composeAnswer({ kind: 'v2_no_answer', outcome: kind, reasonCode, ...(modelingGap ? { modelingGap } : {}) }).text;
   return {
     kind: 'no_answer',
     sourceTier: 'no_answer',
@@ -5827,8 +5801,9 @@ async function deriveHostFirstSemanticArgs(input: {
 }): Promise<{ metricIds: string[]; dimensionIds?: string[]; filters?: Array<{ dimensionId: string; value: string }>; orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>; limit?: number } | undefined> {
   const { question, candidates, capabilities } = input;
   if (!capabilities || capabilities.size === 0) return undefined;
-  const requirements = buildAnalyticalRequirementSet({ question });
   const plan = buildAnalysisQuestionPlan(question);
+  // One reading of the question: the plan's own requirement set.
+  const requirements = plan.requirements;
   // Shapes the deterministic composer cannot express go to the analyst.
   if (plan.requestedShape.topN?.scope === 'per_group') return undefined;
   if (requirements.time?.grain) return undefined;

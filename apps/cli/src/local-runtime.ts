@@ -1,4 +1,5 @@
 import type { ProviderDispatchPhaseV1, ProviderEgressPurpose, SemanticAggregationCompilerReceiptV1, SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
+import { terminalTitle } from '@duckcodeailabs/dql-agent';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync, execSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -2005,35 +2006,11 @@ function terminalFallbackReasonForAnswer(answer: AgentAnswer): string | undefine
 export function terminalFailureTitleForAnswer(
   answer: Pick<AgentAnswer, 'refusalCode' | 'analyticalFailure' | 'refusalDetails'>,
 ): string {
-  if (answer.analyticalFailure?.phase === 'compilation') {
-    return 'DQL could not compile the frozen plan';
-  }
-  if (answer.analyticalFailure?.phase === 'validation') {
-    return 'The selected governed inputs need correction';
-  }
-  if (answer.analyticalFailure?.phase === 'result_validation') {
-    return 'The query result did not match the frozen plan';
-  }
-  // A precise cause recorded in the details must win over the coarse code.
-  // The switch below cannot distinguish DQL declining to start a call from a
-  // clock that genuinely ran out, and titling both as a provider outage sent
-  // readers to debug the wrong system.
-  if (answer.refusalDetails?.code === 'RUN_DEADLINE_INSUFFICIENT') {
-    return 'DQL stopped before starting another AI call';
-  }
-  switch (answer.refusalCode) {
-    case 'policy_blocked': return 'Blocked by a governance policy';
-    case 'modeling_gap': return 'Not modeled yet';
-    case 'grounding_gap': return 'Not enough context to answer safely';
-    case 'model_declined': return 'The assistant declined to answer';
-    // A headline is what the reader sees first. Naming our transport tells them
-    // nothing about their question and nothing they can act on.
-    case 'provider_error': return 'Could not finish working this one out';
-    case 'orchestration_budget_exhausted': return 'DQL stopped at its own orchestration budget';
-    case 'execution_error': return 'The selected query did not complete on the current connection';
-    case 'ambiguous': return 'Needs one detail before running';
-    default: return 'No answer was produced';
-  }
+  return terminalTitle({
+    ...(answer.refusalCode ? { refusalCode: answer.refusalCode } : {}),
+    ...(answer.analyticalFailure?.phase ? { failurePhase: answer.analyticalFailure.phase } : {}),
+    ...(answer.refusalDetails?.code ? { detailCode: answer.refusalDetails.code } : {}),
+  });
 }
 
 /**

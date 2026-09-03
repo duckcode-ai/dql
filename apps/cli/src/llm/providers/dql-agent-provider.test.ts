@@ -2567,7 +2567,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
       expect.objectContaining({ tool: 'finish_answer', outcome: 'error', reasonCode: 'ASK_V2_INVALID_TOOL_RESPONSE' }),
     ]));
     expect(answer.refusalCode).toBe('provider_error');
-    expect(answer.text).toContain('AI provider could not complete');
+    expect(answer.text).toContain('was not worked out to a query');
   });
 
   it('rejects invented IDs and preserves the snapshot-bound failure instead of re-searching', async () => {

@@ -3,7 +3,7 @@ import type {
   MetadataAllowedSqlContext,
   MetadataObject,
 } from './catalog.js';
-import { normalizeAnalyticalMeasureTerms } from '../analytical-orchestration.js';
+import { buildAnalyticalRequirementSet, normalizeAnalyticalMeasureTerms, type AnalyticalRequirementSetV1 } from '../analytical-orchestration.js';
 
 export type AnalysisQuestionMode =
   | 'exact_lookup'
@@ -49,6 +49,13 @@ export interface AnalysisQuestionPlan {
   entities: AnalysisEntityMention[];
   valueMentions: AnalysisValueMention[];
   metricTerms: string[];
+  /**
+   * The execution-facing reading of the same question — measures, groupings,
+   * entity display terms, members, ranking, time — computed ONCE from this
+   * plan's own terms so no consumer reads the question a second time with
+   * different inputs. Host-first execution, the floor and retrieval share it.
+   */
+  requirements: AnalyticalRequirementSetV1;
   /**
    * Words the question put directly before a measure or a grouping noun that
    * no kept term covers — "beverage" in "beverage revenue", "BCM" in "BCM
@@ -354,6 +361,9 @@ export function buildAnalysisQuestionPlan(
     // qualifier before the grouping noun is as much a filter as one before
     // the measure. Every term the plan kept covers its own words.
     unboundQualifiers: unboundMeasureQualifierTerms(cleanQuestion, [...metricTerms, ...dimensionTerms]),
+    // The question alone: retrieval-side parser hints are broader and staler
+    // than the question, and the requirement set is host authority.
+    requirements: buildAnalyticalRequirementSet({ question: cleanQuestion }),
     dimensionTerms,
     filterTerms,
     timeTerms,

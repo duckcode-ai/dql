@@ -2080,3 +2080,5 @@ export {
   type ScriptedAnalystPersona,
   type ScriptedAnalystProvider,
 } from './testing/scripted-analyst-provider.js';
+
+export { composeAnswer, terminalTitle, type TerminalAnswerShape, type TerminalIncidentCode, type ComposedAnswer, type HostFloorRefusalReason } from './ask-runtime/compose-answer.js';

@@ -1,3 +1,5 @@
+import { composeAnswer, type TerminalIncidentCode } from './ask-runtime/compose-answer.js';
+import type { AnswerRefusalCode } from './answer-loop.js';
 import { createHash, randomUUID } from "node:crypto";
 import {
   normalizeProviderEgressReceiptV1,
@@ -5384,7 +5386,7 @@ function modeledFieldLabels(run: AgentRun): string[] {
  * where only locations are modeled — naming that term and the nearest governed
  * fields turns a dead end into a next step.
  */
-function unmodeledRequestAnswer(run: AgentRun): string | undefined {
+function unmodeledTermForRun(run: AgentRun): { term: string; modeled: string[] } | undefined {
   const question = typeof run.question === 'string' ? run.question : '';
   if (!question.trim()) return undefined;
   const labels = modeledFieldLabels(run);
@@ -5398,13 +5400,12 @@ function unmodeledRequestAnswer(run: AgentRun): string | undefined {
     // A term the admitted snapshot never mentions, in any field, anywhere.
     .find((word) => !haystack.includes(word) && !haystack.includes(word.replace(/s$/, '')));
   if (!unmodeled) return undefined;
-  const alternatives = labels.filter((label) => !/^\d/.test(label)).slice(0, 5);
-  return `"${unmodeled}" is not modeled in this project, so no governed query can answer it.`
-    + (alternatives.length
-      ? ` The fields that are modeled here include ${alternatives.join(', ')}.`
-        + ' Ask again using one of those, or tell me which should stand in for'
-        + ` "${unmodeled}".`
-      : '');
+  return { term: unmodeled, modeled: labels };
+}
+
+function unmodeledRequestAnswer(run: AgentRun): string | undefined {
+  const unmodeled = unmodeledTermForRun(run);
+  return unmodeled ? composeAnswer({ kind: 'unmodeled_term', ...unmodeled }).text : undefined;
 }
 
 /**
@@ -5444,15 +5445,7 @@ function askV2RetrievedAssetLabels(run: AgentRun): string[] {
  * next.
  */
 function lastResortAnswerForRun(run: AgentRun, cause: 'provider' | 'budget'): string {
-  const assets = askV2RetrievedAssetLabels(run).slice(0, 6);
-  const opening = cause === 'provider'
-    ? 'I could not finish working this question out — the assistant step did not complete, so no query was run.'
-    : 'I ran out of room to work this question out before a query was accepted.';
-  const closing = 'Nothing about your data has been ruled out: this run did not reach a query.'
-    + ' Asking again usually works, and naming the exact field or metric you want makes it certain.';
-  return assets.length > 0
-    ? `${opening} What I had found so far for it: ${assets.join(', ')}. ${closing}`
-    : `${opening} ${closing}`;
+  return composeAnswer({ kind: 'last_resort', cause, assets: askV2RetrievedAssetLabels(run) }).text;
 }
 
 function deterministicTerminalAnswerForRun(run: AgentRun): string {
@@ -5461,31 +5454,23 @@ function deterministicTerminalAnswerForRun(run: AgentRun): string {
   // a generic grounding gap. Surface the specific sentence.
   const v2Terminal = run.routeDecision?.askAgentV2Decision?.state?.terminalOutcome;
   if (v2Terminal?.reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED') {
-    return 'No certified block or semantic metric covers this question, and the analyst declined to run unverified exploratory SQL against this snapshot. No query was executed. Use Research for a deeper investigation, certify a block for this question, or name the exact model/columns to query.';
+    return composeAnswer({ kind: 'remaining_tiers_declined' }).text;
   }
   const incident = terminalIncidentForRun(
     run,
     run.routeDecision?.analyticalCascadeDecision?.stopReason,
   );
-  switch (incident?.code) {
-    case 'CONNECTION_NOT_CONFIGURED':
-      return 'No database connection is configured yet. Add an approved connection, then retry this question.';
-    case 'PROVIDER_FAILURE':
-      return lastResortAnswerForRun(run, 'provider');
-    case 'COMPILATION_FAILED':
-      return 'DQL selected a governed plan but could not compile it for the current target. Review the semantic target, then retry.';
-    case 'RESULT_CONTRACT_MISMATCH':
-      return 'The query ran, but its result did not match the frozen plan. Review the result contract and trace, then retry.';
-    case 'ANALYTICAL_COVERAGE_GAP':
-      return unmodeledRequestAnswer(run)
-        ?? 'DQL could not prove one safe analytical path from the current metadata snapshot. Review the available modeled fields, then retry.';
-    case 'ANALYTICAL_EXECUTION_FAILED':
-      return 'The selected governed query did not complete on the current connection. Review the connection and trace, then retry.';
-    case 'CANCELLED':
-      return 'This Ask run was cancelled before it completed.';
-    default:
-      return 'No executable data answer was accepted for this Ask run.';
-  }
+  const code = incident?.code;
+  const known: TerminalIncidentCode[] = [
+    'CONNECTION_NOT_CONFIGURED', 'PROVIDER_FAILURE', 'COMPILATION_FAILED', 'RESULT_CONTRACT_MISMATCH',
+    'ANALYTICAL_COVERAGE_GAP', 'ANALYTICAL_EXECUTION_FAILED', 'CANCELLED',
+  ];
+  return composeAnswer({
+    kind: 'incident',
+    code: known.includes(code as TerminalIncidentCode) ? code as TerminalIncidentCode : undefined,
+    assets: askV2RetrievedAssetLabels(run),
+    ...(code === 'ANALYTICAL_COVERAGE_GAP' ? { unmodeled: unmodeledTermForRun(run) } : {}),
+  }).text;
 }
 
 function diagnosticReceiptV5ForRun(
@@ -6598,17 +6583,15 @@ function computeStepOutcome(
  * The sentence a typed refusal code deserves. These are the honest,
  * user-actionable readings; the coarse code is still what machines branch on.
  */
+const REFUSAL_CODES = new Set<AnswerRefusalCode>([
+  'grounding_gap', 'modeling_gap', 'ambiguous', 'model_declined', 'provider_error',
+  'orchestration_budget_exhausted', 'policy_blocked', 'execution_error',
+]);
+
 function refusalCodeSummary(code: string | undefined): string | undefined {
-  switch (code) {
-    case 'grounding_gap': return 'DQL could not match every part of this question to governed data, so no query was run.';
-    case 'modeling_gap': return 'Part of this question is not modeled in this project yet, so no governed query can answer it as asked.';
-    case 'ambiguous': return 'One business choice is required before DQL can run this question.';
-    case 'provider_error': return 'This question was not worked out to a query, so nothing about the data has been ruled out.';
-    case 'orchestration_budget_exhausted': return 'DQL stopped this run at its own orchestration budget before the question was settled.';
-    case 'policy_blocked': return 'A governance policy blocked this request before execution.';
-    case 'execution_error': return 'The selected governed query did not complete on the current connection.';
-    default: return undefined;
-  }
+  return REFUSAL_CODES.has(code as AnswerRefusalCode)
+    ? composeAnswer({ kind: 'refusal', refusalCode: code as AnswerRefusalCode }).text
+    : undefined;
 }
 
 function blockingOutcomeSummary(
@@ -6630,7 +6613,7 @@ function blockingOutcomeSummary(
   // refusal-code sentence: "analyst declined the exploratory tier" is
   // actionable where "could not ground every part" reads as a system fault.
   if (result.askAgentV2Outcome?.reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED') {
-    return 'No certified block or semantic metric covers this question, and the analyst declined to run unverified exploratory SQL. No query was executed. Use Research for a deeper investigation, certify a block for this question, or name the exact model/columns to query.';
+    return composeAnswer({ kind: 'remaining_tiers_declined' }).text;
   }
   // The host floor names what it could and could not bind, and which
   // measures exist. That sentence was written for the reader; the coarse
