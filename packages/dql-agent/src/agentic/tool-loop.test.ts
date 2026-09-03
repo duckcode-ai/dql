@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runAgenticToolLoop, parseTextToolCall, runTextProtocolToolLoopDetailed } from './tool-loop.js';
+import { runAgenticToolLoop, parseTextToolCall, runTextProtocolToolLoopDetailed, admittedToolNames, advertisedTools } from './tool-loop.js';
 import { deriveAgenticTrust, normalizeSql, type CompiledSemanticRecord } from './answer-contract.js';
 import type { AgentMessage, AgentProvider, AgentToolDefinition, ProviderToolLoopOptions } from '../providers/types.js';
 
@@ -380,6 +380,42 @@ describe('runAgenticToolLoop — text protocol (no native tools)', () => {
     const finalPrompt = provider.calls[2]!.map((message) => message.content).join('\n');
     expect(finalPrompt).toContain('Controller progression required');
     expect(finalPrompt).not.toContain('Revenue looks ready');
+  });
+
+  it('admits a hidden alias when its advertised tool is allowed, and never advertises it', async () => {
+    const tools: AgentToolDefinition[] = [
+      { name: 'propose_plan', description: 'one plan', inputSchema: { type: 'object' }, run: async () => ({ ok: true }) },
+      { name: 'compile_and_run_semantic', description: 'tier handler', inputSchema: { type: 'object' }, hidden: true, aliasOf: 'propose_plan', run: async () => ({ executed: true }) },
+      { name: 'finish_answer', description: 'close', inputSchema: { type: 'object' }, run: async () => ({ finished: true }) },
+    ];
+    expect([...admittedToolNames(['propose_plan'], tools)]).toEqual(['propose_plan', 'compile_and_run_semantic']);
+    expect([...admittedToolNames(['finish_answer'], tools)]).toEqual(['finish_answer']);
+    expect(advertisedTools(tools).map((tool) => tool.name)).toEqual(['propose_plan', 'finish_answer']);
+
+    let ran = 0;
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"compile_and_run_semantic","input":{}}\n```',
+      '```json\n{"tool":"finish_answer","input":{"answer":"done"}}\n```',
+    ]);
+    const result = await runTextProtocolToolLoopDetailed(
+      provider,
+      [{ role: 'user', content: 'revenue' }],
+      tools.map((tool) => (tool.name === 'compile_and_run_semantic'
+        ? { ...tool, run: async () => { ran += 1; return { executed: true }; } }
+        : tool)),
+      {
+        maxToolCalls: 4,
+        maxProviderDispatches: 4,
+        getCurrentToolPolicy: () => ({ allowedToolNames: ['propose_plan', 'finish_answer'] }),
+      },
+    );
+    expect(result).toMatchObject({ stop: 'final', toolCalls: 2 });
+    expect(ran).toBe(1);
+    // The loop appends to the same message array it sent, so read only the
+    // host's system messages: the contract and the availability update.
+    const shown = provider.calls[0]!.filter((message) => message.role === 'system').map((message) => message.content).join('\n');
+    expect(shown).toContain('propose_plan');
+    expect(shown).not.toContain('compile_and_run_semantic');
   });
 
   it('adopts post-execution prose as the finish narration instead of spending a send to ask for the same words', async () => {

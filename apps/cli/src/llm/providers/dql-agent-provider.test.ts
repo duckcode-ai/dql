@@ -1016,6 +1016,106 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
     ]));
   });
 
+  it('propose_plan resolves a certified block id to the certified tier and advertises only the five tools', async () => {
+    const candidate: AgentEvidenceCandidate = {
+      id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+      trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const executeCertifiedBlock = vi.fn(async () => ({ columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 }));
+    const state = askV2State([candidate]);
+    let advertised: string[] = [];
+    let call = 0;
+    const result = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 4 })({
+      question: 'who are the top customers',
+      provider: {
+        name: 'ollama',
+        available: async () => true,
+        generate: async (messages: AgentMessage[]) => {
+          if (call === 0) {
+            const contract = messages.map((message) => message.content).join('\n');
+            advertised = ['describe_relation', 'propose_plan', 'request_clarification', 'finish_answer', 'run_certified', 'compile_and_run_semantic', 'inspect_certified_candidates']
+              .filter((name) => new RegExp(`- ${name}\\(`).test(contract));
+          }
+          return [
+            '```json\n{"tool":"propose_plan","input":{"measures":[{"id":"block:top-customers"}]}}\n```',
+            'Ada leads the customers.',
+          ][call++] ?? '';
+        },
+      },
+      askAgentV2Workspace: askV2Workspace([candidate], {
+        certifiedArtifacts: new Map([['block:top-customers', {
+          version: 1,
+          artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+          revisionFingerprint: 'sha256:top-customers',
+          isCurrent: () => true,
+        }]]),
+        certifiedCompleteCandidateIds: ['block:top-customers'],
+      }),
+      executeCertifiedBlock,
+    } as never);
+
+    expect(advertised).toEqual(['describe_relation', 'propose_plan', 'request_clarification', 'finish_answer']);
+    expect(executeCertifiedBlock).toHaveBeenCalledOnce();
+    expect(result.result?.answerTier).toBe('certified_block');
+    expect(result.text).toBe('Ada leads the customers.');
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'run_certified', outcome: 'executed', candidateIds: ['block:top-customers'] }),
+    ]));
+  });
+
+  it('propose_plan resolves semantic metric ids to the semantic tier, carrying time, filters and ordering', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:account_revenue.revenue', qualifiedId: 'semantic:metric:account_revenue.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'account_revenue.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric]);
+    const compile = vi.fn(async (selection: { metrics: string[]; limit?: number }) => {
+      expect(selection.metrics).toEqual(['account_revenue.revenue']);
+      expect(selection.limit).toBe(5);
+      return { sql: 'select 1 as revenue', engine: 'native' as const };
+    });
+    const result = await __test__.createAskV2LaneHandler(state)({
+      question: 'top 5 revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"propose_plan","input":{"measures":[{"id":"semantic:metric:account_revenue.revenue"}],"orderBy":{"reference":"semantic:metric:account_revenue.revenue","direction":"desc"},"limit":5}}\n```',
+        'Revenue is ranked.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(result.result?.answerTier).toBe('semantic_metric');
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', candidateIds: ['semantic:metric:account_revenue.revenue'] }),
+    ]));
+  });
+
+  it('propose_plan refuses a plan that mixes tiers and names the fix', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:account_revenue.revenue', qualifiedId: 'semantic:metric:account_revenue.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'account_revenue.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric]);
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 4, maxProviderDispatches: 3 })({
+      question: 'revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"propose_plan","input":{"measures":[{"id":"semantic:metric:account_revenue.revenue"},{"id":"orders.amount","aggregation":"sum"}]}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"I could not express that as one plan."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'propose_plan', outcome: 'ineligible', reasonCode: 'PLAN_MIXED_TIERS' }),
+    ]));
+  });
+
   it('blocks a native semantic join whose fanout probe proves row multiplication, before any governed execution', async () => {
     const metric: AgentEvidenceCandidate = {
       id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
@@ -2136,7 +2236,10 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
       const body = JSON.parse(String(init?.body ?? '{}')) as {
         tools?: Array<{ function?: { name?: string; parameters?: { properties?: { engine?: { enum?: unknown } } } }; name?: string; input_schema?: { properties?: { engine?: { enum?: unknown } } } }>;
       };
-      const semanticTool = (body.tools ?? []).find((tool) => tool.function?.name === 'compile_and_run_semantic' || tool.name === 'compile_and_run_semantic');
+      // The advertised surface is `propose_plan`; the semantic handler stays
+      // hidden behind it. Neither may advertise an engine choice.
+      expect((body.tools ?? []).some((tool) => tool.function?.name === 'compile_and_run_semantic' || tool.name === 'compile_and_run_semantic')).toBe(false);
+      const semanticTool = (body.tools ?? []).find((tool) => tool.function?.name === 'propose_plan' || tool.name === 'propose_plan');
       if (semanticTool) {
         advertisedEngineProperties.push(
           semanticTool.function?.parameters?.properties?.engine
@@ -2674,7 +2777,7 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
 
     expect(state.controllerTier).toBe('semantic');
     expect(dispatchedMessages).toHaveLength(4);
-    expect(dispatchedMessages[2]?.at(-1)?.content).toContain('compile_and_run_semantic');
+    expect(dispatchedMessages[2]?.at(-1)?.content).toContain('propose_plan');
     expect(dispatchedMessages[3]?.at(-1)?.content).toContain('Controller progression required');
     expect(answer.askAgentV2Outcome).toMatchObject({
       kind: 'provider_failure',

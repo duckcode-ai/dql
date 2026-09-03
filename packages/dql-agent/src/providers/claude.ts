@@ -11,7 +11,7 @@ import type {
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
 import { fetchProviderHttpDispatch, providerDispatchLimit } from './dispatch.js';
-import { adoptProseAsFinishNarration } from '../agentic/tool-loop.js';
+import { adoptProseAsFinishNarration, admittedToolNames } from '../agentic/tool-loop.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 
@@ -350,13 +350,21 @@ function nativeToolLoopStopForError(error: unknown, toolCalls: number): NativeTo
 function nativeToolPolicy(
   options: ProviderToolLoopOptions,
   tools: readonly AgentToolDefinition[],
-): { tools: AgentToolDefinition[]; terminalActionToolNames: Set<string>; instruction?: string } {
+): { tools: AgentToolDefinition[]; admittedTools: AgentToolDefinition[]; terminalActionToolNames: Set<string>; visibleTerminalActionToolNames: Set<string>; instruction?: string } {
   const policy = options.getCurrentToolPolicy?.();
-  const allowed = new Set(policy?.allowedToolNames ?? tools.map((tool) => tool.name));
-  const enabled = tools.filter((tool) => allowed.has(tool.name));
+  const allowed = admittedToolNames(policy?.allowedToolNames ?? tools.map((tool) => tool.name), tools);
+  // A hidden alias is admitted through its advertised tool — it stays in the
+  // dispatch table — but is never declared to the API.
+  const admitted = tools.filter((tool) => allowed.has(tool.name));
+  const enabled = admitted.filter((tool) => !tool.hidden);
+  const terminalActionToolNames = new Set(
+    [...admittedToolNames(policy?.terminalActionToolNames ?? [], tools)].filter((name) => allowed.has(name)),
+  );
   return {
     tools: enabled,
-    terminalActionToolNames: new Set((policy?.terminalActionToolNames ?? []).filter((name) => allowed.has(name))),
+    admittedTools: admitted,
+    terminalActionToolNames,
+    visibleTerminalActionToolNames: new Set([...terminalActionToolNames].filter((name) => enabled.some((tool) => tool.name === name))),
     ...(policy?.instruction?.trim() ? { instruction: policy.instruction.trim() } : {}),
   };
 }
@@ -513,7 +521,11 @@ options: ProviderToolLoopOptions = {},
     const roundTools = terminalActionRound
       ? currentPolicy.tools.filter((tool) => currentPolicy.terminalActionToolNames.has(tool.name))
       : currentPolicy.tools;
-    const roundToolMap = new Map(roundTools.map((tool) => [tool.name, tool]));
+    const roundToolMap = new Map(
+      (terminalActionRound
+        ? currentPolicy.admittedTools.filter((tool) => currentPolicy.terminalActionToolNames.has(tool.name))
+        : currentPolicy.admittedTools).map((tool) => [tool.name, tool]),
+    );
     const roundToolDefs = roundTools.map((tool) => ({
       name: tool.name,
       description: tool.description,
@@ -528,7 +540,7 @@ options: ProviderToolLoopOptions = {},
     // transport meant the LAST step of a turn — the one that would have
     // produced the answer — could never be sent. Reasoning is the request's
     // optional part; the tool the host requires is not.
-    const forcesToolChoice = dynamicToolPolicy && currentPolicy.terminalActionToolNames.size === 1;
+    const forcesToolChoice = dynamicToolPolicy && currentPolicy.visibleTerminalActionToolNames.size === 1;
     const roundReasoning = ((): Record<string, unknown> => {
       const reasoning = transport.reasoning(model, options);
       if (!forcesToolChoice) return reasoning;
@@ -549,7 +561,7 @@ options: ProviderToolLoopOptions = {},
           messages: turns,
           tools: roundToolDefs,
           ...(forcesToolChoice
-            ? { tool_choice: { type: 'tool', name: [...currentPolicy.terminalActionToolNames][0]! } }
+            ? { tool_choice: { type: 'tool', name: [...currentPolicy.visibleTerminalActionToolNames][0]! } }
             : {}),
         },
         roundReasoning,
@@ -602,7 +614,7 @@ options: ProviderToolLoopOptions = {},
         requiredActionProseRetries += 1;
         turns.push({
           role: 'user',
-          content: `Controller progression required. Call exactly one of: ${[...currentPolicy.terminalActionToolNames].join(', ')}. Do not answer in prose.`,
+          content: `Controller progression required. Call exactly one of: ${[...currentPolicy.visibleTerminalActionToolNames].join(', ')}. Do not answer in prose.`,
         });
         continue;
       }

@@ -35,6 +35,8 @@ import {
   buildAnalysisQuestionPlan,
   buildCertifiedBlockInvocationInput,
   certifiedBlockProvesRequestedTopN,
+  ASK_V2_CANONICAL_TOOLS,
+  advertisedTools,
   deterministicDisplayKeyClarification,
   probeSemanticJoinFanout,
   buildAnalyticalRequirementSet,
@@ -404,7 +406,66 @@ function v2ToolShapeFingerprint(value: unknown): string {
   return runtimeFingerprint(JSON.stringify(shape(value)));
 }
 
+/**
+ * THE MODEL SEES FIVE TOOLS; THE HOST RESOLVES THE TIER.
+ *
+ * `propose_plan` is the one build contract: measures, dimensions, filters,
+ * time, ordering, a row bound. Its ids may name a certified block, a
+ * semantic metric, or a `<relation>.<column>`, and the host decides whether
+ * that plan is a certified run, a semantic compile, or a composed governed
+ * program — the model can no longer choose a trust label by choosing a
+ * tool. The tier handlers stay in the dispatch table as HIDDEN ALIASES of
+ * `propose_plan`: still kernel-gated, still observed under their own names
+ * in the receipt, callable by the host floor, host-first, older transcripts
+ * and cassettes, but never advertised.
+ */
+const ASK_V2_ADVERTISED_TOOLS: readonly AskToolNameV2[] = [
+  'describe_relation',
+  'search_values',
+  'propose_plan',
+  'request_clarification',
+  'finish_answer',
+];
+const ASK_V2_TOOL_ALIASES: Readonly<Partial<Record<AskToolNameV2, AskToolNameV2>>> = {
+  run_certified: 'propose_plan',
+  compile_and_run_semantic: 'propose_plan',
+  compile_and_run_dql: 'propose_plan',
+  validate_and_run_sql: 'propose_plan',
+  describe_metric: 'describe_relation',
+  // The inspectors are host work: their cards are prefilled, and a kernel
+  // that still wants one recorded gets it from the plan dispatcher itself.
+  inspect_ask_context: 'propose_plan',
+  inspect_conversation_result: 'propose_plan',
+  inspect_business_context: 'propose_plan',
+  inspect_certified_candidates: 'propose_plan',
+  inspect_semantic_candidates: 'propose_plan',
+  inspect_relational_context: 'propose_plan',
+};
+const ASK_V2_HOST_INSPECTORS: ReadonlySet<string> = new Set([
+  'inspect_certified_candidates',
+  'inspect_semantic_candidates',
+  'inspect_relational_context',
+]);
+function projectAnalystToolNames(names: readonly AskToolNameV2[] | undefined): AskToolNameV2[] {
+  return [...new Set((names ?? []).map((name) => ASK_V2_TOOL_ALIASES[name] ?? name))];
+}
+const ASK_V2_INTERNAL_NAME_RE = /\b(run_certified|compile_and_run_semantic|compile_and_run_dql|validate_and_run_sql|describe_metric|inspect_(?:ask_context|conversation_result|business_context|certified_candidates|semantic_candidates|relational_context))\b/g;
+function projectAnalystText(text: string): string {
+  return text.replace(ASK_V2_INTERNAL_NAME_RE, (name) => ASK_V2_TOOL_ALIASES[name as AskToolNameV2] ?? name);
+}
+/** Rewrite a handler's `safeNextTools` onto the advertised surface. */
+function projectAnalystToolOutput(output: unknown): unknown {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return output;
+  const record = output as Record<string, unknown>;
+  if (!Array.isArray(record.safeNextTools)) return output;
+  return {
+    ...record,
+    safeNextTools: projectAnalystToolNames(record.safeNextTools.filter((name): name is AskToolNameV2 => typeof name === 'string')),
+  };
+}
+
 function v2CanonicalToolName(name: string): AskToolNameV2 {
+  if ((ASK_V2_CANONICAL_TOOLS as readonly string[]).includes(name)) return name as AskToolNameV2;
   if (name === 'search_semantic_layer') return 'inspect_semantic_candidates';
   // A provider/tool-loop callback confirms only that a physical tool returned.
   // It is not a successful compile or execution, so map it to inspection. The
@@ -3532,6 +3593,13 @@ function createAskV2LaneHandler(
               ?? (separator > 0 ? resolveAdmittedReference(requested.slice(0, separator), 'retained') : undefined)
             : undefined;
           const candidate = resolved?.candidate;
+          // One describe tool on the advertised surface: a metric id describes
+          // the metric (its groupable dimensions and grains).
+          if (candidate && (candidate.kind === 'semantic_metric'
+            || candidate.semanticObjectType === 'metric'
+            || candidate.semanticObjectType === 'measure')) {
+            return toolByName('describe_metric')?.run({ candidateId: requested });
+          }
           // A relation is a thing with columns. Refusing anything else keeps
           // this tool from becoming a second, weaker card renderer.
           if (!candidate || (candidate.columns?.length ?? 0) === 0) {
@@ -4262,8 +4330,201 @@ function createAskV2LaneHandler(
       // as a result set and reports the tool call to the model as an error.
       .map((tool) => ({
         ...tool,
-        run: async (args: Record<string, unknown>) => markAskV2ToolOutput(await tool.run(args)),
+        ...(ASK_V2_TOOL_ALIASES[tool.name as AskToolNameV2]
+          ? { hidden: true, aliasOf: ASK_V2_TOOL_ALIASES[tool.name as AskToolNameV2] }
+          : {}),
+        run: async (args: Record<string, unknown>) => markAskV2ToolOutput(projectAnalystToolOutput(await tool.run(args))),
       }));
+    const toolByName = (name: string) => tools.find((tool) => tool.name === name);
+    /**
+     * The kernel's policy speaks in tier handlers; the model speaks in the
+     * five advertised tools. Admission is projected, never widened: a handler
+     * is admitted exactly when the advertised tool it stands behind is.
+     */
+    const analystToolPolicy = () => {
+      const policy = kernel.toolPolicy();
+      return {
+        allowedToolNames: projectAnalystToolNames(policy.allowedToolNames),
+        ...(policy.terminalActionToolNames?.length
+          ? { terminalActionToolNames: projectAnalystToolNames(policy.terminalActionToolNames) }
+          : {}),
+        ...(policy.instruction ? { instruction: projectAnalystText(policy.instruction) } : {}),
+      };
+    };
+    tools.push({
+      name: 'propose_plan',
+      description: 'Propose the ONE plan that answers the question: measures (each id a certified block id, a semantic metric id, or "<relation>.<column>" with an aggregation), optional dimensions, filters, time {dimensionId, grain}, orderBy and limit. DQL resolves the tier — a certified block, the semantic layer, or a composed governed program — builds the query, runs it, and assigns trust. Only when a shape genuinely cannot be expressed as a plan, send sql {text, reads} as the review-required last resort.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          measures: {
+            type: 'array', maxItems: 8,
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: 'A certified block id, a semantic:metric: id, or "<relation>.<column>".' },
+                aggregation: { type: 'string', enum: ASK_V2_RELATIONAL_AGGREGATION_NAMES, description: 'Required for a "<relation>.<column>" measure; ignored for a metric or block.' },
+                alias: { type: 'string' },
+              },
+              required: ['id'], additionalProperties: false,
+            },
+          },
+          dimensions: {
+            type: 'array', maxItems: 16,
+            items: { type: 'object', properties: { id: { type: 'string' }, alias: { type: 'string' } }, required: ['id'], additionalProperties: false },
+          },
+          filters: {
+            type: 'array', maxItems: 8,
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                operator: { type: 'string', enum: ASK_V2_RELATIONAL_OPERATOR_NAMES },
+                value: { type: 'string' },
+                values: { type: 'array', maxItems: 24, items: { type: 'string' } },
+              },
+              required: ['id'], additionalProperties: false,
+            },
+          },
+          time: {
+            type: 'object',
+            properties: {
+              dimensionId: { type: 'string', description: 'An admitted time dimension id.' },
+              grain: { type: 'string', enum: ['day', 'week', 'month', 'quarter', 'year'] },
+            },
+            additionalProperties: false,
+          },
+          orderBy: {
+            type: 'object',
+            properties: { reference: { type: 'string' }, direction: { type: 'string', enum: ['asc', 'desc'] } },
+            additionalProperties: false,
+          },
+          limit: { type: 'integer', minimum: 1, maximum: 10000 },
+          bindings: { type: 'object', additionalProperties: { type: 'string' }, description: 'Scalar parameter bindings for a certified block.' },
+          sql: {
+            type: 'object',
+            properties: {
+              text: { type: 'string', minLength: 1, maxLength: 30000 },
+              reads: { type: 'array', items: { type: 'string' }, maxItems: 24, description: 'Every "<relation>.<column>" the SQL reads.' },
+            },
+            required: ['text', 'reads'], additionalProperties: false,
+          },
+          repair: { type: 'boolean' },
+        },
+        required: [], additionalProperties: false,
+      },
+      run: async (raw) => markAskV2ToolOutput(await resolveAndRunPlan(raw)),
+    });
+    /**
+     * Resolve a plan to a tier and run it through that tier's handler.
+     * Every governance gate lives in the handler and the kernel; this only
+     * decides WHICH handler the plan names, and performs any inspection the
+     * kernel still wants recorded first (host work, never the analyst's).
+     */
+    async function resolveAndRunPlan(raw: unknown): Promise<unknown> {
+      const args = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      const item = (value: unknown): Record<string, unknown> | undefined => (
+        value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+      );
+      const list = (value: unknown, max: number): Record<string, unknown>[] => (
+        Array.isArray(value) ? value.slice(0, max).flatMap((entry) => (item(entry) ? [item(entry)!] : [])) : []
+      );
+      const str = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+      type PlanItem = Record<string, unknown> & { id: string };
+      const withId = (entries: Record<string, unknown>[]): PlanItem[] => entries.flatMap((entry) => (str(entry.id) ? [{ ...entry, id: str(entry.id)! }] : []));
+      const measures = withId(list(args.measures, 8));
+      const dimensions = withId(list(args.dimensions, 16));
+      const filters = withId(list(args.filters, 8));
+      const time = item(args.time);
+      const orderBy = item(args.orderBy);
+      const limit = typeof args.limit === 'number' && Number.isInteger(args.limit) && args.limit > 0 ? args.limit : undefined;
+      const sql = item(args.sql);
+      const repair = args.repair === true;
+      const refuse = (reasonCode: string, usage: string) => {
+        observe('propose_plan', 'ineligible', reasonCode, { origin: 'validation', candidateIds: measures.map((measure) => measure.id) });
+        return { ...denied('propose_plan', reasonCode, ['propose_plan']), usage };
+      };
+      if (measures.length === 0 && !sql) {
+        return refuse('PLAN_MEASURES_REQUIRED', 'A plan names at least one measure: a certified block id, a semantic metric id, or "<relation>.<column>" with an aggregation.');
+      }
+      // Inspections the kernel still wants recorded before an execution are
+      // the host's job: the cards were prefilled, so there is nothing for
+      // the analyst to learn by spending a dispatch on them.
+      for (let round = 0; round < 3; round += 1) {
+        const allowed = kernel.toolPolicy().allowedToolNames;
+        const pending = allowed.filter((name) => ASK_V2_HOST_INSPECTORS.has(name));
+        if (pending.length === 0 || allowed.some((name) => !ASK_V2_HOST_INSPECTORS.has(name))) break;
+        for (const name of pending) await toolByName(name)?.run({});
+      }
+      const dispatch = async (name: AskToolNameV2, input: Record<string, unknown>) => {
+        const output = await toolByName(name)?.run(input);
+        return output && typeof output === 'object' && !Array.isArray(output)
+          ? { ...(output as Record<string, unknown>), resolvedTool: name }
+          : { resolvedTool: name, output };
+      };
+      if (sql) {
+        const text = str(sql.text);
+        if (!text) return refuse('PLAN_SQL_TEXT_REQUIRED', 'sql.text carries the read-only SQL and sql.reads every "<relation>.<column>" it touches.');
+        return dispatch('validate_and_run_sql', {
+          sql: text,
+          expectedOutputIds: v2StringArray(sql.reads, 24),
+          repair,
+        });
+      }
+      const kindOf = (id: string): 'certified' | 'semantic' | 'relational' => {
+        const candidate = resolveAdmittedReference(id, 'retained')?.candidate;
+        if (candidate?.kind === 'certified_block' || /::block::|^block:/.test(id)) return 'certified';
+        if (candidate?.kind === 'semantic_metric' || candidate?.semanticObjectType === 'metric' || candidate?.semanticObjectType === 'measure' || id.startsWith('semantic:metric:')) return 'semantic';
+        return 'relational';
+      };
+      const kinds = new Set(measures.map((measure) => kindOf(measure.id)));
+      if (kinds.size > 1) {
+        return refuse('PLAN_MIXED_TIERS', 'One plan answers through one tier: name only certified block ids, only semantic metric ids, or only "<relation>.<column>" measures.');
+      }
+      const kind = [...kinds][0]!;
+      if (kind === 'certified') {
+        if (measures.length > 1) return refuse('PLAN_ONE_CERTIFIED_BLOCK', 'A certified plan names exactly one block id.');
+        return dispatch('run_certified', {
+          candidateId: measures[0]!.id,
+          ...(item(args.bindings) ? { bindings: item(args.bindings) } : {}),
+          repair,
+        });
+      }
+      if (kind === 'semantic') {
+        const semanticFilters: Array<{ dimensionId: string; value: string }> = [];
+        for (const filter of filters) {
+          const operator = str(filter.operator) ?? '=';
+          const values = [...(str(filter.value) ? [str(filter.value)!] : []), ...v2StringArray(filter.values, 24)];
+          if (!['=', '==', 'eq', 'equals', 'is', 'in'].includes(operator.toLowerCase()) || values.length !== 1) {
+            return refuse('PLAN_FILTER_SHAPE_UNSUPPORTED_FOR_SEMANTIC', 'The semantic layer applies equality filters with one value per dimension. Use one value per filter, or express the shape over "<relation>.<column>" measures instead.');
+          }
+          semanticFilters.push({ dimensionId: filter.id, value: values[0]! });
+        }
+        return dispatch('compile_and_run_semantic', {
+          metricIds: measures.map((measure) => measure.id),
+          ...(dimensions.length ? { dimensionIds: dimensions.map((dimension) => dimension.id) } : {}),
+          ...(str(time?.dimensionId) ? { timeDimensionId: str(time?.dimensionId) } : {}),
+          ...(str(time?.grain) ? { timeGrain: str(time?.grain)!.toLowerCase() } : {}),
+          ...(semanticFilters.length ? { filters: semanticFilters } : {}),
+          ...(str(orderBy?.reference) ? { orderBy: [{ name: str(orderBy?.reference)!, direction: str(orderBy?.direction)?.toLowerCase() === 'asc' ? 'asc' : 'desc' }] } : {}),
+          ...(limit ? { limit } : {}),
+          repair,
+        });
+      }
+      if (str(time?.grain) || str(time?.dimensionId)) {
+        return refuse('PLAN_TIME_NOT_COMPOSABLE', 'A composed governed program has no time grain. Group by a date column of the relation as a dimension, or answer through a semantic metric that declares the grain.');
+      }
+      return dispatch('compile_and_run_dql', {
+        relationalPlan: {
+          measures,
+          ...(dimensions.length ? { dimensions } : {}),
+          ...(filters.length ? { filters } : {}),
+          ...(orderBy ? { orderBy } : {}),
+          ...(limit ? { limit } : {}),
+        },
+        repair,
+      });
+    }
     // `finish_answer` is an authoritative host control boundary.  Text-only
     // provider adapters normally stop in the agent loop immediately after the
     // tool returns, but keep the boundary at this higher layer as well: a
@@ -4972,6 +5233,25 @@ function createAskV2LaneHandler(
       // to end where it started. Admitting the prior relation up front costs
       // nothing: it is bounded by the same retained snapshot describe_relation
       // would have admitted it from.
+      // A contextual turn's evidence is host work too: the business cards
+      // and the trusted prior-result bindings are prefilled here, so the
+      // analyst's first dispatch can already cite or continue them.
+      let contextualEvidence: string | undefined;
+      try {
+        if (state.turnClass === 'definition' || state.turnClass === 'business_context') {
+          if (!state.observations.some((observation) => observation.tool === 'inspect_business_context')) {
+            const cards = await toolByName('inspect_business_context')?.run({});
+            if (cards && typeof cards === 'object') contextualEvidence = `Business context cards (cite their ids as evidenceIds in finish_answer):\n${JSON.stringify(cards)}`;
+          }
+        } else if (state.turnClass === 'prior_result' || state.turnClass === 'clarification_response') {
+          if (!state.observations.some((observation) => observation.tool === 'inspect_conversation_result')) {
+            const bindings = await toolByName('inspect_conversation_result')?.run({});
+            if (bindings && typeof bindings === 'object') contextualEvidence = `Trusted prior-result context for this turn:\n${JSON.stringify(bindings)}`;
+          }
+        }
+      } catch {
+        // Prefill is a courtesy; the analyst can still work from the question.
+      }
       const priorPlanRelationId = ((): string | undefined => {
         const priorArtifact = input.followUp?.priorDqlArtifact;
         const priorIds = [...(priorArtifact?.metrics ?? []), ...(priorArtifact?.dimensions ?? [])];
@@ -5029,11 +5309,12 @@ function createAskV2LaneHandler(
           ? [{
             role: 'user' as const,
             content: 'Admitted context from the immutable snapshot for this question. These are the only identifiers you may reference;'
-              + ' call describe_relation for a relation\'s full column list, or inspect_ask_context with expand for more cards.\n'
+              + ' call describe_relation for a relation\'s full column list or a metric\'s groupable dimensions, then propose_plan.\n'
               + openingContext,
           }]
           : []),
         ...(conversationBrief ? [{ role: 'user' as const, content: conversationBrief }] : []),
+        ...(contextualEvidence ? [{ role: 'user' as const, content: contextualEvidence }] : []),
         { role: 'user', content: input.question },
       ], tools, {
         ...(input.signal ? { signal: input.signal } : {}),
@@ -5049,7 +5330,7 @@ function createAskV2LaneHandler(
         textToolContract: buildAskV2TextToolContract,
         // Every legal reply in this lane is a tool call, so transports that can
         // constrain output are told the shape instead of being asked politely.
-        responseJsonSchema: buildAskV2ResponseJsonSchema(tools),
+        responseJsonSchema: buildAskV2ResponseJsonSchema(advertisedTools(tools)),
         // The analyst turn had no token ceiling or effort of its own: native
         // transports fell back to a 1024-token cap that cannot hold a tool call
         // plus a business answer, and the CLI ignored effort entirely. The
@@ -5103,7 +5384,7 @@ function createAskV2LaneHandler(
         // before each API tool declaration; text transports receive the same
         // update after every observation. This reserves a final *LLM action*
         // when discovery has already established a compatible semantic tier.
-        getCurrentToolPolicy: () => kernel.toolPolicy(),
+        getCurrentToolPolicy: () => analystToolPolicy(),
         // Native OpenAI/Claude loops and text-protocol turns both pass through
         // the same provider wrapper. It calls this for every physical send;
         // a provider cannot label its own discovery/execution request as

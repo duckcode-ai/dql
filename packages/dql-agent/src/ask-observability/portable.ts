@@ -442,7 +442,7 @@ function portableRuntimeReceiptV8(value: unknown, profile: AskTraceExportProfile
   const turns = new Set(['analytics', 'definition', 'business_context', 'prior_result', 'general', 'clarification_response', 'research']);
   const sources = new Set(['certified', 'semantic', 'governed_relational', 'dbt_manifest', 'runtime_schema', 'vector', 'conversation', 'business']);
   const sourceStates = new Set(['available', 'empty', 'stale', 'unavailable', 'errored', 'skipped']);
-  const tools = new Set(['inspect_ask_context', 'inspect_conversation_result', 'inspect_business_context', 'inspect_certified_candidates', 'run_certified', 'inspect_semantic_candidates', 'compile_and_run_semantic', 'inspect_relational_context', 'compile_and_run_dql', 'validate_and_run_sql', 'search_values', 'request_clarification', 'finish_answer']);
+  const tools = new Set(['inspect_ask_context', 'inspect_conversation_result', 'inspect_business_context', 'inspect_certified_candidates', 'run_certified', 'inspect_semantic_candidates', 'compile_and_run_semantic', 'describe_metric', 'inspect_relational_context', 'describe_relation', 'compile_and_run_dql', 'validate_and_run_sql', 'search_values', 'request_clarification', 'finish_answer', 'propose_plan']);
   const outcomes = new Set(['eligible', 'executed', 'ineligible', 'unavailable', 'ambiguous', 'needs_input', 'denied', 'error']);
   const tiers = new Set(['certified', 'semantic', 'governed_relational', 'exploratory_sql']);
   const origins = new Set(['retrieval', 'agent_control', 'tool', 'validation', 'freeze', 'execution', 'provider', 'narration']);

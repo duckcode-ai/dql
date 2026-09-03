@@ -45,7 +45,16 @@ export type AskToolNameV2 =
   | 'validate_and_run_sql'
   | 'search_values'
   | 'request_clarification'
-  | 'finish_answer';
+  | 'finish_answer'
+  /**
+   * The model-facing plan contract. One plan — measures, dimensions,
+   * filters, time, ordering, a row bound — whose ids may name a certified
+   * block, a semantic metric, or a `<relation>.<column>`; the HOST resolves
+   * the tier and dispatches to the handler above, which is where the
+   * kernel's gates apply. The kernel never lists it in a policy; the lane
+   * projects the handlers' admission onto it.
+   */
+  | 'propose_plan';
 
 export const ASK_V2_CANONICAL_TOOLS: readonly AskToolNameV2[] = [
   'inspect_ask_context',
@@ -63,6 +72,7 @@ export const ASK_V2_CANONICAL_TOOLS: readonly AskToolNameV2[] = [
   'search_values',
   'request_clarification',
   'finish_answer',
+  'propose_plan',
 ];
 
 /** Opaque proof that a candidate belongs to this immutable retrieval snapshot. */

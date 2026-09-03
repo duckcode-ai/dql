@@ -791,6 +791,8 @@ export {
   parseTextToolCall,
   type AgenticToolLoopOptions,
   type TextToolLoopResult,
+  advertisedTools,
+  admittedToolNames,
 } from "./agentic/tool-loop.js";
 export {
   buildSemanticStageTools,

@@ -156,21 +156,45 @@ export interface TextToolLoopResult {
   toolCalls: number;
 }
 
+/**
+ * Widen a policy's name set with the hidden tools that alias an admitted
+ * advertised tool. The model is never shown a hidden name, but a transcript,
+ * a cassette, or the host itself may still call one, and it is admitted
+ * exactly when the tool it stands behind is.
+ */
+export function admittedToolNames(
+  names: readonly string[],
+  tools: readonly AgentToolDefinition[],
+): Set<string> {
+  const available = new Set(tools.map((tool) => tool.name));
+  const admitted = new Set(names.filter((name) => available.has(name)));
+  for (const tool of tools) {
+    if (tool.hidden && tool.aliasOf && admitted.has(tool.aliasOf)) admitted.add(tool.name);
+  }
+  return admitted;
+}
+
+/** The tools a model may be shown: everything not marked hidden. */
+export function advertisedTools(tools: readonly AgentToolDefinition[]): AgentToolDefinition[] {
+  return tools.filter((tool) => !tool.hidden);
+}
+
 function currentToolPolicy(
   options: ProviderToolLoopOptions,
   tools: readonly AgentToolDefinition[],
 ): { policy?: ProviderCurrentToolPolicy; allowedToolNames: Set<string>; terminalActionToolNames: Set<string> } {
   const policy = options.getCurrentToolPolicy?.();
-  const available = new Set(tools.map((tool) => tool.name));
-  const allowedToolNames = new Set(
-    (policy?.allowedToolNames ?? tools.map((tool) => tool.name))
-      .filter((name) => available.has(name)),
-  );
+  const allowedToolNames = admittedToolNames(policy?.allowedToolNames ?? tools.map((tool) => tool.name), tools);
   const terminalActionToolNames = new Set(
-    (policy?.terminalActionToolNames ?? [])
+    [...admittedToolNames(policy?.terminalActionToolNames ?? [], tools)]
       .filter((name) => allowedToolNames.has(name)),
   );
   return { policy, allowedToolNames, terminalActionToolNames };
+}
+
+function visibleNames(names: Iterable<string>, tools: readonly AgentToolDefinition[]): string[] {
+  const hidden = new Set(tools.filter((tool) => tool.hidden).map((tool) => tool.name));
+  return [...names].filter((name) => !hidden.has(name));
 }
 
 /**
@@ -184,8 +208,12 @@ function renderCurrentToolPolicy(
 ): string | undefined {
   const { policy, allowedToolNames, terminalActionToolNames } = currentToolPolicy(options, tools);
   if (!policy) return undefined;
-  const allowed = [...allowedToolNames];
-  const terminal = [...terminalActionToolNames];
+  // Only advertised names reach the model; a hidden alias is admitted, not
+  // announced.
+  const visible = advertisedTools(tools);
+  const visibleNames = new Set(visible.map((tool) => tool.name));
+  const allowed = [...allowedToolNames].filter((name) => visibleNames.has(name));
+  const terminal = [...terminalActionToolNames].filter((name) => visibleNames.has(name));
   const instruction = policy.instruction?.trim();
   // Re-state the SIGNATURES of the tools still on the table, not just their
   // names. The response contract is sent once, at the start, listing every
@@ -194,8 +222,8 @@ function renderCurrentToolPolicy(
   // and each refusal costs a dispatch until the turn dies with nothing run.
   // Naming the remaining options in full makes the next legal move the
   // easiest one to make.
-  const allowedSignatures = allowed.length && allowed.length < tools.length
-    ? tools
+  const allowedSignatures = allowed.length && allowed.length < visible.length
+    ? visible
       .filter((tool) => allowedToolNames.has(tool.name))
       .map((tool) => {
         const props = (tool.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
@@ -325,7 +353,7 @@ export async function runTextProtocolToolLoopDetailed(
     ...baseMessages,
     // Tell the model the *effective* ceiling, not a larger policy cap that
     // cannot physically leave room for its final response.
-    { role: 'system', content: (options.textToolContract ?? buildTextToolContract)(tools, effectiveToolBudget) },
+    { role: 'system', content: (options.textToolContract ?? buildTextToolContract)(advertisedTools(tools), effectiveToolBudget) },
   ];
   const initialPolicy = renderCurrentToolPolicy(options, tools);
   if (initialPolicy) messages.push({ role: 'system', content: initialPolicy });
@@ -377,7 +405,7 @@ export async function runTextProtocolToolLoopDetailed(
     if (terminalActionRound) {
       messages.push({
         role: 'system',
-        content: `Final controller action for this phase. Call exactly one of: ${[...livePolicyBeforeDispatch.terminalActionToolNames].join(', ')}. Do not inspect more context or answer in prose.`,
+        content: `Final controller action for this phase. Call exactly one of: ${visibleNames(livePolicyBeforeDispatch.terminalActionToolNames, tools).join(', ')}. Do not inspect more context or answer in prose.`,
       });
     }
     let text: string;
@@ -439,7 +467,7 @@ export async function runTextProtocolToolLoopDetailed(
         requiredActionProseRetries += 1;
         messages.push({
           role: 'user',
-          content: `Controller progression required. Discard the prior prose and call exactly one of: ${[...policy.terminalActionToolNames].join(', ')}. Do not answer in prose.`,
+          content: `Controller progression required. Discard the prior prose and call exactly one of: ${visibleNames(policy.terminalActionToolNames, tools).join(', ')}. Do not answer in prose.`,
         });
         continue;
       }
@@ -475,7 +503,7 @@ export async function runTextProtocolToolLoopDetailed(
     let deadlineStop: TextToolLoopResult | undefined;
     const startedAt = Date.now();
     if (!tool) {
-      output = { error: `Unknown tool: ${call.name}. Available: ${tools.map((t) => t.name).join(', ')}` };
+      output = { error: `Unknown tool: ${call.name}. Available: ${advertisedTools(tools).map((t) => t.name).join(', ')}` };
       isError = true;
     } else {
       try {
@@ -548,7 +576,7 @@ export async function runTextProtocolToolLoopDetailed(
       if (policy.terminalActionToolNames.size > 0) {
         messages.push({
           role: 'user',
-          content: `Final controller action turn. Call exactly one of: ${[...policy.terminalActionToolNames].join(', ')}. Do not inspect more context or write a prose answer.`,
+          content: `Final controller action turn. Call exactly one of: ${visibleNames(policy.terminalActionToolNames, tools).join(', ')}. Do not inspect more context or write a prose answer.`,
         });
         const finalDispatchOptions = providerTurns > 0 && runOptions.dispatchPhase === 'agent_control'
           ? {

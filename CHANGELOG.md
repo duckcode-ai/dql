@@ -8,6 +8,45 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Ask analyst: one plan, five tools
+
+- The model-facing tool surface is five tools: `describe_relation`,
+  `search_values`, `propose_plan`, `request_clarification`, `finish_answer`.
+  `propose_plan` is the one build contract — measures, dimensions, filters,
+  time, ordering, a row bound — whose ids may name a certified block, a
+  semantic metric, or a `<relation>.<column>`. The HOST resolves the tier
+  (certified, then semantic, then a composed single-relation governed
+  program; `sql {text, reads}` is the review-required last resort) and
+  assigns trust; the model can no longer pick a trust label by picking a
+  tool. `describe_relation` on a metric id describes the metric.
+- The tier handlers (`run_certified`, `compile_and_run_semantic`,
+  `compile_and_run_dql`, `validate_and_run_sql`, `describe_metric`, the
+  `inspect_*` inspectors) stay in the dispatch table as hidden aliases of the
+  advertised tool: still kernel-gated, still observed under their own names
+  in the receipt, callable by the host floor, host-first and older
+  transcripts, never declared to a model. Tool definitions gained
+  `hidden`/`aliasOf`; the loops admit an alias exactly when its advertised
+  tool is admitted.
+- Inspections are host work: the certified, semantic and relational cards
+  were already prefilled; a definition/business turn now also gets its
+  business-context cards, and a follow-up its trusted prior-result bindings,
+  before the first dispatch. A kernel that still wants an inspection
+  recorded before an execution gets it from the plan dispatcher.
+- A post-execution prose reply is the narration. Every transport used to
+  discard a model that wrote the answer text without the `finish_answer`
+  envelope and spend another send asking for the same words. The
+  narration-phase prose now goes to the host's own finish control (the
+  route, trust and facts were always host-composed); a turn that never
+  executed is never adopted.
+- Native multi-model semantic joins are proven. The composer's fanout probe
+  runs BEFORE the governed query in the V2 lane: a join that multiplies base
+  rows is a typed block (`SEMANTIC_FANOUT_DUPLICATE_KEY`, nothing shown); a
+  probe that cannot be evaluated leaves the answer review-required.
+- The deterministic display-key clarification is back, host-side: "the top
+  names by revenue" over a metric whose capability contract declares several
+  rank entities is asked, not guessed, before any dispatch; each option
+  carries the authored dimension id and the question to resubmit.
+
 ### Ask runtime: one runtime, and a floor under it
 
 - `authoritative_v2` is now the default Ask runtime. `shadow_v2` — which built

@@ -74,25 +74,24 @@ function looksNumeric(id: string): boolean {
 }
 
 /**
- * A cooperative analyst's one plan: the first certified block it was shown,
- * else the first metric, else a single-relation relational plan over the
- * first numeric-looking admitted column grouped by the first text-looking one.
+ * A cooperative analyst's one plan, sent through the one model-facing
+ * contract: the first certified block it was shown, else the first metric,
+ * else a single-relation plan over the first numeric-looking admitted column
+ * grouped by the first text-looking one. The HOST resolves the tier.
  */
 function cooperativeMove(prompt: string, priorCalls: number): string {
   if (priorCalls >= 1) return toolCall('finish_answer', { answer: 'Here is the result.', evidenceIds: [] });
   const certified = certifiedIds(prompt);
-  if (certified.length) return toolCall('run_certified', { candidateId: certified[0] });
+  if (certified.length) return toolCall('propose_plan', { measures: [{ id: certified[0] }] });
   const metrics = metricIds(prompt);
-  if (metrics.length) return toolCall('compile_and_run_semantic', { metricIds: [metrics[0]] });
+  if (metrics.length) return toolCall('propose_plan', { measures: [{ id: metrics[0] }] });
   const columns = admittedColumnIds(prompt);
   const measure = columns.find(looksNumeric);
   const dimension = columns.find((id) => id !== measure && !looksNumeric(id));
   if (measure) {
-    return toolCall('compile_and_run_dql', {
-      relationalPlan: {
-        measures: [{ id: measure, aggregation: 'sum' }],
-        ...(dimension ? { dimensions: [{ id: dimension }], limit: 10 } : {}),
-      },
+    return toolCall('propose_plan', {
+      measures: [{ id: measure, aggregation: 'sum' }],
+      ...(dimension ? { dimensions: [{ id: dimension }], limit: 10 } : {}),
     });
   }
   return toolCall('finish_answer', { answer: 'Nothing admitted fits this question.', evidenceIds: [] });
@@ -117,9 +116,7 @@ export function createScriptedAnalystProvider(persona: ScriptedAnalystPersona): 
           return toolCall('finish_answer', { answer: 'I would rather not run anything.', evidenceIds: [] });
         case 'wrong_ids_then_corrects':
           if (index === 0) {
-            return toolCall('compile_and_run_dql', {
-              relationalPlan: { measures: [{ id: 'invented_mart.invented_total', aggregation: 'sum' }] },
-            });
+            return toolCall('propose_plan', { measures: [{ id: 'invented_mart.invented_total', aggregation: 'sum' }] });
           }
           return cooperativeMove(prompt, index - 1);
         case 'browser': {

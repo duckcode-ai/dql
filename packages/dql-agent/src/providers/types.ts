@@ -153,6 +153,23 @@ export interface AgentToolDefinition {
   description: string;
   inputSchema: Record<string, unknown>;
   run(args: unknown): Promise<unknown>;
+  /**
+   * Callable when named, never advertised.
+   *
+   * A hidden tool is left out of every surface the model is shown — the
+   * native tool declaration, the text contract, the availability updates —
+   * but stays in the loop's dispatch table. The Ask lane uses this for the
+   * host's own tier handlers, which the model reaches through one
+   * `propose_plan` and which older transcripts and cassettes still name.
+   */
+  hidden?: boolean;
+  /**
+   * The advertised tool whose policy admission this hidden tool shares: when
+   * the host allows `aliasOf`, a call to this tool is admitted too (and it
+   * may take the terminal slot `aliasOf` holds). Meaningful only with
+   * `hidden`.
+   */
+  aliasOf?: string;
 }
 
 /**
