@@ -10,7 +10,7 @@ import type {
 } from './types.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
-import { DEFAULT_PROVIDER_DISPATCH_LIMIT, fetchProviderHttpDispatch } from './dispatch.js';
+import { fetchProviderHttpDispatch, providerDispatchLimit } from './dispatch.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 
@@ -438,7 +438,7 @@ options: ProviderToolLoopOptions = {},
     .map((m) => ({ role: m.role, content: m.content }));
   const model = options.model ?? transport.defaultModel;
   const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
-  const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? DEFAULT_PROVIDER_DISPATCH_LIMIT));
+  const dispatchLimit = providerDispatchLimit(options);
   const requestedToolBudget = Math.max(0, Math.min(dispatchLimit <= 2 ? 4 : 30, options.maxToolCalls ?? 8));
   // The V2 controller can reserve the last physical provider send for one
   // host-approved terminal action. Preserve the legacy native-loop budget

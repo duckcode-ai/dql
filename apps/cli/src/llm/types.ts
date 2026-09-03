@@ -190,6 +190,12 @@ export interface ProviderDispatchEvidenceSink {
   snapshot(fallbackReason?: string): ProviderDispatchTerminalEvidence;
   /** Run-budget guard checked before every provider-visible tool branch. */
   mayStartToolCall?(): boolean;
+  /**
+   * Physical sends this ledger will still admit for the run. The loop that
+   * plans its turns against a dispatch count reads THIS, so the number it
+   * reserves its final narration send against is the one actually enforced.
+   */
+  remainingDispatches?(): number;
 }
 
 export interface AgentRunRequest {

@@ -629,7 +629,9 @@ describe('Ask V2 tool kernel', () => {
       });
     }
     expect(kernel.canCall('describe_relation')).toMatchObject({ ok: false, reasonCode: 'ASK_V2_REDUNDANT_INSPECTION' });
-    // A parameterless inspector still gets exactly one call.
+    // A parameterless inspector is never refused for being REPEATED — only
+    // the policy's progression rule may narrow it away, and then it points at
+    // the executable next step rather than at a reason code.
     kernel.observe({
       version: 1,
       tool: 'inspect_conversation_result',
@@ -638,7 +640,9 @@ describe('Ask V2 tool kernel', () => {
       candidateIds: [],
       origin: 'retrieval',
     });
-    expect(kernel.canCall('inspect_conversation_result')).toMatchObject({ ok: false, reasonCode: 'ASK_V2_REDUNDANT_INSPECTION' });
+    const again = kernel.canCall('inspect_conversation_result');
+    expect(again.reasonCode).not.toBe('ASK_V2_REDUNDANT_INSPECTION');
+    if (!again.ok) expect(again.safeNextTools?.length).toBeGreaterThan(0);
   });
 
   it('lets a frozen plan that could not run descend once to review-required SQL, and only once', () => {
@@ -1047,13 +1051,16 @@ describe('Ask V2 tool kernel', () => {
     expect(kernel.toolPolicy()).toMatchObject({
       terminalActionToolNames: ['compile_and_run_semantic', 'compile_and_run_dql', 'validate_and_run_sql'],
     });
+    // Looking at the same snapshot again is not an error in itself. Once the
+    // evidence is in, the progression rule narrows the analyst to execution
+    // and hands it those tools; the refused repeat costs no tool budget.
     expect(kernel.canCall('inspect_ask_context')).toMatchObject({
       ok: false,
-      reasonCode: 'ASK_V2_REDUNDANT_INSPECTION',
+      reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED',
       safeNextTools: ['compile_and_run_semantic', 'compile_and_run_dql', 'validate_and_run_sql'],
     });
     const toolCallsBefore = kernel.diagnosticReceipt().activity.toolCalls;
-    kernel.observe({ version: 1, tool: 'inspect_ask_context', outcome: 'ineligible', reasonCode: 'ASK_V2_REDUNDANT_INSPECTION', candidateIds: [], origin: 'validation' });
+    kernel.observe({ version: 1, tool: 'inspect_ask_context', outcome: 'ineligible', reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED', candidateIds: [], origin: 'validation' });
     expect(kernel.diagnosticReceipt().activity.toolCalls).toBe(toolCallsBefore);
     expect(kernel.canCall('compile_and_run_dql')).toEqual({ ok: true });
   });

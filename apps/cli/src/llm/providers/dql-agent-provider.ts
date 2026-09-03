@@ -1545,6 +1545,16 @@ function v2ExecutionFailureFromError(
  */
 let v2TurnConversationCounter = 0;
 
+/**
+ * Sends a lane may plan against when its caller passed no limit. The wrapper
+ * always passes the run ledger's remaining count; this only serves direct
+ * in-process callers, and it is one number rather than one per turn class
+ * because the ledger, not the turn class, is what runs out.
+ */
+const ASK_V2_LANE_DEFAULT_DISPATCHES = 10;
+/** Research proposes hypotheses first, so it needs one send more than an Ask per branch it may open. */
+const ASK_V2_RESEARCH_DEFAULT_DISPATCHES = 12;
+
 function createAskV2LaneHandler(
   state: AskAgentStateV4,
   limits?: { maxToolCalls?: number; maxProviderDispatches?: number },
@@ -2006,26 +2016,6 @@ function createAskV2LaneHandler(
       }
       return state.observations.some((observation) => observation.tool === tool);
     };
-    const requireInspections = (tool: AskToolNameV2, required: AskToolNameV2[]): boolean => {
-      // A live V2 controller commitment is made only by the matching
-      // host-backed inspector below.  Requiring it to spend later-tier
-      // inspection turns before the selected compiler can run was the source
-      // of semantic dispatch-budget failures.  The kernel still rejects an
-      // earlier *complete* tier before authorization/freeze.
-      const committedExecutionTool = state.controllerTier === 'certified'
-        ? 'run_certified'
-        : state.controllerTier === 'semantic'
-          ? 'compile_and_run_semantic'
-          : state.controllerTier === 'governed_relational'
-            ? 'compile_and_run_dql'
-            : state.controllerTier === 'exploratory_sql'
-              ? 'validate_and_run_sql'
-              : undefined;
-      if (committedExecutionTool === tool) return true;
-      if (required.every(inspected)) return true;
-      observe(tool, 'ineligible', 'REQUIRED_TIER_INSPECTION_MISSING', { origin: 'validation' });
-      return false;
-    };
     const safeTool = (
       name: AskToolNameV2,
       description: string,
@@ -2218,7 +2208,6 @@ function createAskV2LaneHandler(
           repair: { type: 'boolean' },
         }, required: ['candidateId'], additionalProperties: false,
       }, async (args) => {
-        if (!requireInspections('run_certified', ['inspect_certified_candidates'])) return denied('run_certified', 'REQUIRED_TIER_INSPECTION_MISSING');
         // Re-materialize immediately before authorizing. An artifact may have
         // gone stale after the inspector rendered it; while still pre-freeze
         // that is an unavailable observation and the cascade may continue.
@@ -2412,7 +2401,6 @@ function createAskV2LaneHandler(
           limit: { type: 'integer', minimum: 1, maximum: 10000 }, repair: { type: 'boolean' },
         }, required: ['metricIds'], additionalProperties: false,
       }, async (args) => {
-        if (!requireInspections('compile_and_run_semantic', ['inspect_certified_candidates', 'inspect_semantic_candidates'])) return denied('compile_and_run_semantic', 'REQUIRED_TIER_INSPECTION_MISSING');
         const semanticCapabilities = workspace?.semanticCapabilities;
         const semanticCapabilityCollisionIds = new Set(workspace?.semanticCapabilityCollisionIds ?? []);
         const directlyRequestedCollisionIds = [
@@ -3659,7 +3647,6 @@ function createAskV2LaneHandler(
           expectedOutputIds: { type: 'array', items: { type: 'string' }, maxItems: 24 }, repair: { type: 'boolean' },
         }, required: [], additionalProperties: false,
       }, async (args) => {
-        if (!requireInspections('compile_and_run_dql', ['inspect_certified_candidates', 'inspect_semantic_candidates', 'inspect_relational_context'])) return denied('compile_and_run_dql', 'REQUIRED_TIER_INSPECTION_MISSING');
         // A relational plan names decisions; the host turns them into the
         // executable artifact. When one is present it is authoritative, and
         // the binding arrays are derived from it so the frozen closure and
@@ -3943,7 +3930,6 @@ function createAskV2LaneHandler(
       safeTool('validate_and_run_sql', 'Validate one read-only SQL proposal, mint a one-use capability, and execute it as review-required. expectedOutputIds are the ADMITTED IDENTIFIERS the SQL reads — "<relation>.<column>" for each column it touches — never the aliases the SELECT returns.', {
         type: 'object', properties: { sql: { type: 'string', minLength: 1, maxLength: 30000 }, expectedOutputIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 24 }, repair: { type: 'boolean' } }, required: ['sql', 'expectedOutputIds'], additionalProperties: false,
       }, async (args) => {
-        if (!requireInspections('validate_and_run_sql', ['inspect_certified_candidates', 'inspect_semantic_candidates', 'inspect_relational_context'])) return denied('validate_and_run_sql', 'REQUIRED_TIER_INSPECTION_MISSING');
         const sql = typeof args.sql === 'string' ? args.sql : '';
         const outputIds = v2StringArray(args.expectedOutputIds, 24);
         const outputs = resolveCandidates(outputIds);
@@ -4640,12 +4626,7 @@ function createAskV2LaneHandler(
         // that is really enforced (agentControl 1 + toolFollowup 9 + narration
         // 1), so the loop is told that number and its reserve logic finally
         // describes reality.
-        maxProviderDispatches: limits?.maxProviderDispatches
-          ?? (state.turnClass === 'research'
-            ? ASK_V2_BUDGETS.research.providerDispatches
-            : state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response'
-              ? ASK_V2_BUDGETS.ask.providerDispatches
-              : ASK_V2_BUDGETS.contextual.providerDispatches),
+        maxProviderDispatches: limits?.maxProviderDispatches ?? ASK_V2_LANE_DEFAULT_DISPATCHES,
         // The kernel owns current availability. Native transports evaluate it
         // before each API tool declaration; text transports receive the same
         // update after every observation. This reserves a final *LLM action*
@@ -5228,7 +5209,10 @@ function askV2ResearchAnalyticalBranchReceipt(
  * legacy research controller, V1 answer loop, or fabricated branch list is
  * involved.
  */
-function createAskV2ResearchLaneHandler(state: AskAgentStateV4) {
+function createAskV2ResearchLaneHandler(
+  state: AskAgentStateV4,
+  limits?: { maxProviderDispatches?: number },
+) {
   return async (input: AnswerLoopInput): Promise<AgentAnswer> => {
     const workspace = v2WorkspaceForInput(input, state);
     if (!workspace) {
@@ -5299,7 +5283,7 @@ function createAskV2ResearchLaneHandler(state: AskAgentStateV4) {
     // child loops cannot add up to an unbounded parent Research run.
     const analyticalBranchCount = hypotheses.filter((hypothesis) => hypothesis.kind === 'analytical').length;
     const perAnalyticalBranchDispatches = analyticalBranchCount > 0
-      ? Math.max(1, Math.floor((ASK_V2_BUDGETS.research.providerDispatches - 1) / analyticalBranchCount))
+      ? Math.max(1, Math.floor(((limits?.maxProviderDispatches ?? ASK_V2_RESEARCH_DEFAULT_DISPATCHES) - 1) / analyticalBranchCount))
       : 0;
     const perAnalyticalBranchTools = Math.min(6, Math.max(0, perAnalyticalBranchDispatches - 1));
     for (const hypothesis of hypotheses) {
@@ -6225,20 +6209,15 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       // not an analytical repair route and retains its established three-tool
       // plus final-response wrapper cap; it cannot acquire the repair phase.
       const v2ResultEgress = v2Authoritative ? askV2ProviderResultEgress(req.projectRoot, id) : undefined;
-      // The authoritative V2 analyst walks a tier ladder: inspect certified,
-      // inspect semantic, attempt it, inspect relational, attempt that, and
-      // only then exploratory SQL — with a finish control reserved at the end.
-      // At six dispatches a single mis-specified argument anywhere in that
-      // sequence ended the turn with nothing executed, which read to users as
-      // "the AI could not answer" when it had simply run out of turns partway
-      // down a path it was following correctly. Ten leaves room to be wrong
-      // once per tier and still finish; the tool-call ceiling and the run
-      // deadline remain the real bounds.
-      const maxProviderDispatches = isResearch
-        ? (v2Authoritative ? 12 : 8)
-        : frozenExploratoryRepairRoute ? 3 : v2Authoritative ? 10 : 4;
-      const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
       const sharedDispatchEvidence = req.providerDispatchEvidenceSink;
+      // The run's dispatch ledger is the one budget that is enforced, so it is
+      // the one the loop plans against. The literal numbers are for entries
+      // that install no ledger (in-process tests, cassette replays): a
+      // frozen exploratory repair needs two sends and a finish, a simple Ask
+      // enough to be wrong once per tier and still finish.
+      const maxProviderDispatches = sharedDispatchEvidence?.remainingDispatches?.()
+        ?? (isResearch ? 12 : frozenExploratoryRepairRoute ? 3 : 10);
+      const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
       let providerRoundTrips = 0;
       let sqlExecutions = 0;
       let pendingResultRowCount = 0;
@@ -7575,7 +7554,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               // controller when the provider chooses a branch/tool.
               handlers: {
                 ask_v2: createAskV2LaneHandler(v2State!),
-                research: createAskV2ResearchLaneHandler(v2State!),
+                research: createAskV2ResearchLaneHandler(v2State!, { maxProviderDispatches }),
               },
             });
             }

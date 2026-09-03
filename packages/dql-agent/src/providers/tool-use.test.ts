@@ -980,6 +980,8 @@ describe('provider tool use', () => {
       [{ name: 'sample_rows', description: 'Rows', inputSchema: { type: 'object' }, run: async () => ({ rows: [{ secret: 'ROW_CANARY_ADA' }] }) }],
       {
         maxToolCalls: 4,
+        // The bound is the caller's to state; no provider supplies one silently.
+        maxProviderDispatches: 2,
         onProviderDispatch: recorded.observe,
         providerPayloadGuard: { purpose: 'research_tool', allowedResultRowTools: {} },
       },

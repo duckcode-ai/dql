@@ -4118,11 +4118,12 @@ describe('provider runner — analyst physical dispatch budget', () => {
     }
   });
 
-  it('allows three text tools and a final SQL response under the ordinary four-dispatch wrapper cap', async () => {
+  it('tells the analyst the dispatch bound it is actually under, and accepts the final SQL inside it', async () => {
     // This exercises the actual provider-runner wrapper, not just the generic
     // text loop: historically the runner silently replaced the loop options
-    // with maxProviderDispatches=4 while the analyst was allowed to schedule
-    // four tools plus a final response.
+    // with its own cap while the analyst was told a different one. With no
+    // run ledger installed the wrapper's stated default applies, and the
+    // number in the prompt must be that number.
     const root = mkdtempSync(join(tmpdir(), 'dql-provider-runner-budget-'));
     try {
       cpSync(providerFixtureRoot, root, { recursive: true });
@@ -4224,8 +4225,10 @@ describe('provider runner — analyst physical dispatch budget', () => {
 
       expect(calls).toHaveLength(4);
       expect(calls.every((messages) => !messages.some((message) => /You are planning an analytics investigation/i.test(message.content)))).toBe(true);
-      expect(calls[0]!.map((message) => message.content).join('\n')).toContain('at most 3 tool call');
-      expect(calls[3]!.map((message) => message.content).join('\n')).toContain('Tool budget reached');
+      // The configured tool ceiling (maxIterations 8) is what the analyst is
+      // told. It used to be crushed to three by a dispatch cap of four that
+      // the analyst was never shown.
+      expect(calls[0]!.map((message) => message.content).join('\n')).toContain('at most 8 tool call');
       expect(turns.find((turn) => turn.kind === 'error')).toBeUndefined();
       const governed = turns.find((turn) => turn.kind === 'tool_result' && turn.id === 'governed_answer');
       // The minimal frozen-plan fixture deliberately has no executable plan

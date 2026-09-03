@@ -70,6 +70,83 @@ export function resolveAgentRunRetention(env: NodeJS.ProcessEnv = process.env): 
   return Math.max(20, Math.min(5_000, Math.floor(configured)));
 }
 
+
+/**
+ * What a run is allowed to weigh when it is written down.
+ *
+ * A finished run carried the same context pack and artifact payloads four to
+ * five times: on `run.artifacts`, inside the V1 receipt's `steps`/`artifacts`
+ * (held by reference), inside the answer artifact's own embedded receipt,
+ * inside every `steps[].artifacts`, and as the payload of the
+ * `artifact.created` event. The API projection already drops the copies before
+ * a client sees them — but the STORE wrote the raw object. Measured on a
+ * 13-model project: 4.2 MB per run, 7.1 MB at worst, 1.25 GB across 300 runs,
+ * and a server that reached its heap limit after half an hour of questions.
+ *
+ * Nothing here is lost. `run.artifacts` keeps every payload once; the other
+ * carriers keep identity. The one exception is deliberate: a Research task
+ * step keeps its artifacts whole, because `canonicalTaskResultProofsByTask`
+ * rebuilds task trust from them on reload.
+ */
+export function slimRunForPersistence<T extends { artifacts?: unknown; steps?: unknown; events?: unknown }>(run: T): T {
+  const record = (value: unknown): Record<string, unknown> | undefined =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const identity = (artifact: unknown): unknown => {
+    const item = record(artifact);
+    if (!item) return artifact;
+    const { payload: _payload, ...rest } = item;
+    return rest;
+  };
+  const withoutRunCopies = (receipt: unknown): unknown => {
+    const item = record(receipt);
+    if (!item) return receipt;
+    const { steps: _steps, artifacts: _artifacts, ...rest } = item;
+    return rest;
+  };
+  const artifacts = Array.isArray(run.artifacts)
+    ? run.artifacts.map((artifact) => {
+      const item = record(artifact);
+      const payload = record(item?.payload);
+      if (!item || !payload) return artifact;
+      const slimmed: Record<string, unknown> = { ...payload };
+      for (const key of Object.keys(payload)) {
+        if (key.startsWith('diagnosticReceipt')) slimmed[key] = withoutRunCopies(payload[key]);
+      }
+      return { ...item, payload: slimmed };
+    })
+    : run.artifacts;
+  const steps = Array.isArray(run.steps)
+    ? run.steps.map((step) => {
+      const item = record(step);
+      if (!item || !Array.isArray(item.artifacts)) return step;
+      // A Research task step is the one place reload needs the artifacts whole.
+      if (typeof item.askAnalystTaskId === 'string' && item.askAnalystTaskId) return step;
+      return { ...item, artifacts: item.artifacts.map(identity) };
+    })
+    : run.steps;
+  const events = Array.isArray(run.events)
+    ? run.events.map((event) => {
+      const item = record(event);
+      if (!item) return event;
+      if (item.type === 'artifact.created') {
+        const artifact = record(item.payload);
+        return artifact
+          ? { ...item, payload: { artifactId: artifact.id, kind: artifact.kind, title: artifact.title, trustState: artifact.trustState } }
+          : event;
+      }
+      return event;
+    })
+    : run.events;
+  const receipt = withoutRunCopies((run as Record<string, unknown>).diagnosticReceipt);
+  return {
+    ...run,
+    artifacts,
+    steps,
+    events,
+    ...((run as Record<string, unknown>).diagnosticReceipt !== undefined ? { diagnosticReceipt: receipt } : {}),
+  };
+}
+
 export class SqliteAgentRunStore implements AgentRunStore {
   private readonly db: Database.Database;
   private readonly maxRuns: number;
@@ -315,7 +392,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
             completedAt,
           },
         };
-        update.run(run.route, run.status, completedAt, JSON.stringify(run), completedAt, run.id);
+        update.run(run.route, run.status, completedAt, JSON.stringify(slimRunForPersistence(run)), completedAt, run.id);
       }
     });
     closeAll();
@@ -349,7 +426,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
         update.run(row.payload_json, row.id);
         continue;
       }
-      update.run(JSON.stringify({ ...run, events: [] }), row.id);
+      update.run(JSON.stringify({ ...slimRunForPersistence(run), events: [] }), row.id);
     }
   }
 
@@ -375,7 +452,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
             (run as { status?: string }).status ?? null,
             run.startedAt,
             (run as { completedAt?: string }).completedAt ?? null,
-            JSON.stringify(run),
+            JSON.stringify(slimRunForPersistence(run)),
             now,
           );
         }

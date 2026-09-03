@@ -1125,14 +1125,15 @@ export function projectResearchEvidenceLedgerV4(ledger: ResearchEvidenceLedgerV3
  */
 export const ASK_V2_DESCRIBE_CALLS_PER_TOOL = 2;
 
+/**
+ * What the ANALYST may do in a turn. Deliberately not here: how many provider
+ * sends a turn may make (the run-scoped dispatch ledger owns that, and the
+ * loop reads its remaining count) and how long a turn may run (the run
+ * deadline owns that). Both used to be listed here as well, disagreed with
+ * their owners, and were enforced by nothing.
+ */
 export const ASK_V2_BUDGETS = {
   ask: {
-    durationMs: 45_000,
-    // PHYSICAL sends, and the number the server ledger actually enforces
-    // (one agent-control turn + nine tool follow-ups). The transport loop
-    // reserves its final send for narration against this figure, so the two
-    // budgets can no longer disagree about how much room a turn really has.
-    providerDispatches: 10,
     toolCalls: 8,
     expansions: 2,
     executions: 2,
@@ -1140,8 +1141,8 @@ export const ASK_V2_BUDGETS = {
     valueSearches: 1,
     clarifications: 1,
   },
-  contextual: { durationMs: 15_000, providerDispatches: 2, toolCalls: 4 },
-  research: { durationMs: 120_000, providerDispatches: 12, toolCalls: 24, branches: 6, repairs: 2 },
+  contextual: { toolCalls: 4 },
+  research: { toolCalls: 24, branches: 6, repairs: 2 },
 } as const;
 
 export interface AskToolKernelV2 {
@@ -1219,6 +1220,16 @@ function askV2ObservationConsumesToolBudget(
   // retrieval too.
   if (observation.hostObserved === true) return false;
   if (observation.reasonCode === 'ASK_V2_REDUNDANT_INSPECTION') return false;
+  // A PARAMETERLESS inspector answers from the immutable snapshot, so calling
+  // it again returns the same card. It is neither refused (the refusal only
+  // spent the dispatch on a reason code) nor charged: the analyst learns
+  // nothing new and loses nothing for looking. Describe tools and snapshot
+  // expansions are different calls each time and stay on the budget.
+  if (ASK_V2_INSPECTION_TOOLS.has(observation.tool)
+    && observation.tool !== 'describe_relation'
+    && observation.tool !== 'describe_metric'
+    && observation.reasonCode !== 'same_snapshot_extension'
+    && priorObservations.some((prior) => prior.tool === observation.tool)) return false;
   if (observation.reasonCode === 'SEMANTIC_TIME_BINDING_COMPLETED') return false;
   if (ASK_V2_INSPECTION_TOOLS.has(observation.tool)
     && observation.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED') return false;
@@ -1384,17 +1395,6 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         && observation.tier !== undefined
         && priority.indexOf(observation.tier) < index;
     })?.tier;
-  };
-
-  const earlierTierInspected = (tier: AskExecutionTierV2): boolean => {
-    const index = priority.indexOf(tier);
-    return priority.slice(0, index).every((earlier) => {
-      if (earlier === 'governed_relational' && hasInitialRelationshipClosure()) return true;
-      return state.observations.some((observation) =>
-        inspectionToolTier[observation.tool] === earlier
-        || executionToolTier[observation.tool] === earlier,
-      );
-    });
   };
 
   const hasToolObservation = (tool: AskToolNameV2): boolean => state.observations.some((observation) => observation.tool === tool);
@@ -1905,34 +1905,21 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
       if (state.terminalOutcome?.kind === 'execution_failure') {
         return { ok: false, reasonCode: state.terminalOutcome.reasonCode };
       }
-      const inspectionTools = ASK_V2_INSPECTION_TOOLS;
-      // Immutable retrieval means a repeated inspector cannot reveal a new
-      // candidate, coverage state, or relationship path. Reject it before
-      // normal policy/budget handling so the next controller prompt receives
-      // the current executable safe action instead of treating repetition as
-      // evidence that the data is missing. A bounded same-snapshot extension
-      // is the sole exception.
-      const repeatedInitialContext = tool === 'inspect_ask_context'
-        && input.expansion !== true
-        && hasToolObservation('inspect_ask_context');
+      // Two inspection limits remain, both about the snapshot running out of
+      // things to show. An expansion past the last page reveals nothing; a
+      // describe tool answers a different question each call but is bounded
+      // so a browsing analyst cannot describe until the deadline. A repeated
+      // PARAMETERLESS inspector is neither refused nor charged: its answer is
+      // free, and refusing it only spent the dispatch the analyst had already
+      // paid for on a reason code instead of a card.
       const emptyOrExhaustedExpansion = tool === 'inspect_ask_context'
         && input.expansion === true
         && (expansions >= ASK_V2_BUDGETS.ask.expansions
           || state.expansionCandidateIds.slice(expansions * 12, (expansions + 1) * 12).length === 0);
-      // The "a repeated inspector reveals nothing new" rule holds for the
-      // PARAMETERLESS inspectors, whose whole output is fixed by the snapshot.
-      // It is false for the describe tools: each call names a different
-      // relation, metric, or column search, and blocking the second one made
-      // the analyst describe one 436-column mart, fail to find its column, and
-      // give up with no way to look again. Bounded repetition, not none.
       const describeTools = new Set<AskToolNameV2>(['describe_relation', 'describe_metric']);
       const describeCalls = state.observations.filter((observation) => observation.tool === tool).length;
-      const repeatedImmutableInspection = inspectionTools.has(tool)
-        && tool !== 'inspect_ask_context'
-        && (describeTools.has(tool)
-          ? describeCalls >= ASK_V2_DESCRIBE_CALLS_PER_TOOL
-          : hasToolObservation(tool));
-      if (repeatedInitialContext || emptyOrExhaustedExpansion || repeatedImmutableInspection) {
+      const describeCeilingReached = describeTools.has(tool) && describeCalls >= ASK_V2_DESCRIBE_CALLS_PER_TOOL;
+      if (emptyOrExhaustedExpansion || describeCeilingReached) {
         const progress = toolPolicy();
         return {
           ok: false,
@@ -2049,13 +2036,10 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
           if (executionAttempts >= maxExecutions) return { ok: false, reasonCode: 'ASK_EXECUTION_BUDGET_EXHAUSTED' };
           return { ok: true };
         }
-        // A live controller commitment is created only by the matching
-        // host-backed inspection.  It may let that tier execute without
-        // burning later-tier discovery turns, while the earlier-complete
-        // guard above remains authoritative.
-        if (!earlierTierInspected(tier) && state.controllerTier !== tier) {
-          return { ok: false, reasonCode: 'EARLIER_TIER_INSPECTION_REQUIRED' };
-        }
+        // Tier truth comes from the workspace, admission and the closure gate.
+        // Requiring the analyst to have INSPECTED every earlier tier first only
+        // ever spent dispatches: the earlier-complete guard above is what keeps
+        // a complete certified block ahead of a lower tier.
         if (executionAttempts >= maxExecutions) return { ok: false, reasonCode: 'ASK_EXECUTION_BUDGET_EXHAUSTED' };
         if (input.repair && repairs >= (state.turnClass === 'research' ? ASK_V2_BUDGETS.research.repairs : ASK_V2_BUDGETS.ask.repairs)) {
           return { ok: false, reasonCode: 'ASK_REPAIR_BUDGET_EXHAUSTED' };

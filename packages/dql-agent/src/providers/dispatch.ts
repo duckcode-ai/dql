@@ -5,7 +5,18 @@ import type {
   ProviderRunOptions,
 } from './types.js';
 
-export const DEFAULT_PROVIDER_DISPATCH_LIMIT = 2;
+/**
+ * The physical ceiling on sends from one provider call when the caller sets no
+ * `maxProviderDispatches`. This is a backstop against a runaway loop, not a
+ * budget: the run-scoped dispatch ledger is the only authority on how many
+ * sends a turn may make, and a caller that wants a tighter bound states it.
+ * (A silent default of two ended real turns mid-discovery for months.)
+ */
+export const PROVIDER_DISPATCH_PHYSICAL_CEILING = 30;
+
+export function providerDispatchLimit(options: ProviderRunOptions): number {
+  return Math.max(1, Math.min(PROVIDER_DISPATCH_PHYSICAL_CEILING, options.maxProviderDispatches ?? PROVIDER_DISPATCH_PHYSICAL_CEILING));
+}
 
 /**
  * Enforce the physical-send budget and return the exact envelope to serialize.
@@ -19,7 +30,7 @@ export function prepareProviderHttpDispatch(input: {
   envelope: Record<string, unknown>;
   options: ProviderRunOptions;
 }): Record<string, unknown> {
-  const limit = Math.max(1, Math.min(30, input.options.maxProviderDispatches ?? DEFAULT_PROVIDER_DISPATCH_LIMIT));
+  const limit = providerDispatchLimit(input.options);
   if (input.attemptIndex > limit) {
     const error = Object.assign(new Error(
       `${input.provider}: provider dispatch budget exhausted after ${limit} attempt${limit === 1 ? '' : 's'}`,

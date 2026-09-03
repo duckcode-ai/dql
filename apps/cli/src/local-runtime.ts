@@ -3560,6 +3560,10 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     return !this.runBudget || this.runBudget.mayStartDiscovery(this.currentRoute);
   }
 
+  remainingDispatches(): number {
+    return Math.max(0, this.policy.total - this.receipts.length);
+  }
+
   observe(
     event: ProviderDispatchEvent,
     context: {

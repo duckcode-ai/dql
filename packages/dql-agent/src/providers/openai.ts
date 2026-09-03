@@ -10,7 +10,7 @@ import type {
 import { consumeSse } from './claude.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
-import { DEFAULT_PROVIDER_DISPATCH_LIMIT, fetchProviderHttpDispatch } from './dispatch.js';
+import { fetchProviderHttpDispatch, providerDispatchLimit } from './dispatch.js';
 
 /**
  * Translate reasoning effort into the Chat Completions `reasoning_effort` param.
@@ -120,7 +120,7 @@ export class OpenAIProvider implements AgentProvider {
       role: message.role,
       content: message.content,
     }));
-    const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? DEFAULT_PROVIDER_DISPATCH_LIMIT));
+    const dispatchLimit = providerDispatchLimit(options);
     const requestedToolBudget = Math.max(0, Math.min(dispatchLimit <= 2 ? 4 : 30, options.maxToolCalls ?? 8));
     // Keep one physical provider turn available for a controller-selected
     // terminal action when the host publishes a live V2 tool policy. Existing
