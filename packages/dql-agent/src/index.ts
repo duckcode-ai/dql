@@ -106,14 +106,6 @@ export {
 } from './analytical-orchestration.js';
 export { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
 export type { AnalyticalRequestPolicyDecision } from './analytical-request-policy.js';
-/** V1.15 authoritative Ask entrypoint; legacy router is its compiler broker. */
-export { createAskAnalystRuntimeV1 } from './ask-runtime/ask-analyst-runtime.js';
-export type {
-  AskAnalystRuntimeOptionsV1,
-  AskAnalystRuntimeV1,
-  AskLiteralGroundingProbeRequestV1,
-  AskLiteralGroundingProbeResultV1,
-} from './ask-runtime/ask-analyst-runtime.js';
 /** V2 retrieval-first, LLM-controlled bounded Ask runtime. */
 export {
   ASK_V2_BUDGETS,

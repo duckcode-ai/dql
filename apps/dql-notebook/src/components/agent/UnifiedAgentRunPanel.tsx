@@ -2882,7 +2882,7 @@ interface AnalyticalInspectorContract {
 function isAgentRunDiagnosticReceiptV8(value: unknown): value is NonNullable<AgentRun['diagnosticReceiptV8']> {
   const receipt = recordOf(value);
   return receipt?.version === 8
-    && (receipt.mode === 'legacy_v1' || receipt.mode === 'authoritative_v2')
+    && receipt.mode === 'authoritative_v2'
     && Array.isArray(receipt.contextCoverage)
     && Array.isArray(receipt.observations)
     && Array.isArray(receipt.tierAttempts)
@@ -3201,7 +3201,6 @@ function authoritativeV8Activity(
 
 function askRuntimeEvidenceLabel(mode: AgentRun['askAgentRuntimeMode'] | AskTraceDataV1['runtimeMode'] | undefined): string | undefined {
   if (mode === 'authoritative_v2') return 'Authoritative V2 receipt';
-  if (mode === 'legacy_v1') return 'Legacy V1 runtime';
   return undefined;
 }
 
@@ -3522,9 +3521,8 @@ function AnalyticalHowAnswered({
     ['Outputs', outputs.map((item) => `${displayValue(item.id)} (${displayValue(item.kind)})`).join(', ')],
     ['Semantic metrics', stringList(semanticAuthoringRequest?.metrics).join(', ')],
     ['Semantic dimensions', stringList(semanticAuthoringRequest?.dimensions).join(', ')],
-    ['Review assumption', run.diagnosticReceiptV7?.inspector.route.reviewRequired
-      && run.diagnosticReceiptV7.inspector.route.selectedTier === 'semantic'
-      ? 'Sole declared MetricFlow grouping was inferred for the requested dimension; verify before reuse.'
+    ['Review assumption', run.trustState === 'review_required' && run.route === 'semantic_answer'
+      ? 'The semantic grouping was inferred for the requested dimension; verify before reuse.'
       : 'None'],
   ];
   const trustRows: Array<[string, string]> = authoritativeV8 ? [
@@ -4812,9 +4810,8 @@ function AddToAppButton({
  */
 export function trustExplainer(run: AgentRun): string | null {
   if (run.status === 'cancelled' || run.stopReason === 'cancelled' || run.route === 'cancelled') return 'Stopped by user. No result was accepted.';
-  if (run.diagnosticReceiptV7?.inspector.route.reviewRequired
-    && run.diagnosticReceiptV7.inspector.route.selectedTier === 'semantic') {
-    return 'Review required: DQL used the sole declared MetricFlow grouping for the requested dimension. Verify this inferred business mapping before reuse.';
+  if (run.trustState === 'review_required' && run.route === 'semantic_answer') {
+    return 'Review required: DQL inferred the semantic grouping for the requested dimension. Verify this business mapping before reuse.';
   }
   if (run.trustState === 'certified') return 'Answered from a certified block.';
   if (run.route === 'dql_block_draft') return 'Prepared an ownerless review draft. Add it to Block Studio when you are ready to save it.';

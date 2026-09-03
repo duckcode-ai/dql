@@ -131,7 +131,6 @@ const HELP = `
     --to <layout>                   Target layout for "migrate layout" (domain-first)
                                     For "promote": shared
     --port <number>                 Preferred local port for "preview" or "serve"
-    --ask-runtime-mode <mode>       Ask runtime: authoritative_v2 (default) or legacy_v1 (rollback, deprecated)
                                     Overrides "agent.askRuntimeMode" in dql.config.json,
                                     which all Ask surfaces honor
     --chart <type>                  Primary chart type for "new" scaffolds (default: bar)

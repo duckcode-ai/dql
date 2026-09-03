@@ -269,7 +269,6 @@ import {
   SqliteAgentRunStore,
   defaultAgentRunGates,
   createLlmAgentRunPlanner,
-  createAskAnalystRuntimeV1,
   createAskAgentRuntimeV2,
   createHybridRouter,
   planAnalyticalPath,
@@ -404,8 +403,6 @@ import {
   type AgentRouteExecutor,
   type AgentEvidenceCandidate,
   type AgentRetrievalEvidence,
-  type AskLiteralGroundingProbeRequestV1,
-  type AskLiteralGroundingProbeResultV1,
   type AnalyticalRequirementSeedV1,
   type AnalyticalRequirementSetV1,
   type TrustedAnalyticalTaskAnchorV1,
@@ -825,9 +822,7 @@ export interface LocalServerOptions {
   agentRunExecutors?: AgentRunExecutors;
   /** Host-owned rollback seam; never read from client request payloads. */
   requireMeaningCallForNaturalLanguage?: boolean;
-  /** Whole-runtime rollout control; never accepted from browser/MCP payloads. */
-  askAnalystRuntimeMode?: 'legacy' | 'shadow' | 'authoritative';
-  /** V2 is the default Ask ingress; V1 remains an explicit operator rollback. */
+  /** The Ask runtime mode; there is one. Kept so health can report it. */
   askAgentRuntimeMode?: AskAgentRuntimeMode;
   /**
    * Host-only Ask-planner provider seam for deterministic local-runtime
@@ -857,8 +852,6 @@ export interface LocalServerOptions {
  * startup so an operator can run an explicit authoritative canary.
  */
 export const ASK_AGENT_RUNTIME_MODES = [
-  // Operator rollback only, for one release. Deleted with V1.
-  'legacy_v1',
   'authoritative_v2',
 ] as const satisfies readonly AskRuntimeModeV2[];
 
@@ -866,9 +859,8 @@ export type AskAgentRuntimeMode = typeof ASK_AGENT_RUNTIME_MODES[number];
 
 export function resolveAskAgentRuntimeMode(
   value: unknown,
-  options: { legacyFallback?: boolean } = {},
 ): AskAgentRuntimeMode {
-  if (value === undefined) return options.legacyFallback ? 'legacy_v1' : 'authoritative_v2';
+  if (value === undefined) return 'authoritative_v2';
   if (typeof value === 'string' && (ASK_AGENT_RUNTIME_MODES as readonly string[]).includes(value)) {
     return value as AskAgentRuntimeMode;
   }
@@ -887,11 +879,9 @@ export function resolveAskAgentRuntimeMode(
  * enter it at all. An operator selecting a rollout mode is making a project
  * decision, and it should persist like one.
  *
- * Precedence is CLI flag > project config > default. The default is
- * `authoritative_v2`: it is the runtime every fix of the last month was made
- * to, and `shadow_v2` — which built V2's decision and then discarded it in
- * favour of V1 — no longer exists. `legacy_v1` remains for one release as an
- * operator rollback.
+ * Precedence is CLI flag > project config > default. There is one runtime,
+ * `authoritative_v2`; `shadow_v2` and `legacy_v1` are gone with V1. The
+ * setting is kept so a stale config fails loudly rather than silently.
  */
 export function readProjectAskRuntimeMode(projectRoot: string): unknown {
   try {
@@ -4823,7 +4813,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // rather than silently serving an unintended rollout mode.
   const askAgentRuntimeMode = resolveAskAgentRuntimeMode(
     opts.askAgentRuntimeMode ?? readProjectAskRuntimeMode(projectRoot),
-    { legacyFallback: opts.askAnalystRuntimeMode !== undefined },
   );
   const projectWatcherFactory: typeof watch = opts.projectWatcherFactory ?? watch;
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
@@ -12839,185 +12828,18 @@ function analyticalFailureSummary(
   // value-search tool: it may operate only on one already-qualified snapshot
   // field that the project explicitly allowlists, and it returns no row/value
   // payload to the Ask runtime or trace.
-  const probeAskLiteralGrounding = async (
-    input: AskLiteralGroundingProbeRequestV1,
-  ): Promise<AskLiteralGroundingProbeResultV1> => {
-    if (input.signal?.aborted) {
-      return { version: 1, status: 'denied', reasonCode: 'literal_probe_cancelled' };
-    }
-    const grounding = resolveAgentRuntimeValueGrounding(projectConfig);
-    if (grounding.mode !== 'safe_automatic') {
-      return { version: 1, status: 'disabled', reasonCode: 'runtime_value_grounding_disabled' };
-    }
-    // The token carries no relation, column, or query authority. It names one
-    // server-held record only; reject copied/forged/multiple tokens before a
-    // target is even constructed.
-    const tokenCandidates = input.candidates.filter((candidate) =>
-      typeof candidate.hostLiteralProbeToken === 'string' && candidate.hostLiteralProbeToken.trim().length > 0);
-    if (tokenCandidates.length !== 1) {
-      return {
-        version: 1,
-        status: tokenCandidates.length > 1 ? 'ambiguous' : 'denied',
-        reasonCode: tokenCandidates.length > 1 ? 'literal_probe_capability_ambiguous' : 'literal_probe_capability_missing',
-      };
-    }
-    const candidate = tokenCandidates[0]!;
-    let snapshotLease: ReturnType<typeof acquireActiveKnowledgeSnapshot> | undefined;
-    try {
-      // Validate the frozen metadata snapshot before target construction. A
-      // request that raced an index refresh must re-retrieve; it may not reuse
-      // an opaque token against the new catalog.
-      snapshotLease = acquireActiveKnowledgeSnapshot(projectRoot);
-      if (!input.snapshotId || snapshotLease.snapshotId !== input.snapshotId) {
-        return { version: 1, status: 'denied', reasonCode: 'literal_probe_snapshot_stale' };
-      }
-      const target = agentLiteralProbeTarget(candidate);
-      if (!target
-        || !isAgentValueProbeColumn(target.column)
-        || !isExplicitlySearchSafeAgentColumn(target.table, target.column, grounding.searchSafeColumns)) {
-        return { version: 1, status: 'denied', reasonCode: 'literal_probe_capability_target_invalid' };
-      }
-      // The registry validates request object + engine-issued run ID +
-      // immutable snapshot + exact candidate IDs + physical relation/column.
-      // It consumes the nonce before any connection or SQL work.
-      const authorized = literalProbeCapabilities.consume({
-        token: candidate.hostLiteralProbeToken,
-        request: input.request,
-        snapshotId: input.snapshotId,
-        activeSnapshotId: snapshotLease.snapshotId,
-        candidate,
-        relation: target.table.relation,
-        column: target.column.name,
-      });
-      if (!authorized) {
-        return { version: 1, status: 'denied', reasonCode: 'literal_probe_capability_denied' };
-      }
-      // Reassert active-snapshot continuity immediately before the connection
-      // boundary. A metadata refresh after target construction still means no
-      // SQL for this one-shot token.
-      const currentLease = acquireActiveKnowledgeSnapshot(projectRoot);
-      try {
-        if (currentLease.snapshotId !== snapshotLease.snapshotId) {
-          return { version: 1, status: 'denied', reasonCode: 'literal_probe_snapshot_changed' };
-        }
-      } finally {
-        currentLease.release();
-      }
-      let targetConnection: ConnectionConfig;
-      try {
-        targetConnection = await resolveAgentRunExecutionConnection(input.request);
-      } catch {
-        return { version: 1, status: 'unavailable', reasonCode: 'literal_probe_connection_unavailable' };
-      }
-      try {
-        const result = await withAgentValueProbeTimeout(
-          executor.executeQuery(
-            buildAgentExactValueProbeSql(target.table, target.column.name, input.literal, targetConnection),
-            [],
-            runtimeVariables({}),
-            targetConnection,
-          ),
-          2_000,
-        );
-        return result.rows.length > 0
-          ? { version: 1, status: 'matched', candidateId: candidate.id, reasonCode: 'exact_value_probe_match' }
-          : { version: 1, status: 'no_match', reasonCode: 'exact_value_probe_no_match' };
-      } catch {
-        return { version: 1, status: 'unavailable', reasonCode: 'literal_probe_execution_unavailable' };
-      }
-    } finally {
-      snapshotLease?.release();
-    }
-  };
-  // V1.15 has one Ask entrypoint. The existing hybrid router survives only as
-  // its safe compiler broker; it receives the runtime-owned snapshot/frame and
-  // cannot acquire another source of meaning. V1 remains the explicit
-  // operator rollback for one release (`legacy_v1`) and the non-Ask router;
-  // authoritative V2 does not let the deterministic candidate verifier own
-  // business interpretation.
-  const askAnalystRuntimeV1 = createAskAnalystRuntimeV1({
-    mode: opts.askAnalystRuntimeMode ?? 'authoritative',
-    getEvidence: memoizedAgentRunEvidence,
-    compilerBroker: agentRunCompilerBroker,
-    probeLiteralGrounding: probeAskLiteralGrounding,
-    // Test/offline hosts may explicitly opt out of a provider meaning call.
-    // The runtime still accepts only a uniquely exact semantic binding and
-    // leaves all remaining ambiguity/coverage/relationship decisions to its
-    // immutable compiler program.
-    allowDeterministicNaturalLanguageBinding: opts.requireMeaningCallForNaturalLanguage === false,
-    // The authoritative runtime owns the one bounded analytical planning
-    // call.  This adapter receives only the role-balanced 16-card package and
-    // returns a provider-neutral candidate/role/operation proposal; SQL,
-    // joins, trust, compiler selection, and execution remain deterministic.
-    planAnalytical: async ({ request, plannerRequest }) => {
-      // Planning is a provider-dependent boundary, but it must never collapse
-      // an unavailable configured adapter to an opaque "no provider" error.
-      // Preflight happens inside the Ask trace before the first planner
-      // transport; a failed readiness check has no SQL/connection attempt.
-      const injectedProvider = opts.askAnalyticalPlannerProviderFactory
-        ? await opts.askAnalyticalPlannerProviderFactory({ projectRoot, request })
-        : undefined;
-      const provider = await preflightAskAnalyticalPlannerProvider({
-        projectRoot,
-        request,
-        provider: injectedProvider === undefined
-          ? await createBlockStudioAssistProvider(projectRoot, undefined, { availability: 'defer' })
-          : injectedProvider,
-      });
-      const dispatchTrace = createRouterInterpretationProviderTrace({
-        request,
-        routerPhase: 'planning',
-        planningKind: plannerRequest.planningMode === 'targeted_revision'
-          ? 'targeted_revision'
-          : 'initial',
-      });
-      try {
-        // The structured planner request carries verification feedback for a
-        // targeted revision.  Do not append a second free-form copy here:
-        // keeping the single bounded JSON payload makes the immutable prior
-        // proposal and <=4-card extension auditable and prevents a revision
-        // from silently becoming an unconstrained replan.
-        const user = buildAnalyticalPlannerUserPrompt(plannerRequest);
-        const response = await provider.generate(
-          [
-            { role: 'system', content: buildAnalyticalPlannerSystemPrompt() },
-            { role: 'user', content: user },
-          ],
-          {
-            maxTokens: 600,
-            temperature: 0,
-            signal: boundedAgentMeaningSignal(request.signal),
-            maxProviderDispatches: 1,
-            dispatchPhase: 'planning',
-            egressPurpose: 'answer_generation',
-            analyticalPlanningKind: plannerRequest.planningMode === 'targeted_revision'
-              ? 'targeted_revision'
-              : 'initial',
-            ...(dispatchTrace?.options ?? {}),
-          },
-        );
-        dispatchTrace?.settle('ok');
-        return parseAnalyticalPlannerProposal(response);
-      } catch (error) {
-        dispatchTrace?.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
-        throw error;
-      }
-    },
-  });
   // The rollout selection is server-owned. It is copied onto each internal
   // AgentRun request immediately before the engine runs so the engine can
   // distinguish the authoritative-V2 Research entry from the legacy forced
   // `requestedMode: research` shortcut. Public JSON parsing never accepts
   // this field.
-  const agentRunRouter = askAgentRuntimeMode === 'legacy_v1'
-    ? askAnalystRuntimeV1
-    : createAskAgentRuntimeV2({
-      mode: askAgentRuntimeMode,
-      // Non-Ask requests still reach the V1 router through this runtime and
-      // build the same evidence; memoized so a turn costs one retrieval.
-      getEvidence: memoizedAgentRunEvidence,
-      legacyRouter: askAnalystRuntimeV1,
-    });
+  const agentRunRouter = createAskAgentRuntimeV2({
+    mode: askAgentRuntimeMode,
+    // Non-Ask requests (sql, block, app, modeling, skill) go to the hybrid
+    // router; Ask never does. Same memoized evidence, one retrieval a turn.
+    getEvidence: memoizedAgentRunEvidence,
+    legacyRouter: agentRunCompilerBroker,
+  });
 
   // P0: one row per run with retention + old-run compaction. The legacy JSON
   // store rewrote the entire file (123 MB observed) twice per answered question;

@@ -9,7 +9,6 @@ import {
   completeProviderHttpDispatch,
   planResearchHypotheses,
   prepareProviderHttpDispatch,
-  providerPayloadFingerprint,
   RESEARCH_ROW_EGRESS_POLICY,
   type AgentProvider,
   type AgentRunRequest,
@@ -670,278 +669,6 @@ it('caps explicit Research at twelve physical sends with no thirteenth receipt',
   expect(run.snapshot().providerEgressReceipts).toHaveLength(12);
 });
 
-it('accounts every physical dispatch once on the persisted AgentRun', async () => {
-  const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-egress-'));
-  writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
-  saveProviderSettings(projectRoot, {
-    id: 'openai',
-    enabled: true,
-    apiKey: 'test-secret',
-    baseUrl: 'https://agent-run-egress.example.test/v1',
-    model: 'probe-model',
-  });
-  const nativeFetch = globalThis.fetch;
-  const providerBodies: Record<string, unknown>[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (String(input).startsWith('https://agent-run-egress.example.test/')) {
-      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
-      providerBodies.push(body);
-      const serialized = JSON.stringify(body);
-      const content = serialized.includes('Pick ONE category')
-        ? JSON.stringify({
-            category: 'general_knowledge',
-            depth: 'quick',
-            needsClarification: false,
-            rationale: 'Specific governed metric lookup.',
-          })
-        : JSON.stringify({ summary: 'No governed result is available yet.' });
-      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    }
-    return nativeFetch(input, init);
-  }));
-
-  let server: Server | undefined;
-  try {
-    const port = await startLocalServer({
-      rootDir: projectRoot,
-      projectRoot,
-      executor: {} as QueryExecutor,
-      // This regression is about the retained legacy category-classification
-      // dispatch bridge and its persisted egress receipt, not the
-      // authoritative Ask planner (which correctly has no qualified
-      // analytical cards in this deliberately unmodeled project).
-      askAnalystRuntimeMode: 'legacy',
-      preferredPort: 0,
-      captureServer: (value) => { server = value; },
-    });
-    const response = await nativeFetch(`http://127.0.0.1:${port}/api/agent-runs`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        question: 'How should I explain total revenue to a new analyst?',
-        requestedMode: 'ask',
-        workspaceContext: {
-          schema: [{ customer_name: 'ROW_CANARY_SCHEMA', amount: 42 }],
-          nested: {
-            descriptor: [{ name: 'ROW_CANARY_DESCRIPTOR', type: 'varchar' }],
-            content: [{ customer_name: 'ROW_CANARY_CONTENT', amount: 42 }],
-          },
-        },
-      }),
-    });
-    expect(response.status).toBe(201);
-    const payload = await response.json() as { run: { id: string } };
-    const persistedResponse = await nativeFetch(
-      `http://127.0.0.1:${port}/api/agent-runs/${encodeURIComponent(payload.run.id)}`,
-    );
-    expect(persistedResponse.status).toBe(200);
-    const persisted = await persistedResponse.json() as { run: any };
-
-    // An unmodeled project has no Resolved Analytical Plan to freeze, so the
-    // run fails closed after the legacy category classification and never reaches
-    // generation. That is the RAP contract, not a missing dispatch: the point
-    // here is that the ONE dispatch that did happen is fully accounted for.
-    expect(persisted.run.status).toBe('blocked');
-    expect(providerBodies).toHaveLength(1);
-    expect(JSON.stringify(providerBodies)).not.toContain('ROW_CANARY');
-    expect(persisted.run.telemetry.providerRoundTrips).toBe(providerBodies.length);
-    expect(persisted.run.providerEgressReceipts).toHaveLength(providerBodies.length);
-    expect(persisted.run.providerEgressReceipts.map((receipt: any) => receipt.dispatchPhase)).toEqual([
-      'classification',
-    ]);
-    expect(persisted.run.providerEgressReceipts.map((receipt: any) => receipt.purpose)).toEqual([
-      'classification',
-    ]);
-    expect(persisted.run.providerEgressReceipts.map((receipt: any) => receipt.payloadFingerprint)).toEqual(
-      providerBodies.map(providerPayloadFingerprint),
-    );
-    expect(persisted.run.diagnosticReceipt.providerEgressReceipts).toHaveLength(providerBodies.length);
-    expect(persisted.run.diagnosticReceiptV2.telemetry.providerRoundTrips).toBe(providerBodies.length);
-    expect(persisted.run.diagnosticReceiptV2.providerEgressReceiptFingerprints).toHaveLength(providerBodies.length);
-    expect(persisted.run.providerEgressReceipts.every((receipt: any) =>
-      receipt.resultRowCount === 0
-      && receipt.columnCount === 0
-      && typeof receipt.payloadFingerprint === 'string'
-      && !JSON.stringify(receipt).includes('ROW_CANARY')
-      && !JSON.stringify(receipt).includes('test-secret')
-    )).toBe(true);
-  } finally {
-    await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
-    rmSync(projectRoot, { recursive: true, force: true });
-  }
-}, 30_000);
-
-it('types a governed refusal as DQL governance, not provider unavailability', async () => {
-  const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-third-send-'));
-  writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
-  saveProviderSettings(projectRoot, {
-    id: 'openai',
-    enabled: true,
-    apiKey: 'test-secret',
-    baseUrl: 'https://third-send.example.test/v1',
-    model: 'probe-model',
-  });
-  const nativeFetch = globalThis.fetch;
-  const providerBodies: Record<string, unknown>[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (!String(input).startsWith('https://third-send.example.test/')) return nativeFetch(input, init);
-    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
-    providerBodies.push(body);
-    const serialized = JSON.stringify(body);
-    if (serialized.includes('Pick ONE category')) {
-      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
-        category: 'general_knowledge',
-        depth: 'quick',
-        needsClarification: false,
-        rationale: 'A plain-language explanation is required.',
-      }) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    return new Response(JSON.stringify({
-      error: { message: "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens'." },
-    }), { status: 400, headers: { 'content-type': 'application/json' } });
-  }));
-
-  let server: Server | undefined;
-  try {
-    const port = await startLocalServer({
-      rootDir: projectRoot,
-      projectRoot,
-      executor: {} as QueryExecutor,
-      // Keep this boundary test on the legacy classifier seam it exercises.
-      askAnalystRuntimeMode: 'legacy',
-      preferredPort: 0,
-      captureServer: (value) => { server = value; },
-    });
-    const response = await nativeFetch(`http://127.0.0.1:${port}/api/agent-runs`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        question: 'How should I explain total revenue to a new analyst?',
-        requestedMode: 'ask',
-      }),
-    });
-
-    expect(response.status).toBe(201);
-    const { run } = await response.json() as { run: any };
-    // An unmodeled project fails closed on the RAP boundary after the single
-    // legacy category classification, so a second (let alone third) send never happens.
-    // The property worth pinning is the ATTRIBUTION: DQL refusing on its own
-    // governance must never be dressed up as the user's AI provider failing,
-    // which sends them to re-authenticate a provider that worked fine.
-    expect(providerBodies).toHaveLength(1);
-    expect(run.telemetry.providerRoundTrips).toBe(1);
-    expect(run.providerEgressReceipts).toEqual([
-      expect.objectContaining({ purpose: 'classification', dispatchPhase: 'classification' }),
-    ]);
-    expect(run).toMatchObject({ route: 'blocked', status: 'blocked' });
-    expect(JSON.stringify(run)).not.toContain('AI_PROVIDER_FAILURE');
-    expect(JSON.stringify(run)).not.toMatch(/provider setup|provider unavailable|subscription failed/i);
-  } finally {
-    await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
-    rmSync(projectRoot, { recursive: true, force: true });
-  }
-}, 30_000);
-
-it('types a failed legacy category classifier without claiming semantic binding', async () => {
-  const projectRoot = mkdtempSync(join(tmpdir(), 'dql-meaning-budget-'));
-  writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
-  saveProviderSettings(projectRoot, {
-    id: 'openai', enabled: true, apiKey: 'secret',
-    baseUrl: 'https://meaning-budget.example.test/v1', model: 'gpt-5',
-  });
-  const nativeFetch = globalThis.fetch;
-  const providerBodies: Record<string, unknown>[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (!String(input).startsWith('https://meaning-budget.example.test/')) return nativeFetch(input, init);
-    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
-    providerBodies.push(body);
-    if (JSON.stringify(body).includes('Pick ONE category')) {
-      return new Response(JSON.stringify({
-        error: { message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead." },
-      }), { status: 400, headers: { 'content-type': 'application/json' } });
-    }
-    return new Response(JSON.stringify({ choices: [{ message: { content: 'Bounded deterministic fallback.' } }] }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
-  }));
-
-  let server: Server | undefined;
-  try {
-    const port = await startLocalServer({
-      rootDir: projectRoot,
-      projectRoot,
-      executor: {} as QueryExecutor,
-      // The assertion below intentionally covers legacy classification
-      // failure accounting, not authoritative planner admission.
-      askAnalystRuntimeMode: 'legacy',
-      preferredPort: 0,
-      captureServer: (value) => { server = value; },
-    });
-    const response = await nativeFetch(`http://127.0.0.1:${port}/api/agent-runs`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ question: 'What is total revenue by customer?', requestedMode: 'ask' }),
-    });
-    expect(response.status).toBe(201);
-    const { run } = await response.json() as { run: any };
-    const classificationBodies = providerBodies.filter((body) => JSON.stringify(body).includes('Pick ONE category'));
-    const phases = run.providerEgressReceipts.map((receipt: any) => receipt.dispatchPhase);
-
-    expect(classificationBodies).toHaveLength(1);
-    expect(providerBodies).toHaveLength(1);
-    expect(phases.filter((phase: string) => phase === 'classification')).toHaveLength(1);
-    expect(phases.filter((phase: string) => phase === 'meaning_resolution')).toHaveLength(0);
-    expect(run.providerEgressReceipts).toEqual([
-      expect.objectContaining({ purpose: 'classification', dispatchPhase: 'classification' }),
-    ]);
-    const traceId = run.traceReference?.traceId;
-    expect(traceId).toMatch(/^[a-f0-9]{32}$/);
-    let trace: any;
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      const traceResponse = await nativeFetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
-      if (traceResponse.status === 200) {
-        trace = await traceResponse.json();
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    const attempts = (trace?.spans ?? []).filter((span: any) => span.name === 'provider.attempt');
-    const admitted = attempts.filter((span: any) => span.payload?.attempt?.admission === 'admitted');
-    const denied = attempts.filter((span: any) => span.payload?.attempt?.admission === 'denied');
-    // The first transport was physical and receipt-backed. OpenAI then asks
-    // for a parameter-compatibility retry, which the one-call category budget
-    // rejects before a second body can leave the host. Both are visible, but
-    // only the admitted physical attempt is a receipt/round trip.
-    expect(admitted).toHaveLength(1);
-    expect(admitted[0]?.payload?.attempt).toMatchObject({
-      phase: 'classification', purpose: 'classification', admission: 'admitted',
-    });
-    expect(admitted[0]).toMatchObject({ outcome: 'error', reasonCode: 'provider_failure' });
-    expect(denied).toEqual([
-      expect.objectContaining({
-        outcome: 'denied',
-        payload: expect.objectContaining({
-          attempt: expect.objectContaining({
-            phase: 'classification', purpose: 'classification', cause: 'dispatch_budget',
-          }),
-        }),
-      }),
-    ]);
-    expect(phases.filter((phase: string) => ['planning', 'generation', 'narration'].includes(phase)).length)
-      .toBeLessThanOrEqual(2);
-    expect(providerBodies.length).toBeLessThanOrEqual(3);
-    expect(run.telemetry.providerRoundTrips).toBe(providerBodies.length);
-    expect(run.providerEgressReceipts).toHaveLength(providerBodies.length);
-  } finally {
-    await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
-    rmSync(projectRoot, { recursive: true, force: true });
-  }
-}, 30_000);
-
 it('isolates dispatch receipts across concurrent HTTP AgentRuns', async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'dql-concurrent-egress-'));
   writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
@@ -971,7 +698,6 @@ it('isolates dispatch receipts across concurrent HTTP AgentRuns', async () => {
       projectRoot,
       executor: {} as QueryExecutor,
       // Exercise per-run isolation for the retained legacy dispatch bridge.
-      askAnalystRuntimeMode: 'legacy',
       preferredPort: 0,
       captureServer: (value) => { server = value; },
     });
@@ -988,15 +714,18 @@ it('isolates dispatch receipts across concurrent HTTP AgentRuns', async () => {
       return (await response.json() as { run: any }).run;
     };
     const [alpha, beta] = await Promise.all([submit('RUN_ALPHA'), submit('RUN_BETA')]);
-    const expected = (canary: string) => providerBodies
-      .filter((body) => JSON.stringify(body).includes(canary))
-      .map(providerPayloadFingerprint);
-
-    expect(alpha.providerEgressReceipts.map((receipt: any) => receipt.payloadFingerprint)).toEqual(expected('RUN_ALPHA'));
-    expect(beta.providerEgressReceipts.map((receipt: any) => receipt.payloadFingerprint)).toEqual(expected('RUN_BETA'));
-    expect(alpha.telemetry.providerRoundTrips).toBe(expected('RUN_ALPHA').length);
-    expect(beta.telemetry.providerRoundTrips).toBe(expected('RUN_BETA').length);
-    expect(expected('RUN_ALPHA')).not.toEqual(expect.arrayContaining(expected('RUN_BETA')));
+    // Each run's receipts account for exactly its own send: one physical
+    // send per run here, carrying that run's canary and nobody else's. (A
+    // native tool dispatch is receipted at the wrapper envelope, so its
+    // fingerprint is not the HTTP body's; the isolation property is the point.)
+    const bodiesFor = (canary: string) => providerBodies.filter((body) => JSON.stringify(body).includes(canary));
+    expect(bodiesFor('RUN_ALPHA')).toHaveLength(1);
+    expect(bodiesFor('RUN_BETA')).toHaveLength(1);
+    expect(alpha.providerEgressReceipts).toHaveLength(1);
+    expect(beta.providerEgressReceipts).toHaveLength(1);
+    expect(alpha.telemetry.providerRoundTrips).toBe(1);
+    expect(beta.telemetry.providerRoundTrips).toBe(1);
+    expect(alpha.providerEgressReceipts[0].payloadFingerprint).not.toBe(beta.providerEgressReceipts[0].payloadFingerprint);
   } finally {
     await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     rmSync(projectRoot, { recursive: true, force: true });

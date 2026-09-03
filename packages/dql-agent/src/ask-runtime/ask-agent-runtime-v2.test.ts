@@ -474,15 +474,13 @@ describe('AskAgentRuntimeV2', () => {
     expect(JSON.stringify(receipt)).not.toContain('not modeled');
   });
 
-  it('AGT-048 serves V1 only under the explicit legacy rollback, never by default', async () => {
+  it('AGT-048 sends only non-Ask modes to the non-Ask router; an Ask never reaches it', async () => {
     const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
-    const legacy = createAskAgentRuntimeV2({ mode: 'legacy_v1', getEvidence: async () => evidence(), legacyRouter });
-    const decision = await legacy.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
+    const runtime = createAskAgentRuntimeV2({ getEvidence: async () => evidence(), legacyRouter });
+    const sql = await runtime.decide({ question: 'select 1', requestedMode: 'sql' });
     expect(legacyRouter.decide).toHaveBeenCalledOnce();
-    expect(decision.terminalOutcome?.message).toBe('legacy terminal');
-    // The default runtime never asks V1 for an Ask decision.
-    const authoritative = createAskAgentRuntimeV2({ getEvidence: async () => evidence(), legacyRouter });
-    await authoritative.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
+    expect(sql.terminalOutcome?.message).toBe('legacy terminal');
+    await runtime.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
     expect(legacyRouter.decide).toHaveBeenCalledOnce();
   });
 

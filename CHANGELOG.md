@@ -14,9 +14,10 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   V2's decision for every question and then discarded it in favour of V1 —
   is removed, along with `dql agent shadow-report`. A project config or
   `--ask-runtime-mode` naming `shadow_v2` now fails loudly.
-- `legacy_v1` remains for exactly one release as an operator rollback and is
-  **deprecated**: it is deleted, together with the V1 runtime, in the next
-  minor release.
+- The V1 analyst runtime (`createAskAnalystRuntimeV1`) and the `legacy_v1`
+  rollback mode are deleted. `authoritative_v2` is the only Ask runtime;
+  non-Ask modes (sql, block, app, modeling, skill) keep the hybrid router.
+  Public exports of the V1 runtime are removed (minor version bump).
 - The host floor: when the analyst's turn ends with nothing executed (a spent
   budget, a provider fault, a plan that would not compile, an analyst that
   declined to act), the host walks the tier ladder itself — the proven

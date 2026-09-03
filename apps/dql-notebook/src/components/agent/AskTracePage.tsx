@@ -365,9 +365,8 @@ function TraceHeader({ trace, t, onRefresh }: { trace: AskTraceDataV1; t: Theme;
   );
 }
 
-function askRuntimeModeLabel(mode: NonNullable<AskTraceDataV1['runtimeMode']>): string {
-  if (mode === 'authoritative_v2') return 'Authoritative V2 runtime';
-  return 'Legacy V1 runtime';
+function askRuntimeModeLabel(_mode: NonNullable<AskTraceDataV1['runtimeMode']>): string {
+  return 'Authoritative V2 runtime';
 }
 
 function TraceTabs({ selected, onSelect, t }: { selected: TraceTab; onSelect: (tab: TraceTab) => void; t: Theme }): JSX.Element {

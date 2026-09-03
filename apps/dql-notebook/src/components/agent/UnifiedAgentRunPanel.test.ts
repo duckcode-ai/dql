@@ -2299,23 +2299,13 @@ describe('failure card origin and detail', () => {
     expect(binding?.rowFingerprint).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it('AGT-040 explains an inferred sole MetricFlow grouping as review-required', () => {
+  it('AGT-040 explains a review-required semantic answer as an inferred grouping', () => {
     expect(trustExplainer({
       status: 'needs_review',
       stopReason: 'human_review_required',
       route: 'semantic_answer',
       trustState: 'review_required',
-      diagnosticReceiptV7: {
-        version: 7,
-        inspector: {
-          understood: { questionKind: 'aggregation', conversationBinding: 'none', measureCount: 1, dimensionCount: 1, entityRequested: false, hasBoundFilter: false },
-          evidence: { admittedCandidateCount: 2, roleCount: 2, recoveryAttempted: false },
-          planning: { mode: 'initial_planner', plannerCalls: 1, verification: 'valid' },
-          route: { selectedTier: 'semantic', tierAttemptCount: 2, planFrozen: true, reviewRequired: true },
-          outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 1, narration: 'fact_bound' },
-        },
-      },
       artifacts: [],
-    } as any)).toContain('sole declared MetricFlow grouping');
+    } as any)).toContain('inferred the semantic grouping');
   });
 });

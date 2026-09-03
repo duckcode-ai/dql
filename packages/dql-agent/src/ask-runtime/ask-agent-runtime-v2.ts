@@ -23,8 +23,8 @@ import type { ContextSourceCoverageV1, ResearchEvidenceLedgerV3 } from '../analy
 import type { AgentEvidenceCandidate, AgentRetrievalEvidence } from '../meaning-resolution.js';
 
 /** Explicit operator rollout control.  Browser/MCP request bodies never set it. */
-/** `shadow_v2` — build V2's decision, then discard it for V1's — is gone. */
-export type AskRuntimeModeV2 = 'legacy_v1' | 'authoritative_v2';
+/** One runtime. `shadow_v2` and `legacy_v1` are gone with V1. */
+export type AskRuntimeModeV2 = 'authoritative_v2';
 
 /** V2 has one turn owner; classification is an LLM/tool-runtime responsibility. */
 export type { AskTurnClassV2 } from './turn-classification.js';
@@ -2520,12 +2520,13 @@ function askV2PriorPlanId(conversationContext: unknown): string | undefined {
 }
 
 export function createAskAgentRuntimeV2(options: AskAgentRuntimeOptionsV2): AskAgentRuntimeV2 {
-  // V2 is the runtime. `legacy_v1` is an explicit operator rollback only.
+  // V2 is the runtime.
   const mode = options.mode ?? 'authoritative_v2';
   return {
     mode,
     async decide(request): Promise<IntentDecision> {
-      if (!isAskRequestV2(request) || mode === 'legacy_v1') return options.legacyRouter.decide(request);
+      // Non-Ask modes (sql, block, app, modeling, skill) keep their router.
+      if (!isAskRequestV2(request)) return options.legacyRouter.decide(request);
 
       const turn = classifyAskTurn(request);
       const conversationalKind = turn.conversationalKind;
