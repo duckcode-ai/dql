@@ -1020,6 +1020,8 @@ it('stops before starting a dispatch the deadline cannot fit', () => {
     mayStartDiscovery: () => true,
     narrationSoftTargetMs: () => 38_000,
     mayStartNarration: () => true,
+    hostFloorReserveMs: 0,
+    mayStartHostFloor: () => true,
   };
   const run = new RunScopedProviderDispatchEvidence(
     { total: 6, meaningResolution: 1, generationGroup: 3, narration: 2, repair: 1 },

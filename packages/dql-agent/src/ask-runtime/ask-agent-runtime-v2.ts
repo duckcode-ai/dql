@@ -448,6 +448,13 @@ export interface AskToolObservationV1 {
    * never consumes the tool budget.
    */
   hostObserved?: boolean;
+  /**
+   * Minted by the host floor: the plan the HOST composed and authorized after
+   * the analyst's turn ended with nothing executed. Lets the kernel re-freeze
+   * on a floor authorization when the analyst's frozen plan never reached the
+   * warehouse; never set from a model tool call.
+   */
+  hostFloor?: boolean;
   /** Wall-clock duration of the physical tool/host boundary, never prompt text. */
   durationMs?: number;
   /** Content-free correlations for input/output payloads where the host has one. */
@@ -1172,6 +1179,16 @@ export interface AskToolKernelV2 {
     relationshipPathIds?: readonly string[];
     /** Stable selected-target/binding proof; never raw program or SQL. */
     bindingFingerprint?: string;
+    /**
+     * THE FLOOR IS HOST WORK. Budgets bound the analyst; when its turn ends
+     * with nothing executed, the host runs the tier ladder itself. Under this
+     * flag the analyst's spend (tool calls, execution attempts, inspection
+     * progression, a frozen plan that never ran) does not apply. The
+     * governance gates still do: a complete earlier tier still wins, a
+     * contextual turn still cannot execute, a plan that reached the
+     * warehouse is never replaced. Never reachable from a model tool call.
+     */
+    hostFloor?: boolean;
   }): { ok: boolean; reasonCode?: string; safeNextTools?: AskToolNameV2[] };
   diagnosticReceipt(
     finalStopReason?: string,
@@ -1902,7 +1919,11 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
   const kernel: AskToolKernelV2 = {
     state,
     canCall(tool, input = {}) {
-      if (state.terminalOutcome?.kind === 'execution_failure') {
+      // A frozen program that never compiled is exactly what the floor exists
+      // for; one that reached the warehouse and failed there is terminal.
+      const floorMayContinue = input.hostFloor === true && !hasExecutedTool();
+      if (state.terminalOutcome?.kind === 'execution_failure'
+        && !(floorMayContinue && state.terminalOutcome.origin === 'validation')) {
         return { ok: false, reasonCode: state.terminalOutcome.reasonCode };
       }
       // Two inspection limits remain, both about the snapshot running out of
@@ -1929,7 +1950,7 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
             : progress.allowedToolNames,
         };
       }
-      if (toolCalls >= maxTools) return { ok: false, reasonCode: 'ASK_TOOL_BUDGET_EXHAUSTED' };
+      if (toolCalls >= maxTools && !input.hostFloor) return { ok: false, reasonCode: 'ASK_TOOL_BUDGET_EXHAUSTED' };
       const progress = toolPolicy();
       const tier = executionToolTier[tool];
       // Tier-truth materialization records snapshot provenance, not a model
@@ -1968,6 +1989,9 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         // is the actionable reason for a lower-tier request; a higher-tier
         // replacement remains a post-freeze route-change denial.
         if (state.resolvedPlan?.frozen && state.resolvedPlan.tier !== tier) {
+          // The floor may replace a frozen plan only while nothing has reached
+          // the warehouse; an executed plan is never replaced by anyone.
+          if (floorMayContinue) return { ok: true };
           // ONE DESCENT, WHEN THE FROZEN PLAN CANNOT RUN AT ALL.
           //
           // The freeze exists so a compiler or warehouse result cannot talk the
@@ -2006,6 +2030,7 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         // let an identical ordinary tool call look like a fresh pre-freeze
         // execution attempt: that would silently bypass the repair budget.
         if (state.resolvedPlan?.frozen && state.resolvedPlan.tier === tier && !input.repair) {
+          if (floorMayContinue) return { ok: true };
           return { ok: false, reasonCode: 'POST_FREEZE_REPAIR_REQUIRED' };
         }
         // A same-plan repair is bound to the frozen tool/plan. It must not
@@ -2040,7 +2065,7 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         // Requiring the analyst to have INSPECTED every earlier tier first only
         // ever spent dispatches: the earlier-complete guard above is what keeps
         // a complete certified block ahead of a lower tier.
-        if (executionAttempts >= maxExecutions) return { ok: false, reasonCode: 'ASK_EXECUTION_BUDGET_EXHAUSTED' };
+        if (executionAttempts >= maxExecutions && !input.hostFloor) return { ok: false, reasonCode: 'ASK_EXECUTION_BUDGET_EXHAUSTED' };
         if (input.repair && repairs >= (state.turnClass === 'research' ? ASK_V2_BUDGETS.research.repairs : ASK_V2_BUDGETS.ask.repairs)) {
           return { ok: false, reasonCode: 'ASK_REPAIR_BUDGET_EXHAUSTED' };
         }
@@ -2048,7 +2073,7 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
       // Keep tier/freeze denials above as the primary reason. Once ordinary
       // safety permits a call, the live policy may still narrow discovery to
       // the next LLM-controlled action (for example semantic compilation).
-      if (!progress.allowedToolNames.includes(tool) && !directExactCertifiedExecution) {
+      if (!progress.allowedToolNames.includes(tool) && !directExactCertifiedExecution && !input.hostFloor) {
         // A raw/text controller can still submit an admitted semantic handle
         // after the inspector has reported a host-unavailable or ineligible
         // semantic tier. Let the canonical semantic tool return its precise
@@ -2110,7 +2135,9 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
         // Freeze at host authorization/capability minting, before a compiler
         // or executor is called.  A failure after this point is terminal
         // unless the same frozen plan receives its one permitted repair.
-        if (executionTier && observation.executionAuthorized && observation.outcome === 'eligible' && !state.resolvedPlan?.frozen) {
+        const floorRefreeze = observation.hostFloor === true && !hasExecutedTool();
+        if (executionTier && observation.executionAuthorized && observation.outcome === 'eligible'
+          && (!state.resolvedPlan?.frozen || floorRefreeze)) {
           const ids = [...new Set(observation.candidateIds)].filter((id) => state.retainedCandidateIds.includes(id));
           state.resolvedPlan = {
             version: 3,

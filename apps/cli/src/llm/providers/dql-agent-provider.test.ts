@@ -188,6 +188,8 @@ function v2NarrationTestBudget(input: {
     mayStartDiscovery: () => input.discoveryOpen(),
     narrationSoftTargetMs: () => 38_000,
     mayStartNarration: () => input.narrationOpen(),
+    hostFloorReserveMs: 0,
+    mayStartHostFloor: () => true,
   };
 }
 
@@ -504,10 +506,13 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
         outcome: 'unavailable',
         reasonCode: provideCertifiedExecutor ? 'CERTIFIED_ARTIFACT_STALE' : 'CERTIFIED_EXECUTOR_UNAVAILABLE',
       }),
+      // The host settled the dead tier before the first dispatch, so the
+      // analyst's own attempt to run it is narrowed to the live next step
+      // rather than spent rediscovering what the host already recorded.
       expect.objectContaining({
         tool: 'run_certified',
-        outcome: 'unavailable',
-        reasonCode: provideCertifiedExecutor ? 'CERTIFIED_ARTIFACT_STALE' : 'CERTIFIED_EXECUTOR_UNAVAILABLE',
+        outcome: 'denied',
+        reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED',
       }),
     ]));
   });
@@ -660,11 +665,16 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
         executeCertifiedBlock: vi.fn(async () => ({ columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 })),
       } as never);
 
-      expect(answer.kind).toBe('no_answer');
+      // The analyst's stop is recorded exactly as before...
       expect(state.observations).toEqual(expect.arrayContaining([
         expect.objectContaining({ tool: 'finish_answer', outcome: 'error', reasonCode: 'ASK_TOOL_BUDGET_EXHAUSTED', origin: 'agent_control' }),
       ]));
-      expect(state.terminalOutcome).toMatchObject({ kind: 'budget_exhausted', reasonCode: 'ASK_TOOL_BUDGET_EXHAUSTED', origin: 'agent_control' });
+      // ...and then the HOST runs the certified block it had already proved
+      // complete. A project with a complete certified answer gets it no matter
+      // how the analyst behaved: that is the floor's invariant.
+      expect(answer.kind).toBe('certified');
+      expect(answer.askAgentV2Outcome?.reasonCode).toBe('ASK_V2_HOST_FLOOR_ANSWERED');
+      expect(state.terminalOutcome).toMatchObject({ kind: 'finish_answer', reasonCode: 'ASK_V2_HOST_FLOOR_ANSWERED' });
     } finally {
       vi.unstubAllGlobals();
     }

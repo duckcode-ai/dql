@@ -1590,6 +1590,13 @@ function createAskV2LaneHandler(
     let clarification: { message: string; options: Array<{ id: string; label: string }> } | undefined;
     let finalText: string | undefined;
     let executionFailure: { reasonCode: string; origin: 'execution' | 'validation' } | undefined;
+    /**
+     * True only while the host floor is running its own ladder after the
+     * analyst's turn. Every kernel call the execution tools make carries it,
+     * so the analyst's spent budgets do not apply to the host's work. Set by
+     * `runHostFloor` alone; a model tool call cannot reach it.
+     */
+    let hostFloorActive = false;
     let inspectedBusinessContextIds: string[] = [];
     // A missing time binding may be completed only once from the immutable
     // current question and one admitted compatible capability. This is a
@@ -1774,6 +1781,7 @@ function createAskV2LaneHandler(
     }): { ok: true } | { ok: false; reasonCode: string } => {
       const allowed = kernel.canCall(input.tool, {
         repair: input.repair,
+        hostFloor: hostFloorActive,
         candidateIds: input.candidateIds,
         ...(input.relationshipPathIds ? { relationshipPathIds: input.relationshipPathIds } : {}),
         bindingFingerprint: input.bindingFingerprint,
@@ -1793,6 +1801,7 @@ function createAskV2LaneHandler(
         planId: input.planId,
         frozen: true,
         executionAuthorized: true,
+        ...(hostFloorActive ? { hostFloor: true } : {}),
         samePlanRepair: input.repair,
         inputFingerprint: input.bindingFingerprint,
         ...(input.relationshipPathIds?.length ? { relationshipPathIds: input.relationshipPathIds } : {}),
@@ -2048,6 +2057,7 @@ function createAskV2LaneHandler(
         const allowed = kernel.canCall(name, {
           repair: args.repair === true,
           expansion: args.expand === true,
+          hostFloor: hostFloorActive,
           ...(semanticCandidateIds.length ? { candidateIds: semanticCandidateIds } : {}),
           ...(relationshipPathIds.length ? { relationshipPathIds } : {}),
         });
@@ -3860,6 +3870,7 @@ function createAskV2LaneHandler(
           // the single place that records the authorization/freeze receipt.
           const preflight = kernel.canCall('compile_and_run_dql', {
             repair,
+            hostFloor: hostFloorActive,
             candidateIds: selectedCandidateIds,
             relationshipPathIds: pathIds,
             bindingFingerprint,
@@ -4321,15 +4332,10 @@ function createAskV2LaneHandler(
       && (state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response')) {
       const certifiedCandidates = visibleCandidates()
         .filter((candidate) => candidate.kind === 'certified_block' && candidate.trustTier === 'certified');
-      const executableMetricPossible = visibleCandidates().some((candidate) => {
-        const id = v2CandidateId(candidate);
-        const handle = workspace?.semanticCapabilities?.get(id);
-        return askV2ExecutableSemanticRoles(candidate)?.includes('metric') === true
-          && handle?.candidateId === id
-          && handle.roles.includes('metric')
-          && Boolean(handle.selectedEngine ?? (handle.engines.length === 1 ? handle.engines[0] : undefined));
-      });
-      if (certifiedCandidates.length === 0 && !executableMetricPossible) {
+      // Unconditional: a curated project used to pay two or three dispatches
+      // to be told what the host already held, because this ran only when the
+      // host had already concluded the upper tiers were empty.
+      {
         try {
           const preInspect = (name: string) => tools.find((tool) => tool.name === name);
           // Everything recorded from here to the end of this block is the
@@ -4404,6 +4410,243 @@ function createAskV2LaneHandler(
         return askV2NoAnswer(input, 'gap', 'ASK_V2_REQUESTED_TERM_UNMODELED', 'validation', undefined, unmodeled);
       }
     }
+    // ------------------------------------------------------------------
+    // THE FLOOR.
+    //
+    // Budgets bound the analyst. When its turn ends with nothing executed —
+    // out of dispatches, a provider fault, a plan that would not compile, an
+    // honest "I decline to write SQL" — the HOST walks the tier ladder itself:
+    // the certified block it already proved complete, the semantic metric the
+    // parser can bind exactly, a single-relation program composed from the
+    // question over admitted columns, and finally a refusal that names what
+    // IS available. The model cannot reach this and cannot block it. Its only
+    // clock is the run deadline, and its only gates are the governance ones.
+    //
+    // A frozen plan that reached the warehouse is never replaced: then the
+    // execution error is the honest terminal and the floor does not fire.
+    // ------------------------------------------------------------------
+    const FLOOR_GAP_REASONS = new Set([
+      'ASK_V2_TOOL_PROGRESSION_REQUIRED',
+      'ASK_V2_NO_EXECUTABLE_TOOL_RESULT',
+      'ASK_V2_REMAINING_TIERS_DECLINED',
+    ]);
+    const executedInTurn = () => state.observations.some((observation) => observation.outcome === 'executed');
+    const floorEligible = (answer: AgentAnswer): boolean => {
+      if (completed || executedInTurn()) return false;
+      if (answer.kind !== 'no_answer' || answer.clarificationOptions?.length) return false;
+      if (!(state.turnClass === 'analytics' || state.turnClass === 'prior_result' || state.turnClass === 'clarification_response')) return false;
+      const outcome = answer.askAgentV2Outcome;
+      if (!outcome) return false;
+      if (outcome.kind === 'budget_exhausted' || outcome.kind === 'provider_failure') return true;
+      if (outcome.kind === 'gap') return FLOOR_GAP_REASONS.has(outcome.reasonCode);
+      if (outcome.kind === 'execution_failure') return outcome.origin === 'validation';
+      return false;
+    };
+    const floorDeadlineOpen = () => !input.signal?.aborted;
+    const FLOOR_RELATION_KINDS = new Set(['dql_modeling', 'dbt_model', 'dbt_source', 'sql_table']);
+    const FLOOR_NUMERIC_TYPE = /int|num|dec|float|double|real|money|bigint|smallint|tinyint/i;
+    /** Heads that say HOW to aggregate, not WHICH column: "total revenue" is revenue. */
+    const FLOOR_MEASURE_HEADS = new Set(['total', 'sum', 'amount', 'count', 'number', 'average', 'avg', 'mean', 'overall']);
+    const FLOOR_COUNT_HEADS = new Set(['count', 'number', 'many']);
+    /**
+     * The subject noun of a question, which the parser also lists as a
+     * dimension term ("customer accounts" → account, customer). When the
+     * grouping already bound to a column and only such a noun is left over,
+     * nothing asked for has been dropped.
+     */
+    const FLOOR_ENTITY_NOUNS = new Set(['customer', 'customers', 'account', 'accounts', 'client', 'clients', 'user', 'users', 'order', 'orders', 'product', 'products', 'item', 'items', 'record', 'records', 'row', 'rows']);
+    const FLOOR_TIME_GRAINS = new Set(['day', 'week', 'month', 'quarter', 'year', 'date', 'daily', 'weekly', 'monthly', 'quarterly', 'yearly']);
+    const floorTerm = (term: string) => term.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    /**
+     * One column for one business term, or nothing. Exact name first, then
+     * the name without an aggregation head, then a unique suffix or unique
+     * substring match. Two plausible columns is an ambiguity, and an
+     * ambiguity is not bound — the floor refuses rather than guesses.
+     */
+    const floorBindColumn = (
+      columns: ReadonlyArray<{ name: string; type?: string }>,
+      term: string,
+      numeric: boolean,
+    ): string | undefined => {
+      const wanted = floorTerm(term);
+      if (!wanted) return undefined;
+      const stripped = wanted.split('_').filter((word) => !FLOOR_MEASURE_HEADS.has(word)).join('_');
+      const names = columns
+        .filter((column) => !numeric || FLOOR_NUMERIC_TYPE.test(column.type ?? ''))
+        .map((column) => column.name);
+      for (const target of [...new Set([wanted, stripped].filter(Boolean))]) {
+        const exact = names.find((name) => name.toLowerCase() === target);
+        if (exact) return exact;
+      }
+      const target = stripped || wanted;
+      const suffix = names.filter((name) => name.toLowerCase().endsWith(`_${target}`));
+      if (suffix.length === 1) return suffix[0];
+      const contains = names.filter((name) => name.toLowerCase().includes(target));
+      if (contains.length === 1) return contains[0];
+      return undefined;
+    };
+    const floorRelations = () => retainedCandidates()
+      .filter((candidate) => FLOOR_RELATION_KINDS.has(candidate.kind) && (candidate.columns?.length ?? 0) > 0)
+      .sort((a, b) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0));
+    /**
+     * A single-relation plan the parser's reading of the question can bind
+     * EXACTLY to admitted columns, or the reason it cannot. Filters, member
+     * bindings and time windows are shapes this composer does not express,
+     * so a question that needs them is refused honestly rather than answered
+     * more broadly than it was asked.
+     */
+    const composeFloorRelationalPlan = (): { plan: Record<string, unknown>; relation: string } | { refusal: string } => {
+      const questionPlan = buildAnalysisQuestionPlan(input.question, input.followUp);
+      const shape = questionPlan.requestedShape;
+      // "how many orders" parses as the head `count` and the noun `order`:
+      // a pure head carries its aggregation onto the next term.
+      const measureTerms: Array<{ term: string; counting: boolean }> = [];
+      let pendingCount = false;
+      for (const raw of (shape.measures.length ? shape.measures : questionPlan.metricTerms)) {
+        const words = floorTerm(raw).split('_').filter(Boolean);
+        if (words.length > 0 && words.every((word) => FLOOR_COUNT_HEADS.has(word))) { pendingCount = true; continue; }
+        measureTerms.push({ term: raw, counting: pendingCount || FLOOR_COUNT_HEADS.has(words[0] ?? '') });
+        pendingCount = false;
+      }
+      if (measureTerms.length === 0) return { refusal: 'no measure' };
+      if (questionPlan.unboundQualifiers.length) return { refusal: `qualifier ${questionPlan.unboundQualifiers.join(', ')}` };
+      if (shape.filters.length || shape.memberBindings?.length) return { refusal: 'filter' };
+      if (questionPlan.timeTerms.length || (shape.grain && FLOOR_TIME_GRAINS.has(shape.grain.toLowerCase()))) return { refusal: 'time' };
+      // The grouping the parser settled on comes first; every other dimension
+      // term must bind too unless it is only the question's subject noun.
+      const dimensionTerms = [...new Set([...(shape.grain ? [shape.grain] : []), ...shape.dimensions])];
+      for (const relation of floorRelations()) {
+        const columns = relation.columns ?? [];
+        const measures = measureTerms.map(({ term, counting }) => {
+          const column = floorBindColumn(columns, term, !counting);
+          return column ? { id: `${relation.name}.${column}`, aggregation: counting ? 'count' : 'sum', alias: `${counting ? 'count' : 'total'}_${column}` } : undefined;
+        });
+        if (measures.some((measure) => !measure)) continue;
+        const bindings = dimensionTerms.map((term) => ({ term, column: floorBindColumn(columns, term, false) }));
+        const boundDimensions = bindings.filter((binding) => binding.column);
+        const dropped = bindings.filter((binding) => !binding.column && !(boundDimensions.length > 0 && FLOOR_ENTITY_NOUNS.has(floorTerm(binding.term))));
+        if (dropped.length > 0) continue;
+        const dimensions = [...new Set(boundDimensions.map((binding) => binding.column!))].map((column) => ({ id: `${relation.name}.${column}` }));
+        const boundMeasures = measures as Array<{ id: string; aggregation: string; alias: string }>;
+        const first = boundMeasures[0]!;
+        return {
+          relation: relation.name,
+          plan: {
+            measures: boundMeasures,
+            ...(dimensions.length ? { dimensions } : {}),
+            ...(dimensions.length ? { orderBy: { reference: first.alias, direction: shape.rankingDirection === 'bottom' ? 'asc' : 'desc' } } : {}),
+            ...(dimensions.length ? { limit: shape.topN?.n ?? 50 } : {}),
+          },
+        };
+      }
+      return { refusal: 'unbound' };
+    };
+    const floorAnswer = (rung: 'certified' | 'semantic' | 'relational'): AgentAnswer | undefined => {
+      if (!completed) return undefined;
+      // A host-composed relational program is single-relation and admitted,
+      // but nobody verified it against the question: label it for review.
+      const executed: AskV2CompletedExecution = rung === 'relational' ? { ...completed, tier: 'exploratory_sql' } : completed;
+      const outcome: NonNullable<AgentAnswer['askAgentV2Outcome']> = {
+        version: 2,
+        kind: 'finish_answer',
+        reasonCode: 'ASK_V2_HOST_FLOOR_ANSWERED',
+        origin: 'execution',
+        safeAction: 'review_validated_result',
+      };
+      observe('finish_answer', 'eligible', 'ASK_V2_HOST_FLOOR_ANSWERED', { origin: 'execution', tier: executed.tier, hostObserved: true, safeAction: `floor:${rung}` });
+      finishAskAgentV2Turn(state, outcome);
+      return askV2ExecutedAnswer(input, executed, deterministicAskV2ResultNarration(executed), outcome);
+    };
+    const floorRefusal = (reason: string): AgentAnswer => {
+      const questionPlan = buildAnalysisQuestionPlan(input.question, input.followUp);
+      const relations = floorRelations();
+      const numericColumnsOf = (relation: AgentEvidenceCandidate) => (relation.columns ?? [])
+        .filter((column) => FLOOR_NUMERIC_TYPE.test(column.type ?? ''))
+        .map((column) => column.name);
+      const admitted = relations
+        .filter((relation) => numericColumnsOf(relation).length > 0)
+        .slice(0, 5)
+        .map((relation) => `${relation.name} (${numericColumnsOf(relation).slice(0, 4).join(', ')})`);
+      const asked = (questionPlan.requestedShape.measures[0] ?? questionPlan.metricTerms[0] ?? '').trim();
+      const because = reason === 'filter'
+        ? 'it needs a filter that no governed query here can prove'
+        : reason === 'time'
+          ? 'it needs a time window that no governed query here expresses'
+          : reason.startsWith('qualifier')
+            ? `"${reason.slice('qualifier '.length)}" narrows the measure in a way nothing here models`
+            : reason === 'no measure'
+              ? 'it does not name a measure this project can compute'
+              : asked
+                ? `"${asked}" does not bind to exactly one column of the models retrieved for it`
+                : 'nothing retrieved for it binds exactly';
+      const text = `No governed query was run for this question because ${because}.${admitted.length ? ` Measures available: ${admitted.join('; ')}.` : ''} Name the measure and the model to use, or model it and re-sync.`;
+      observe('finish_answer', 'ineligible', 'ASK_V2_HOST_FLOOR_UNBOUND', { origin: 'validation', hostObserved: true, safeAction: `floor:${reason}` });
+      finishAskAgentV2Turn(state, { version: 2, kind: 'gap', reasonCode: 'ASK_V2_HOST_FLOOR_UNBOUND', origin: 'validation', safeAction: 'name_measure_and_model' });
+      return {
+        kind: 'no_answer', sourceTier: 'no_answer', certification: 'analyst_review_required', reviewStatus: 'analyst_review_required',
+        refusalCode: 'grounding_gap', text, answer: text, citations: [], considered: [], contextPack: input.contextPack,
+        askAgentV2Outcome: { version: 2, kind: 'gap', reasonCode: 'ASK_V2_HOST_FLOOR_UNBOUND', origin: 'validation', safeAction: 'name_measure_and_model' },
+      };
+    };
+    const runHostFloor = async (analystAnswer: AgentAnswer): Promise<AgentAnswer | undefined> => {
+      if (!floorEligible(analystAnswer) || !floorDeadlineOpen()) return undefined;
+      const toolByName = (name: string) => tools.find((tool) => tool.name === name);
+      hostFloorActive = true;
+      try {
+        observe('finish_answer', 'ineligible', 'ASK_V2_HOST_FLOOR_STARTED', {
+          origin: 'agent_control', hostObserved: true,
+          safeAction: `after:${analystAnswer.askAgentV2Outcome?.reasonCode ?? 'unknown'}`,
+        });
+        // Rung 1 — a certified block the host already proved complete.
+        const certifiedTier = state.tierStates?.certified;
+        const certifiedId = state.exactCertifiedCandidateId
+          ?? (certifiedTier?.status === 'complete' && certifiedTier.candidateIds.length === 1 ? certifiedTier.candidateIds[0] : undefined);
+        if (certifiedId && floorDeadlineOpen()) {
+          try {
+            await toolByName('run_certified')?.run({ candidateId: certifiedId });
+            const answer = floorAnswer('certified');
+            if (answer) return answer;
+          } catch { /* the next rung is the answer to a faulted rung */ }
+        }
+        // Rung 2 — a semantic metric the parser binds exactly.
+        if (floorDeadlineOpen()) {
+          try {
+            const semanticArgs = await deriveHostFirstSemanticArgs({
+              question: input.question,
+              candidates: retainedCandidates(),
+              capabilities: workspace?.semanticCapabilities,
+              ...(parseV2TrustedMemberSelection(state) ? { trustedMemberSelection: parseV2TrustedMemberSelection(state) } : {}),
+              ...(input.probeAllowlistedLiteral ? { probeAllowlistedLiteral: input.probeAllowlistedLiteral } : {}),
+            });
+            if (semanticArgs) {
+              await toolByName('compile_and_run_semantic')?.run(semanticArgs);
+              const answer = floorAnswer('semantic');
+              if (answer) return answer;
+            }
+          } catch { /* fall through */ }
+        }
+        // Rung 3 — one relation, admitted columns, host-composed program.
+        const composed = composeFloorRelationalPlan();
+        if ('plan' in composed && floorDeadlineOpen()) {
+          try {
+            await toolByName('compile_and_run_dql')?.run({ relationalPlan: composed.plan });
+            const answer = floorAnswer('relational');
+            if (answer) return answer;
+          } catch { /* fall through */ }
+          if (analystAnswer.askAgentV2Outcome?.kind === 'provider_failure') return undefined;
+          return floorRefusal('unbound');
+        }
+        // Rung 4 — an honest refusal that names what is available. Not after
+        // a provider fault: the analyst never got its chance, so "nothing
+        // binds" would blame the question for the transport. That answer
+        // already says nothing about the data has been ruled out.
+        if (analystAnswer.askAgentV2Outcome?.kind === 'provider_failure') return undefined;
+        return floorRefusal('refusal' in composed ? composed.refusal : 'unbound');
+      } finally {
+        hostFloorActive = false;
+      }
+    };
+    const analystTurn = async (): Promise<AgentAnswer> => {
     let loop: Awaited<ReturnType<typeof runAgenticToolLoopDetailed>>;
     try {
       // THE WORKSPACE TRAVELS WITH THE QUESTION.
@@ -4884,6 +5127,9 @@ function createAskV2LaneHandler(
       return askV2NoAnswer(input, 'gap', 'ASK_V2_TOOL_PROGRESSION_REQUIRED', 'agent_control');
     }
     return askV2NoAnswer(input, 'gap', 'ASK_V2_NO_EXECUTABLE_TOOL_RESULT', 'tool', undefined, await requestedUnmodeledTerm());
+    };
+    const analystAnswer = await analystTurn();
+    return (await runHostFloor(analystAnswer)) ?? analystAnswer;
   };
 }
 

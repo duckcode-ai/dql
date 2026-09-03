@@ -588,6 +588,13 @@ export interface AgentRunBudget {
    */
   narrationSoftTargetMs(): number;
   mayStartNarration(): boolean;
+  /**
+   * Wall clock held back from the analyst and its narration so the host floor
+   * — the tier ladder the host walks itself when the analyst's turn ends with
+   * nothing executed — always has room to run one governed query.
+   */
+  hostFloorReserveMs: number;
+  mayStartHostFloor(): boolean;
 }
 
 export interface AgentRunEvent {
@@ -1056,6 +1063,7 @@ export function createAgentRunBudget(input: {
     ? AbortSignal.any([input.inheritedSignal, timeout])
     : timeout;
   const elapsedMs = () => Math.max(0, nowMs() - startedAtMs);
+  const remainingMs = () => Math.max(0, hardDeadlineMs - elapsedMs());
   const softTargetMs = (route: AgentRunRoute): number => {
     const base = mode === 'research' ? 90_000 : (agentRouteDeadlineMs(route) ?? 15_000);
     // Scaled with the hard deadline: a soft target that stayed fixed while the
@@ -1065,9 +1073,13 @@ export function createAgentRunBudget(input: {
   };
   // Narration must still be reachable after a full generation window, and must
   // leave the hard deadline (45s ask / 120s research) room to land.
+  // The floor's slice comes off the END of the run: the analyst's soft target
+  // and the narration window both stop short of it, so neither can spend the
+  // time the host needs to answer when they did not.
+  const hostFloorReserveMs = mode === 'research' ? 15_000 : 8_000;
   const narrationSoftTargetMs = () => Math.min(
     (mode === 'research' ? 100_000 : 38_000) * scale,
-    hardDeadlineMs,
+    Math.max(hardDeadlineMs - hostFloorReserveMs, Math.floor(hardDeadlineMs / 2)),
   );
   return Object.freeze({
     startedAtMs,
@@ -1075,11 +1087,13 @@ export function createAgentRunBudget(input: {
     hardSignal,
     mode,
     elapsedMs,
-    remainingMs: () => Math.max(0, hardDeadlineMs - elapsedMs()),
+    remainingMs,
     softTargetMs,
     mayStartDiscovery: (route: AgentRunRoute) => !hardSignal.aborted && elapsedMs() < softTargetMs(route),
     narrationSoftTargetMs,
     mayStartNarration: () => !hardSignal.aborted && elapsedMs() < narrationSoftTargetMs(),
+    hostFloorReserveMs,
+    mayStartHostFloor: () => !hardSignal.aborted && remainingMs() > 1_500,
   });
 }
 
