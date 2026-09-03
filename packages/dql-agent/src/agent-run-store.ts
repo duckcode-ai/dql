@@ -147,6 +147,9 @@ export function slimRunForPersistence<T extends { artifacts?: unknown; steps?: u
   };
 }
 
+/** A persisted run heavier than this is one written before slimming; it gets slimmed in place. */
+const OVERSIZED_RUN_BYTES = 512 * 1024;
+
 export class SqliteAgentRunStore implements AgentRunStore {
   private readonly db: Database.Database;
   private readonly maxRuns: number;
@@ -174,6 +177,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
     `);
     this.finalizeInterruptedRuns();
     if (options.legacyJsonPath) this.migrateLegacyJson(options.legacyJsonPath);
+    this.slimOversizedRuns();
   }
 
   save(run: AgentRun): void {
@@ -241,12 +245,24 @@ export class SqliteAgentRunStore implements AgentRunStore {
     return row ? parseProgress(row.payload_json) : undefined;
   }
 
-  list(): AgentRun[] {
-    const rows = this.db.prepare('SELECT payload_json FROM agent_runs ORDER BY started_at DESC').all() as Array<{ payload_json: string }>;
+  /**
+   * Newest first. `limit` bounds the rows READ, not just the rows returned:
+   * parsing every stored run to answer a page of fifty took the server past
+   * its heap on a project with months of history.
+   */
+  list(limit?: number): AgentRun[] {
+    const rows = (Number.isFinite(limit) && (limit as number) > 0
+      ? this.db.prepare('SELECT payload_json FROM agent_runs ORDER BY started_at DESC LIMIT ?').all(Math.floor(limit as number))
+      : this.db.prepare('SELECT payload_json FROM agent_runs ORDER BY started_at DESC').all()) as Array<{ payload_json: string }>;
     return rows.flatMap((row) => {
       const run = parseRun(row.payload_json);
       return run ? [run] : [];
     });
+  }
+
+  count(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS total FROM agent_runs').get() as { total: number } | undefined;
+    return row?.total ?? 0;
   }
 
   close(): void {
@@ -427,6 +443,30 @@ export class SqliteAgentRunStore implements AgentRunStore {
         continue;
       }
       update.run(JSON.stringify({ ...slimRunForPersistence(run), events: [] }), row.id);
+    }
+    this.slimOversizedRuns();
+  }
+
+  /**
+   * Rows written before persisted runs were slimmed still carry the context
+   * pack and artifacts four to five times — 4 MB a run, 1.2 GB over a
+   * project's history — and reading a page of them took the server past its
+   * heap. Bring a few of the heaviest down each time a run is saved (and
+   * once at open), so an old project heals without a migration step.
+   */
+  private slimOversizedRuns(batch = 8): void {
+    const heavy = this.db.prepare(`
+      SELECT id, payload_json, compacted FROM agent_runs
+      WHERE length(payload_json) > ?
+      ORDER BY length(payload_json) DESC LIMIT ?
+    `).all(OVERSIZED_RUN_BYTES, batch) as Array<{ id: string; payload_json: string; compacted: number }>;
+    if (heavy.length === 0) return;
+    const update = this.db.prepare('UPDATE agent_runs SET payload_json = ? WHERE id = ?');
+    for (const row of heavy) {
+      const run = parseRun(row.payload_json);
+      if (!run) continue;
+      const slim = JSON.stringify(row.compacted ? { ...slimRunForPersistence(run), events: [] } : slimRunForPersistence(run));
+      if (slim.length < row.payload_json.length) update.run(slim, row.id);
     }
   }
 

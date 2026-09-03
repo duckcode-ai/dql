@@ -17483,17 +17483,17 @@ function analyticalFailureSummary(
       const limit = Number.isFinite(rawLimit) && rawLimit > 0
         ? Math.min(200, Math.floor(rawLimit))
         : 50;
-      const stored = agentRunStore.list();
       // This is an INDEX payload: one row per run, no answer bodies. Shipping
-      // stored runs whole meant a measured 47.61 MB for 20 real runs.
+      // stored runs whole meant a measured 47.61 MB for 20 real runs, and
+      // PARSING every stored run to build the index took the server past its
+      // heap on a project with 300 runs of history (1.2 GB of JSON). The store
+      // reads only the page, newest first.
       // `GET /api/agent-runs/:id` still serves the complete immutable record.
-      const runs = stored
-        .slice()
+      const runs = agentRunStore.list(limit)
         .sort((a: AgentRun, b: AgentRun) => b.startedAt.localeCompare(a.startedAt))
-        .slice(0, limit)
         .map(agentRunListEntryForTransport);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ runs, total: stored.length, limit }));
+      res.end(serializeJSON({ runs, total: agentRunStore.count(), limit }));
       return;
     }
 
