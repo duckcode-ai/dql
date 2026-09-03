@@ -856,8 +856,8 @@ export interface LocalServerOptions {
  * startup so an operator can run an explicit authoritative canary.
  */
 export const ASK_AGENT_RUNTIME_MODES = [
+  // Operator rollback only, for one release. Deleted with V1.
   'legacy_v1',
-  'shadow_v2',
   'authoritative_v2',
 ] as const satisfies readonly AskRuntimeModeV2[];
 
@@ -867,7 +867,7 @@ export function resolveAskAgentRuntimeMode(
   value: unknown,
   options: { legacyFallback?: boolean } = {},
 ): AskAgentRuntimeMode {
-  if (value === undefined) return options.legacyFallback ? 'legacy_v1' : 'shadow_v2';
+  if (value === undefined) return options.legacyFallback ? 'legacy_v1' : 'authoritative_v2';
   if (typeof value === 'string' && (ASK_AGENT_RUNTIME_MODES as readonly string[]).includes(value)) {
     return value as AskAgentRuntimeMode;
   }
@@ -886,9 +886,11 @@ export function resolveAskAgentRuntimeMode(
  * enter it at all. An operator selecting a rollout mode is making a project
  * decision, and it should persist like one.
  *
- * Precedence is CLI flag > project config > default. The default stays
- * `shadow_v2`: a rollout control that turns itself on is not a rollout
- * control.
+ * Precedence is CLI flag > project config > default. The default is
+ * `authoritative_v2`: it is the runtime every fix of the last month was made
+ * to, and `shadow_v2` — which built V2's decision and then discarded it in
+ * favour of V1 — no longer exists. `legacy_v1` remains for one release as an
+ * operator rollback.
  */
 export function readProjectAskRuntimeMode(projectRoot: string): unknown {
   try {
@@ -12900,11 +12902,10 @@ function analyticalFailureSummary(
   };
   // V1.15 has one Ask entrypoint. The existing hybrid router survives only as
   // its safe compiler broker; it receives the runtime-owned snapshot/frame and
-  // cannot acquire another source of meaning. Shadow records the same state
-  // without a second execution, while legacy remains a host-only rollback.
-  // V1 remains the explicit operator rollback/compiler comparison.  V2 uses
-  // this only in `legacy_v1`/`shadow_v2`; authoritative V2 does not let the
-  // deterministic candidate verifier own business interpretation.
+  // cannot acquire another source of meaning. V1 remains the explicit
+  // operator rollback for one release (`legacy_v1`) and the non-Ask router;
+  // authoritative V2 does not let the deterministic candidate verifier own
+  // business interpretation.
   const askAnalystRuntimeV1 = createAskAnalystRuntimeV1({
     mode: opts.askAnalystRuntimeMode ?? 'authoritative',
     getEvidence: memoizedAgentRunEvidence,
@@ -12983,12 +12984,8 @@ function analyticalFailureSummary(
     ? askAnalystRuntimeV1
     : createAskAgentRuntimeV2({
       mode: askAgentRuntimeMode,
-      // Shadow mode builds V2's evidence and then delegates to V1, which
-      // builds it again from the SAME request object — a second candidate
-      // binding, relationship-path hash and workspace bridge per turn, all
-      // for a decision shadow throws away. The context pack was already
-      // memoized; this memoizes the rest of the build so observing V2 costs
-      // one retrieval, not two.
+      // Non-Ask requests still reach the V1 router through this runtime and
+      // build the same evidence; memoized so a turn costs one retrieval.
       getEvidence: memoizedAgentRunEvidence,
       legacyRouter: askAnalystRuntimeV1,
     });

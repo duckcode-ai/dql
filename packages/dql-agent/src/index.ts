@@ -2071,3 +2071,12 @@ export {
 } from './agentic/sql-authorization.js';
 
 export { parseAnalyticalTimeWindow } from './requirement-clauses.js';
+
+// Scripted analysts for the Ask battery: the runtime is judged by what the
+// user gets no matter how the model behaves.
+export {
+  createScriptedAnalystProvider,
+  SCRIPTED_ANALYST_PERSONAS,
+  type ScriptedAnalystPersona,
+  type ScriptedAnalystProvider,
+} from './testing/scripted-analyst-provider.js';

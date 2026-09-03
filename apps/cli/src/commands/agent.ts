@@ -35,7 +35,6 @@ import {
   evalCassetteCanonicalizationV2,
   withCassette,
 } from './agent-eval-cassette.js';
-import { runAgentShadowReport } from './agent-shadow-report.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
@@ -417,18 +416,15 @@ export async function runAgent(
       return runFeedback(rest, flags);
     case 'eval':
       return runEval(rest, flags);
-    case 'shadow-report':
-      return runAgentShadowReport(rest, flags);
     default:
       throw new Error(
-        'Usage: dql agent <ask|threads|trace|reindex|feedback|eval|shadow-report> [args]\n' +
+        'Usage: dql agent <ask|threads|trace|reindex|feedback|eval> [args]\n' +
             '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>] [--purpose <approved-purpose>] [--thread <id>]\n' +
       '  dql agent threads [--runtime-url <url>]\n' +
       '  dql agent trace list|show|export|validate|replay|compare\n' +
       '  dql agent reindex [path]\n' +
       '  dql agent feedback up|down --block <id> --question "..."\n' +
-      '  dql agent eval agent-evals.yml [--provider claude|openai|gemini|ollama] [--execute] [--save]\n' +
-      '  dql agent shadow-report [path] [--json] [--limit <n>]   Compare what V1 answered with what V2 would have done',
+      '  dql agent eval agent-evals.yml [--provider claude|openai|gemini|ollama] [--execute] [--save]\n',
         );
   }
 }

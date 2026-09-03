@@ -474,13 +474,16 @@ describe('AskAgentRuntimeV2', () => {
     expect(JSON.stringify(receipt)).not.toContain('not modeled');
   });
 
-  it('AGT-048 uses V1 only as a shadow comparison and never serves its terminal decision', async () => {
+  it('AGT-048 serves V1 only under the explicit legacy rollback, never by default', async () => {
     const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
-    const runtime = createAskAgentRuntimeV2({ mode: 'shadow_v2', getEvidence: async () => evidence(), legacyRouter });
-    const decision = await runtime.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
+    const legacy = createAskAgentRuntimeV2({ mode: 'legacy_v1', getEvidence: async () => evidence(), legacyRouter });
+    const decision = await legacy.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
     expect(legacyRouter.decide).toHaveBeenCalledOnce();
     expect(decision.terminalOutcome?.message).toBe('legacy terminal');
-    expect(decision.askAgentV2Decision?.mode).toBe('shadow_v2');
+    // The default runtime never asks V1 for an Ask decision.
+    const authoritative = createAskAgentRuntimeV2({ getEvidence: async () => evidence(), legacyRouter });
+    await authoritative.decide({ question: 'top customers by revenue', requestedMode: 'ask' });
+    expect(legacyRouter.decide).toHaveBeenCalledOnce();
   });
 
   it('AGT-052 enters Research only through explicit Research selection', async () => {
@@ -507,12 +510,12 @@ describe('AskAgentRuntimeV2', () => {
     expect(decision.askAgentV2Decision?.state.conversation.selectedMemberBinding).toBe('Melissa Davis');
   });
 
-  it('AGT-054 defaults to shadow and treats grouped measures as analytics', async () => {
+  it('AGT-054 defaults to the authoritative runtime and treats grouped measures as analytics', async () => {
     const legacyRouter = { decide: vi.fn(async () => legacyDecision()) };
     const runtime = createAskAgentRuntimeV2({ getEvidence: async () => evidence(), legacyRouter });
     const decision = await runtime.decide({ question: 'what is revenue for each customer?', requestedMode: 'ask' });
-    expect(runtime.mode).toBe('shadow_v2');
-    expect(legacyRouter.decide).toHaveBeenCalledOnce();
+    expect(runtime.mode).toBe('authoritative_v2');
+    expect(legacyRouter.decide).not.toHaveBeenCalled();
     expect(decision.askAgentV2Decision?.state.turnClass).toBe('analytics');
   });
 

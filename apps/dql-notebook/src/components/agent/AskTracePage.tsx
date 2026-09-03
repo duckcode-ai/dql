@@ -365,10 +365,8 @@ function TraceHeader({ trace, t, onRefresh }: { trace: AskTraceDataV1; t: Theme;
   );
 }
 
-/** Keep shadow evidence visibly distinct from a serving authoritative run. */
 function askRuntimeModeLabel(mode: NonNullable<AskTraceDataV1['runtimeMode']>): string {
   if (mode === 'authoritative_v2') return 'Authoritative V2 runtime';
-  if (mode === 'shadow_v2') return 'Shadow V2 observation · legacy V1 served answers';
   return 'Legacy V1 runtime';
 }
 

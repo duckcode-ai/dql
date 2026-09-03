@@ -20,8 +20,8 @@ describe('resolveNotebookConnection', () => {
     });
   });
 
-  it('uses shadow_v2 by default, passes the explicit notebook mode to the server, and rejects invalid modes', async () => {
-    expect(resolveAskAgentRuntimeMode(undefined)).toBe('shadow_v2');
+  it('uses authoritative_v2 by default, passes the explicit notebook mode to the server, and rejects invalid modes', async () => {
+    expect(resolveAskAgentRuntimeMode(undefined)).toBe('authoritative_v2');
     expect(resolveAskAgentRuntimeMode('authoritative_v2')).toBe('authoritative_v2');
     expect(() => resolveAskAgentRuntimeMode('experimental')).toThrow(/Invalid Ask runtime mode/i);
 
@@ -31,7 +31,7 @@ describe('resolveNotebookConnection', () => {
     try {
       const health = await fetch(`${shadow.url}/api/health`);
       expect(health.status).toBe(200);
-      expect(await health.json()).toMatchObject({ askRuntimeMode: 'shadow_v2' });
+      expect(await health.json()).toMatchObject({ askRuntimeMode: 'authoritative_v2' });
     } finally {
       await shadow.close();
     }

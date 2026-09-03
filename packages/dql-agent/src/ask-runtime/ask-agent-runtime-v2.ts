@@ -23,7 +23,8 @@ import type { ContextSourceCoverageV1, ResearchEvidenceLedgerV3 } from '../analy
 import type { AgentEvidenceCandidate, AgentRetrievalEvidence } from '../meaning-resolution.js';
 
 /** Explicit operator rollout control.  Browser/MCP request bodies never set it. */
-export type AskRuntimeModeV2 = 'legacy_v1' | 'shadow_v2' | 'authoritative_v2';
+/** `shadow_v2` — build V2's decision, then discard it for V1's — is gone. */
+export type AskRuntimeModeV2 = 'legacy_v1' | 'authoritative_v2';
 
 /** V2 has one turn owner; classification is an LLM/tool-runtime responsibility. */
 export type AskTurnClassV2 =
@@ -2525,10 +2526,8 @@ function askV2PriorPlanId(conversationContext: unknown): string | undefined {
 }
 
 export function createAskAgentRuntimeV2(options: AskAgentRuntimeOptionsV2): AskAgentRuntimeV2 {
-  // Serving defaults to shadow until an operator explicitly enables the
-  // canary.  V2 can observe an Ask in shadow, but it must never replace the
-  // established answer path merely because a runtime was constructed.
-  const mode = options.mode ?? 'shadow_v2';
+  // V2 is the runtime. `legacy_v1` is an explicit operator rollback only.
+  const mode = options.mode ?? 'authoritative_v2';
   return {
     mode,
     async decide(request): Promise<IntentDecision> {
@@ -2552,11 +2551,6 @@ export function createAskAgentRuntimeV2(options: AskAgentRuntimeOptionsV2): AskA
       const state = createState(mode, turnClass, request, evidence);
       applyHostCertifiedFastPath(state, request);
       const v2Decision = { version: 2 as const, mode, state };
-
-      if (mode === 'shadow_v2') {
-        const legacy = await options.legacyRouter.decide(request);
-        return { ...legacy, askAgentV2Decision: v2Decision };
-      }
 
       if (request.selectedResultBindingGap) {
         state.terminal = 'clarification';

@@ -49,8 +49,9 @@ relationship, MetricFlow, SQL, authorization, or trust invariants.
    fingerprints. Rows require an explicit project setting; local and opted-in
    remote rows are capped at 20×20/400 cells (`AGT-053`, `PERF-004`).
 
-V1 remains readable and is available only through an explicit `legacy_v1`
-operator mode. `shadow_v2` never serves a V2 result. Stage 1 exposes the
+V1 remains readable and is available only through an explicit, deprecated
+`legacy_v1` operator mode for one release. `shadow_v2` no longer exists:
+`authoritative_v2` is the default and the only serving runtime. Stage 1 exposes the
 runtime/receipt contracts and host seam. The current implementation also
 persists the V8 decision story into the existing local trace API and Notebook
 trace detail, and projects the existing bounded Research ledger as V4. Those

@@ -6600,7 +6600,7 @@ function computeStepOutcome(
  */
 function refusalCodeSummary(code: string | undefined): string | undefined {
   switch (code) {
-    case 'grounding_gap': return 'DQL could not ground every part of this question in the current metadata snapshot, so no query was accepted.';
+    case 'grounding_gap': return 'DQL could not match every part of this question to governed data, so no query was run.';
     case 'modeling_gap': return 'Part of this question is not modeled in this project yet, so no governed query can answer it as asked.';
     case 'ambiguous': return 'One business choice is required before DQL can run this question.';
     case 'provider_error': return 'This question was not worked out to a query, so nothing about the data has been ruled out.';
@@ -6630,7 +6630,13 @@ function blockingOutcomeSummary(
   // refusal-code sentence: "analyst declined the exploratory tier" is
   // actionable where "could not ground every part" reads as a system fault.
   if (result.askAgentV2Outcome?.reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED') {
-    return 'No certified block or semantic metric covers this question, and the analyst declined to run unverified exploratory SQL against this snapshot. No query was executed. Use Research for a deeper investigation, certify a block for this question, or name the exact model/columns to query.';
+    return 'No certified block or semantic metric covers this question, and the analyst declined to run unverified exploratory SQL. No query was executed. Use Research for a deeper investigation, certify a block for this question, or name the exact model/columns to query.';
+  }
+  // The host floor names what it could and could not bind, and which
+  // measures exist. That sentence was written for the reader; the coarse
+  // code's sentence was not.
+  if (result.askAgentV2Outcome?.reasonCode?.startsWith('ASK_V2_HOST_FLOOR') && typeof result.answer === 'string' && result.answer.trim()) {
+    return result.answer.trim();
   }
   const typed = refusalCodeSummary(result.answerRefusalCode);
   if (typed) return typed;

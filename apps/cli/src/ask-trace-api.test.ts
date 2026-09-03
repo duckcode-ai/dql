@@ -55,7 +55,7 @@ async function start(root: string, options: {
   connection?: ConnectionConfig;
   requireMeaningCallForNaturalLanguage?: boolean;
   /** V2-only integration cases opt in explicitly; production defaults to shadow. */
-  askAgentRuntimeMode?: 'legacy_v1' | 'shadow_v2' | 'authoritative_v2';
+  askAgentRuntimeMode?: 'legacy_v1' | 'authoritative_v2';
   askAnalyticalPlannerProviderFactory?: (input: {
     projectRoot: string;
     request: AgentRunRequest;

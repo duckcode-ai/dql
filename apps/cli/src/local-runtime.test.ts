@@ -4151,10 +4151,15 @@ describe('agent run runtime API', () => {
       expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('authoritative_v2');
     });
 
-    it('keeps shadow_v2 as the default when the project says nothing', () => {
+    it('serves authoritative_v2 by default when the project says nothing', () => {
       const root = projectWithConfig({ agent: {} });
       expect(readProjectAskRuntimeMode(root)).toBeUndefined();
-      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('shadow_v2');
+      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('authoritative_v2');
+    });
+
+    it('no longer accepts the deleted shadow mode', () => {
+      const root = projectWithConfig({ agent: { askRuntimeMode: 'shadow_v2' } });
+      expect(() => resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toThrow(/Invalid Ask runtime mode/);
     });
 
     it('lets a CLI flag override the project config, and the config override the default', () => {
@@ -4178,7 +4183,7 @@ describe('agent run runtime API', () => {
       dirs.push(root);
       writeFileSync(join(root, 'dql.config.json'), '{ not json');
       expect(readProjectAskRuntimeMode(root)).toBeUndefined();
-      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('shadow_v2');
+      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('authoritative_v2');
     });
   });
 

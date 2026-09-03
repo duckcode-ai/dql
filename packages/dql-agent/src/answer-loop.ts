@@ -917,7 +917,18 @@ export function certifiedBlockProvesRequestedTopN(
     && Number.isInteger(options.hostEnforcedRowLimit)
     && options.hostEnforcedRowLimit === topN.n
     && options.hostEnforcedRowLimit! > 0;
-  if (!limitUsesDeclaredParameter && !hostOwnsFrozenRowLimit) return false;
+  // 3. The artifact's own fixed outer LIMIT is exactly the requested N, and
+  //    the host holds snapshot evidence that this block is THE answer to
+  //    this question (an authored example matched it, or it is the one
+  //    complete certified fit). "Top customers" over a block authored with
+  //    LIMIT 10 is the most ordinary certified question there is; refusing
+  //    it because the 10 was not a parameter sent every such question down
+  //    to the analyst. A fixed LIMIT still proves nothing for a DIFFERENT N.
+  const fixedLimitMatchesRequest = typeof limitValue === 'string'
+    && /^\d+$/.test(limitValue.trim())
+    && Number(limitValue.trim()) === topN.n
+    && (options.exactCertifiedQuestionMatch === true || options.uniqueCompleteCertifiedFit === true);
+  if (!limitUsesDeclaredParameter && !hostOwnsFrozenRowLimit && !fixedLimitMatchesRequest) return false;
 
   // A question-driven ranking is only exact when the *primary* authored sort
   // expression proves the requested measure.  Finding `revenue DESC` later in
@@ -950,6 +961,11 @@ export function certifiedBlockProvesRequestedTopN(
   if (firstOrder.direction !== requiredDirection) return false;
 
   const orderMetricIds = topNOrderMetricIds(firstOrder.expression, block);
+  // An authored example that matches the question verbatim is the author's
+  // own statement that this ranking answers it; the measure the parser
+  // reduced the question to ("spend" for "lifetime spend") need not be
+  // re-derived from the ORDER BY, only the ordering itself must be a metric.
+  if (options.exactCertifiedQuestionMatch === true && orderMetricIds.size > 0) return true;
   if (requestedMeasures.length > 0) {
     return requestedMeasures.some((measure) => orderMetricIds.has(measure));
   }

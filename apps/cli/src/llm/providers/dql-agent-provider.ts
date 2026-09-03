@@ -4471,8 +4471,10 @@ function createAskV2LaneHandler(
       const wanted = floorTerm(term);
       if (!wanted) return undefined;
       const stripped = wanted.split('_').filter((word) => !FLOOR_MEASURE_HEADS.has(word)).join('_');
+      // A column with no recorded type is not known to be non-numeric; the
+      // manifest often carries names without types.
       const names = columns
-        .filter((column) => !numeric || FLOOR_NUMERIC_TYPE.test(column.type ?? ''))
+        .filter((column) => !numeric || !column.type || FLOOR_NUMERIC_TYPE.test(column.type))
         .map((column) => column.name);
       for (const target of [...new Set([wanted, stripped].filter(Boolean))]) {
         const exact = names.find((name) => name.toLowerCase() === target);
@@ -4483,6 +4485,14 @@ function createAskV2LaneHandler(
       if (suffix.length === 1) return suffix[0];
       const contains = names.filter((name) => name.toLowerCase().includes(target));
       if (contains.length === 1) return contains[0];
+      // "by customer" over customer_id and customer_name is not ambiguous to a
+      // reader: the grouping label is the name. Only for groupings — a measure
+      // is never chosen this way.
+      if (!numeric && contains.length > 1) {
+        const label = contains.find((name) => name.toLowerCase() === `${target}_name`)
+          ?? contains.find((name) => name.toLowerCase().endsWith('_name'));
+        if (label) return label;
+      }
       return undefined;
     };
     const floorRelations = () => retainedCandidates()
@@ -4509,7 +4519,21 @@ function createAskV2LaneHandler(
         pendingCount = false;
       }
       if (measureTerms.length === 0) return { refusal: 'no measure' };
-      if (questionPlan.unboundQualifiers.length) return { refusal: `qualifier ${questionPlan.unboundQualifiers.join(', ')}` };
+      // "lifetime spend" parses as the measure `spend` with `lifetime` left
+      // over. If a column named for the WHOLE phrase exists — lifetime_spend —
+      // the qualifier was never dropped, and that column is the measure. If it
+      // does not, the qualifier is real and unbound, and the question is
+      // refused rather than answered as plain `spend`.
+      const qualifiers = questionPlan.unboundQualifiers;
+      if (qualifiers.length) {
+        const qualified = measureTerms.map((entry) => {
+          const phrase = qualifiers.map((qualifier) => `${qualifier} ${entry.term}`)
+            .find((candidate) => floorRelations().some((relation) => floorBindColumn(relation.columns ?? [], candidate, !entry.counting)));
+          return phrase ? { ...entry, term: phrase } : undefined;
+        });
+        if (qualified.some((entry) => !entry)) return { refusal: `qualifier ${qualifiers.join(', ')}` };
+        measureTerms.splice(0, measureTerms.length, ...(qualified as typeof measureTerms));
+      }
       if (shape.filters.length || shape.memberBindings?.length) return { refusal: 'filter' };
       if (questionPlan.timeTerms.length || (shape.grain && FLOOR_TIME_GRAINS.has(shape.grain.toLowerCase()))) return { refusal: 'time' };
       // The grouping the parser settled on comes first; every other dimension
@@ -5753,7 +5777,10 @@ async function deriveHostFirstSemanticArgs(input: {
   // for questions it can answer exactly; a lost qualifier means this is not one
   // of them, so hand it to the analyst, which can see the beverage-specific
   // metric and certified block that exist for precisely this question.
-  if ((requirements.unboundMeasureQualifiers?.length ?? 0) > 0) return undefined;
+  // ...unless the QUALIFIED phrase is itself a metric ("lifetime spend" is
+  // `customers.lifetime_spend`): then nothing was dropped. Decided below,
+  // once `resolve` exists, by binding the qualified phrase before the bare one.
+  const droppedQualifiers = requirements.unboundMeasureQualifiers ?? [];
 
   // Requirement terms are business English ("customer name"); runtime names
   // are snake_case ("customer_name"). Both spell the same field — try the
@@ -5835,7 +5862,9 @@ async function deriveHostFirstSemanticArgs(input: {
 
   const metricIds: string[] = [];
   for (const measure of requirements.measures.slice(0, 4)) {
-    const resolved = resolve(measure, 'metric');
+    const resolved = droppedQualifiers.length
+      ? droppedQualifiers.map((qualifier) => resolve(`${qualifier} ${measure}`, 'metric')).find(Boolean)
+      : resolve(measure, 'metric');
     if (!resolved) return undefined;
     if (!metricIds.includes(resolved)) metricIds.push(resolved);
   }

@@ -1378,7 +1378,7 @@ export interface AskCascadeTierAttemptV2 {
 
 export interface AgentRunDiagnosticReceiptV8 {
   version: 8;
-  mode: 'legacy_v1' | 'shadow_v2' | 'authoritative_v2';
+  mode: 'legacy_v1' | 'authoritative_v2';
   turnClass: 'analytics' | 'definition' | 'business_context' | 'prior_result' | 'general' | 'clarification_response' | 'research';
   snapshotId?: string;
   retainedCandidateCount: number;
@@ -1628,7 +1628,7 @@ export interface AskTraceDataV1 {
   /** Same redacted V8 tool-runtime receipt returned by the full trace API. */
   runtimeReceiptV8?: AgentRunDiagnosticReceiptV8;
   /** Server-owned Ask rollout mode joined from the durable run; old traces omit it. */
-  runtimeMode?: 'legacy_v1' | 'shadow_v2' | 'authoritative_v2';
+  runtimeMode?: 'legacy_v1' | 'authoritative_v2';
 }
 
 export interface AskTraceStoreStatusV1 {
@@ -1644,7 +1644,7 @@ export interface AskTraceListEntryV1 extends AskTraceEnvelopeV1 {
   /** Joined at API read time from the local run store; never persisted in the trace store. */
   questionPreview?: string;
   scenarioLabel?: string;
-  runtimeMode?: 'legacy_v1' | 'shadow_v2' | 'authoritative_v2';
+  runtimeMode?: 'legacy_v1' | 'authoritative_v2';
 }
 
 export interface AskTraceListQueryV1 {
@@ -1698,7 +1698,7 @@ export interface AgentRun {
   diagnosticReceiptV7?: AgentRunDiagnosticReceiptV7;
   diagnosticReceiptV8?: AgentRunDiagnosticReceiptV8;
   /** Server-owned rollout mode; this is never client-controlled. */
-  askAgentRuntimeMode?: 'legacy_v1' | 'shadow_v2' | 'authoritative_v2';
+  askAgentRuntimeMode?: 'legacy_v1' | 'authoritative_v2';
   businessAnswer?: AgentRunBusinessAnswerV1;
   /** Persisted server-owned runtime checkpoint; client consumes the narrow stable shape only. */
   askAnalystState?: AskAnalystRuntimeStateV1;

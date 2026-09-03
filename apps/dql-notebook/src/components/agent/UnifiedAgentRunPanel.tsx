@@ -2882,7 +2882,7 @@ interface AnalyticalInspectorContract {
 function isAgentRunDiagnosticReceiptV8(value: unknown): value is NonNullable<AgentRun['diagnosticReceiptV8']> {
   const receipt = recordOf(value);
   return receipt?.version === 8
-    && (receipt.mode === 'legacy_v1' || receipt.mode === 'shadow_v2' || receipt.mode === 'authoritative_v2')
+    && (receipt.mode === 'legacy_v1' || receipt.mode === 'authoritative_v2')
     && Array.isArray(receipt.contextCoverage)
     && Array.isArray(receipt.observations)
     && Array.isArray(receipt.tierAttempts)
@@ -3201,7 +3201,6 @@ function authoritativeV8Activity(
 
 function askRuntimeEvidenceLabel(mode: AgentRun['askAgentRuntimeMode'] | AskTraceDataV1['runtimeMode'] | undefined): string | undefined {
   if (mode === 'authoritative_v2') return 'Authoritative V2 receipt';
-  if (mode === 'shadow_v2') return 'Shadow V2 observation only — legacy V1 served this answer.';
   if (mode === 'legacy_v1') return 'Legacy V1 runtime';
   return undefined;
 }

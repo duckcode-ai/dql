@@ -438,7 +438,7 @@ function portableRuntimeReceiptV8(value: unknown, profile: AskTraceExportProfile
   const safeCode = (candidate: unknown): string => typeof candidate === 'string' && /^[A-Z][A-Z0-9_:-]{1,95}$/.test(candidate)
     ? candidate
     : 'UNRECOGNIZED_REASON';
-  const modes = new Set(['legacy_v1', 'shadow_v2', 'authoritative_v2']);
+  const modes = new Set(['legacy_v1', 'authoritative_v2']);
   const turns = new Set(['analytics', 'definition', 'business_context', 'prior_result', 'general', 'clarification_response', 'research']);
   const sources = new Set(['certified', 'semantic', 'governed_relational', 'dbt_manifest', 'runtime_schema', 'vector', 'conversation', 'business']);
   const sourceStates = new Set(['available', 'empty', 'stale', 'unavailable', 'errored', 'skipped']);

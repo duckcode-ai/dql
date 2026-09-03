@@ -6,6 +6,35 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## Unreleased
+
+### Ask runtime: one runtime, and a floor under it
+
+- `authoritative_v2` is now the default Ask runtime. `shadow_v2` — which built
+  V2's decision for every question and then discarded it in favour of V1 —
+  is removed, along with `dql agent shadow-report`. A project config or
+  `--ask-runtime-mode` naming `shadow_v2` now fails loudly.
+- `legacy_v1` remains for exactly one release as an operator rollback and is
+  **deprecated**: it is deleted, together with the V1 runtime, in the next
+  minor release.
+- The host floor: when the analyst's turn ends with nothing executed (a spent
+  budget, a provider fault, a plan that would not compile, an analyst that
+  declined to act), the host walks the tier ladder itself — the proven
+  certified block, the exactly-bound semantic metric, a single-relation
+  program composed from the question over admitted columns (labelled
+  review-required), or a refusal that names the measures that exist. It never
+  answers a narrower question more broadly and never replaces a plan that
+  reached the warehouse.
+- Deleted the gates that only ever spent dispatches: inspection-order
+  requirements before execution, the refusal of a repeated parameterless
+  inspector, the kernel's dead dispatch/duration budgets, the provider
+  wrapper's hardcoded dispatch cap and the silent per-provider default of two
+  sends. The run-scoped dispatch ledger is the one dispatch authority.
+- Persisted runs keep each artifact payload once; the server no longer grows
+  ~4 MB per question.
+
+---
+
 ## v1.14.3-rc.1 - 2026-08-25
 
 ### Ask AI orchestration and observability

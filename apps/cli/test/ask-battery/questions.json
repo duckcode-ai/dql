@@ -1,0 +1,17 @@
+{
+  "_comment": "The Ask battery. Every question runs against every fixture it names, under every scripted analyst persona, through the real local server. The runtime is judged by what the user gets: an executed governed answer, a clarification, or an honest gap — never a sentence about the machinery. `expect` names the invariant beyond that floor: `certified` means a complete certified block must be served under EVERY persona; `answer_or_gap` means anything but an infrastructure sentence; `not_broadened` means a question with a qualifier the fixture cannot bind must never be answered as the wider question.",
+  "questions": [
+    { "id": "top-customers-certified", "question": "Who are the top customers by lifetime spend?", "fixtures": ["jaffle-semantic", "jaffle-supply-chain"], "expect": "certified" },
+    { "id": "top-products-certified", "question": "what are the top products", "fixtures": ["jaffle-semantic", "jaffle-supply-chain"], "expect": "certified" },
+    { "id": "food-vs-drink", "question": "compare food and drink revenue", "fixtures": ["jaffle-semantic", "jaffle-supply-chain"], "expect": "answer_or_gap" },
+    { "id": "order-count-by-customer", "question": "what is the order count for each customer?", "fixtures": ["jaffle-semantic"], "expect": "answer_or_gap" },
+    { "id": "revenue-total", "question": "total revenue", "fixtures": ["jaffle-semantic", "jaffle-supply-chain"], "expect": "answer_or_gap" },
+    { "id": "revenue-by-month", "question": "revenue by month", "fixtures": ["jaffle-semantic", "jaffle-supply-chain"], "expect": "answer_or_gap" },
+    { "id": "beverage-qualifier", "question": "beverage revenue by customer", "fixtures": ["jaffle-semantic", "jaffle-supply-chain"], "expect": "not_broadened" },
+    { "id": "unmodeled-term", "question": "churn rate by region", "fixtures": ["jaffle-semantic", "jaffle-supply-chain", "bigrepo-arr"], "expect": "answer_or_gap" },
+    { "id": "arr-by-account", "question": "top 10 customer accounts by arr", "fixtures": ["bigrepo-arr"], "expect": "answer_or_gap" },
+    { "id": "net-arr-by-account", "question": "top 10 customer accounts by net arr", "fixtures": ["bigrepo-arr"], "expect": "answer_or_gap" },
+    { "id": "greeting", "question": "hi", "fixtures": ["jaffle-semantic"], "expect": "answer_or_gap" },
+    { "id": "why-drop", "question": "why did it drop?", "fixtures": ["jaffle-semantic"], "expect": "answer_or_gap" }
+  ]
+}
