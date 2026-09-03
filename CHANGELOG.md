@@ -86,6 +86,22 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - A plan's `orderBy` that names none of the selected fields ("revenue" for
   `drink_revenue`) resolves to the selected field it names, else to the
   measure, instead of freezing an unrunnable plan.
+- An Ask turn is executed once, and its answer is never replaced by a
+  second, worse one. The engine's repair loop did not recognise a V2 Ask as
+  frozen, so a failing evaluation ran the executor again; the second pass
+  opened a fresh lane over a state that had already finished, and a result
+  the first pass had validated and preserved was replaced by that pass's
+  budget refusal. Live, a governed relational query returned rows and the
+  run reported "DQL stopped at its own orchestration budget" with zero
+  facts. The engine now treats an authoritative V2 decision as frozen, and
+  the lane memoizes its answer per turn state so any other re-entry returns
+  what the turn already proved.
+- An unadmitted `expectedOutputIds` refusal names which identifier failed
+  and offers real `<relation>.<column>` examples. It used to answer "not
+  admitted" with a list of card ids while asking for column ids, so the
+  model guessed again and the same refusal repeated until the budget died.
+- A prior-result member filter binds the member's dimension, never the
+  member-value card the host minted for it.
 - A physical relation whose catalog name already carries a quoted segment
   (Snowflake's `"ANALYTICS_PROD".schema.table`) is quoted once per segment.
   Wrapping the quoted segment again produced a triple-quoted identifier that

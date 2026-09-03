@@ -1658,6 +1658,9 @@ let v2TurnConversationCounter = 0;
  * because the ledger, not the turn class, is what runs out.
  */
 const ASK_V2_LANE_DEFAULT_DISPATCHES = 10;
+/** The answer an Ask V2 turn already produced, keyed by its state (see the handler's return). */
+const askV2TurnAnswers = new WeakMap<AskAgentStateV4, AgentAnswer>();
+
 /** Research proposes hypotheses first, so it needs one send more than an Ask per branch it may open. */
 const ASK_V2_RESEARCH_DEFAULT_DISPATCHES = 12;
 
@@ -1666,7 +1669,7 @@ function createAskV2LaneHandler(
   limits?: { maxToolCalls?: number; maxProviderDispatches?: number },
 ) {
   const v2TurnConversationNonce = `${Date.now().toString(36)}:${(v2TurnConversationCounter += 1)}`;
-  return async (input: AnswerLoopInput): Promise<AgentAnswer> => {
+  const runAskV2Turn = async (input: AnswerLoopInput): Promise<AgentAnswer> => {
     // Reapply immutable Tier 1 tuple truth before a reloaded state creates a
     // kernel or exposes a tool policy.  A persisted lower controllerTier is
     // only a pre-freeze proposal; it cannot outrank a complete certified
@@ -1693,6 +1696,13 @@ function createAskV2LaneHandler(
     // without ever making an adapter a provider-controlled argument.
     if (workspace?.semanticRuntime) state.semanticRuntime = { ...workspace.semanticRuntime };
     let completed: AskV2CompletedExecution | undefined;
+    // A turn that starts on a state carrying observations is a RE-ENTRY: the
+    // memo above should have returned the first answer, so seeing this means
+    // something ran the turn again. DQL_DEBUG_LANE prints the caller.
+    if (process.env.DQL_DEBUG_LANE) {
+      console.error('[DQL_DEBUG lane-enter]', JSON.stringify({ question: input.question.slice(0, 60), observations: state.observations.length, terminal: state.terminal }));
+      if (state.observations.length > 0) console.error('[DQL_DEBUG lane-reenter]', new Error('reenter').stack?.split('\n').slice(1, 8).join(' | '));
+    }
     let clarification: { message: string; options: Array<{ id: string; label: string }> } | undefined;
     let finalText: string | undefined;
     let executionFailure: { reasonCode: string; origin: 'execution' | 'validation'; detail?: string } | undefined;
@@ -2136,6 +2146,31 @@ function createAskV2LaneHandler(
      * up instead. Naming the near misses turns a two-step recovery
      * (describe, then re-send) into one.
      */
+    /**
+     * Real `<relation>.<column>` identifiers from the admitted relations,
+     * preferring columns whose name echoes an id the model just tried. This
+     * is what an admission refusal must offer: the SHAPE it is asking for,
+     * not the card ids it happens to hold.
+     */
+    const admittedColumnIdentifiers = (wanted: readonly string[] = [], limit = 12): string[] => {
+      const tail = (value: string) => value.split(/[.:]/).at(-1)?.toLowerCase() ?? value.toLowerCase();
+      const wantedTails = wanted.map(tail).filter(Boolean);
+      const relations = retainedCandidates().filter((candidate) => (candidate.columns?.length ?? 0) > 0);
+      const scored: Array<{ id: string; score: number }> = [];
+      for (const relation of relations) {
+        const relationName = v2CandidateId(relation);
+        for (const column of relation.columns ?? []) {
+          const name = column.name.toLowerCase();
+          const score = wantedTails.some((want) => name === want) ? 3
+            : wantedTails.some((want) => want.length >= 3 && (name.includes(want) || want.includes(name))) ? 2
+            : 0;
+          scored.push({ id: `${relationName}.${column.name}`, score });
+        }
+      }
+      const ranked = scored.filter((entry) => entry.score > 0).sort((left, right) => right.score - left.score);
+      const fallback = scored.filter((entry) => entry.score === 0);
+      return [...new Set([...ranked, ...fallback].map((entry) => entry.id))].slice(0, limit);
+    };
     const nearMissColumns = (rawId: string, limit = 6): string[] => {
       const separator = rawId.lastIndexOf('.');
       if (separator <= 0) return [];
@@ -4178,8 +4213,18 @@ function createAskV2LaneHandler(
           // Same teaching contract as the semantic/relational refusals: a
           // model told only "not admitted" guesses identifiers until the
           // budget dies. Name the admitted output IDs verbatim.
+          // NAME THE ONE THAT FAILED, AND OFFER THE RIGHT SHAPE. The refusal
+          // used to answer "not admitted" with a list of CARD ids — relations,
+          // metrics, entities — while asking for "<relation>.<column>". A
+          // model handed the wrong shape guesses again, and the same refusal
+          // repeats until the budget dies (observed three times in a row on
+          // the enterprise warehouse). Report exactly which ids failed and
+          // real column identifiers drawn from the admitted relations.
+          const unadmittedOutputIds = reason === 'EXPLORATORY_OUTPUT_IDENTIFIER_NOT_ADMITTED'
+            ? outputIds.filter((id) => !resolveAdmittedReference(id))
+            : [];
           const admittedOutputs = reason === 'EXPLORATORY_OUTPUT_IDENTIFIER_NOT_ADMITTED'
-            ? visibleCandidates().slice(0, 24).map((candidate) => v2CandidateId(candidate))
+            ? admittedColumnIdentifiers(unadmittedOutputIds)
             : [];
           // The validator names the exact offending relation or column. Reading
           // a field it does not have ("reason") meant every SQL-validation
@@ -4194,12 +4239,15 @@ function createAskV2LaneHandler(
             : {};
           return {
             ...denied('validate_and_run_sql', reason),
-            ...(admittedOutputs.length ? {
-              admittedOutputIds: admittedOutputs,
+            ...(reason === 'EXPLORATORY_OUTPUT_IDENTIFIER_NOT_ADMITTED' ? {
+              ...(unadmittedOutputIds.length ? { unadmittedOutputIds } : {}),
+              ...(admittedOutputs.length ? { admittedOutputIds: admittedOutputs } : {}),
               admittedRelations: admittedRelationVocabulary(),
-              usage: 'expectedOutputIds names the ADMITTED IDENTIFIERS this SQL reads, not the aliases it returns:'
-                + ' send "<relation>.<column>" for each column the query touches (see admittedRelations), never the SELECT alias.'
-                + ' Use describe_relation to see every column of one relation.',
+              usage: `${unadmittedOutputIds.length ? `These ids are not admitted: ${unadmittedOutputIds.join(', ')}. ` : ''}`
+                + 'expectedOutputIds names the ADMITTED IDENTIFIERS this SQL reads, not the aliases it returns:'
+                + ' send "<relation>.<column>" for each column the query touches, never the SELECT alias'
+                + `${admittedOutputs.length ? ` (for example ${admittedOutputs.slice(0, 6).join(', ')})` : ''}.`
+                + ' Use describe_relation on a relation to see every column it has.',
             } : {}),
             ...(reason === 'EXPLORATORY_SQL_VALIDATION_FAILED' ? {
               ...validationDetail,
@@ -4642,10 +4690,19 @@ function createAskV2LaneHandler(
         // spelled it out; the dimension is host knowledge.
         const trusted = parseV2TrustedMemberSelection(state);
         if (trusted && !filters.some((filter) => [str(filter.value), ...v2StringArray(filter.values, 24)].some((value) => value?.toLowerCase() === trusted.value.toLowerCase()))) {
+          // The DIMENSION the value belongs to, never the member-value card
+          // itself: `semantic:member:<dimension>:<value>` is an admitted
+          // handle for the value, and sending it as a filter's dimensionId
+          // is refused as an unadmitted identifier — which cost the whole
+          // turn on a follow-up that had everything it needed.
           const boundDimension = trusted.dimensionReferences
-            .map((reference) => resolveAdmittedReference(reference, 'retained')?.candidate
-              ?? resolveAdmittedReference(`${reference} name`, 'retained')?.candidate)
-            .find((candidate) => candidate && (candidate.kind === 'semantic_member' || candidate.semanticObjectType === 'dimension'));
+            .flatMap((reference) => [
+              resolveAdmittedReference(reference, 'retained')?.candidate,
+              resolveAdmittedReference(`${reference} name`, 'retained')?.candidate,
+            ])
+            .find((candidate) => Boolean(candidate)
+              && candidate!.semanticObjectType === 'dimension'
+              && !v2CandidateId(candidate!).startsWith('semantic:member:'));
           if (boundDimension) filters.push({ id: v2CandidateId(boundDimension), operator: '=', value: trusted.value });
         }
         for (const filter of filters) {
@@ -5862,6 +5919,29 @@ function createAskV2LaneHandler(
     };
     const analystAnswer = await analystTurn();
     return (await runHostFloor(analystAnswer)) ?? analystAnswer;
+  };
+  /**
+   * ONE ASK TURN, ONE ANSWER.
+   *
+   * The turn's state is a single immutable snapshot with one frozen plan and
+   * one terminal. Anything that runs this handler twice on that state — an
+   * engine repair loop, a retry above the runner — opens a FRESH closure:
+   * the second pass has no `completed`, so a result the first pass validated
+   * (and preserved through a narration failure) is replaced by whatever the
+   * second pass can reach, which is usually a budget refusal. Observed live:
+   * a governed relational query returned rows and the run reported "DQL
+   * stopped at its own orchestration budget" with zero facts.
+   *
+   * The answer is therefore memoized per state object. This is process-local
+   * and never serialized (the kernel keeps its own live instances the same
+   * way); Research children carry their own state, so each still runs.
+   */
+  return async (input: AnswerLoopInput): Promise<AgentAnswer> => {
+    const prior = askV2TurnAnswers.get(state);
+    if (prior) return prior;
+    const answer = await runAskV2Turn(input);
+    askV2TurnAnswers.set(state, answer);
+    return answer;
   };
 }
 

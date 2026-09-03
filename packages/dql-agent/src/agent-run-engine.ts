@@ -2365,7 +2365,19 @@ export class AgentRunEngine {
           // A frozen analytical plan has one route and no downstream planner,
           // rematch, route escalation, or whole-answer regeneration authority.
           // Typed server-issued repair is a separate derived run.
-          if (authoritativeAsk || taskRouteDecision.analyticalCascadeDecision?.planFrozen === true) {
+          //
+          // AN ASK V2 TURN IS ONE TURN. Its kernel owns a single immutable
+          // snapshot, one frozen plan and one terminal; re-running the
+          // executor cannot improve it and actively destroys it — the second
+          // pass opens a fresh lane closure over a state that already
+          // finished, so a result the first pass validated (and preserved
+          // through a narration failure) is replaced by that pass's
+          // budget-exhausted refusal. Observed live: a governed relational
+          // query executed and returned rows, and the run reported "DQL
+          // stopped at its own orchestration budget" with zero facts.
+          const authoritativeV2Ask = taskRouteDecision.askAgentV2Decision?.mode === 'authoritative_v2'
+            || routeDecision.askAgentV2Decision?.mode === 'authoritative_v2';
+          if (authoritativeAsk || authoritativeV2Ask || taskRouteDecision.analyticalCascadeDecision?.planFrozen === true) {
             stepStatus = 'needs_review';
             break;
           }

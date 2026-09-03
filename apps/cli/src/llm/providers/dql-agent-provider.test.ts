@@ -1188,6 +1188,67 @@ describe('authoritative Ask V2 snapshot tool controller', () => {
     ]));
   });
 
+  it('never discards a validated relational result when the budget dies before the finish control', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt::model.mart_arr', qualifiedId: 'dbt::model.mart_arr', kind: 'dbt_model', trustTier: 'governed_sql',
+      name: 'mart_arr', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      columns: [{ name: 'crm_account_name', type: 'text' }, { name: 'arr', type: 'number' }],
+    } as AgentEvidenceCandidate;
+    const state = askV2State([relation]);
+    const executeDql = vi.fn(async () => ({ columns: ['crm_account_name', 'net_arr'], rows: [{ crm_account_name: 'Tyrell', net_arr: 274155.2 }], rowCount: 1 }));
+    // Two dispatches: the plan, then nothing left for the finish control.
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 2 })({
+      question: 'top 10 accounts by arr',
+      provider: textToolProvider([
+        '```json\n{"tool":"propose_plan","input":{"measures":[{"id":"mart_arr.arr","aggregation":"sum"}],"dimensions":[{"id":"mart_arr.crm_account_name"}],"orderBy":{"reference":"mart_arr.arr","direction":"desc"},"limit":10}}\n```',
+        'I would rather keep talking than call the finish control.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([relation]),
+      executeAskV2DqlArtifact: executeDql,
+      authorizeAskV2DqlArtifact: async () => ({ planId: 'ask-v2:governed:test', targetFingerprint: 'sha256:target' }),
+    } as never);
+
+    expect(executeDql).toHaveBeenCalledOnce();
+    // The validated rows are the answer. A budget that elapsed after the
+    // warehouse returned is a narration incident, never a lost result.
+    expect(answer.kind).not.toBe('no_answer');
+    expect(answer.result).toMatchObject({ rowCount: 1, answerTier: 'governed_relational' });
+    expect(answer.askAgentV2Outcome).toMatchObject({ kind: 'finish_answer' });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_dql', outcome: 'executed', reasonCode: 'GOVERNED_RELATIONAL_RESULT_VALIDATED' }),
+    ]));
+  });
+
+  it('answers a re-entered turn with the answer it already produced, never a second, worse one', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt::model.mart_arr', qualifiedId: 'dbt::model.mart_arr', kind: 'dbt_model', trustTier: 'governed_sql',
+      name: 'mart_arr', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      columns: [{ name: 'crm_account_name', type: 'text' }, { name: 'arr', type: 'number' }],
+    } as AgentEvidenceCandidate;
+    const state = askV2State([relation]);
+    const executeDql = vi.fn(async () => ({ columns: ['crm_account_name', 'net_arr'], rows: [{ crm_account_name: 'Tyrell', net_arr: 274155.2 }], rowCount: 1 }));
+    const handler = __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 3 });
+    const laneInput = {
+      question: 'top 10 accounts by arr',
+      provider: textToolProvider([
+        '```json\n{"tool":"propose_plan","input":{"measures":[{"id":"mart_arr.arr","aggregation":"sum"}],"dimensions":[{"id":"mart_arr.crm_account_name"}],"orderBy":{"reference":"mart_arr.arr","direction":"desc"},"limit":10}}\n```',
+        'Tyrell leads on ARR.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([relation]),
+      executeAskV2DqlArtifact: executeDql,
+      authorizeAskV2DqlArtifact: async () => ({ planId: 'ask-v2:governed:test', targetFingerprint: 'sha256:target' }),
+    } as never;
+
+    const first = await handler(laneInput);
+    expect(first.result).toMatchObject({ rowCount: 1, answerTier: 'governed_relational' });
+    // A repair loop above the lane runs the same turn again. The state is
+    // spent — its plan is frozen and its budget used — so a fresh pass could
+    // only return a refusal. The turn answers with what it already proved.
+    const second = await handler(laneInput);
+    expect(second).toBe(first);
+    expect(executeDql).toHaveBeenCalledOnce();
+  });
+
   it('propose_plan refuses a plan that mixes tiers and names the fix', async () => {
     const metric: AgentEvidenceCandidate = {
       id: 'semantic:metric:account_revenue.revenue', qualifiedId: 'semantic:metric:account_revenue.revenue', kind: 'semantic_metric',
