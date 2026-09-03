@@ -31,7 +31,6 @@ import {
   loadAgentSemanticLayer,
   OllamaProvider,
   OpenAIProvider,
-  answer,
   createAnalyticalFailure,
   buildAnalysisQuestionPlan,
   buildCertifiedBlockInvocationInput,
@@ -8084,7 +8083,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           // analyst loop receives this projected object, so dropping the
           // observer here would make actual text-protocol tool calls invisible
           // even though provider, router, and SQL evidence was recorded.
-          const answerLoopInput: Parameters<typeof answer>[0] = attachAskTraceObserverV1<Parameters<typeof answer>[0]>({
+          const answerLoopInput: AnswerLoopInput = attachAskTraceObserverV1<AnswerLoopInput>({
             question,
             ...(v2Workspace ? { askAgentV2Workspace: v2Workspace } : {}),
             ...(req.skipCrossResultComputation
@@ -8296,7 +8295,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT
             // auto-write a draft into the blocks space. A draft is created only when the user
             // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
-          } as Parameters<typeof answer>[0], askTrace);
+          } as AnswerLoopInput, askTrace);
           let result: AgentAnswer;
           if (v2Authoritative) {
             // Tier 1 completes before provider planning.  The direct path is
@@ -8328,134 +8327,14 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             });
             }
           } else {
-          result = req.deterministicExploratoryProposal
-            ? await answer(answerLoopInput)
-            : await answerAgentic(answerLoopInput, {
-            // V2 is an explicit host-owned runtime selection, not a project
-            // config accident.  It sends the immutable retrieved workspace to
-            // the bounded analyst tool loop even when an older project still
-            // has the migration policy set to legacy.  Shadow never serves.
-            policy: orchestratorPolicyForRequest(req),
-            lane: agenticLaneForRequest(req),
-            legacy: answer,
-            // The generated lane runs the analyst loop: it verifies every
-            // identifier against a tool observation before the SQL is executed.
-            // Certified and semantic lanes are deliberately NOT registered —
-            // their answers already come from a governed contract, so a
-            // verification pass would add latency and no safety.
-            handlers: {
-              generated: createAnalystLaneHandler({
-                legacy: answer,
-                authoritativeV2: v2Authoritative,
-                buildDeps: (loopInput) => {
-                  const execute = loopInput.executeGeneratedSql;
-                  const valuesEnabled = valueLookupEnabled(req.projectRoot);
-                  const tools = buildAnalystLoopTools(loopInput, { valuesEnabled });
-                  if (process.env.DQL_ORCHESTRATOR_TRACE) {
-                    console.warn(`[dql] analyst loop deps: tools=${tools.length} preview=${Boolean(execute)} values=${valuesEnabled}`);
-                  }
-                  if (tools.length === 0) return undefined;
-                  return {
-                    tools,
-                    maxIterations: resolveOrchestratorPolicy({
-                      config: readOrchestratorConfig(req.projectRoot),
-                    }).maxIterations,
-                    // Keep the raw loop bounded by the same physical ceiling
-                    // as the wrapper. The run-scoped ledger still admits only
-                    // one ordinary generation/planning transport; a separate
-                    // frozen-plan repair marker is required for the third send.
-                    maxProviderDispatches,
-                    // Scaled by the same knob as every other agent deadline, so
-                    // a local model that needs seconds per call is not planned
-                    // out of existence by a budget calibrated for a hosted one.
-                    // V2 deliberately uses one bounded turn plan after
-                    // retrieval.  V1 keeps its historical research-only
-                    // planning policy so this does not broaden legacy calls.
-                    ...(turnPlanningEnabled(req.projectRoot, req.orchestrationMode) || v2Authoritative ? {
-                    planTurn: async (question: string, toolNames: string[]) => {
-                      const plan = await planAnalystTurn(
-                        loopInput.provider,
-                        question,
-                        toolNames,
-                        {
-                          timeoutMs: Math.round(2_500 * deadlineScale()),
-                          ...(loopInput.signal ? { signal: loopInput.signal } : {}),
-                        },
-                      );
-                      if (process.env.DQL_ORCHESTRATOR_TRACE) {
-                        console.warn(plan
-                          ? `[dql] analyst turn plan: "${plan.restatement}" establish=${plan.mustEstablish.length} opening=${plan.openingTool ?? 'unset'}`
-                          : '[dql] analyst turn plan: unavailable (loop proceeds unplanned)');
-                      }
-                      return plan;
-                    },
-                    } : {}),
-                    // Text-protocol tool loops execute tools outside the
-                    // provider transport, so carry the same physical-boundary
-                    // observer through the loop. The marker prevents the
-                    // provider wrapper from duplicating native tool records.
-                    onToolCall: v2Authoritative
-                      ? createAskV2TraceToolCallback(askTraceObserverForV1(loopInput), v2State)
-                      : createAskTraceToolCallback(askTraceObserverForV1(loopInput)),
-                    // The loop's trace, on the channel the provider already uses
-                    // for progress. `thinking` turns become `onProgress`, which
-                    // the run engine emits as `executor.started` over SSE — so
-                    // this needs no new event type, no contract change, and no
-                    // UI work. Without it the loop does real work (tool calls,
-                    // identifier checks, a bounded repair) behind a silent
-                    // spinner, which reads as a hang rather than as an analyst
-                    // establishing facts.
-                    onStep: (step) => {
-                      emit({
-                        kind: 'thinking',
-                        text: step.detail ? `${step.label} — ${step.detail}` : step.label,
-                      });
-                    },
-                    // Reuse the legacy parser and validator rather than forking
-                    // a second SQL front end that would drift from the first.
-                    parseSql: (raw) => parseProposal(raw).sql,
-                    extractReferences: (sql) => {
-                      const validation = validateSqlAgainstLocalContext(sql, loopInput.contextPack);
-                      const qualified = qualifyAuthorizationReferences(sql, {
-                        relations: validation.referencedRelations ?? [],
-                        columns: validation.referencedColumns ?? [],
-                      });
-                      return {
-                        relations: validation.referencedRelations ?? [],
-                        columns: qualified.filter((reference) => !validation.referencedRelations?.includes(reference)),
-                      };
-                    },
-                    // The safety verifiers keep their logic; only what happens on
-                    // failure changes. Instead of ending the turn, the specific
-                    // check that fired comes back as something the model can act
-                    // on — "joining those tables multiplies rows" rather than
-                    // "nothing was executed".
-                    verifySql: (sql) => {
-                      const validation = validateSqlAgainstLocalContext(sql, loopInput.contextPack);
-                      if (validation.ok) return undefined;
-                      return renderContextValidationRefusalForUser(
-                        validation.code,
-                        validation.error,
-                        loopInput.followUp?.memberBindings,
-                        validation.aggregationSafetyProof?.issueCodes,
-                      );
-                    },
-                  };
-                },
-              }),
-            },
-            onDiagnostic: (event) => {
-              if (event.kind === 'fallback') {
-                console.warn(`[dql] agentic orchestrator fell back on ${event.lane}: ${event.reason}`);
-              } else if (process.env.DQL_ORCHESTRATOR_TRACE) {
-                // Opt-in dispatch trace. A migration where the new path silently
-                // never runs looks identical to one where it runs and agrees,
-                // and that ambiguity costs more to debug than the log costs to
-                // carry.
-                console.warn(`[dql] agentic orchestrator dispatched lane=${event.lane} mode=${event.mode}`);
-              }
-            },
-          });
+            // authoritative_v2 is the only Ask runtime. The V1 answer loop is
+            // gone; a request that reaches here without the V2 mode is a
+            // host wiring fault, reported as such rather than answered by
+            // a runtime that no longer exists.
+            throw Object.assign(
+              new Error('The V1 Ask controller was removed; every Ask request runs the authoritative V2 lane.'),
+              { code: 'ASK_V2_LEGACY_CONTROLLER_MUST_NOT_RUN' },
+            );
           }
           if (v2Authoritative) finishV2AnswerFromResult(v2State, result);
           terminalAnswer = result;

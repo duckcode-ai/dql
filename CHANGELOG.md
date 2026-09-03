@@ -47,6 +47,18 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   rank entities is asked, not guessed, before any dispatch; each option
   carries the authored dimension id and the question to resubmit.
 
+### The V1 answer loop is gone
+
+- `answer()` and the V1 execution body of `answer-loop.ts` (≈9,900 lines)
+  are deleted, with the V1-only tests. The file is now the answer CONTRACT
+  (the `AgentAnswer` / `AnswerLoopInput` types) plus the small helper
+  library the V2 host still uses; `cascade/packer.ts` went with it. Public
+  export of `answer` is removed.
+- `dql agent ask` and `dql agent eval` drive the running runtime over HTTP
+  (`POST /api/agent-runs`), exactly as the notebook and the MCP server do;
+  the eval's in-process `--via loop` driver is removed. The Slack bot proxies
+  to the runtime at `DQL_RUNTIME_URL` (default `http://127.0.0.1:3474`).
+
 ### Ask runtime: one runtime, and a floor under it
 
 - `authoritative_v2` is now the default Ask runtime. `shadow_v2` — which built

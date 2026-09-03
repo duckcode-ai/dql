@@ -54,7 +54,6 @@ import {
   readProjectEmbeddingSettings,
   loadSkills,
   pickProvider,
-  answer,
   resolveDomainContextEnvelope,
   buildAnalysisQuestionPlan,
   buildLocalContextPack,
@@ -596,149 +595,11 @@ async function runLegacyDirectAsk(rest: string[], flags: CLIFlags): Promise<void
       reasonCode: 'completed',
       payload: { kind: 'retrieval', candidateCount: contextPack?.objects.length ?? 0 },
     });
-    const answerLoopTools = buildAnswerLoopTools(projectRoot);
-    const result = await answer({
-      question,
-      provider: tracedProvider,
-      kg,
-      manifest,
-      skills,
-      userId,
-      domain,
-      domainContext,
-      memoryContext,
-      semanticLayer,
-      schemaContext,
-      contextPack,
-      reasoningEffort,
-      analysisDepth: contextBudget.analysisDepth,
-      expandGroundingContext: createGroundingContextExpander(projectRoot),
-      answerLoopTools,
-      executeCertifiedBlock: async (node) => {
-        const block = manifest.blocks[node.name] ?? manifest.blocks[node.nodeId.replace(/^block:/, '')];
-        if (!block) throw new Error(`Matched block ${node.name} is not present in the manifest.`);
-        const source = readFileSync(join(projectRoot, block.filePath), 'utf-8');
-        const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/notebook/execute`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            cell: {
-              id: `agent-${node.name}`,
-              type: 'dql',
-              source,
-              title: node.name,
-            },
-          }),
-        });
-        if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
-        const payload = (await response.json()) as {
-          result?: {
-            columns?: unknown[];
-            rows?: unknown[];
-            rowCount?: number;
-            executionTime?: number;
-          };
-          error?: string;
-        };
-        if (payload.error) throw new Error(payload.error);
-        const rows = Array.isArray(payload.result?.rows) ? payload.result.rows : [];
-        const result = {
-          columns: Array.isArray(payload.result?.columns) ? payload.result.columns : [],
-          rows,
-          rowCount: typeof payload.result?.rowCount === 'number' ? payload.result.rowCount : rows.length,
-          executionTime: payload.result?.executionTime,
-          blockName: node.name,
-        };
-        recordCliQueryRun(projectRoot, {
-          objectKey: `dql:block:${node.name}`,
-          source: 'certified_block',
-          status: 'executed',
-          rowCount: result.rowCount,
-          durationMs: result.executionTime,
-          payload: { question, blockName: node.name },
-        });
-        return result;
-      },
-        executeGeneratedSql: async (sql) => {
-        const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/notebook/execute`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            cell: {
-              id: `agent-generated-${Date.now().toString(36)}`,
-              type: 'sql',
-              source: sql,
-              title: question,
-            },
-          }),
-        });
-        if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
-        const payload = (await response.json()) as {
-          result?: {
-            columns?: unknown[];
-            rows?: unknown[];
-            rowCount?: number;
-            executionTime?: number;
-          };
-          error?: string;
-        };
-        if (payload.error) throw new Error(payload.error);
-        const rows = Array.isArray(payload.result?.rows) ? payload.result.rows : [];
-        const result = {
-          columns: Array.isArray(payload.result?.columns) ? payload.result.columns : [],
-          rows,
-          rowCount: typeof payload.result?.rowCount === 'number' ? payload.result.rowCount : rows.length,
-          executionTime: payload.result?.executionTime,
-          sql,
-        };
-        recordCliQueryRun(projectRoot, {
-          source: 'ai_draft',
-          status: 'executed',
-          rowCount: result.rowCount,
-          durationMs: result.executionTime,
-          payload: { question, sql },
-          });
-          return result;
-        },
-        captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp, contextPack, sourceBlock, sourceDqlArtifact, dqlArtifact, proposedEntity, requestedFilters, requestedDimensions, validationWarnings, outputs }) => {
-          const slug = deriveGeneratedDraftSlug(draftQuestion);
-          const proposedDomain = sourceBlock?.domain ?? contextPack?.objects.find((object) => object.domain)?.domain ?? domain ?? 'misc';
-          if (dqlArtifact?.kind === 'semantic_block') {
-            return upsertGeneratedDqlArtifactDraft(projectRoot, {
-              slug,
-              question: draftQuestion,
-              proposedContractId: `${proposedDomain}.Unknown.${slug}`,
-              proposedDomain,
-              dqlArtifact,
-              sourceQuestion: followUp?.sourceQuestion,
-              sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
-              followupKind: followUp?.kind,
-              outputs,
-              contextPackId: contextPack?.id,
-              routeIntent: String(intent),
-              validationWarnings,
-            });
-          }
-          return upsertGeneratedDraft(projectRoot, {
-            slug,
-            question: draftQuestion,
-            proposedSql: sql,
-            proposedContractId: `${proposedDomain}.Unknown.${slug}`,
-            proposedDomain,
-            proposedEntity,
-            sourceDqlArtifact,
-            sourceQuestion: followUp?.sourceQuestion,
-            sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
-            followupKind: followUp?.kind,
-            requestedFilters,
-            requestedDimensions,
-            outputs,
-            contextPackId: contextPack?.id,
-            routeIntent: String(intent),
-            validationWarnings,
-          });
-        },
-      });
+    // The running runtime owns Ask: routing, the V2 lane, the plan boundary,
+    // the gates, and the persisted run. The CLI drives it over HTTP exactly as
+    // the notebook and the MCP server do; there is no second, in-process path.
+    const runtimeRun = await driveViaRuntime({ runtimeBase, question, requestedMode: 'auto', timeoutMs: 180_000 });
+    const result = answerFromRuntimeRun(runtimeRun);
 
     trace.finalize({ status: 'completed' });
 
@@ -1197,7 +1058,12 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
     provider.generate([{ role: 'system', content: system }, { role: 'user', content: user }], {});
   // Which half of the stack is under test. `loop` preserves today's behaviour;
   // `runtime` is the one that exercises routing and gates end to end.
-  const via = (flags as { via?: string }).via === 'runtime' ? 'runtime' : 'loop';
+  // The in-process answer-loop driver is gone with the V1 runtime; every case
+  // runs through a live server so it exercises routing, the lane, and the gates.
+  const via = 'runtime' as const;
+  if ((flags as { via?: string }).via && (flags as { via?: string }).via !== 'runtime') {
+    throw new Error(`--via ${(flags as { via?: string }).via} is no longer supported; the eval drives a running server (--via runtime).`);
+  }
   const runtimeBase = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
     ?? (flags as { runtime?: string }).runtime
     ?? process.env.DQL_RUNTIME_URL
@@ -1265,86 +1131,8 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
       // local preflight pack here would fabricate retrieval/route evidence for a
       // different execution path.
       const runtimeProjection = runtimeRun ? projectRuntimeRun(runtimeRun) : undefined;
-      const result = runtimeRun
-        ? answerFromRuntimeRun(runtimeRun)
-        : await answer({
-        question: testCase.question,
-        domain: testCase.domain,
-        domainContext: testCase.domain && manifest
-          ? resolveDomainContextEnvelope({ manifest, activeDomain: testCase.domain, source: 'explicit_api' })
-          : undefined,
-        provider,
-        kg,
-        manifest: manifest ?? undefined,
-        skills,
-        memoryContext,
-        followUp: testCase.followUp,
-        semanticLayer,
-        schemaContext,
-        contextPack,
-        reasoningEffort,
-        analysisDepth: contextBudget.analysisDepth,
-        expandGroundingContext,
-        answerLoopTools,
-        executeCertifiedBlock: execute && manifest
-          ? createCertifiedBlockExecutor(projectRoot, manifest, runtimeBase)
-          : undefined,
-        executeGeneratedSql: execute
-          ? createGeneratedSqlExecutor(runtimeBase)
-          : undefined,
-        captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp, contextPack: draftContextPack, sourceBlock, sourceDqlArtifact, dqlArtifact, proposedEntity, requestedFilters, requestedDimensions, validationWarnings, outputs }) => {
-          const slug = deriveGeneratedDraftSlug(draftQuestion);
-          const proposedDomain = sourceBlock?.domain ?? draftContextPack?.objects.find((object) => object.domain)?.domain ?? testCase.domain ?? 'misc';
-          if (dqlArtifact?.kind === 'semantic_block') {
-            if (!(flags as { save?: boolean }).save) {
-              return {
-                path: previewGeneratedDraftPath(projectRoot, proposedDomain, slug),
-                askedTimes: 0,
-                proposedContractId: `${proposedDomain}.Unknown.${slug}`,
-              };
-            }
-            return upsertGeneratedDqlArtifactDraft(projectRoot, {
-              slug,
-              question: draftQuestion,
-              proposedContractId: `${proposedDomain}.Unknown.${slug}`,
-              proposedDomain,
-              dqlArtifact,
-              sourceQuestion: followUp?.sourceQuestion,
-              sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
-              followupKind: followUp?.kind,
-              outputs,
-              contextPackId: draftContextPack?.id,
-              routeIntent: String(intent),
-              validationWarnings,
-            });
-          }
-          if (!(flags as { save?: boolean }).save) {
-            return {
-              path: previewGeneratedDraftPath(projectRoot, proposedDomain, slug),
-              askedTimes: 0,
-              proposedContractId: `${proposedDomain}.Unknown.${slug}`,
-            };
-          }
-          return upsertGeneratedDraft(projectRoot, {
-            slug,
-            question: draftQuestion,
-            proposedSql: sql,
-            proposedContractId: `${proposedDomain}.Unknown.${slug}`,
-            proposedDomain,
-            proposedEntity,
-            sourceDqlArtifact,
-            sourceQuestion: followUp?.sourceQuestion,
-            sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
-            followupKind: followUp?.kind,
-            requestedFilters,
-            requestedDimensions,
-            outputs,
-            contextPackId: draftContextPack?.id,
-            routeIntent: String(intent),
-            validationWarnings,
-          });
-        },
-      });
+      if (!runtimeRun) throw new Error('The runtime returned no run for this case.');
+      const result = answerFromRuntimeRun(runtimeRun);
       const evaluation = evaluateCase(testCase, result, runtimeProjection);
       const durationMs = Date.now() - startedAt;
       const draftSaved = Boolean(result.draftBlock?.path ?? result.draftBlockId);
@@ -1522,7 +1310,7 @@ function previewGeneratedDraftPath(projectRoot: string, domain: string, slug: st
 
 function evaluateCase(
   testCase: AgentEvalCase,
-  result: Awaited<ReturnType<typeof answer>>,
+  result: AgentAnswer,
   runtime?: RuntimeDrivenRun,
 ): {
   failures: string[];
@@ -1848,7 +1636,7 @@ function agentEvalThresholdsPass(
 
 function buildEvalTrace(input: {
   testCase: AgentEvalCase;
-  result: Awaited<ReturnType<typeof answer>>;
+  result: AgentAnswer;
   evaluation: ReturnType<typeof evaluateCase>;
   durationMs: number;
   draftSaved: boolean;

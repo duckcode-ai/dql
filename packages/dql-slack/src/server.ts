@@ -18,9 +18,8 @@ import { URL } from 'node:url';
 import {
   KGStore,
   defaultKgPath,
-  loadSkills,
   pickProvider,
-  answer,
+  type AgentAnswer,
   type ProviderName,
 } from '@duckcodeailabs/dql-agent';
 import { verifySlackSignature } from './signature.js';
@@ -214,15 +213,52 @@ async function runDispatch(
     );
   }
 
-  // Default: ask
-  const kg = new KGStore(kgPath);
-  const skills = loadSkills('').skills; // project root unknown to the request handler; KG already merged
+  // Default: ask. The running DQL runtime owns the answer (routing, the V2
+  // lane, the gates, trust); the bot is a thin transport to it, exactly as the
+  // MCP server is.
+  const result = await askRuntime(arg, userName);
+  return formatAnswerForSlack(result, { question: arg });
+}
+
+/** POST one question to the local runtime and adapt the run for the formatter. */
+async function askRuntime(question: string, userName: string): Promise<AgentAnswer> {
+  const base = (process.env.DQL_RUNTIME_URL ?? 'http://127.0.0.1:3474').replace(/\/$/, '');
+  let response: Response;
   try {
-    const result = await answer({ question: arg, provider, kg, skills, userId: userName });
-    return formatAnswerForSlack(result, { question: arg });
-  } finally {
-    kg.close();
+    response = await fetch(`${base}/api/agent-runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, requestedMode: 'auto', userId: userName }),
+    });
+  } catch (error) {
+    return {
+      kind: 'no_answer',
+      text: `The DQL runtime at ${base} is not reachable (${(error as Error).message}). Start it with \`dql serve\` or set DQL_RUNTIME_URL.`,
+      citations: [],
+      considered: [],
+    };
   }
+  if (!response.ok) {
+    return { kind: 'no_answer', text: `DQL runtime returned ${response.status}.`, citations: [], considered: [] };
+  }
+  const payload = (await response.json().catch(() => ({}))) as {
+    run?: { status?: string; trustState?: string; answer?: string; summary?: string; artifacts?: Array<{ payload?: { sql?: string; proposedSql?: string; dqlArtifact?: { source?: string } } }> };
+  };
+  const run = payload.run;
+  if (!run) return { kind: 'no_answer', text: 'The runtime returned no run.', citations: [], considered: [] };
+  const proposedSql = run.artifacts?.map((artifact) => artifact.payload?.proposedSql ?? artifact.payload?.sql).find(Boolean);
+  const kind: AgentAnswer['kind'] = run.status === 'completed'
+    ? (run.trustState === 'certified' ? 'certified' : 'uncertified')
+    : run.status === 'needs_review'
+      ? 'uncertified'
+      : 'no_answer';
+  return {
+    kind,
+    text: run.answer ?? run.summary ?? '',
+    citations: [],
+    considered: [],
+    ...(proposedSql ? { proposedSql } : {}),
+  };
 }
 
 async function handleAction(rawBody: string, res: ServerResponse, kgPath: string): Promise<void> {
