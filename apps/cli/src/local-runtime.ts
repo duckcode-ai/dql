@@ -1841,7 +1841,7 @@ function narrationIntegrityFailureCodes(failures: readonly string[]): string[] {
  * aggregation proof actually passed.
  */
 export function trustStateForAgentAnswer(
-  answer: Pick<AgentAnswer, 'certification' | 'kind' | 'route' | 'aggregationSafetyProof'>,
+  answer: Pick<AgentAnswer, 'certification' | 'kind' | 'route' | 'aggregationSafetyProof' | 'semanticExecutionSafety'>,
 ): AgentRunTrustState {
   if (answer.certification === 'certified' || answer.kind === 'certified') return 'certified';
   return semanticAnswerHasPassedAggregationProof(answer) ? 'governed' : 'review_required';
@@ -1861,7 +1861,7 @@ export function trustStateForAgentAnswer(
  * proof after the fact.
  */
 function canonicalPersistedTrustState(input: {
-  answer?: Pick<AgentAnswer, 'certification' | 'kind' | 'route' | 'aggregationSafetyProof'>;
+  answer?: Pick<AgentAnswer, 'certification' | 'kind' | 'route' | 'aggregationSafetyProof' | 'semanticExecutionSafety'>;
   trustState?: unknown;
   answerTier?: unknown;
 }): AgentRunTrustState | undefined {
@@ -1944,10 +1944,13 @@ export function compoundStopReason(
 }
 
 export function semanticAnswerHasPassedAggregationProof(
-  governedAnswer: Pick<AgentAnswer, 'route' | 'aggregationSafetyProof'>,
+  governedAnswer: Pick<AgentAnswer, 'route' | 'aggregationSafetyProof' | 'semanticExecutionSafety'>,
 ): boolean {
+  // Two proofs of the same fact: the V1 fanout probe, or the V2 lane's typed
+  // statement that the engine owns join semantics / nothing was joined.
   return governedAnswer.route?.tier === 'semantic_metric'
-    && governedAnswer.aggregationSafetyProof?.status === 'safe';
+    && (governedAnswer.aggregationSafetyProof?.status === 'safe'
+      || governedAnswer.semanticExecutionSafety?.status === 'safe');
 }
 
 export function agentAnswerHasExecutionFailure(
@@ -5848,6 +5851,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       resolvedProvider = 'ollama';
       runner = createDqlAgentProviderRunner('ollama', deterministicProvider);
     }
+    let providerPreflightDiagnostic: ProviderFailureDiagnosticV1 | undefined;
     if (!resolvedProvider || !runner) {
       const error = governedProviderPreflightError(requestedProvider);
       // This is the only no-provider path. It has no physical send, but it is
@@ -5872,14 +5876,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             safeAction: 'fix_provider_configuration',
           }
         : classifiedDiagnostic;
-      if (request.askAgentRuntimeMode === 'authoritative_v2' && request.askAgentV2State) {
-        observeAskAgentV2Tool(request.askAgentV2State, {
+      const v2LaneWillRun = request.askAgentRuntimeMode === 'authoritative_v2' && Boolean(request.askAgentV2State);
+      if (v2LaneWillRun) {
+        observeAskAgentV2Tool(request.askAgentV2State!, {
           version: 1,
           tool: 'finish_answer',
           outcome: 'error',
           reasonCode: `provider_${diagnostic.cause}`,
           candidateIds: [],
           origin: 'provider',
+          hostObserved: true,
           provider: {
             phase: diagnostic.phase,
             cause: diagnostic.cause,
@@ -5887,13 +5893,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             safeAction: diagnostic.safeAction,
           },
         } satisfies AskToolObservationV1);
-        finishAskAgentV2Turn(request.askAgentV2State, {
-          version: 2,
-          kind: 'provider_failure',
-          reasonCode: `provider_${diagnostic.cause}`,
-          safeAction: diagnostic.safeAction,
-          origin: 'provider',
-        });
+        // The turn is NOT finished here: the lane runs around the absent
+        // analyst (host-first execution, then the floor) and finishes it.
       }
       const span = trace.startSpan({
         name: 'provider.preflight',
@@ -5918,8 +5919,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         outcome: 'unavailable',
         reasonCode: 'provider_preflight',
       });
-      throw error;
+      if (!v2LaneWillRun) throw error;
+      providerPreflightDiagnostic = diagnostic;
     }
+    // NO PROVIDER IS NOT NO ANSWER. A project with no AI configured still has
+    // its certified blocks, its exactly-bound semantic metrics and its
+    // admitted relations, and the V2 lane executes those itself — host-first
+    // before the analyst's turn, the floor after it. The analyst here is a
+    // stub that fails its first send with a typed readiness error, so the
+    // lane records an honest provider terminal and the host does the rest.
+    if ((!resolvedProvider || !runner) && providerPreflightDiagnostic) {
+      const preflight = governedProviderPreflightError(requestedProvider);
+      const absentProvider: AgentProvider = {
+        name: 'ollama',
+        // "Available" so the lane STARTS — host-first execution runs before
+        // the first send — and the missing provider surfaces as the typed
+        // failure of that first send, not as a preflight that skips the host.
+        available: async () => true,
+        generate: async () => {
+          throw Object.assign(new Error(preflight.message), { code: preflight.code ?? 'PROVIDER_NOT_CONFIGURED' });
+        },
+      };
+      resolvedProvider = 'ollama';
+      runner = createDqlAgentProviderRunner('ollama', absentProvider);
+    }
+    if (!resolvedProvider || !runner) throw governedProviderPreflightError(requestedProvider);
+    const activeProvider: ProviderId = resolvedProvider;
+    const activeRunner = runner;
     let governedAnswer: GovernedAgentAnswerForRun | undefined;
     // The answer loop intentionally owns its own user-facing execution
     // failure. Some tool adapters serialize that error before returning the
@@ -6848,6 +6874,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             return {
               sql: governedCompiledSql,
               engine: compiled.engine,
+              joins: compiled.joins,
               selection: {
                 ...selection,
                 metrics: compiled.effectiveRequest.metrics,
@@ -8061,7 +8088,9 @@ function analyticalFailureSummary(
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
     const semanticRouteClaimed = governedAnswer.route?.tier === 'semantic_metric';
     const semanticAggregationProofPassed = semanticAnswerHasPassedAggregationProof(governedAnswer);
-    const semanticAggregationBlocked = semanticRouteClaimed && !semanticAggregationProofPassed;
+    const semanticAggregationBlocked = semanticRouteClaimed
+      && !semanticAggregationProofPassed
+      && governedAnswer.semanticExecutionSafety === undefined;
     // A safe semantic compilation normally earns governed trust. A frozen
     // planner-declared inference is intentionally stricter: it may execute,
     // but the resulting run/card/artifact remains review-required until the
@@ -8131,9 +8160,12 @@ function analyticalFailureSummary(
     // from stale request/decision state, reader-facing text, route names, or
     // result rows.
     const v2ExecutionReceipt = governedAnswer.askAgentV2ExecutionReceipt;
+    // A provider that was never reachable is reported even when the host
+    // then closed the turn itself (a typed gap, a floor answer): the reader
+    // asked a question with no analyst, and the incident says so.
     const v2ProviderObservation = v2Outcome?.kind === 'provider_failure'
       ? v2ReceiptState?.observations.find((observation) => observation.provider)?.provider
-      : undefined;
+      : v2ReceiptState?.observations.find((observation) => observation.provider?.phase === 'preflight')?.provider;
     // V8 distinguishes the agent-control and tool-follow-up provider phases.
     // V1 readers deliberately have a smaller phase vocabulary, so retain the
     // exact V2 phase in the receipt/state and project those two new phases to
@@ -8516,7 +8548,7 @@ function analyticalFailureSummary(
         ? 'blocked'
         : v2Outcome.kind === 'clarification'
           ? 'needs_clarification'
-          : v2ResultCompleted && (governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified')
+          : v2ResultCompleted && (governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified' || isSemantic)
             ? 'completed'
             : 'needs_review'
       : isTerminalFailure
@@ -8556,7 +8588,9 @@ function analyticalFailureSummary(
           ? 'needs_clarification'
           : governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified'
             ? 'certified_answer_found'
-            : 'human_review_required'
+            : v2ResultCompleted && isSemantic
+              ? 'governed_semantic_answer'
+              : 'human_review_required'
       : isTerminalFailure
       ? 'blocked'
       : needsClarification
@@ -12219,20 +12253,35 @@ function analyticalFailureSummary(
         // spend for a two-month ask and the window vanished silently. The
         // semantic tier applies windows; send it there.
         const requestedTimeWindow = buildAnalyticalRequirementSet({ question: request.question }).time?.window;
+        const requestedFilters = (pack.questionPlan.requestedShape.filters?.length ?? 0) > 0
+          || (pack.questionPlan.requestedShape.memberBindings?.length ?? 0) > 0;
         const certifiedCompleteCandidateIds = fitCompleteCandidateIds.filter((candidateId) => {
           if (requestedTimeWindow) return false;
-          if (!pack.questionPlan.requestedShape.topN) return true;
+          // No short-circuit for an unranked question: the proof itself
+          // decides, and it refuses a ranked block for "each customer".
           const handle = certifiedArtifacts.get(candidateId);
           const block = handle && typeof handle === 'object' && (handle as AskCertifiedArtifactHandleV1).version === 1
             ? (handle as AskCertifiedArtifactHandleV1).artifact as KGNode
             : undefined;
           if (!block) return false;
           const candidate = evidence.candidates.find((item) => (item.qualifiedId ?? item.id) === candidateId);
-          const exactQuestionMatch = Boolean(candidate
+          // Only a VERBATIM authored example is the author's statement that
+          // this block answers this question. A title or alias match says
+          // the block is about the same subject, which is not the same
+          // claim: "top BCM customers" matches the title "Top Customers"
+          // and would silently lose BCM.
+          const exactExampleMatch = Boolean(candidate
             && [candidate.id, candidate.qualifiedId]
-              .some((identity) => identity && directCertifiedQuestionContracts.has(identity)));
+              .some((identity) => identity && directCertifiedQuestionContracts.get(identity) === 'exact_example'));
+          // A block executes its authored query verbatim; it cannot apply a
+          // member filter the question carries. Unless the author wrote this
+          // exact question, a filtered ask is not complete for any block.
+          if (requestedFilters && !exactExampleMatch) return false;
+          // "top BCM customers" parsed to "top customers": the block that
+          // answers the latter does not answer the former.
+          if (pack.questionPlan.unboundQualifiers.length > 0 && !exactExampleMatch) return false;
           return certifiedBlockProvesRequestedTopN(block, pack.questionPlan, {
-            exactCertifiedQuestionMatch: exactQuestionMatch,
+            exactCertifiedQuestionMatch: exactExampleMatch,
             uniqueCompleteCertifiedFit: fitCompleteCandidateIds.length === 1,
             // Match the downstream fast-path proof exactly: a target that can
             // append a trailing row bound proves the limit host-side even when
@@ -30890,10 +30939,15 @@ export function captureAskV2SemanticCapabilities(input: {
     // one-engine fallback only for old, already-captured workspaces that did
     // not persist this additive host selection; never choose among multiple
     // engines on behalf of a provider.
+    // The project's preferred engine when this metric can run on it; else
+    // the ONE engine that can (a metric the loaded layer proves natively
+    // while the box prefers MetricFlow is still executable — it was refused
+    // for months on any machine with `mf` installed). Two ready engines and
+    // no preference among them is still not a choice the host makes.
     const selectedEngine = input.semanticRuntime?.selectedEngine
       && engines.includes(input.semanticRuntime.selectedEngine)
       ? input.semanticRuntime.selectedEngine
-      : input.semanticRuntime === undefined && engines.length === 1
+      : engines.length === 1
         ? engines[0]
         : undefined;
     const handle: AskSemanticCapabilityHandleV1 = {

@@ -50,11 +50,13 @@ export interface AnalysisQuestionPlan {
   valueMentions: AnalysisValueMention[];
   metricTerms: string[];
   /**
-   * Words the question put directly before a measure that no measure term
-   * kept — "beverage" in "beverage revenue". A non-empty list means the plan's
-   * measures do NOT fully describe what was asked, and every consumer that
-   * would bind plain `revenue` (retrieval, host-first execution, the floor)
-   * must treat the question as unresolved rather than answer the wider one.
+   * Words the question put directly before a measure or a grouping noun that
+   * no kept term covers — "beverage" in "beverage revenue", "BCM" in "BCM
+   * customers". A non-empty list means the plan's terms do NOT fully describe
+   * what was asked, and every consumer that would bind plain `revenue` or
+   * plain `customers` (retrieval, the certified proof, host-first execution,
+   * the floor) must treat the question as unresolved rather than answer the
+   * wider one.
    */
   unboundQualifiers: string[];
   dimensionTerms: string[];
@@ -207,6 +209,7 @@ const MEASURE_QUALIFIER_STOPWORDS = new Set([
   'highest', 'lowest', 'top', 'bottom', 'most', 'least', 'best', 'worst', 'largest', 'smallest',
   'daily', 'weekly', 'monthly', 'quarterly', 'yearly', 'annual', 'cumulative',
   'and', 'or', 'with', 'by', 'per', 'for', 'of', 'in', 'on', 'at', 'to', 'from', 'is', 'was', 'are',
+  'each', 'every', 'all', 'any', 'which', 'across', 'among', 'between',
   'more', 'less', 'much', 'many', 'what', 'which', 'who', 'whose', 'give', 'show', 'me', 'us',
   'customer', 'customers', 'account', 'accounts', 'client', 'clients', 'product', 'products',
 ]);
@@ -217,13 +220,15 @@ export function unboundMeasureQualifierTerms(question: string, measures: readonl
   // Every token any retained measure already accounts for.
   const covered = new Set(measures.flatMap((measure) => measure.toLowerCase().split(/[^a-z0-9]+/)).filter(Boolean));
   const qualifiers: string[] = [];
+  // "customers" in the question is the term "customer" in the plan.
+  const singular = (word: string) => word.replace(/(ies)$/, 'y').replace(/(ses|xes|shes|ches)$/, (match) => match.slice(0, -2)).replace(/s$/, '');
   for (const measure of measures) {
     const head = measure.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).at(0);
     if (!head) continue;
     for (let index = 1; index < words.length; index += 1) {
-      if (words[index] !== head) continue;
+      if (words[index] !== head && singular(words[index]!) !== singular(head)) continue;
       const previous = words[index - 1]!;
-      if (covered.has(previous) || MEASURE_QUALIFIER_STOPWORDS.has(previous) || previous.length < 3) continue;
+      if (covered.has(previous) || covered.has(singular(previous)) || MEASURE_QUALIFIER_STOPWORDS.has(previous) || previous.length < 3) continue;
       qualifiers.push(previous);
     }
   }
@@ -345,7 +350,10 @@ export function buildAnalysisQuestionPlan(
     entities,
     valueMentions,
     metricTerms,
-    unboundQualifiers: unboundMeasureQualifierTerms(cleanQuestion, metricTerms),
+    // "BCM customers" and "beverage revenue" drop a word the same way; a
+    // qualifier before the grouping noun is as much a filter as one before
+    // the measure. Every term the plan kept covers its own words.
+    unboundQualifiers: unboundMeasureQualifierTerms(cleanQuestion, [...metricTerms, ...dimensionTerms]),
     dimensionTerms,
     filterTerms,
     timeTerms,

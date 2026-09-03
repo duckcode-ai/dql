@@ -3346,8 +3346,14 @@ function createAskV2LaneHandler(
                 ...(selection.timeDimension ? [selection.timeDimension.name] : []),
                 ...selection.metrics,
               ];
+            const joinedRelations = compiled.joins ?? [];
             completed = {
               tier: 'semantic',
+              semanticExecutionSafety: compiled.engine !== 'native'
+                ? { version: 1, status: 'safe', reason: `${compiled.engine} owns join and aggregation semantics` }
+                : joinedRelations.length === 0
+                  ? { version: 1, status: 'safe', reason: 'single-model native query; no join could multiply rows' }
+                  : { version: 1, status: 'unproven', reason: `native query joined ${joinedRelations.length} relation(s) without a fanout probe` },
               result: {
                 ...result,
                 columns: projectedColumns,
@@ -3365,12 +3371,14 @@ function createAskV2LaneHandler(
             };
             observe('compile_and_run_semantic', 'executed', 'SEMANTIC_RESULT_VALIDATED', { tier: 'semantic', candidateIds: selectedCandidateIds, origin: 'execution', planId: state.resolvedPlan?.id });
             return { executed: true, tier: 'semantic', rowCount: result.rowCount, engine: compiled.engine };
-          } catch {
+          } catch (error) {
+            if (process.env.DQL_DEBUG_EXECUTION_ERROR) console.error('[DQL_DEBUG semantic]', JSON.stringify({ message: v2BoundedFailureDetail(error), sql: compiled.sql.slice(0, 900), metrics: selection.metrics }));
             executionFailure = { reasonCode: 'SEMANTIC_EXECUTION_FAILED', origin: 'execution' };
             observe('compile_and_run_semantic', 'error', executionFailure.reasonCode, { tier: 'semantic', candidateIds: selectedCandidateIds, origin: 'execution', planId: state.resolvedPlan?.id });
             return denied('compile_and_run_semantic', executionFailure.reasonCode);
           }
-        } catch {
+        } catch (error) {
+          if (process.env.DQL_DEBUG_EXECUTION_ERROR) console.error('[DQL_DEBUG semantic-compile]', JSON.stringify({ message: v2BoundedFailureDetail(error), metrics: selection.metrics, dimensions: selection.dimensions }));
           // Compilation happens after the host has frozen the exact semantic
           // capability. It is therefore a terminal same-plan failure, not a
           // pre-freeze signal to silently select a different route.
@@ -4467,37 +4475,69 @@ function createAskV2LaneHandler(
       columns: ReadonlyArray<{ name: string; type?: string }>,
       term: string,
       numeric: boolean,
-    ): string | undefined => {
+    ): string | undefined => floorBindColumnScored(columns, term, numeric)?.column;
+    /** 3 = the column IS the term; 2 = ends with it; 1 = merely contains it. */
+    const floorBindColumnScored = (
+      columns: ReadonlyArray<{ name: string; type?: string }>,
+      term: string,
+      numeric: boolean,
+    ): { column: string; quality: 1 | 2 | 3 } | undefined => {
       const wanted = floorTerm(term);
       if (!wanted) return undefined;
       const stripped = wanted.split('_').filter((word) => !FLOOR_MEASURE_HEADS.has(word)).join('_');
       // A column with no recorded type is not known to be non-numeric; the
       // manifest often carries names without types.
+      // A grouping is never an aggregate-looking column: `sum_customer_reach`
+      // contains "customer" and groups nothing.
       const names = columns
-        .filter((column) => !numeric || !column.type || FLOOR_NUMERIC_TYPE.test(column.type))
+        .filter((column) => numeric
+          ? (!column.type || FLOOR_NUMERIC_TYPE.test(column.type))
+          : !(column.type && FLOOR_NUMERIC_TYPE.test(column.type)) && !/^(sum|count|total|avg|average|min|max|num)_/i.test(column.name))
         .map((column) => column.name);
       for (const target of [...new Set([wanted, stripped].filter(Boolean))]) {
         const exact = names.find((name) => name.toLowerCase() === target);
-        if (exact) return exact;
+        if (exact) return { column: exact, quality: 3 };
       }
       const target = stripped || wanted;
-      const suffix = names.filter((name) => name.toLowerCase().endsWith(`_${target}`));
-      if (suffix.length === 1) return suffix[0];
       const contains = names.filter((name) => name.toLowerCase().includes(target));
-      if (contains.length === 1) return contains[0];
-      // "by customer" over customer_id and customer_name is not ambiguous to a
-      // reader: the grouping label is the name. Only for groupings — a measure
-      // is never chosen this way.
-      if (!numeric && contains.length > 1) {
-        const label = contains.find((name) => name.toLowerCase() === `${target}_name`)
-          ?? contains.find((name) => name.toLowerCase().endsWith('_name'));
-        if (label) return label;
+      if (!numeric) {
+        // A grouping is a LABEL. "by account" over crm_account_name,
+        // parent_crm_account_name and is_jihu_account means the name — the
+        // shortest one — never the flag, and never an id when a name exists.
+        const labels = contains
+          .filter((name) => name.toLowerCase().endsWith(`${target}_name`))
+          .sort((a, b) => a.length - b.length);
+        if (labels[0]) return { column: labels[0], quality: labels[0].toLowerCase() === `${target}_name` ? 3 : 2 };
+        const flagLike = (name: string) => /^(is|has|was)_/i.test(name) || /_(flag|ind|indicator)$/i.test(name);
+        const suffix = contains.filter((name) => name.toLowerCase().endsWith(`_${target}`) && !flagLike(name));
+        if (suffix.length === 1) return { column: suffix[0]!, quality: 2 };
+        const plain = contains.filter((name) => !flagLike(name));
+        if (plain.length === 1) return { column: plain[0]!, quality: 1 };
+        const anyLabel = plain.filter((name) => name.toLowerCase().endsWith('_name')).sort((a, b) => a.length - b.length);
+        if (anyLabel[0]) return { column: anyLabel[0], quality: 1 };
+        return undefined;
       }
+      const suffix = names.filter((name) => name.toLowerCase().endsWith(`_${target}`));
+      if (suffix.length === 1) return { column: suffix[0]!, quality: 2 };
+      if (contains.length === 1) return { column: contains[0]!, quality: 1 };
       return undefined;
     };
-    const floorRelations = () => retainedCandidates()
-      .filter((candidate) => FLOOR_RELATION_KINDS.has(candidate.kind) && (candidate.columns?.length ?? 0) > 0)
-      .sort((a, b) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0));
+    /**
+     * Relations the floor may compose over: the visible cards first (already
+     * admitted for execution), then the rest of the retained set (admitted
+     * once the host describes them, which the floor does before compiling).
+     */
+    const floorRelations = () => {
+      const visibleIds = new Set(visibleCandidates().map(v2CandidateId));
+      const byRelevance = (a: AgentEvidenceCandidate, b: AgentEvidenceCandidate) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0);
+      const all = retainedCandidates()
+        .filter((candidate) => FLOOR_RELATION_KINDS.has(candidate.kind) && (candidate.columns?.length ?? 0) > 0);
+      return [
+        ...all.filter((candidate) => visibleIds.has(v2CandidateId(candidate))).sort(byRelevance),
+        ...all.filter((candidate) => !visibleIds.has(v2CandidateId(candidate))).sort(byRelevance),
+      ];
+    };
+    const floorRelationVisible = (name: string) => visibleCandidates().some((candidate) => FLOOR_RELATION_KINDS.has(candidate.kind) && candidate.name === name);
     /**
      * A single-relation plan the parser's reading of the question can bind
      * EXACTLY to admitted columns, or the reason it cannot. Filters, member
@@ -4539,30 +4579,49 @@ function createAskV2LaneHandler(
       // The grouping the parser settled on comes first; every other dimension
       // term must bind too unless it is only the question's subject noun.
       const dimensionTerms = [...new Set([...(shape.grain ? [shape.grain] : []), ...shape.dimensions])];
+      // Every relation that binds the whole shape is a candidate; the one
+      // whose MEASURES bind best wins (an exact `net_arr` column anywhere
+      // beats a column that merely contains the words on a more relevant
+      // relation), and relevance breaks the tie.
+      type FloorPlanCandidate = { relation: string; quality: number; plan: Record<string, unknown> };
+      let best: FloorPlanCandidate | undefined;
+      const floorDebug = process.env.DQL_DEBUG_FLOOR ? (line: string) => console.error(`[DQL_DEBUG floor] ${line}`) : undefined;
+      floorDebug?.(`question=${JSON.stringify(input.question)} measures=${JSON.stringify(measureTerms)} dimensions=${JSON.stringify(dimensionTerms)} relations=${floorRelations().map((relation) => `${relation.name}(${relation.columns?.length ?? 0})`).join(',')}`);
       for (const relation of floorRelations()) {
         const columns = relation.columns ?? [];
         const measures = measureTerms.map(({ term, counting }) => {
-          const column = floorBindColumn(columns, term, !counting);
-          return column ? { id: `${relation.name}.${column}`, aggregation: counting ? 'count' : 'sum', alias: `${counting ? 'count' : 'total'}_${column}` } : undefined;
+          const bound = floorBindColumnScored(columns, term, !counting);
+          return bound
+            ? { id: `${relation.name}.${bound.column}`, aggregation: counting ? 'count' : 'sum', alias: `${counting ? 'count' : 'total'}_${bound.column}`, quality: bound.quality }
+            : undefined;
         });
-        if (measures.some((measure) => !measure)) continue;
-        const bindings = dimensionTerms.map((term) => ({ term, column: floorBindColumn(columns, term, false) }));
-        const boundDimensions = bindings.filter((binding) => binding.column);
-        const dropped = bindings.filter((binding) => !binding.column && !(boundDimensions.length > 0 && FLOOR_ENTITY_NOUNS.has(floorTerm(binding.term))));
-        if (dropped.length > 0) continue;
-        const dimensions = [...new Set(boundDimensions.map((binding) => binding.column!))].map((column) => ({ id: `${relation.name}.${column}` }));
-        const boundMeasures = measures as Array<{ id: string; aggregation: string; alias: string }>;
+        if (measures.some((measure) => !measure)) { floorDebug?.(`${relation.name}: measure unbound`); continue; }
+        const bindings = dimensionTerms.map((term) => ({ term, bound: floorBindColumnScored(columns, term, false) }));
+        const boundDimensions = bindings.filter((binding) => binding.bound);
+        const dropped = bindings.filter((binding) => !binding.bound && !(boundDimensions.length > 0 && FLOOR_ENTITY_NOUNS.has(floorTerm(binding.term))));
+        if (dropped.length > 0) { floorDebug?.(`${relation.name}: dimensions dropped ${dropped.map((binding) => binding.term).join(',')}`); continue; }
+        floorDebug?.(`${relation.name}: bound ${JSON.stringify(measures)} ${JSON.stringify(boundDimensions)}`);
+        const dimensions = [...new Set(boundDimensions.map((binding) => binding.bound!.column))].map((column) => ({ id: `${relation.name}.${column}` }));
+        const boundMeasures = measures as Array<{ id: string; aggregation: string; alias: string; quality: number }>;
+        // The weakest binding in the plan is the plan's quality; a visible
+        // relation outranks a retained one at equal quality.
+        const quality = Math.min(...boundMeasures.map((measure) => measure.quality), ...boundDimensions.map((binding) => binding.bound!.quality))
+          + (floorRelationVisible(relation.name) ? 0.5 : 0);
+        if (best && best.quality >= quality) continue;
         const first = boundMeasures[0]!;
-        return {
+        best = {
           relation: relation.name,
+          quality,
           plan: {
-            measures: boundMeasures,
+            measures: boundMeasures.map(({ quality: _quality, ...measure }) => measure),
             ...(dimensions.length ? { dimensions } : {}),
             ...(dimensions.length ? { orderBy: { reference: first.alias, direction: shape.rankingDirection === 'bottom' ? 'asc' : 'desc' } } : {}),
             ...(dimensions.length ? { limit: shape.topN?.n ?? 50 } : {}),
           },
         };
+        if (quality >= 3.5) break;
       }
+      if (best) return { relation: best.relation, plan: best.plan };
       return { refusal: 'unbound' };
     };
     const floorAnswer = (rung: 'certified' | 'semantic' | 'relational'): AgentAnswer | undefined => {
@@ -4653,6 +4712,11 @@ function createAskV2LaneHandler(
         const composed = composeFloorRelationalPlan();
         if ('plan' in composed && floorDeadlineOpen()) {
           try {
+            // A retained relation becomes executable once described — the same
+            // rule the analyst lives under, applied by the host to itself.
+            if (!floorRelationVisible(composed.relation)) {
+              await toolByName('describe_relation')?.run({ candidateId: composed.relation });
+            }
             await toolByName('compile_and_run_dql')?.run({ relationalPlan: composed.plan });
             const answer = floorAnswer('relational');
             if (answer) return answer;
@@ -5718,6 +5782,7 @@ type AskV2CompletedExecution = {
   tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
   result: NonNullable<AgentAnswer['result']>;
   block?: KGNode;
+  semanticExecutionSafety?: NonNullable<AgentAnswer['semanticExecutionSafety']>;
 };
 
 /**
@@ -5780,7 +5845,14 @@ async function deriveHostFirstSemanticArgs(input: {
   // ...unless the QUALIFIED phrase is itself a metric ("lifetime spend" is
   // `customers.lifetime_spend`): then nothing was dropped. Decided below,
   // once `resolve` exists, by binding the qualified phrase before the bare one.
-  const droppedQualifiers = requirements.unboundMeasureQualifiers ?? [];
+  // Two readers, one question: the requirement set keeps "order count" whole
+  // while the plan reduces it to `count` + `order`. A qualifier is dropped
+  // only if NEITHER reading kept it.
+  const measureWords = (measure: string) => measure.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const droppedQualifiers = [...new Set([
+    ...(requirements.unboundMeasureQualifiers ?? []),
+    ...plan.unboundQualifiers.filter((qualifier) => !requirements.measures.some((measure) => measureWords(measure).includes(qualifier))),
+  ])];
 
   // Requirement terms are business English ("customer name"); runtime names
   // are snake_case ("customer_name"). Both spell the same field — try the
@@ -5862,8 +5934,9 @@ async function deriveHostFirstSemanticArgs(input: {
 
   const metricIds: string[] = [];
   for (const measure of requirements.measures.slice(0, 4)) {
-    const resolved = droppedQualifiers.length
-      ? droppedQualifiers.map((qualifier) => resolve(`${qualifier} ${measure}`, 'metric')).find(Boolean)
+    const missing = droppedQualifiers.filter((qualifier) => !measureWords(measure).includes(qualifier));
+    const resolved = missing.length
+      ? missing.map((qualifier) => resolve(`${qualifier} ${measure}`, 'metric')).find(Boolean)
       : resolve(measure, 'metric');
     if (!resolved) return undefined;
     if (!metricIds.includes(resolved)) metricIds.push(resolved);
@@ -5871,16 +5944,24 @@ async function deriveHostFirstSemanticArgs(input: {
   if (metricIds.length === 0) return undefined;
 
   const dimensionIds: string[] = [];
+  // "for each customer" is a grouping the plan sees (grain, dimensions) and
+  // the requirement set does not; a scalar where a breakdown was asked for
+  // would be the wrong answer, so both readings contribute grouping terms.
   const rawGroupingTerms = [...new Set([
     ...requirements.entityDisplayTerms,
     ...requirements.dimensions,
+    ...plan.requestedShape.dimensions,
+    ...(plan.requestedShape.grain ? [plan.requestedShape.grain] : []),
   ])].filter((term) => !/^(?:day|week|month|quarter|year|season|period)s?$/i.test(term.trim()));
   // "customer" and "customer name" name the same grouping; the display form
   // is the executable one. Keep only the display form when both appear.
   const groupingTerms = rawGroupingTerms.filter((term) =>
     !rawGroupingTerms.some((other) => other !== term && other.startsWith(`${term} `)));
   for (const term of groupingTerms.slice(0, 6)) {
-    const resolved = resolve(term, 'dimension');
+    // "by customer" means the customer's NAME when the layer has one: a
+    // grouping is a label the reader can read, not the entity key. Fall back
+    // to the bare term for groupings that are their own label (region).
+    const resolved = resolve(`${term} name`, 'dimension') ?? resolve(term, 'dimension');
     if (!resolved) return undefined;
     if (!dimensionIds.includes(resolved)) dimensionIds.push(resolved);
   }
@@ -5932,8 +6013,18 @@ function askV2ExecutedAnswer(
   const certified = completed.tier === 'certified';
   const exploratory = completed.tier === 'exploratory_sql';
   const text = narration.trim() || `The ${completed.tier.replace(/_/g, ' ')} query completed with ${completed.result.rowCount} row${completed.result.rowCount === 1 ? '' : 's'}.`;
+  // The run's route and trust are read off this tier: a semantic execution is
+  // a semantic answer, governed — not "generated SQL awaiting review" merely
+  // because the V2 lane, not the V1 cascade, ran it.
+  const route: AgentAnswer['route'] = certified
+    ? { tier: 'certified_block', label: 'Certified block' }
+    : completed.tier === 'semantic'
+      ? { tier: 'semantic_metric', label: 'Semantic metric' }
+      : { tier: 'generated_sql', label: completed.tier === 'governed_relational' ? 'Governed relational program' : 'Exploratory SQL' };
   return {
     kind: certified ? 'certified' : 'uncertified',
+    route,
+    ...(completed.semanticExecutionSafety ? { semanticExecutionSafety: completed.semanticExecutionSafety } : {}),
     sourceTier: certified ? 'certified_artifact' : completed.tier === 'semantic' ? 'semantic_layer' : 'dbt_manifest',
     certification: certified ? 'certified' : exploratory ? 'analyst_review_required' : 'governed',
     reviewStatus: certified ? 'certified' : exploratory ? 'analyst_review_required' : 'governed',

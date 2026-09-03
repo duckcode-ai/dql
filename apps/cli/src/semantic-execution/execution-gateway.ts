@@ -24,6 +24,25 @@ import {
   type MetricFlowTargetMetadata,
 } from './target-binding.js';
 
+
+/**
+ * Positional execution, or plain execution when the executor has no
+ * positional entry point. Compiled semantic SQL carries no parameters, so the
+ * two are the same statement; the difference is only whether the executor
+ * exposes the bounded-read options. Injected test executors and the simplest
+ * connectors expose `executeQuery` alone.
+ */
+type PositionalExecute = QueryExecutor['executePositional'];
+function positionalExecutor(executor: QueryExecutor): PositionalExecute {
+  if (typeof (executor as { executePositional?: unknown }).executePositional === 'function') {
+    return executor.executePositional.bind(executor);
+  }
+  return (async (sql: string, _params: unknown[], connection: unknown) => {
+    const plain = executor as unknown as { executeQuery: (sql: string, specs?: unknown, values?: unknown, connection?: unknown) => Promise<unknown> };
+    return plain.executeQuery(sql, undefined, undefined, connection);
+  }) as unknown as PositionalExecute;
+}
+
 export class SemanticPhysicalPreflightError extends Error {
   readonly code: 'IDENTIFIER_SCOPE_INVALID' | 'PHYSICAL_PREFLIGHT_FAILED';
   readonly details: {
@@ -134,7 +153,7 @@ export async function executeTargetBoundSemanticQuery(input: {
   );
   const executionStartedAt = Date.now();
   const rowBound = Math.max(1, Math.min(input.rowBound ?? 10_000, 100_000));
-  const result = await input.executor.executePositional(
+  const result = await positionalExecutor(input.executor)(
     prepared.sql,
     [],
     preparedConnection,
@@ -220,7 +239,7 @@ async function preflightCompiledSql(
   // without accepting the result as an analytical execution.
   if (connection.driver !== 'snowflake') return;
   try {
-    await executor.executePositional(
+    await positionalExecutor(executor)(
       `EXPLAIN USING TEXT ${sql}`,
       [],
       connection,

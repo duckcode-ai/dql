@@ -43,13 +43,23 @@ const INFRASTRUCTURE = /\b(provider|dispatch(es)?|budget|orchestration|snapshot|
  * so certified blocks, semantic compiles and composed programs all execute.
  */
 function columnsFromSql(sql: string): string[] {
+  // The outer SELECT list: the last SELECT at parenthesis depth zero (after
+  // any CTEs), up to the FROM at depth zero.
   const upper = sql.toUpperCase();
-  const start = upper.lastIndexOf('SELECT');
-  const end = upper.indexOf(' FROM', start);
-  const projection = start >= 0 && end > start ? sql.slice(start + 6, end) : '';
-  const columns: string[] = [];
   let depth = 0;
+  let selectAt = -1;
+  let fromAt = -1;
+  for (let index = 0; index < upper.length; index += 1) {
+    const char = upper[index];
+    if (char === '(') depth += 1;
+    else if (char === ')') depth -= 1;
+    else if (depth === 0 && upper.startsWith('SELECT', index) && /[\s(]/.test(upper[index - 1] ?? ' ')) { selectAt = index; fromAt = -1; }
+    else if (depth === 0 && selectAt >= 0 && fromAt < 0 && upper.startsWith('FROM', index) && /\s/.test(upper[index - 1] ?? '') && /\s/.test(upper[index + 4] ?? '')) fromAt = index;
+  }
+  const projection = selectAt >= 0 && fromAt > selectAt ? sql.slice(selectAt + 6, fromAt) : '';
+  const columns: string[] = [];
   let current = '';
+  depth = 0;
   for (const char of projection) {
     if (char === '(') depth += 1;
     if (char === ')') depth -= 1;

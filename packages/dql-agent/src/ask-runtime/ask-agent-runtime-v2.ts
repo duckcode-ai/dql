@@ -1940,7 +1940,7 @@ export function createAskToolKernelV2(state: AskAgentStateV4): AskToolKernelV2 {
           || state.expansionCandidateIds.slice(expansions * 12, (expansions + 1) * 12).length === 0);
       const describeTools = new Set<AskToolNameV2>(['describe_relation', 'describe_metric']);
       const describeCalls = state.observations.filter((observation) => observation.tool === tool).length;
-      const describeCeilingReached = describeTools.has(tool) && describeCalls >= ASK_V2_DESCRIBE_CALLS_PER_TOOL;
+      const describeCeilingReached = describeTools.has(tool) && describeCalls >= ASK_V2_DESCRIBE_CALLS_PER_TOOL && !input.hostFloor;
       if (emptyOrExhaustedExpansion || describeCeilingReached) {
         const progress = toolPolicy();
         return {

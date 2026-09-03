@@ -611,6 +611,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     const printed = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       const base = await start(root, {
+        askAgentRuntimeMode: 'legacy_v1',
         executor: { executeQuery } as unknown as QueryExecutor,
         connection: { driver: 'duckdb', filepath: join(root, 'jaffle_shop.duckdb') },
       });
@@ -689,6 +690,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
       artifacts: [], evaluations: [], nextActions: [],
     }));
     const base = await start(root, {
+      askAgentRuntimeMode: 'legacy_v1',
       // The real local context-pack, retrieval, package, cascade, and trace
       // callbacks remain in place. This only prevents a live provider from
       // becoming a dependency of the fixture assertion.
@@ -774,6 +776,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
       sql,
     }));
     const base = await start(root, {
+      askAgentRuntimeMode: 'legacy_v1',
       // The semantic compiler/answer loop is the production path. The local
       // executor supplies only deterministic synthetic result rows; it is not
       // an AgentRun route executor and cannot choose/relabel a route. The
@@ -903,7 +906,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     directories.push(root);
     cpSync(fixture, root, { recursive: true });
     rmSync(join(root, '.dql', 'cache'), { recursive: true, force: true });
-    const base = await start(root, { requireMeaningCallForNaturalLanguage: false });
+    const base = await start(root, { askAgentRuntimeMode: 'legacy_v1', requireMeaningCallForNaturalLanguage: false });
     const response = await fetch(`${base}/api/agent-runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1020,7 +1023,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     cpSync(fixture, root, { recursive: true });
     rmSync(join(root, '.dql', 'cache'), { recursive: true, force: true });
     const question = 'Show the top names by revenue';
-    const firstBase = await start(root, { requireMeaningCallForNaturalLanguage: false });
+    const firstBase = await start(root, { askAgentRuntimeMode: 'legacy_v1', requireMeaningCallForNaturalLanguage: false });
     const threadResponse = await fetch(`${firstBase}/api/agent/threads`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1072,7 +1075,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     // clarification from its persisted thread before accepting the stable ID.
     const firstServer = servers.pop();
     await new Promise<void>((done) => firstServer ? firstServer.close(() => done()) : done());
-    const base = await start(root, { requireMeaningCallForNaturalLanguage: false });
+    const base = await start(root, { askAgentRuntimeMode: 'legacy_v1', requireMeaningCallForNaturalLanguage: false });
     const selectedResponse = await fetch(`${base}/api/agent-runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1198,7 +1201,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     // No semantic execution target is configured. This must be a truthful
     // same-tier post-freeze compilation failure, never a pre-route
     // MISSING_DIMENSION refusal or a generated/provider fallback.
-    const base = await start(root, { requireMeaningCallForNaturalLanguage: false });
+    const base = await start(root, { askAgentRuntimeMode: 'legacy_v1', requireMeaningCallForNaturalLanguage: false });
     const response = await fetch(`${base}/api/agent-runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1374,6 +1377,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
       nextActions: [],
     }));
     const base = await start(root, {
+      askAgentRuntimeMode: 'legacy_v1',
       agentRunExecutors: {
         certified_answer: certifiedAnswer,
         semantic_answer: nonCertifiedExecutor,
@@ -1572,6 +1576,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     // connection, so neither query boundary should be reached.
     const executePositional = vi.fn();
     const base = await start(root, {
+      askAgentRuntimeMode: 'legacy_v1',
       executor: { executeQuery, executePositional } as unknown as QueryExecutor,
       requireMeaningCallForNaturalLanguage: false,
     });
@@ -1697,6 +1702,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     const provider = vi.fn();
     const executeQuery = vi.fn();
     const base = await start(root, {
+      askAgentRuntimeMode: 'legacy_v1',
       requireMeaningCallForNaturalLanguage: false,
       executor: { executeQuery } as unknown as QueryExecutor,
       agentRunExecutors: {
@@ -1877,7 +1883,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     // network call, SQL executor, or gold result is injected here.
     rmSync(join(root, '.dql', 'cache'), { recursive: true, force: true });
     const question = 'Investigate revenue and BCM across top accounts, explain trends, contributors, risks, counter-evidence, and limitations.';
-    const base = await start(root, { requireMeaningCallForNaturalLanguage: false });
+    const base = await start(root, { askAgentRuntimeMode: 'legacy_v1', requireMeaningCallForNaturalLanguage: false });
     const response = await fetch(`${base}/api/agent-runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2307,11 +2313,12 @@ describe('local Ask trace API errors (OBS-009)', () => {
         routeDecision?: { askAgentV2Decision?: { state?: { observations?: Array<{ tool?: string; candidateIds?: string[]; reasonCode?: string }> } } };
       };
     };
-    // Semantic execution is validated and successful, but—unlike a certified
-    // block—the persisted run remains review-required by the existing trust
-    // contract. The V2 result itself retains the semantic execution receipt.
-    expect(body.run.status, JSON.stringify(body.run)).toBe('needs_review');
-    expect(body.run.trustState).toBe('review_required');
+    // Semantic execution is validated and successful, and the lane states its
+    // aggregation safety (single-model native query): the persisted run is a
+    // governed semantic answer, exactly as the V1 cascade labelled one that
+    // passed its fanout proof. The V2 result retains the execution receipt.
+    expect(body.run.status, JSON.stringify(body.run)).toBe('completed');
+    expect(body.run.trustState).toBe('governed');
     expect(body.run.telemetry?.sqlExecutions).toBe(1);
     // Host-first semantic execution: every clause of this question binds to
     // exactly one admitted capability, so the HOST calls its own governed
@@ -2416,7 +2423,10 @@ describe('local Ask trace API errors (OBS-009)', () => {
         };
       };
     };
-    expect(body.run.status, JSON.stringify(body.run)).toBe('needs_review');
+    // MetricFlow owns join and aggregation semantics, so the executed month
+    // capability is a governed semantic answer.
+    expect(body.run.status, JSON.stringify(body.run)).toBe('completed');
+    expect(body.run.trustState).toBe('governed');
     expect(body.run.telemetry?.sqlExecutions).toBe(1);
     // The local runtime performs one bounded schema read before agent
     // execution. Count only the physical semantic statement: it must execute

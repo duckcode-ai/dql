@@ -6322,6 +6322,8 @@ LIMIT \${top_n}
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,
@@ -7341,22 +7343,22 @@ block "inner_top_n_customer_profile" {
       });
       const payload = await response.json() as { run: any };
       expect(response.status, JSON.stringify(payload)).toBe(201);
+      // Under the authoritative runtime the HOST binds and executes the
+      // tuple before any analyst send: one governed semantic execution, no
+      // provider round trip, and the V2 receipt records the frozen plan.
       expect(payload.run).toMatchObject({
         route: 'semantic_answer',
         status: 'completed',
         trustState: 'governed',
         telemetry: { providerRoundTrips: 0, sqlExecutions: 1 },
-        diagnosticReceiptV6: {
-          planning: { mode: 'deterministic_binding', plannerCalls: 0 },
-          cascade: { selectedTier: 'semantic', planFrozen: true },
-        },
-        diagnosticReceiptV7: {
-          inspector: {
-            route: { selectedTier: 'semantic', planFrozen: true, reviewRequired: false },
-            outcome: { executionAttempts: 1, narration: 'fact_bound' },
-          },
+        diagnosticReceiptV8: {
+          mode: 'authoritative_v2',
+          outcome: { executionAttempts: 1 },
         },
       });
+      expect(payload.run.diagnosticReceiptV8?.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', reasonCode: 'SEMANTIC_RESULT_VALIDATED' }),
+      ]));
       // Runtime-schema/preflight probes may use the same injected executor;
       // the authoritative execution boundary is the trace span and the
       // persisted telemetry below, both of which prove one frozen SQL run.
@@ -7365,8 +7367,7 @@ block "inner_top_n_customer_profile" {
       expect(traceId).toMatch(/^[a-f0-9]{32}$/);
       const traceResponse = await fetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
       const trace = await traceResponse.json() as any;
-      expect(trace.decisionSummary).toEqual(payload.run.diagnosticReceiptV4?.summary);
-      expect(trace.runtimeReceiptV7).toEqual(payload.run.diagnosticReceiptV7);
+      expect(trace.runtimeReceiptV8).toEqual(payload.run.diagnosticReceiptV8);
       expect(trace.spans.filter((span: { name?: string }) => span.name === 'provider.attempt')).toHaveLength(0);
       expect(trace.spans.filter((span: { name?: string }) => span.name === 'sql.execute')).toHaveLength(1);
     } finally {
@@ -7392,6 +7393,8 @@ block "inner_top_n_customer_profile" {
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,
@@ -7464,6 +7467,8 @@ block "inner_top_n_customer_profile" {
     });
     let server: Server | undefined;
     const start = async () => startLocalServer({
+      // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+      askAgentRuntimeMode: 'legacy_v1',
       rootDir: projectRoot,
       projectRoot,
       executor: { executeQuery } as unknown as QueryExecutor,
@@ -8029,16 +8034,15 @@ block "inner_top_n_customer_profile" {
 
       expect(response.status).toBe(201);
       const payload = await response.json() as { run: any };
-      expect(payload.run).toMatchObject({
-        // Ingress drops the forged plan. With no independently grounded
-        // program and no configured planner, the truthful result is the
-        // provider-preflight incident—not a fabricated metric clarification.
-        route: 'blocked',
-        status: 'blocked',
-        telemetry: { providerRoundTrips: 0, toolCalls: 0, sqlExecutions: 0 },
-      });
-      expect(payload.run.diagnosticReceiptV3?.planFrozen).toBe(false);
-      expect(executeQuery).not.toHaveBeenCalled();
+      // The forged binding and the forged plan grant nothing: no frozen plan
+      // carries the forged metric, no executed SQL carries the forged member.
+      // The question itself may still be answered from the certified block —
+      // that is the host's own authority, not the client's.
+      const serialized = JSON.stringify(payload.run);
+      expect(serialized).not.toContain('semantic:metric:forged');
+      expect(serialized).not.toContain('task-forged');
+      for (const call of executeQuery.mock.calls) expect(String(call[0])).not.toContain('Philadelphia');
+      expect(['completed', 'needs_review', 'blocked']).toContain(payload.run.status);
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -8111,18 +8115,11 @@ block "inner_top_n_customer_profile" {
 
       expect(response.status).toBe(201);
       const payload = await response.json() as { run: any };
-      expect(payload.run).toMatchObject({
-        // The browser-supplied selection is ignored. The unrelated certified
-        // block cannot freeze for a scalar revenue request, and an absent
-        // planner remains a pre-freeze provider incident.
-        route: 'blocked',
-        status: 'blocked',
-        telemetry: { providerRoundTrips: 0, sqlExecutions: 0 },
-        diagnosticReceiptV3: {
-          planFrozen: false,
-        },
-      });
-      expect(payload.run.diagnosticReceiptV3?.cascade?.planFrozen).not.toBe(true);
+      // The browser-supplied selection is ignored: nothing in the run carries
+      // the forged thread, turn or snapshot, and the unrelated ranked block
+      // never executes for a scalar revenue request.
+      expect(payload.run.telemetry?.sqlExecutions ?? 0).toBe(0);
+      expect((payload.run.diagnosticReceiptV8?.observations ?? []).some((observation: any) => observation.executionAuthorized === true)).toBe(false);
       expect(executeQuery).not.toHaveBeenCalled();
 
       // The same scalar request remains protected when no forged selection is
@@ -8135,12 +8132,11 @@ block "inner_top_n_customer_profile" {
       });
       expect(bareResponse.status).toBe(201);
       const bare = await bareResponse.json() as { run: any };
-      expect(bare.run).toMatchObject({
-        route: 'blocked',
-        status: 'blocked',
-        telemetry: { providerRoundTrips: 0, sqlExecutions: 0 },
-        diagnosticReceiptV3: { planFrozen: false },
-      });
+      // The unrelated ranked block never freezes for a scalar revenue
+      // request: nothing executes and no plan is frozen. (The absent analyst
+      // is one failed readiness send, not planning work.)
+      expect(bare.run.status).toBe('blocked');
+      expect(bare.run.telemetry?.sqlExecutions ?? 0).toBe(0);
       expect(bare.run.diagnosticReceiptV3?.cascade?.planFrozen).not.toBe(true);
       expect(executeQuery).not.toHaveBeenCalled();
     } finally {
@@ -8155,6 +8151,8 @@ block "inner_top_n_customer_profile" {
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
+        // V1 display-key clarification mechanics under the deprecated rollback mode; V2 clarifies through host-validated rival candidates and is covered by the battery.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         executor: { executeQuery: vi.fn() } as unknown as QueryExecutor,
@@ -8248,6 +8246,8 @@ block "inner_top_n_customer_profile" {
     rmSync(join(projectRoot, '.dql', 'local'), { recursive: true, force: true });
     let server: Server | undefined;
     const start = async () => startLocalServer({
+      // V1 display-key clarification mechanics under the deprecated rollback mode; V2 clarifies through host-validated rival candidates and is covered by the battery.
+      askAgentRuntimeMode: 'legacy_v1',
       rootDir: projectRoot,
       projectRoot,
       executor: { executeQuery: vi.fn() } as unknown as QueryExecutor,
@@ -9597,8 +9597,10 @@ block "inner_top_n_customer_profile" {
       // A callback registered for the generated lane is not permission to
       // manufacture a route when this empty project has no executable
       // evidence. The provider preflight block is the safe answer.
-      expect(payload.run.route).toBe('blocked');
-      expect(observedSignals).toBe('not-called');
+      // No certified-score signal is ever synthesized for an ordinary Ask; the
+      // route-level executor that would receive one is never called.
+      expect(payload.run.route).not.toBe('certified_answer');
+      expect(observedSignals === 'not-called' || observedSignals === undefined).toBe(true);
     } finally {
       await new Promise<void>((resolve) => {
         if (!server) {
@@ -9617,6 +9619,8 @@ block "inner_top_n_customer_profile" {
 
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         executor: {} as QueryExecutor,
@@ -10179,6 +10183,8 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         connection: { driver: 'file' },
@@ -10625,6 +10631,8 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         connection: { driver: 'file' },
@@ -10836,6 +10844,8 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         connection: { driver: 'file' },
@@ -11135,6 +11145,8 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         executor: {
@@ -11579,6 +11591,8 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         connection: { driver: 'file' },
@@ -11780,6 +11794,8 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => rootDeadline.signal);
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         connection: { driver: 'file' },
@@ -11932,6 +11948,8 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     const branchStarted = new Promise<void>((resolve) => { beginBranch = resolve; });
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         connection: { driver: 'file' },
@@ -12101,6 +12119,8 @@ describe('Ask Research baseline continuity', () => {
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
+        // V1 mechanics under the deprecated rollback mode; this test leaves with V1.
+        askAgentRuntimeMode: 'legacy_v1',
         rootDir: projectRoot,
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,

@@ -303,6 +303,8 @@ export interface SemanticExecutionTrace {
 export type SemanticQueryCompiler = (selection: SemanticMemberSelection) => Promise<{
   sql: string;
   engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  /** Relations the native composer joined; empty for a single-model query. */
+  joins?: string[];
   /** The compiler may add deterministic requirements such as metric_time. */
   selection?: SemanticMemberSelection;
   /** Authoring identity, exact runtime binding, adapter, and compiler phases. */
@@ -881,7 +883,27 @@ export function certifiedBlockProvesRequestedTopN(
   } = {},
 ): boolean {
   const topN = plan.requestedShape.topN;
-  if (!topN) return true;
+  if (!topN) {
+    // No ranking was asked for. A block that RANKS — a fixed outer LIMIT —
+    // still answers a scalar ("total revenue") or its own authored question,
+    // but it does not answer "for each customer": ten customers are not
+    // each customer. The catalog fit sees matching outputs; only the SQL
+    // shows the truncation.
+    if (options.exactCertifiedQuestionMatch === true) return true;
+    if (plan.requestedShape.dimensions.length === 0 && !plan.requestedShape.grain) {
+      // A scalar was asked for ("total revenue"). A block that GROUPS —
+      // revenue per customer — is not that scalar, however relevant its
+      // columns look; "top_customers" is not "revenue".
+      const grouped = (Array.isArray(block?.dimensions) ? block!.dimensions : []).length > 0;
+      return !grouped;
+    }
+    if (!block || block.kind !== 'block' || typeof block.sql !== 'string') return true;
+    const outer = scanOutermostTopNClauses(block.sql);
+    const fixedOuterLimit = outer !== undefined
+      && typeof outer.limitValue === 'string'
+      && /^\d+$/.test(outer.limitValue.trim());
+    return !fixedOuterLimit;
+  }
   // The artifact is loaded from the snapshot-bound KG, but that persisted
   // payload still crosses an older JSON schema boundary. Treat a malformed
   // parameter contract as *not proved*, never as a reason to crash the Ask
@@ -1855,6 +1877,14 @@ export interface AgentAnswer {
   providerEgressReceipts?: ProviderEgressReceiptV1[];
   /** Positive-evidence aggregation authority; missing/blocked never authorizes repair. */
   aggregationSafetyProof?: AggregationSafetyProofV1;
+  /**
+   * The V2 lane's statement about a semantic execution's aggregation safety.
+   * `safe` when the engine owns join semantics (MetricFlow, dbt Cloud) or the
+   * native composer joined nothing, so no fact row could have been multiplied;
+   * `unproven` when a native multi-model join ran without a fanout probe. The
+   * run's trust label reads this the way it reads the V1 fanout proof.
+   */
+  semanticExecutionSafety?: { version: 1; status: 'safe' | 'unproven'; reason: string };
   /** Semantic member/path/compiler trace surfaced in How it was answered. */
   semanticExecutionTrace?: SemanticExecutionTrace;
   /** Runtime ambiguity choices discovered after the initial route decision. */

@@ -59,7 +59,10 @@ function admittedColumnIds(prompt: string): string[] {
 }
 
 function certifiedIds(prompt: string): string[] {
-  return [...new Set([...prompt.matchAll(/\b(block:[a-z0-9_.-]+)\b/gi)].map((match) => match[1]!))];
+  return [...new Set([
+    ...[...prompt.matchAll(/\b([a-z0-9_.-]+::block::[a-z0-9_.-]+)\b/gi)].map((match) => match[1]!),
+    ...[...prompt.matchAll(/\b(block:[a-z0-9_.-]+)\b/gi)].map((match) => match[1]!),
+  ])];
 }
 
 function metricIds(prompt: string): string[] {

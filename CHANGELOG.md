@@ -32,6 +32,22 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   sends. The run-scoped dispatch ledger is the one dispatch authority.
 - Persisted runs keep each artifact payload once; the server no longer grows
   ~4 MB per question.
+- A project with no AI provider configured still gets its certified blocks,
+  its exactly-bound semantic metrics and host-composed relational answers:
+  the V2 lane runs host-first execution and the floor around an absent
+  analyst instead of stopping at provider preflight.
+- The certified top-N proof accepts a block whose fixed `LIMIT` equals the
+  requested N on a verbatim authored example or a unique complete fit, and
+  refuses a ranked block for an unranked "each customer" listing and a
+  grouped block for a scalar ask. Only a verbatim example lets a block answer
+  a question with a filter or a dropped qualifier ("top BCM customers").
+- The native semantic compiler is selected for a metric it alone can serve
+  even when a MetricFlow binary is installed but not ready.
+- Known gap: the deterministic display-key clarification ("Show the top names
+  by revenue" → choose Customer Name / Product Name) is a V1 mechanism. Under
+  `authoritative_v2` a configured analyst may still ask through
+  host-validated rival candidates; the zero-provider clarification returns
+  with the single turn/clarification owner in the next release.
 
 ---
 
