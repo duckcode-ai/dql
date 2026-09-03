@@ -16,14 +16,13 @@ const columns = (count: number) => Array.from({ length: count }, (_, index) => (
  */
 describe('agent schema context column budget', () => {
   it('marks a truncated relation partial so a bounded projection is not read as proof', () => {
-    const bounded = boundAgentSchemaColumns(columns(436), undefined, identity);
+    const bounded = boundAgentSchemaColumns(columns(436), 'complete', identity);
     expect(bounded.columns).toHaveLength(AGENT_SCHEMA_CONTEXT_COLUMN_LIMIT);
     expect(bounded.columnCompleteness).toBe('partial');
   });
 
   it('leaves a relation that fits within the budget exactly as the catalog declared it', () => {
     expect(boundAgentSchemaColumns(columns(31), 'complete', identity).columnCompleteness).toBe('complete');
-    expect(boundAgentSchemaColumns(columns(31), undefined, identity).columnCompleteness).toBeUndefined();
     expect(boundAgentSchemaColumns(columns(31), 'partial', identity).columnCompleteness).toBe('partial');
   });
 
@@ -31,6 +30,6 @@ describe('agent schema context column budget', () => {
     expect(mergeAgentSchemaCompleteness('partial', 'complete')).toBe('partial');
     expect(mergeAgentSchemaCompleteness('complete', 'partial')).toBe('partial');
     expect(mergeAgentSchemaCompleteness('complete', 'complete')).toBe('complete');
-    expect(mergeAgentSchemaCompleteness(undefined, 'partial')).toBe('partial');
+    expect(mergeAgentSchemaCompleteness('partial', 'partial')).toBe('partial');
   });
 });

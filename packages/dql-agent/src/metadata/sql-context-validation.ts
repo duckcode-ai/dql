@@ -222,10 +222,9 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
-  const unknownRelations = referencedRelations.filter((relation) =>
-    !relationLookupKeys(relation).some((key) => allowed.has(key)),
-  );
-  if (unknownRelations.length > 0) {
+  const finding = checkSqlReferences({ analysis, allowed, outputAliases });
+  if (finding?.kind === 'unknown_relation') {
+    const unknownRelations = finding.relations;
     return {
       ok: false,
       code: 'unknown_relation',
@@ -243,7 +242,7 @@ export function validateSqlAgainstLocalContext(
     }
   }
 
-  const unknownColumn = findUnknownColumn(analysis.columns, allowed, outputAliases);
+  const unknownColumn = finding?.kind === 'unknown_column' ? finding : undefined;
   if (unknownColumn) {
     return {
       ok: false,
@@ -277,11 +276,7 @@ export function validateSqlAgainstLocalContext(
   // A CTE that shares a name with a real relation must never be treated as that
   // relation's owner — `WITH orders AS (...) ... FROM orders o JOIN dw.customers`
   // would otherwise report a phantom conflict now that partial relations count.
-  const ambiguousColumn = findScopeAwareAmbiguousColumn(
-    analysis.scopes ?? [],
-    allowed,
-    new Set((analysis.ctes ?? []).flatMap(relationLookupKeys)),
-  );
+  const ambiguousColumn = finding?.kind === 'ambiguous_column' ? finding : undefined;
   if (ambiguousColumn) {
     return {
       ok: false,
@@ -591,6 +586,60 @@ function findAmbiguousUnqualifiedColumn(
     if (owners.length > 1) return { column: column.column, owners };
   }
   return undefined;
+}
+
+/**
+ * THE check of a parsed statement's references against an allowed relation
+ * set. The metadata-context validator and the grounding validator used to
+ * carry their own copies of the relation/column/ambiguity walk with drifting
+ * rules; both now call this and only phrase the finding in their own words.
+ */
+export type SqlReferenceFinding =
+  | { kind: 'unknown_relation'; relations: string[] }
+  | { kind: 'unknown_column'; column: string; relation?: string }
+  | { kind: 'ambiguous_column'; column: string; owners: string[] };
+
+export function checkSqlReferences(input: {
+  analysis: Pick<ReturnType<typeof analyzeSqlReferences>, 'tables' | 'columns' | 'scopes' | 'ctes'>;
+  allowed: Map<string, MetadataAllowedSqlRelation>;
+  outputAliases: Set<string>;
+  /** Skip the relation walk (the caller resolved relations its own way). */
+  relationsResolved?: boolean;
+}): SqlReferenceFinding | undefined {
+  const { analysis, allowed, outputAliases } = input;
+  if (!input.relationsResolved) {
+    const unknownRelations = analysis.tables.filter((relation) =>
+      !relationLookupKeys(relation).some((key) => allowed.has(key)));
+    if (unknownRelations.length > 0) return { kind: 'unknown_relation', relations: unknownRelations };
+  }
+  const unknownColumn = findUnknownColumn(analysis.columns, allowed, outputAliases);
+  if (unknownColumn) return { kind: 'unknown_column', ...unknownColumn };
+  const ambiguousColumn = findScopeAwareAmbiguousColumn(
+    analysis.scopes ?? [],
+    allowed,
+    new Set((analysis.ctes ?? []).flatMap(relationLookupKeys)),
+  );
+  if (ambiguousColumn) return { kind: 'ambiguous_column', ...ambiguousColumn };
+  return undefined;
+}
+
+/** An allowed-relation lookup from plain relation records (live-probed columns are complete). */
+export function allowedRelationLookupFromTables(
+  tables: ReadonlyArray<{ relation: string; name?: string; columns: ReadonlyArray<{ name: string; type?: string }>; source?: string }>,
+): Map<string, MetadataAllowedSqlRelation> {
+  const allowed = new Map<string, MetadataAllowedSqlRelation>();
+  for (const table of tables) {
+    const entry: MetadataAllowedSqlRelation = {
+      relation: table.relation,
+      name: table.name ?? table.relation.split('.').at(-1) ?? table.relation,
+      source: table.source ?? 'grounded schema',
+      columnCompleteness: 'complete',
+      columns: table.columns.map((column) => ({ name: column.name, ...(column.type ? { type: column.type } : {}) })),
+    };
+    for (const key of relationLookupKeys(table.relation)) allowed.set(key, entry);
+    if (table.name) for (const key of relationLookupKeys(table.name)) if (!allowed.has(key)) allowed.set(key, entry);
+  }
+  return allowed;
 }
 
 function findScopeAwareAmbiguousColumn(

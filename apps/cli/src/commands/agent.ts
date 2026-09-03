@@ -198,11 +198,13 @@ function normalizeRuntimeSchemaTable(raw: unknown): AgentSchemaTable | undefined
         .filter((column): column is AgentSchemaTable['columns'][number] => Boolean(column))
         .slice(0, 120)
     : [];
+  const declared = cleanRuntimeSchemaString(table.columnCompleteness);
   return {
     relation,
     name: cleanRuntimeSchemaString(table.name) ?? relation.split('.').pop() ?? relation,
     source: cleanRuntimeSchemaString(table.source) ?? 'runtime schema',
     columns,
+    columnCompleteness: declared === 'complete' && (Array.isArray(table.columns) ? table.columns.length : 0) <= 120 ? 'complete' : 'partial',
   };
 }
 

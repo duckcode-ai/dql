@@ -20,10 +20,10 @@ export function boundAgentSchemaColumns(
   dedupe: (columns: AgentSchemaTable['columns']) => AgentSchemaTable['columns'],
 ): Pick<AgentSchemaTable, 'columns' | 'columnCompleteness'> {
   const deduped = dedupe(columns);
-  const completeness = deduped.length > AGENT_SCHEMA_CONTEXT_COLUMN_LIMIT ? 'partial' : declared;
+  const completeness: AgentSchemaTable['columnCompleteness'] = deduped.length > AGENT_SCHEMA_CONTEXT_COLUMN_LIMIT ? 'partial' : declared;
   return {
     columns: deduped.slice(0, AGENT_SCHEMA_CONTEXT_COLUMN_LIMIT),
-    ...(completeness ? { columnCompleteness: completeness } : {}),
+    columnCompleteness: completeness,
   };
 }
 

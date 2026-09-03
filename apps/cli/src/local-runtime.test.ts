@@ -14449,6 +14449,7 @@ describe('EXP-001 exploratory join probes', () => {
       [{
         relation: 'jaffle_shop.dev.dim_customers',
         name: 'dim_customers',
+        columnCompleteness: 'complete',
         columns: [{ name: 'customer_name' }, { name: 'lifetime_spend' }],
       }],
       repairs,
@@ -14465,8 +14466,8 @@ describe('EXP-001 exploratory join probes', () => {
     const sql = qualifyUnambiguousSqlRelationsFromSchema(
       'SELECT customer_name FROM dim_customers',
       [
-        { relation: 'jaffle_shop.dev.dim_customers', name: 'dim_customers', columns: [{ name: 'customer_name' }] },
-        { relation: 'other.prod.dim_customers', name: 'dim_customers', columns: [{ name: 'customer_name' }] },
+        { relation: 'jaffle_shop.dev.dim_customers', name: 'dim_customers', columnCompleteness: 'complete', columns: [{ name: 'customer_name' }] },
+        { relation: 'other.prod.dim_customers', name: 'dim_customers', columnCompleteness: 'complete', columns: [{ name: 'customer_name' }] },
       ],
       repairs,
     );
@@ -14490,11 +14491,13 @@ describe('EXP-001 exploratory join probes', () => {
       {
         relation: 'dev.customers',
         name: 'customers',
+        columnCompleteness: 'complete',
         columns: [{ name: 'customer_id' }, { name: 'customer_name' }, { name: 'lifetime_spend' }],
       },
       {
         relation: 'jaffle_shop.dev.order_items',
         name: 'order_items',
+        columnCompleteness: 'complete',
         columns: [{ name: 'order_id' }, { name: 'product_id' }],
       },
     ]);
@@ -14517,21 +14520,25 @@ describe('EXP-001 exploratory join probes', () => {
       {
         relation: 'jaffle_shop.dev.orders',
         name: 'orders',
+        columnCompleteness: 'complete',
         columns: [{ name: 'order_id' }, { name: 'customer_id' }, { name: 'tax_paid' }],
       },
       {
         relation: 'jaffle_shop.dev.customers',
         name: 'customers',
+        columnCompleteness: 'complete',
         columns: [{ name: 'customer_id' }, { name: 'customer_name' }, { name: 'lifetime_tax_paid' }],
       },
       {
         relation: 'jaffle_shop.dev.order_items',
         name: 'order_items',
+        columnCompleteness: 'complete',
         columns: [{ name: 'order_id' }, { name: 'product_id' }],
       },
       {
         relation: 'jaffle_shop.dev.products',
         name: 'products',
+        columnCompleteness: 'complete',
         columns: [{ name: 'product_id' }, { name: 'product_description' }],
       },
     ], 'what is the tax and product info for customer life span?');
@@ -14556,6 +14563,7 @@ describe('EXP-001 exploratory join probes', () => {
     `, [{
       relation: 'customers',
       name: 'customers',
+      columnCompleteness: 'complete',
       columns: [{ name: 'customer_id' }, { name: 'customer_name' }, { name: 'lifetime_tax_paid' }],
     }]);
 
@@ -14602,6 +14610,7 @@ describe('EXP-001 exploratory join probes', () => {
       [{
         relation: 'analytics.orders',
         name: 'orders',
+        columnCompleteness: 'complete',
         columns: [{ name: 'amount', type: 'DECIMAL(18,2)' }],
       }],
     );
@@ -14610,6 +14619,7 @@ describe('EXP-001 exploratory join probes', () => {
       [{
         relation: 'analytics.orders',
         name: 'orders',
+        columnCompleteness: 'complete',
         columns: [{ name: 'amount', type: 'DECIMAL(18,2)' }],
       }],
     );
@@ -14730,6 +14740,7 @@ describe('buildAgentSchemaContext', () => {
         schema: 'main',
         name: 'dim_customers',
         source: 'local metadata catalog',
+        columnCompleteness: 'complete',
         columns: [
           { name: 'customer_id', description: 'Customer key' },
           { name: 'customer_name', description: 'Customer full name' },
@@ -14740,6 +14751,7 @@ describe('buildAgentSchemaContext', () => {
         schema: 'main',
         name: 'dim_customers',
         source: 'runtime information_schema',
+        columnCompleteness: 'complete',
         columns: [
           { name: 'customer_id', type: 'INTEGER' },
           { name: 'name', type: 'VARCHAR' },
@@ -14900,6 +14912,7 @@ describe('buildAgentValueProbeSql', () => {
         schema: 'main',
         name: 'revenue',
         source: 'runtime information_schema',
+        columnCompleteness: 'complete',
         columns: [{ name: 'segment', type: 'VARCHAR' }],
       },
       'segment',
@@ -14918,7 +14931,7 @@ describe('buildAgentValueProbeSql', () => {
 describe('cold Ask literal probe boundary', () => {
   it('builds an exact existence probe without returning warehouse values', () => {
     const sql = buildAgentExactValueProbeSql(
-      { relation: 'main.locations', name: 'locations', columns: [{ name: 'location_name', type: 'VARCHAR' }] },
+      { relation: 'main.locations', name: 'locations', columnCompleteness: 'complete', columns: [{ name: 'location_name', type: 'VARCHAR' }] },
       'location_name',
       'Philadelphia',
       { driver: 'file', filepath: ':memory:' },

@@ -23,6 +23,7 @@
  * crash the offline path.
  */
 
+import { allowedRelationLookupFromTables, checkSqlReferences } from './sql-context-validation.js';
 import { analyzeSqlReferences } from '@duckcodeailabs/dql-core';
 import type { DbtArtifacts, DbtModelNode, DbtSourceNode } from '../propose/dbt-artifacts.js';
 
@@ -523,62 +524,43 @@ export function validateSqlAgainstGrounding(
     }
   }
 
-  // Column check — qualified columns must exist on their relation; unqualified
-  // columns must exist on exactly one relation used by a multi-relation query.
-  const outputAliases = extractSelectAliases(sql);
-  for (const column of analysis.columns) {
-    if (column.column === '*') continue;
-    if (column.unqualified && outputAliases.has(column.column.toLowerCase())) continue;
-    if (column.relation) {
-      const table = lookupTable(column.relation, grounding);
-      if (!table || table.columns.length === 0) continue; // unknown relation already handled / no column info.
-      if (!table.columns.some((c) => c.name.toLowerCase() === column.column.toLowerCase())) {
-        return {
-          ok: false,
-          code: 'unknown_column',
-          error: `SQL references column "${column.column}" which does not exist on ${table.qualifiedRelation}.`,
-          warnings,
-          referencedRelations,
-          offending: { relation: table.qualifiedRelation, column: column.column },
-        };
-      }
-      continue;
-    }
-    // `analyzeSqlReferences` flattens CTE aliases across scopes. Avoid a false
-    // ambiguity between an inner CTE source and an outer relation until scoped
-    // column ownership is available from the parser.
-    const owners = analysis.ctes.length === 0 ? Object.entries(analysis.aliasToRelation)
-      .filter(([, relation]) => {
-        const table = lookupTable(relation, grounding);
-        return Boolean(table?.columns.some((candidate) => candidate.name.toLowerCase() === column.column.toLowerCase()));
-      })
-      .map(([alias, relation]) => `${alias} (${relation})`)
-      .filter((owner, index, values) => values.indexOf(owner) === index) : [];
-    if (owners.length > 1) {
-      return {
-        ok: false,
-        code: 'unknown_column',
-        error: `SQL references unqualified column "${column.column}", which exists on multiple joined relations: ${owners.join(', ')}. Qualify it with the intended relation alias.`,
-        warnings,
-        referencedRelations,
-        offending: { column: column.column },
-      };
-    }
-    const referencedTables = referencedRelations
-      .map((relation) => lookupTable(relation, grounding))
-      .filter((table): table is GroundedTable => Boolean(table));
-    const tablesWithCols = referencedTables.filter((table) => table.columns.length > 0);
-    if (tablesWithCols.length === 0) continue;
-    if (!tablesWithCols.some((t) => t.columns.some((c) => c.name.toLowerCase() === column.column.toLowerCase()))) {
-      return {
-        ok: false,
-        code: 'unknown_column',
-        error: `SQL references column "${column.column}" which is not present on any grounded relation.`,
-        warnings,
-        referencedRelations,
-        offending: { column: column.column },
-      };
-    }
+  // Column check — the one reference checker, over the grounded relations
+  // this statement actually reads (live-probed, so their columns are complete).
+  const referencedTables = referencedRelations
+    .map((relation) => lookupTable(relation, grounding))
+    .filter((table): table is GroundedTable => Boolean(table));
+  const finding = checkSqlReferences({
+    analysis,
+    allowed: allowedRelationLookupFromTables(referencedTables.map((table) => ({
+      relation: table.qualifiedRelation,
+      name: table.name,
+      columns: table.columns,
+      source: 'grounded schema',
+    }))),
+    outputAliases: extractSelectAliases(sql),
+    relationsResolved: true,
+  });
+  if (finding?.kind === 'unknown_column') {
+    return {
+      ok: false,
+      code: 'unknown_column',
+      error: finding.relation
+        ? `SQL references column "${finding.column}" which does not exist on ${finding.relation}.`
+        : `SQL references column "${finding.column}" which is not present on any grounded relation.`,
+      warnings,
+      referencedRelations,
+      offending: { ...(finding.relation ? { relation: finding.relation } : {}), column: finding.column },
+    };
+  }
+  if (finding?.kind === 'ambiguous_column') {
+    return {
+      ok: false,
+      code: 'unknown_column',
+      error: `SQL references unqualified column "${finding.column}", which exists on multiple joined relations: ${finding.owners.join(', ')}. Qualify it with the intended relation alias.`,
+      warnings,
+      referencedRelations,
+      offending: { column: finding.column },
+    };
   }
 
   return { ok: true, warnings, referencedRelations };

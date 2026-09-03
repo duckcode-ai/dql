@@ -7837,12 +7837,15 @@ function analyticalFailureSummary(
           relation: table.relation,
           name: table.name,
           columns: table.columns.map((column) => ({ ...column })),
+          columnCompleteness: table.columnCompleteness,
           source: table.source,
         } satisfies AgentSchemaTable))
           ?? governedAnswer.analysisPlan?.candidateTables.map((table) => ({
             relation: table.relation,
             name: table.relation.split('.').at(-1) ?? table.relation,
             columns: table.columns.map((name) => ({ name })),
+            // A plan names the columns it wants, not every column there is.
+            columnCompleteness: 'partial',
             source: 'answer analysis plan',
           } satisfies AgentSchemaTable));
         const exploration = await executeExploratoryCandidate(
@@ -42528,6 +42531,9 @@ function buildFrozenCertifiedSchemaContext(
       relation,
       schema: model.schema,
       name: model.name,
+      // A manifest lists the columns an author documented, not necessarily
+      // every column the relation has.
+      columnCompleteness: 'partial',
       description: model.description,
       columns: (model.columns ?? []).map((column) => ({
         name: column.name,
@@ -42578,6 +42584,8 @@ function metadataObjectToAgentSchemaTable(object: MetadataObject): AgentSchemaTa
   // that on the way into the schema context let a bounded projection be read as
   // proof, and the SQL gate then rejected real columns it had never been shown.
   const declaredCompleteness = metadataPayloadString(object, 'columnCompleteness');
+  // Unknown is not complete: a gate may only trust a list the catalog vouched for.
+  const columnCompleteness: AgentSchemaTable['columnCompleteness'] = declaredCompleteness === 'complete' ? 'complete' : 'partial';
   return {
     relation,
     schema,
@@ -42585,9 +42593,7 @@ function metadataObjectToAgentSchemaTable(object: MetadataObject): AgentSchemaTa
     description: object.description,
     columns,
     source: 'local metadata catalog',
-    ...(declaredCompleteness === 'complete' || declaredCompleteness === 'partial'
-      ? { columnCompleteness: declaredCompleteness }
-      : {}),
+    columnCompleteness,
   };
 }
 
@@ -42656,12 +42662,16 @@ export function buildAgentSchemaContext(
       name: table,
       source: 'runtime information_schema',
       columns: [],
+      columnCompleteness: 'complete' as const,
     };
     if (current.columns.length < 80) {
       current.columns.push({
         name: column,
         type: stringFromRecord(record, 'data_type'),
       });
+    } else {
+      // The cap is for the prompt; the gate must know a column was left out.
+      current.columnCompleteness = 'partial';
     }
     byRelation.set(relation, current);
   }

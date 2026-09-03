@@ -1643,8 +1643,13 @@ export interface AgentSchemaTable {
   description?: string;
   columns: AgentSchemaColumn[];
   source?: string;
-  /** A complete live lookup is authoritative for executable column names. */
-  columnCompleteness?: 'partial' | 'complete';
+  /**
+   * Whether `columns` is the WHOLE relation. Required: a producer that slices
+   * a wide relation for a prompt must say so, because a gate that believed an
+   * 80-column prefix was complete hard-rejected real columns. Caps are for
+   * prompts, never for gates; this marker is how the gate knows.
+   */
+  columnCompleteness: 'partial' | 'complete';
   /** Optional metadata-context rank; lower is better. Used to preserve catalog relation ordering. */
   selectionRank?: number;
   selectionScore?: number;

@@ -473,7 +473,8 @@ export interface MetadataAllowedSqlRelation {
   objectKey?: string;
   source: string;
   columns: RuntimeSchemaColumn[];
-  columnCompleteness?: 'complete' | 'partial';
+  /** Whether `columns` is the whole relation; a sliced list must say `partial`. */
+  columnCompleteness: 'complete' | 'partial';
 }
 
 export interface MetadataAllowedSqlContext {
