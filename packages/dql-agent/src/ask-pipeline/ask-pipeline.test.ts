@@ -60,6 +60,7 @@ const jaffle: VocabularySource = {
   ],
   relations: [
     { schema: 'dev', name: 'orders', columns: [{ name: 'order_id', dataType: 'VARCHAR' }, { name: 'customer_id', dataType: 'VARCHAR' }, { name: 'order_total', dataType: 'DOUBLE' }, { name: 'ordered_at', dataType: 'TIMESTAMP' }] },
+    { schema: 'dev', name: 'supplies', columns: [{ name: 'supply_uuid', dataType: 'VARCHAR' }, { name: 'product_id', dataType: 'VARCHAR' }, { name: 'supply_name', dataType: 'VARCHAR' }, { name: 'supply_cost', dataType: 'DOUBLE' }] },
   ],
 };
 
@@ -321,5 +322,24 @@ describe('certified precedent and the second follow-up reading', () => {
       expect(result.question).toMatch(/Keep the previous analysis/);
     }
     expect(result.attempts).toBe(2);
+  });
+});
+
+describe('"not modeled" is checked against the whole vocabulary', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const intent = (raw: Record<string, unknown>): AnalyticalIntentV1 => {
+    const parsed = parseIntent({ version: 1, kind: 'analytics', reading: 'x', display: [], filters: [], groupBy: [], measures: [], unresolved: [], provenance: {}, expectedShape: 'grouped', ...raw });
+    if (!parsed.intent) throw new Error(parsed.errors.map((e) => e.message).join('; '));
+    return parsed.intent;
+  };
+  it('a gap claimed for words that name a numeric column is sent back with the column as a measure', () => {
+    const next = validateIntentRefs(intent({ groupBy: [{ ref: 'entity:products.product', role: 'key' }], unresolved: [{ clause: 'supply cost by product', options: [], material: true }] }), vocabulary);
+    const problem = next.problems.find((candidate) => candidate.path === 'unresolved');
+    expect(problem?.message).toMatch(/is modeled: .*column:dev.supplies.supply_cost/);
+    expect(problem?.message).toMatch(/as a measure/);
+  });
+  it('a gap for words that name nothing stands', () => {
+    const next = validateIntentRefs(intent({ unresolved: [{ clause: 'weather in Philadelphia', options: [], material: true }] }), vocabulary);
+    expect(next.problems.filter((candidate) => candidate.path === 'unresolved')).toEqual([]);
   });
 });

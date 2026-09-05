@@ -3495,6 +3495,11 @@ export function agentRunProviderDispatchBudgetForMode(
       generationGroup: 9,
       narration: 1,
       repair: 1,
+      // Each hypothesis is an ordinary Ask through the pipeline: one
+      // interpreter read per child, bounded corrections after it. These share
+      // the twelve-send ceiling with the root plan and narration.
+      agentControl: 6,
+      toolFollowup: 5,
     };
   }
   return {
@@ -15526,9 +15531,15 @@ function analyticalFailureSummary(
       const executionProof = normalizeAnalyticalExecutionFingerprint(previewRecord?.resultFingerprint)
         ?? executionReceipt?.resultFingerprint;
       const executionUnavailable = !previewError && !executionProof;
+      // A governed branch that ended without rows explains itself: its own
+      // sentence (a clarification, a modeling gap, a compiler message) is
+      // the branch failure, not a generic "no execution receipt".
+      const governedNoAnswer = governedAnswer && governedAnswer.kind === 'no_answer'
+        ? (governedAnswer.executionError ?? governedAnswer.analyticalFailure?.message ?? governedAnswer.answer ?? governedAnswer.text)
+        : undefined;
       const terminalError = previewError
         ?? (executionUnavailable
-          ? 'Research did not produce an executed result or execution receipt; the branch remains review-required.'
+          ? (governedNoAnswer?.trim() || 'Research did not produce an executed result or execution receipt; the branch remains review-required.')
           : undefined);
       // A Research child reaches this point only after its own Ask cascade
       // selected and executed a frozen plan.  Once that execution has a

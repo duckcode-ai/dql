@@ -70,6 +70,7 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
     '8. KIND. Greetings, thanks, and questions about what you can do are kind "conversation" with a short `reply`. "What does X mean / how is X defined" is kind "definition" with a `reply` drawn from the vocabulary descriptions. Everything that asks for numbers or rows is kind "analytics". A question about something this project does not hold at all (weather, news, a different business) is kind "analytics" with no measures and one `unresolved` entry {clause: what was asked, options: [], material: true}: never a conversational reply, never a guessed metric.',
     '8b. BUSINESS TERMS ARE THE GOVERNED DEFAULT. When a term in the vocabulary defines a word of the question ("Revenue" defined as product revenue excluding tax), the metric that term names is the meaning; do not treat the word as ambiguous. Only two competing definitions with no governing term are material.',
     '8c. DISPLAY IS THE GRAIN\'S LABEL. A display ref is the name/label of an entity in groupBy (the customer\'s name beside the customer key). Never display an attribute of a finer grain (a supply name when grouping by product): it multiplies the rows.',
+    '8d. A NUMERIC COLUMN IS A MEASURE. When the question asks for a quantity that exists only as a numeric column (no metric declares it), use its column: or dimension: ref as a measure with an aggregation (sum, avg, count). Report a clause as not modeled ONLY when no entry of any kind — metric, dimension, column, block, term — matches its words.',
     '9. PROVENANCE. For every ref you use, provenance[ref] is the phrase of the question it came from ("q:<phrase>"), or "inherited" when it is carried from the previous analysis.',
     ...(input.hasPrior ? [
       '10. THIS IS A FOLLOW-UP. The previous executed analysis is given below. Treat the new message as an EDIT of it: keep every clause the message does not change (mark it "inherited"), add or replace what it asks for, and for any prior ref you drop write provenance[ref] = "removed:<why>". "Include X" adds a display or measure and keeps everything else, including scope, ranking and limit. A short correction that repeats a word of the previous analysis ("I need the beverage category", "no, drinks only") without a new measure or a new entity is an EDIT that keeps the previous measures, grain, ranking and limit. Only a message that names a new subject entirely ("what is Ryan Byrd\'s revenue") starts a new analysis; list the dropped refs as removed. When both readings are plausible, ask one bounded clarification instead of choosing.',
@@ -179,6 +180,31 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
   for (const group of next.groupBy) {
     if (group.role === 'time' && !group.grain) problems.push({ path: 'groupBy', message: `${group.ref} is a time axis and needs a grain` });
   }
+  // "Not modeled" is a claim the host checks against the whole vocabulary.
+  // A material clause with no options whose words name an authorized entry
+  // is sent back with those entries: a numeric column with no metric is
+  // still a measure with an aggregation, never a modeling gap.
+  for (const clause of next.unresolved) {
+    if (!clause.material || clause.options.length > 0) continue;
+    const words = (clause.clause.toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) ?? []).filter((word) => !CLAUSE_STOPWORDS.has(word));
+    const hits = new Map<string, VocabularyEntry>();
+    for (let i = 0; i < words.length; i += 1) {
+      for (const phrase of [words.slice(i, i + 2).join(' '), words[i]!]) {
+        for (const hit of vocabulary.lookup(phrase, { limit: 3, minScore: 0.85 })) {
+          if (hit.matchedOn !== 'name' && hit.matchedOn !== 'alias') continue;
+          if (hit.entry.kind === 'model' || hit.entry.kind === 'relation' || hit.entry.kind === 'entity') continue;
+          hits.set(hit.entry.ref, hit.entry);
+        }
+      }
+    }
+    if (hits.size === 0) continue;
+    const measureLike = [...hits.values()].filter((entry) => entry.kind === 'metric' || entry.kind === 'measure' || entry.kind === 'block' || (entry.kind === 'column' && entry.roles.includes('numeric')) || (entry.kind === 'dimension' && entry.roles.includes('numeric')));
+    problems.push({
+      path: 'unresolved',
+      message: `"${clause.clause}" is modeled: ${[...hits.keys()].join(', ')}. ${measureLike.length ? `Use ${measureLike.map((entry) => entry.ref).join(' or ')} as a measure (a numeric column takes an aggregation such as sum) instead of reporting a gap.` : 'Use these refs instead of reporting a gap.'}`,
+      suggestions: [...hits.keys()],
+    });
+  }
   for (const ref of unaccountedInheritedRefs(prior, next)) {
     problems.push({ path: 'provenance', message: `the previous analysis used ${ref}; keep it (provenance "inherited") or list it as "removed:<why>"` });
   }
@@ -249,6 +275,8 @@ function editDistance(a: string, b: string): number {
   }
   return table[rows * cols - 1]!;
 }
+
+const CLAUSE_STOPWORDS = new Set(['the', 'and', 'for', 'per', 'each', 'with', 'from', 'that', 'this', 'what', 'which', 'how', 'many', 'much', 'total', 'show', 'give', 'list', 'top', 'all', 'any']);
 
 const FOLLOW_UP_STOPWORDS = new Set(['the', 'and', 'for', 'need', 'get', 'want', 'show', 'give', 'please', 'can', 'you', 'now', 'just', 'only', 'also', 'but', 'with', 'from', 'that', 'this', 'what', 'about', 'into', 'them', 'those', 'these', 'not', 'yes', 'okay', 'thanks', 'include', 'add', 'results', 'result', 'again', 'instead', 'actually', 'sorry', 'mean', 'meant']);
 
