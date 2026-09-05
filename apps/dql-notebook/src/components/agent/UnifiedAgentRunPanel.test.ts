@@ -37,6 +37,7 @@ let askRunAllowsExecutionRepair: typeof UnifiedAgentRunPanelModule.askRunAllowsE
 let agentRunPerformanceRows: typeof UnifiedAgentRunPanelModule.agentRunPerformanceRows;
 let mergeFinishedRun: typeof UnifiedAgentRunPanelModule.mergeFinishedRun;
 let pipelineV9Activity: typeof UnifiedAgentRunPanelModule.pipelineV9Activity;
+let askPipelinePlanRows: typeof UnifiedAgentRunPanelModule.askPipelinePlanRows;
 let askRunCaptureWarning: typeof UnifiedAgentRunPanelModule.askRunCaptureWarning;
 let askFailureOriginTyped: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
 let askFailurePresentation: typeof UnifiedAgentRunPanelModule.ASK_FAILURE_PRESENTATION;
@@ -91,6 +92,7 @@ beforeAll(async () => {
     agentRunPerformanceRows = module.agentRunPerformanceRows;
     mergeFinishedRun = module.mergeFinishedRun;
     pipelineV9Activity = module.pipelineV9Activity;
+    askPipelinePlanRows = module.askPipelinePlanRows;
     askRunCaptureWarning = module.askRunCaptureWarning;
     askFailureOriginTyped = module.askFailureOrigin;
     askFailurePresentation = module.ASK_FAILURE_PRESENTATION;
@@ -2362,5 +2364,32 @@ describe('the Ask pipeline receipt is the authority on call counts', () => {
       ['Trace evidence', 'Ask pipeline receipt (dispatch, preparation and execution counts)'],
       ['Ask runtime', 'Ask pipeline receipt'],
     ]));
+  });
+});
+
+describe('the inspector plan of a pipeline run is its intent', () => {
+  it('renders reading, measures with a ratio formula, grain, window, population, tiers and proofs from the V9 receipt', () => {
+    const rows = Object.fromEntries(askPipelinePlanRows({
+      version: 1, vocabularyFingerprint: 'v', reading: 'AOV in 2025',
+      intent: {
+        reading: 'Average order value in 2025', measures: [{ ref: 'ratio:metric:order_item.revenue/metric:orders.orders', derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' }, alias: 'aov' }, { ref: 'metric:orders.order_total', scope: [{ ref: 'dimension:orders.is_drink_order', op: 'is_true', values: [] }] }],
+        groupBy: [{ ref: 'entity:locations.location', role: 'key' }], display: ['dimension:locations.location_name'], filters: [{ ref: 'dimension:customers.customer_name', op: 'eq', values: ['Jordan Lee'] }],
+        time: { ref: 'dimension:orders.ordered_at', window: { start: '2025-01-01', end: '2026-01-01', expression: 'in 2025' } }, population: 'all', ordering: { ref: 'measure:0', direction: 'desc' }, limit: 5, unresolved: [], provenance: {},
+      },
+      dispatches: [], candidates: [{ tier: 'relational', trust: 'governed', proof: ['every member of dev.locations is a row'] }], refusals: [],
+      tiers: [{ round: 0, tier: 'certified', outcome: 'refused', detail: 'no block' }, { round: 0, tier: 'semantic', outcome: 'refused' }, { round: 0, tier: 'relational', outcome: 'prepared' }],
+      executed: { tier: 'relational', sqlFingerprint: 'sha256:abc', rowCount: 6, ms: 3, proofs: ['executed on the warehouse: 6 rows in 3 ms'] }, timings: {}, grounding: ['customer_name: "jordan lee" is stored as "Jordan Lee"'],
+    }));
+    expect(rows.Reading).toBe('Average order value in 2025');
+    expect(rows.Measures).toBe('aov = metric:order_item.revenue / metric:orders.orders\nmetric:orders.order_total where dimension:orders.is_drink_order is_true');
+    expect(rows['Group by']).toBe('entity:locations.location (key)');
+    expect(rows.Filters).toBe('dimension:customers.customer_name eq Jordan Lee');
+    expect(rows.Time).toBe('axis dimension:orders.ordered_at · window 2025-01-01 → 2026-01-01 ("in 2025")');
+    expect(rows.Population).toBe('Every member of the grain (zero-filled)');
+    expect(rows.Ordering).toBe('measure:0 desc · limit 5');
+    expect(rows['Tiers tried']).toBe('certified: refused — no block\nsemantic: refused\nrelational: prepared');
+    expect(rows.Executed).toBe('relational · 6 row(s) · sha256:abc');
+    expect(rows.Proofs).toBe('every member of dev.locations is a row\nexecuted on the warehouse: 6 rows in 3 ms');
+    expect(rows.Grounding).toMatch(/stored as "Jordan Lee"/);
   });
 });

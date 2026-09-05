@@ -308,9 +308,10 @@ describe('golden reference SQL agrees with the seed', () => {
     expect(rows.length, spec.sql).toBeGreaterThan(0);
     for (const alternative of spec.alternatives ?? []) expect(local.query(alternative.sql).length).toBeGreaterThan(0);
   });
-  it('the seed holds Ryan Byrd and the twelve golden customers', () => {
+  it('the seed holds Ryan Byrd, the twelve golden customers, and two customers named Jordan Lee', () => {
     expect(local.query(`SELECT customer_name FROM dev.customers WHERE lower(customer_name) = 'ryan byrd'`)).toHaveLength(1);
-    expect(local.query('SELECT customer_id FROM dev.customers')).toHaveLength(12);
+    expect(local.query(`SELECT customer_id FROM dev.customers WHERE lower(customer_name) = 'jordan lee'`)).toHaveLength(2);
+    expect(local.query('SELECT customer_id FROM dev.customers')).toHaveLength(14);
   });
 });
 

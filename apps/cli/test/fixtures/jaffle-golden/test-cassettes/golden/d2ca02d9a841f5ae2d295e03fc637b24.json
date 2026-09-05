@@ -1,0 +1,24 @@
+{
+  "key": "d2ca02d9a841f5ae2d295e03fc637b24",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show Ryan Byrd's total revenue and beverage revenue, both measures side by side for this one customer.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"alias\":\"total_revenue\"},{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:order_item.is_drink_item\",\"op\":\"is_true\",\"values\":[],\"source\":\"question\"}],\"alias\":\"beverage_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:total revenue and beverage revenue\",\"dimension:order_item.is_drink_item\":\"q:beverage revenue\",\"dimension:customers.customer_name\":\"q:Ryan byrd\",\"entity:customers.customer\":\"removed:question now asks for one named customer's revenue, not a ranking\",\"ordering\":\"removed:no ranking requested\",\"limit\":\"removed:no ranking requested\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T21:38:56.518Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "d2ca02d9a841f5ae2d295e03fc637b24db4f659534d3c2c01196307ea73a8da3",
+    "postCanonicalHash": "d2ca02d9a841f5ae2d295e03fc637b24db4f659534d3c2c01196307ea73a8da3",
+    "appliedRuleClasses": []
+  }
+}

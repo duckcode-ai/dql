@@ -507,6 +507,7 @@ function clearAskConversationBrowserCache(): void {
   try {
     window.localStorage.removeItem(STORAGE_KEY);
     window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+    try { window.sessionStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY); } catch { /* per-tab memory unavailable */ }
     window.localStorage.removeItem(DELETED_THREAD_STORAGE_KEY);
     window.localStorage.removeItem(PROJECT_IDENTITY_STORAGE_KEY);
   } catch {
@@ -579,13 +580,24 @@ function loadConversations(): Conversation[] {
   }
 }
 
-function loadActiveConversationId(): string | undefined {
+/**
+ * Which chat a tab reopens: its own last selection (session storage is
+ * per tab), then the browser-wide last selection as a fallback for a new
+ * tab. Two tabs never overwrite each other's place.
+ */
+export function resolveActiveConversationId(stored: { tab?: string | null; shared?: string | null }, known: ReadonlySet<string>): string | undefined {
+  if (stored.tab && known.has(stored.tab)) return stored.tab;
+  if (stored.shared && known.has(stored.shared)) return stored.shared;
+  return undefined;
+}
+
+function loadActiveConversationId(known: ReadonlySet<string>): string | undefined {
   if (typeof window === 'undefined') return undefined;
-  try {
-    return window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) ?? undefined;
-  } catch {
-    return undefined;
-  }
+  let tab: string | null = null;
+  let shared: string | null = null;
+  try { tab = window.sessionStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY); } catch { /* per-tab memory unavailable */ }
+  try { shared = window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY); } catch { /* best-effort */ }
+  return resolveActiveConversationId({ tab, shared }, known);
 }
 
 // Strip fields that only matter during a LIVE run before writing to disk. Event
@@ -745,10 +757,8 @@ export function AnalyticsHome() {
   // Keep the selected thread across a page remount/reload. The panel's pending-run
   // handoff uses this server thread id to reconnect rather than asking again.
   const [activeId, setActiveId] = useState<string>(() => {
-    const stored = loadActiveConversationId();
-    return stored && conversations.some((conversation) => conversation.id === stored)
-      ? stored
-      : makeConversationId();
+    const stored = loadActiveConversationId(new Set(conversations.map((conversation) => conversation.id)));
+    return stored ?? makeConversationId();
   });
   const activeIdRef = React.useRef(activeId);
   // Switching conversations remounts the panel. A running panel now persists its
@@ -758,6 +768,7 @@ export function AnalyticsHome() {
 
   useEffect(() => {
     activeIdRef.current = activeId;
+    try { window.sessionStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeId); } catch { /* per-tab memory unavailable */ }
     try { window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeId); } catch { /* best-effort */ }
   }, [activeId]);
 

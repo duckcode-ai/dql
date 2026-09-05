@@ -11,16 +11,39 @@ import type { PreparedCandidate } from './prepare/types.js';
  * the warehouse's own message.
  */
 
+/** What a result column IS, from the vocabulary: the units contract every renderer reads. */
+export interface ResultColumnMeta {
+  name: string;
+  kind: 'currency' | 'percent' | 'number' | 'count' | 'duration' | 'date' | 'text' | 'boolean';
+  /** `USD` for currency; `fraction` (0.626) or `percentage_points` (10.8) for percent. */
+  unit?: string;
+  decimals?: number;
+  /** The vocabulary ref the column carries, when known. */
+  ref?: string;
+  /** The time grain of a date column. */
+  grain?: string;
+}
+
 export interface ExecutedRows {
   columns: string[];
   rows: Array<Record<string, unknown>>;
   rowCount: number;
   executionTimeMs: number;
   truncated?: boolean;
+  /** Units per column; absent on legacy results, which render exactly as before. */
+  columnsMeta?: ResultColumnMeta[];
+}
+
+export interface ExecuteRunOptions {
+  maxRows: number;
+  /** What this statement is for: the answer itself, or the one-row fan-out probe. */
+  purpose?: 'query' | 'fanout_probe';
+  /** The tier whose candidate is being executed. */
+  tier?: PreparedCandidate['tier'];
 }
 
 export interface ExecuteDeps {
-  run(sql: string, params: unknown[] | undefined, options: { maxRows: number }): Promise<ExecutedRows>;
+  run(sql: string, params: unknown[] | undefined, options: ExecuteRunOptions): Promise<ExecutedRows>;
   maxRows?: number;
 }
 
@@ -116,7 +139,7 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
 
   if (candidate.fanoutProbeSql) {
     try {
-      const probe = await deps.run(candidate.fanoutProbeSql, undefined, { maxRows: 1 });
+      const probe = await deps.run(candidate.fanoutProbeSql, undefined, { maxRows: 1, purpose: 'fanout_probe', tier: candidate.tier });
       const row = probe.rows[0] ?? {};
       const base = Number(row.base_rows ?? row.BASE_ROWS ?? NaN);
       const joined = Number(row.joined_rows ?? row.JOINED_ROWS ?? NaN);
@@ -129,7 +152,7 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
     }
   }
   try {
-    const executed = await deps.run(candidate.sql, candidate.params, { maxRows: deps.maxRows ?? 500 });
+    const executed = await deps.run(candidate.sql, candidate.params, { maxRows: deps.maxRows ?? 500, purpose: 'query', tier: candidate.tier });
     const result = candidate.derived?.length ? applyDerivedColumns(executed, candidate.derived) : executed;
     proofs.push(`executed on the warehouse: ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} in ${Math.round(result.executionTimeMs)} ms`);
     if (candidate.derived?.length) proofs.push(`ratio${candidate.derived.length > 1 ? 's' : ''} ${candidate.derived.map((item) => `${item.alias} = ${item.numerator} / ${item.denominator}`).join('; ')} computed from the executed columns`);

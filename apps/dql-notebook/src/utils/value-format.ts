@@ -65,15 +65,36 @@ function numberOptions(compact: boolean, integer = false): Intl.NumberFormatOpti
       : { maximumFractionDigits: 2 };
 }
 
+/** The units contract a result may carry per column; it wins over every name heuristic. */
+export interface DisplayColumnMeta {
+  kind: 'currency' | 'percent' | 'number' | 'count' | 'duration' | 'date' | 'text' | 'boolean';
+  unit?: string;
+  decimals?: number;
+  grain?: string;
+}
+
+function kindFromMeta(meta: DisplayColumnMeta): DisplayValueKind {
+  switch (meta.kind) {
+    case 'count': return 'integer';
+    case 'date': return meta.grain === 'month' ? 'month' : meta.grain === 'year' ? 'year' : 'date';
+    case 'duration': return 'number';
+    default: return meta.kind;
+  }
+}
+
 export function formatDisplayValue(
   column: string,
   value: unknown,
   values: unknown[] = [],
-  options: { compact?: boolean; format?: string } = {},
+  options: { compact?: boolean; format?: string; meta?: DisplayColumnMeta } = {},
 ): string {
   if (value === null || value === undefined) return '';
-  const kind = inferDisplayValueKind(column, values, options.format);
   const numeric = numericValue(value);
+  // Percentage points are a difference of percentages, never re-scaled.
+  if (options.meta?.kind === 'percent' && options.meta.unit === 'percentage_points' && numeric !== undefined) {
+    return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: options.meta.decimals ?? 1 }).format(numeric)} pp`;
+  }
+  const kind = options.meta ? kindFromMeta(options.meta) : inferDisplayValueKind(column, values, options.format);
 
   if (kind === 'year') {
     const year = typeof value === 'string' && (ISO_DATE_RE.test(value) || ISO_TIMESTAMP_RE.test(value))
@@ -102,8 +123,9 @@ export function formatDisplayValue(
       }).format(numeric);
     }
     if (kind === 'percent') {
-      const normalized = Math.abs(numeric) <= 1 ? numeric : numeric / 100;
-      return new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 2 }).format(normalized);
+      // A declared fraction is a fraction whatever its magnitude; only an undeclared value is guessed.
+      const normalized = options.meta?.unit === 'fraction' ? numeric : Math.abs(numeric) <= 1 ? numeric : numeric / 100;
+      return new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: options.meta?.decimals ?? 2 }).format(normalized);
     }
     return new Intl.NumberFormat('en-US', numberOptions(Boolean(options.compact), kind === 'integer')).format(numeric);
   }

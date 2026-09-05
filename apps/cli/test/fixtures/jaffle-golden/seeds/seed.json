@@ -1,5 +1,5 @@
 {
- "_comment": "Golden-harness subset of the jaffle-shop-duckdb dev/raw schemas: Ryan Byrd, the top nine beverage customers and the top two lifetime spenders, with every order and order line they have, plus all products, locations and supplies. Extracted Sept 2026 from jaffle_shop.duckdb; reference SQL in ../golden/*.yaml is evaluated against exactly these rows.",
+ "_comment": "Golden-harness subset of the jaffle-shop-duckdb dev/raw schemas: Ryan Byrd, the top nine beverage customers and the top two lifetime spenders, with every order and order line they have, plus all products, locations and supplies. Extracted Sept 2026 from jaffle_shop.duckdb; reference SQL in ../golden/*.yaml is evaluated against exactly these rows. Two customers share the name Jordan Lee (distinct customer_id) for the identity cases.",
  "tables": {
   "dev.customers": {
    "columns": [
@@ -172,6 +172,28 @@
      "lifetime_tax_paid": 174.8,
      "lifetime_spend": 3089.8,
      "customer_type": "returning"
+    },
+    {
+     "customer_id": "a1b2c3d4-0001-4a1b-9c1d-000000000001",
+     "customer_name": "Jordan Lee",
+     "count_lifetime_orders": 2,
+     "first_ordered_at": "2024-10-05 00:00:00",
+     "last_ordered_at": "2025-02-14 00:00:00",
+     "lifetime_spend_pretax": 23.0,
+     "lifetime_tax_paid": 1.38,
+     "lifetime_spend": 24.38,
+     "customer_type": "returning"
+    },
+    {
+     "customer_id": "a1b2c3d4-0002-4a1b-9c1d-000000000002",
+     "customer_name": "Jordan Lee",
+     "count_lifetime_orders": 1,
+     "first_ordered_at": "2024-11-20 00:00:00",
+     "last_ordered_at": "2024-11-20 00:00:00",
+     "lifetime_spend_pretax": 11.0,
+     "lifetime_tax_paid": 0.66,
+     "lifetime_spend": 11.66,
+     "customer_type": "new"
     }
    ]
   },
@@ -41950,6 +41972,66 @@
      "is_food_order": true,
      "is_drink_order": true,
      "customer_order_number": 29
+    },
+    {
+     "order_id": "b1b2c3d4-0001-4a1b-9c1d-000000000101",
+     "location_id": "4b6c2304-2b9e-41e4-942a-cf11a1819378",
+     "customer_id": "a1b2c3d4-0001-4a1b-9c1d-000000000001",
+     "subtotal_cents": 1700,
+     "tax_paid_cents": 102,
+     "order_total_cents": 1802,
+     "subtotal": 17.0,
+     "tax_paid": 1.02,
+     "order_total": 18.02,
+     "ordered_at": "2024-10-05 00:00:00",
+     "order_cost": 3.4,
+     "order_items_subtotal": 17.0,
+     "count_food_items": 1,
+     "count_drink_items": 1,
+     "count_order_items": 2,
+     "is_food_order": true,
+     "is_drink_order": true,
+     "customer_order_number": 149
+    },
+    {
+     "order_id": "b1b2c3d4-0002-4a1b-9c1d-000000000102",
+     "location_id": "4b6c2304-2b9e-41e4-942a-cf11a1819378",
+     "customer_id": "a1b2c3d4-0001-4a1b-9c1d-000000000001",
+     "subtotal_cents": 600,
+     "tax_paid_cents": 36,
+     "order_total_cents": 636,
+     "subtotal": 6.0,
+     "tax_paid": 0.36,
+     "order_total": 6.36,
+     "ordered_at": "2025-02-14 00:00:00",
+     "order_cost": 1.2,
+     "order_items_subtotal": 6.0,
+     "count_food_items": 0,
+     "count_drink_items": 1,
+     "count_order_items": 1,
+     "is_food_order": false,
+     "is_drink_order": true,
+     "customer_order_number": 149
+    },
+    {
+     "order_id": "b1b2c3d4-0003-4a1b-9c1d-000000000103",
+     "location_id": "4b6c2304-2b9e-41e4-942a-cf11a1819378",
+     "customer_id": "a1b2c3d4-0002-4a1b-9c1d-000000000002",
+     "subtotal_cents": 1100,
+     "tax_paid_cents": 66,
+     "order_total_cents": 1166,
+     "subtotal": 11.0,
+     "tax_paid": 0.66,
+     "order_total": 11.66,
+     "ordered_at": "2024-11-20 00:00:00",
+     "order_cost": 2.2,
+     "order_items_subtotal": 11.0,
+     "count_food_items": 1,
+     "count_drink_items": 0,
+     "count_order_items": 1,
+     "is_food_order": true,
+     "is_drink_order": false,
+     "customer_order_number": 149
     }
    ]
   },
@@ -74134,6 +74216,50 @@
      "is_food_item": false,
      "is_drink_item": true,
      "supply_cost": 0.82
+    },
+    {
+     "order_item_id": "c1b2c3d4-0001-4a1b-9c1d-000000000201",
+     "order_id": "b1b2c3d4-0001-4a1b-9c1d-000000000101",
+     "product_id": "JAF-001",
+     "ordered_at": "2024-10-05 00:00:00",
+     "product_name": "nutellaphone who dis?",
+     "product_price": 11.0,
+     "is_food_item": true,
+     "is_drink_item": false,
+     "supply_cost": 1.5
+    },
+    {
+     "order_item_id": "c1b2c3d4-0002-4a1b-9c1d-000000000202",
+     "order_id": "b1b2c3d4-0001-4a1b-9c1d-000000000101",
+     "product_id": "BEV-001",
+     "ordered_at": "2024-10-05 00:00:00",
+     "product_name": "tangaroo",
+     "product_price": 6.0,
+     "is_food_item": false,
+     "is_drink_item": true,
+     "supply_cost": 1.2
+    },
+    {
+     "order_item_id": "c1b2c3d4-0003-4a1b-9c1d-000000000203",
+     "order_id": "b1b2c3d4-0002-4a1b-9c1d-000000000102",
+     "product_id": "BEV-001",
+     "ordered_at": "2025-02-14 00:00:00",
+     "product_name": "tangaroo",
+     "product_price": 6.0,
+     "is_food_item": false,
+     "is_drink_item": true,
+     "supply_cost": 1.2
+    },
+    {
+     "order_item_id": "c1b2c3d4-0004-4a1b-9c1d-000000000204",
+     "order_id": "b1b2c3d4-0003-4a1b-9c1d-000000000103",
+     "product_id": "JAF-001",
+     "ordered_at": "2024-11-20 00:00:00",
+     "product_name": "nutellaphone who dis?",
+     "product_price": 11.0,
+     "is_food_item": true,
+     "is_drink_item": false,
+     "supply_cost": 1.5
     }
    ]
   },

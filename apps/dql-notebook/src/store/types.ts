@@ -554,9 +554,21 @@ export interface ActivePersona {
   appId?: string;
 }
 
+/** What a result column is, from the governed vocabulary; the units every renderer reads. */
+export interface ResultColumnMeta {
+  name: string;
+  kind: 'currency' | 'percent' | 'number' | 'count' | 'duration' | 'date' | 'text' | 'boolean';
+  unit?: string;
+  decimals?: number;
+  ref?: string;
+  grain?: string;
+}
+
 export interface QueryResult {
   columns: string[];
   rows: Record<string, unknown>[];
+  /** Units per column; absent on legacy results, which render exactly as before. */
+  columnsMeta?: ResultColumnMeta[];
   resultFingerprint?: string;
   executionReceipt?: Record<string, unknown>;
   trustState?: string;

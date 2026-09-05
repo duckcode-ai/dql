@@ -15,6 +15,7 @@ let hydrateInitialAskConversationList: typeof AnalyticsHomeModule.hydrateInitial
 let AskHistoryVerificationGate: typeof AnalyticsHomeModule.AskHistoryVerificationGate;
 let askResearchTracePath: typeof AnalyticsHomeModule.askResearchTracePath;
 let openAskResearchTrace: typeof AnalyticsHomeModule.openAskResearchTrace;
+let resolveActiveConversationId: typeof AnalyticsHomeModule.resolveActiveConversationId;
 
 describe('Ask AI Notebook repair handoff', () => {
   beforeAll(async () => {
@@ -30,6 +31,7 @@ describe('Ask AI Notebook repair handoff', () => {
       AskHistoryVerificationGate,
       askResearchTracePath,
       openAskResearchTrace,
+      resolveActiveConversationId,
     } = await import('./AnalyticsHome'));
   });
 
@@ -132,6 +134,14 @@ describe('Ask AI Notebook repair handoff', () => {
       now: '2026-09-05T10:05:00.000Z',
     });
     expect(derived[0].title).toBe('who are the top customers');
+  });
+
+  it('a tab reopens its own last chat, and a new tab falls back to the browser-wide one', () => {
+    const known = new Set(['conv-a', 'conv-b']);
+    expect(resolveActiveConversationId({ tab: 'conv-a', shared: 'conv-b' }, known)).toBe('conv-a');
+    expect(resolveActiveConversationId({ tab: null, shared: 'conv-b' }, known)).toBe('conv-b');
+    expect(resolveActiveConversationId({ tab: 'conv-gone', shared: 'conv-b' }, known)).toBe('conv-b');
+    expect(resolveActiveConversationId({ tab: 'conv-gone', shared: 'other-project' }, known)).toBeUndefined();
   });
 
   it('API-008 rebuilds Ask history from durable server threads after browser storage is reset', () => {

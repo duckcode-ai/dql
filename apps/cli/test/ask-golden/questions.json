@@ -863,6 +863,54 @@
         }
       ],
       "note": "population: all. The seed has six locations and orders only in Philadelphia: six rows, five of them zero-filled, enumerated from the locations relation and never from the orders that reference it."
+    },
+    {
+      "id": "duplicate-name-spend",
+      "question": "what is the lifetime spend of Jordan Lee",
+      "sql": "SELECT c.customer_id, c.customer_name, c.lifetime_spend FROM dev.customers c WHERE lower(c.customer_name) = 'jordan lee'",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer",
+          "customer__customer_id"
+        ],
+        "customer_name": [
+          "customer_name",
+          "name"
+        ],
+        "lifetime_spend": [
+          "lifetime_spend",
+          "spend",
+          "total_spend"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "tier": "governed",
+      "alternatives": [
+        {
+          "sql": "SELECT c.customer_id, c.customer_name, c.lifetime_spend_pretax FROM dev.customers c WHERE lower(c.customer_name) = 'jordan lee'",
+          "columns": {
+            "customer_id": [
+              "customer_id",
+              "customer",
+              "customer__customer_id"
+            ],
+            "customer_name": [
+              "customer_name",
+              "name"
+            ],
+            "lifetime_spend_pretax": [
+              "lifetime_spend_pretax",
+              "lifetime_spend",
+              "spend"
+            ]
+          }
+        }
+      ],
+      "note": "Two customers share this name. The label names several keys, so the answer is one row per customer, keyed, with the name displayed and an identity warning; never one merged number."
     }
   ]
 }

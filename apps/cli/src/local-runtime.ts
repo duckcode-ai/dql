@@ -6036,6 +6036,41 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const result = await executor.executeQuery(sql, [], {}, connection);
       return result.rows.map((row) => String((row as Record<string, unknown>).stored_value ?? (row as Record<string, unknown>).STORED_VALUE ?? '')).filter(Boolean);
     },
+    // Physical spans for the pipeline's statements and probes: the trace
+    // carries fingerprints and outcomes only, never SQL or values.
+    traceExecution: (request, span) => {
+      const observer = askTraceObserverForV1(request);
+      const tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql' | undefined = span.name === 'sql.execute'
+        ? (span.tier === 'relational' ? 'governed_relational' : span.tier === 'exploratory' ? 'exploratory_sql' : span.tier)
+        : undefined;
+      const payload = span.name === 'sql.execute'
+        ? { kind: 'sql' as const, execution: { version: 1 as const, sqlFingerprint: span.sqlFingerprint, reviewRequired: false, executionReason: span.purpose, ...(tier ? { tier } : {}) } }
+        : { kind: 'tool' as const, call: { version: 1 as const, toolCallId: span.inputFingerprint.slice(0, 16), toolKind: span.toolKind, attemptIndex: 1, inputFingerprint: span.inputFingerprint } };
+      const id = observer.startSpan({ name: span.name, stage: span.name === 'sql.execute' ? 'sql' : 'tool', reasonCode: 'started', payload });
+      return {
+        finish: (outcome, extra) => {
+          const finished = span.name === 'sql.execute'
+            ? { ...payload, execution: { ...(payload as { execution: Record<string, unknown> }).execution, ...(extra?.resultFingerprint ? { resultFingerprint: extra.resultFingerprint } : {}) } }
+            : { ...payload, call: { ...(payload as { call: Record<string, unknown> }).call, ...(extra?.safeErrorCode ? { safeErrorCode: extra.safeErrorCode } : {}) } };
+          observer.finishSpan(id, { outcome, reasonCode: outcome === 'ok' ? 'completed' : span.name === 'sql.execute' ? 'sql_failure' : 'tool_failure', payload: finished as never });
+        },
+      };
+    },
+    // The keys behind a label, under the same allowlist and the same bounded
+    // equality shape: which members a singular name actually denotes.
+    probeLabelKeys: async (relation, keyColumn, labelColumn, value, connection) => {
+      const dialect = getDialect(connection.driver);
+      const quotedRelation = relation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
+      const quotedKey = dialect.quoteIdentifier(keyColumn);
+      const quotedLabel = dialect.quoteIdentifier(labelColumn);
+      const literal = value.replace(/'/g, "''");
+      const sql = `SELECT DISTINCT ${quotedKey} AS member_key, ${quotedLabel} AS member_label FROM ${quotedRelation} WHERE LOWER(CAST(${quotedLabel} AS VARCHAR)) = LOWER('${literal}') LIMIT 6`;
+      const result = await executor.executeQuery(sql, [], {}, connection);
+      return result.rows.map((row) => {
+        const record = row as Record<string, unknown>;
+        return { key: String(record.member_key ?? record.MEMBER_KEY ?? ''), label: String(record.member_label ?? record.MEMBER_LABEL ?? '') };
+      }).filter((member) => member.key);
+    },
   });
 
   const answerRunExecutor: AgentRouteExecutor = async (executionContext) => {

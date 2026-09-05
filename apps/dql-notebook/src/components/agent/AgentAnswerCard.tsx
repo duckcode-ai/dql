@@ -10,7 +10,7 @@ import { TrustBadge, DerivationWalkPanel, type TrustState } from '@duckcodeailab
 import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
 import { buildDerivationWalk, type DerivationWalk } from '@duckcodeailabs/dql-core/lineage/derivation';
 import { useNotebook } from '../../store/NotebookStore';
-import { formatDisplayValue } from '../../utils/value-format';
+import { formatDisplayValue, type DisplayColumnMeta } from '../../utils/value-format';
 import { GuidedBySkills, RouteBadge } from './AiBuildResult';
 
 type AnswerTab = 'answer' | 'dql' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
@@ -1507,7 +1507,7 @@ function ResultPreview({ result, t, compact }: { result: QueryResult; t: Theme; 
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                   }}>
-                    {formatPreviewValue(column, row[column], rows.map((item) => item[column]))}
+                    {formatPreviewValue(column, row[column], rows.map((item) => item[column]), result.columnsMeta?.find((meta) => meta.name === column))}
                   </td>
                 ))}
               </tr>
@@ -1970,9 +1970,9 @@ function formatJoinPath(join: NonNullable<AgentAnalysisPlan['candidateJoins']>[n
   return join.reason ? `${path} (${join.reason})` : path;
 }
 
-function formatPreviewValue(column: string, value: unknown, values: unknown[]): string {
+function formatPreviewValue(column: string, value: unknown, values: unknown[], meta?: DisplayColumnMeta): string {
   if (value === null || value === undefined) return '-';
-  return formatDisplayValue(column, value, values);
+  return formatDisplayValue(column, value, values, meta ? { meta } : {});
 }
 
 function formatBusinessTier(value: string): string {

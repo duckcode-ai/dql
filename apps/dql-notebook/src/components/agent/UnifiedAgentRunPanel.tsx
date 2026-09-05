@@ -3405,6 +3405,50 @@ export function pipelineV9Activity(
   };
 }
 
+/**
+ * The plan of a pipeline run is its intent: what was read, what was
+ * measured, how it was grouped and restricted, which tiers were tried and
+ * which executed, with the proofs. Rendered from `diagnosticReceiptV9`.
+ */
+export function askPipelinePlanRows(receipt: Record<string, unknown>): Array<[string, string]> {
+  const intent = recordOf(receipt.intent) ?? {};
+  const list = (value: unknown): Record<string, unknown>[] => Array.isArray(value) ? value.map((item) => recordOf(item)).filter((item): item is Record<string, unknown> => Boolean(item)) : [];
+  const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  const text = (value: unknown): string => typeof value === 'string' ? value : value === undefined || value === null ? '' : String(value);
+  const predicate = (item: Record<string, unknown>) => `${text(item.ref)} ${text(item.op)} ${strings(item.values).length ? strings(item.values).join('/') : Array.isArray(item.values) ? (item.values as unknown[]).map(String).join('/') : ''}`.trim();
+  const measures = list(intent.measures).map((measure) => {
+    const derived = recordOf(measure.derived);
+    const base = derived ? `${text(measure.alias) || text(measure.ref)} = ${text(derived.numerator)} / ${text(derived.denominator)}` : `${text(measure.ref)}${measure.alias ? ` as ${text(measure.alias)}` : ''}${measure.aggregation ? ` (${text(measure.aggregation)})` : ''}`;
+    const scope = list(measure.scope).map(predicate);
+    return scope.length ? `${base} where ${scope.join(' and ')}` : base;
+  });
+  const groupBy = list(intent.groupBy).map((group) => `${text(group.ref)} (${text(group.role)}${group.grain ? ` ${text(group.grain)}` : ''})`);
+  const time = recordOf(intent.time);
+  const window = recordOf(time?.window);
+  const ordering = recordOf(intent.ordering);
+  const tiers = list(receipt.tiers).map((tier) => `${text(tier.tier)}: ${text(tier.outcome)}${tier.detail ? ` — ${text(tier.detail).slice(0, 120)}` : ''}`);
+  const executed = recordOf(receipt.executed);
+  const candidates = list(receipt.candidates);
+  const proofs = [...candidates.flatMap((candidate) => strings(candidate.proof)), ...strings(executed?.proofs)];
+  const none = 'None';
+  return [
+    ['Reading', text(intent.reading) || text(receipt.reading) || 'Not recorded'],
+    ['Measures', measures.join('\n') || none],
+    ['Group by', groupBy.join(', ') || none],
+    ['Display', strings(intent.display).join(', ') || none],
+    ['Filters', list(intent.filters).map(predicate).join('\n') || none],
+    ['Time', [time?.ref ? `axis ${text(time.ref)}` : '', time?.grain ? `grain ${text(time.grain)}` : '', window ? `window ${text(window.start)} → ${text(window.end)}${window.expression ? ` ("${text(window.expression)}")` : ''}` : ''].filter(Boolean).join(' · ') || none],
+    ['Population', intent.population === 'all' ? 'Every member of the grain (zero-filled)' : 'Matched members'],
+    ['Ordering', ordering ? `${text(ordering.ref)} ${text(ordering.direction)}${intent.limit ? ` · limit ${text(intent.limit)}` : ''}` : intent.limit ? `limit ${text(intent.limit)}` : none],
+    ['Unresolved', list(intent.unresolved).map((clause) => `${text(clause.clause)}${clause.material ? ' (material)' : ''}${strings(clause.options).length ? `: ${strings(clause.options).join(', ')}` : ''}`).join('\n') || none],
+    ['Tiers tried', tiers.join('\n') || none],
+    ['Executed', executed ? `${text(executed.tier)} · ${text(executed.rowCount)} row(s) · ${text(executed.sqlFingerprint)}` : 'Nothing executed'],
+    ['Proofs', proofs.join('\n') || none],
+    ['Grounding', strings(receipt.grounding).join('\n') || none],
+    ['Reuse', text(receipt.reuse) || 'none'],
+  ];
+}
+
 function askRuntimeEvidenceLabel(mode: AgentRun['askAgentRuntimeMode'] | AskTraceDataV1['runtimeMode'] | undefined): string | undefined {
   if (mode === 'authoritative_v2') return 'Authoritative V2 receipt';
   if (mode === 'pipeline_v3') return 'Ask pipeline receipt';
@@ -3709,7 +3753,8 @@ function AnalyticalHowAnswered({
       ? agentRunPerformanceRows(run)
       : undefined;
   const sourceTitle = dqlArtifact?.name ?? run.question;
-  const planRows: Array<[string, string]> = authoritativeV8 ? [
+  const askPipelineReceipt = recordOf(run.diagnosticReceiptV9);
+  const planRows: Array<[string, string]> = askPipelineReceipt && recordOf(askPipelineReceipt.intent) ? askPipelinePlanRows(askPipelineReceipt) : authoritativeV8 ? [
     ['Objective', authoritativeV8.receipt.objective.replace(/_/g, ' ')],
     ['Selected tier', authoritativeV8.selectedTier ?? 'No executable tier selected'],
     ['Frozen plan', authoritativeV8PlanLabel(authoritativeV8)],

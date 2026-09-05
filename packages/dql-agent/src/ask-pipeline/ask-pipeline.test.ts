@@ -4,7 +4,7 @@ import { applyDerivedColumns, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
 import { applyGovernedDefaults, buildIntentSystemPrompt, proveTimeRoles, resolveIntent, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
-import { formatValue } from './outcomes.js';
+import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { runAskPipeline } from './pipeline.js';
 import { buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
@@ -631,5 +631,56 @@ describe('a derived metric card shows what it divides', () => {
   it('renders the formula and the time role, so a lifetime ratio is never mistaken for a period one', () => {
     const local = buildVocabularyIndex({ metrics: [{ name: 'average_order_value', model: 'customers', label: 'Average Order Value', type: 'derived', expr: 'lifetime_spend_pretax / count_lifetime_orders', aggTimeDimension: 'first_ordered_at', description: 'LTV pre-tax / number of orders' }] });
     expect(local.renderCards()).toMatch(/metric:customers\.average_order_value \[[^\]]*time first_ordered_at\] = lifetime_spend_pretax \/ count_lifetime_orders LTV pre-tax/);
+  });
+});
+
+describe('the units contract of a result', () => {
+  const source: VocabularySource = {
+    metrics: [
+      { name: 'revenue', model: 'order_item', label: 'Revenue', aggregation: 'sum', physical: { relation: 'dev.order_items', expr: '"dev"."order_items"."product_price"', aggregate: 'sum' } },
+      { name: 'orders', model: 'orders', aggregation: 'count', physical: { relation: 'dev.orders', expr: '"dev"."orders"."order_id"', aggregate: 'count' } },
+      { name: 'drink_revenue_pct', model: 'order_item', type: 'ratio', expr: 'drink_revenue / revenue' },
+      { name: 'revenue_growth_mom', model: 'order_item', type: 'derived', displayFormat: { kind: 'percent', decimals: 1 } },
+      { name: 'order_total', model: 'orders', aggregation: 'sum', displayFormat: { kind: 'currency', currency: 'USD' } },
+      { name: 'order_count_sum', model: 'orders', label: 'Orders placed', aggregation: 'sum', expr: '1', physical: { relation: 'dev.orders', expr: '1', aggregate: 'sum' } },
+      { name: 'count_order_items', model: 'orders', aggregation: 'sum', physical: { relation: 'dev.orders', expr: '"dev"."orders"."count_order_items"', aggregate: 'sum' } },
+    ],
+    dimensions: [{ name: 'ordered_at', model: 'order_item', dataType: 'timestamp', isTime: true, physical: { relation: 'dev.order_items', column: 'ordered_at' } }, { name: 'customer_name', model: 'customers', dataType: 'string', physical: { relation: 'dev.customers', column: 'customer_name' } }],
+    entities: [{ name: 'customer', model: 'customers', type: 'primary', physical: { relation: 'dev.customers', column: 'customer_id' } }],
+  };
+  const local = buildVocabularyIndex(source);
+  const make = (raw: Record<string, unknown>) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped', ...raw }).intent!;
+  it('reads currency, counts, ratios, derived formats and time grains from the vocabulary, not from the values', () => {
+    const intent = make({
+      measures: [{ ref: 'metric:order_item.revenue' }, { ref: 'metric:orders.orders' }, { ref: 'metric:order_item.drink_revenue_pct' }, { ref: 'metric:order_item.revenue_growth_mom' }, { ref: 'metric:orders.order_total' }, { derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' }, alias: 'aov' }],
+      groupBy: [{ ref: 'entity:customers.customer', role: 'key' }, { ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }], display: ['dimension:customers.customer_name'],
+    });
+    const meta = describeResultColumns(intent, { columns: ['customer_id', 'customer_name', 'ordered_at_month', 'revenue', 'orders', 'drink_revenue_pct', 'revenue_growth_mom', 'order_total', 'aov', 'mystery'], rows: [{ mystery: 'x' }] }, local);
+    const kinds = Object.fromEntries(meta.map((item) => [item.name, `${item.kind}${item.unit ? `:${item.unit}` : ''}${item.grain ? `@${item.grain}` : ''}`]));
+    expect(kinds).toEqual({ customer_id: 'text', customer_name: 'text', ordered_at_month: 'date@month', revenue: 'currency:USD', orders: 'count', drink_revenue_pct: 'percent:fraction', revenue_growth_mom: 'percent:fraction', order_total: 'currency:USD', aov: 'currency:USD', mystery: 'text' });
+    expect(meta.find((item) => item.name === 'revenue_growth_mom')?.decimals).toBe(1);
+    expect(meta.find((item) => item.name === 'revenue')?.ref).toBe('metric:order_item.revenue');
+    const counts = describeResultColumns(make({ measures: [{ ref: 'metric:orders.order_count_sum' }, { ref: 'metric:orders.count_order_items' }] }), { columns: ['order_count_sum', 'count_order_items'], rows: [] }, local);
+    expect(counts.map((item) => item.kind)).toEqual(['count', 'count']);
+  });
+  it('a semantic column name that qualifies the dimension still finds its meta', () => {
+    const intent = make({ measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }] });
+    const meta = describeResultColumns(intent, { columns: ['order_item__ordered_at__month', 'revenue'], rows: [] }, local);
+    expect(meta[0]).toMatchObject({ name: 'order_item__ordered_at__month', kind: 'date', grain: 'month' });
+  });
+  it('formatValue renders by the contract: fractions as percentages, points as pp, counts whole', () => {
+    expect(formatValue(0.6263, { name: 'x', kind: 'percent', unit: 'fraction' })).toBe('62.6%');
+    expect(formatValue(10.84, { name: 'x', kind: 'percent', unit: 'percentage_points' })).toBe('10.8 pp');
+    expect(formatValue(2085.0, { name: 'x', kind: 'count' })).toBe('2085');
+    expect(formatValue(2735.7, { name: 'x', kind: 'currency', unit: 'USD' })).toBe('2735.70');
+    expect(formatValue(2735.7)).toBe('2735.70');
+  });
+  it('the answer names shared identities and certified caveats', () => {
+    const intent = make({ measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'entity:customers.customer', role: 'key' }], display: ['dimension:customers.customer_name'] });
+    const text = composeAnsweredText(intent, { columns: ['customer_id', 'customer_name', 'revenue'], rows: [{ customer_id: 'a', customer_name: 'Jordan Lee', revenue: 17 }, { customer_id: 'b', customer_name: 'Jordan Lee', revenue: 11 }], rowCount: 2, executionTimeMs: 1 }, local, 'governed', { notes: ['customer_name: "jordan lee" is stored as "Jordan Lee"', 'identity: 2 customers share the name "Jordan Lee"; one row per customer, keyed by customer_id'] });
+    expect(text).toMatch(/2 customers share the name "Jordan Lee"; one row per customer, keyed by customer_id\./);
+    expect(text).not.toMatch(/stored as/);
+    const certified = composeAnsweredText(intent, { columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1, executionTimeMs: 1 }, local, 'certified', { caveats: ['the block groups by customer_name (a label) with no identity key, so two entities sharing a name would merge; recertify it with the entity key to keep them apart'] });
+    expect(certified).toMatch(/Source: a certified block\. the block groups by customer_name .* recertify it with the entity key to keep them apart\.$/);
   });
 });

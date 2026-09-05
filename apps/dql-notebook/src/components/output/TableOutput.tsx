@@ -120,7 +120,10 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
     setPage(0);
   }, [sortCol, sortDir]);
 
-  // Filter rows
+  const metaOf = useCallback((col: string) => result.columnsMeta?.find((meta) => meta.name === col), [result.columnsMeta]);
+
+  // Filter rows on what the reader sees as well as the raw value: "$1,317"
+  // and "1317" both find the row.
   const filteredRows = useMemo(() => {
     if (!filterText.trim()) return result.rows;
     const lower = filterText.toLowerCase();
@@ -128,10 +131,11 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
       result.columns.some((col) => {
         const val = row[col];
         if (val === null || val === undefined) return false;
-        return String(val).toLowerCase().includes(lower);
+        if (String(val).toLowerCase().includes(lower)) return true;
+        try { return formatDisplayValue(col, val, [], { meta: metaOf(col) }).toLowerCase().includes(lower); } catch { return false; }
       })
     );
-  }, [result.rows, result.columns, filterText]);
+  }, [result.rows, result.columns, filterText, metaOf]);
 
   // Sort rows
   const sortedRows = useMemo(() => {
@@ -338,7 +342,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
                           transition: 'background 0.1s',
                         }}
                       >
-                        {isNull ? '—' : formatDisplayValue(col, value, columnValues.get(col) ?? [])}
+                        {isNull ? '—' : formatDisplayValue(col, value, columnValues.get(col) ?? [], { meta: metaOf(col) })}
                       </td>
                     );
                   })}

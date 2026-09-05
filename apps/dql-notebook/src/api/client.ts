@@ -3425,6 +3425,7 @@ export function normalizeQueryResultPayload(raw: any): QueryResult {
     columns: inferredColumns,
     rows,
     ...(typeof raw?.resultFingerprint === 'string' ? { resultFingerprint: raw.resultFingerprint } : {}),
+    ...(Array.isArray(raw?.columnsMeta) ? { columnsMeta: raw.columnsMeta.filter((meta: unknown) => meta && typeof meta === 'object' && typeof (meta as { name?: unknown }).name === 'string' && typeof (meta as { kind?: unknown }).kind === 'string') } : {}),
     ...(raw?.executionReceipt && typeof raw.executionReceipt === 'object' ? { executionReceipt: raw.executionReceipt as Record<string, unknown> } : {}),
     ...(typeof raw?.trustState === 'string' ? { trustState: raw.trustState } : {}),
     ...(typeof raw?.answerTier === 'string' ? { answerTier: raw.answerTier } : {}),

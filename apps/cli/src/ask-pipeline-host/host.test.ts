@@ -3,7 +3,7 @@ import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { createAskPipelineRouteExecutor, groundIntentLiterals, normalizeExecutedRow } from './host.js';
+import { createAskPipelineRouteExecutor, groundIntentLiterals, normalizeExecutedRow, tracedProbes } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -78,6 +78,7 @@ describe('member literal grounding', () => {
       { name: 'customer_name', model: 'customers', dataType: 'string', physical: { relation: 'dev.customers', column: 'customer_name' } },
       { name: 'customer_type', model: 'customers', dataType: 'string', physical: { relation: 'dev.customers', column: 'customer_type' } },
     ],
+    entities: [{ name: 'customer', model: 'customers', type: 'primary', physical: { relation: 'dev.customers', column: 'customer_id' } }],
   });
   const intent = (filters: AnalyticalIntentV1['filters']): AnalyticalIntentV1 => {
     const parsed = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters, unresolved: [], provenance: {}, expectedShape: 'scalar' });
@@ -110,11 +111,66 @@ describe('member literal grounding', () => {
   });
 });
 
+describe('identity behind a label', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'lifetime_spend', model: 'customers', aggregation: 'sum', physical: { relation: 'dev.customers', expr: '"dev"."customers"."lifetime_spend"', aggregate: 'sum' } }],
+    dimensions: [{ name: 'customer_name', model: 'customers', dataType: 'string', physical: { relation: 'dev.customers', column: 'customer_name' } }],
+    entities: [{ name: 'customer', model: 'customers', type: 'primary', physical: { relation: 'dev.customers', column: 'customer_id' } }],
+  });
+  const connection = { driver: 'duckdb' } as ConnectionConfig;
+  const ask = (name: string): AnalyticalIntentV1 => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:customers.lifetime_spend' }], groupBy: [], display: [], filters: [{ ref: 'dimension:customers.customer_name', op: 'eq', values: [name], source: 'question' }], unresolved: [], provenance: {}, expectedShape: 'scalar' }).intent!;
+  const members: Record<string, Array<{ key: string; label: string }>> = { 'jordan lee': [{ key: 'a', label: 'Jordan Lee' }, { key: 'b', label: 'Jordan Lee' }], 'ryan byrd': [{ key: 'r', label: 'Ryan Byrd' }] };
+  const probed: string[] = [];
+  const deps = {
+    literalProbeAllowed: (relation: string, column: string) => `${relation}.${column}` === 'dev.customers.customer_name',
+    probeLiteral: async (_relation: string, _column: string, value: string) => members[value.toLowerCase()]?.map((member) => member.label).slice(0, 1) ?? [],
+    probeLabelKeys: async (_relation: string, key: string, label: string, value: string) => { probed.push(`${key}/${label}=${value}`); return members[value.toLowerCase()] ?? []; },
+  };
+  it('several keys behind one name make the answer one row per member, keyed, with the name displayed', async () => {
+    const grounded = await groundIntentLiterals(ask('jordan lee'), vocabulary, connection, deps);
+    expect(grounded.intent.groupBy).toEqual([{ ref: 'entity:customers.customer', role: 'key' }]);
+    expect(grounded.intent.display).toEqual(['dimension:customers.customer_name']);
+    expect(grounded.intent.expectedShape).toBe('grouped');
+    expect(grounded.intent.filters[0]!.values).toEqual(['Jordan Lee']);
+    expect(grounded.notes).toContain('identity: 2 customers share the name "Jordan Lee"; one row per customer, keyed by customer_id');
+    expect(grounded.intent.provenance['entity:customers.customer']).toMatch(/host:2 customers share/);
+  });
+  it('one key leaves the scalar alone and says whom it identifies; a column outside the allowlist is never probed', async () => {
+    probed.length = 0;
+    const one = await groundIntentLiterals(ask('ryan byrd'), vocabulary, connection, deps);
+    expect(one.intent.groupBy).toEqual([]);
+    expect(one.notes).toContain('identity: "Ryan Byrd" identifies one customer');
+    const closed = await groundIntentLiterals(ask('jordan lee'), vocabulary, connection, { ...deps, literalProbeAllowed: () => false });
+    expect(closed.intent.groupBy).toEqual([]);
+    expect(probed).toEqual(['customer_id/customer_name=Ryan Byrd']);
+  });
+});
+
 describe('executed rows', () => {
   it('calendar cells become ISO instants so narration, persistence and the table read one value', () => {
     const row = normalizeExecutedRow({ month: new Date('2025-03-01T00:00:00.000Z'), revenue: 12.5, name: 'Ryan Byrd', empty: null });
     expect(row).toEqual({ month: '2025-03-01T00:00:00.000Z', revenue: 12.5, name: 'Ryan Byrd', empty: null });
     const untouched = { revenue: 1 };
     expect(normalizeExecutedRow(untouched)).toBe(untouched);
+  });
+});
+
+describe('physical trace spans', () => {
+  it('a value probe is one search_values tool span carrying fingerprints only, and a failed probe finishes as an error', async () => {
+    const spans: string[] = [];
+    const connection = { driver: 'duckdb' } as ConnectionConfig;
+    const request = { question: 'q', requestedMode: 'ask' } as AgentRunRequest;
+    const probes = tracedProbes({
+      literalProbeAllowed: () => true,
+      probeLiteral: async () => ['Ryan Byrd'],
+      probeLabelKeys: async () => { throw new Error('boom'); },
+      traceExecution: (_request, span) => { spans.push(span.name === 'tool.call' ? `${span.name}:${span.toolKind}:${span.inputFingerprint.length}` : span.name); return { finish: (outcome, extra) => { spans.push(`finish:${outcome}${extra?.safeErrorCode ? `:${extra.safeErrorCode}` : ''}`); } }; },
+    }, request);
+    expect(await probes.probeLiteral!('dev.customers', 'customer_name', 'ryan byrd', connection)).toEqual(['Ryan Byrd']);
+    await expect(probes.probeLabelKeys!('dev.customers', 'customer_id', 'customer_name', 'ryan byrd', connection)).rejects.toThrow('boom');
+    expect(spans).toEqual(['tool.call:search_values:24', 'finish:ok', 'tool.call:search_values:24', 'finish:error:probe_failure']);
+    // Without a tracer the deps are handed through untouched.
+    const plain = { literalProbeAllowed: () => true, probeLiteral: async () => [] };
+    expect(tracedProbes(plain, request)).toBe(plain);
   });
 });

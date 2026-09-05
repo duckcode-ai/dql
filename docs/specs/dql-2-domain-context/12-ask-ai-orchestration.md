@@ -389,6 +389,31 @@ the question string again.
    islands, zero-fills additive aggregates only, and is refused by the
    semantic and certified tiers. Legacy intents without these fields parse and
    fingerprint identically (`AGT-061`).
+12. **Identity, units, and the certified caveat.** A singular label that
+   names several members ("Jordan Lee" is two customers) is resolved on the
+   same allowlist as literal grounding (`probeLabelKeys`): several keys make
+   the answer one row per member, keyed, with the label displayed, an
+   identity warning, and the sentence in the answer; never one merged number.
+   Every executed result carries a units contract (`columnsMeta`: currency,
+   percent as fraction or percentage points, count, date with grain, text)
+   derived from the vocabulary, not from column names; the answer, the table
+   and the card render by it, a table search matches the rendered text, and
+   a result without it renders exactly as before. A certified block served
+   with the "label, no identity key" caveat surfaces it as a warning, in the
+   answer, and as a next action to recertify with the key (`AGT-062`,
+   `OBS-020`).
+13. **Inspector plan, physical spans, per-tab restore.** The Notebook
+   inspector's plan for a pipeline run is the intent itself (reading,
+   measures with ratio formulas and scopes, grain, display, filters, time
+   axis and window, population, ordering, unresolved clauses), the tiers
+   tried, the executed tier with its SQL fingerprint, the proofs and the
+   grounding notes, read from `diagnosticReceiptV9`. The host opens one
+   `sql.execute` span per warehouse statement (the answer and the fan-out
+   probe, with tier and purpose) and one `tool.call` (`search_values`) span
+   per value or key probe; spans carry fingerprints and outcomes only, never
+   SQL or values. A browser tab reopens the chat it last had open (per-tab
+   session storage) and a new tab falls back to the browser-wide last chat;
+   two tabs never overwrite each other's place (`OBS-021`, `UI-025`).
 
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn

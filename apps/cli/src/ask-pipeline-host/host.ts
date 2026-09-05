@@ -52,7 +52,20 @@ export interface AskPipelineHostDeps {
   literalProbeAllowed?(relation: string, column: string): boolean;
   /** Distinct stored values equal to the literal ignoring case, on an allowlisted column; bounded, equality-predicated. */
   probeLiteral?(relation: string, column: string, value: string, connection: ConnectionConfig): Promise<string[]>;
+  /** The entity keys behind a label value on an allowlisted label column (`SELECT DISTINCT key, label ... LIMIT 6`). */
+  probeLabelKeys?(relation: string, keyColumn: string, labelColumn: string, value: string, connection: ConnectionConfig): Promise<Array<{ key: string; label: string }>>;
+  /**
+   * Open a physical trace span for a warehouse statement or a value probe;
+   * the host never records SQL or values, only fingerprints and outcomes.
+   */
+  traceExecution?(request: AgentRunRequest, span: AskHostTraceSpan): { finish(outcome: 'ok' | 'error', extra?: { rowCount?: number; resultFingerprint?: string; safeErrorCode?: string }): void } | undefined;
 }
+
+export type AskHostTraceSpan =
+  | { name: 'sql.execute'; sqlFingerprint: string; purpose: 'query' | 'fanout_probe'; tier?: 'certified' | 'semantic' | 'relational' | 'exploratory' }
+  | { name: 'tool.call'; toolKind: 'search_values'; inputFingerprint: string };
+
+const fingerprintText = (value: string): string => createHash('sha256').update(value).digest('hex').slice(0, 24);
 
 interface VocabularyCacheEntry { key: string; vocabulary: VocabularyIndex }
 
@@ -68,7 +81,7 @@ export async function groundIntentLiterals(
   intent: AnalyticalIntentV1,
   vocabulary: VocabularyIndex,
   connection: ConnectionConfig,
-  deps: Pick<AskPipelineHostDeps, 'literalProbeAllowed' | 'probeLiteral'>,
+  deps: Pick<AskPipelineHostDeps, 'literalProbeAllowed' | 'probeLiteral' | 'probeLabelKeys'>,
 ): Promise<{ intent: AnalyticalIntentV1; notes: string[] }> {
   const notes: string[] = [];
   const ground = async <T extends { ref: string; op: string; values: unknown[] }>(predicate: T): Promise<T> => {
@@ -97,7 +110,50 @@ export async function groundIntentLiterals(
     for (const predicate of measure.scope) scope.push(await ground(predicate));
     measures.push({ ...measure, scope });
   }
-  return { intent: { ...intent, filters, measures }, notes };
+  let next: AnalyticalIntentV1 = { ...intent, filters, measures };
+  // IDENTITY. A singular label ("Ryan Byrd") can name several members. The
+  // keys behind the label are looked up on the same allowlist; several keys
+  // make the answer one row per member, keyed, with the label displayed,
+  // never one merged number.
+  if (deps.probeLabelKeys) {
+    for (const predicate of next.filters) {
+      if (!(predicate.op === 'eq' || predicate.op === 'in') || predicate.values.length !== 1 || typeof predicate.values[0] !== 'string') continue;
+      const entry = vocabulary.get(predicate.ref);
+      const relation = entry?.physical?.relation;
+      const column = entry?.physical?.column;
+      if (!entry || !relation || !column || !entry.roles.includes('label') || !deps.literalProbeAllowed!(relation, column)) continue;
+      const owner = vocabulary.entries.find((candidate) => candidate.kind === 'entity' && candidate.model === entry.model && candidate.entityType === 'primary' && candidate.physical?.relation === relation && candidate.physical.column);
+      if (!owner?.physical?.column) continue;
+      let members: Array<{ key: string; label: string }>;
+      try { members = await deps.probeLabelKeys(relation, owner.physical.column, column, predicate.values[0], connection); } catch (error) { notes.push(`${column}: key probe failed (${error instanceof Error ? error.message : String(error)})`); continue; }
+      const keys = [...new Set(members.map((member) => member.key))];
+      if (keys.length <= 1) { if (keys.length === 1) notes.push(`identity: ${JSON.stringify(predicate.values[0])} identifies one ${owner.name}`); continue; }
+      const keyed = next.groupBy.some((group) => group.ref === owner.ref);
+      next = {
+        ...next,
+        groupBy: keyed ? next.groupBy : [{ ref: owner.ref, role: 'key' }, ...next.groupBy],
+        display: next.display.includes(predicate.ref) ? next.display : [...next.display, predicate.ref],
+        expectedShape: next.expectedShape === 'scalar' || next.expectedShape === 'comparison' || next.expectedShape === 'lookup' ? 'grouped' : next.expectedShape,
+        provenance: { ...next.provenance, [owner.ref]: next.provenance[owner.ref] ?? `host:${keys.length} ${owner.name}s share ${JSON.stringify(predicate.values[0])}; one row per ${owner.name}` },
+      };
+      notes.push(`identity: ${keys.length} ${owner.name}s share the name ${JSON.stringify(predicate.values[0])}; one row per ${owner.name}, keyed by ${owner.physical.column}`);
+    }
+  }
+  return { intent: next, notes };
+}
+
+/** Value probes are tool calls in the physical trace: one `search_values` span each, fingerprints only. */
+export function tracedProbes(deps: Pick<AskPipelineHostDeps, 'literalProbeAllowed' | 'probeLiteral' | 'probeLabelKeys' | 'traceExecution'>, request: AgentRunRequest): Pick<AskPipelineHostDeps, 'literalProbeAllowed' | 'probeLiteral' | 'probeLabelKeys'> {
+  if (!deps.traceExecution) return deps;
+  const traced = async <T>(input: string, work: () => Promise<T>): Promise<T> => {
+    const span = deps.traceExecution!(request, { name: 'tool.call', toolKind: 'search_values', inputFingerprint: fingerprintText(input) });
+    try { const value = await work(); span?.finish('ok'); return value; } catch (error) { span?.finish('error', { safeErrorCode: 'probe_failure' }); throw error; }
+  };
+  return {
+    literalProbeAllowed: deps.literalProbeAllowed,
+    ...(deps.probeLiteral ? { probeLiteral: (relation, column, value, connection) => traced(`${relation}.${column}=${value}`, () => deps.probeLiteral!(relation, column, value, connection)) } : {}),
+    ...(deps.probeLabelKeys ? { probeLabelKeys: (relation, key, label, value, connection) => traced(`${relation}.${key}/${label}=${value}`, () => deps.probeLabelKeys!(relation, key, label, value, connection)) } : {}),
+  };
 }
 
 /**
@@ -253,13 +309,24 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
           if (!connection) throw connectionError instanceof Error ? connectionError : new Error(String(connectionError ?? 'No database connection is configured.'));
           const started = Date.now();
           const executor = deps.executor as QueryExecutor & { executePositional?: QueryExecutor['executePositional'] };
-          const result = typeof executor.executePositional === 'function'
-            ? await executor.executePositional(sql, params ?? [], connection, { maxRows: options.maxRows })
-            : await (async () => {
-              if (params?.length) throw new Error('this warehouse executor cannot bind positional parameters');
-              return executor.executeQuery(sql, [], {}, connection);
-            })();
-          const columns = result.columns.length ? result.columns.map((column) => column.name) : Object.keys(result.rows[0] ?? {});
+          const span = deps.traceExecution?.(request, { name: 'sql.execute', sqlFingerprint: fingerprintText(`${sql}\n${JSON.stringify(params ?? [])}`), purpose: options.purpose ?? 'query', ...(options.tier ? { tier: options.tier } : {}) });
+          let result: Awaited<ReturnType<QueryExecutor['executeQuery']>>;
+          try {
+            result = typeof executor.executePositional === 'function'
+              ? await executor.executePositional(sql, params ?? [], connection, { maxRows: options.maxRows })
+              : await (async () => {
+                if (params?.length) throw new Error('this warehouse executor cannot bind positional parameters');
+                return executor.executeQuery(sql, [], {}, connection);
+              })();
+          } catch (error) {
+            span?.finish('error', { safeErrorCode: 'sql_failure' });
+            throw error;
+          }
+          span?.finish('ok', { rowCount: result.rowCount, resultFingerprint: createHash('sha256').update(JSON.stringify({ columns: result.columns, rows: result.rows })).digest('hex') });
+          // An executor may describe columns as objects or as bare names.
+          const columns = result.columns.length
+            ? (result.columns as Array<string | { name?: string }>).map((column, index) => typeof column === 'string' ? column : column?.name ?? Object.keys(result.rows[0] ?? {})[index] ?? `column_${index + 1}`)
+            : Object.keys(result.rows[0] ?? {});
           // Calendar cells leave the warehouse as JS Dates; every consumer
           // (narration, persistence, the table) must read the same instant,
           // never a host-timezone rendering of it.
@@ -269,7 +336,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       },
       ...(prior ? { prior: prior.intent, priorAnswerSummary: prior.summary } : {}),
       ...(deps.guidance?.(request) ? { guidance: deps.guidance(request) } : {}),
-      ...(connection && deps.probeLiteral && deps.literalProbeAllowed ? { groundLiterals: (intent) => groundIntentLiterals(intent, vocabulary, connection, deps) } : {}),
+      ...(connection && deps.probeLiteral && deps.literalProbeAllowed ? { groundLiterals: (intent: AnalyticalIntentV1) => groundIntentLiterals(intent, vocabulary, connection, tracedProbes(deps, request)) } : {}),
       explorationOptIn: explorationOptIn(request),
       deadlineMs: 120_000,
       preparationCache,
@@ -373,6 +440,8 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
       // Canonical result identity is a bare sha256 hex: every reader of
       // execution proof (Research branches, result follow-ups) validates that shape.
       resultFingerprint: createHash('sha256').update(JSON.stringify({ columns: result.columns, rows: result.rows })).digest('hex'), trustState, answerTier: route.tier, ...(result.truncated ? { truncated: true } : {}),
+      // The units contract; absent on legacy results, which render exactly as before.
+      ...(result.columnsMeta?.length ? { columnsMeta: result.columnsMeta } : {}),
     },
     ...(candidate.sourceRef ? { certifiedBlockRef: candidate.sourceRef } : {}),
     ...(candidate.artifact !== undefined ? { dqlArtifact: candidate.artifact } : {}),
@@ -390,8 +459,13 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
       { id: 'pipeline-preparation', label: certified ? 'Certified entailment' : candidate.tier === 'semantic' ? 'Semantic compilation' : 'Governed composition', passed: true, severity: 'info', message: candidate.proof.join(' ') },
       ...(receipt.executed?.proofs ?? []).map((proof, index) => ({ id: `pipeline-execution-${index + 1}`, label: 'Execution proof', passed: true, severity: 'info' as const, message: proof })),
       ...(receipt.uncovered?.length ? [{ id: 'pipeline-coverage', label: 'Question coverage', passed: true, severity: 'warning' as const, message: `The question mentioned ${receipt.uncovered.map((word) => `"${word}"`).join(', ')}, which this reading does not use. If that was the point, say it explicitly.` }] : []),
+      ...(receipt.grounding ?? []).filter((note) => note.startsWith('identity:') && /share the name/.test(note)).map((note, index) => ({ id: `pipeline-identity-${index + 1}`, label: 'Identity', passed: true, severity: 'warning' as const, message: note.slice('identity:'.length).trim() })),
+      ...(certified ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line, index) => ({ id: `pipeline-certified-identity-${index + 1}`, label: 'Certified block identity', passed: true, severity: 'warning' as const, message: `${line.replace(/; the certified block is served as published$/, '')}. Recertify the block with the entity key to keep same-named members apart.` })) : []),
     ],
-    nextActions: [{ id: 'create-block', label: 'Save as block', route: 'dql_block_draft', artifactKind: 'dql_block_draft' }, { id: 'research-gap', label: 'Research deeper', route: 'research' }],
+    nextActions: [
+      ...(certified && candidate.proof.some((line) => /no identity key/.test(line)) ? [{ id: 'recertify-with-key', label: 'Recertify this block with the entity key', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const }] : []),
+      { id: 'create-block', label: 'Save as block', route: 'dql_block_draft', artifactKind: 'dql_block_draft' }, { id: 'research-gap', label: 'Research deeper', route: 'research' },
+    ],
     telemetry,
   });
 }
