@@ -6019,6 +6019,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return undefined;
     },
     buildIdentity: () => ({ runtime: 'pipeline_v3', snapshotId: projectSnapshot().snapshotId }),
+    // Exact literal probes stay behind the operator allowlist
+    // (`agent.runtimeValueGrounding.searchSafeColumns`): a column the project
+    // did not name is never queried for a value, and the probe is one
+    // bounded equality lookup that returns stored values only.
+    literalProbeAllowed: (relation, column) => {
+      const policy = resolveAgentRuntimeValueGrounding(projectConfig);
+      return policy.mode === 'safe_automatic' && policy.searchSafeColumns.has(normalizeAgentSafeColumnReference(`${relation}.${column}`));
+    },
+    probeLiteral: async (relation, column, value, connection) => {
+      const dialect = getDialect(connection.driver);
+      const quotedRelation = relation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
+      const quotedColumn = dialect.quoteIdentifier(column);
+      const literal = value.replace(/'/g, "''");
+      const sql = `SELECT DISTINCT ${quotedColumn} AS stored_value FROM ${quotedRelation} WHERE LOWER(CAST(${quotedColumn} AS VARCHAR)) = LOWER('${literal}') LIMIT 5`;
+      const result = await executor.executeQuery(sql, [], {}, connection);
+      return result.rows.map((row) => String((row as Record<string, unknown>).stored_value ?? (row as Record<string, unknown>).STORED_VALUE ?? '')).filter(Boolean);
+    },
   });
 
   const answerRunExecutor: AgentRouteExecutor = async (executionContext) => {

@@ -48,9 +48,57 @@ export interface AskPipelineHostDeps {
   guidance?(request: AgentRunRequest): string | undefined;
   buildIdentity?(): Record<string, string>;
   maxRows?: number;
+  /** Whether the project allowlists this physical column for an exact literal probe (`agent.runtimeValueGrounding`). */
+  literalProbeAllowed?(relation: string, column: string): boolean;
+  /** Distinct stored values equal to the literal ignoring case, on an allowlisted column; bounded, equality-predicated. */
+  probeLiteral?(relation: string, column: string, value: string, connection: ConnectionConfig): Promise<string[]>;
 }
 
 interface VocabularyCacheEntry { key: string; vocabulary: VocabularyIndex }
+
+/**
+ * GROUND MEMBER LITERALS. A question says "Ryan byrd"; the warehouse holds
+ * "Ryan Byrd". The relational tier compares case-insensitively, the semantic
+ * compilers do not, so the literal is looked up once, on columns the project
+ * explicitly allowlists, and replaced by the stored value. One stored value
+ * is a correction; several are left to the query; none is recorded so the
+ * reader learns the member is absent rather than seeing an empty aggregate.
+ */
+export async function groundIntentLiterals(
+  intent: AnalyticalIntentV1,
+  vocabulary: VocabularyIndex,
+  connection: ConnectionConfig,
+  deps: Pick<AskPipelineHostDeps, 'literalProbeAllowed' | 'probeLiteral'>,
+): Promise<{ intent: AnalyticalIntentV1; notes: string[] }> {
+  const notes: string[] = [];
+  const ground = async <T extends { ref: string; op: string; values: unknown[] }>(predicate: T): Promise<T> => {
+    if (!(predicate.op === 'eq' || predicate.op === 'in') || !predicate.values.some((value) => typeof value === 'string')) return predicate;
+    const entry = vocabulary.get(predicate.ref);
+    const relation = entry?.physical?.relation;
+    const column = entry?.physical?.column;
+    if (!relation || !column || !deps.literalProbeAllowed!(relation, column)) return predicate;
+    const values: unknown[] = [];
+    for (const value of predicate.values) {
+      if (typeof value !== 'string' || !value.trim()) { values.push(value); continue; }
+      let stored: string[];
+      try { stored = await deps.probeLiteral!(relation, column, value, connection); } catch (error) { notes.push(`${column}: probe failed (${error instanceof Error ? error.message : String(error)})`); values.push(value); continue; }
+      if (stored.length === 1 && stored[0] !== value) { notes.push(`${column}: ${JSON.stringify(value)} is stored as ${JSON.stringify(stored[0])}`); values.push(stored[0]); }
+      else if (stored.length === 0) { notes.push(`${column}: no stored value matches ${JSON.stringify(value)}`); values.push(value); }
+      else values.push(value);
+    }
+    return { ...predicate, values };
+  };
+  const filters = [] as AnalyticalIntentV1['filters'];
+  for (const predicate of intent.filters) filters.push(await ground(predicate));
+  const measures = [] as AnalyticalIntentV1['measures'];
+  for (const measure of intent.measures) {
+    if (!measure.scope?.length) { measures.push(measure); continue; }
+    const scope = [] as NonNullable<AnalyticalIntentV1['measures'][number]['scope']>;
+    for (const predicate of measure.scope) scope.push(await ground(predicate));
+    measures.push({ ...measure, scope });
+  }
+  return { intent: { ...intent, filters, measures }, notes };
+}
 
 /**
  * Join paths over the relationships the team declared in Domain Studio.
@@ -204,6 +252,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       },
       ...(prior ? { prior: prior.intent, priorAnswerSummary: prior.summary } : {}),
       ...(deps.guidance?.(request) ? { guidance: deps.guidance(request) } : {}),
+      ...(connection && deps.probeLiteral && deps.literalProbeAllowed ? { groundLiterals: (intent) => groundIntentLiterals(intent, vocabulary, connection, deps) } : {}),
       explorationOptIn: explorationOptIn(request),
       deadlineMs: 120_000,
       preparationCache,

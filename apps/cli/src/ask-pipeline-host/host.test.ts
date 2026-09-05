@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
-import { createAskPipelineRouteExecutor } from './host.js';
+import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
+import { buildVocabularyIndex, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
+import { createAskPipelineRouteExecutor, groundIntentLiterals } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -66,5 +68,44 @@ describe('the pipeline host without a warehouse', () => {
     const receipt = result.askPipelineReceipt;
     expect(receipt).toBeDefined();
     if (receipt?.failure?.stage === 'execute') expect(receipt.failure.message).toMatch(/No database connection is configured yet/);
+  });
+});
+
+describe('member literal grounding', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'revenue', model: 'order_item', aggregation: 'sum', physical: { relation: 'dev.order_items', expr: '"dev"."order_items"."product_price"', aggregate: 'sum' } }],
+    dimensions: [
+      { name: 'customer_name', model: 'customers', dataType: 'string', physical: { relation: 'dev.customers', column: 'customer_name' } },
+      { name: 'customer_type', model: 'customers', dataType: 'string', physical: { relation: 'dev.customers', column: 'customer_type' } },
+    ],
+  });
+  const intent = (filters: AnalyticalIntentV1['filters']): AnalyticalIntentV1 => {
+    const parsed = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters, unresolved: [], provenance: {}, expectedShape: 'scalar' });
+    if (!parsed.intent) throw new Error('bad intent');
+    return parsed.intent;
+  };
+  const connection = { driver: 'duckdb' } as ConnectionConfig;
+  const probes: string[] = [];
+  const deps = {
+    literalProbeAllowed: (relation: string, column: string) => `${relation}.${column}` === 'dev.customers.customer_name',
+    probeLiteral: async (_relation: string, column: string, value: string) => {
+      probes.push(`${column}=${value}`);
+      return value.toLowerCase() === 'ryan byrd' ? ['Ryan Byrd'] : [];
+    },
+  };
+  it('replaces a literal with its stored casing on an allowlisted column and says so', async () => {
+    const grounded = await groundIntentLiterals(intent([{ ref: 'dimension:customers.customer_name', op: 'eq', values: ['Ryan byrd'], source: 'question' }]), vocabulary, connection, deps);
+    expect(grounded.intent.filters[0]!.values).toEqual(['Ryan Byrd']);
+    expect(grounded.notes).toEqual(['customer_name: "Ryan byrd" is stored as "Ryan Byrd"']);
+  });
+  it('records an absent member and never probes a column outside the allowlist', async () => {
+    probes.length = 0;
+    const grounded = await groundIntentLiterals(intent([
+      { ref: 'dimension:customers.customer_name', op: 'eq', values: ['Nobody Here'], source: 'question' },
+      { ref: 'dimension:customers.customer_type', op: 'eq', values: ['returning'], source: 'question' },
+    ]), vocabulary, connection, deps);
+    expect(grounded.intent.filters.map((filter) => filter.values)).toEqual([['Nobody Here'], ['returning']]);
+    expect(grounded.notes).toEqual(['customer_name: no stored value matches "Nobody Here"']);
+    expect(probes).toEqual(['customer_name=Nobody Here']);
   });
 });

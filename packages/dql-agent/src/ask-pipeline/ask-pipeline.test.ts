@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
+import { executeCandidate } from './execute.js';
 import { describeIntent, intentExecutionFingerprint, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
 import { applyGovernedDefaults, buildIntentSystemPrompt, resolveIntent, validateIntentRefs } from './resolve-intent.js';
 import { buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
@@ -341,5 +342,19 @@ describe('"not modeled" is checked against the whole vocabulary', () => {
   it('a gap for words that name nothing stands', () => {
     const next = validateIntentRefs(intent({ unresolved: [{ clause: 'weather in Philadelphia', options: [], material: true }] }), vocabulary);
     expect(next.problems.filter((candidate) => candidate.path === 'unresolved')).toEqual([]);
+  });
+});
+
+describe('an empty aggregate is not an answer about a member', () => {
+  const intent = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [{ ref: 'dimension:customers.customer_name', op: 'eq', values: ['Ryan byrd'], source: 'question' }], unresolved: [], provenance: {}, expectedShape: 'scalar' }).intent!;
+  const candidate = { tier: 'semantic' as const, trust: 'governed' as const, sql: "SELECT SUM(x) AS revenue FROM t WHERE customer_name = 'Ryan byrd'", proof: [] };
+  it('a single all-null row over a member filter is reported as no rows matched', async () => {
+    const outcome = await executeCandidate(candidate, intent, { run: async () => ({ columns: ['revenue'], rows: [{ revenue: null }], rowCount: 1, executionTimeMs: 1 }) });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) { expect(outcome.code).toBe('no_rows_matched'); expect(outcome.message).toMatch(/no rows matched "Ryan byrd"/); }
+  });
+  it('a real value passes', async () => {
+    const outcome = await executeCandidate(candidate, intent, { run: async () => ({ columns: ['revenue'], rows: [{ revenue: 2581 }], rowCount: 1, executionTimeMs: 1 }) });
+    expect(outcome.ok).toBe(true);
   });
 });

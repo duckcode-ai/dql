@@ -26,7 +26,7 @@ export interface ExecuteDeps {
 
 export type ExecutionOutcome =
   | { ok: true; result: ExecutedRows; proofs: string[] }
-  | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed'; message: string; proofs: string[] };
+  | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed' | 'no_rows_matched'; message: string; proofs: string[] };
 
 export async function executeCandidate(candidate: PreparedCandidate, intent: AnalyticalIntentV1, deps: ExecuteDeps): Promise<ExecutionOutcome> {
   const proofs: string[] = [];
@@ -57,6 +57,13 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
   try {
     const result = await deps.run(candidate.sql, candidate.params, { maxRows: deps.maxRows ?? 500 });
     proofs.push(`executed on the warehouse: ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} in ${Math.round(result.executionTimeMs)} ms`);
+    // A scalar aggregate over a member filter that matched nothing comes back
+    // as one row of nulls. That is not an answer about the member; it is the
+    // absence of any row for the literal, and it is reported as such.
+    const memberLiterals = literals.filter((value) => !/^(true|false)$/i.test(value));
+    if (memberLiterals.length > 0 && result.rows.length === 1 && Object.values(result.rows[0] ?? {}).every((value) => value === null || value === undefined)) {
+      return { ok: false, code: 'no_rows_matched', message: `no rows matched ${memberLiterals.map((value) => JSON.stringify(value)).join(', ')} on the warehouse; the aggregate was empty, so nothing about the member was answered`, proofs };
+    }
     return { ok: true, result, proofs };
   } catch (error) {
     return { ok: false, code: 'execution_failed', message: error instanceof Error ? error.message : String(error), proofs };

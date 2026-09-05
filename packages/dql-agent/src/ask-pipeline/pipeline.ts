@@ -42,6 +42,12 @@ export interface RunAskPipelineInput {
   build?: Record<string, string>;
   now?: () => number;
   trace?: (event: { stage: string; detail?: unknown }) => void;
+  /**
+   * Host-owned literal grounding: replace a member literal with the value
+   * the warehouse actually holds (its casing, its spelling) on columns the
+   * project explicitly allowlists, and say so. Never invents a value.
+   */
+  groundLiterals?: (intent: AnalyticalIntentV1) => Promise<{ intent: AnalyticalIntentV1; notes: string[] }>;
 }
 
 const fingerprintSql = (sql: string) => `sha256:${createHash('sha256').update(sql).digest('hex').slice(0, 24)}`;
@@ -102,6 +108,17 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
   }
   let intent = resolution.intent;
+  if (input.groundLiterals) {
+    const groundStarted = now();
+    try {
+      const grounded = await input.groundLiterals(intent);
+      intent = grounded.intent;
+      if (grounded.notes.length) receipt.grounding = grounded.notes;
+    } catch (error) {
+      receipt.grounding = [`literal grounding skipped: ${error instanceof Error ? error.message : String(error)}`];
+    }
+    mark('ground', groundStarted);
+  }
   const uncovered = uncoveredQuestionTerms(input.question, intent, input.vocabulary);
   if (uncovered.length) receipt.uncovered = uncovered;
 
@@ -174,6 +191,12 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     executeStarted = now();
     executed = await executeCandidate(candidate, intent, input.executeDeps);
     mark(`execute_${excluded.length + 1}`, executeStarted);
+  }
+  if (!executed.ok && executed.code === 'no_rows_matched') {
+    receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);
+    receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: 0, ms: Math.round(now() - executeStarted), proofs: executed.proofs };
+    const nearest = (receipt.grounding ?? []).filter((note) => note.includes('nearest'));
+    return { kind: 'gap', gap: 'not_retrieved', message: executed.message, nearest, text: `The governed query ran, but ${executed.message}.${nearest.length ? ` ${nearest.join('; ')}.` : ''} Check the spelling of the member, or ask for the values this field holds.`, receipt, intent, offerExploration: false };
   }
   if (!executed.ok) {
     receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);

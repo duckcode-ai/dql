@@ -31,6 +31,8 @@ export interface PipelineReceipt {
   build?: Record<string, string>;
   /** Question words naming vocabulary the reading does not use; shown as a warning, never a refusal. */
   uncovered?: string[];
+  /** Member literals the host grounded against allowlisted columns before preparing (canonical value, or that none matched). */
+  grounding?: string[];
   /** Why resolution or execution stopped, verbatim, when it did. */
   failure?: { stage: 'resolve' | 'prepare' | 'execute'; reason?: string; message: string; problems?: Array<{ path: string; message: string; suggestions?: string[] }> };
 }
