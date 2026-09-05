@@ -682,9 +682,12 @@ it('isolates dispatch receipts across concurrent HTTP AgentRuns', async () => {
     if (!String(input).startsWith('https://concurrent-egress.example.test/')) return nativeFetch(input, init);
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
     providerBodies.push(body);
-    const content = JSON.stringify(body).includes('Pick ONE category')
-      ? JSON.stringify({ category: 'general_knowledge', depth: 'quick', needsClarification: false, rationale: 'explanation' })
-      : 'A bounded explanation.';
+    // The Ask pipeline's one interpreter read: a conversational intent
+    // answers without a warehouse and without a second send.
+    const content = JSON.stringify({
+      version: 1, kind: 'conversation', reading: 'A request to explain revenue.', reply: 'A bounded explanation.',
+      measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar',
+    });
     return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -697,7 +700,7 @@ it('isolates dispatch receipts across concurrent HTTP AgentRuns', async () => {
       rootDir: projectRoot,
       projectRoot,
       executor: {} as QueryExecutor,
-      // Exercise per-run isolation for the retained legacy dispatch bridge.
+      // Exercise per-run isolation of the pipeline's dispatch ledger.
       preferredPort: 0,
       captureServer: (value) => { server = value; },
     });

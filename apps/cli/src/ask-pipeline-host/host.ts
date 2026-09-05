@@ -169,17 +169,27 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     if (!provider) {
       return failure(runId, 'No AI model is configured for this project, so the question could not be interpreted.', 'provider_error', startedAt);
     }
-    const connection = await deps.resolveConnection(request);
+    // Interpretation never needs a warehouse: a greeting, a definition, a
+    // clarification or a modeling gap is answered without one. A missing
+    // connection surfaces verbatim at the first execution instead.
+    let connection: ConnectionConfig | undefined;
+    let connectionError: unknown;
+    try {
+      connection = await deps.resolveConnection(request);
+    } catch (error) {
+      connectionError = error;
+    }
     const prior = request.threadId ? deps.priorIntent(request) : undefined;
     emit({ type: 'executor.started', message: prior ? 'Reading the question as an edit of the previous analysis.' : 'Reading the question against the governed vocabulary.', route: 'generated_answer' });
     const outcome = await runAskPipeline({
       question: request.question,
       vocabulary,
       provider: withLedger(provider, deps, request),
-      prepareDeps: prepareDeps(connection, vocabulary),
+      prepareDeps: prepareDeps(connection ?? { driver: 'duckdb' } as ConnectionConfig, vocabulary),
       executeDeps: {
         maxRows: deps.maxRows ?? 500,
         run: async (sql, params, options) => {
+          if (!connection) throw connectionError instanceof Error ? connectionError : new Error(String(connectionError ?? 'No database connection is configured.'));
           const started = Date.now();
           const executor = deps.executor as QueryExecutor & { executePositional?: QueryExecutor['executePositional'] };
           const result = typeof executor.executePositional === 'function'
@@ -197,7 +207,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       explorationOptIn: explorationOptIn(request),
       deadlineMs: 120_000,
       preparationCache,
-      cacheScope: `${deps.getManifest().snapshotId}|${connection.driver}|${vocabulary.fingerprint}`,
+      cacheScope: `${deps.getManifest().snapshotId}|${connection?.driver ?? 'none'}|${vocabulary.fingerprint}`,
       ...(deps.buildIdentity ? { build: deps.buildIdentity() } : {}),
       trace: (event) => emit({ type: 'executor.started', message: `${event.stage}${typeof event.detail === 'number' ? ` ${event.detail} ms` : ''}`, route: 'generated_answer' }),
     });
