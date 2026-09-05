@@ -32,6 +32,12 @@ export interface PreparedCandidate {
   compileRequest?: unknown;
   /** Host artifact (a DQL source) rendered for the answer, when available. */
   artifact?: unknown;
+  /**
+   * Ratio columns to compute after execution from two executed columns
+   * (`alias = numerator / denominator`, null on a zero denominator); the
+   * helper columns are dropped unless the intent asked for them.
+   */
+  derived?: Array<{ alias: string; numerator: string; denominator: string; keepInputs?: boolean }>;
 }
 
 export type PrepareRefusalCode =

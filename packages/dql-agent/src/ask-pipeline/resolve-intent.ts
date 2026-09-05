@@ -51,6 +51,7 @@ export type IntentResolution =
   | { status: 'failed'; reason: 'provider_error' | 'unparseable' | 'invalid'; detail: string; problems: IntentProblem[]; attempts: number };
 
 const MEASURE_KINDS: VocabularyKind[] = ['metric', 'measure', 'column', 'block'];
+const RATIO_KINDS: VocabularyKind[] = ['metric', 'measure'];
 const GROUP_KINDS: VocabularyKind[] = ['dimension', 'entity', 'column'];
 const DISPLAY_KINDS: VocabularyKind[] = ['dimension', 'entity', 'column'];
 const FILTER_KINDS: VocabularyKind[] = ['dimension', 'entity', 'column'];
@@ -65,20 +66,22 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
     '3. A QUOTED OR PROPER-NAME LITERAL IS A FILTER VALUE on the dimension that holds such values (customer names on customer_name, product names on product_name). Keep the literal exactly as written; the host matches it case-insensitively.',
     '4. PREFER THE GOVERNED DEFINITION. If a metric already expresses the measure the question asks for, use it; only fall back to column refs with an aggregation when no metric fits. A certified block may be named as the ONLY measure ref when the question asks for exactly what the block declares (same measure, same scope, same grain, same ranking); a block-named intent carries NO groupBy, display or filters of its own because the block already fixes them. If you are not sure the block matches exactly, express the analysis with metric and dimension refs instead.',
     '5. SHAPE. "top/best/highest N" is a ranking: ordering desc on the measure and a limit (default 10 when "top" has no number). "by <thing>" is a breakdown. "how many/what is the total" with no breakdown is a scalar. "X and Y" for one subject is a comparison.',
-    '6. TIME. A time axis ("by month") is a groupBy with role time and a grain, using the time dimension of the SAME model as the measure (an order total is by the orders model\'s time, an order-line revenue by the order line model\'s time). A time window ("last quarter", "in 2025") is `time.window` with an ISO half-open range plus the expression.',
+    '5b. A RATIO OF TWO GOVERNED MEASURES. "average order value", "revenue per order", "X per Y", "share of", "margin %" is a measure with `derived: {"kind":"ratio","numerator":<metric ref>,"denominator":<metric ref>}` and an `alias`, and no `ref` (average order value = the revenue metric / the order-count metric). A governed derived or ratio metric (its card shows `= formula` and `time <dim>`) may be used instead ONLY when it measures the same thing over the same time role as the question: a metric built from lifetime per-customer measures (lifetime spend / lifetime orders, time = the customer\'s first order date) is a cohort average, so "average order value in 2025", "by month", "last quarter" is NEVER that metric; it is the derived ratio of the period\'s revenue and orders. Use the cohort metric only when the question names the cohort itself ("customers first acquired in 2025", "customers who joined in").',
+    '6. TIME. A time axis ("by month") is a groupBy with role time and a grain, using the time dimension of the SAME model as the measure (an order total is by the orders model\'s time, an order-line revenue by the order line model\'s time). A time window ("last quarter", "in 2025") is `time.window` with an ISO half-open range plus the expression. Measures under one window must share their `time` role (see the cards); when they do not, add an `unresolved` entry with material=true and the two time dimension refs as options instead of choosing.',
     '7. CLARIFY ONLY WHAT IS MATERIAL. If two vocabulary entries are both plausible and the answer would differ (for example pretax product revenue vs order total including tax when the question says only "total revenue" and the project defines both), add an `unresolved` entry with material=true, the options as refs, and a one-sentence question. But: a metric whose NAME is the word the question uses ("revenue" is metric revenue, "lifetime spend" is metric lifetime_spend) IS the meaning; clarify only when the question adds a qualifier the vocabulary distinguishes ("gross", "including tax", "order revenue"). Never clarify which of two refs to use when they identify the same entity (a key column on the measure\'s model vs the entity on its own model): pick the one on the measure\'s model. Do not clarify spelling mistakes or obvious paraphrases; resolve them. Never ask whether a dimension or entity is reachable from a measure\'s model, or which join to take: the host proves join paths and grain after you answer. A material clause is only ever a choice between two or more refs, or an empty options list for something this project does not hold.',
     '8. KIND. Greetings, thanks, and questions about what you can do are kind "conversation" with a short `reply`. "What does X mean / how is X defined" is kind "definition" with a `reply` drawn from the vocabulary descriptions. Everything that asks for numbers or rows is kind "analytics". A question about something this project does not hold at all (weather, news, a different business) is kind "analytics" with no measures and one `unresolved` entry {clause: what was asked, options: [], material: true}: never a conversational reply, never a guessed metric.',
     '8b. BUSINESS TERMS ARE THE GOVERNED DEFAULT. When a term in the vocabulary defines a word of the question ("Revenue" defined as product revenue excluding tax), the metric that term names is the meaning; do not treat the word as ambiguous. Only two competing definitions with no governing term are material.',
     '8c. DISPLAY IS THE GRAIN\'S LABEL. A display ref is the name/label of an entity in groupBy (the customer\'s name beside the customer key). Never display an attribute of a finer grain (a supply name when grouping by product): it multiplies the rows.',
     '8d. A NUMERIC COLUMN IS A MEASURE. When the question asks for a quantity that exists only as a numeric column (no metric declares it), use its column: or dimension: ref as a measure with an aggregation (sum, avg, count). Report a clause as not modeled ONLY when no entry of any kind — metric, dimension, column, block, term — matches its words.',
     '9. PROVENANCE. For every ref you use, provenance[ref] is the phrase of the question it came from ("q:<phrase>"), or "inherited" when it is carried from the previous analysis.',
+    '11. POPULATION. "including X with no Y", "every store", "all customers, even those with zero orders", "show zeros" means `population: "all"`: every member of the entity in groupBy is a row (grouped by its key ref, role key) and additive measures read 0 where nothing matched. Otherwise omit `population` (only matched members are rows).',
     ...(input.hasPrior ? [
       '10. THIS IS A FOLLOW-UP. The previous executed analysis is given below. Treat the new message as an EDIT of it: keep every clause the message does not change (mark it "inherited"), add or replace what it asks for, and for any prior ref you drop write provenance[ref] = "removed:<why>". "Include X" adds a display or measure and keeps everything else, including scope, ranking and limit. A short correction that repeats a word of the previous analysis ("I need the beverage category", "no, drinks only") without a new measure or a new entity is an EDIT that keeps the previous measures, grain, ranking and limit. Only a message that names a new subject entirely ("what is Ryan Byrd\'s revenue") starts a new analysis; list the dropped refs as removed. When both readings are plausible, ask one bounded clarification instead of choosing.',
     ] : []),
     '',
     'OUTPUT: one JSON object matching this shape, nothing else. `reading` restates the question in one sentence as you understood it.',
-    '{"version":1,"kind":"analytics","reading":"...","measures":[{"ref":"metric:...","scope":[{"ref":"dimension:...","op":"eq","values":["..."],"source":"question"}],"aggregation":"sum"}],"groupBy":[{"ref":"entity:...","role":"key"},{"ref":"dimension:...","role":"time","grain":"month"}],"display":["dimension:..."],"filters":[{"ref":"dimension:...","op":"eq","values":["literal"],"source":"question"}],"ordering":{"ref":"metric:...","direction":"desc"},"limit":10,"expectedShape":"ranking","unresolved":[],"provenance":{"metric:...":"q:phrase"},"reply":"only for conversation/definition"}',
-    'Predicates always carry `values` as an array (one element for eq; the literal exactly as written). `scope` and `aggregation` are optional. Omit `ordering`, `limit` and `time` when the question has none.',
+    '{"version":1,"kind":"analytics","reading":"...","measures":[{"ref":"metric:...","scope":[{"ref":"dimension:...","op":"eq","values":["..."],"source":"question"}],"aggregation":"sum"},{"derived":{"kind":"ratio","numerator":"metric:...","denominator":"metric:..."},"alias":"..."}],"groupBy":[{"ref":"entity:...","role":"key"},{"ref":"dimension:...","role":"time","grain":"month"}],"display":["dimension:..."],"filters":[{"ref":"dimension:...","op":"eq","values":["literal"],"source":"question"}],"ordering":{"ref":"metric:...","direction":"desc"},"limit":10,"time":{"ref":"dimension:...","window":{"start":"2025-01-01","end":"2026-01-01","expression":"in 2025"}},"expectedShape":"ranking","population":"matching","unresolved":[],"provenance":{"metric:...":"q:phrase"},"reply":"only for conversation/definition"}',
+    'Predicates always carry `values` as an array (one element for eq; the literal exactly as written). `scope`, `aggregation`, `derived` and `population` are optional. Omit `ordering`, `limit` and `time` when the question has none.',
     ...(input.guidance ? ['', 'PROJECT GUIDANCE', input.guidance] : []),
     ...(input.hints?.length ? ['', 'SPELLING HINTS (question words that match nothing exactly, with the nearest vocabulary; a misspelling resolves to the obvious entry)', ...input.hints.map((hint) => `- ${hint}`)] : []),
     '',
@@ -128,6 +131,14 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
   };
   const predicate = (p: IntentPredicate, path: string): IntentPredicate => ({ ...p, ref: canonical(p.ref, FILTER_KINDS, path) });
   const measures = intent.measures.map((measure, index) => {
+    if (measure.derived) {
+      // A ratio's parts are governed metrics or measures, never columns or blocks.
+      const numerator = canonical(measure.derived.numerator, RATIO_KINDS, `measures[${index}].derived.numerator`);
+      const denominator = canonical(measure.derived.denominator, RATIO_KINDS, `measures[${index}].derived.denominator`);
+      const scope = measure.scope?.map((p, at) => predicate(p, `measures[${index}].scope[${at}]`));
+      const ref = measure.ref.startsWith('ratio:') ? `ratio:${numerator}/${denominator}` : measure.ref;
+      return { ...measure, ref, derived: { kind: 'ratio' as const, numerator, denominator }, ...(scope?.length ? { scope } : {}) };
+    }
     const ref = canonical(measure.ref, MEASURE_KINDS, `measures[${index}].ref`, (entry) =>
       entry.kind === 'column' && !measure.aggregation ? `${entry.ref} is a raw column; a column measure needs an aggregation` : undefined);
     const scope = measure.scope?.map((p, at) => predicate(p, `measures[${index}].scope[${at}]`));
@@ -146,7 +157,7 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
   // A time axis belongs to the measure's own model: an order total by the
   // order lines' time multiplies orders across lines. When the same-named
   // time dimension exists on the measure's model, rebind to it.
-  const measureModels = new Set(measures.map((measure) => vocabulary.get(measure.ref)?.model).filter((model): model is string => Boolean(model)));
+  const measureModels = new Set(measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]).map((ref) => vocabulary.get(ref)?.model).filter((model): model is string => Boolean(model)));
   const rebindTime = (ref: string): string => {
     const entry = vocabulary.get(ref);
     if (!entry || !entry.roles.includes('time') || !entry.model || measureModels.size === 0 || measureModels.has(entry.model)) return ref;
@@ -192,6 +203,28 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
   }
   const next: AnalyticalIntentV1 = { ...intent, measures, groupBy, display, filters, ...(ordering ? { ordering } : {}), ...(time ? { time } : {}) };
   if (windowDefault) next.provenance = { ...next.provenance, [windowDefault]: `host:time window "${time?.window?.expression ?? `${time?.window?.start}..${time?.window?.end}`}" bound to the measure's own time axis` };
+  if (next.population === 'all') {
+    // Every member of the grain: the grain must be an entity key with a
+    // physical relation to enumerate, and never a time axis. The key is
+    // rewritten to the entity's primary owner so the members come from the
+    // entity's own relation, not from the fact that references it.
+    const keys = next.groupBy.filter((group) => group.role === 'key');
+    if (keys.length !== 1) problems.push({ path: 'groupBy', message: 'population "all" needs exactly one entity key in groupBy (role key): the members to include are that entity\'s' });
+    else if (next.groupBy.some((group) => group.role === 'time')) problems.push({ path: 'groupBy', message: 'population "all" cannot be combined with a time axis; drop the time groupBy or the population' });
+    else {
+      const key = keys[0]!;
+      const entry = vocabulary.get(key.ref);
+      const primary = entry?.kind === 'entity' && entry.entityType !== 'primary'
+        ? vocabulary.entries.find((candidate) => candidate.kind === 'entity' && candidate.name === entry.name && candidate.entityType === 'primary' && candidate.physical?.relation)
+        : undefined;
+      const owner = primary ?? entry;
+      if (!owner?.physical?.relation) problems.push({ path: 'groupBy', message: `${key.ref} has no physical relation to enumerate every member from; population "all" needs an entity key with one`, suggestions: vocabulary.entries.filter((candidate) => candidate.kind === 'entity' && candidate.entityType === 'primary' && candidate.physical?.relation).slice(0, 6).map((candidate) => candidate.ref) });
+      else if (primary && primary.ref !== key.ref) {
+        next.groupBy = next.groupBy.map((group) => group === key ? { ...group, ref: primary.ref } : group);
+        next.provenance = { ...next.provenance, [primary.ref]: `host:population "all" enumerates ${primary.ref} from its own relation (was ${key.ref})` };
+      }
+    }
+  }
   if (next.kind === 'analytics' && next.measures.length === 0 && next.unresolved.every((clause) => !clause.material)) {
     problems.push({ path: 'measures', message: 'an analytics intent needs at least one measure ref, or a material unresolved clause explaining what is missing', suggestions: vocabulary.lookup('revenue', { kinds: ['metric', 'block'], limit: 4 }).map((hit) => hit.entry.ref) });
   }
@@ -448,6 +481,99 @@ function correctionMessage(problems: IntentProblem[]): string {
   ].join('\n');
 }
 
+/**
+ * Measures under one time window must share a time role: each metric
+ * aggregates over its own time dimension (a customer count over the first
+ * order date, revenue over the order date), and "in 2025" means different
+ * things for them. One role is bound as the window's axis (and said so);
+ * several become one bounded clarification, unless the question already
+ * named the axis itself. Never applied silently.
+ */
+export function proveTimeRoles(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): void {
+  if (!intent.time?.window) return;
+  const label = (ref: string) => vocabulary.get(ref)?.label ?? vocabulary.get(ref)?.name ?? ref;
+  // A time role is a time MEANING: the same-named dimension on two models
+  // (an order date on orders and on order lines) is one role, represented
+  // by the first measure's ref.
+  const roleName = (ref: string) => vocabulary.get(ref)?.name ?? ref.split('.').pop() ?? ref;
+  const roles = new Map<string, string[]>();
+  const representative = new Map<string, string>();
+  for (const measure of intent.measures) {
+    for (const ref of measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]) {
+      const role = vocabulary.get(ref)?.timeRef;
+      if (!role) continue;
+      const name = roleName(role);
+      if (!representative.has(name)) representative.set(name, role);
+      roles.set(representative.get(name)!, [...(roles.get(representative.get(name)!) ?? []), label(ref)]);
+    }
+  }
+  if (roles.size === 0) return;
+  const expression = intent.time.window.expression ?? `${intent.time.window.start}..${intent.time.window.end}`;
+  const current = intent.time.ref;
+  const hostChosen = Boolean(current && (intent.provenance[current] ?? '').startsWith('host:'));
+  const explicit = Boolean(current && !hostChosen && vocabulary.get(current)?.name !== 'metric_time');
+  if (roles.size === 1) {
+    const [role] = [...roles.keys()] as [string];
+    // An axis with the same meaning (same name on another model) already there stays.
+    if (current && roleName(current) === roleName(role) && vocabulary.get(current)?.name !== 'metric_time') return;
+    if (!explicit && current !== role) {
+      intent.time = { ...intent.time, ref: role };
+      intent.provenance = { ...intent.provenance, [role]: `host:time window "${expression}" applied on the measures' time role ${label(role)}` };
+    }
+    return;
+  }
+  if (explicit) {
+    intent.provenance = { ...intent.provenance, [current!]: `${intent.provenance[current!] ?? 'q:time'}; host:time window "${expression}" applies on ${label(current!)} to every measure (their own time roles differ: ${[...roles.entries()].map(([role, names]) => `${label(role)} for ${names.join(', ')}`).join('; ')})` };
+    return;
+  }
+  if (intent.unresolved.some((clause) => clause.options.some((option) => roles.has(option)))) return;
+  if (hostChosen && current) {
+    delete intent.provenance[current];
+    intent.time = { ...intent.time, ref: undefined };
+  }
+  intent.unresolved.push({
+    clause: expression,
+    options: [...roles.keys()],
+    material: true,
+    question: `"${expression}" means a different time for these measures: ${[...roles.entries()].map(([role, names]) => `${label(role)} (${names.join(', ')})`).join(' or ')}. Which time should the window apply to?`,
+  });
+}
+
+/** An intent whose only content is what it left unresolved. */
+function isBareIntent(intent: AnalyticalIntentV1): boolean {
+  return intent.measures.length === 0 && intent.groupBy.length === 0 && intent.display.length === 0 && intent.filters.length === 0 && !intent.time && !intent.ordering && !intent.limit;
+}
+
+const QUESTION_STOPWORDS = new Set([...CLAUSE_STOPWORDS, ...FOLLOW_UP_STOPWORDS, 'our', 'overall', 'whats', 'does', 'did', 'are', 'was', 'were', 'have', 'has', 'much', 'many', 'number', 'amount', 'sum', 'total', 'totals', 'please', 'tell', 'find', 'out', 'like', 'would']);
+
+/**
+ * Question words neither a stopword nor part of any ref the intent uses
+ * (name, label, alias, description words): what the intent has not
+ * accounted for.
+ */
+export function unaccountedQuestionWords(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
+  const covered = new Set<string>();
+  for (const ref of intentRefs(intent)) {
+    const entry = vocabulary.get(ref);
+    for (const text of [entry?.name, entry?.label, entry?.model, ...(entry?.aliases ?? []), entry?.description ?? '', ref]) {
+      for (const word of normalizeVocabularyText(text ?? '').split(' ')) if (word) { covered.add(word); covered.add(singularWord(word)); }
+    }
+  }
+  // A grain the intent carries accounts for the question's time words.
+  const GRAIN_WORDS: Record<string, string[]> = { day: ['day', 'daily'], week: ['week', 'weekly'], month: ['month', 'monthly'], quarter: ['quarter', 'quarterly'], year: ['year', 'yearly', 'annual', 'annually'] };
+  for (const grain of [...intent.groupBy.map((group) => group.grain), intent.time?.grain]) for (const word of GRAIN_WORDS[grain ?? ''] ?? []) covered.add(word);
+  if (intent.time?.window) for (const word of normalizeVocabularyText(intent.time.window.expression ?? '').split(' ')) if (word) covered.add(word);
+  const out: string[] = [];
+  for (const word of normalizeVocabularyText(question).split(' ')) {
+    if (word.length < 3 || QUESTION_STOPWORDS.has(word) || /^\d+$/.test(word)) continue;
+    if (covered.has(word) || covered.has(singularWord(word))) continue;
+    out.push(word);
+  }
+  return [...new Set(out)];
+}
+
+const singularWord = (word: string): string => word.replace(/ies$/, 'y').replace(/(ses|xes|shes|ches)$/, (m) => m.slice(0, -2)).replace(/s$/, '');
+
 export async function resolveIntent(input: ResolveIntentInput): Promise<IntentResolution> {
   const maxAttempts = Math.max(1, Math.min(3, input.maxAttempts ?? 2));
   const now = input.now ?? (() => Date.now());
@@ -493,7 +619,30 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       return { status: 'clarify', intent: clarify, question: clarify.unresolved[0]!.question!, options, attempts };
     }
     if (validation.followUpReplacement && attempts > 1) validation.problems = validation.problems.filter((problem) => problem.message !== validation.followUpReplacement);
+    const bare = isBareIntent(parsed.intent);
+    const askedQuestions = new Map(validation.intent.unresolved.map((clause) => [clause, clause.question]));
     applyGovernedDefaults(validation.intent, input.question, input.vocabulary);
+    proveTimeRoles(validation.intent, input.vocabulary);
+    // NO PARTIAL ANSWERS. When the interpreter wrote down nothing but a
+    // clarification and the governed default supplied the only measure, the
+    // rest of the question (a time axis, a grain, a member) is still
+    // unaccounted for. The interpreter is sent back once for the complete
+    // intent; if it still returns nothing else, the user is asked, never
+    // served a scalar for a breakdown.
+    if (bare && validation.problems.length === 0) {
+      const defaulted = validation.intent.unresolved.filter((clause) => !clause.material && askedQuestions.get(clause) !== clause.question && clause.question?.startsWith('Read "'));
+      if (defaulted.length > 0) {
+        const leftover = unaccountedQuestionWords(input.question, validation.intent, input.vocabulary);
+        if (leftover.length > 0) {
+          if (attempts < maxAttempts) {
+            lastDetail = `the question also says "${leftover.join(' ')}"; the intent must carry it`;
+            messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The governed default reads ${defaulted.map((clause) => `"${clause.clause}" as ${validation.intent.measures.map((measure) => measure.ref).join(', ')}`).join('; ')}. Your intent carried nothing else, but the question also says "${leftover.join(' ')}". Resend the COMPLETE JSON intent: measures [${validation.intent.measures.map((measure) => measure.ref).join(', ')}] plus every other clause the question asks for (a groupBy time axis with its grain, a breakdown, a filter, an ordering, a limit), with unresolved: [].` });
+            continue;
+          }
+          for (const clause of defaulted) { clause.material = true; clause.question = askedQuestions.get(clause) ?? clause.question; }
+        }
+      }
+    }
     const material = validation.intent.unresolved.find((clause) => clause.material);
     if (validation.problems.length === 0 || (material && validation.problems.every((problem) => problem.path === 'measures'))) {
       if (material) {

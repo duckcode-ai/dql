@@ -33,8 +33,18 @@ export interface IntentPredicate {
   source: ClauseSource;
 }
 
+/** A measure computed from two governed measures: `numerator / denominator`, disclosed as such. */
+export interface IntentDerivedMeasure {
+  kind: 'ratio';
+  numerator: string;
+  denominator: string;
+}
+
 export interface IntentMeasure {
+  /** A vocabulary ref, or `ratio:<numerator>/<denominator>` when `derived` is set. */
   ref: string;
+  /** A ratio of two governed measures; the parts are the refs the host proves, `ref` is only a name. */
+  derived?: IntentDerivedMeasure;
   /** Restriction that belongs to THIS measure only ("beverage revenue" → is_drink_item on this measure). */
   scope?: IntentPredicate[];
   /** Required for a `column:` ref; ignored for metrics, measures and blocks. */
@@ -75,6 +85,11 @@ export interface AnalyticalIntentV1 {
   limit?: number;
   time?: IntentTime;
   expectedShape: IntentShape;
+  /**
+   * `all`: every member of the grain's entity is a row (including those with
+   * nothing matched), additive measures zero-filled. Absent means `matching`.
+   */
+  population?: 'matching' | 'all';
   unresolved: IntentUnresolved[];
   /** Every clause says where it came from; an inherited clause that vanishes must be listed as removed. */
   provenance: Record<string, string>;
@@ -94,9 +109,14 @@ export const ANALYTICAL_INTENT_JSON_SCHEMA: Record<string, unknown> = {
     measures: {
       type: 'array', maxItems: 8,
       items: {
-        type: 'object', additionalProperties: false, required: ['ref'],
+        // `ref` is required unless `derived` names the ratio's parts; parseIntent enforces that.
+        type: 'object', additionalProperties: false, required: [],
         properties: {
           ref: { type: 'string' },
+          derived: {
+            type: 'object', additionalProperties: false, required: ['kind', 'numerator', 'denominator'],
+            properties: { kind: { type: 'string', enum: ['ratio'] }, numerator: { type: 'string' }, denominator: { type: 'string' } },
+          },
           aggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max', 'median'] },
           alias: { type: 'string', maxLength: 80 },
           scope: { type: 'array', maxItems: 4, items: { $ref: '#/$defs/predicate' } },
@@ -133,6 +153,7 @@ export const ANALYTICAL_INTENT_JSON_SCHEMA: Record<string, unknown> = {
       },
     },
     expectedShape: { type: 'string', enum: ['ranking', 'grouped', 'scalar', 'comparison', 'lookup', 'trend'] },
+    population: { type: 'string', enum: ['matching', 'all'] },
     unresolved: {
       type: 'array', maxItems: 4,
       items: {
@@ -199,12 +220,22 @@ export function parseIntent(raw: unknown): { intent?: AnalyticalIntentV1; errors
   const reading = typeof raw.reading === 'string' ? raw.reading.trim().slice(0, 400) : '';
   const measures: IntentMeasure[] = [];
   for (const [index, item] of (Array.isArray(raw.measures) ? raw.measures : []).slice(0, 8).entries()) {
-    if (!isRecord(item) || typeof item.ref !== 'string' || !item.ref.trim()) { errors.push({ path: `measures[${index}]`, message: 'measure needs a ref' }); continue; }
+    if (!isRecord(item)) { errors.push({ path: `measures[${index}]`, message: 'measure needs a ref' }); continue; }
+    let derived: IntentDerivedMeasure | undefined;
+    if (item.derived !== undefined && item.derived !== null) {
+      const raw = isRecord(item.derived) ? item.derived : {};
+      const numerator = typeof raw.numerator === 'string' ? raw.numerator.trim() : '';
+      const denominator = typeof raw.denominator === 'string' ? raw.denominator.trim() : '';
+      if (raw.kind !== 'ratio' || !numerator || !denominator) { errors.push({ path: `measures[${index}].derived`, message: 'a derived measure is {kind: "ratio", numerator: <ref>, denominator: <ref>}' }); continue; }
+      derived = { kind: 'ratio', numerator, denominator };
+    }
+    const ref = typeof item.ref === 'string' && item.ref.trim() ? item.ref.trim() : derived ? `ratio:${derived.numerator}/${derived.denominator}` : '';
+    if (!ref) { errors.push({ path: `measures[${index}]`, message: 'measure needs a ref, or a derived ratio' }); continue; }
     const aggregation = typeof item.aggregation === 'string' && AGGREGATIONS.has(item.aggregation) ? item.aggregation as IntentMeasure['aggregation'] : undefined;
     const scope = Array.isArray(item.scope)
       ? item.scope.slice(0, 4).map((predicate, at) => parsePredicate(predicate, `measures[${index}].scope[${at}]`, errors)).filter((p): p is IntentPredicate => Boolean(p))
       : undefined;
-    measures.push({ ref: item.ref.trim(), ...(aggregation ? { aggregation } : {}), ...(scope?.length ? { scope } : {}), ...(typeof item.alias === 'string' && item.alias.trim() ? { alias: item.alias.trim().slice(0, 80) } : {}) });
+    measures.push({ ref, ...(derived ? { derived } : {}), ...(aggregation ? { aggregation } : {}), ...(scope?.length ? { scope } : {}), ...(typeof item.alias === 'string' && item.alias.trim() ? { alias: item.alias.trim().slice(0, 80) } : {}) });
   }
   const groupBy: IntentGroupBy[] = [];
   for (const [index, item] of (Array.isArray(raw.groupBy) ? raw.groupBy : []).slice(0, 6).entries()) {
@@ -249,6 +280,7 @@ export function parseIntent(raw: unknown): { intent?: AnalyticalIntentV1; errors
     for (const [key, value] of Object.entries(raw.provenance)) if (typeof value === 'string') provenance[key] = value.slice(0, 200);
   }
   const reply = typeof raw.reply === 'string' ? raw.reply.trim().slice(0, 2000) : undefined;
+  const population = raw.population === 'all' ? 'all' as const : undefined;
   if (kind === 'analytics' && measures.length === 0 && groupBy.length === 0 && display.length === 0 && unresolved.length === 0) {
     errors.push({ path: 'measures', message: 'an analytics intent names at least one measure, or lists what is unresolved' });
   }
@@ -258,7 +290,7 @@ export function parseIntent(raw: unknown): { intent?: AnalyticalIntentV1; errors
     intent: {
       version: 1, kind, reading, measures, groupBy, display, filters,
       ...(ordering ? { ordering } : {}), ...(limit ? { limit } : {}), ...(time ? { time } : {}),
-      expectedShape, unresolved, provenance, ...(reply ? { reply } : {}),
+      expectedShape, ...(population ? { population } : {}), unresolved, provenance, ...(reply ? { reply } : {}),
     },
   };
 }
@@ -278,13 +310,16 @@ export function intentFingerprint(intent: AnalyticalIntentV1): string {
 /** Identity of what would EXECUTE: refs, predicates, ordering, limit, time — never the prose or provenance. */
 export function intentExecutionFingerprint(intent: AnalyticalIntentV1): string {
   const executable = {
-    measures: intent.measures.map((measure) => ({ ref: measure.ref, aggregation: measure.aggregation ?? null, scope: (measure.scope ?? []).map((p) => ({ ref: p.ref, op: p.op, values: p.values })) })),
+    // New fields join the fingerprint only when present, so an intent
+    // without them hashes exactly as it did before they existed.
+    measures: intent.measures.map((measure) => ({ ref: measure.ref, aggregation: measure.aggregation ?? null, scope: (measure.scope ?? []).map((p) => ({ ref: p.ref, op: p.op, values: p.values })), ...(measure.derived ? { derived: measure.derived } : {}) })),
     groupBy: intent.groupBy.map((group) => ({ ref: group.ref, role: group.role, grain: group.grain ?? null })),
     display: [...intent.display].sort(),
     filters: intent.filters.map((p) => ({ ref: p.ref, op: p.op, values: [...p.values].map(String).sort() })),
     ordering: intent.ordering ?? null,
     limit: intent.limit ?? null,
     time: intent.time ?? null,
+    ...(intent.population === 'all' ? { population: 'all' } : {}),
   };
   return `sha256:${createHash('sha256').update(stable(executable)).digest('hex')}`;
 }
@@ -292,7 +327,11 @@ export function intentExecutionFingerprint(intent: AnalyticalIntentV1): string {
 /** Every ref the intent names, deduplicated, in a stable order. */
 export function intentRefs(intent: AnalyticalIntentV1): string[] {
   const refs = new Set<string>();
-  for (const measure of intent.measures) { refs.add(measure.ref); for (const p of measure.scope ?? []) refs.add(p.ref); }
+  for (const measure of intent.measures) {
+    // A ratio's identity is its parts; its own ref is only a name.
+    if (measure.derived) { refs.add(measure.derived.numerator); refs.add(measure.derived.denominator); } else refs.add(measure.ref);
+    for (const p of measure.scope ?? []) refs.add(p.ref);
+  }
   for (const group of intent.groupBy) refs.add(group.ref);
   for (const ref of intent.display) refs.add(ref);
   for (const p of intent.filters) refs.add(p.ref);
@@ -318,12 +357,14 @@ export function describeIntent(intent: AnalyticalIntentV1, label: (ref: string) 
   if (intent.kind !== 'analytics') return intent.reading || intent.kind;
   const measures = intent.measures.map((measure) => {
     const scope = (measure.scope ?? []).map((p) => `${label(p.ref)} ${p.op} ${p.values.join('/')}`).join(', ');
-    return scope ? `${label(measure.ref)} where ${scope}` : label(measure.ref);
+    const name = measure.derived ? `${label(measure.derived.numerator)} per ${label(measure.derived.denominator)}` : label(measure.ref);
+    return scope ? `${name} where ${scope}` : name;
   }).join(' and ');
   const by = intent.groupBy.length ? ` by ${intent.groupBy.map((group) => `${label(group.ref)}${group.grain ? ` (${group.grain})` : ''}`).join(', ')}` : '';
   const where = intent.filters.length ? ` for ${intent.filters.map((p) => `${label(p.ref)} ${p.op} ${p.values.join('/')}`).join(' and ')}` : '';
   const order = intent.ordering ? `, ${intent.ordering.direction === 'desc' ? 'highest' : 'lowest'} first` : '';
   const limit = intent.limit ? `, top ${intent.limit}` : '';
   const shown = intent.display.length ? `, showing ${intent.display.map(label).join(', ')}` : '';
-  return `${measures}${by}${where}${order}${limit}${shown}`.trim();
+  const population = intent.population === 'all' ? ', including members with nothing matched' : '';
+  return `${measures}${by}${where}${order}${limit}${shown}${population}`.trim();
 }

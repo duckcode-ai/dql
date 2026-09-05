@@ -712,6 +712,157 @@
       ],
       "ordered": true,
       "tier": "governed"
+    },
+    {
+      "id": "aov-2025",
+      "question": "what was the average order value in 2025",
+      "sql": "SELECT SUM(oi.product_price) / COUNT(DISTINCT oi.order_id) AS average_order_value FROM dev.order_items oi WHERE oi.ordered_at >= '2025-01-01' AND oi.ordered_at < '2026-01-01'",
+      "columns": {
+        "average_order_value": [
+          "average_order_value",
+          "aov",
+          "avg_order_value",
+          "average_order_value_2025",
+          "aov_2025",
+          "revenue_per_order",
+          "avg_order_total",
+          "order_value",
+          "average_order"
+        ]
+      },
+      "tier": "governed",
+      "alternatives": [
+        {
+          "sql": "SELECT SUM(o.order_total) / COUNT(o.order_id) AS average_order_value FROM dev.orders o WHERE o.ordered_at >= '2025-01-01' AND o.ordered_at < '2026-01-01'",
+          "columns": {
+            "average_order_value": [
+              "average_order_value",
+              "aov",
+              "avg_order_value",
+              "average_order_value_2025",
+              "aov_2025",
+              "revenue_per_order",
+              "avg_order_total",
+              "order_value",
+              "average_order"
+            ]
+          }
+        },
+        {
+          "sql": "SELECT SUM(o.subtotal) / COUNT(o.order_id) AS average_order_value FROM dev.orders o WHERE o.ordered_at >= '2025-01-01' AND o.ordered_at < '2026-01-01'",
+          "columns": {
+            "average_order_value": [
+              "average_order_value",
+              "aov",
+              "avg_order_value",
+              "average_order_value_2025",
+              "aov_2025",
+              "revenue_per_order",
+              "avg_order_total",
+              "order_value",
+              "average_order"
+            ]
+          }
+        }
+      ],
+      "note": "A period average is revenue over orders IN THAT PERIOD: a derived ratio of two governed measures sharing the order-date time role, disclosed as such. The dbt metric average_order_value (lifetime_spend_pretax / count_lifetime_orders at the customers grain, over first_ordered_at) is a cohort average and is NOT the answer to 'in 2025'."
+    },
+    {
+      "id": "aov-cohort-explicit",
+      "question": "what is the average order value of customers first acquired in 2024",
+      "sql": "SELECT SUM(c.lifetime_spend_pretax) / SUM(c.count_lifetime_orders) AS average_order_value FROM dev.customers c WHERE c.first_ordered_at >= '2024-01-01' AND c.first_ordered_at < '2025-01-01'",
+      "columns": {
+        "average_order_value": [
+          "average_order_value",
+          "aov",
+          "avg_order_value",
+          "average_order_value_2025",
+          "aov_2025",
+          "revenue_per_order",
+          "avg_order_total",
+          "order_value",
+          "average_order"
+        ]
+      },
+      "tier": "governed",
+      "outcome": "clarify_or_rows",
+      "alternatives": [
+        {
+          "sql": "SELECT SUM(oi.product_price) / COUNT(DISTINCT oi.order_id) AS average_order_value FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id WHERE c.first_ordered_at >= '2024-01-01' AND c.first_ordered_at < '2025-01-01'",
+          "columns": {
+            "average_order_value": [
+              "average_order_value",
+              "aov",
+              "avg_order_value",
+              "average_order_value_2025",
+              "aov_2025",
+              "revenue_per_order",
+              "avg_order_total",
+              "order_value",
+              "average_order"
+            ]
+          }
+        },
+        {
+          "sql": "SELECT SUM(o.order_total) / COUNT(o.order_id) AS average_order_value FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id WHERE c.first_ordered_at >= '2024-01-01' AND c.first_ordered_at < '2025-01-01'",
+          "columns": {
+            "average_order_value": [
+              "average_order_value",
+              "aov",
+              "avg_order_value",
+              "average_order_value_2025",
+              "aov_2025",
+              "revenue_per_order",
+              "avg_order_total",
+              "order_value",
+              "average_order"
+            ]
+          }
+        }
+      ],
+      "note": "The question names the cohort axis itself (first acquired in 2024): the governed customer-grain metric restricted by first_ordered_at, or the cohort's revenue per order, or one bounded clarification between them. The axis is explicit, so the window is never applied silently on a different time role. The seed's twelve customers all first ordered in 2024."
+    },
+    {
+      "id": "revenue-by-location-including-empty",
+      "question": "revenue by location, including locations with no orders",
+      "sql": "SELECT l.location_id, l.location_name, COALESCE(SUM(oi.product_price), 0) AS revenue FROM dev.locations l LEFT JOIN dev.orders o ON o.location_id = l.location_id LEFT JOIN dev.order_items oi ON oi.order_id = o.order_id GROUP BY l.location_id, l.location_name",
+      "columns": {
+        "location_id": [
+          "location_id",
+          "location"
+        ],
+        "location_name": [
+          "location_name"
+        ],
+        "revenue": [
+          "revenue"
+        ]
+      },
+      "identity": [
+        "location_id",
+        "location_name"
+      ],
+      "tier": "governed",
+      "alternatives": [
+        {
+          "sql": "SELECT l.location_id, l.location_name, COALESCE(SUM(o.order_total), 0) AS order_total FROM dev.locations l LEFT JOIN dev.orders o ON o.location_id = l.location_id GROUP BY l.location_id, l.location_name",
+          "columns": {
+            "location_id": [
+              "location_id",
+              "location"
+            ],
+            "location_name": [
+              "location_name"
+            ],
+            "order_total": [
+              "order_total",
+              "revenue",
+              "gross_revenue"
+            ]
+          }
+        }
+      ],
+      "note": "population: all. The seed has six locations and orders only in Philadelphia: six rows, five of them zero-filled, enumerated from the locations relation and never from the orders that reference it."
     }
   ]
 }

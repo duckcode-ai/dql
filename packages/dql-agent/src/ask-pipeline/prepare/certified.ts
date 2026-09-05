@@ -30,6 +30,9 @@ export function entails(block: VocabularyEntry, intent: AnalyticalIntentV1, voca
   const caveats: string[] = [];
   if (!contract) return { ok: false, missing: ['the block has no contract'], caveats };
   if (intent.measures.length === 0) return { ok: false, missing: ['the intent names no measure'], caveats };
+  // A ratio the question composes, or a population the block never declared, is never what a block certified.
+  if (intent.measures.some((measure) => measure.derived)) return { ok: false, missing: ['a derived ratio measure is composed by the governed tiers, never served from a block'], caveats };
+  if (intent.population === 'all') return { ok: false, missing: ['a block returns the rows it matched; it cannot include every member of the entity'], caveats };
   const outputs = new Set(contract.outputs.map(norm));
 
   const namesBlock = intent.measures.every((measure) => measure.ref === block.ref);

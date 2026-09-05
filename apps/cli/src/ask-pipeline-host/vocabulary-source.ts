@@ -111,6 +111,18 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     }
     const measures = layer.listMeasures();
     const measureByKey = new Map(measures.map((measure) => [`${measure.cube ?? ''}:${measure.name}`, measure]));
+    // A model's default time role, for measures that do not name their own.
+    const modelTime = new Map<string, string>();
+    for (const model of layer.listSemanticModels()) {
+      const declared = (model.defaults as { agg_time_dimension?: unknown } | undefined)?.agg_time_dimension;
+      if (typeof declared === 'string' && declared) modelTime.set(model.name, declared);
+    }
+    const timeRoleOf = (model: string | undefined, measure: { aggTimeDimension?: string } | undefined, metric?: { aggTimeDimension?: string }): string | undefined =>
+      metric?.aggTimeDimension ?? measure?.aggTimeDimension ?? (model ? modelTime.get(model) : undefined);
+    const displayFormatOf = (name: string): { kind: 'currency' | 'percent' | 'number' | 'count' | 'duration'; currency?: string; decimals?: number } | undefined => {
+      const format = layer.displayFormatFor(name);
+      return format ? { kind: format.kind, ...(format.currency ? { currency: format.currency } : {}), ...(format.decimals !== undefined ? { decimals: format.decimals } : {}) } : undefined;
+    };
     const cubeColumns = (cubeName: string) => new Set([...columnsOf(cubeName), ...(cubes.find((cube) => cube.name === cubeName)?.dimensions.map((d) => d.name) ?? []), ...(cubes.find((cube) => cube.name === cubeName)?.measures.map((m) => m.name) ?? [])]);
     for (const metric of layer.listMetrics()) {
       const model = metric.cube ?? metric.semanticModelIds?.[0];
@@ -160,10 +172,13 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       }
       const scopeNote = filters.length ? ` Only where ${filters.map((filter) => `${filter.column} ${filter.condition}`).join(' and ')}.` : '';
       const kindNote = !simple ? ` (${metric.metricType} metric: semantic engine only)` : '';
+      const timeRole = timeRoleOf(model, measure, metric);
+      const displayFormat = displayFormatOf(metric.name);
       source.metrics!.push({
         name: metric.name, ...(model ? { model } : {}), label: metric.label, description: `${metric.description ?? ''}${scopeNote}${kindNote}`.trim(),
         ...(aggregate ? { aggregation: aggregate } : {}), ...(metric.metricType ? { type: metric.metricType } : {}), expr: metric.sql, sourceId: metric.name,
         ...(metric.status ? { status: metric.status } : {}), ...(physical ? { physical } : {}),
+        ...(timeRole ? { aggTimeDimension: timeRole } : {}), ...(displayFormat ? { displayFormat } : {}),
       });
     }
     const metricNames = new Set(layer.listMetrics().map((metric) => metric.name));
@@ -171,10 +186,13 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       if (!measure.cube || metricNames.has(measure.name)) continue;
       const relation = relationOfCube.get(measure.cube);
       const aggregate = measure.agg?.toLowerCase();
+      const timeRole = timeRoleOf(measure.cube, measure);
+      const displayFormat = displayFormatOf(measure.name);
       source.measures!.push({
         name: measure.name, model: measure.cube, label: measure.label, description: measure.description, ...(aggregate ? { aggregation: aggregate } : {}),
         ...(measure.expr ? { expr: measure.expr } : {}), sourceId: measure.name,
         ...(relation && aggregate && AGGREGATES.has(aggregate) ? { physical: { relation, expr: qualifyExpression(measure.expr ?? measure.name, relation, cubeColumns(measure.cube)), aggregate } } : {}),
+        ...(timeRole ? { aggTimeDimension: timeRole } : {}), ...(displayFormat ? { displayFormat } : {}),
       });
     }
     const timeNames = new Set<string>();

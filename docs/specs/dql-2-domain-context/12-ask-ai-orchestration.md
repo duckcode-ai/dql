@@ -349,7 +349,11 @@ the question string again.
    measures' own time dimension when exactly one exists (recorded in
    provenance), otherwise every tier refuses it rather than dropping it, and
    execution proves both bounds are bound in the SQL or its parameters before
-   anything runs (`AGT-060`).
+   anything runs. When the interpreter wrote down nothing but a clarification
+   and the governed default supplied the only measure, question words the
+   intent does not account for (a grain, a member) send the interpreter back
+   once for the complete intent; a second bare reply becomes the
+   clarification, never a scalar served for a breakdown (`AGT-060`).
 9. **Browser submission identity.** The Notebook mints one identity per
    explicit submit, sends it as `Idempotency-Key`, persists the pending
    record before the request leaves, and pairs the answer with the question
@@ -366,6 +370,25 @@ the question string again.
    definition embodies it (a business term naming `is_drink_item` is covered
    by `drink_revenue`), so no false coverage warning is raised. A chat the
    user renamed keeps its title through later turns (`OBS-019`, `UI-024`).
+11. **Contract v1.1: ratios, time roles, population.** A measure may be a
+   `derived` ratio of two governed metrics or measures (`numerator /
+   denominator`, never a column or block), synthesised as `ratio:<num>/<den>`
+   and disclosed in the proof and the answer; the relational tier projects it
+   from hidden per-island aggregates (`NULLIF` on zero), the semantic tier
+   compiles both parts and divides after execution, and a block never serves
+   one. Every metric card names its time role (`time <dim>`, from the metric's
+   or measure's `agg_time_dimension` or the model default); measures under one
+   window must share a role (same-named dimensions on different models are one
+   role): one role is bound as the axis and recorded in provenance, several are
+   one bounded clarification, and an axis the question named itself is kept
+   with the difference disclosed. The relational tier binds the window to each
+   island's own same-named time column and never joins a finer relation only
+   to filter by time. `population: "all"` ("including locations with no
+   orders") enumerates every member of the grain's entity from its own
+   relation (the key is rewritten to the primary owner), left-joins the
+   islands, zero-fills additive aggregates only, and is refused by the
+   semantic and certified tiers. Legacy intents without these fields parse and
+   fingerprint identically (`AGT-061`).
 
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn

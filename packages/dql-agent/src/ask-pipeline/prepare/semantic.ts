@@ -26,10 +26,32 @@ function predicateToFilter(predicate: IntentPredicate, entry: VocabularyEntry): 
   return { dimension: semanticName(entry), operator: OPERATORS[predicate.op], values };
 }
 
-export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): { request?: SemanticCompileRequest; refusal?: PreparedRefusal; groupedByLabel?: boolean } {
+export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): { request?: SemanticCompileRequest; refusal?: PreparedRefusal; groupedByLabel?: boolean; derived?: NonNullable<PreparedCandidate['derived']> } {
   const entry = (ref: string) => vocabulary.get(ref);
+  if (intent.population === 'all') {
+    return { refusal: { tier: 'semantic', code: 'not_semantic', message: 'the semantic layer returns the members it matched; including every member of the entity is composed relationally', repairable: false } };
+  }
   const metrics: string[] = [];
+  const derived: NonNullable<PreparedCandidate['derived']> = [];
+  const asked = new Set<string>();
   for (const measure of intent.measures) {
+    if (measure.derived) {
+      // A ratio is two governed metrics compiled together and divided after execution.
+      const parts = [measure.derived.numerator, measure.derived.denominator].map((ref) => entry(ref));
+      if (parts.some((part) => !part || (part.kind !== 'metric' && part.kind !== 'measure'))) {
+        return { refusal: { tier: 'semantic', code: 'not_semantic', message: `the ratio ${measure.ref} needs two semantic metrics`, repairable: false } };
+      }
+      if (measure.scope?.length) {
+        return { refusal: { tier: 'semantic', code: 'measure_scope_not_expressible', message: `${measure.ref} carries a restriction the semantic layer cannot apply to one measure`, repairable: false } };
+      }
+      if (intent.ordering && (intent.ordering.ref === measure.ref || intent.ordering.ref === `measure:${intent.measures.indexOf(measure)}`)) {
+        return { refusal: { tier: 'semantic', code: 'not_semantic', message: `ordering by the ratio ${measure.ref} is composed relationally`, repairable: false } };
+      }
+      const [numerator, denominator] = parts.map((part) => semanticName(part!)) as [string, string];
+      for (const name of [numerator, denominator]) if (!metrics.includes(name)) metrics.push(name);
+      derived.push({ alias: measure.alias ?? measure.ref.replace(/^ratio:/, '').replace(/[^A-Za-z0-9_]+/g, '_'), numerator, denominator });
+      continue;
+    }
     const found = entry(measure.ref);
     if (!found || (found.kind !== 'metric' && found.kind !== 'measure')) {
       return { refusal: { tier: 'semantic', code: 'not_semantic', message: `${measure.ref} is not a semantic metric`, repairable: false } };
@@ -37,8 +59,11 @@ export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: Voca
     if (measure.scope?.length) {
       return { refusal: { tier: 'semantic', code: 'measure_scope_not_expressible', message: `${measure.ref} carries a restriction (${measure.scope.map((p) => `${p.ref} ${p.op} ${p.values.join('/')}`).join(', ')}) that the semantic layer cannot apply to one measure`, repairable: false } };
     }
-    metrics.push(semanticName(found));
+    const name = semanticName(found);
+    asked.add(name);
+    if (!metrics.includes(name)) metrics.push(name);
   }
+  for (const item of derived) if (asked.has(item.numerator) || asked.has(item.denominator)) item.keepInputs = true;
   const dimensions: string[] = [];
   let timeDimension: SemanticCompileRequest['timeDimension'];
   for (const group of intent.groupBy) {
@@ -67,6 +92,9 @@ export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: Voca
   }
   if (intent.time?.window) {
     const axis = intent.time.ref ? entry(intent.time.ref) : undefined;
+    // The window filters the concrete time dimension the host bound (a
+    // `metric_time` filter is silently dropped by the native composer; the
+    // execution proof would refuse it, but the concrete axis compiles).
     const name = axis ? semanticName(axis) : timeDimension?.name;
     if (!name) return { refusal: { tier: 'semantic', code: 'not_semantic', message: 'a time window needs a semantic time dimension', repairable: true } };
     filters.push({ dimension: name, operator: '>=', values: [intent.time.window.start.slice(0, 10)] }, { dimension: name, operator: '<', values: [intent.time.window.end.slice(0, 10)] });
@@ -88,6 +116,7 @@ export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: Voca
       ...(orderBy ? { orderBy } : {}),
       ...(intent.limit ? { limit: intent.limit } : {}),
     },
+    ...(derived.length ? { derived } : {}),
   };
 }
 
@@ -103,8 +132,12 @@ export async function prepareSemantic(intent: AnalyticalIntentV1, vocabulary: Vo
         ...(compiled.columns ? { columns: compiled.columns } : {}),
         ...(compiled.fanoutProbeSql ? { fanoutProbeSql: compiled.fanoutProbeSql } : {}),
         ...(compiled.artifact !== undefined ? { artifact: compiled.artifact } : {}),
+        ...(bound.derived ? { derived: bound.derived } : {}),
         compileRequest: bound.request,
-        proof: [`compiled on the ${compiled.engine} semantic engine from metrics ${bound.request.metrics.join(', ')}${bound.request.dimensions.length ? ` by ${bound.request.dimensions.join(', ')}` : ''}${compiled.strategy ? ` (${compiled.strategy})` : ''}`],
+        proof: [
+          `compiled on the ${compiled.engine} semantic engine from metrics ${bound.request.metrics.join(', ')}${bound.request.dimensions.length ? ` by ${bound.request.dimensions.join(', ')}` : ''}${compiled.strategy ? ` (${compiled.strategy})` : ''}`,
+          ...(bound.derived ?? []).map((item) => `${item.alias} = ${item.numerator} / ${item.denominator}, computed from the executed metrics (null when the denominator is 0)`),
+        ],
       }],
       refusals: [],
     };

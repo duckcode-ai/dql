@@ -24,6 +24,40 @@ export interface ExecuteDeps {
   maxRows?: number;
 }
 
+const numeric = (value: unknown): number | undefined => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
+};
+
+/**
+ * Compute ratio columns from two executed columns (semantic candidates carry
+ * both metrics and divide here). Null when the denominator is 0 or absent;
+ * helper columns are dropped unless the intent asked for them too.
+ */
+export function applyDerivedColumns(result: ExecutedRows, derived: NonNullable<PreparedCandidate['derived']>): ExecutedRows {
+  if (derived.length === 0) return result;
+  const find = (row: Record<string, unknown>, name: string): unknown => {
+    if (name in row) return row[name];
+    const key = Object.keys(row).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+    return key === undefined ? undefined : row[key];
+  };
+  const drop = new Set(derived.filter((item) => !item.keepInputs).flatMap((item) => [item.numerator, item.denominator]).map((name) => name.toLowerCase()));
+  const rows = result.rows.map((row) => {
+    const next: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(row)) if (!drop.has(key.toLowerCase())) next[key] = value;
+    for (const item of derived) {
+      const numerator = numeric(find(row, item.numerator));
+      const denominator = numeric(find(row, item.denominator));
+      next[item.alias] = numerator === undefined || denominator === undefined || denominator === 0 ? null : numerator / denominator;
+    }
+    return next;
+  });
+  const columns = [...result.columns.filter((column) => !drop.has(column.toLowerCase())), ...derived.map((item) => item.alias).filter((alias) => !result.columns.includes(alias))];
+  return { ...result, columns, rows };
+}
+
 export type ExecutionOutcome =
   | { ok: true; result: ExecutedRows; proofs: string[] }
   | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed' | 'no_rows_matched'; message: string; proofs: string[]; cause?: EmptyAggregateCause };
@@ -95,8 +129,10 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
     }
   }
   try {
-    const result = await deps.run(candidate.sql, candidate.params, { maxRows: deps.maxRows ?? 500 });
+    const executed = await deps.run(candidate.sql, candidate.params, { maxRows: deps.maxRows ?? 500 });
+    const result = candidate.derived?.length ? applyDerivedColumns(executed, candidate.derived) : executed;
     proofs.push(`executed on the warehouse: ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} in ${Math.round(result.executionTimeMs)} ms`);
+    if (candidate.derived?.length) proofs.push(`ratio${candidate.derived.length > 1 ? 's' : ''} ${candidate.derived.map((item) => `${item.alias} = ${item.numerator} / ${item.denominator}`).join('; ')} computed from the executed columns`);
     const cause = emptyAggregateCause(intent, result);
     if (cause) return { ok: false, code: 'no_rows_matched', message: describeEmptyAggregate(cause), proofs, cause };
     return { ok: true, result, proofs };

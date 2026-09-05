@@ -1,0 +1,23 @@
+{
+  "key": "9d9ba04de9d165e46a1a499e13e05ca6",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants the total count of large orders (orders with order total over 20).\",\"measures\":[{\"ref\":\"metric:orders.large_orders\",\"aggregation\":\"sum\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.large_orders\":\"q:large orders\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T20:32:46.547Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "9d9ba04de9d165e46a1a499e13e05ca6ee2a4edae4215e1641ce2a3a445b7291",
+    "postCanonicalHash": "9d9ba04de9d165e46a1a499e13e05ca6ee2a4edae4215e1641ce2a3a445b7291",
+    "appliedRuleClasses": []
+  }
+}

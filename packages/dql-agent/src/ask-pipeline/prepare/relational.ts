@@ -81,6 +81,19 @@ function predicateSql(dialect: SqlDialectLike, bound: BoundPredicate, params: un
   }
 }
 
+interface VisibleMeasure {
+  alias: string;
+  kind: 'aggregate' | 'ratio';
+  /** The physical aggregate for `aggregate`; the parts for `ratio`. */
+  physical?: PhysicalMeasure;
+  numerator?: PhysicalMeasure;
+  denominator?: PhysicalMeasure;
+  /** Additive aggregates read 0 under `population: all`; anything else stays null. */
+  zeroFill: boolean;
+}
+
+const ADDITIVE = new Set(['sum', 'count', 'count_distinct']);
+
 export function composeRelational(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, deps: PrepareDeps): { candidate?: PreparedCandidate; refusal?: PreparedRefusal } {
   const dialect = deps.dialect ?? DEFAULT_DIALECT;
   const refuse = (code: PreparedRefusal['code'], message: string, repairable = false): { refusal: PreparedRefusal } => ({ refusal: { tier: 'relational', code, message, repairable } });
@@ -92,20 +105,39 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     return { predicate, relation: physical.relation, column: physical.column, boolean: Boolean(entry?.roles.includes('boolean')) };
   };
 
-  // Measures, each bound to the fact relation it reads.
+  // Measures, each bound to the fact relation it reads. A ratio contributes
+  // two hidden aggregates and is projected afterwards as their quotient.
   const measures: PhysicalMeasure[] = [];
-  for (const measure of intent.measures) {
-    const entry = vocabulary.get(measure.ref);
+  const visible: VisibleMeasure[] = [];
+  const bindMeasure = (ref: string, alias: string, aggregation: string | undefined, scope: IntentPredicate[]): PhysicalMeasure | PreparedRefusal => {
+    const entry = vocabulary.get(ref);
     const physical = physicalOf(entry);
-    if (!physical) return refuse('not_relational', `${measure.ref} has no physical binding`);
+    if (!physical) return { tier: 'relational', code: 'not_relational', message: `${ref} has no physical binding`, repairable: false };
     // The vocabulary owns a metric's aggregate; an intent aggregation applies to raw columns only.
-    const aggregate = entry?.kind === 'column' ? (measure.aggregation ?? physical.aggregate) : (physical.aggregate ?? measure.aggregation);
-    if (!aggregate || (!AGG_SQL[aggregate] && aggregate !== 'derived')) return refuse('not_relational', `${measure.ref} needs an aggregation`, true);
-    if (aggregate === 'derived' && measure.scope?.length) return refuse('not_relational', `${measure.ref} is a derived metric and cannot take a per-measure scope`);
+    const aggregate = entry?.kind === 'column' ? (aggregation ?? physical.aggregate) : (physical.aggregate ?? aggregation);
+    if (!aggregate || (!AGG_SQL[aggregate] && aggregate !== 'derived')) return { tier: 'relational', code: 'not_relational', message: `${ref} needs an aggregation`, repairable: true };
+    if (aggregate === 'derived' && scope.length) return { tier: 'relational', code: 'not_relational', message: `${ref} is a derived metric and cannot take a per-measure scope`, repairable: false };
     const expr = physical.expr ?? (physical.column ? qualify(dialect, physical.relation, physical.column) : undefined);
-    if (!expr) return refuse('not_relational', `${measure.ref} has no expression`);
+    if (!expr) return { tier: 'relational', code: 'not_relational', message: `${ref} has no expression`, repairable: false };
+    const bound: PhysicalMeasure = { alias, aggregate, expr, relation: physical.relation, scope };
+    measures.push(bound);
+    return bound;
+  };
+  for (const [index, measure] of intent.measures.entries()) {
+    if (measure.derived) {
+      const alias = measure.alias ?? measure.ref.replace(/^ratio:/, '').replace(/[^A-Za-z0-9_]+/g, '_');
+      const numerator = bindMeasure(measure.derived.numerator, `__num_${index + 1}`, undefined, measure.scope ?? []);
+      if ('tier' in numerator) return { refusal: numerator };
+      const denominator = bindMeasure(measure.derived.denominator, `__den_${index + 1}`, undefined, measure.scope ?? []);
+      if ('tier' in denominator) return { refusal: denominator };
+      visible.push({ alias, kind: 'ratio', numerator, denominator, zeroFill: false });
+      continue;
+    }
+    const entry = vocabulary.get(measure.ref);
     const alias = measure.alias ?? entry?.name ?? measure.ref.split('.').pop() ?? 'value';
-    measures.push({ alias, aggregate, expr, relation: physical.relation, scope: measure.scope ?? [] });
+    const bound = bindMeasure(measure.ref, alias, measure.aggregation, measure.scope ?? []);
+    if ('tier' in bound) return { refusal: bound };
+    visible.push({ alias, kind: 'aggregate', physical: bound, zeroFill: ADDITIVE.has(bound.aggregate) });
   }
   if (measures.length === 0) return refuse('not_relational', 'no measure to compose');
 
@@ -151,6 +183,20 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     scopes.set(measure, bound);
   }
 
+  // POPULATION: every member of the grain's entity, from its own relation.
+  // Entity-bound filters restrict the population; fact filters and the
+  // window restrict only what is counted for each member.
+  let population: { relation: string; filters: BoundPredicate[] } | undefined;
+  if (intent.population === 'all') {
+    const key = intent.groupBy.find((group) => group.role === 'key');
+    const keyColumn = key ? columns.find((column) => column.role === 'group' && column.column === physicalOf(vocabulary.get(key.ref))?.column) : undefined;
+    if (!key || !keyColumn) return refuse('not_relational', 'including every member needs an entity key in groupBy with a physical relation', true);
+    if (columns.some((column) => column.grain)) return refuse('not_relational', 'including every member cannot be combined with a time axis');
+    const off = columns.filter((column) => column.relation !== keyColumn.relation);
+    if (off.length) return refuse('not_relational', `including every member of ${keyColumn.relation} needs its columns from that relation; ${off.map((column) => `${column.relation}.${column.column}`).join(', ')} live elsewhere`, true);
+    population = { relation: keyColumn.relation, filters: filters.filter((filter) => filter.relation === keyColumn.relation) };
+  }
+
   const everyRelation = new Set<string>([...measures.map((m) => m.relation), ...columns.map((c) => c.relation), ...filters.map((f) => f.relation), ...(window ? [window.relation] : []), ...[...scopes.values()].flat().map((s) => s.relation)]);
   const denial = deps.policyDenies?.([...everyRelation]);
   if (denial) return refuse('policy_denied', denial);
@@ -163,7 +209,15 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   const islandSql: string[] = [];
   for (const base of islandOrder) {
     const islandMeasures = measures.filter((measure) => measure.relation === base);
-    const needed = new Set<string>([...columns.map((c) => c.relation), ...filters.map((f) => f.relation), ...(window ? [window.relation] : []), ...islandMeasures.flatMap((m) => (scopes.get(m) ?? []).map((s) => s.relation))]);
+    // The window binds to the island's own same-named time column when it
+    // has one (an order date lives on orders and on order lines alike);
+    // joining a finer relation only to filter by time would multiply rows.
+    const islandWindow = window
+      ? (vocabulary.entries.some((candidate) => candidate.kind === 'dimension' && candidate.roles.includes('time') && candidate.physical?.relation === base && candidate.physical.column === window!.column)
+        ? { ...window, relation: base }
+        : window)
+      : undefined;
+    const needed = new Set<string>([...columns.map((c) => c.relation), ...filters.map((f) => f.relation), ...(islandWindow ? [islandWindow.relation] : []), ...islandMeasures.flatMap((m) => (scopes.get(m) ?? []).map((s) => s.relation))]);
     const joins: string[] = [];
     const joined = new Set([base]);
     for (const relation of needed) {
@@ -179,9 +233,9 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     for (const relation of joined) joinedAll.add(relation);
     const where: string[] = [];
     for (const filter of filters) where.push(predicateSql(dialect, filter, params));
-    if (window) {
-      const target = qualify(dialect, window.relation, window.column);
-      params.push(window.start, window.end);
+    if (islandWindow) {
+      const target = qualify(dialect, islandWindow.relation, islandWindow.column);
+      params.push(islandWindow.start, islandWindow.end);
       where.push(`${target} >= ?`, `${target} < ?`);
     }
     const measureSql = islandMeasures.map((measure) => {
@@ -204,11 +258,27 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     ].join('\n'));
   }
 
+  // The final projection: keys, then each visible measure. A ratio divides
+  // its hidden aggregates; under a population, additive aggregates zero-fill.
+  const q = (name: string) => dialect.quoteIdentifier(name);
+  const names = islandOrder.map((_, index) => `island_${index + 1}`);
+  const islandOf = (measure: PhysicalMeasure) => names[islandOrder.indexOf(measure.relation)]!;
+  const projected = (measure: VisibleMeasure): string => {
+    if (measure.kind === 'ratio') {
+      const numerator = `${islandOf(measure.numerator!)}.${q(measure.numerator!.alias)}`;
+      const denominator = `${islandOf(measure.denominator!)}.${q(measure.denominator!.alias)}`;
+      return `CAST(${numerator} AS DOUBLE) / NULLIF(${denominator}, 0) AS ${q(measure.alias)}`;
+    }
+    const value = `${islandOf(measure.physical!)}.${q(measure.alias)}`;
+    return `${population && measure.zeroFill ? `COALESCE(${value}, 0)` : value} AS ${q(measure.alias)}`;
+  };
+  const needsProjection = population !== undefined || islandSql.length > 1 || visible.some((measure) => measure.kind === 'ratio');
+
   // Ordering and limit apply to the final projection.
   let orderBy = '';
   if (intent.ordering) {
     const measureIndex = intent.ordering.ref.startsWith('measure:') ? Number(intent.ordering.ref.slice('measure:'.length)) || 0 : intent.measures.findIndex((measure) => measure.ref === intent.ordering!.ref);
-    const target = measureIndex >= 0 ? measures[measureIndex]?.alias : columns.find((column) => vocabulary.get(intent.ordering!.ref)?.physical?.column === column.column || vocabulary.get(intent.ordering!.ref)?.name === column.column)?.alias;
+    const target = measureIndex >= 0 ? visible[measureIndex]?.alias : columns.find((column) => vocabulary.get(intent.ordering!.ref)?.physical?.column === column.column || vocabulary.get(intent.ordering!.ref)?.name === column.column)?.alias;
     if (target) orderBy = `\nORDER BY ${dialect.quoteIdentifier(target)} ${intent.ordering.direction.toUpperCase()}`;
   } else if (columns.some((column) => column.grain)) {
     orderBy = `\nORDER BY ${columns.filter((column) => column.grain).map((column) => dialect.quoteIdentifier(column.alias)).join(', ')}`;
@@ -216,37 +286,63 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   const limit = intent.limit ? `\n${dialect.limitClause(intent.limit)}` : '';
 
   let sql: string;
-  let proof: string;
-  if (islandSql.length === 1) {
+  const proof: string[] = [];
+  const keys = columns.map((column) => column.alias);
+  if (!needsProjection) {
     sql = islandSql[0]! + orderBy + limit;
-    proof = `composed over ${[...joinedAll].join(', ')} along governed join paths${measures.some((m) => m.scope.length) ? ' with per-measure scope' : ''}`;
+    proof.push(`composed over ${[...joinedAll].join(', ')} along governed join paths${measures.some((m) => m.scope.length) ? ' with per-measure scope' : ''}`);
   } else {
-    const names = islandOrder.map((_, index) => `island_${index + 1}`);
-    const q = (name: string) => dialect.quoteIdentifier(name);
-    const keys = columns.map((column) => column.alias);
     const ctes = islandSql.map((body, index) => `${names[index]} AS (\n${body}\n)`);
     let outer: string;
-    if (keys.length === 0) {
-      outer = `SELECT ${measures.map((measure) => `${names[islandOrder.indexOf(measure.relation)]}.${q(measure.alias)} AS ${q(measure.alias)}`).join(', ')}\nFROM ${names.join(' CROSS JOIN ')}`;
+    if (population) {
+      // The population CTE enumerates the members; islands attach by key.
+      const populationParams: unknown[] = [];
+      const populationWhere = population.filters.map((filter) => predicateSql(dialect, filter, populationParams));
+      params.unshift(...populationParams);
+      ctes.unshift(`population AS (\nSELECT DISTINCT ${columns.map((column) => `${column.expr} AS ${q(column.alias)}`).join(', ')}\nFROM ${qualifyRelation(dialect, population.relation)}${populationWhere.length ? `\nWHERE ${populationWhere.join(' AND ')}` : ''}\n)`);
+      const joins = names.map((name) => `LEFT JOIN ${name} ON ${keys.map((key) => `population.${q(key)} = ${name}.${q(key)}`).join(' AND ')}`);
+      outer = [
+        `SELECT ${[...keys.map((key) => `population.${q(key)} AS ${q(key)}`), ...visible.map(projected)].join(', ')}`,
+        'FROM population',
+        ...joins,
+      ].join('\n');
+      proof.push(`every member of ${population.relation} is a row (${columns.length ? keys.join(', ') : 'no key'}); ${visible.filter((measure) => measure.zeroFill).map((measure) => measure.alias).join(', ') || 'no measure'} read 0 where nothing matched${visible.some((measure) => !measure.zeroFill) ? `; ${visible.filter((measure) => !measure.zeroFill).map((measure) => measure.alias).join(', ')} stay null` : ''}`);
+    } else if (keys.length === 0) {
+      outer = `SELECT ${visible.map(projected).join(', ')}\nFROM ${names.join(' CROSS JOIN ')}`;
+    } else if (islandSql.length === 1) {
+      outer = `SELECT ${[...keys.map((key) => `${names[0]}.${q(key)} AS ${q(key)}`), ...visible.map(projected)].join(', ')}\nFROM ${names[0]}`;
     } else {
       ctes.push(`grain_keys AS (\n${names.map((name) => `SELECT ${keys.map(q).join(', ')} FROM ${name}`).join('\nUNION\n')}\n)`);
       const joins = names.map((name) => `LEFT JOIN ${name} ON ${keys.map((key) => `grain_keys.${q(key)} = ${name}.${q(key)}`).join(' AND ')}`);
       outer = [
-        `SELECT ${[...keys.map((key) => `grain_keys.${q(key)} AS ${q(key)}`), ...measures.map((measure) => `${names[islandOrder.indexOf(measure.relation)]}.${q(measure.alias)} AS ${q(measure.alias)}`)].join(', ')}`,
+        `SELECT ${[...keys.map((key) => `grain_keys.${q(key)} AS ${q(key)}`), ...visible.map(projected)].join(', ')}`,
         'FROM grain_keys',
         ...joins,
       ].join('\n');
     }
     sql = `WITH ${ctes.join(',\n')}\n${outer}${orderBy}${limit}`;
-    proof = `composed as ${islandSql.length} aggregate islands (${islandOrder.join(' | ')}) joined on ${keys.length ? keys.join(', ') : 'a single row'}, so measures of different grains never multiply each other`;
+    if (islandSql.length > 1) proof.push(`composed as ${islandSql.length} aggregate islands (${islandOrder.join(' | ')}) joined on ${keys.length ? keys.join(', ') : 'a single row'}, so measures of different grains never multiply each other`);
+    else if (!population) proof.push(`composed over ${[...joinedAll].join(', ')} along governed join paths${measures.some((m) => m.scope.length) ? ' with per-measure scope' : ''}`);
+    for (const measure of visible) {
+      if (measure.kind === 'ratio') proof.push(`${measure.alias} = ${labelOf(vocabulary, measure.numerator!)} / ${labelOf(vocabulary, measure.denominator!)}, divided after each part is aggregated (null when the denominator is 0)`);
+    }
   }
   return {
     candidate: {
       tier: 'relational', trust: 'governed', sql, params,
-      columns: [...columns.map((column) => column.alias), ...measures.map((measure) => measure.alias)],
-      proof: [proof],
+      columns: [...columns.map((column) => column.alias), ...visible.map((measure) => measure.alias)],
+      proof,
     },
   };
+}
+
+function labelOf(vocabulary: VocabularyIndex, measure: PhysicalMeasure): string {
+  const entry = vocabulary.entries.find((candidate) => candidate.physical?.relation === measure.relation && (candidate.physical?.expr === measure.expr || (candidate.physical?.column && qualifyMatches(measure.expr, candidate.physical.column))));
+  return entry?.label ?? entry?.name ?? measure.expr;
+}
+
+function qualifyMatches(expr: string, column: string): boolean {
+  return expr.replace(/"/g, '').endsWith(`.${column}`);
 }
 
 export function prepareRelational(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, deps: PrepareDeps): { candidates: PreparedCandidate[]; refusals: PreparedRefusal[] } {

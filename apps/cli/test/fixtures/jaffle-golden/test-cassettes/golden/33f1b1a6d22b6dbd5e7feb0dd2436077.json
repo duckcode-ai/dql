@@ -1,0 +1,24 @@
+{
+  "key": "33f1b1a6d22b6dbd5e7feb0dd2436077",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show Ryan Byrd's total order revenue (including tax) and beverage revenue.\",\"measures\":[{\"ref\":\"metric:orders.order_total\"},{\"ref\":\"metric:order_item.drink_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:total revenue\",\"metric:order_item.drink_revenue\":\"q:beverage revenue\",\"dimension:customers.customer_name\":\"q:Ryan byrd\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T20:38:58.263Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "33f1b1a6d22b6dbd5e7feb0dd243607703275f0ed3809b3f696972521826b495",
+    "postCanonicalHash": "33f1b1a6d22b6dbd5e7feb0dd243607703275f0ed3809b3f696972521826b495",
+    "appliedRuleClasses": []
+  }
+}

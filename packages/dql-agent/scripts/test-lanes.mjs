@@ -45,7 +45,7 @@ const EXPECTED_TEST_FILES = 149;
 // observability, retrieval, semantic-proof, research-ledger, conversation and
 // provider-transport regressions total 1,891 non-skipped tests; a future
 // accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 1909;
+const EXPECTED_TESTS = 1925;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

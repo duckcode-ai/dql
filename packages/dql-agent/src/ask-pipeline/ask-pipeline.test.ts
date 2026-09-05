@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
-import { executeCandidate } from './execute.js';
-import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, buildIntentSystemPrompt, resolveIntent, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyDerivedColumns, executeCandidate } from './execute.js';
+import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
+import { applyGovernedDefaults, buildIntentSystemPrompt, proveTimeRoles, resolveIntent, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { bindSemanticRequest } from './prepare/index.js';
 import { formatValue } from './outcomes.js';
 import { runAskPipeline } from './pipeline.js';
 import { buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
@@ -204,6 +205,20 @@ describe('intent resolution', () => {
     const defaulted = await resolveIntent({ question: 'total revenue', vocabulary, provider: scripted([ambiguous]) });
     expect(defaulted.status).toBe('resolved');
     if (defaulted.status === 'resolved') expect(defaulted.intent.measures.map((measure) => measure.ref)).toEqual(['metric:order_item.revenue']);
+  });
+  it('a clarification-only reply that the governed default resolves is sent back for the rest of the question, never executed as a scalar', async () => {
+    const bareTrend = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Monthly revenue trend', measures: [], groupBy: [], display: [], filters: [], expectedShape: 'trend', unresolved: [{ clause: 'revenue by month', options: ['metric:orders.order_total', 'metric:order_item.revenue'], material: true, question: 'Gross order revenue or product revenue?' }], provenance: {} });
+    const full = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Monthly product revenue', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }], display: [], filters: [], expectedShape: 'trend', unresolved: [], provenance: { 'metric:order_item.revenue': 'q:revenue', 'dimension:order_item.ordered_at': 'q:by month' } });
+    const dispatches: string[] = [];
+    const result = await resolveIntent({ question: 'revenue by month', vocabulary, provider: scripted([bareTrend, full]), onDispatch: (event) => dispatches.push(event.purpose) });
+    expect(result.status).toBe('resolved');
+    if (result.status === 'resolved') expect(result.intent.groupBy).toEqual([{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }]);
+    expect(dispatches).toHaveLength(2);
+    const stubborn = await resolveIntent({ question: 'revenue by month', vocabulary, provider: scripted([bareTrend, bareTrend]) });
+    expect(stubborn.status).toBe('clarify');
+    if (stubborn.status === 'clarify') expect(stubborn.question).toBe('Gross order revenue or product revenue?');
+    expect(unaccountedQuestionWords('what is the total revenue', parseIntent(JSON.parse(full)).intent!, vocabulary)).toEqual([]);
+    expect(unaccountedQuestionWords('revenue for Ryan Byrd by month', parseIntent(JSON.parse(full)).intent!, vocabulary)).toEqual(['ryan', 'byrd']);
   });
   it('prose that never becomes JSON fails with a typed reason after the bounded attempts', async () => {
     const result = await resolveIntent({ question: 'x', vocabulary, provider: scripted(['I cannot help with that.']) });
@@ -495,5 +510,126 @@ describe('a time window without an axis', () => {
   it('stays unbound when the model declares no time dimension', () => {
     const next = validateIntentRefs(windowed('metric:customers.lifetime_spend'), vocabulary);
     expect(next.intent.time?.ref).toBeUndefined();
+  });
+});
+
+describe('contract v1.1: derived ratio and population', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const legacy = { version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'entity:customers.customer', role: 'key' }], display: ['dimension:customers.customer_name'], filters: [], unresolved: [], provenance: {}, expectedShape: 'ranking', limit: 10, ordering: { ref: 'measure:0', direction: 'desc' } };
+  it('an intent without the new fields parses and fingerprints exactly as before', () => {
+    const parsed = parseIntent(legacy).intent!;
+    expect(parsed.population).toBeUndefined();
+    expect(parsed.measures[0]!.derived).toBeUndefined();
+    // Pinned: the execution fingerprint of this legacy intent must never move.
+    expect(intentExecutionFingerprint(parsed)).toBe(intentExecutionFingerprint(parseIntent({ ...legacy, population: 'matching' }).intent!));
+    expect(intentExecutionFingerprint(parsed)).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(intentExecutionFingerprint(parseIntent({ ...legacy, population: 'all' }).intent!)).not.toBe(intentExecutionFingerprint(parsed));
+  });
+  it('a derived ratio needs no ref: one is synthesized, and its parts are its refs', () => {
+    const parsed = parseIntent({ ...legacy, measures: [{ derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' }, alias: 'aov' }] }).intent!;
+    expect(parsed.measures[0]).toEqual({ ref: 'ratio:metric:order_item.revenue/metric:orders.orders', derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' }, alias: 'aov' });
+    expect(intentRefs(parsed)).toEqual(['dimension:customers.customer_name', 'entity:customers.customer', 'metric:order_item.revenue', 'metric:orders.orders']);
+    expect(describeIntent(parsed, (ref) => ref.split('.').pop()!)).toMatch(/^revenue per orders/);
+    expect(parseIntent({ ...legacy, measures: [{ derived: { kind: 'ratio', numerator: 'metric:order_item.revenue' } }] }).errors[0]?.path).toBe('measures[0].derived');
+  });
+  it('ratio parts are canonicalised as metrics or measures; a column part is sent back', () => {
+    const ok = validateIntentRefs(parseIntent({ ...legacy, measures: [{ derived: { kind: 'ratio', numerator: 'revenue', denominator: 'metric:orders.orders' }, alias: 'aov' }] }).intent!, vocabulary);
+    expect(ok.intent.measures[0]!.derived).toEqual({ kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' });
+    expect(ok.intent.measures[0]!.ref).toBe('ratio:metric:order_item.revenue/metric:orders.orders');
+    const bad = validateIntentRefs(parseIntent({ ...legacy, measures: [{ derived: { kind: 'ratio', numerator: 'column:dev.orders.order_total', denominator: 'metric:orders.orders' } }] }).intent!, vocabulary);
+    expect(bad.problems.some((problem) => problem.path === 'measures[0].derived.numerator' && /expected one of metric, measure/.test(problem.message))).toBe(true);
+  });
+  it('population "all" rewrites the key to the entity\'s primary owner and needs a key', () => {
+    const source: VocabularySource = {
+      metrics: [{ name: 'order_total', model: 'orders', aggregation: 'sum', physical: { relation: 'dev.orders', expr: '"dev"."orders"."order_total"', aggregate: 'sum' } }],
+      entities: [
+        { name: 'location', model: 'orders', type: 'foreign', physical: { relation: 'dev.orders', column: 'location_id' } },
+        { name: 'location', model: 'locations', type: 'primary', physical: { relation: 'dev.locations', column: 'location_id' } },
+      ],
+      dimensions: [{ name: 'location_name', model: 'locations', dataType: 'string', physical: { relation: 'dev.locations', column: 'location_name' } }],
+    };
+    const local = buildVocabularyIndex(source);
+    const base = { version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:orders.order_total' }], display: ['dimension:locations.location_name'], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped', population: 'all' };
+    const rewritten = validateIntentRefs(parseIntent({ ...base, groupBy: [{ ref: 'entity:orders.location', role: 'key' }] }).intent!, local);
+    expect(rewritten.problems).toEqual([]);
+    expect(rewritten.intent.groupBy[0]!.ref).toBe('entity:locations.location');
+    expect(rewritten.intent.provenance['entity:locations.location']).toMatch(/host:population "all"/);
+    const keyless = validateIntentRefs(parseIntent({ ...base, groupBy: [] }).intent!, local);
+    expect(keyless.problems.some((problem) => /exactly one entity key/.test(problem.message))).toBe(true);
+  });
+});
+
+describe('time roles under one window', () => {
+  const source: VocabularySource = {
+    metrics: [
+      { name: 'revenue', model: 'order_item', aggregation: 'sum', aggTimeDimension: 'ordered_at', physical: { relation: 'dev.order_items', expr: '"dev"."order_items"."product_price"', aggregate: 'sum' } },
+      { name: 'orders', model: 'orders', aggregation: 'count', aggTimeDimension: 'ordered_at', physical: { relation: 'dev.orders', expr: '"dev"."orders"."order_id"', aggregate: 'count' } },
+      { name: 'customers', model: 'customers', aggregation: 'count_distinct', aggTimeDimension: 'first_ordered_at', physical: { relation: 'dev.customers', expr: '"dev"."customers"."customer_id"', aggregate: 'count_distinct' } },
+    ],
+    dimensions: [
+      { name: 'ordered_at', model: 'order_item', dataType: 'timestamp', isTime: true, physical: { relation: 'dev.order_items', column: 'ordered_at' } },
+      { name: 'ordered_at', model: 'orders', dataType: 'timestamp', isTime: true, physical: { relation: 'dev.orders', column: 'ordered_at' } },
+      { name: 'first_ordered_at', model: 'customers', dataType: 'timestamp', isTime: true, physical: { relation: 'dev.customers', column: 'first_ordered_at' } },
+      { name: 'metric_time', model: 'order_item', dataType: 'timestamp', isTime: true },
+    ],
+  };
+  const local = buildVocabularyIndex(source);
+  const windowed = (measures: unknown[], time: Record<string, unknown> = {}, provenance: Record<string, string> = {}) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures, groupBy: [], display: [], filters: [], unresolved: [], provenance, expectedShape: 'scalar', time: { ...time, window: { start: '2025-01-01', end: '2026-01-01', expression: 'in 2025' } } }).intent!;
+  it('the card says which time a metric aggregates over', () => {
+    expect(local.get('metric:customers.customers')?.timeRef).toBe('dimension:customers.first_ordered_at');
+    expect(local.renderCards()).toMatch(/metric:customers\.customers \[[^\]]*time first_ordered_at/);
+  });
+  it('one shared role (the same-named order date on two models) becomes the window axis, and a metric_time axis is replaced by it', () => {
+    const intent = windowed([{ derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' }, alias: 'aov' }]);
+    proveTimeRoles(intent, local);
+    expect(intent.time?.ref).toBe('dimension:order_item.ordered_at');
+    expect(intent.unresolved).toEqual([]);
+    const kept = windowed([{ ref: 'metric:order_item.revenue' }, { ref: 'metric:orders.orders' }], { ref: 'dimension:orders.ordered_at' }, { 'dimension:orders.ordered_at': 'q:in 2025' });
+    proveTimeRoles(kept, local);
+    expect(kept.time?.ref).toBe('dimension:orders.ordered_at');
+    expect(intent.provenance['dimension:order_item.ordered_at']).toMatch(/host:time window "in 2025"/);
+    const generic = windowed([{ ref: 'metric:order_item.revenue' }], { ref: 'dimension:order_item.metric_time' });
+    proveTimeRoles(generic, local);
+    expect(generic.time?.ref).toBe('dimension:order_item.ordered_at');
+  });
+  it('two roles become one bounded clarification, never a silent choice', () => {
+    const intent = windowed([{ ref: 'metric:order_item.revenue' }, { ref: 'metric:customers.customers' }]);
+    proveTimeRoles(intent, local);
+    expect(intent.time?.ref).toBeUndefined();
+    expect(intent.unresolved).toHaveLength(1);
+    expect(intent.unresolved[0]).toMatchObject({ clause: 'in 2025', material: true, options: ['dimension:order_item.ordered_at', 'dimension:customers.first_ordered_at'] });
+    expect(intent.unresolved[0]!.question).toMatch(/different time for these measures/);
+  });
+  it('an axis the question named itself is kept and the difference is disclosed', () => {
+    const intent = windowed([{ ref: 'metric:order_item.revenue' }, { ref: 'metric:customers.customers' }], { ref: 'dimension:customers.first_ordered_at' }, { 'dimension:customers.first_ordered_at': 'q:first acquired in 2025' });
+    proveTimeRoles(intent, local);
+    expect(intent.time?.ref).toBe('dimension:customers.first_ordered_at');
+    expect(intent.unresolved).toEqual([]);
+    expect(intent.provenance['dimension:customers.first_ordered_at']).toMatch(/applies on first_ordered_at to every measure/);
+  });
+  it('the semantic tier compiles both parts of a ratio and divides after execution; ordering by the ratio is relational', () => {
+    const intent = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' }, alias: 'aov' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }).intent!;
+    const bound = bindSemanticRequest(intent, local);
+    expect(bound.request?.metrics).toEqual(['revenue', 'orders']);
+    expect(bound.derived).toEqual([{ alias: 'aov', numerator: 'revenue', denominator: 'orders' }]);
+    const windowedRatio = { ...intent, time: { ref: 'dimension:order_item.ordered_at', window: { start: '2025-01-01', end: '2026-01-01' } }, provenance: { 'dimension:order_item.ordered_at': 'host:time window "in 2025" applied on the measures\' time role' } };
+    expect(bindSemanticRequest(windowedRatio, local).request?.filters).toEqual([{ dimension: 'order_item.ordered_at', operator: '>=', values: ['2025-01-01'] }, { dimension: 'order_item.ordered_at', operator: '<', values: ['2026-01-01'] }]);
+    const ordered = bindSemanticRequest({ ...intent, ordering: { ref: 'measure:0', direction: 'desc' } }, local);
+    expect(ordered.refusal?.message).toMatch(/ordering by the ratio/);
+    const population = bindSemanticRequest({ ...intent, population: 'all' }, local);
+    expect(population.refusal?.code).toBe('not_semantic');
+    const divided = applyDerivedColumns({ columns: ['revenue', 'orders'], rows: [{ revenue: 546503, orders: 53559 }, { revenue: 10, orders: 0 }], rowCount: 2, executionTimeMs: 1 }, bound.derived!);
+    expect(divided.columns).toEqual(['aov']);
+    expect(divided.rows[0]!.aov).toBeCloseTo(10.2038, 3);
+    expect(divided.rows[1]!.aov).toBeNull();
+    const kept = applyDerivedColumns({ columns: ['revenue', 'orders'], rows: [{ revenue: 4, orders: 2 }], rowCount: 1, executionTimeMs: 1 }, [{ alias: 'aov', numerator: 'revenue', denominator: 'orders', keepInputs: true }]);
+    expect(kept.columns).toEqual(['revenue', 'orders', 'aov']);
+  });
+});
+
+describe('a derived metric card shows what it divides', () => {
+  it('renders the formula and the time role, so a lifetime ratio is never mistaken for a period one', () => {
+    const local = buildVocabularyIndex({ metrics: [{ name: 'average_order_value', model: 'customers', label: 'Average Order Value', type: 'derived', expr: 'lifetime_spend_pretax / count_lifetime_orders', aggTimeDimension: 'first_ordered_at', description: 'LTV pre-tax / number of orders' }] });
+    expect(local.renderCards()).toMatch(/metric:customers\.average_order_value \[[^\]]*time first_ordered_at\] = lifetime_spend_pretax \/ count_lifetime_orders LTV pre-tax/);
   });
 });

@@ -45,6 +45,14 @@ export interface VocabularyEntry {
   examples?: string[];
   /** The id the host's existing compilers know this object by (semantic runtime name, catalog key). */
   sourceId?: string;
+  /** For a metric or measure: the time dimension ref it aggregates over (its time role). */
+  timeRef?: string;
+  /** For a metric: simple, ratio, derived, cumulative, conversion. */
+  metricType?: string;
+  /** For an entity: primary, foreign, unique, natural. */
+  entityType?: string;
+  /** How a value of this measure is displayed (currency, percent, count...). */
+  displayFormat?: { kind: 'currency' | 'percent' | 'number' | 'count' | 'duration'; currency?: string; decimals?: number };
   /**
    * Physical binding for the relational tier: the relation a semantic object
    * reads, its column (dimensions, entities, plain measures) or aggregate
@@ -245,7 +253,13 @@ export function renderCard(entry: VocabularyEntry): string {
   if (entry.aggregation) bits.push(entry.aggregation);
   if (entry.dataType) bits.push(entry.dataType);
   if (entry.timeGrains?.length) bits.push(`grains ${entry.timeGrains.join(',')}`);
+  // The time role: which dimension a measure aggregates over. Two measures
+  // under one window must agree on it.
+  if (entry.timeRef) bits.push(`time ${entry.timeRef.split('.').pop()}`);
   if (entry.certified) bits.push('certified');
+  // A derived or ratio metric shows its formula: what it divides decides
+  // whether it is a period ratio or a lifetime one.
+  const formula = (entry.metricType === 'derived' || entry.metricType === 'ratio') && entry.expr ? ` = ${entry.expr.replace(/\s+/g, ' ').slice(0, 120)}` : '';
   const description = entry.description ? ` ${entry.description.replace(/\s+/g, ' ').slice(0, entry.kind === 'term' || entry.kind === 'block' ? 400 : 160)}` : '';
   const columns = entry.columns?.length ? ` columns: ${entry.columns.slice(0, 40).join(', ')}${entry.columns.length > 40 ? ', ...' : ''}` : '';
   const scope = entry.contract?.staticScope.length
@@ -256,14 +270,14 @@ export function renderCard(entry: VocabularyEntry): string {
   const examples = entry.examples?.length ? ` e.g. "${entry.examples[0]}"` : '';
   const aliases = entry.aliases.filter((alias) => normalizeVocabularyText(alias) !== normalizeVocabularyText(entry.name)).slice(0, 4);
   const aka = aliases.length ? ` aka ${aliases.join(', ')}` : '';
-  return `- ${entry.ref} [${bits.join('; ')}]${description}${aka}${columns}${groupBy}${scope}${limit}${examples}`;
+  return `- ${entry.ref} [${bits.join('; ')}]${formula}${description}${aka}${columns}${groupBy}${scope}${limit}${examples}`;
 }
 
 // Building from host-neutral sources.
 
 export interface VocabularySource {
-  metrics?: Array<{ name: string; model?: string; label?: string; description?: string; aggregation?: string; type?: string; expr?: string; sourceId?: string; aliases?: string[]; status?: string; timeGrains?: string[]; physical?: VocabularyEntry['physical'] }>;
-  measures?: Array<{ name: string; model: string; label?: string; description?: string; aggregation?: string; expr?: string; sourceId?: string; physical?: VocabularyEntry['physical'] }>;
+  metrics?: Array<{ name: string; model?: string; label?: string; description?: string; aggregation?: string; type?: string; expr?: string; sourceId?: string; aliases?: string[]; status?: string; timeGrains?: string[]; physical?: VocabularyEntry['physical']; aggTimeDimension?: string; displayFormat?: VocabularyEntry['displayFormat'] }>;
+  measures?: Array<{ name: string; model: string; label?: string; description?: string; aggregation?: string; expr?: string; sourceId?: string; physical?: VocabularyEntry['physical']; aggTimeDimension?: string; displayFormat?: VocabularyEntry['displayFormat'] }>;
   dimensions?: Array<{ name: string; model: string; label?: string; description?: string; dataType?: string; isTime?: boolean; timeGrains?: string[]; sourceId?: string; aliases?: string[]; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
   entities?: Array<{ name: string; model: string; type: string; label?: string; description?: string; sourceId?: string; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
   models?: Array<{ name: string; label?: string; description?: string; relation?: string }>;
@@ -304,6 +318,9 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       ...(metric.status ? { status: metric.status } : {}),
       ...(metric.sourceId ? { sourceId: metric.sourceId } : {}),
       ...(metric.physical ? { physical: metric.physical } : {}),
+      ...(metric.aggTimeDimension && metric.model ? { timeRef: `dimension:${metric.model}.${metric.aggTimeDimension}` } : {}),
+      ...(metric.type ? { metricType: metric.type } : {}),
+      ...(metric.displayFormat ? { displayFormat: metric.displayFormat } : {}),
     });
   }
   for (const measure of source.measures ?? []) {
@@ -320,6 +337,8 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       ...(measure.expr ? { expr: measure.expr } : {}),
       ...(measure.sourceId ? { sourceId: measure.sourceId } : {}),
       ...(measure.physical ? { physical: measure.physical } : {}),
+      ...(measure.aggTimeDimension ? { timeRef: `dimension:${measure.model}.${measure.aggTimeDimension}` } : {}),
+      ...(measure.displayFormat ? { displayFormat: measure.displayFormat } : {}),
     });
   }
   for (const dimension of source.dimensions ?? []) {
@@ -349,6 +368,7 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       description: `${entity.type} entity${entity.description ? `: ${entity.description}` : ''}`,
       model: entity.model,
       roles: ['key'],
+      entityType: entity.type,
       ...(entity.reachableFrom?.length ? { joinReach: entity.reachableFrom } : {}),
       ...(entity.sourceId ? { sourceId: entity.sourceId } : {}),
       ...(entity.physical ? { physical: entity.physical } : {}),

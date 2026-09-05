@@ -15,6 +15,7 @@ const source: VocabularySource = {
     { name: 'customer_name', model: 'customers', dataType: 'string', physical: { relation: 'dev.customers', column: 'customer_name' } },
     { name: 'is_drink_item', model: 'order_item', dataType: 'boolean', physical: { relation: 'dev.order_items', column: 'is_drink_item' } },
     { name: 'ordered_at', model: 'order_item', dataType: 'timestamp', isTime: true, physical: { relation: 'dev.order_items', column: 'ordered_at' } },
+    { name: 'ordered_at', model: 'orders', dataType: 'timestamp', isTime: true, physical: { relation: 'dev.orders', column: 'ordered_at' } },
   ],
   entities: [
     { name: 'customer', model: 'customers', type: 'primary', physical: { relation: 'dev.customers', column: 'customer_id' } },
@@ -135,5 +136,72 @@ describe('prepare order', () => {
     expect(gap.chosen).toBeUndefined();
     expect(gap.refusals.map((refusal) => refusal.code)).toEqual(['block_not_applicable', 'semantic_compile_failed', 'join_path_required', 'exploration_not_opted_in']);
     expect(gap.refusals[1]!.message).toBe('Dimension customer_name is not reachable from order_item');
+  });
+});
+
+describe('relational ratio and population', () => {
+  const ratio = (extra: Record<string, unknown> = {}) => intent({
+    measures: [{ derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.order_total' }, alias: 'revenue_share' }],
+    expectedShape: 'scalar', ...extra,
+  });
+  it('a ratio of two measures on different grains divides the islands, never the rows', () => {
+    const composed = composeRelational(ratio(), vocabulary, deps);
+    const sql = composed.candidate!.sql;
+    expect(sql).toMatch(/^WITH island_1 AS/);
+    expect(sql).toContain('SUM("dev"."order_items"."product_price") AS "__num_1"');
+    expect(sql).toContain('SUM("dev"."orders"."order_total") AS "__den_1"');
+    expect(sql).toMatch(/CAST\(island_1\."__num_1" AS DOUBLE\) \/ NULLIF\(island_2\."__den_1", 0\) AS "revenue_share"/);
+    expect(composed.candidate!.columns).toEqual(['revenue_share']);
+    expect(composed.candidate!.proof.join(' ')).toMatch(/revenue_share = .* \/ .*, divided after each part is aggregated/);
+  });
+  it('a window binds to each island\'s own same-named time column, never through a multiplying join', () => {
+    const composed = composeRelational(ratio({ time: { ref: 'dimension:order_item.ordered_at', window: { start: '2025-01-01', end: '2026-01-01' } } }), vocabulary, { ...deps, joinPath: () => { throw new Error('no join should be needed'); } });
+    const sql = composed.candidate!.sql;
+    expect(sql).toContain('WHERE "dev"."order_items"."ordered_at" >= ? AND "dev"."order_items"."ordered_at" < ?');
+    expect(sql).toContain('WHERE "dev"."orders"."ordered_at" >= ? AND "dev"."orders"."ordered_at" < ?');
+    expect(composed.candidate!.params).toEqual(['2025-01-01', '2026-01-01', '2025-01-01', '2026-01-01']);
+  });
+  it('a single-island ratio is wrapped so the projection can order by it', () => {
+    const composed = composeRelational(intent({
+      measures: [{ ref: 'metric:order_item.revenue' }, { derived: { kind: 'ratio', numerator: 'metric:order_item.drink_revenue', denominator: 'metric:order_item.revenue' }, alias: 'drink_share' }],
+      groupBy: [{ ref: 'entity:customers.customer', role: 'key' }], display: ['dimension:customers.customer_name'], ordering: { ref: 'measure:1', direction: 'desc' }, limit: 5, expectedShape: 'ranking',
+    }), vocabulary, deps);
+    const sql = composed.candidate!.sql;
+    expect(sql).toMatch(/^WITH island_1 AS/);
+    expect(sql).toMatch(/island_1\."customer_id" AS "customer_id", island_1\."customer_name" AS "customer_name", island_1\."revenue" AS "revenue", CAST\(island_1\."__num_2" AS DOUBLE\) \/ NULLIF\(island_1\."__den_2", 0\) AS "drink_share"/);
+    expect(sql).toMatch(/ORDER BY "drink_share" DESC\nLIMIT 5$/);
+  });
+  it('population "all" enumerates every member from the entity relation and zero-fills additive measures only', () => {
+    const source: VocabularySource = {
+      metrics: [
+        { name: 'order_total', model: 'orders', aggregation: 'sum', physical: { relation: 'dev.orders', expr: '"dev"."orders"."order_total"', aggregate: 'sum' } },
+        { name: 'avg_order', model: 'orders', aggregation: 'avg', physical: { relation: 'dev.orders', expr: '"dev"."orders"."order_total"', aggregate: 'avg' } },
+      ],
+      entities: [{ name: 'location', model: 'locations', type: 'primary', physical: { relation: 'dev.locations', column: 'location_id' } }],
+      dimensions: [
+        { name: 'location_name', model: 'locations', dataType: 'string', physical: { relation: 'dev.locations', column: 'location_name' } },
+        { name: 'customer_type', model: 'customers', dataType: 'string', physical: { relation: 'dev.customers', column: 'customer_type' } },
+      ],
+    };
+    const local = buildVocabularyIndex(source);
+    const paths: PrepareDeps['joinPath'] = (from, to) => from === 'dev.orders' && to === 'dev.locations' ? [{ relation: 'dev.locations', on: '"dev"."orders".location_id = "dev"."locations".location_id' }] : undefined;
+    const composed = composeRelational(intent({
+      measures: [{ ref: 'metric:orders.order_total' }, { ref: 'metric:orders.avg_order' }], groupBy: [{ ref: 'entity:locations.location', role: 'key' }], display: ['dimension:locations.location_name'],
+      filters: [{ ref: 'dimension:locations.location_name', op: 'neq', values: ['Closed'], source: 'question' }], population: 'all', expectedShape: 'grouped', ordering: { ref: 'measure:0', direction: 'desc' },
+    }), local, { joinPath: paths });
+    const sql = composed.candidate!.sql;
+    expect(sql).toMatch(/^WITH population AS \(\nSELECT DISTINCT "dev"\."locations"\."location_id" AS "location_id", "dev"\."locations"\."location_name" AS "location_name"\nFROM "dev"\."locations"\nWHERE "dev"\."locations"\."location_name" <> \?\n\)/);
+    expect(sql).toContain('LEFT JOIN island_1 ON population."location_id" = island_1."location_id" AND population."location_name" = island_1."location_name"');
+    expect(sql).toContain('COALESCE(island_1."order_total", 0) AS "order_total", island_1."avg_order" AS "avg_order"');
+    expect(sql).toMatch(/ORDER BY "order_total" DESC$/);
+    expect(composed.candidate!.params).toEqual(['Closed', 'Closed']);
+    expect(composed.candidate!.proof[0]).toMatch(/every member of dev\.locations is a row .* order_total read 0 where nothing matched; avg_order stay null/);
+    const timed = composeRelational(intent({ measures: [{ ref: 'metric:orders.order_total' }], groupBy: [{ ref: 'entity:locations.location', role: 'key' }, { ref: 'dimension:customers.customer_type', role: 'categorical' }], population: 'all', expectedShape: 'grouped' }), local, { joinPath: paths });
+    expect(timed.refusal?.message).toMatch(/live elsewhere/);
+  });
+  it('a certified block never serves a ratio or a population', () => {
+    const block = vocabulary.get('block:commerce.beverage_by_customer_id')!;
+    expect(entails(block, intent({ measures: [{ derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.order_total' } }] }), vocabulary).missing[0]).toMatch(/derived ratio/);
+    expect(entails(block, intent({ measures: [{ ref: 'block:commerce.beverage_by_customer_id' }], population: 'all' }), vocabulary).missing[0]).toMatch(/every member/);
   });
 });
