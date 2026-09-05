@@ -1,0 +1,23 @@
+{
+  "key": "7bbaa7dc747544852aa58708b7da023c",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top 5 customers ranked by their gross lifetime spend (revenue including tax).\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"ordering\":{\"ref\":\"metric:customers.lifetime_spend\",\"direction\":\"desc\"},\"limit\":5,\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"revenue\",\"options\":[\"metric:customers.lifetime_spend\",\"metric:customers.lifetime_spend_pretax\"],\"material\":true,\"question\":\"Should customer revenue include tax (lifetime spend) or exclude it (lifetime spend pre-tax)?\"}],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:revenue\",\"entity:customers.customer\":\"q:customers\",\"dimension:customers.customer_name\":\"q:customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:56:06.932Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "7bbaa7dc747544852aa58708b7da023cedda86594b28ef2a1f961519b5834b81",
+    "postCanonicalHash": "7bbaa7dc747544852aa58708b7da023cedda86594b28ef2a1f961519b5834b81",
+    "appliedRuleClasses": []
+  }
+}

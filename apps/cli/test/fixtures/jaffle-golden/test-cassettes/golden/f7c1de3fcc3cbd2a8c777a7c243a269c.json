@@ -1,0 +1,23 @@
+{
+  "key": "f7c1de3fcc3cbd2a8c777a7c243a269c",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total order revenue (excluding tax) broken down by month.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"dimension:order_item.metric_time\",\"role\":\"time\",\"grain\":\"month\"}],\"expectedShape\":\"breakdown\",\"unresolved\":[{\"clause\":\"revenue\",\"options\":[\"metric:order_item.revenue\",\"metric:orders.order_total\"],\"material\":true,\"question\":\"Do you mean pretax product revenue from order items, or gross order total including tax?\"}],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"dimension:order_item.metric_time\":\"q:by month\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:56:17.296Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "f7c1de3fcc3cbd2a8c777a7c243a269ca4dbc8242adbf0aa4dc67b7901ca6464",
+    "postCanonicalHash": "f7c1de3fcc3cbd2a8c777a7c243a269ca4dbc8242adbf0aa4dc67b7901ca6464",
+    "appliedRuleClasses": []
+  }
+}

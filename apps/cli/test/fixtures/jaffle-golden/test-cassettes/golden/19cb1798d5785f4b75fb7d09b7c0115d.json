@@ -1,0 +1,24 @@
+{
+  "key": "19cb1798d5785f4b75fb7d09b7c0115d",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Ranking customers by their beverage (drink) revenue, including customer name, using the certified top beverage customers block.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"inherited\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:58:00.800Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "19cb1798d5785f4b75fb7d09b7c0115db09ddcfb5e5ae7e25a62b5672964d0a7",
+    "postCanonicalHash": "19cb1798d5785f4b75fb7d09b7c0115db09ddcfb5e5ae7e25a62b5672964d0a7",
+    "appliedRuleClasses": []
+  }
+}

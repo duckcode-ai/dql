@@ -1,0 +1,23 @@
+{
+  "key": "1d2518d2d92e7f04e6f693cd2dace8c4",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants the top customers ranked by beverage revenue, using the certified block that already returns this breakdown.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:top beverage customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:57:41.339Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "1d2518d2d92e7f04e6f693cd2dace8c477fd49b9a9f298b963b37d3a014e28a9",
+    "postCanonicalHash": "1d2518d2d92e7f04e6f693cd2dace8c477fd49b9a9f298b963b37d3a014e28a9",
+    "appliedRuleClasses": []
+  }
+}

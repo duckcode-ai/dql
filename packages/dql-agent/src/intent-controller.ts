@@ -31,7 +31,6 @@ import type {
   ResolvedAnalyticalPlanV2,
 } from './analytical-orchestration.js';
 import type { AgentRunPlan } from './agent-run-engine.js';
-import type { AskAgentStateV4, AskRuntimeModeV2 } from './ask-runtime/ask-agent-runtime-v2.js';
 
 /** The high-level action the agent will take for a turn. */
 export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse' | 'block';
@@ -66,9 +65,9 @@ export interface AnalyticalTerminalGapWitness {
  * routing cascade. Deliberately narrow — anything with data vocabulary falls
  * through to the analytics cascade so we never chit-chat a real question away.
  */
-export type { ConversationalKind } from './ask-runtime/turn-classification.js';
-export { classifyConversationalTurn, looksLikePriorAnswerExplanation } from './ask-runtime/turn-classification.js';
-import { classifyConversationalTurn, type ConversationalKind } from './ask-runtime/turn-classification.js';
+export type { ConversationalKind } from './ask-runtime/conversational-turn.js';
+export { classifyConversationalTurn, looksLikePriorAnswerExplanation } from './ask-runtime/conversational-turn.js';
+import { classifyConversationalTurn, type ConversationalKind } from './ask-runtime/conversational-turn.js';
 
 export interface IntentSignals {
   /** Best certified-artifact match score (0..1), if any. */
@@ -204,17 +203,6 @@ export interface IntentDecision {
      */
     taskOutcomes?: AnalyticalTaskOutcomeV1[];
     taskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
-  };
-  /**
-   * V2 retrieval-first Ask handoff.  Unlike `askAnalystDecision`, this is not
-   * a deterministic business-meaning or compiler authority: it tells the
-   * engine/provider to enter the bounded tool runtime with the already
-   * acquired snapshot and to return pre-freeze misses as observations.
-   */
-  askAgentV2Decision?: {
-    version: 2;
-    mode: AskRuntimeModeV2;
-    state: AskAgentStateV4;
   };
 }
 

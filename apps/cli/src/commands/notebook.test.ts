@@ -22,7 +22,8 @@ describe('resolveNotebookConnection', () => {
 
   it('uses the Ask pipeline by default, passes the explicit notebook mode to the server, and rejects invalid modes', async () => {
     expect(resolveAskAgentRuntimeMode(undefined)).toBe('pipeline_v3');
-    expect(resolveAskAgentRuntimeMode('authoritative_v2')).toBe('authoritative_v2');
+    // The deleted kernel's name is accepted for old configs and served by the pipeline.
+    expect(resolveAskAgentRuntimeMode('authoritative_v2')).toBe('pipeline_v3');
     expect(() => resolveAskAgentRuntimeMode('experimental')).toThrow(/Invalid Ask runtime mode/i);
 
     const root = mkdtempSync(join(tmpdir(), 'dql-notebook-runtime-mode-'));
@@ -36,11 +37,11 @@ describe('resolveNotebookConnection', () => {
       await shadow.close();
     }
 
-    const authoritative = await startProjectRuntime(root, { preferredPort: 0, askAgentRuntimeMode: 'authoritative_v2' });
+    const authoritative = await startProjectRuntime(root, { preferredPort: 0, askAgentRuntimeMode: 'pipeline_v3' });
     try {
       const health = await fetch(`${authoritative.url}/api/health`);
       expect(health.status).toBe(200);
-      expect(await health.json()).toMatchObject({ askRuntimeMode: 'authoritative_v2' });
+      expect(await health.json()).toMatchObject({ askRuntimeMode: 'pipeline_v3' });
     } finally {
       await authoritative.close();
       rmSync(root, { recursive: true, force: true });

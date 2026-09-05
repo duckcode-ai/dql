@@ -65,18 +65,7 @@ import {
   normalizeCanonicalQueryResult,
 } from './analytical-orchestration.js';
 import type { AgentRetrievalEvidence, MeaningResolution } from './meaning-resolution.js';
-import {
-  createAskToolKernelV2,
-  type AgentRunDiagnosticReceiptV8,
-  type AskAgentStateV4,
-  type AskAgentTerminalOutcomeV2,
-  type AskV2ExecutionCapabilityV1,
-  type AskV2ExecutionReceipt,
-  type AskAgentRuntimeWorkspaceBridgeV2,
-  type AskRuntimeModeV2,
-  createAskV2ExecutionCapabilityV1,
-  isAskV2ExecutionReceiptAuthorizedV1,
-} from './ask-runtime/ask-agent-runtime-v2.js';
+import type { AgentRunDiagnosticReceiptV8, AskRuntimeModeV2 } from './ask-runtime/legacy-receipts.js';
 import { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
 import { frozenRequiredOutputBindingProofsForPlan } from './generated-analytical-proposal.js';
 import {
@@ -481,20 +470,6 @@ export interface AgentRunRequest {
    * one immutable retrieval boundary.
    */
   askAgentRuntimeMode?: AskRuntimeModeV2;
-  askAgentV2State?: AskAgentStateV4;
-  /**
-   * Process-local engine capability for one authoritative V2 execution. It is
-   * minted only after routing/retrieval and never hydrated from public input.
-   * The provider runner returns an object-identity-attested receipt bound to
-   * this capability; copied receipt-shaped JSON cannot bypass engine gates.
-   */
-  askAgentV2ExecutionCapability?: AskV2ExecutionCapabilityV1;
-  /**
-   * Ephemeral same-snapshot provider workspace. This is installed only by the
-   * local host after retrieval and carries a function, so browser/MCP JSON
-   * cannot create it. It is never copied into a persisted run receipt.
-   */
-  askAgentV2Workspace?: AskAgentRuntimeWorkspaceBridgeV2;
   /**
    * Server-owned frozen-task execution boundary.  It makes the child question
    * authoritative for compiler/executor input while preserving the submitted
@@ -880,19 +855,6 @@ export interface AgentRouteExecutorResult {
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
   /** Optional executor update to the runtime state after a fact-backed result. */
   askAnalystState?: AskAnalystState;
-  /**
-   * Typed terminal boundary from the authoritative V2 tool kernel.  The
-   * engine consumes it only to avoid reopening a completed frozen execution;
-   * it does not infer one from reader-facing answer prose.
-   */
-  askAgentV2Outcome?: AskAgentTerminalOutcomeV2;
-  /**
-   * Server-minted proof that the local V2 host froze and executed this exact
-   * snapshot-bound tool plan. It is an executor return value, never HTTP/MCP
-   * input, and lets the engine preserve a completed V2 result even when its
-   * scoped request still holds the immutable pre-execution state copy.
-   */
-  askAgentV2ExecutionReceipt?: AskV2ExecutionReceipt;
   businessAnswer?: BusinessAnswer;
 }
 
@@ -1564,20 +1526,11 @@ export class AgentRunEngine {
    */
   private async decideRoute(request: AgentRunRequest): Promise<IntentDecision> {
     const requestedAction = requestedModeToAction(request.requestedMode);
-    // An explicitly selected authoritative-V2 Research turn still has to
-    // enter the V2 router once. The old forced-mode shortcut predates the V2
-    // tool kernel and returned the legacy `investigate` decision before the
-    // host could attach the immutable retrieval workspace, so the V2 Research
-    // planner/handler was never reached. This is deliberately narrow: legacy
-    // and shadow Research retain their existing forced-mode behavior, and no
-    // browser-provided value can set this host-owned runtime mode.
-    const authoritativeV2Research = request.askAgentRuntimeMode === 'authoritative_v2'
-      && request.requestedMode === 'research';
     // `ask` constrains the eventual analytical action to a direct answer, but it
     // still needs retrieval-first meaning resolution. Treating it like the SQL,
     // block, or app authoring modes used to bypass the evidence router entirely
     // on the primary Ask surface.
-    if (requestedAction && request.requestedMode !== "ask" && !authoritativeV2Research) {
+    if (requestedAction && request.requestedMode !== "ask") {
       return buildIntentDecision(request);
     }
     if (this.router) {
@@ -1970,31 +1923,6 @@ export class AgentRunEngine {
             source: "heuristic",
         }
         : await awaitWithAbort(this.decideRoute(request), request.signal);
-      // V2 owns interpretation and pre-freeze route progression in its bounded
-      // tool runtime.  Carry only its host-created state to the executor; no
-      // public request path can manufacture this handoff.  The engine remains
-      // the owner of policy, plan freeze, execution and persistence.
-      if (routeDecision.askAgentV2Decision) {
-        // `ASK_TRACE_OBSERVER_V1` is deliberately non-enumerable.  This V2
-        // carrier update is the first immutable request replacement after
-        // routing, so a plain spread would detach the physical provider
-        // preflight from the root trace precisely on authoritative V2 turns.
-        // Keep the observer with the server-owned state; no client value can
-        // attach it.
-        const v2ExecutionCapability = routeDecision.askAgentV2Decision.mode === 'authoritative_v2'
-          ? createAskV2ExecutionCapabilityV1({
-              id: randomUUID(),
-              runId,
-              state: routeDecision.askAgentV2Decision.state,
-            })
-          : undefined;
-        request = attachAskTraceObserverV1({
-          ...request,
-          askAgentRuntimeMode: routeDecision.askAgentV2Decision.mode,
-          askAgentV2State: routeDecision.askAgentV2Decision.state,
-          ...(v2ExecutionCapability ? { askAgentV2ExecutionCapability: v2ExecutionCapability } : {}),
-        }, traceObserver);
-      }
       routeDecision = enforceOrdinaryAnalyticalPlanBoundary(request, routeDecision);
       traceObserver.finishSpan(classifySpan, { outcome: 'ok', reasonCode: 'route_selected' });
       // Router/cascade evidence is captured after its authoritative decision
@@ -2325,27 +2253,7 @@ export class AgentRunEngine {
           // the valid result which already ran.  Preserve the successful V2
           // boundary here; terminal V2 errors still flow through the ordinary
           // evaluation and blocked-outcome path below.
-          const acceptedV2TerminalState = acceptedAskAgentV2TerminalState(
-            taskRequest,
-            taskRouteDecision,
-            result,
-            runId,
-          );
-          // Run the generic gates for a successful V2 terminal too — but with
-          // their REPAIRS disarmed. Replacing the whole array with the single
-          // terminal receipt meant the answer-shape gate never inspected a V2
-          // result: a run whose executed columns did not match the question's
-          // required outputs shipped as "1 check passed". The repair hooks
-          // stay stripped for the reason documented above — the legacy replan
-          // would discard the validated result — so a failed gate REPORTS
-          // (status/summary see it) without ever re-planning the frozen plan.
-          evaluations = acceptedV2TerminalState
-            ? [
-              ...this.evaluate({ route, request: taskRequest, routeDecision: taskRouteDecision, result, attempt })
-                .map(disarmRepairForV2Terminal),
-              acceptedAskAgentV2TerminalEvaluation(acceptedV2TerminalState),
-            ]
-            : this.evaluate({ route, request: taskRequest, routeDecision: taskRouteDecision, result, attempt });
+          evaluations = this.evaluate({ route, request: taskRequest, routeDecision: taskRouteDecision, result, attempt });
           for (const evaluation of evaluations) {
             emit({
               type: "evaluation.recorded",
@@ -2380,9 +2288,7 @@ export class AgentRunEngine {
           // budget-exhausted refusal. Observed live: a governed relational
           // query executed and returned rows, and the run reported "DQL
           // stopped at its own orchestration budget" with zero facts.
-          const authoritativeV2Ask = taskRouteDecision.askAgentV2Decision?.mode === 'authoritative_v2'
-            || routeDecision.askAgentV2Decision?.mode === 'authoritative_v2';
-          if (authoritativeAsk || authoritativeV2Ask || taskRouteDecision.analyticalCascadeDecision?.planFrozen === true) {
+          if (authoritativeAsk || taskRouteDecision.analyticalCascadeDecision?.planFrozen === true) {
             stepStatus = 'needs_review';
             break;
           }
@@ -3023,14 +2929,6 @@ export class AgentRunEngine {
     // provider observation here, at the persisted route-decision boundary,
     // rather than trying to infer it from user-facing error prose upstream.
     const providerFailure = finalResult.providerFailure
-      // A frozen child receives the same server-owned V2 state as the root
-      // request.  Its scoped compiler decision deliberately replaces the
-      // business-plan fields, so use the request carrier as the first-class
-      // persistence fallback rather than losing a physical provider
-      // observation simply because the child route was rehydrated.
-      ?? providerFailureFromAskAgentV2State(
-        input.request.askAgentV2State ?? input.routeDecision.askAgentV2Decision?.state,
-      )
       // Planner/preflight failures can be terminal before a V2 executor emits
       // an answer envelope.  The typed decision is already the authoritative
       // boundary in that case; retain it for older receipt readers without
@@ -3880,11 +3778,9 @@ function enforceOrdinaryAnalyticalPlanBoundary(
   // ineligible/unavailable/ambiguous outcomes are returned to that same tool
   // loop.  Do not let V1's rescue/reinterpretation policy create a second
   // authority before the tool runtime can try the next safe tier.
-  if (decision.askAgentV2Decision?.mode === 'authoritative_v2'
-    || request.askAgentRuntimeMode === 'authoritative_v2'
-    // The Ask pipeline interprets the question itself, once, with the model;
-    // no regex here may pre-empt it into a block or a conversational reply.
-    || request.askAgentRuntimeMode === 'pipeline_v3') {
+  // The Ask pipeline interprets the question itself, once, with the model;
+  // no regex here may pre-empt it into a block or a conversational reply.
+  if (request.askAgentRuntimeMode === 'pipeline_v3') {
     return decision;
   }
   // AskAnalystRuntimeV1 has already retrieved, planned, verified and (when
@@ -4480,80 +4376,8 @@ function diagnosticReceiptV4ForRun(run: AgentRun): AgentRunDiagnosticReceiptV4 {
  */
 function attachAskAnalystRuntimeReceipt(run: AgentRun, runtimeMode?: AskRuntimeModeV2): void {
   if (runtimeMode) run.askAgentRuntimeMode = runtimeMode;
-  attachAskAgentV2RuntimeReceipt(run);
 }
 
-/** V2's compact receipt is additive and deliberately does not alter V1-V6. */
-function attachAskAgentV2RuntimeReceipt(run: AgentRun): void {
-  const state = run.routeDecision?.askAgentV2Decision?.state;
-  if (!state) return;
-  run.askAgentRuntimeMode ??= state.mode;
-  // The V2 tool runtime may already have recorded the exact terminal boundary
-  // (for example provider versus execution failure).  Do not overwrite it
-  // with the engine's broad status during persistence.
-  if (!state.terminalOutcome) {
-    state.terminal = run.status === 'needs_clarification'
-      ? 'clarification'
-      : run.status === 'blocked' || run.status === 'cancelled'
-        ? 'error'
-        : 'completed';
-  }
-  // V8 reports only V2 tool/execution evidence.  A route step or an inspected
-  // candidate is not a warehouse connection, and a failed validation is not a
-  // result.  Deriving these fields from the actual canonical tool receipts
-  // keeps a terminal tool error blocked instead of making it look like a
-  // review-required generated result.
-  const executionTools = new Set([
-    'run_certified',
-    'compile_and_run_semantic',
-    'compile_and_run_dql',
-    'validate_and_run_sql',
-  ]);
-  const executionObservations = state.observations.filter((observation) => executionTools.has(observation.tool)
-    && (observation.outcome === 'executed' || observation.outcome === 'error')
-    && observation.origin === 'execution');
-  const executionAttempts = executionObservations.length;
-  const hasExecutedResult = executionObservations.some((observation) => observation.outcome === 'executed');
-  // V2 deliberately has no V1 `resolvedAnalyticalPlan`.  Once its immutable
-  // tool receipt proves a frozen execution result, project the same bounded
-  // deterministic facts used by the older authoritative runtime.  This is
-  // presentation only: it neither reroutes the question nor grants a new
-  // execution capability.
-  if (hasExecutedResult) {
-    attachDeterministicResultFacts(run);
-    run.businessAnswer = businessAnswerForRun(run);
-    // A narration that was VERIFIED against these same facts is not a
-    // presentation detail to be overwritten by the deterministic join. It
-    // passed the check that exists to make it safe, so replacing it here
-    // silently discarded the one thing the extra provider turn bought.
-    const verifiedNarration = run.narrationIntegrityReceipt?.outcome === 'success'
-      && run.narrationIntegrityReceipt.mode === 'verified_facts'
-      && typeof run.answer === 'string'
-      && run.answer.trim().length > 0;
-    if (!verifiedNarration) run.answer = run.businessAnswer.answer;
-  }
-  // The V2 receipt has no row/prompt payload.  It may nevertheless state the
-  // count of accepted fact identities only after an actual result boundary.
-  const businessAnswer = run.businessAnswer ?? businessAnswerForRun(run);
-  run.diagnosticReceiptV8 = createAskToolKernelV2(state).diagnosticReceipt(run.stopReason, {
-    connectionAttempted: executionAttempts > 0,
-    executionAttempts,
-    factCount: hasExecutedResult ? businessAnswer.factIds.length : 0,
-    narration: hasExecutedResult && businessAnswer.mode === 'facts_only'
-      ? 'fact_bound'
-      : run.status === 'needs_clarification'
-        ? 'not_applicable'
-        : 'deterministic_fallback',
-  }, {
-    // These are physical egress receipts owned by the server wrapper. A
-    // provider planning observation alone never increments the user-visible
-    // dispatch count.
-    providerDispatches: run.providerEgressReceipts?.length ?? 0,
-    toolCalls: state.observations.filter((observation) => !observation.executionAuthorized).length,
-    executionAttempts,
-    repairs: state.observations.filter((observation) => observation.executionAuthorized && observation.samePlanRepair).length,
-  });
-}
 
 
 function analyticalExecutionAttemptCount(run: AgentRun): number {
@@ -4665,27 +4489,10 @@ function authoritativeExecutedAnswerArtifactsForRun(run: AgentRun): Authoritativ
     && run.askAnalystState.resolvedPlan?.planFrozen === true;
   const decisionFrozenAuthoritative = run.routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative'
     && run.routeDecision.analyticalCascadeDecision?.planFrozen === true;
-  // V2 freezes its typed plan in the tool kernel rather than in V1's
-  // `resolvedAnalyticalPlan`.  It may project local facts only when the
-  // terminal state says `finish_answer` *and* a real execution observation
-  // exists; a provider/general answer cannot acquire governed facts merely by
-  // finishing a turn.
-  const v2State = run.routeDecision?.askAgentV2Decision?.state;
-  const runtimeFrozenAuthoritativeV2 = run.askAgentRuntimeMode === 'authoritative_v2'
-    && v2State?.resolvedPlan?.frozen === true
-    && v2State.terminalOutcome?.kind === 'finish_answer'
-    && v2State.observations.some((observation) => (
-      observation.outcome === 'executed'
-      && observation.origin === 'execution'
-      && (observation.tool === 'run_certified'
-        || observation.tool === 'compile_and_run_semantic'
-        || observation.tool === 'compile_and_run_dql'
-        || observation.tool === 'validate_and_run_sql')
-    ));
   if ((run.requestedMode !== 'ask' && run.requestedMode !== 'auto')
     || run.status === 'blocked'
     || run.status === 'cancelled'
-    || (!runtimeFrozenAuthoritative && !decisionFrozenAuthoritative && !runtimeFrozenAuthoritativeV2)) {
+    || (!runtimeFrozenAuthoritative && !decisionFrozenAuthoritative)) {
     return [];
   }
   const finalStep = [...run.steps].reverse().find((step) =>
@@ -4697,21 +4504,8 @@ function authoritativeExecutedAnswerArtifactsForRun(run: AgentRun): Authoritativ
       .filter((artifact) => artifact.kind === 'answer' && artifact.trustState !== 'blocked')
       .map((artifact) => artifact.id),
   );
-  // A V2 host result can reach the engine through its terminal executor
-  // envelope after the step was created. Its aggregate artifacts retain the
-  // frozen result even when the step-local artifact list is empty. This
-  // fallback is deliberately limited to a frozen V2 terminal execution; the
-  // canonical fingerprint check below still rejects ambiguity.
-  const acceptedArtifactIds = runtimeFrozenAuthoritativeV2
-    ? new Set(
-        run.artifacts
-          .filter((artifact) => artifact.kind === 'answer' && artifact.trustState !== 'blocked')
-          .map((artifact) => artifact.id),
-      )
-    : finalAnswerIds.size > 0
-      ? finalAnswerIds
-      : undefined;
-  if (!acceptedArtifactIds?.size) return [];
+  const acceptedArtifactIds = finalAnswerIds;
+  if (!acceptedArtifactIds.size) return [];
   const candidates = run.artifacts.flatMap((artifact) => {
     if (!acceptedArtifactIds.has(artifact.id) || artifact.kind !== 'answer' || artifact.trustState === 'blocked') return [];
     const payload = objectRecordForResultFacts(artifact.payload);
@@ -5336,26 +5130,6 @@ function unmodeledRequestAnswer(run: AgentRun): string | undefined {
   return unmodeled ? composeAnswer({ kind: 'unmodeled_term', ...unmodeled }).text : undefined;
 }
 
-/**
- * The governed assets this run actually retrieved, as business labels.
- *
- * V2 keeps its admitted candidates on its own state, which `modeledFieldLabels`
- * (written for the V1 analyst state) never reads — so on an authoritative run
- * the host knew exactly which relations and metrics it had found and still told
- * the reader nothing.
- */
-function askV2RetrievedAssetLabels(run: AgentRun): string[] {
-  const state = run.routeDecision?.askAgentV2Decision?.state;
-  const ids = [
-    ...(state?.initialCandidateIds ?? []),
-    ...(state?.observations ?? []).flatMap((observation) => observation.candidateIds ?? []),
-  ];
-  const labels = ids.map((id) => {
-    const leaf = id.split(':').pop() ?? id;
-    return (leaf.split('.').pop() ?? leaf).replace(/_/g, ' ').trim().toLowerCase();
-  }).filter((label) => label.length > 2 && !/^\d/.test(label));
-  return [...new Set(labels)];
-}
 
 /**
  * NEVER HAND A READER AN INFRASTRUCTURE SENTENCE.
@@ -5372,18 +5146,25 @@ function askV2RetrievedAssetLabels(run: AgentRun): string[] {
  * failing are different things, and only the reader can decide what to ask
  * next.
  */
+/**
+ * The governed assets this run retrieved, as business labels. The pipeline
+ * records its reading on the run receipt; a run without one names nothing.
+ */
+function retrievedAssetLabels(run: AgentRun): string[] {
+  const intent = run.diagnosticReceiptV9?.intent;
+  const ids = intent ? [...intent.measures.map((measure) => measure.ref), ...intent.groupBy.map((group) => group.ref), ...intent.display] : [];
+  const labels = ids.map((id) => {
+    const leaf = id.split(':').pop() ?? id;
+    return (leaf.split('.').pop() ?? leaf).replace(/_/g, ' ').trim().toLowerCase();
+  }).filter((label) => label.length > 2 && !/^\d/.test(label));
+  return [...new Set(labels)];
+}
+
 function lastResortAnswerForRun(run: AgentRun, cause: 'provider' | 'budget'): string {
-  return composeAnswer({ kind: 'last_resort', cause, assets: askV2RetrievedAssetLabels(run) }).text;
+  return composeAnswer({ kind: 'last_resort', cause, assets: retrievedAssetLabels(run) }).text;
 }
 
 function deterministicTerminalAnswerForRun(run: AgentRun): string {
-  // An analyst that inspected the executable tiers and explicitly declined
-  // the remaining exploratory path is a specific, actionable outcome — not
-  // a generic grounding gap. Surface the specific sentence.
-  const v2Terminal = run.routeDecision?.askAgentV2Decision?.state?.terminalOutcome;
-  if (v2Terminal?.reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED') {
-    return composeAnswer({ kind: 'remaining_tiers_declined' }).text;
-  }
   const incident = terminalIncidentForRun(
     run,
     run.routeDecision?.analyticalCascadeDecision?.stopReason,
@@ -5396,7 +5177,7 @@ function deterministicTerminalAnswerForRun(run: AgentRun): string {
   return composeAnswer({
     kind: 'incident',
     code: known.includes(code as TerminalIncidentCode) ? code as TerminalIncidentCode : undefined,
-    assets: askV2RetrievedAssetLabels(run),
+    assets: retrievedAssetLabels(run),
     ...(code === 'ANALYTICAL_COVERAGE_GAP' ? { unmodeled: unmodeledTermForRun(run) } : {}),
   }).text;
 }
@@ -5420,40 +5201,6 @@ function providerFailureForRun(run: AgentRun): ProviderFailureDiagnosticV1 | und
   return undefined;
 }
 
-/**
- * Project the V2 tool-kernel's terminal provider observation for V1/V3
- * receipt readers.  This runs only at the final persistence boundary, after
- * the provider/tool runner has settled its shared state.  It intentionally
- * does not classify free-form error text or synthesize a failure for a
- * non-terminal provider observation.
- */
-function providerFailureFromAskAgentV2State(
-  state: AskAgentStateV4 | undefined,
-): ProviderFailureDiagnosticV1 | undefined {
-  if (state?.terminalOutcome?.kind !== 'provider_failure') return undefined;
-  const provider = [...state.observations]
-    .reverse()
-    .find((observation) => observation.provider)?.provider;
-  if (!provider) return undefined;
-  const phase: ProviderFailureDiagnosticV1['phase'] = provider.phase === 'agent_control'
-    || provider.phase === 'tool_followup'
-    ? 'generation'
-    : provider.phase;
-  const safeAction: ProviderFailureDiagnosticV1['safeAction'] = provider.safeAction === 'retry_same_provider'
-    || provider.safeAction === 'fix_provider_configuration'
-    || provider.safeAction === 'wait_and_retry'
-    || provider.safeAction === 'inspect_run'
-    || provider.safeAction === 'none'
-      ? provider.safeAction
-      : 'inspect_run';
-  return {
-    version: 1,
-    cause: provider.cause,
-    phase,
-    retryable: provider.retryable,
-    safeAction,
-  };
-}
 
 type AskSummaryEvidenceRole = AskDecisionSummaryV1['evidenceByRole'][number]['role'];
 type AskResearchBranchFailureCode = AskResearchBranchSummaryV1['failureReasons'][number]['code'];
@@ -6049,81 +5796,8 @@ function attachDiagnosticReceipt(
   return artifacts;
 }
 
-/**
- * The authoritative V2 controller owns the one frozen-plan execution
- * lifecycle.  This narrow predicate prevents the pre-V2 generic evaluator
- * from re-opening a successful V2 execution while continuing to let terminal
- * failures, clarifications, gaps, and unexecuted/provider-only responses use
- * their normal validation paths.
- */
-type AcceptedAskAgentV2TerminalBoundary = {
-  tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
-  planId: string;
-};
 
-function acceptedAskAgentV2TerminalState(
-  request: AgentRunRequest,
-  decision: IntentDecision,
-  result: AgentRouteExecutorResult,
-  runId: string,
-): AcceptedAskAgentV2TerminalBoundary | undefined {
-  // A scoped execution can retain an earlier immutable request snapshot while
-  // the provider advances its cloned V2 state. That is why the execution
-  // carrier is an explicit runner return value. It is *not* enough for an
-  // executor to return receipt-shaped JSON: the engine verifies the
-  // process-local server attestation, current run, immutable snapshot closure,
-  // frozen plan identity, and canonical result fingerprint below.
-  const states = [
-    request.askAgentV2State,
-    decision.askAgentV2Decision?.state,
-  ].filter((state): state is AskAgentStateV4 => Boolean(state));
-  if (result.status === 'blocked') return undefined;
-  const receipt = result.askAgentV2ExecutionReceipt;
-  const terminal = result.askAgentV2Outcome;
-  const state = states.find((candidate) => isAskV2ExecutionReceiptAuthorizedV1({
-    receipt,
-    capability: request.askAgentV2ExecutionCapability,
-    state: candidate,
-    result: result.result,
-    runId,
-  }));
-  if (state
-    && receipt
-    && terminal?.kind === 'finish_answer'
-    && terminal.origin === 'execution') {
-    return { tier: receipt.tier, planId: receipt.planId };
-  }
-  return undefined;
-}
 
-/**
- * Keep a gate's VERDICT while removing its authority to re-plan.
- *
- * After an accepted V2 terminal, the frozen plan already executed; the legacy
- * repair machinery would replan the same artifact, be refused as
- * POST_FREEZE_REPAIR_REQUIRED, and discard the validated result. The failure
- * itself must still be visible — that is the entire point of running the
- * gates — so only the repair hooks are stripped.
- */
-function disarmRepairForV2Terminal(evaluation: AgentRunEvaluation): AgentRunEvaluation {
-  if (evaluation.passed) return evaluation;
-  const { suggestedRepair: _repair, repairAction: _action, ...reported } = evaluation;
-  return reported;
-}
-
-function acceptedAskAgentV2TerminalEvaluation(boundary: AcceptedAskAgentV2TerminalBoundary): AgentRunEvaluation {
-  return {
-    id: 'ask-v2-terminal-result',
-    label: 'Authoritative V2 result validation',
-    passed: true,
-    severity: 'info',
-    message: 'The snapshot-bound V2 plan executed and its result was validated before the terminal answer was accepted.',
-    evidence: {
-      tier: boundary.tier,
-      planId: boundary.planId,
-    },
-  };
-}
 
 function computeStepOutcome(
   route: AgentRunRoute,
@@ -6200,7 +5874,7 @@ function refusalCodeSummary(code: string | undefined): string | undefined {
 
 function blockingOutcomeSummary(
   evaluations: AgentRunEvaluation[],
-  result: Pick<AgentRouteExecutorResult, 'answerRefusalCode' | 'answer' | 'askAgentV2Outcome'>,
+  result: Pick<AgentRouteExecutorResult, 'answerRefusalCode' | 'answer' | 'askPipelineReceipt'>,
   fallback: string,
 ): string {
   const messages = evaluations
@@ -6208,26 +5882,15 @@ function blockingOutcomeSummary(
     .map((evaluation) => evaluation.message.trim())
     .filter(Boolean);
   if (messages[0]) return messages[0];
+  // The Ask pipeline writes its own sentence from the verbatim compiler or
+  // warehouse message ("DuckDB connection failed: ..."). That sentence is the
+  // truth this run recorded; the coarse refusal-code sentence is not.
+  if (result.askPipelineReceipt && typeof result.answer === 'string' && result.answer.trim()) return result.answer.trim();
   // A typed refusal is the truth this run actually recorded. The old fallback
   // fabricated "did not pass its required validation" whenever no evaluation
   // was blocking and the route's default summary contained "Answered" — it
   // asserted a validation that never ran, and masked deadline/budget/gap
   // terminals behind an invented one.
-  // A V2 terminal that names its own specific outcome beats the coarse
-  // refusal-code sentence: "analyst declined the exploratory tier" is
-  // actionable where "could not ground every part" reads as a system fault.
-  if (result.askAgentV2Outcome?.reasonCode === 'ASK_V2_REMAINING_TIERS_DECLINED') {
-    return composeAnswer({ kind: 'remaining_tiers_declined' }).text;
-  }
-  // The host floor names what it could and could not bind, and which
-  // measures exist. That sentence was written for the reader; the coarse
-  // code's sentence was not.
-  // Likewise the semantic compiler's own sentence ("this metric cannot be
-  // grouped by that dimension") over the coarse execution-error sentence.
-  if ((result.askAgentV2Outcome?.reasonCode?.startsWith('ASK_V2_HOST_FLOOR') || result.askAgentV2Outcome?.reasonCode === 'SEMANTIC_COMPILATION_FAILED')
-    && typeof result.answer === 'string' && result.answer.trim()) {
-    return result.answer.trim();
-  }
   const typed = refusalCodeSummary(result.answerRefusalCode);
   if (typed) return typed;
   return fallback.includes('Answered')
@@ -6280,12 +5943,6 @@ function taskScopedRouteDecision(
         ? { recommendedExecutionId: outer.meaningResolution.recommendedExecutionId }
         : {}),
     },
-    // Preserve the root V2 runtime carrier across the frozen-task scope.  It
-    // contains only server-owned snapshot/tool observations and is the source
-    // of a physical provider preflight outcome; dropping it here caused a
-    // child request to persist a generic blocked result instead of its typed
-    // provider diagnostic.
-    ...(outer.askAgentV2Decision ? { askAgentV2Decision: outer.askAgentV2Decision } : {}),
     ...(outer.providerFailure ? { providerFailure: outer.providerFailure } : {}),
     // `compileVerifiedAskTasks` accepts a task only after the compiler broker
     // supplied its complete resolved-plan authority. Do not manufacture a
@@ -6464,22 +6121,6 @@ function requestedModeToAction(mode: AgentRunRequestedMode | undefined): IntentD
 export function selectRoute(request: AgentRunRequest, decision: IntentDecision): AgentRunRoute {
   if (decision.meaningResolutionErrorCode === 'invalid_evidence_reference') return 'blocked';
   if (decision.action === 'block') return 'blocked';
-  // A unique Tier 1 artifact may be proven complete by the authoritative V2
-  // retrieval workspace before any provider turn.  Treat that host-owned
-  // result as a route selection, not as a V1 business interpretation or an
-  // instruction for the model to rediscover the same block.  The artifact is
-  // still rechecked and frozen only at the V2 execution-capability boundary.
-  const v2State = decision.askAgentV2Decision?.mode === 'authoritative_v2'
-    ? decision.askAgentV2Decision.state
-    : undefined;
-  const v2ExactCertified = decision.action === 'answer'
-    && decision.requiresClarification !== true
-    && Boolean(
-      v2State?.exactCertifiedCandidateId
-      && v2State.tierStates?.certified?.status === 'complete'
-      && v2State.tierStates.certified.candidateIds.includes(v2State.exactCertifiedCandidateId),
-    );
-  if (v2ExactCertified) return 'certified_answer';
   const authoritativePlan = decision.resolvedAnalyticalPlan?.mode === 'authoritative'
     ? decision.resolvedAnalyticalPlan
     : undefined;

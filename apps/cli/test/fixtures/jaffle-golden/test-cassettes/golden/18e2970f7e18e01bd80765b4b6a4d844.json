@@ -1,0 +1,23 @@
+{
+  "key": "18e2970f7e18e01bd80765b4b6a4d844",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Sum of product revenue broken down by product type\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"dimension:products.product_type\",\"role\":\"categorical\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"breakdown\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"dimension:products.product_type\":\"q:by product type\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:56:33.360Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "18e2970f7e18e01bd80765b4b6a4d8443a9ea4ff03e40e5325fd433836e69cec",
+    "postCanonicalHash": "18e2970f7e18e01bd80765b4b6a4d8443a9ea4ff03e40e5325fd433836e69cec",
+    "appliedRuleClasses": []
+  }
+}

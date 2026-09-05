@@ -33,9 +33,9 @@ import { createSeededSqliteExecutor, type GoldenSeed, type SeededSqliteExecutor 
  * `DQL_ASK_GOLDEN_REPEAT=n` replays each case n times and requires the same
  * outcome, tier and rows every time (the stability lane).
  *
- * Baseline honesty: `baseline-known-failing.json` is consulted ONLY for the
- * legacy `authoritative_v2` mode, to document where the old runtime stands. It
- * never exempts the pipeline: under `pipeline_v3` every case must pass.
+ * Baseline honesty: the legacy runtime's baseline (17/34) is documented in
+ * `baseline-report-authoritative_v2.json`, never asserted. The pipeline's
+ * suite carries no known-failure exemptions: every case must pass.
  */
 
 type Outcome = 'rows' | 'clarify_or_rows' | 'gap' | 'conversation';
@@ -67,9 +67,6 @@ const ONLY = new Set((process.env.DQL_ASK_GOLDEN_ONLY ?? '').split(',').map((id)
 const selected = <T extends { id: string }>(items: T[]): T[] => (ONLY.size ? items.filter((item) => ONLY.has(item.id)) : items);
 const CASSETTES = join(fixtureDir, 'test-cassettes', 'golden');
 const INFRASTRUCTURE = /\b(provider|dispatch(es)?|budget|orchestration|snapshot|closure|kernel|tool path|retry)\b/i;
-const knownFailing: Record<string, string> = existsSync(join(goldenDir, 'baseline-known-failing.json'))
-  ? JSON.parse(readFileSync(join(goldenDir, 'baseline-known-failing.json'), 'utf8')) as Record<string, string>
-  : {};
 
 // ── build identity ──────────────────────────────────────────────────────────
 function buildIdentity(): Record<string, string> {
@@ -296,16 +293,10 @@ function record(lane: string, spec: GoldenCase, verdict: Verdict, extra: Record<
 }
 
 function assertVerdict(spec: GoldenCase, verdict: Verdict) {
-  const legacy = (MODE ?? 'authoritative_v2') === 'authoritative_v2';
-  const documented = legacy ? knownFailing[spec.id] : undefined;
+  // The pipeline's suite carries no known-failure exemptions. The legacy
+  // runtime's baseline (17/34) is documented in
+  // test/ask-golden/baseline-report-authoritative_v2.json, not asserted.
   const detail = JSON.stringify({ id: spec.id, question: spec.question, reasons: verdict.reasons, observed: verdict.observed }, null, 2);
-  if (!verdict.pass && documented) {
-    // Documented baseline failure of the legacy runtime. Recorded, not asserted.
-    return;
-  }
-  if (verdict.pass && documented) {
-    throw new Error(`${spec.id} is listed in baseline-known-failing.json but passed — remove the entry.\n${detail}`);
-  }
   expect(verdict.pass, detail).toBe(true);
 }
 

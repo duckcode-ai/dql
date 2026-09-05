@@ -1,0 +1,23 @@
+{
+  "key": "92e85707a5b787f79b79b01772c024e2",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"For each customer, count the number of orders they placed.\",\"measures\":[{\"ref\":\"metric:customers.count_lifetime_orders\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"expectedShape\":\"breakdown\",\"provenance\":{\"metric:customers.count_lifetime_orders\":\"q:how many orders did each customer place\",\"entity:customers.customer\":\"q:each customer\",\"dimension:customers.customer_name\":\"q:each customer\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:56:19.823Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "92e85707a5b787f79b79b01772c024e2aca897566b74572f664b3e335b086393",
+    "postCanonicalHash": "92e85707a5b787f79b79b01772c024e2aca897566b74572f664b3e335b086393",
+    "appliedRuleClasses": []
+  }
+}

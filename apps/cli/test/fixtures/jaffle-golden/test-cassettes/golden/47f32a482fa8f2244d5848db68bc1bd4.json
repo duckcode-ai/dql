@@ -1,0 +1,23 @@
+{
+  "key": "47f32a482fa8f2244d5848db68bc1bd4",
+  "operation": "generate",
+  "text": "Looking at this question: \"total revenue\" is defined by the term:Revenue as gross order revenue (dev.orders.order_total) when using the orders mart, and the breakdown is \"by location\" — a categorical dimension available via entity:orders.location, with location_name as the display label.\n\nSince orders is the natural grain for \"total revenue\" (order_total includes tax, per the governed term), and location is reachable from orders, I'll use metric:orders.order_total grouped by entity:orders.location with dimension:locations.location_name as display.\n\n```json\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross order revenue broken down by location.\",\"measures\":[{\"ref\":\"metric:orders.order_total\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:orders.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:orders.order_total\",\"direction\":\"desc\"},\"expectedShape\":\"breakdown\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:total revenue\",\"entity:orders.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"}}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:56:24.497Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "47f32a482fa8f2244d5848db68bc1bd4dc21a39092ca49115afcea6bf9112f05",
+    "postCanonicalHash": "47f32a482fa8f2244d5848db68bc1bd4dc21a39092ca49115afcea6bf9112f05",
+    "appliedRuleClasses": []
+  }
+}

@@ -12,8 +12,8 @@ describe('parseArgs', () => {
   });
 
   it('preserves the notebook Ask runtime mode for launch-time validation', () => {
-    const parsed = parseArgs(['notebook', '.', '--ask-runtime-mode', 'authoritative_v2']);
-    expect(parsed.flags.askRuntimeMode).toBe('authoritative_v2');
+    const parsed = parseArgs(['notebook', '.', '--ask-runtime-mode', 'pipeline_v3']);
+    expect(parsed.flags.askRuntimeMode).toBe('pipeline_v3');
 
     // The parser does not silently coerce an absent value into the safe
     // default. The notebook startup validator will reject this explicit error.

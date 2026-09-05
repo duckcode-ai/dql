@@ -107,65 +107,24 @@ export {
 export { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
 export type { AnalyticalRequestPolicyDecision } from './analytical-request-policy.js';
 /** V2 retrieval-first, LLM-controlled bounded Ask runtime. */
-export {
-  ASK_V2_BUDGETS,
-  ASK_V2_CANONICAL_TOOLS,
-  createAskAgentRuntimeV2,
-  createAskToolKernelV2,
-  releaseAskV2CertifiedTierLock,
-  commitAskV2ControllerTier,
-  releaseAskV2ControllerTier,
-  defaultProviderResultEgressPolicyV2,
-  observeAskAgentV2Tool,
-  setAskV2TierState,
-  finishAskAgentV2Turn,
-  askAgentV2WorkspaceMatches,
-  materializeAskV2WorkspaceTierTruth,
-  projectResearchEvidenceLedgerV4,
-  recordAskV2ResearchLedger,
-  createAskV2ExecutionCapabilityV1,
-  mintAskV2ExecutionReceiptV1,
-  isAskV2ExecutionReceiptAuthorizedV1,
-  askV2ExecutionResultFingerprint,
-  askV2RetainedCandidateFingerprint,
-  askV2SemanticCandidateAuthorityFingerprint,
-  askV2ExecutableSemanticRoles,
-} from './ask-runtime/ask-agent-runtime-v2.js';
 export type {
   AskRuntimeModeV2,
   AskTurnClassV2,
   AskToolNameV2,
   AskExecutionTierV2,
   AskEvidenceHandleV1,
-  AskRelationshipPathHandleV1,
-  AskCertifiedArtifactHandleV1,
   AskSemanticEngineV1,
   AskSemanticRuntimeSelectionV1,
-  AskSemanticCapabilityHandleV1,
-  AskFrozenResearchChildHandleV1,
-  AskTierStateV1,
-  AskAgentToolWorkspaceV2,
-  AskAgentRuntimeWorkspaceBridgeV2,
-  AskConversationContextV2,
-  AskCandidatePlanV1,
   AskToolObservationV1,
   AskToolObservationOutcomeV1,
   AskCascadeTierAttemptV2,
   AskAgentTerminalOutcomeV2,
   AskAgentTerminalOutcomeKindV2,
-  AskV2ExecutionCapabilityV1,
-  AskV2ExecutionReceipt,
-  ResolvedAnalyticalPlanV3,
-  AskAgentStateV4,
-  ProviderResultEgressPolicyV2,
+  AskContextCoverageV2,
   AgentRunDiagnosticReceiptV8,
   ResearchEvidenceLedgerV4,
-  AskV2ResearchBranchReceiptInput,
-  AskContextCoverageV2,
-  AskToolKernelV2,
-  AskAgentRuntimeV2,
-  AskAgentRuntimeOptionsV2,
-} from './ask-runtime/ask-agent-runtime-v2.js';
+} from './ask-runtime/legacy-receipts.js';
+export { projectResearchEvidenceLedgerV4, RESEARCH_LEDGER_BRANCH_CAP } from './ask-runtime/legacy-receipts.js';
 /** Local-only, additive Ask/Research execution tracing (OBS-001..OBS-010). */
 export * from './ask-observability/index.js';
 export type {
@@ -2059,8 +2018,6 @@ export { composeAnswer, terminalTitle, type TerminalAnswerShape, type TerminalIn
 
 export { probeSemanticJoinFanout } from './semantic-bridge/fanout-probe.js';
 export type { SemanticFanoutProbeFailureCodeV1, SemanticFanoutProbeResultV1 } from './semantic-bridge/fanout-probe.js';
-export { deterministicDisplayKeyClarification } from './ask-runtime/display-key-clarification.js';
-export type { DisplayKeyClarificationV1, DisplayKeyClarificationOptionV1 } from './ask-runtime/display-key-clarification.js';
 
 // Ask pipeline (intent → prepare → execute): the interpreter-first runtime.
 export * from './ask-pipeline/index.js';

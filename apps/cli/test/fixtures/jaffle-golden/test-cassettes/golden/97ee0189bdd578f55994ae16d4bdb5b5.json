@@ -1,0 +1,23 @@
+{
+  "key": "97ee0189bdd578f55994ae16d4bdb5b5",
+  "operation": "generate",
+  "text": "```json\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top 10 products ranked by total product revenue (excluding tax).\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:order_item.product\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:order_item.revenue\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"entity:order_item.product\":\"q:products\",\"dimension:products.product_name\":\"q:products\"}}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:56:27.780Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "97ee0189bdd578f55994ae16d4bdb5b584dc059e86589bcf359f981ec0cdbc5e",
+    "postCanonicalHash": "97ee0189bdd578f55994ae16d4bdb5b584dc059e86589bcf359f981ec0cdbc5e",
+    "appliedRuleClasses": []
+  }
+}

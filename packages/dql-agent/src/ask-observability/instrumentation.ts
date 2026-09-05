@@ -43,7 +43,6 @@ function selectedTierFromAuthoritativeV8(run: AgentRun): AskTraceEnvelopeV1['sel
   if (receipt?.mode !== 'authoritative_v2') return undefined;
   return receipt.tierAttempts.find((attempt) => attempt.frozen)?.tier
     ?? receipt.tierAttempts.find((attempt) => attempt.outcome === 'executed')?.tier
-    ?? (receipt.planFrozen ? run.routeDecision?.askAgentV2Decision?.state.resolvedPlan?.tier : undefined)
     // An unfrozen V2 run still has one authoritative controller position.
     // Preserve it in the indexed envelope instead of inheriting a stale V1
     // cascade selection (for example, semantic after the controller has
@@ -114,30 +113,6 @@ export function recordAuthoritativeRouterDecisionV1(observer: AskTraceObserverV1
   // story distinguish "not shown to the model yet" from "not retrieved".
   // Shadow keeps the legacy projection alone to avoid double-counting an
   // answer it does not serve.
-  const v2State = decision.askAgentV2Decision?.mode === 'authoritative_v2'
-    ? decision.askAgentV2Decision.state
-    : undefined;
-  if (v2State) {
-    const retained = new Set(v2State.retainedCandidateIds);
-    const initial = new Set(v2State.initialCandidateIds);
-    for (const entry of metadata.values()) {
-      if (!retained.has(entry.candidateId)) continue;
-      const exactCertified = entry.candidateId === v2State.exactCertifiedCandidateId;
-      observer.recordCandidateDecision({
-        candidateId: entry.candidateId,
-        role: entry.role,
-        source: entry.source,
-        ...(entry.lanes?.length ? { lanes: entry.lanes, lane: entry.lanes[0]?.lane, laneRank: entry.lanes[0]?.rank } : {}),
-        decision: initial.has(entry.candidateId) ? 'admitted' : 'reserved',
-        reasonCode: exactCertified
-          ? 'exact_name_match'
-          : initial.has(entry.candidateId)
-            ? 'role_reserved'
-            : 'fused_relevance_fill',
-        compatibilityCode: 'unknown',
-      });
-    }
-  }
   const recordMeaningCandidates = (candidateIds: string[], decisionKind: 'model_selected' | 'model_rejected') => {
     for (const candidateId of uniqueIds(candidateIds)) {
       for (const entry of [...metadata.values()].filter((item) => item.candidateId === candidateId)) {

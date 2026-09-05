@@ -1,0 +1,23 @@
+{
+  "key": "6e33d10a1da57500b7cc47a09b788768",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Ranking customers by their beverage (drink) revenue, top 10 customers.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"limit\":10,\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:top customers for beverage product category\"},\"reply\":\"\"}\n\nWait, let me correct: using a certified block as the measure means no groupBy/display/filters.\n\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Ranking customers by their beverage (drink) revenue, using the certified top beverage customers block.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"limit\":10,\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:top customers for beverage product category\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:55:56.497Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "6e33d10a1da57500b7cc47a09b788768d70310ae288be0b0491d37ed815c4d14",
+    "postCanonicalHash": "6e33d10a1da57500b7cc47a09b788768d70310ae288be0b0491d37ed815c4d14",
+    "appliedRuleClasses": []
+  }
+}

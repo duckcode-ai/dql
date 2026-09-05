@@ -1,0 +1,23 @@
+{
+  "key": "d61e6e3b143eecf12f2dad073d286c21",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"conversation\",\"reading\":\"A greeting with no analytical content.\",\"reply\":\"Hi! I can help you explore Jaffle Shop's orders, customers, products, and revenue data. What would you like to know?\"}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:57:11.112Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d61e6e3b143eecf12f2dad073d286c21d7723b78db17739a08c2689d3b2f09c7",
+    "postCanonicalHash": "d61e6e3b143eecf12f2dad073d286c21d7723b78db17739a08c2689d3b2f09c7",
+    "appliedRuleClasses": []
+  }
+}

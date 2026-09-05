@@ -29,40 +29,23 @@ const HEAVY_TEST_FILES = [
   'src/metadata/catalog.test.ts',
   'src/project-state.test.ts',
 ];
-// The authoritative V2 kernel is a release-critical Ask surface. Keep an
-// explicit discovery assertion so a future glob or lane refactor cannot omit
-// its regression suite while still producing a superficially complete count.
+// The Ask pipeline is the release-critical Ask surface. Keep an explicit
+// discovery assertion so a future glob or lane refactor cannot omit its
+// regression suites while still producing a superficially complete count.
 const REQUIRED_TEST_FILES = [
-  'src/ask-runtime/ask-agent-runtime-v2.test.ts',
+  'src/ask-pipeline/ask-pipeline.test.ts',
+  'src/ask-pipeline/prepare/prepare.test.ts',
 ];
 // Keep this audited set explicit: new Ask analytical-frame and observability
 // regressions must participate in the same serial package gate rather than
 // being silently omitted from the receipt audit.
 const EXPECTED_TEST_FILES = 149;
-// Keep the aggregate receipt exact. The current Ask routing, semantic-proof,
-// trace, product-category, exploratory-output, governed-proof, compound
-// metric-binding, V6 decision-story, V2 continuation persistence, and the
-// final bounded Ask planner/execution, constrained recovery (including a
-// full initial package plus #17 targeted extension), explicit
-// filter/time/ranking regressions, the authoritative V2 runtime suite,
-// certified profile, exact semantic order-count fast paths, durable
-// failed-planner V6 receipt regressions, and controller-progress recovery
-// across text/OpenAI/Claude transports, including terminal-control
-// clarification, native budget-stop, and post-execution terminalization
-// regressions, including model-qualified MetricFlow time-capability identity
-// coverage, including immutable certified-completeness reload and semantic
-// execution-readiness regressions, plus the exact-certified fast-path
-// lifecycle/provenance regression, plus the pronoun/named-member follow-up
-// continuity regressions (third-person topic classification, prior-result
-// member clarification, unmodeled-dimension truthfulness, and honest
-// orchestration-budget labelling), plus the V2 lane response-contract and
-// narrowed-tool-availability regressions, plus the time-window-vs-row-limit
-// parser table and the executed-ranking-clause (invented/unordered limit)
-// coverage, plus the typed time-window clause (requirement-clauses) suite,
-// plus the shape-clause task-merge regressions, total 2,290 non-skipped
-// tests; a
-// future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 1899;
+// Keep the aggregate receipt exact. The Ask pipeline suites (intent contract,
+// vocabulary, governed defaults and host proofs, prepare tiers), the engine,
+// observability, retrieval, semantic-proof, research-ledger, conversation and
+// provider-transport regressions total 1,891 non-skipped tests; a future
+// accidental skip must not be hidden by a broad package pass.
+const EXPECTED_TESTS = 1891;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

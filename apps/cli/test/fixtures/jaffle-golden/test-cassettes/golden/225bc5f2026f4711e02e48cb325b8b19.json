@@ -1,0 +1,23 @@
+{
+  "key": "225bc5f2026f4711e02e48cb325b8b19",
+  "operation": "generate",
+  "text": "```json\n{\"hypotheses\":[\n  {\"statement\":\"Beverage revenue is concentrated in a small number of top products rather than broad-based demand\",\"priorConfidence\":0.55,\"target\":\"beverage_revenue_by_product\",\"action\":\"breakdown\",\"expectation\":\"A small subset of product_name values (e.g. top 2-3) account for a disproportionate majority (>60%) of total beverage revenue; if revenue is evenly spread across many products, this is refuted\"},\n  {\"statement\":\"Beverage revenue is high primarily because of drink_revenue_pct rising relative to food, not because overall order volume grew\",\"priorConfidence\":0.5,\"target\":\"order_item.drink_revenue_pct\",\"action\":\"compare_time\",\"expectation\":\"drink_revenue_pct shows a sustained upward trend over the month dimension while orders.orders stays flat or declines; if drink_revenue_pct is flat and orders.orders rose, this is refuted\"},\n  {\"statement\":\"High beverage revenue is driven by one customer_type segment (e.g. a specific customer type) disproportionately buying drinks\",\"priorConfidence\":0.5,\"target\":\"top_beverage_customers\",\"action\":\"breakdown\",\"expectation\":\"One customer_type accounts for a majority share of top beverage customers' revenue; if revenue is evenly distributed across customer_types, this is refuted\"},\n  {\"statement\":\"Beverage revenue growth is driven by a small number of repeat high-value customers rather than broad new-customer adoption\",\"priorConfidence\":0.45,\"target\":\"top_beverage_customers\",\"action\":\"lookup_block\",\"expectation\":\"The top beverage customers list shows high concentration (few customer_name entries with very high lifetime_spend_pretax/order counts); if the list is long and spend is dispersed, this is refuted\"},\n  {\"statement\":\"Beverage revenue's high share reflects an overall revenue growth trend (monthly revenue increasing across the board), not a beverage-specific effect\",\"priorConfidence\":0.4,\"target\":\"monthly_revenue\",\"action\":\"compare_time\",\"expectation\":\"monthly_revenue shows overall revenue growth over month that tracks similarly to drink_revenue growth; if food_revenue and total order_item.revenue are flat while drink_revenue rises, this is refuted\"},\n  {\"statement\":\"Beverage revenue is high because average order value for drink-heavy orders exceeds that of food-only orders, not because of order volume\",\"priorConfidence\":0.4,\"target\":\"customers.average_order_value\",\"action\":\"compare_time\",\"expectation\":\"average_order_value correlates positively with drink_revenue_pct across months; if average_order_value stays flat regardless of drink_revenue_pct changes, this is refuted\"}\n]}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:57:38.574Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "225bc5f2026f4711e02e48cb325b8b197da08de59373ef9e5aed975bd5948164",
+    "postCanonicalHash": "225bc5f2026f4711e02e48cb325b8b197da08de59373ef9e5aed975bd5948164",
+    "appliedRuleClasses": []
+  }
+}

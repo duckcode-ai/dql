@@ -1,0 +1,23 @@
+{
+  "key": "ef04945aef5cbc8b2f1a0adf2dbce2a9",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by their lifetime spend before tax, showing the top 10.\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend_pretax\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:customers.lifetime_spend_pretax\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend_pretax\":\"q:lifetime spend before tax\",\"entity:customers.customer\":\"q:customers\",\"dimension:customers.customer_name\":\"q:customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:57:29.460Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "ef04945aef5cbc8b2f1a0adf2dbce2a9403d206895ad88877085eb6fca68a55d",
+    "postCanonicalHash": "ef04945aef5cbc8b2f1a0adf2dbce2a9403d206895ad88877085eb6fca68a55d",
+    "appliedRuleClasses": []
+  }
+}

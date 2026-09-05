@@ -1,0 +1,23 @@
+{
+  "key": "e303d4d9e4f846bb68a30cd09dc0d05d",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for weather information in Chicago, which is not a business or analytics topic covered by this project.\",\"measures\":[],\"unresolved\":[{\"clause\":\"weather in Chicago\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:57:13.879Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "e303d4d9e4f846bb68a30cd09dc0d05df57075f8ac078a36457ea9f3d533fa8c",
+    "postCanonicalHash": "e303d4d9e4f846bb68a30cd09dc0d05df57075f8ac078a36457ea9f3d533fa8c",
+    "appliedRuleClasses": []
+  }
+}

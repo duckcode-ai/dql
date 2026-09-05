@@ -32,7 +32,6 @@ import { type SemanticMemberSelection } from './semantic-bridge/compose.js';
 import type { AgenticSqlExecutionCapabilityV1 } from './agentic/sql-authorization.js';
 import { type CascadeAnswerResult } from './cascade/cascade.js';
 import type { AnalyticalCascadeTierV1, ExploratoryExecutionAuthorizationAttemptV1, ExploratoryExecutionFreezeV1 } from './analytical-orchestration.js';
-import type { AskAgentRuntimeWorkspaceBridgeV2 } from './ask-runtime/ask-agent-runtime-v2.js';
 import { type ResolvedAnalyticalPlan, type ResolvedAnalyticalPlanDelta } from './resolved-analytical-plan.js';
 import { type PlanExecutionBinding, type PlanExecutionBlockedCode, type SemanticGraphExecutionBinding } from './plan-execution-adapter.js';
 import { type GovernedCompilationReceipt, type GovernedAnalyticalGraphCompilationReceipt, type GovernedAnalyticalGraphCompileResult, type GovernedRelationalCompileResult } from './governed-relational-compiler.js';
@@ -1383,18 +1382,6 @@ export interface AgentAnswer {
    * stable public payload.
    */
   _semanticMetricMatch?: MetricMatch;
-  /**
-   * Additive terminal projection from the authoritative Ask V2 tool runtime.
-   * It carries a typed stop boundary so callers do not re-enter legacy business
-   * interpretation after the V2 tool loop has ended.
-   */
-  askAgentV2Outcome?: {
-    version: 2;
-    kind: 'finish_answer' | 'clarification' | 'gap' | 'provider_failure' | 'execution_failure' | 'denied' | 'budget_exhausted';
-    reasonCode: string;
-    safeAction?: string;
-    origin: 'retrieval' | 'agent_control' | 'tool' | 'validation' | 'freeze' | 'execution' | 'provider' | 'narration';
-  };
 }
 
 export interface AgentResultPayload {
@@ -1515,12 +1502,6 @@ export interface CertifiedBlockInvocationInput {
 
 export interface AnswerLoopInput {
   question: string;
-  /**
-   * Authoritative V2-only, function-bearing retrieval workspace.  It is never
-   * accepted from JSON and only the V2 provider tool adapter consumes it;
-   * legacy answer() deliberately ignores it.
-   */
-  askAgentV2Workspace?: AskAgentRuntimeWorkspaceBridgeV2;
   /**
    * Server-owned continuation guard for a plural prior-result member binding.
    * Such a follow-up must execute its already-frozen analytical program with

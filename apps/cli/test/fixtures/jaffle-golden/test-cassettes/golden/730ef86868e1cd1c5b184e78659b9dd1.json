@@ -1,0 +1,24 @@
+{
+  "key": "730ef86868e1cd1c5b184e78659b9dd1",
+  "operation": "generate",
+  "text": "The block already includes `customer_name` as a declared output column, so this is simply re-affirming the existing certified block—no new display ref needs to be added since it's already part of the block's fixed output.\n\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Ranking customers by their beverage (drink) revenue, including customer name, using the certified top beverage customers block.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"inherited\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:57:58.294Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "730ef86868e1cd1c5b184e78659b9dd11d3d939c83e9f8c59b249973396fda81",
+    "postCanonicalHash": "730ef86868e1cd1c5b184e78659b9dd11d3d939c83e9f8c59b249973396fda81",
+    "appliedRuleClasses": []
+  }
+}

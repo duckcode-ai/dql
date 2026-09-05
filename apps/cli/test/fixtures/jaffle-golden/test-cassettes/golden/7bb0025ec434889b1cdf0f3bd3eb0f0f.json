@@ -1,0 +1,23 @@
+{
+  "key": "7bb0025ec434889b1cdf0f3bd3eb0f0f",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross lifetime spend for the customer named 'Ryan Byrd'\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\",\"aggregation\":\"sum\"}],\"groupBy\":[],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan Byrd\"],\"source\":\"question\"}],\"expectedShape\":\"scalar\",\"unresolved\":[{\"clause\":\"total revenue for Ryan Byrd\",\"options\":[\"metric:customers.lifetime_spend\",\"metric:customers.lifetime_spend_pretax\"],\"material\":true,\"question\":\"Should 'total revenue' include tax (lifetime spend) or be the pre-tax lifetime spend?\"}],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:total revenue\",\"dimension:customers.customer_name\":\"q:Ryan Byrd\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T09:56:39.432Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "7bb0025ec434889b1cdf0f3bd3eb0f0f4db4e705857978360df76bf7e0ba22c6",
+    "postCanonicalHash": "7bb0025ec434889b1cdf0f3bd3eb0f0f4db4e705857978360df76bf7e0ba22c6",
+    "appliedRuleClasses": []
+  }
+}

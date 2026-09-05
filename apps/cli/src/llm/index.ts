@@ -1,6 +1,6 @@
 import { claudeAgentSdkRunner } from './providers/claude-agent-sdk.js';
 import { claudeCodeRunner } from './providers/claude-code.js';
-import { createDqlAgentProviderRunner } from './providers/dql-agent-provider.js';
+import { createDqlAgentProviderRunner } from './providers/provider-runner.js';
 import { anthropicSdkRunner, openAiSdkRunner } from './providers/native-sdk-provider.js';
 import type { AgentRunner, ProviderId } from './types.js';
 
