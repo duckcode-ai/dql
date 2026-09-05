@@ -271,3 +271,76 @@ story—interpretation, role coverage, planner, verifier/recovery, cascade,
 freeze/connection, execution, facts, and safe next action—while raw spans and
 candidate lifecycle remain Advanced local evidence (`API-016`, `OBS-016`,
 `E2E-024`).
+
+## Ask pipeline amendment (intent → prepare → execute)
+
+Status: **implemented; the golden harness is the gate; independent
+built-product verification pending**
+
+The Ask pipeline (`packages/dql-agent/src/ask-pipeline/`, host
+`apps/cli/src/ask-pipeline-host/`) supersedes the V2 tool kernel for every
+ordinary Ask turn and for every analytical Research hypothesis. One rule:
+**the LLM interprets, the host proves.** After interpretation no code reads
+the question string again.
+
+1. **One interpretation contract.** A turn produces exactly one
+   `AnalyticalIntentV1` from one structured provider call over the snapshot's
+   `VocabularyIndex` (every metric, dimension, entity, certified block,
+   relation, column and business term the snapshot authorizes; fuzzy lookup
+   proposes candidates, never authorizes a guessed id). Refs are validated
+   against the vocabulary; an invented ref earns one bounded correction with
+   the nearest authorized refs. Turn classification (conversation,
+   definition, analytics) is a field of the same output. Every physical
+   provider call, corrections included, is counted (`AGT-055`).
+2. **Governed defaults and host proofs on the intent.** A metric whose name
+   is the word the question uses is its meaning; a business term that
+   defines a word is its meaning; a certified block that ranks the entity the
+   question ranks fixes the measure of "top <entity>" (certified precedent).
+   A word spent on the grain never names a measure. Identity is the entity
+   key with the label displayed; a label finer than the grain is replaced by
+   the grain's own label. Reachability and grain are never clarifications.
+   A follow-up made only of the previous analysis's words cannot replace its
+   measures on the first reading; a second reading that still replaces them
+   becomes one clarification between the two (`AGT-056`).
+3. **Prepare before commit.** Certified is entailment, not lexical fit: a
+   block the intent names by ref is served as published (identity caveat on
+   the proof); a block matched only through its measures must prove identity
+   with a key column; an intent with no measures never entails. Semantic
+   binds model-scoped names and keeps the compiler's verbatim message.
+   Relational composes aggregate islands per fact grain over the semantic
+   layer's entity joins and the relationships declared in Domain Studio
+   (deprecated relationships never join). Exploration is an explicit one-run
+   opt-in and never automatic; a policy denial is terminal. The highest
+   trust that prepared is frozen as the executable; an execution proof
+   failure (a silently dropped filter, fan-out) falls through to the next
+   governed tier; an unchanged failed attempt is never repeated (`AGT-057`).
+4. **Four outcomes, one receipt.** A turn ends `answered(tier, trust)`,
+   `clarify(question, options)`, `gap(not_retrieved | not_modeled |
+   ambiguous | unsupported | denied)` or `failed(stage, verbatim error)`.
+   The pipeline receipt (intent, every prepared candidate and typed refusal,
+   dispatches with replies, executed SQL fingerprint, verbatim failures,
+   build identity) is persisted on the run as `diagnosticReceiptV9`, served
+   by the trace API as `runtimeReceiptV9`, and rendered by the Notebook
+   inspector; V1–V8 receipts stay readable for the runs that carry them
+   (`AGT-058`, `OBS-018`).
+5. **Conversation is intent edits.** The executed intent is persisted per
+   turn as `contract.askIntentV1`; the next resolver call receives it and must
+   account for every prior clause (inherited, changed, or removed with a
+   reason) before anything runs (`AGT-059`).
+6. **Request identity.** A submission carrying `Idempotency-Key` is claimed
+   before any work; a replay attaches to the original run (`replayed: true`),
+   a different question under the same key is `409 IDEMPOTENCY_CONFLICT`, an
+   in-flight original streams to completion, and an unknown outcome is
+   reported as such rather than re-executed (`API-018`).
+7. **Runtime selection.** `pipeline_v3` is the default for every Ask surface;
+   `authoritative_v2` remains an explicit operator rollback
+   (`agent.askRuntimeMode`, `--ask-runtime-mode`) until it is deleted.
+
+The gate is `apps/cli/src/ask-golden.test.ts` with
+`apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn
+conversation, hand-reviewed reference SQL executed against a seeded SQLite
+copy of the jaffle warehouse, row-set equality with numeric tolerance,
+expected tier/trust, build identity on every report, cassette replay in CI,
+live nightly on the subscription CLI, a repeat lane for stability. The new
+pipeline's suite carries no known-failure exemptions; the legacy baseline
+(17/34) is documented, not prescribed (`E2E-026`).
