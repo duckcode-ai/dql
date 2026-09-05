@@ -1602,8 +1602,10 @@ export interface AskTraceDataV1 {
   runtimeReceiptV6?: AgentRunDiagnosticReceiptV6;
   /** Same redacted V8 tool-runtime receipt returned by the full trace API. */
   runtimeReceiptV8?: AgentRunDiagnosticReceiptV8;
+  /** The Ask pipeline's receipt (`diagnosticReceiptV9` on the run), when the run carries one. */
+  runtimeReceiptV9?: Record<string, unknown>;
   /** Server-owned Ask rollout mode joined from the durable run; old traces omit it. */
-  runtimeMode?: 'authoritative_v2';
+  runtimeMode?: 'authoritative_v2' | 'pipeline_v3';
 }
 
 export interface AskTraceStoreStatusV1 {
@@ -1619,7 +1621,7 @@ export interface AskTraceListEntryV1 extends AskTraceEnvelopeV1 {
   /** Joined at API read time from the local run store; never persisted in the trace store. */
   questionPreview?: string;
   scenarioLabel?: string;
-  runtimeMode?: 'authoritative_v2';
+  runtimeMode?: 'authoritative_v2' | 'pipeline_v3';
 }
 
 export interface AskTraceListQueryV1 {
@@ -1785,6 +1787,12 @@ export type AgentThinkingMode = 'auto' | 'low' | 'medium' | 'high';
 
 export interface CreateAgentRunInput {
   question: string;
+  /**
+   * The submission's identity, minted by the caller once per explicit submit
+   * and sent as `Idempotency-Key`. It never travels in the body: a retry of
+   * the same submission attaches to the run the first attempt started.
+   */
+  requestId?: string;
   selectedEvidenceId?: string;
   selectedResultBinding?: AgentSelectedResultBinding;
   /** Original analytical question for an identifier-bound clarification choice. */
@@ -1951,7 +1959,7 @@ export type AgentRunStreamMessage =
    * The runtime has accepted the request and minted the only run identity that
    * may be used for cancellation, reload, or capability-scoped execution.
    */
-  | { kind: 'accepted'; runId: string; operationId?: string }
+  | { kind: 'accepted'; runId: string; operationId?: string; replayed?: boolean }
   | { kind: 'event'; event: AgentRunEvent }
   | { kind: 'answer-delta'; delta: string }
   | { kind: 'complete'; run: AgentRun };
@@ -3166,6 +3174,8 @@ export class DqlApiError extends Error {
   readonly nextActions?: string[];
   readonly requestId?: string;
   readonly snapshotId?: string;
+  /** The run an idempotency conflict or unknown-outcome response refers to. */
+  readonly runId?: string;
 
   constructor(input: {
     message: string;
@@ -3176,6 +3186,7 @@ export class DqlApiError extends Error {
     nextActions?: string[];
     requestId?: string;
     snapshotId?: string;
+    runId?: string;
   }) {
     super(input.message);
     this.name = 'DqlApiError';
@@ -3183,6 +3194,7 @@ export class DqlApiError extends Error {
     this.code = input.code;
     this.recoverable = input.recoverable;
     this.details = input.details;
+    this.runId = input.runId;
     this.nextActions = input.nextActions;
     this.requestId = input.requestId;
     this.snapshotId = input.snapshotId;
@@ -3222,6 +3234,7 @@ function formatRequestError(res: Response, text: string): DqlApiError {
         : undefined,
       requestId: typeof payload?.requestId === 'string' ? payload.requestId : undefined,
       snapshotId: typeof payload?.snapshotId === 'string' ? payload.snapshotId : undefined,
+      ...(typeof payload?.runId === 'string' && payload.runId ? { runId: payload.runId } : {}),
     });
   } catch {
     return new DqlApiError({ message: fallback, status: res.status });
@@ -3307,7 +3320,10 @@ async function streamAgentRunResponse(
       // or cancel a background run.
       const runId = typeof payload?.runId === 'string' ? payload.runId : undefined;
       const operationId = typeof payload?.operationId === 'string' ? payload.operationId : undefined;
-      if (runId) onMessage({ kind: 'accepted', runId, ...(operationId ? { operationId } : {}) });
+      // `replayed` means this submission identity was already claimed: the
+      // stream is attached to the run that claim started, not a second run.
+      const replayed = payload?.replayed === true;
+      if (runId) onMessage({ kind: 'accepted', runId, ...(operationId ? { operationId } : {}), ...(replayed ? { replayed } : {}) });
     } else if (eventName === 'agent-run-event') {
       onMessage({ kind: 'event', event: payload as AgentRunEvent });
     } else if (eventName === 'agent-run-answer-delta') {
@@ -3352,29 +3368,22 @@ function serializeCreateAgentRunInput(input: CreateAgentRunInput): string {
   return JSON.stringify(safeInput);
 }
 
+/** A fresh submission identity: a UUID when the platform has one, else time plus entropy. */
+export function mintAgentRunSubmissionId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 /**
- * One durable identity per submission. It is minted in the browser BEFORE the
- * request leaves, remembered for a few minutes keyed by what was asked, and
- * sent as `Idempotency-Key`, so a retry after a lost stream (or a reload that
- * resubmits the same question in the same thread) attaches to the original
- * run instead of starting another.
+ * One identity per submission, sent as `Idempotency-Key`. The caller mints it
+ * once per explicit submit (so a retry of THAT submit attaches to the run it
+ * started); a call without one gets a fresh identity. Identity is never
+ * derived from the question text: asking the same thing twice is two
+ * submissions and must start two runs.
  */
 function agentRunRequestIdentity(input: CreateAgentRunInput): string {
-  const explicit = (input as CreateAgentRunInput & { requestId?: unknown }).requestId;
+  const explicit = input.requestId;
   if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
-  const key = `dql-ask-request:${JSON.stringify({ q: input.question, t: (input as { threadId?: string }).threadId ?? null, m: input.requestedMode ?? null, e: input.selectedEvidenceId ?? null })}`;
-  try {
-    const remembered = sessionStorage.getItem(key);
-    if (remembered) {
-      const parsed = JSON.parse(remembered) as { id: string; at: number };
-      if (Date.now() - parsed.at < 5 * 60_000) return parsed.id;
-    }
-    const id = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    sessionStorage.setItem(key, JSON.stringify({ id, at: Date.now() }));
-    return id;
-  } catch {
-    return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  }
+  return mintAgentRunSubmissionId();
 }
 
 /**

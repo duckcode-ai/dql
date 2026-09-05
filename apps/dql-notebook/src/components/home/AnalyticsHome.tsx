@@ -43,6 +43,8 @@ export interface Conversation {
   threadId?: string;
   /** Pinned by the user; pinned chats are listed in their own group. */
   favorite?: boolean;
+  /** The user renamed this chat; a later turn never re-derives the title. */
+  titleCustomized?: boolean;
 }
 
 const STORAGE_KEY = 'dql-ask-conversations';
@@ -170,6 +172,7 @@ export function mergePersistedAskConversations(
       items: existing?.items ?? [],
       threadId: thread.id,
       favorite: thread.favorite ?? existing?.favorite ?? false,
+      ...(existing?.titleCustomized ? { titleCustomized: true } : {}),
     };
   });
   // A successful server list is the authority for thread membership. Browser
@@ -278,6 +281,7 @@ function mergePostRequestAskConversationCreations(
       items: creation.items.length > 0 ? creation.items : existing.items,
       threadId: creation.threadId ?? existing.threadId,
       favorite: existing.favorite ?? creation.favorite,
+      ...(existing.titleCustomized || creation.titleCustomized ? { titleCustomized: true } : {}),
     };
   }
   return merged
@@ -457,12 +461,14 @@ export function applyAskItemsCallback(input: {
   const now = input.now ?? new Date().toISOString();
   const conversation: Conversation = {
     id: input.callbackConversationId,
-    title: deriveTitle(input.items),
+    // A title the user typed is theirs; only a derived title follows the turns.
+    title: existing?.titleCustomized && existing.title.trim() ? existing.title : deriveTitle(input.items),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
     items: input.items,
     threadId: existing?.threadId,
     favorite: existing?.favorite,
+    ...(existing?.titleCustomized ? { titleCustomized: true } : {}),
   };
   return [conversation, ...input.conversations.filter((entry) => entry.id !== input.callbackConversationId)]
     .slice(0, MAX_CONVERSATIONS);
@@ -886,7 +892,7 @@ export function AnalyticsHome() {
     const clean = title.trim();
     if (!clean) return;
     setConversations((current) => persistConversations(current.map((conversation) =>
-      conversation.id === id ? { ...conversation, title: clean } : conversation)));
+      conversation.id === id ? { ...conversation, title: clean, titleCustomized: true } : conversation)));
     const threadId = conversations.find((conversation) => conversation.id === id)?.threadId;
     if (threadId) void api.updateAgentThread(threadId, { title: clean }).catch(() => undefined);
   }, [conversations]);

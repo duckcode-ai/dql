@@ -59,9 +59,17 @@ export function labelFor(vocabulary: VocabularyIndex): (ref: string) => string {
   };
 }
 
-function formatValue(value: unknown): string {
+/** An ISO instant at UTC midnight is a calendar date; it is never rendered through the host timezone. */
+const UTC_MIDNIGHT = /^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.0+)?(?:Z|\+00:00)$/;
+
+export function formatValue(value: unknown): string {
   if (value === null || value === undefined) return 'null';
   if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? formatValue(value.toISOString()) : 'null';
+  if (typeof value === 'string') {
+    const date = UTC_MIDNIGHT.exec(value);
+    return date ? date[1]! : value;
+  }
   return String(value);
 }
 

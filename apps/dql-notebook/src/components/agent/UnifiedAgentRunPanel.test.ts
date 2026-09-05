@@ -35,6 +35,8 @@ let askAppDestinations: typeof UnifiedAgentRunPanelModule.askAppDestinations;
 let askAppWriteErrorMessage: typeof UnifiedAgentRunPanelModule.askAppWriteErrorMessage;
 let askRunAllowsExecutionRepair: typeof UnifiedAgentRunPanelModule.askRunAllowsExecutionRepair;
 let agentRunPerformanceRows: typeof UnifiedAgentRunPanelModule.agentRunPerformanceRows;
+let mergeFinishedRun: typeof UnifiedAgentRunPanelModule.mergeFinishedRun;
+let pipelineV9Activity: typeof UnifiedAgentRunPanelModule.pipelineV9Activity;
 let askRunCaptureWarning: typeof UnifiedAgentRunPanelModule.askRunCaptureWarning;
 let askFailureOriginTyped: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
 let askFailurePresentation: typeof UnifiedAgentRunPanelModule.ASK_FAILURE_PRESENTATION;
@@ -87,6 +89,8 @@ beforeAll(async () => {
     askAppWriteErrorMessage = module.askAppWriteErrorMessage;
     askRunAllowsExecutionRepair = module.askRunAllowsExecutionRepair;
     agentRunPerformanceRows = module.agentRunPerformanceRows;
+    mergeFinishedRun = module.mergeFinishedRun;
+    pipelineV9Activity = module.pipelineV9Activity;
     askRunCaptureWarning = module.askRunCaptureWarning;
     askFailureOriginTyped = module.askFailureOrigin;
     askFailurePresentation = module.ASK_FAILURE_PRESENTATION;
@@ -2307,5 +2311,56 @@ describe('failure card origin and detail', () => {
       trustState: 'review_required',
       artifacts: [],
     } as any)).toContain('inferred the semantic grouping');
+  });
+});
+
+describe('submission identity in the thread', () => {
+  const run = (id: string) => ({ id, question: 'top customers', route: 'generated_answer', status: 'completed', trustState: 'governed', events: [], steps: [], artifacts: [] } as unknown as Parameters<typeof mergeFinishedRun>[1]);
+  it('pairs the answer with the question item of its submission, never with equal text', () => {
+    const items = [
+      { kind: 'user' as const, id: 'user_1', text: 'top customers' },
+      { kind: 'run' as const, id: 'run_1', run: run('run_1') },
+      { kind: 'user' as const, id: 'user_2', text: 'top customers' },
+    ];
+    const merged = mergeFinishedRun(items, run('run_2'), { question: 'top customers', userItemId: 'user_2' });
+    expect(merged.map((item) => item.id)).toEqual(['user_1', 'run_1', 'user_2', 'run_2']);
+  });
+  it('restores the question under its submission id when a reload lost the local item', () => {
+    const merged = mergeFinishedRun([], run('run_2'), { question: 'top customers', userItemId: 'user_2' });
+    expect(merged.map((item) => item.id)).toEqual(['user_2', 'run_2']);
+  });
+  it('a pending record without a submission id falls back to the text match', () => {
+    const merged = mergeFinishedRun([{ kind: 'user' as const, id: 'user_1', text: 'top customers' }], run('run_1'), { question: 'top customers' });
+    expect(merged.map((item) => item.id)).toEqual(['user_1', 'run_1']);
+  });
+});
+
+describe('the Ask pipeline receipt is the authority on call counts', () => {
+  const receipt = {
+    version: 1, vocabularyFingerprint: 'v', dispatches: [{ purpose: 'resolve', ms: 900 }, { purpose: 'intent:repair', ms: 700 }],
+    candidates: [{ tier: 'semantic', trust: 'governed', proof: [] }], refusals: [{ tier: 'certified', code: 'no_certified_block', message: 'none', repairable: false }],
+    tiers: [], executed: { tier: 'semantic', sqlFingerprint: 'f', rowCount: 3, ms: 12, proofs: [] }, timings: {},
+  };
+  it('counts dispatches, preparation and the execution from the receipt', () => {
+    expect(pipelineV9Activity({ diagnosticReceiptV9: receipt })).toEqual({ providerDispatches: 2, toolCalls: 2, executionAttempts: 1, repairs: 1 });
+    expect(pipelineV9Activity({})).toBeUndefined();
+  });
+  it('performance rows prefer the receipt over absent physical spans for a pipeline run', () => {
+    const trace = {
+      envelope: {
+        version: 1, traceId: 'p'.repeat(32), rootSpanId: 'q'.repeat(16), runId: 'v9-counts', surface: 'browser', mode: 'ask',
+        questionFingerprint: 'sha256:question', status: 'completed', recordingStatus: 'complete', startedAt: '2026-09-05T12:00:00.000Z', durationMs: 1600,
+        spanCount: 0, candidateDecisionCount: 0, droppedRecordCount: 0,
+      },
+      spans: [],
+      runtimeReceiptV9: receipt,
+      runtimeMode: 'pipeline_v3' as const,
+    } as unknown as Parameters<typeof agentRunPerformanceRows>[1];
+    const run = { requestedMode: 'ask', providerEgressReceipts: [], askAgentRuntimeMode: 'pipeline_v3' } as unknown as Parameters<typeof agentRunPerformanceRows>[0];
+    expect(agentRunPerformanceRows(run, trace)).toEqual(expect.arrayContaining([
+      ['Calls', '2 provider · 2 tool · 1 SQL · 1 repair'],
+      ['Trace evidence', 'Ask pipeline receipt (dispatch, preparation and execution counts)'],
+      ['Ask runtime', 'Ask pipeline receipt'],
+    ]));
   });
 });

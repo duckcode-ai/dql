@@ -26,7 +26,37 @@ export interface ExecuteDeps {
 
 export type ExecutionOutcome =
   | { ok: true; result: ExecutedRows; proofs: string[] }
-  | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed' | 'no_rows_matched'; message: string; proofs: string[] };
+  | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed' | 'no_rows_matched'; message: string; proofs: string[]; cause?: EmptyAggregateCause };
+
+/** Why a single all-null aggregate row is empty: the restriction that matched nothing. */
+export type EmptyAggregateCause = { kind: 'member'; literals: string[] } | { kind: 'window'; start: string; end: string } | { kind: 'predicate'; refs: string[] };
+
+/**
+ * A result that holds nothing (no rows, or one row whose every cell is null)
+ * did not aggregate anything. Under a restriction (a member literal, a time
+ * window, any predicate) that is the absence of matching rows, not a value,
+ * and the cause is named. An unrestricted empty result stays an answer: the
+ * table is empty, which is what the rows say.
+ */
+export function emptyAggregateCause(intent: AnalyticalIntentV1, result: ExecutedRows): EmptyAggregateCause | undefined {
+  if (result.rows.length > 1) return undefined;
+  if (result.rows.length === 1) {
+    const cells = Object.values(result.rows[0] ?? {});
+    if (cells.length === 0 || !cells.every((value) => value === null || value === undefined)) return undefined;
+  }
+  const predicates = [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])];
+  const literals = predicates.flatMap((predicate) => predicate.values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0 && !/^(true|false)$/i.test(value)));
+  if (literals.length > 0) return { kind: 'member', literals };
+  if (intent.time?.window) return { kind: 'window', start: intent.time.window.start, end: intent.time.window.end };
+  if (predicates.length > 0) return { kind: 'predicate', refs: [...new Set(predicates.map((predicate) => predicate.ref))] };
+  return undefined;
+}
+
+function describeEmptyAggregate(cause: EmptyAggregateCause): string {
+  if (cause.kind === 'member') return `no rows matched ${cause.literals.map((value) => JSON.stringify(value)).join(', ')} on the warehouse; the aggregate was empty, so nothing about the member was answered`;
+  if (cause.kind === 'window') return `no rows fell inside the window ${cause.start}..${cause.end}; the aggregate was empty, so nothing about that period was answered`;
+  return `no rows matched the restriction on ${cause.refs.join(', ')}; the aggregate was empty, so nothing under that restriction was answered`;
+}
 
 export async function executeCandidate(candidate: PreparedCandidate, intent: AnalyticalIntentV1, deps: ExecuteDeps): Promise<ExecutionOutcome> {
   const proofs: string[] = [];
@@ -39,6 +69,16 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
     return { ok: false, code: 'filter_not_applied', message: `the prepared query does not apply the filter value${missing.length > 1 ? 's' : ''} ${missing.map((value) => JSON.stringify(value)).join(', ')}; nothing was executed`, proofs };
   }
   if (literals.length > 0) proofs.push(`every filter literal (${literals.map((value) => JSON.stringify(value)).join(', ')}) is bound in the executed query`);
+  // The time window is a restriction too: both bounds must be bound, as
+  // parameters or as date literals, or nothing runs.
+  if (intent.time?.window) {
+    const bounds = [intent.time.window.start, intent.time.window.end].map((bound) => bound.slice(0, 10).toLowerCase());
+    const unbound = bounds.filter((bound) => !haystack.includes(bound));
+    if (unbound.length > 0) {
+      return { ok: false, code: 'filter_not_applied', message: `the prepared query does not apply the time window ${intent.time.window.start}..${intent.time.window.end} (missing ${unbound.join(', ')}); nothing was executed`, proofs };
+    }
+    proofs.push(`the time window ${bounds[0]}..${bounds[1]} is bound in the executed query`);
+  }
 
   if (candidate.fanoutProbeSql) {
     try {
@@ -57,13 +97,8 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
   try {
     const result = await deps.run(candidate.sql, candidate.params, { maxRows: deps.maxRows ?? 500 });
     proofs.push(`executed on the warehouse: ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} in ${Math.round(result.executionTimeMs)} ms`);
-    // A scalar aggregate over a member filter that matched nothing comes back
-    // as one row of nulls. That is not an answer about the member; it is the
-    // absence of any row for the literal, and it is reported as such.
-    const memberLiterals = literals.filter((value) => !/^(true|false)$/i.test(value));
-    if (memberLiterals.length > 0 && result.rows.length === 1 && Object.values(result.rows[0] ?? {}).every((value) => value === null || value === undefined)) {
-      return { ok: false, code: 'no_rows_matched', message: `no rows matched ${memberLiterals.map((value) => JSON.stringify(value)).join(', ')} on the warehouse; the aggregate was empty, so nothing about the member was answered`, proofs };
-    }
+    const cause = emptyAggregateCause(intent, result);
+    if (cause) return { ok: false, code: 'no_rows_matched', message: describeEmptyAggregate(cause), proofs, cause };
     return { ok: true, result, proofs };
   } catch (error) {
     return { ok: false, code: 'execution_failed', message: error instanceof Error ? error.message : String(error), proofs };

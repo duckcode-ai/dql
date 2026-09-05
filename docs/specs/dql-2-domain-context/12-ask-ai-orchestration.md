@@ -332,9 +332,40 @@ the question string again.
    a different question under the same key is `409 IDEMPOTENCY_CONFLICT`, an
    in-flight original streams to completion, and an unknown outcome is
    reported as such rather than re-executed (`API-018`).
-7. **Runtime selection.** `pipeline_v3` is the default for every Ask surface;
-   `authoritative_v2` remains an explicit operator rollback
-   (`agent.askRuntimeMode`, `--ask-runtime-mode`) until it is deleted.
+7. **Runtime selection.** `pipeline_v3` is the only Ask runtime; the V2
+   tool kernel is deleted. A configured `authoritative_v2` is served by the
+   pipeline with a logged warning, and persisted V8 receipts stay readable.
+8. **No partial answers; an empty result under a restriction is a gap.** A
+   material unresolved clause with no vocabulary option is never demoted:
+   the turn ends as `gap(not_modeled)` that names the clause and, when the
+   intent still carries measures, the reading that was answerable, and
+   nothing executes. Only a clause with exactly one option the intent
+   already uses is a host-proven worry (reachability, grain). A result that
+   holds nothing (no rows, or one row whose every cell is null) under a
+   member literal, a time window, or any predicate is `gap(not_retrieved)`
+   naming that cause (the literal, the window bounds, the predicate refs);
+   an unrestricted empty result stays an answer. A time window is a
+   restriction like any other: a window without an axis is bound to the
+   measures' own time dimension when exactly one exists (recorded in
+   provenance), otherwise every tier refuses it rather than dropping it, and
+   execution proves both bounds are bound in the SQL or its parameters before
+   anything runs (`AGT-060`).
+9. **Browser submission identity.** The Notebook mints one identity per
+   explicit submit, sends it as `Idempotency-Key`, persists the pending
+   record before the request leaves, and pairs the answer with the question
+   item of that submission by id, never by question text; identical
+   questions are two runs. A reload before `agent-run-accepted` re-sends the
+   stored request under the same key; `409 IDEMPOTENCY_CONFLICT` with a run
+   id attaches to that run, without one it re-mints once; an unknown outcome
+   names the run (`API-019`).
+10. **Calendar values and receipt counts.** Date cells leave the host as ISO
+   instants, and a UTC-midnight instant renders as the calendar day, never
+   through the host timezone. The inspector's call counts, evidence label
+   and the trace envelope's `selectedTier` come from `diagnosticReceiptV9`
+   for a pipeline run; a question word is covered when a used measure's
+   definition embodies it (a business term naming `is_drink_item` is covered
+   by `drink_revenue`), so no false coverage warning is raised. A chat the
+   user renamed keeps its title through later turns (`OBS-019`, `UI-024`).
 
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn

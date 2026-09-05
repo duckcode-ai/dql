@@ -109,6 +109,14 @@ describe('relational composition', () => {
     expect(composed.candidate!.params).toEqual(['ryan byrd', 'ryan byrd']);
     expect(composed.candidate!.proof[0]).toMatch(/aggregate islands/);
   });
+  it('a time window without an axis is refused, never dropped', () => {
+    const composed = composeRelational(intent({ measures: [{ ref: 'metric:orders.order_total' }], expectedShape: 'scalar', time: { window: { start: '2031-01-01', end: '2032-01-01' } } }), vocabulary, deps);
+    expect(composed.candidate).toBeUndefined();
+    expect(composed.refusal?.code).toBe('not_relational');
+    expect(composed.refusal?.message).toMatch(/names no time dimension/);
+    const bound = composeRelational(intent({ measures: [{ ref: 'metric:order_item.revenue' }], expectedShape: 'scalar', time: { ref: 'dimension:order_item.ordered_at', window: { start: '2031-01-01', end: '2032-01-01' } } }), vocabulary, deps);
+    expect(bound.candidate?.params).toEqual(['2031-01-01', '2032-01-01']);
+  });
   it('refuses when no governed join path reaches a relation', () => {
     const composed = composeRelational(intent({ measures: [{ ref: 'metric:orders.order_total' }], groupBy: [{ ref: 'dimension:order_item.is_drink_item', role: 'categorical' }], expectedShape: 'grouped' }), vocabulary, { ...deps, joinPath: () => undefined });
     expect(composed.refusal?.code).toBe('join_path_required');

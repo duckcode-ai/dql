@@ -157,6 +157,19 @@ export function modelingJoinPaths(manifest: DQLManifest | undefined, quoteRelati
   };
 }
 
+/** Date cells become ISO instants so every consumer reads one calendar value. */
+export function normalizeExecutedRow(row: Record<string, unknown>): Record<string, unknown> {
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (value instanceof Date) {
+      out[key] = Number.isFinite(value.getTime()) ? value.toISOString() : null;
+      changed = true;
+    } else out[key] = value;
+  }
+  return changed ? out : row;
+}
+
 export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): AgentRouteExecutor {
   let vocabularyCache: VocabularyCacheEntry | undefined;
   const preparationCache = new Map<string, PreparedCandidate>();
@@ -247,7 +260,11 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
               return executor.executeQuery(sql, [], {}, connection);
             })();
           const columns = result.columns.length ? result.columns.map((column) => column.name) : Object.keys(result.rows[0] ?? {});
-          return { columns, rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount, executionTimeMs: result.executionTimeMs ?? Date.now() - started, ...(result.truncated ? { truncated: true } : {}) };
+          // Calendar cells leave the warehouse as JS Dates; every consumer
+          // (narration, persistence, the table) must read the same instant,
+          // never a host-timezone rendering of it.
+          const rows = (result.rows as Array<Record<string, unknown>>).map((row) => normalizeExecutedRow(row));
+          return { columns, rows, rowCount: result.rowCount, executionTimeMs: result.executionTimeMs ?? Date.now() - started, ...(result.truncated ? { truncated: true } : {}) };
         },
       },
       ...(prior ? { prior: prior.intent, priorAnswerSummary: prior.summary } : {}),

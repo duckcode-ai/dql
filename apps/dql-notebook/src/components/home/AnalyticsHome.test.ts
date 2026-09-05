@@ -113,6 +113,27 @@ describe('Ask AI Notebook repair handoff', () => {
     );
   });
 
+  it('a renamed chat keeps its title through the next turn', () => {
+    const renamed: AnalyticsHomeModule.Conversation = {
+      id: 'conv-renamed', title: 'Q3 beverage review', titleCustomized: true, createdAt: '2026-09-05T10:00:00.000Z', updatedAt: '2026-09-05T10:00:00.000Z',
+      items: [{ kind: 'user', id: 'u1', text: 'who are the top customers' }],
+    };
+    const next = applyAskItemsCallback({
+      conversations: [renamed],
+      callbackConversationId: 'conv-renamed', callbackEpoch: 0, activeConversationId: 'conv-renamed', activeEpoch: 0, revokedPanelKeys: new Set(),
+      items: [...renamed.items, { kind: 'user', id: 'u2', text: 'and by beverage revenue' }],
+      now: '2026-09-05T10:05:00.000Z',
+    });
+    expect(next[0]).toMatchObject({ id: 'conv-renamed', title: 'Q3 beverage review', titleCustomized: true });
+    const derived = applyAskItemsCallback({
+      conversations: [{ ...renamed, titleCustomized: undefined, title: 'who are the top customers' }],
+      callbackConversationId: 'conv-renamed', callbackEpoch: 0, activeConversationId: 'conv-renamed', activeEpoch: 0, revokedPanelKeys: new Set(),
+      items: [...renamed.items, { kind: 'user', id: 'u2', text: 'and by beverage revenue' }],
+      now: '2026-09-05T10:05:00.000Z',
+    });
+    expect(derived[0].title).toBe('who are the top customers');
+  });
+
   it('API-008 rebuilds Ask history from durable server threads after browser storage is reset', () => {
     const recovered = mergePersistedAskConversations([], [{
       id: 'thr_revenue',

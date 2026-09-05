@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { executeCandidate } from './execute.js';
-import { describeIntent, intentExecutionFingerprint, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, buildIntentSystemPrompt, resolveIntent, validateIntentRefs } from './resolve-intent.js';
+import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
+import { applyGovernedDefaults, buildIntentSystemPrompt, resolveIntent, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { formatValue } from './outcomes.js';
+import { runAskPipeline } from './pipeline.js';
 import { buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
 import { extractFirstJsonObject } from '../providers/structured-output.js';
@@ -287,6 +289,23 @@ describe('host proofs on the interpreted intent', () => {
     const second = validateIntentRefs(replaced, vocabulary, prior, undefined);
     expect(second.problems).toEqual([]);
   });
+  it('a generic classifier word ("catogery") names nothing new even when the previous analysis never used it', () => {
+    const prior = intent({
+      reading: 'Rank customers by their beverage revenue, showing the top customers along with customer name', measures: [{ ref: 'metric:order_item.drink_revenue' }], groupBy: [{ ref: 'entity:customers.customer', role: 'key' }], display: ['dimension:customers.customer_name'],
+      provenance: { 'metric:order_item.drink_revenue': 'q:beverage revenue', 'dimension:customers.customer_name': 'q:customer name' }, expectedShape: 'ranking',
+    });
+    const replaced = intent({ measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'entity:products.product', role: 'key' }], provenance: { 'metric:order_item.drink_revenue': 'removed:asks for products' } });
+    const first = validateIntentRefs(replaced, vocabulary, prior, 'I need to get the bevereage catogery');
+    expect(first.followUpReplacement).toMatch(/corrects that analysis rather than replacing it/);
+  });
+});
+
+describe('the intent schema survives strict validators', () => {
+  it('uses anyOf, never a union type keyword (the Claude Code CLI validates in Ajv strict mode)', () => {
+    expect(JSON.stringify(ANALYTICAL_INTENT_JSON_SCHEMA)).not.toMatch(/"type":\[/);
+    const parsed = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [{ ref: 'dimension:customers.customer_name', op: 'in', values: ['a', 2, true], source: 'question' }], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+    expect(parsed.intent?.filters[0]?.values).toEqual(['a', 2, true]);
+  });
 });
 
 describe('certified precedent and the second follow-up reading', () => {
@@ -356,5 +375,125 @@ describe('an empty aggregate is not an answer about a member', () => {
   it('a real value passes', async () => {
     const outcome = await executeCandidate(candidate, intent, { run: async () => ({ columns: ['revenue'], rows: [{ revenue: 2581 }], rowCount: 1, executionTimeMs: 1 }) });
     expect(outcome.ok).toBe(true);
+  });
+});
+
+describe('no partial answers: a clause nothing models stays material', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const intent = (raw: Record<string, unknown>): AnalyticalIntentV1 => {
+    const parsed = parseIntent({ version: 1, kind: 'analytics', reading: 'x', display: [], filters: [], groupBy: [], measures: [], unresolved: [], provenance: {}, expectedShape: 'scalar', ...raw });
+    if (!parsed.intent) throw new Error(parsed.errors.map((e) => e.message).join('; '));
+    return parsed.intent;
+  };
+  it('a material clause with no options is never demoted', () => {
+    const next = intent({
+      measures: [{ ref: 'metric:order_item.revenue' }],
+      unresolved: [{ clause: 'weather in Philadelphia', options: [], material: true, question: 'What is weather?' }],
+    });
+    applyGovernedDefaults(next, 'revenue and the weather in Philadelphia', vocabulary);
+    expect(next.unresolved[0]!.material).toBe(true);
+  });
+  it('the gap names the reading that was answerable, and executes nothing', async () => {
+    const reply = JSON.stringify({
+      version: 1, kind: 'analytics', reading: 'Total revenue alongside the weather.', measures: [{ ref: 'metric:order_item.revenue' }],
+      groupBy: [], display: [], filters: [], unresolved: [{ clause: 'weather in Philadelphia', options: [], material: true }], provenance: {}, expectedShape: 'scalar',
+    });
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => reply };
+    let executed = 0;
+    const outcome = await runAskPipeline({
+      question: 'total revenue and the weather in Philadelphia', vocabulary, provider, prepareDeps: {},
+      executeDeps: { run: async () => { executed += 1; throw new Error('must not execute'); } },
+    });
+    expect(outcome.kind).toBe('gap');
+    if (outcome.kind === 'gap') {
+      expect(outcome.gap).toBe('not_modeled');
+      expect(outcome.text).toMatch(/Answerable from this reading: .*Revenue/);
+    }
+    expect(executed).toBe(0);
+  });
+});
+
+describe('an empty aggregate under any restriction is not an answer', () => {
+  const base = { version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' };
+  const candidate = { tier: 'semantic' as const, trust: 'governed' as const, sql: 'SELECT SUM(x) AS revenue FROM t', proof: [] };
+  const nullRow = async () => ({ columns: ['revenue'], rows: [{ revenue: null }], rowCount: 1, executionTimeMs: 1 });
+  it('a null scalar under a time window names the window', async () => {
+    const windowed = parseIntent({ ...base, time: { ref: 'dimension:order_item.ordered_at', window: { start: '2027-01-01', end: '2028-01-01' } } }).intent!;
+    const outcome = await executeCandidate({ ...candidate, sql: "SELECT SUM(x) AS revenue FROM t WHERE ordered_at >= '2027-01-01' AND ordered_at < '2028-01-01'" }, windowed, { run: nullRow });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.code).toBe('no_rows_matched');
+      expect(outcome.message).toMatch(/no rows fell inside the window 2027-01-01\.\.2028-01-01/);
+      expect(outcome.cause).toEqual({ kind: 'window', start: '2027-01-01', end: '2028-01-01' });
+    }
+  });
+  it('a null scalar under a boolean scope names the predicate', async () => {
+    const scoped = parseIntent({ ...base, measures: [{ ref: 'metric:order_item.revenue', scope: [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [], source: 'question' }] }] }).intent!;
+    const outcome = await executeCandidate({ ...candidate, sql: 'SELECT SUM(x) AS revenue FROM t WHERE is_drink_item' }, scoped, { run: nullRow });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.message).toMatch(/no rows matched the restriction on dimension:order_item.is_drink_item/);
+  });
+  it('zero rows under a window is the same gap: an engine that filters before aggregating returns nothing, not null', async () => {
+    const windowed = parseIntent({ ...base, time: { ref: 'dimension:order_item.ordered_at', window: { start: '2031-01-01', end: '2032-01-01' } } }).intent!;
+    const outcome = await executeCandidate({ ...candidate, sql: 'SELECT SUM(x) AS revenue FROM t WHERE ordered_at >= ? AND ordered_at < ?', params: ['2031-01-01', '2032-01-01'] }, windowed, { run: async () => ({ columns: ['revenue'], rows: [], rowCount: 0, executionTimeMs: 1 }) });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.cause).toEqual({ kind: 'window', start: '2031-01-01', end: '2032-01-01' });
+  });
+  it('a query that does not bind the window bounds never runs', async () => {
+    const windowed = parseIntent({ ...base, time: { ref: 'dimension:order_item.ordered_at', window: { start: '2031-01-01', end: '2032-01-01' } } }).intent!;
+    let ran = 0;
+    const outcome = await executeCandidate(candidate, windowed, { run: async () => { ran += 1; return { columns: ['revenue'], rows: [{ revenue: 637444 }], rowCount: 1, executionTimeMs: 1 }; } });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) { expect(outcome.code).toBe('filter_not_applied'); expect(outcome.message).toMatch(/does not apply the time window 2031-01-01\.\.2032-01-01/); }
+    expect(ran).toBe(0);
+  });
+  it('an unrestricted null scalar or empty result is still an answer: the table is empty', async () => {
+    const outcome = await executeCandidate(candidate, parseIntent(base).intent!, { run: nullRow });
+    expect(outcome.ok).toBe(true);
+    const empty = await executeCandidate(candidate, parseIntent(base).intent!, { run: async () => ({ columns: ['revenue'], rows: [], rowCount: 0, executionTimeMs: 1 }) });
+    expect(empty.ok).toBe(true);
+  });
+});
+
+describe('calendar cells render as dates, never through the host timezone', () => {
+  it('a UTC-midnight instant is the calendar day; other values are untouched', () => {
+    expect(formatValue('2025-03-01T00:00:00.000Z')).toBe('2025-03-01');
+    expect(formatValue('2025-03-01T00:00:00Z')).toBe('2025-03-01');
+    expect(formatValue(new Date('2025-12-01T00:00:00.000Z'))).toBe('2025-12-01');
+    expect(formatValue('2025-03-01T13:45:00.000Z')).toBe('2025-03-01T13:45:00.000Z');
+    expect(formatValue(1234.5)).toBe('1234.50');
+    expect(formatValue('Philadelphia')).toBe('Philadelphia');
+  });
+});
+
+describe('a question word is covered when the used measure embodies it', () => {
+  const source: VocabularySource = {
+    metrics: [{ name: 'drink_revenue', model: 'order_item', label: 'Drink Revenue', description: 'The revenue from drinks in each order.', aggregation: 'sum', expr: 'SUM(case when is_drink_item then product_price else 0 end)' }],
+    dimensions: [{ name: 'is_drink_item', model: 'order_item', dataType: 'boolean' }],
+    terms: [{ name: 'Beverage', description: 'Filter on products.is_drink_item = true for beverage analysis.' }],
+  };
+  const local = buildVocabularyIndex(source);
+  it('"beverage" is covered by drink_revenue through the term that names is_drink_item', () => {
+    const used = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.drink_revenue' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }).intent!;
+    expect(uncoveredQuestionTerms('total beverage revenue', used, local)).toEqual([]);
+  });
+  it('a term whose definition the used measures do not embody is still reported', () => {
+    const withoutRule = buildVocabularyIndex({ ...source, terms: [{ name: 'Beverage', description: 'Drinks sold at the counter.' }] });
+    const used = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.drink_revenue' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }).intent!;
+    expect(uncoveredQuestionTerms('total beverage revenue', used, withoutRule)).toEqual(['beverage']);
+  });
+});
+
+describe('a time window without an axis', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const windowed = (measure: string) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: measure }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar', time: { window: { start: '2031-01-01', end: '2032-01-01', expression: 'in 2031' } } }).intent!;
+  it("is bound to the measure's own time axis when the model has exactly one, and says so", () => {
+    const next = validateIntentRefs(windowed('metric:order_item.revenue'), vocabulary);
+    expect(next.intent.time?.ref).toBe('dimension:order_item.ordered_at');
+    expect(next.intent.provenance['dimension:order_item.ordered_at']).toMatch(/host:time window "in 2031"/);
+  });
+  it('stays unbound when the model declares no time dimension', () => {
+    const next = validateIntentRefs(windowed('metric:customers.lifetime_spend'), vocabulary);
+    expect(next.intent.time?.ref).toBeUndefined();
   });
 });

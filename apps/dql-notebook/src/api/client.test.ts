@@ -53,3 +53,48 @@ describe('agent-run stream transport', () => {
     expect(JSON.parse(String(requestInit?.body))).toEqual({ question: 'show revenue' });
   });
 });
+
+describe('agent-run submission identity', () => {
+  const completed = { id: 'server-run-1', question: 'q', route: 'generated_answer', status: 'completed', trustState: 'review_required', events: [], steps: [], artifacts: [] };
+  const sse = (accepted: Record<string, unknown>) => new Response([
+    'event: agent-run-accepted',
+    `data: ${JSON.stringify(accepted)}`,
+    '',
+    'event: agent-run-complete',
+    `data: ${JSON.stringify(completed)}`,
+    '',
+  ].join('\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+
+  it('sends the caller-minted submission id as the Idempotency-Key and keeps it out of the body', async () => {
+    const headers: string[] = [];
+    let body: unknown;
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      headers.push(String(new Headers(init?.headers).get('Idempotency-Key')));
+      body = JSON.parse(String(init?.body));
+      return sse({ runId: 'server-run-1' });
+    }));
+    await api.createAgentRunStream({ question: 'show revenue', requestId: 'submission-abc' }, () => {});
+    expect(headers).toEqual(['submission-abc']);
+    expect(body).toEqual({ question: 'show revenue' });
+  });
+
+  it('two submissions of the same question carry two identities: the text is never the key', async () => {
+    const headers: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      headers.push(String(new Headers(init?.headers).get('Idempotency-Key')));
+      return sse({ runId: 'server-run-1' });
+    }));
+    await api.createAgentRunStream({ question: 'show revenue', threadId: 'thr-1' } as never, () => {});
+    await api.createAgentRunStream({ question: 'show revenue', threadId: 'thr-1' } as never, () => {});
+    expect(headers).toHaveLength(2);
+    expect(headers[0]).toBeTruthy();
+    expect(headers[0]).not.toBe(headers[1]);
+  });
+
+  it('forwards a replayed acceptance so the browser knows it attached to an earlier run', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => sse({ runId: 'server-run-1', replayed: true })));
+    const messages: unknown[] = [];
+    await api.createAgentRunStream({ question: 'show revenue', requestId: 'submission-abc' }, (message) => { messages.push(message); });
+    expect(messages[0]).toEqual({ kind: 'accepted', runId: 'server-run-1', replayed: true });
+  });
+});

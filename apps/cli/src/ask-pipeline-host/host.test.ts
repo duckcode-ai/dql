@@ -3,7 +3,7 @@ import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { createAskPipelineRouteExecutor, groundIntentLiterals } from './host.js';
+import { createAskPipelineRouteExecutor, groundIntentLiterals, normalizeExecutedRow } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -107,5 +107,14 @@ describe('member literal grounding', () => {
     expect(grounded.intent.filters.map((filter) => filter.values)).toEqual([['Nobody Here'], ['returning']]);
     expect(grounded.notes).toEqual(['customer_name: no stored value matches "Nobody Here"']);
     expect(probes).toEqual(['customer_name=Nobody Here']);
+  });
+});
+
+describe('executed rows', () => {
+  it('calendar cells become ISO instants so narration, persistence and the table read one value', () => {
+    const row = normalizeExecutedRow({ month: new Date('2025-03-01T00:00:00.000Z'), revenue: 12.5, name: 'Ryan Byrd', empty: null });
+    expect(row).toEqual({ month: '2025-03-01T00:00:00.000Z', revenue: 12.5, name: 'Ryan Byrd', empty: null });
+    const untouched = { revenue: 1 };
+    expect(normalizeExecutedRow(untouched)).toBe(untouched);
   });
 });

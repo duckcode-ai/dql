@@ -132,9 +132,13 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     filters.push(bound);
   }
   let window: { relation: string; column: string; start: string; end: string } | undefined;
-  if (intent.time?.window && intent.time.ref) {
-    const physical = physicalOf(vocabulary.get(intent.time.ref));
-    if (physical?.column) window = { relation: physical.relation, column: physical.column, start: intent.time.window.start, end: intent.time.window.end };
+  if (intent.time?.window) {
+    // A window is a restriction like any other: it is applied or the tier
+    // refuses. It is never dropped.
+    const physical = intent.time.ref ? physicalOf(vocabulary.get(intent.time.ref)) : undefined;
+    if (!intent.time.ref) return { refusal: { tier: 'relational', code: 'not_relational', message: `the time window ${intent.time.window.start}..${intent.time.window.end} names no time dimension, and the measures' models declare none or several; say which time axis to use`, repairable: true } };
+    if (!physical?.column) return { refusal: { tier: 'relational', code: 'not_relational', message: `${intent.time.ref} has no physical column to bound the time window on`, repairable: true } };
+    window = { relation: physical.relation, column: physical.column, start: intent.time.window.start, end: intent.time.window.end };
   }
   const scopes = new Map<PhysicalMeasure, BoundPredicate[]>();
   for (const measure of measures) {

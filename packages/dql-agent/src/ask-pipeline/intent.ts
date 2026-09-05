@@ -154,7 +154,9 @@ export const ANALYTICAL_INTENT_JSON_SCHEMA: Record<string, unknown> = {
       properties: {
         ref: { type: 'string' },
         op: { type: 'string', enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'contains', 'is_true', 'is_false'] },
-        values: { type: 'array', maxItems: 24, items: { type: ['string', 'number', 'boolean'] } },
+        // `anyOf`, not a union `type`: the Claude Code CLI validates response
+        // schemas in Ajv strict mode, which rejects union type keywords.
+        values: { type: 'array', maxItems: 24, items: { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }] } },
         source: { type: 'string', enum: ['question', 'inherited', 'prior_result', 'clarification'] },
       },
     },

@@ -38,6 +38,19 @@ const safeCascadeAttemptCache = new WeakMap<object, SafeCascadeDecisionTraceV1['
  * envelope is intentionally a small indexed projection, so it needs this
  * explicit bridge rather than falling back to a stale V1/V3 cascade field.
  */
+/**
+ * The Ask pipeline's receipt names the tier that executed (or, for a turn
+ * that prepared nothing, none). It is the terminal authority for a
+ * `pipeline_v3` run, ahead of any legacy cascade field.
+ */
+function selectedTierFromPipelineV9(run: AgentRun): AskTraceEnvelopeV1['selectedTier'] | undefined {
+  const tier = run.diagnosticReceiptV9?.executed?.tier;
+  if (tier === 'certified' || tier === 'semantic') return tier;
+  if (tier === 'relational') return 'governed_relational';
+  if (tier === 'exploratory') return 'exploratory_sql';
+  return undefined;
+}
+
 function selectedTierFromAuthoritativeV8(run: AgentRun): AskTraceEnvelopeV1['selectedTier'] | undefined {
   const receipt = run.diagnosticReceiptV8;
   if (receipt?.mode !== 'authoritative_v2') return undefined;
@@ -324,7 +337,8 @@ export function finalizeAgentRunTraceV1(observer: AskTraceObserverV1, run: Agent
     status,
     terminalOutcome: run.status,
     trustState: run.trustState,
-    selectedTier: selectedTierFromAuthoritativeV8(run)
+    selectedTier: selectedTierFromPipelineV9(run)
+      ?? selectedTierFromAuthoritativeV8(run)
       ?? run.diagnosticReceiptV3?.cascade?.selectedTier,
     completedAt: run.completedAt,
   });

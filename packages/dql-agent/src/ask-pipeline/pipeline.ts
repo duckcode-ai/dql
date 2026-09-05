@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AgentProvider, ProviderRunOptions } from '../providers/types.js';
 import { executeCandidate, type ExecuteDeps } from './execute.js';
-import { intentExecutionFingerprint, type AnalyticalIntentV1 } from './intent.js';
+import { describeIntent, intentExecutionFingerprint, type AnalyticalIntentV1 } from './intent.js';
 import { composeAnsweredText, composeFailedText, composeGapText, labelFor, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
 import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal, type PrepareResult } from './prepare/index.js';
 import { resolveIntent, uncoveredQuestionTerms, type IntentResolution } from './resolve-intent.js';
@@ -103,7 +103,10 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       // Nothing to choose between: the project simply does not hold it.
       const clause = resolution.intent.unresolved.find((item) => item.material)?.clause ?? input.question;
       const nearest = input.vocabulary.lookup(clause, { limit: 4, minScore: 0.5 }).map((hit) => label(hit.entry.ref));
-      return { kind: 'gap', gap: 'not_modeled', message: `"${clause}" is not something this project's governed data describes`, nearest, text: composeGapText('not_modeled', `"${clause}" is not something this project's governed data describes`, nearest, false), receipt, intent: resolution.intent, offerExploration: false };
+      // No partial answers: nothing executes, but the reading that WAS
+      // answerable is named so the user can ask for exactly that.
+      const answerable = resolution.intent.measures.length > 0 ? ` Answerable from this reading: ${describeIntent(resolution.intent, label).replace(/[.\s]+$/, '')}.` : '';
+      return { kind: 'gap', gap: 'not_modeled', message: `"${clause}" is not something this project's governed data describes`, nearest, text: `${composeGapText('not_modeled', `"${clause}" is not something this project's governed data describes`, nearest, false)}${answerable}`, receipt, intent: resolution.intent, offerExploration: false };
     }
     return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
   }
@@ -196,7 +199,12 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);
     receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: 0, ms: Math.round(now() - executeStarted), proofs: executed.proofs };
     const nearest = (receipt.grounding ?? []).filter((note) => note.includes('nearest'));
-    return { kind: 'gap', gap: 'not_retrieved', message: executed.message, nearest, text: `The governed query ran, but ${executed.message}.${nearest.length ? ` ${nearest.join('; ')}.` : ''} Check the spelling of the member, or ask for the values this field holds.`, receipt, intent, offerExploration: false };
+    const advice = executed.cause?.kind === 'window'
+      ? 'The data may end before that period; ask for the latest period it holds.'
+      : executed.cause?.kind === 'predicate'
+        ? 'Loosen the restriction, or ask for the values this field holds.'
+        : 'Check the spelling of the member, or ask for the values this field holds.';
+    return { kind: 'gap', gap: 'not_retrieved', message: executed.message, nearest, text: `The governed query ran, but ${executed.message}.${nearest.length ? ` ${nearest.join('; ')}.` : ''} ${advice}`, receipt, intent, offerExploration: false };
   }
   if (!executed.ok) {
     receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);

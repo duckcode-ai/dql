@@ -172,8 +172,26 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
   const ordering = intent.ordering
     ? { ...intent.ordering, ref: intent.ordering.ref.startsWith('measure:') && /^measure:\d+$/.test(intent.ordering.ref) ? intent.ordering.ref : canonical(intent.ordering.ref, [...MEASURE_KINDS, ...GROUP_KINDS], 'ordering.ref') }
     : undefined;
-  const time = intent.time?.ref ? { ...intent.time, ref: canonical(intent.time.ref, ['dimension', 'column'], 'time.ref', (entry) => entry.roles.includes('time') ? undefined : `${entry.ref} is not a time dimension`) } : intent.time;
+  let time = intent.time?.ref ? { ...intent.time, ref: canonical(intent.time.ref, ['dimension', 'column'], 'time.ref', (entry) => entry.roles.includes('time') ? undefined : `${entry.ref} is not a time dimension`) } : intent.time;
+  let windowDefault: string | undefined;
+  if (time?.window && !time.ref) {
+    // A window without an axis: the measures' own models decide. Exactly one
+    // time dimension across them is the host's default (and is recorded as
+    // such); none or several leaves the axis unset, and no tier may then
+    // apply the window silently — each refuses instead.
+    const axes = new Set<string>();
+    for (const model of measureModels) {
+      const own = vocabulary.entries.filter((candidate) => candidate.kind === 'dimension' && candidate.model === model && candidate.roles.includes('time') && candidate.name !== 'metric_time');
+      if (own.length === 1) axes.add(own[0]!.ref);
+      else own.forEach((candidate) => axes.add(candidate.ref));
+    }
+    if (axes.size === 1) {
+      windowDefault = [...axes][0]!;
+      time = { ...time, ref: windowDefault };
+    }
+  }
   const next: AnalyticalIntentV1 = { ...intent, measures, groupBy, display, filters, ...(ordering ? { ordering } : {}), ...(time ? { time } : {}) };
+  if (windowDefault) next.provenance = { ...next.provenance, [windowDefault]: `host:time window "${time?.window?.expression ?? `${time?.window?.start}..${time?.window?.end}`}" bound to the measure's own time axis` };
   if (next.kind === 'analytics' && next.measures.length === 0 && next.unresolved.every((clause) => !clause.material)) {
     problems.push({ path: 'measures', message: 'an analytics intent needs at least one measure ref, or a material unresolved clause explaining what is missing', suggestions: vocabulary.lookup('revenue', { kinds: ['metric', 'block'], limit: 4 }).map((hit) => hit.entry.ref) });
   }
@@ -251,7 +269,11 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
     ].filter(Boolean).join(' '));
     const priorWords = new Set(priorText.split(/\s+/).filter((word) => word.length > 2));
     const content = (question.toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) ?? []).filter((word) => !FOLLOW_UP_STOPWORDS.has(word));
-    const known = (word: string) => priorWords.has(word) || [...priorWords].some((candidate) => trigramSimilarity(word, candidate) >= 0.6 || (word.length >= 5 && Math.abs(word.length - candidate.length) <= 2 && editDistance(word, candidate) <= 2));
+    // A word is known when it belongs to the previous analysis or is a
+    // generic classifier word ("category", "breakdown"); both are matched
+    // with spelling tolerance, so "bevereage catogery" still names nothing new.
+    const near = (word: string, candidate: string) => word === candidate || trigramSimilarity(word, candidate) >= 0.6 || (word.length >= 5 && Math.abs(word.length - candidate.length) <= 2 && editDistance(word, candidate) <= 2);
+    const known = (word: string) => [...priorWords].some((candidate) => near(word, candidate)) || FOLLOW_UP_GENERIC_WORDS.some((candidate) => near(word, candidate));
     if (content.length && content.every(known)) {
       followUpReplacement = `every word of this message (${content.join(', ')}) already belongs to the previous analysis, so it corrects that analysis rather than replacing it: keep the previous measures ${prior.measures.map((measure) => measure.ref).join(', ')}, grain, ranking and limit, and apply the correction to them (a scope, a display, a filter); ask one clarification only if two readings remain`;
       problems.push({ path: 'measures', message: followUpReplacement });
@@ -278,6 +300,8 @@ function editDistance(a: string, b: string): number {
 
 const CLAUSE_STOPWORDS = new Set(['the', 'and', 'for', 'per', 'each', 'with', 'from', 'that', 'this', 'what', 'which', 'how', 'many', 'much', 'total', 'show', 'give', 'list', 'top', 'all', 'any']);
 
+/** Classifier words a correction may add without naming a new subject. */
+const FOLLOW_UP_GENERIC_WORDS = ['category', 'categories', 'breakdown', 'group', 'groups', 'level', 'levels', 'kind', 'kinds'];
 const FOLLOW_UP_STOPWORDS = new Set(['the', 'and', 'for', 'need', 'get', 'want', 'show', 'give', 'please', 'can', 'you', 'now', 'just', 'only', 'also', 'but', 'with', 'from', 'that', 'this', 'what', 'about', 'into', 'them', 'those', 'these', 'not', 'yes', 'okay', 'thanks', 'include', 'add', 'results', 'result', 'again', 'instead', 'actually', 'sorry', 'mean', 'meant']);
 
 /**
@@ -304,8 +328,10 @@ export function applyGovernedDefaults(intent: AnalyticalIntentV1, question: stri
     // A material clause with at most one distinct option, already used by
     // the intent, is not an ambiguity: the interpreter is asking about
     // something the host proves (reachability, grain), not about meaning.
+    // A clause with NO options is the opposite: nothing in the vocabulary
+    // answers it, and it stays material so the turn ends as a named gap.
     const distinct = [...new Set(clause.options)];
-    if (distinct.length <= 1 && distinct.every((ref) => intentRefs(intent).includes(ref))) {
+    if (distinct.length === 1 && intentRefs(intent).includes(distinct[0]!)) {
       clause.material = false;
       clause.question = clause.question ? `${clause.question} (not asked: the host proves reachability and grain)` : undefined;
       continue;
@@ -370,8 +396,21 @@ export function applyGovernedDefaults(intent: AnalyticalIntentV1, question: stri
  * warning the reader sees beside the answer: "the question said beverage;
  * this reading does not use anything named beverage".
  */
+const IDENTIFIER_TOKENS = /[a-z][a-z0-9]*(?:_[a-z0-9]+)+/g;
+
+/** Column-like identifiers (`is_drink_item`) a vocabulary entry's own text names. */
+function definitionIdentifiers(entry: VocabularyEntry): string[] {
+  const text = [entry.description ?? '', entry.expr ?? '', entry.physical?.expr ?? '', ...(entry.columns ?? []), ...(entry.contract?.staticScope ?? []).map((scope) => scope.column)].join(' ').toLowerCase();
+  return [...new Set(text.match(IDENTIFIER_TOKENS) ?? [])];
+}
+
 export function uncoveredQuestionTerms(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
   const used = new Set(intentRefs(intent));
+  const usedIdentifiers = new Set([...used].flatMap((ref) => {
+    const entry = vocabulary.get(ref);
+    if (!entry) return [];
+    return [entry.name.toLowerCase(), ...(entry.physical?.column ? [entry.physical.column.toLowerCase()] : []), ...definitionIdentifiers(entry)];
+  }));
   const usedText = [...used].map((ref) => `${ref} ${vocabulary.get(ref)?.name ?? ''} ${vocabulary.get(ref)?.label ?? ''} ${(vocabulary.get(ref)?.aliases ?? []).join(' ')} ${vocabulary.get(ref)?.description ?? ''}`).join(' ').toLowerCase();
   const out: string[] = [];
   for (const word of new Set(question.toLowerCase().match(/[a-z][a-z0-9_]{3,}/g) ?? [])) {
@@ -381,6 +420,10 @@ export function uncoveredQuestionTerms(question: string, intent: AnalyticalInten
     const stem = word.replace(/s$/, '');
     if (usedText.includes(stem)) continue;
     if (hits.some((hit) => used.has(hit.entry.ref))) continue;
+    // A business term or block is covered when its own definition names a
+    // column the used measures embody ("beverage": filter on is_drink_item;
+    // drink_revenue's expression is a case on is_drink_item).
+    if (hits.some((hit) => (hit.entry.kind === 'term' || hit.entry.kind === 'block') && definitionIdentifiers(hit.entry).some((identifier) => usedIdentifiers.has(identifier)))) continue;
     out.push(word);
   }
   return out;

@@ -1492,3 +1492,20 @@ function makeStoreSpan(traceId: string, spanId: string, ordinal: number): AskTra
     },
   };
 }
+
+describe('the Ask pipeline receipt names the envelope tier', () => {
+  it('a pipeline run indexes the tier its receipt executed, mapped onto the cascade vocabulary', () => {
+    const { store, observer } = memoryObserver({ runId: 'run-v9-tier' });
+    finalizeAgentRunTraceV1(observer, {
+      status: 'completed',
+      trustState: 'governed',
+      completedAt: '2026-09-05T12:00:01.000Z',
+      askAgentRuntimeMode: 'pipeline_v3',
+      diagnosticReceiptV9: {
+        version: 1, vocabularyFingerprint: 'v', dispatches: [{ purpose: 'resolve', ms: 800 }], candidates: [], refusals: [], tiers: [],
+        executed: { tier: 'relational', sqlFingerprint: 'f', rowCount: 2, ms: 9, proofs: [] }, timings: {},
+      },
+    } as never);
+    expect(store.getByRun('run-v9-tier')!.envelope.selectedTier).toBe('governed_relational');
+  });
+});

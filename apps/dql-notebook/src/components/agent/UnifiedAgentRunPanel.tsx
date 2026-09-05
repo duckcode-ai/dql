@@ -38,9 +38,12 @@ import {
 import {
   api,
   DqlApiError,
+  mintAgentRunSubmissionId,
   normalizeQueryResultPayload,
   type AgentConversationTurn,
   type AgentRun,
+  type AgentRunStreamMessage,
+  type CreateAgentRunInput,
   type AgentRunArtifact,
   type AgentRunAudience,
   type AgentRunClarificationOption,
@@ -153,11 +156,15 @@ export function acceptedAskAnswer(run: AgentRun): string | undefined {
 }
 
 /** A submitted run that may outlive this mounted panel (tab switch, reload, or navigation). */
-interface PendingAgentRun {
+export interface PendingAgentRun {
   id: string;
   question: string;
   threadId?: string;
   startedAt: string;
+  /** The submission's Idempotency-Key, minted once per explicit submit. */
+  submissionId?: string;
+  /** The local question item this submission answers; the answer is paired by id, never by text. */
+  userItemId?: string;
 }
 
 interface AgentBlockSave {
@@ -470,26 +477,14 @@ export function UnifiedAgentRunPanel({
       recoveryTimerRef.current = null;
     }
     clearActiveAgentRun(run.id);
+    clearActiveAgentRun(pending.id);
+    clearSubmissionInput(pending.submissionId);
     if (activeRunIdRef.current === run.id) activeRunIdRef.current = null;
     pendingRunRef.current = null;
     setBackgroundRun(null);
     setRunningEvents(run.events.slice(-8));
     resetStreamingAnswer();
-    setItems((current) => {
-      if (current.some((item) => item.kind === 'run' && item.run.id === run.id)) {
-        return current.map((item) => item.kind === 'run' && item.run.id === run.id
-          ? { ...item, id: run.id, run }
-          : item);
-      }
-      // A reload can happen after the question was sent but before its local item
-      // was rendered. Restore that question ahead of the recovered answer.
-      const alreadyHasQuestion = current.some((item) => item.kind === 'user' && item.text === pending.question);
-      return [
-        ...current,
-        ...(alreadyHasQuestion ? [] : [{ kind: 'user' as const, id: `${run.id}-question`, text: pending.question }]),
-        { kind: 'run' as const, id: run.id, run },
-      ];
-    });
+    setItems((current) => mergeFinishedRun(current, run, pending));
     if (run.route !== 'certified_answer') {
       const ready = artifactReadyPayloadFromRun(run);
       if (ready) onArtifactReadyRef.current?.(ready, run);
@@ -510,6 +505,73 @@ export function UnifiedAgentRunPanel({
 
   const recoverPendingRun = useCallback((pending: PendingAgentRun) => {
     if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
+    if (isProvisionalAgentRunId(pending.id)) {
+      // The server never told this tab which run it started (a reload landed
+      // between submit and `accepted`). Re-send the identical request under
+      // the same Idempotency-Key: the runtime attaches to the run that claim
+      // started, or starts it now if the first attempt never arrived. Without
+      // the stored request there is nothing safe to resend.
+      const input = pending.submissionId ? readSubmissionInput(pending.submissionId) : undefined;
+      if (!input) {
+        clearActiveAgentRun(pending.id);
+        clearSubmissionInput(pending.submissionId);
+        return undefined;
+      }
+      const recoveryEpoch = ++recoveryEpochRef.current;
+      let current = pending;
+      activeRunIdRef.current = null;
+      pendingRunRef.current = current;
+      setBackgroundRun(current);
+      setRunning(true);
+      resetStreamingAnswer();
+      setRunningEvents([]);
+      const controller = new AbortController();
+      abortRef.current = controller;
+      let accepted = false;
+      void api.createAgentRunStream(input, (message) => {
+        if (message.kind === 'accepted') {
+          const previousPendingId = current.id;
+          current = { ...current, id: message.runId };
+          activeRunIdRef.current = message.runId;
+          pendingRunRef.current = current;
+          setBackgroundRun(current);
+          clearActiveAgentRun(previousPendingId);
+          saveActiveAgentRun(current);
+          accepted = true;
+        } else if (message.kind === 'event') {
+          setRunningEvents((existing) => [...existing, message.event].slice(-8));
+        } else if (message.kind === 'answer-delta') {
+          appendStreamingDelta(message.delta);
+        } else {
+          setRunningEvents(message.run.events.slice(-8));
+        }
+      }, controller.signal).then((run) => {
+        if (recoveryEpoch !== recoveryEpochRef.current) return;
+        if (current.id !== run.id) {
+          clearActiveAgentRun(current.id);
+          current = { ...current, id: run.id };
+        }
+        appendFinishedRun(run, current);
+        setRunning(false);
+      }).catch((error: unknown) => {
+        if (controller.signal.aborted || recoveryEpoch !== recoveryEpochRef.current) return;
+        if (accepted) {
+          recoverPendingRun(current);
+          return;
+        }
+        clearActiveAgentRun(current.id);
+        clearSubmissionInput(current.submissionId);
+        pendingRunRef.current = null;
+        setBackgroundRun(null);
+        setRunning(false);
+        setError(error instanceof Error ? error.message : String(error));
+      }).finally(() => {
+        if (abortRef.current === controller) abortRef.current = null;
+      });
+      return () => {
+        if (recoveryEpoch === recoveryEpochRef.current) recoveryEpochRef.current += 1;
+      };
+    }
     const recoveryEpoch = ++recoveryEpochRef.current;
     activeRunIdRef.current = pending.id;
     pendingRunRef.current = pending;
@@ -543,7 +605,7 @@ export function UnifiedAgentRunPanel({
         recoveryTimerRef.current = null;
       }
     };
-  }, [appendFinishedRun]);
+  }, [appendFinishedRun, appendStreamingDelta, resetStreamingAnswer]);
 
   // Resume: when mounted with a threadId, hydrate the conversation from the
   // server-persisted turns. The server thread is the source of truth for
@@ -622,6 +684,10 @@ export function UnifiedAgentRunPanel({
     // Consent is intentionally one-shot and never inherited by the next run.
     setResearchResultRowsOptIn(false);
     pendingModeRef.current = undefined;
+    // One identity per explicit submit. It is the Idempotency-Key of this
+    // request and the pairing key between this question item and its answer;
+    // the question text is neither, so asking twice starts two runs.
+    let submissionId = mintAgentRunSubmissionId();
     const userItem: ThreadItem = { kind: 'user', id: makeId('user'), text };
     setItems((current) => [...current, userItem]);
     setInput('');
@@ -636,10 +702,13 @@ export function UnifiedAgentRunPanel({
     // Those paths begin only after `agent-run-accepted` supplies the canonical
     // server-owned run id.
     const provisionalRunId = makeId('pending');
-    let pending: PendingAgentRun = { id: provisionalRunId, question: text, threadId: threadIdRef.current, startedAt: new Date().toISOString() };
+    let pending: PendingAgentRun = { id: provisionalRunId, question: text, threadId: threadIdRef.current, startedAt: new Date().toISOString(), submissionId, userItemId: userItem.id };
     activeRunIdRef.current = null;
     pendingRunRef.current = pending;
     setBackgroundRun(pending);
+    // Persisted before the request leaves: a reload before `accepted` finds
+    // this record and re-sends the same submission under the same key.
+    saveActiveAgentRun(pending);
     let receivedStreamMessage = false;
     let acceptedServerRun = false;
     let recovering = false;
@@ -665,6 +734,7 @@ export function UnifiedAgentRunPanel({
           pending = { ...pending, threadId: thread.id };
           pendingRunRef.current = pending;
           setBackgroundRun(pending);
+          saveActiveAgentRun(pending);
         } catch {
           // Conversation store unavailable — proceed without a threadId.
         }
@@ -675,6 +745,7 @@ export function UnifiedAgentRunPanel({
       const priorAuthoringArtifact = priorAuthoringRun?.artifacts.find((artifact) => artifact.kind === (activeMode === 'modeling' ? 'modeling_change_proposal' : 'skill_change_proposal'));
       const runInput = {
         question: text,
+        requestId: submissionId,
         ...(selectedEvidenceId ? { selectedEvidenceId } : {}),
         ...(clarificationSourceQuestion ? { clarificationSourceQuestion } : {}),
         ...(selectedResultBinding ? { selectedResultBinding } : {}),
@@ -704,7 +775,8 @@ export function UnifiedAgentRunPanel({
         researchResultRowsOptIn: resultRowsOptInForRun,
         ...(threadIdRef.current ? { threadId: threadIdRef.current } : {}),
       };
-      const run = await api.createAgentRunStream(runInput, (message) => {
+      storeSubmissionInput(submissionId, runInput);
+      const onStreamMessage = (message: AgentRunStreamMessage) => {
         receivedStreamMessage = true;
         if (message.kind === 'accepted') {
           // Replace the local-only placeholder before any progress, recovery,
@@ -725,7 +797,35 @@ export function UnifiedAgentRunPanel({
         } else {
           setRunningEvents(message.run.events.slice(-8));
         }
-      }, controller.signal);
+      };
+      let run: AgentRun;
+      try {
+        run = await api.createAgentRunStream(runInput, onStreamMessage, controller.signal);
+      } catch (error) {
+        if (!(error instanceof DqlApiError) || error.code !== 'IDEMPOTENCY_CONFLICT') throw error;
+        if (error.runId) {
+          // The key already started a run for this submission (a reload
+          // re-sent it with a different context); attach to that run.
+          clearActiveAgentRun(pending.id);
+          pending = { ...pending, id: error.runId };
+          activeRunIdRef.current = error.runId;
+          pendingRunRef.current = pending;
+          setBackgroundRun(pending);
+          saveActiveAgentRun(pending);
+          recovering = true;
+          recoverPendingRun(pending);
+          return;
+        }
+        // A collision on a fresh identity: mint another and resend exactly once.
+        clearSubmissionInput(submissionId);
+        submissionId = mintAgentRunSubmissionId();
+        pending = { ...pending, submissionId };
+        pendingRunRef.current = pending;
+        saveActiveAgentRun(pending);
+        const retryInput = { ...runInput, requestId: submissionId };
+        storeSubmissionInput(submissionId, retryInput);
+        run = await api.createAgentRunStream(retryInput, onStreamMessage, controller.signal);
+      }
       // A compliant runtime emits `accepted` first.  Keep the completion path
       // defensive for an interrupted/older transport so it cannot leave a
       // provisional ID in browser state.
@@ -740,7 +840,8 @@ export function UnifiedAgentRunPanel({
       appendFinishedRun(run, pending);
     } catch (err) {
       if (!controller.signal.aborted) {
-        setError(err instanceof Error ? err.message : String(err));
+        const unknownOutcomeRunId = err instanceof DqlApiError && err.code === 'REQUEST_OUTCOME_UNKNOWN' ? err.runId : undefined;
+        setError(`${err instanceof Error ? err.message : String(err)}${unknownOutcomeRunId ? ` Run ${unknownOutcomeRunId}.` : ''}`);
         setInput(text);
         // If streaming disconnected after the server began reporting progress,
         // let the persisted run finish and quietly reconnect to its final answer.
@@ -749,6 +850,7 @@ export function UnifiedAgentRunPanel({
           recoverPendingRun(pending);
         } else {
           clearActiveAgentRun(pending.id);
+          clearSubmissionInput(pending.submissionId);
           if (activeRunIdRef.current === pending.id) activeRunIdRef.current = null;
           pendingRunRef.current = null;
           setBackgroundRun(null);
@@ -773,6 +875,10 @@ export function UnifiedAgentRunPanel({
     recoveryEpochRef.current += 1;
     if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
     clearActiveAgentRun(runId ?? '');
+    if (pendingRunRef.current) {
+      clearActiveAgentRun(pendingRunRef.current.id);
+      clearSubmissionInput(pendingRunRef.current.submissionId);
+    }
     activeRunIdRef.current = null;
     pendingRunRef.current = null;
     setBackgroundRun(null);
@@ -1273,7 +1379,9 @@ function readActiveAgentRuns(): PendingAgentRun[] {
       return typeof value.id === 'string'
         && typeof value.question === 'string'
         && typeof value.startedAt === 'string'
-        && (value.threadId === undefined || typeof value.threadId === 'string');
+        && (value.threadId === undefined || typeof value.threadId === 'string')
+        && (value.submissionId === undefined || typeof value.submissionId === 'string')
+        && (value.userItemId === undefined || typeof value.userItemId === 'string');
     });
   } catch {
     return [];
@@ -1296,6 +1404,75 @@ function clearActiveAgentRun(runId: string): void {
   } catch {
     // Best effort only: an old entry is harmless and will be de-duplicated if found.
   }
+}
+
+const PROVISIONAL_RUN_ID_PREFIX = 'pending_';
+/** A browser-local pending key that no server has accepted yet. */
+export function isProvisionalAgentRunId(runId: string): boolean {
+  return runId.startsWith(PROVISIONAL_RUN_ID_PREFIX);
+}
+
+const SUBMISSION_INPUT_STORAGE_PREFIX = 'dql-ask-submission:';
+const SUBMISSION_INPUT_TTL_MS = 10 * 60_000;
+
+/**
+ * The exact request of a submission, kept for this tab only while the run
+ * is pending, so a reload before the server accepted it re-sends the same
+ * body under the same Idempotency-Key and attaches to whatever it started.
+ */
+function storeSubmissionInput(submissionId: string, input: CreateAgentRunInput): void {
+  try {
+    window.sessionStorage.setItem(`${SUBMISSION_INPUT_STORAGE_PREFIX}${submissionId}`, JSON.stringify({ at: Date.now(), input }));
+  } catch {
+    // Without storage a reload simply cannot resume a not-yet-accepted submission.
+  }
+}
+
+function readSubmissionInput(submissionId: string): CreateAgentRunInput | undefined {
+  try {
+    const raw = window.sessionStorage.getItem(`${SUBMISSION_INPUT_STORAGE_PREFIX}${submissionId}`);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as { at?: unknown; input?: unknown };
+    if (typeof parsed.at !== 'number' || Date.now() - parsed.at > SUBMISSION_INPUT_TTL_MS) return undefined;
+    if (!parsed.input || typeof parsed.input !== 'object') return undefined;
+    const input = parsed.input as CreateAgentRunInput;
+    return typeof input.question === 'string' ? { ...input, requestId: submissionId } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function clearSubmissionInput(submissionId?: string): void {
+  if (!submissionId) return;
+  try {
+    window.sessionStorage.removeItem(`${SUBMISSION_INPUT_STORAGE_PREFIX}${submissionId}`);
+  } catch {
+    // Best effort.
+  }
+}
+
+/**
+ * Place a finished run in the thread. The answer is paired with the question
+ * item the submission created (by id); the text of the question is never the
+ * pairing key, so two identical questions keep two answers. A pending record
+ * from before submission ids existed falls back to the text match.
+ */
+export function mergeFinishedRun(current: ThreadItem[], run: AgentRun, pending: Pick<PendingAgentRun, 'question' | 'userItemId'>): ThreadItem[] {
+  if (current.some((item) => item.kind === 'run' && item.run.id === run.id)) {
+    return current.map((item) => item.kind === 'run' && item.run.id === run.id
+      ? { ...item, id: run.id, run }
+      : item);
+  }
+  // A reload can happen after the question was sent but before its local item
+  // was rendered. Restore that question ahead of the recovered answer.
+  const alreadyHasQuestion = pending.userItemId
+    ? current.some((item) => item.kind === 'user' && item.id === pending.userItemId)
+    : current.some((item) => item.kind === 'user' && item.text === pending.question);
+  return [
+    ...current,
+    ...(alreadyHasQuestion ? [] : [{ kind: 'user' as const, id: pending.userItemId ?? `${run.id}-question`, text: pending.question }]),
+    { kind: 'run' as const, id: run.id, run },
+  ];
 }
 
 function findActiveAgentRun(threadId?: string): PendingAgentRun | undefined {
@@ -3199,8 +3376,38 @@ function authoritativeV8Activity(
   return receipt?.mode === 'authoritative_v2' ? receipt.activity : undefined;
 }
 
+interface AskPipelineActivity {
+  providerDispatches: number;
+  toolCalls: number;
+  executionAttempts: number;
+  repairs: number;
+}
+
+/**
+ * The Ask pipeline's receipt is the authority on what physically happened in
+ * a `pipeline_v3` run: every provider dispatch, every prepared candidate or
+ * refusal, and the one execution. Spans are an index; the receipt counts.
+ */
+export function pipelineV9Activity(
+  run: Pick<AgentRun, 'diagnosticReceiptV9'>,
+  trace?: Pick<AskTraceDataV1, 'runtimeReceiptV9'>,
+): AskPipelineActivity | undefined {
+  const receipt = recordOf(trace?.runtimeReceiptV9) ?? recordOf(run.diagnosticReceiptV9);
+  if (!receipt || !Array.isArray(receipt.dispatches)) return undefined;
+  const dispatches = receipt.dispatches.map((entry) => recordOf(entry)).filter((entry): entry is Record<string, unknown> => Boolean(entry));
+  const candidates = Array.isArray(receipt.candidates) ? receipt.candidates.length : 0;
+  const refusals = Array.isArray(receipt.refusals) ? receipt.refusals.length : 0;
+  return {
+    providerDispatches: dispatches.length,
+    toolCalls: candidates + refusals,
+    executionAttempts: recordOf(receipt.executed) ? 1 : 0,
+    repairs: dispatches.filter((entry) => typeof entry.purpose === 'string' && /repair|correct/i.test(entry.purpose)).length,
+  };
+}
+
 function askRuntimeEvidenceLabel(mode: AgentRun['askAgentRuntimeMode'] | AskTraceDataV1['runtimeMode'] | undefined): string | undefined {
   if (mode === 'authoritative_v2') return 'Authoritative V2 receipt';
+  if (mode === 'pipeline_v3') return 'Ask pipeline receipt';
   return undefined;
 }
 
@@ -3214,11 +3421,11 @@ function traceDurationMs(value: unknown): number | undefined {
  */
 export function agentRunPerformanceRows(
   run: AgentRun,
-  trace?: Pick<AskTraceDataV1, 'envelope' | 'spans' | 'runtimeReceiptV8' | 'runtimeMode'>,
+  trace?: Pick<AskTraceDataV1, 'envelope' | 'spans' | 'runtimeReceiptV8' | 'runtimeReceiptV9' | 'runtimeMode'>,
 ): Array<[string, string]> | undefined {
   if (trace) {
     const physical = canonicalPhysicalTraceFacts(trace);
-    const v8Activity = authoritativeV8Activity(run, trace);
+    const v8Activity = authoritativeV8Activity(run, trace) ?? pipelineV9Activity(run, trace);
     const v8Projection = authoritativeV8CompactInspectorProjection(trace.runtimeReceiptV8 ?? run.diagnosticReceiptV8);
     const providerAttempts = v8Activity?.providerDispatches ?? physical.providerAttempts;
     const toolCalls = v8Activity?.toolCalls ?? physical.toolCalls;
@@ -3248,7 +3455,7 @@ export function agentRunPerformanceRows(
       ['Stages', physical.stages],
       ['Calls', `${providerAttempts} provider · ${toolCalls} tool · ${executions} SQL · ${repairs} repair`],
       ['Provider rows', providerRows],
-      ['Trace evidence', v8Activity ? 'Authoritative V2 receipt (canonical physical egress and execution counts)' : 'Canonical local physical trace'],
+      ['Trace evidence', authoritativeV8Activity(run, trace) ? 'Authoritative V2 receipt (canonical physical egress and execution counts)' : v8Activity ? 'Ask pipeline receipt (dispatch, preparation and execution counts)' : 'Canonical local physical trace'],
       ...(askRuntimeEvidenceLabel(trace.runtimeMode ?? run.askAgentRuntimeMode)
         ? [['Ask runtime', askRuntimeEvidenceLabel(trace.runtimeMode ?? run.askAgentRuntimeMode)!] as [string, string]]
         : []),
@@ -3260,7 +3467,7 @@ export function agentRunPerformanceRows(
   }
   const telemetry = run.telemetry;
   if (!telemetry) return undefined;
-  const v8Activity = authoritativeV8Activity(run);
+  const v8Activity = authoritativeV8Activity(run) ?? pipelineV9Activity(run);
   const v8Projection = authoritativeV8CompactInspectorProjection(run.diagnosticReceiptV8);
   const totalDurationMs = telemetry.stageDurationsMs.total;
   const warehouseDurationMs = telemetry.warehouseDurationMs;
@@ -3290,7 +3497,7 @@ export function agentRunPerformanceRows(
       .join(' · ')],
     ['Calls', `${v8Activity?.providerDispatches ?? telemetry.providerRoundTrips} provider · ${v8Activity?.toolCalls ?? telemetry.toolCalls} tool · ${v8Activity?.executionAttempts ?? telemetry.sqlExecutions} SQL · ${v8Activity?.repairs ?? telemetry.repairs} repair`],
     ['Provider rows', providerEgressSummary(run, v8Activity?.providerDispatches ?? telemetry.providerRoundTrips)],
-    ...(v8Activity ? [['Trace evidence', 'Authoritative V2 receipt (canonical physical egress and execution counts)'] as [string, string]] : []),
+    ...(authoritativeV8Activity(run) ? [['Trace evidence', 'Authoritative V2 receipt (canonical physical egress and execution counts)'] as [string, string]] : v8Activity ? [['Trace evidence', 'Ask pipeline receipt (dispatch, preparation and execution counts)'] as [string, string]] : []),
     ...(askRuntimeEvidenceLabel(run.askAgentRuntimeMode)
       ? [['Ask runtime', askRuntimeEvidenceLabel(run.askAgentRuntimeMode)!] as [string, string]]
       : []),
