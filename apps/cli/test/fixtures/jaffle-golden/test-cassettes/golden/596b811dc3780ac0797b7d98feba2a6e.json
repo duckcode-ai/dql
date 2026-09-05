@@ -1,0 +1,23 @@
+{
+  "key": "596b811dc3780ac0797b7d98feba2a6e",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the certified customer profile block filtered to the customer named Ryan Byrd.\",\"measures\":[{\"ref\":\"block:commerce.customer_profile\"}],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan Byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"block:commerce.customer_profile\":\"q:customer profile\",\"dimension:customers.customer_name\":\"q:Ryan Byrd\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:20:44.076Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "596b811dc3780ac0797b7d98feba2a6e89c7b2a25b3fd3de84c4b3b8f2fc6178",
+    "postCanonicalHash": "596b811dc3780ac0797b7d98feba2a6e89c7b2a25b3fd3de84c4b3b8f2fc6178",
+    "appliedRuleClasses": []
+  }
+}

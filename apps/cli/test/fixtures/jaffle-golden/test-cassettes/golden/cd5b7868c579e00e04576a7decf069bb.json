@@ -1,0 +1,23 @@
+{
+  "key": "cd5b7868c579e00e04576a7decf069bb",
+  "operation": "generate",
+  "text": "Looking at this question: \"revenue\" is governed by term:Revenue, which distinguishes gross order revenue (orders.order_total, includes tax) from product revenue (order_item.revenue, excludes tax). The question says \"total revenue\" with no qualifier pointing to product-level, so this is material ambiguity per the term's own guidance — but the term explicitly says \"Use dev.orders.order_total for gross order revenue,\" and location is an attribute of orders (orders.location), not of order_item directly at a clean grain distinction the question raises. Since the question is plain \"total revenue\" (no \"product\"/\"beverage\" qualifier), the governing term's default for unqualified \"revenue\" is gross order revenue.\n\nLocation grouping uses the orders model's location entity with the location label, since order_total lives on the orders model.\n\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross order revenue (including tax) broken down by location.\",\"measures\":[{\"ref\":\"metric:orders.order_total\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:orders.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:orders.order_total\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:total revenue\",\"entity:orders.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:25:17.130Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "cd5b7868c579e00e04576a7decf069bbef8e45bd5a8dc211da8ed9ca663fbdcf",
+    "postCanonicalHash": "cd5b7868c579e00e04576a7decf069bbef8e45bd5a8dc211da8ed9ca663fbdcf",
+    "appliedRuleClasses": []
+  }
+}

@@ -131,6 +131,9 @@ const HELP = `
     --to <layout>                   Target layout for "migrate layout" (domain-first)
                                     For "promote": shared
     --port <number>                 Preferred local port for "preview" or "serve"
+    --ask-runtime-mode <mode>       Ask runtime: pipeline_v3 (default; the interpreter-first
+                                    intent → prepare → execute pipeline) or authoritative_v2
+                                    (the legacy kernel, explicit rollback only).
                                     Overrides "agent.askRuntimeMode" in dql.config.json,
                                     which all Ask surfaces honor
     --chart <type>                  Primary chart type for "new" scaffolds (default: bar)

@@ -1,0 +1,23 @@
+{
+  "key": "ee51465ba23497d0a7f936538d013c67",
+  "operation": "generate",
+  "text": "```json\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"A block showing beverage revenue and item count by product, ranked by revenue.\",\"measures\":[{\"ref\":\"block:commerce.beverage_revenue_by_product\"}],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:beverage revenue by product\"}}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:20:19.100Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "ee51465ba23497d0a7f936538d013c67006515731ac0877320355a072b30af95",
+    "postCanonicalHash": "ee51465ba23497d0a7f936538d013c67006515731ac0877320355a072b30af95",
+    "appliedRuleClasses": []
+  }
+}

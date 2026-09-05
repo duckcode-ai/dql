@@ -1,0 +1,717 @@
+{
+  "_comment": "The golden correctness harness. Every question carries hand-reviewed reference SQL over the jaffle-golden seed (dev.* marts of the real jaffle-shop-duckdb project, 12 customers). At test time the reference SQL is executed against the same seeded engine the server queries, and the run's result rows must equal it. `columns` maps each reference column to the names the product may legitimately use for it. `ordered` means row order is part of the answer. `tier` is the trust the answer must carry. `outcome` is 'rows' unless a clarification or an honest gap is the correct answer. Identity rule: rankings of customers/products are keyed by their id and display the name; a result may carry the id, the name, or both, and matches the reference through either.",
+  "questions": [
+    {
+      "id": "top-beverage-customers",
+      "question": "who are the top customers for beverage product category",
+      "sql": "SELECT c.customer_id, c.customer_name, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_id, c.customer_name ORDER BY drink_revenue DESC LIMIT 10",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer",
+          "order_id__customer"
+        ],
+        "customer_name": [
+          "customer_name",
+          "customer name",
+          "name"
+        ],
+        "drink_revenue": [
+          "drink_revenue",
+          "beverage_revenue",
+          "revenue"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "ordered": true,
+      "tier": "any",
+      "note": "Both are correct: the certified top_beverage_customers block served as published (it groups by customer name; the caveat that two customers sharing a name would merge is recorded on the answer), or a governed semantic/relational answer keyed by customer id with the name displayed. The identity rule binds what the pipeline composes, not what the team certified."
+    },
+    {
+      "id": "top-customers",
+      "question": "who are the top customers",
+      "sql": "SELECT customer_id, customer_name, lifetime_spend FROM dev.customers ORDER BY lifetime_spend DESC LIMIT 10",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer"
+        ],
+        "customer_name": [
+          "customer_name"
+        ],
+        "lifetime_spend": [
+          "lifetime_spend",
+          "lifetime_spend_pretax",
+          "revenue",
+          "order_total"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "ordered": true,
+      "tier": "any",
+      "note": "Lifetime spend including tax is the customers mart definition; pretax spend is an acceptable reading and is listed as an alias because the ranking is identical on this seed. \"Top customers\" names no measure; the certified customer_profile ordering (lifetime spend) or the lifetime_spend metric are governed readings, and one bounded clarification between gross and pretax spend is also correct.",
+      "outcome": "clarify_or_rows"
+    },
+    {
+      "id": "top-5-customers-by-revenue",
+      "question": "top 5 customers by revenue",
+      "sql": "SELECT c.customer_id, c.customer_name, SUM(oi.product_price) AS revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_id, c.customer_name ORDER BY revenue DESC LIMIT 5",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer",
+          "order_id__customer"
+        ],
+        "customer_name": [
+          "customer_name"
+        ],
+        "revenue": [
+          "revenue",
+          "lifetime_spend_pretax",
+          "product_revenue"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "ordered": true,
+      "tier": "governed",
+      "alternatives": [
+        {
+          "sql": "SELECT c.customer_id, c.customer_name, SUM(o.order_total) AS order_total FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_id, c.customer_name ORDER BY order_total DESC LIMIT 5",
+          "columns": {
+            "customer_id": [
+              "customer_id",
+              "customer"
+            ],
+            "customer_name": [
+              "customer_name"
+            ],
+            "order_total": [
+              "order_total",
+              "revenue",
+              "gross_revenue",
+              "lifetime_spend"
+            ]
+          }
+        }
+      ],
+      "note": "The governed Revenue term admits gross order revenue (order_total) as well as pretax product revenue; both readings are accepted.",
+      "outcome": "clarify_or_rows"
+    },
+    {
+      "id": "beverage-revenue-total",
+      "question": "beverage revenue",
+      "sql": "SELECT SUM(CASE WHEN is_drink_item THEN product_price ELSE 0 END) AS drink_revenue FROM dev.order_items",
+      "columns": {
+        "drink_revenue": [
+          "drink_revenue",
+          "beverage_revenue"
+        ]
+      },
+      "tier": "governed"
+    },
+    {
+      "id": "total-revenue",
+      "question": "total revenue",
+      "sql": "SELECT SUM(product_price) AS revenue FROM dev.order_items",
+      "columns": {
+        "revenue": [
+          "revenue",
+          "total_revenue"
+        ]
+      },
+      "tier": "governed",
+      "note": "The governed Revenue term defines BOTH gross order revenue (orders.order_total, incl. tax) and product revenue (order_items.product_price, pretax). Either governed reading, or one bounded clarification between them, is correct; a silent third definition is not.",
+      "outcome": "clarify_or_rows",
+      "alternatives": [
+        {
+          "sql": "SELECT SUM(order_total) AS revenue FROM dev.orders",
+          "columns": {
+            "revenue": [
+              "order_total",
+              "total_revenue",
+              "revenue",
+              "gross_revenue"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "revenue-by-month",
+      "question": "revenue by month",
+      "sql": "SELECT date_trunc('month', ordered_at) AS month, SUM(product_price) AS revenue FROM dev.order_items GROUP BY 1 ORDER BY 1",
+      "columns": {
+        "month": [
+          "month",
+          "ordered_at__month",
+          "ordered_at",
+          "metric_time",
+          "metric_time__month"
+        ],
+        "revenue": [
+          "revenue",
+          "gross_revenue"
+        ]
+      },
+      "keys": [
+        "month"
+      ],
+      "tier": "any",
+      "note": "The certified monthly_revenue block sums order_total (incl. tax); the semantic revenue metric sums product_price. Either is a governed monthly revenue answer; the harness accepts the one whose label matches and checks its numbers against that definition.",
+      "alternatives": [
+        {
+          "sql": "SELECT date_trunc('month', ordered_at) AS month, SUM(order_total) AS gross_revenue FROM dev.orders GROUP BY 1 ORDER BY 1",
+          "columns": {
+            "month": [
+              "month",
+              "ordered_at__month",
+              "ordered_at"
+            ],
+            "gross_revenue": [
+              "gross_revenue",
+              "order_total",
+              "revenue"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orders-per-customer",
+      "question": "how many orders did each customer place",
+      "sql": "SELECT c.customer_id, c.customer_name, COUNT(*) AS order_count FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_id, c.customer_name",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer"
+        ],
+        "customer_name": [
+          "customer_name"
+        ],
+        "order_count": [
+          "order_count",
+          "orders",
+          "count_lifetime_orders",
+          "order_id"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "tier": "governed"
+    },
+    {
+      "id": "revenue-by-location",
+      "question": "what is the total revenue by location",
+      "sql": "SELECT l.location_id, l.location_name, SUM(oi.product_price) AS revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.locations l ON o.location_id = l.location_id GROUP BY l.location_id, l.location_name",
+      "columns": {
+        "location_id": [
+          "location_id",
+          "location"
+        ],
+        "location_name": [
+          "location_name"
+        ],
+        "revenue": [
+          "revenue"
+        ]
+      },
+      "identity": [
+        "location_id",
+        "location_name"
+      ],
+      "tier": "governed",
+      "alternatives": [
+        {
+          "sql": "SELECT l.location_id, l.location_name, SUM(o.order_total) AS order_total FROM dev.orders o JOIN dev.locations l ON o.location_id = l.location_id GROUP BY l.location_id, l.location_name",
+          "columns": {
+            "location_id": [
+              "location_id",
+              "location"
+            ],
+            "location_name": [
+              "location_name"
+            ],
+            "order_total": [
+              "order_total",
+              "revenue",
+              "gross_revenue"
+            ]
+          }
+        }
+      ],
+      "note": "The governed Revenue term admits gross order revenue (order_total) as well as pretax product revenue; both readings are accepted."
+    },
+    {
+      "id": "top-products-by-revenue",
+      "question": "top 10 products by revenue",
+      "sql": "SELECT p.product_id, p.product_name, SUM(oi.product_price) AS revenue FROM dev.order_items oi JOIN dev.products p ON oi.product_id = p.product_id GROUP BY p.product_id, p.product_name ORDER BY revenue DESC LIMIT 10",
+      "columns": {
+        "product_id": [
+          "product_id",
+          "product"
+        ],
+        "product_name": [
+          "product_name"
+        ],
+        "revenue": [
+          "revenue"
+        ]
+      },
+      "identity": [
+        "product_id",
+        "product_name"
+      ],
+      "ordered": true,
+      "tier": "governed"
+    },
+    {
+      "id": "beverage-revenue-by-product",
+      "question": "beverage revenue by product",
+      "sql": "SELECT p.product_id, p.product_name, SUM(oi.product_price) AS beverage_revenue FROM dev.order_items oi JOIN dev.products p ON oi.product_id = p.product_id WHERE p.is_drink_item GROUP BY p.product_id, p.product_name ORDER BY beverage_revenue DESC",
+      "columns": {
+        "product_id": [
+          "product_id",
+          "product"
+        ],
+        "product_name": [
+          "product_name"
+        ],
+        "beverage_revenue": [
+          "beverage_revenue",
+          "drink_revenue",
+          "revenue"
+        ]
+      },
+      "identity": [
+        "product_id",
+        "product_name"
+      ],
+      "tier": "any",
+      "alternatives": [
+        {
+          "sql": "SELECT p.product_id, p.product_name, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS beverage_revenue FROM dev.order_items oi JOIN dev.products p ON oi.product_id = p.product_id GROUP BY p.product_id, p.product_name",
+          "columns": {
+            "product_id": [
+              "product_id",
+              "product"
+            ],
+            "product_name": [
+              "product_name"
+            ],
+            "beverage_revenue": [
+              "beverage_revenue",
+              "drink_revenue",
+              "revenue"
+            ]
+          }
+        }
+      ],
+      "note": "Either the certified block (drink products only) or a governed answer scoping the revenue measure to drink items across every product is a correct reading."
+    },
+    {
+      "id": "revenue-by-product-type",
+      "question": "revenue by product type",
+      "sql": "SELECT p.product_type, SUM(oi.product_price) AS revenue FROM dev.order_items oi JOIN dev.products p ON oi.product_id = p.product_id GROUP BY p.product_type",
+      "columns": {
+        "product_type": [
+          "product_type",
+          "product__product_type",
+          "type"
+        ],
+        "revenue": [
+          "revenue"
+        ]
+      },
+      "keys": [
+        "product_type"
+      ],
+      "tier": "governed"
+    },
+    {
+      "id": "food-vs-drink",
+      "question": "compare food and drink revenue",
+      "sql": "SELECT SUM(CASE WHEN is_food_item THEN product_price ELSE 0 END) AS food_revenue, SUM(CASE WHEN is_drink_item THEN product_price ELSE 0 END) AS drink_revenue FROM dev.order_items",
+      "columns": {
+        "food_revenue": [
+          "food_revenue"
+        ],
+        "drink_revenue": [
+          "drink_revenue",
+          "beverage_revenue"
+        ]
+      },
+      "tier": "governed"
+    },
+    {
+      "id": "ryan-byrd-total-revenue",
+      "question": "what is the total revenue for \"Ryan Byrd\"",
+      "sql": "SELECT SUM(oi.product_price) AS revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id WHERE c.customer_name = 'Ryan Byrd'",
+      "columns": {
+        "revenue": [
+          "revenue",
+          "lifetime_spend_pretax"
+        ]
+      },
+      "tier": "governed",
+      "note": "A quoted literal is a filter on the customer name. 'Revenue' follows the governed term: order revenue (incl. tax) or product revenue (pretax) are both governed readings; clarifying between them is also correct.",
+      "outcome": "clarify_or_rows",
+      "alternatives": [
+        {
+          "sql": "SELECT SUM(o.order_total) AS revenue FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id WHERE c.customer_name = 'Ryan Byrd'",
+          "columns": {
+            "revenue": [
+              "order_total",
+              "total_revenue",
+              "revenue",
+              "gross_revenue"
+            ]
+          }
+        },
+        {
+          "sql": "SELECT SUM(lifetime_spend) AS lifetime_spend FROM dev.customers WHERE customer_name = 'Ryan Byrd'",
+          "columns": {
+            "lifetime_spend": [
+              "lifetime_spend",
+              "revenue",
+              "order_total"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ryan-byrd-both-revenues",
+      "question": "what is the \"Ryan byrd\" revenue by total revenue and beverage revenue? give me both",
+      "sql": "SELECT SUM(oi.product_price) AS revenue, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id WHERE lower(c.customer_name) = 'ryan byrd'",
+      "columns": {
+        "revenue": [
+          "revenue",
+          "total_revenue"
+        ],
+        "drink_revenue": [
+          "drink_revenue",
+          "beverage_revenue"
+        ]
+      },
+      "tier": "governed",
+      "note": "Two measures of the same customer, one filter matched case-insensitively. 'Total revenue' may follow either governed reading of the Revenue term (order total incl. tax, or pretax product revenue); the beverage restriction applies only to the beverage measure.",
+      "outcome": "clarify_or_rows",
+      "alternatives": [
+        {
+          "sql": "SELECT (SELECT SUM(o.order_total) FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id WHERE lower(c.customer_name)='ryan byrd') AS revenue, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id WHERE lower(c.customer_name) = 'ryan byrd'",
+          "columns": {
+            "revenue": [
+              "order_total",
+              "total_revenue",
+              "revenue"
+            ],
+            "drink_revenue": [
+              "drink_revenue",
+              "beverage_revenue"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orders-by-customer-type",
+      "question": "how many orders by customer type",
+      "sql": "SELECT c.customer_type, COUNT(*) AS order_count FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_type",
+      "columns": {
+        "customer_type": [
+          "customer_type",
+          "customer__customer_type"
+        ],
+        "order_count": [
+          "order_count",
+          "orders"
+        ]
+      },
+      "keys": [
+        "customer_type"
+      ],
+      "tier": "governed"
+    },
+    {
+      "id": "average-order-value",
+      "question": "what is the average order value",
+      "sql": "SELECT AVG(order_total) AS average_order_value FROM dev.orders",
+      "columns": {
+        "average_order_value": [
+          "average_order_value",
+          "avg_order_total",
+          "order_total"
+        ]
+      },
+      "tier": "any",
+      "alternatives": [
+        {
+          "sql": "SELECT SUM(lifetime_spend_pretax) / SUM(count_lifetime_orders) AS average_order_value FROM dev.customers",
+          "columns": {
+            "average_order_value": [
+              "average_order_value",
+              "avg_order_value"
+            ]
+          }
+        }
+      ],
+      "note": "Two governed readings: the semantic metric average_order_value is defined in dbt as lifetime_spend_pretax / count_lifetime_orders (customers grain); a plain average of order_total is the physical reading. Both are accepted; a silent third definition is not."
+    },
+    {
+      "id": "large-orders-count",
+      "question": "how many large orders were there",
+      "sql": "SELECT COUNT(*) AS large_orders FROM dev.orders WHERE order_total >= 20",
+      "columns": {
+        "large_orders": [
+          "large_orders",
+          "order_count",
+          "orders"
+        ]
+      },
+      "tier": "governed",
+      "note": "large_orders is a filtered metric in the semantic layer (order_total >= 20)."
+    },
+    {
+      "id": "drink-orders-by-month",
+      "question": "drink orders by month",
+      "sql": "SELECT date_trunc('month', ordered_at) AS month, COUNT(*) AS drink_orders FROM dev.orders WHERE is_drink_order GROUP BY 1 ORDER BY 1",
+      "columns": {
+        "month": [
+          "month",
+          "ordered_at__month",
+          "ordered_at",
+          "metric_time__month"
+        ],
+        "drink_orders": [
+          "drink_orders",
+          "orders",
+          "order_count"
+        ]
+      },
+      "keys": [
+        "month"
+      ],
+      "tier": "governed"
+    },
+    {
+      "id": "customer-profile-ryan",
+      "question": "show me the customer profile for Ryan Byrd",
+      "sql": "SELECT customer_name, customer_type, count_lifetime_orders, lifetime_spend FROM dev.customers WHERE customer_name = 'Ryan Byrd'",
+      "columns": {
+        "customer_name": [
+          "customer_name"
+        ],
+        "customer_type": [
+          "customer_type"
+        ],
+        "count_lifetime_orders": [
+          "count_lifetime_orders",
+          "order_count"
+        ],
+        "lifetime_spend": [
+          "lifetime_spend"
+        ]
+      },
+      "tier": "any",
+      "note": "The certified customer_profile block declares customer_name as an allowed filter; a filtered certified answer or a governed semantic answer are both correct."
+    },
+    {
+      "id": "supplies-cost-by-product",
+      "question": "supply cost by product",
+      "sql": "SELECT p.product_id, p.product_name, SUM(s.supply_cost) AS supply_cost FROM dev.supplies s JOIN dev.products p ON s.product_id = p.product_id GROUP BY p.product_id, p.product_name",
+      "columns": {
+        "product_id": [
+          "product_id",
+          "product"
+        ],
+        "product_name": [
+          "product_name"
+        ],
+        "supply_cost": [
+          "supply_cost",
+          "total_supply_cost"
+        ]
+      },
+      "identity": [
+        "product_id",
+        "product_name"
+      ],
+      "tier": "any"
+    },
+    {
+      "id": "misspelt-beverage-category",
+      "question": "I need to get the bevereage catogery",
+      "outcome": "clarify_or_rows",
+      "sql": "SELECT p.product_id, p.product_name, SUM(oi.product_price) AS beverage_revenue FROM dev.order_items oi JOIN dev.products p ON oi.product_id = p.product_id WHERE p.is_drink_item GROUP BY p.product_id, p.product_name ORDER BY beverage_revenue DESC",
+      "columns": {
+        "product_id": [
+          "product_id",
+          "product"
+        ],
+        "product_name": [
+          "product_name"
+        ],
+        "beverage_revenue": [
+          "beverage_revenue",
+          "drink_revenue",
+          "revenue"
+        ]
+      },
+      "identity": [
+        "product_id",
+        "product_name"
+      ],
+      "tier": "any",
+      "note": "Standing alone this is materially ambiguous (which measure? which grain?). A bounded clarification is correct; so is a beverage-scoped governed answer. A drink revenue table grouped by true/false is neither."
+    },
+    {
+      "id": "unmodeled-term",
+      "question": "churn rate by region",
+      "outcome": "gap",
+      "tier": "none",
+      "note": "Nothing in the project models churn or region. The correct answer is a precise gap naming the nearest vocabulary, never a fabricated query."
+    },
+    {
+      "id": "greeting",
+      "question": "hi",
+      "outcome": "conversation",
+      "tier": "none"
+    },
+    {
+      "id": "off-topic",
+      "question": "what is the weather in Chicago",
+      "outcome": "gap",
+      "tier": "none"
+    },
+    {
+      "id": "customers-with-most-orders",
+      "question": "which customers placed the most orders",
+      "sql": "SELECT c.customer_id, c.customer_name, COUNT(*) AS order_count FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_id, c.customer_name ORDER BY order_count DESC LIMIT 10",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer"
+        ],
+        "customer_name": [
+          "customer_name"
+        ],
+        "order_count": [
+          "order_count",
+          "orders",
+          "count_lifetime_orders"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "ordered": true,
+      "tier": "governed"
+    },
+    {
+      "id": "revenue-by-customer-type",
+      "question": "revenue by customer type",
+      "sql": "SELECT c.customer_type, SUM(oi.product_price) AS revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_type",
+      "columns": {
+        "customer_type": [
+          "customer_type",
+          "customer__customer_type"
+        ],
+        "revenue": [
+          "revenue"
+        ]
+      },
+      "keys": [
+        "customer_type"
+      ],
+      "tier": "governed",
+      "alternatives": [
+        {
+          "sql": "SELECT c.customer_type, SUM(o.order_total) AS order_total FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_type",
+          "columns": {
+            "customer_type": [
+              "customer_type",
+              "customer__customer_type"
+            ],
+            "order_total": [
+              "order_total",
+              "revenue",
+              "gross_revenue"
+            ]
+          }
+        }
+      ],
+      "note": "The governed Revenue term admits gross order revenue (order_total) as well as pretax product revenue; both readings are accepted."
+    },
+    {
+      "id": "food-revenue-by-location",
+      "question": "food revenue by location",
+      "sql": "SELECT l.location_id, l.location_name, SUM(CASE WHEN oi.is_food_item THEN oi.product_price ELSE 0 END) AS food_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.locations l ON o.location_id = l.location_id GROUP BY l.location_id, l.location_name",
+      "columns": {
+        "location_id": [
+          "location_id",
+          "location"
+        ],
+        "location_name": [
+          "location_name"
+        ],
+        "food_revenue": [
+          "food_revenue"
+        ]
+      },
+      "identity": [
+        "location_id",
+        "location_name"
+      ],
+      "tier": "governed"
+    },
+    {
+      "id": "order-count-total",
+      "question": "how many orders are there",
+      "sql": "SELECT COUNT(*) AS orders FROM dev.orders",
+      "columns": {
+        "orders": [
+          "orders",
+          "order_count",
+          "count"
+        ]
+      },
+      "tier": "governed"
+    },
+    {
+      "id": "lifetime-spend-pretax-top",
+      "question": "top customers by lifetime spend before tax",
+      "sql": "SELECT customer_id, customer_name, lifetime_spend_pretax FROM dev.customers ORDER BY lifetime_spend_pretax DESC LIMIT 10",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer"
+        ],
+        "customer_name": [
+          "customer_name"
+        ],
+        "lifetime_spend_pretax": [
+          "lifetime_spend_pretax",
+          "pretax_spend"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "ordered": true,
+      "tier": "governed"
+    }
+  ]
+}

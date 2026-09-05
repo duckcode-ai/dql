@@ -1,0 +1,23 @@
+{
+  "key": "e56fb6d34b9cc154c77750c8aa757fae",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show beverage revenue broken down by product.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:beverage revenue by product\"},\"measuresNote\":\"see block\"}\n\nWait, correcting to use the certified block per rule 4 (exact match to declared grouping/scope/grain):\n\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show beverage revenue and item count by product, as defined by the certified beverage revenue by product block.\",\"measures\":[{\"ref\":\"block:commerce.beverage_revenue_by_product\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:beverage revenue by product\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:09:52.162Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "e56fb6d34b9cc154c77750c8aa757faefd0a2b19632ba97c84430d7a3ba563f2",
+    "postCanonicalHash": "e56fb6d34b9cc154c77750c8aa757faefd0a2b19632ba97c84430d7a3ba563f2",
+    "appliedRuleClasses": []
+  }
+}

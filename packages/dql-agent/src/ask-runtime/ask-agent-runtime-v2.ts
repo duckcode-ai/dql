@@ -24,7 +24,7 @@ import type { AgentEvidenceCandidate, AgentRetrievalEvidence } from '../meaning-
 
 /** Explicit operator rollout control.  Browser/MCP request bodies never set it. */
 /** One runtime. `shadow_v2` and `legacy_v1` are gone with V1. */
-export type AskRuntimeModeV2 = 'authoritative_v2';
+export type AskRuntimeModeV2 = 'authoritative_v2' | 'pipeline_v3';
 
 /** V2 has one turn owner; classification is an LLM/tool-runtime responsibility. */
 export type { AskTurnClassV2 } from './turn-classification.js';

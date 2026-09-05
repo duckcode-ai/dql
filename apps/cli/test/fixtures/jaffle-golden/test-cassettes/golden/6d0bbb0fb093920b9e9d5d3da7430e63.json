@@ -1,0 +1,23 @@
+{
+  "key": "6d0bbb0fb093920b9e9d5d3da7430e63",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"You want to see beverage (drink) products, so I'm returning beverage product revenue and item counts per product.\",\"measures\":[{\"ref\":\"block:commerce.beverage_revenue_by_product\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"table\",\"unresolved\":[],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:bevereage catogery\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:04:50.315Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "6d0bbb0fb093920b9e9d5d3da7430e6301472a5c1a5e381bbb59edd839f492cb",
+    "postCanonicalHash": "6d0bbb0fb093920b9e9d5d3da7430e6301472a5c1a5e381bbb59edd839f492cb",
+    "appliedRuleClasses": []
+  }
+}

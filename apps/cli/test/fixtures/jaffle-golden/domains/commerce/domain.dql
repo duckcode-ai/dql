@@ -1,0 +1,12 @@
+// dql-format: 1
+
+domain "Commerce" {
+  id = "commerce"
+  owner = "analytics@jaffle.shop"
+  businessOwner = "Jaffle Shop Growth Team"
+  boundedContext = "Revenue, customer value, product mix, and beverage performance for Jaffle Shop."
+  sourceSystems = ["dbt:orders", "dbt:order_items", "dbt:customers", "dbt:products", "dbt:locations"]
+  primaryTerms = ["Revenue", "Customer", "Beverage", "Order"]
+  reviewCadence = "monthly"
+  tags = ["commerce", "growth", "jaffle-shop"]
+}

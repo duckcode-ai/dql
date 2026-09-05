@@ -1,0 +1,24 @@
+{
+  "key": "6923478b84b73cc0e0b74019a3719752",
+  "operation": "generate",
+  "text": "The customer name is already displayed in the previous result (`dimension:customers.customer_name`), so this is a no-op edit — I'll keep everything the same.\n\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by their beverage (drink) revenue, showing the top customers, including the customer name.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:order_item.drink_revenue\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.drink_revenue\":\"inherited\",\"entity:orders.customer\":\"inherited\",\"dimension:customers.customer_name\":\"inherited\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:05:26.831Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "6923478b84b73cc0e0b74019a37197521165d226c99383856368df1ee3d2196a",
+    "postCanonicalHash": "6923478b84b73cc0e0b74019a37197521165d226c99383856368df1ee3d2196a",
+    "appliedRuleClasses": []
+  }
+}

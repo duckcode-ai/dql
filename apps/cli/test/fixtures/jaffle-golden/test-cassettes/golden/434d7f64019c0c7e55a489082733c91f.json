@@ -1,0 +1,23 @@
+{
+  "key": "434d7f64019c0c7e55a489082733c91f",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top 10 customers ranked by lifetime spend.\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"ordering\":{\"ref\":\"metric:customers.lifetime_spend\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"top customers\",\"options\":[\"metric:customers.lifetime_spend\",\"metric:customers.lifetime_spend_pretax\"],\"material\":true,\"question\":\"Should ranking use gross lifetime spend (including tax) or pretax lifetime spend?\"}],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:top customers\",\"entity:customers.customer\":\"q:customers\",\"dimension:customers.customer_name\":\"q:customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:19:49.162Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "434d7f64019c0c7e55a489082733c91f55f44123d6d6fbc76d0cbd74b10e0280",
+    "postCanonicalHash": "434d7f64019c0c7e55a489082733c91f55f44123d6d6fbc76d0cbd74b10e0280",
+    "appliedRuleClasses": []
+  }
+}

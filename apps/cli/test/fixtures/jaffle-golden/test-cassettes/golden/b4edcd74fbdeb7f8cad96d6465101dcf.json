@@ -1,0 +1,64 @@
+{
+  "key": "b4edcd74fbdeb7f8cad96d6465101dcf",
+  "operation": "generate_with_tools",
+  "text": "",
+  "toolCalls": [
+    {
+      "name": "propose_plan",
+      "args": {
+        "sql": {
+          "text": "<UNKNOWN>",
+          "reads": [
+            "<UNKNOWN>"
+          ]
+        }
+      }
+    },
+    {
+      "name": "propose_plan",
+      "args": {
+        "measures": [
+          {
+            "id": "semantic:metric:order_item.revenue"
+          }
+        ]
+      }
+    },
+    {
+      "name": "propose_plan",
+      "args": {
+        "measures": [
+          {
+            "id": "semantic:jaffle_shop:measure:order_item.revenue"
+          }
+        ]
+      }
+    },
+    {
+      "name": "finish_answer",
+      "args": {
+        "answer": "I can't answer that — this system only has access to Jaffle Shop's sales/analytics data (orders, customers, products, locations, revenue, etc.). It has no weather data source, so there's no way to retrieve current weather conditions for Chicago or anywhere else. If you have a business question about orders, revenue, customers, or products, I'd be happy to help with that instead."
+      }
+    }
+  ],
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T03:37:52.715Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "user",
+      "system"
+    ],
+    "preCanonicalHash": "b4edcd74fbdeb7f8cad96d6465101dcfcd3889326ac50c2773f6cfbeb95c126d",
+    "postCanonicalHash": "b4edcd74fbdeb7f8cad96d6465101dcfcd3889326ac50c2773f6cfbeb95c126d",
+    "appliedRuleClasses": []
+  }
+}

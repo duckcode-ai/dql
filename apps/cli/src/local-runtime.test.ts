@@ -3147,6 +3147,8 @@ describe('agent run runtime API', () => {
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
+        // Legacy V2 lane under test; the server default is the Ask pipeline.
+        askAgentRuntimeMode: 'authoritative_v2',
         projectRoot,
         executor: {} as QueryExecutor,
         connection: { driver: 'file' },
@@ -3235,6 +3237,8 @@ describe('agent run runtime API', () => {
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
+        // Legacy V2 lane under test; the server default is the Ask pipeline.
+        askAgentRuntimeMode: 'authoritative_v2',
         projectRoot,
         executor: {} as QueryExecutor,
         connection: { driver: 'file' },
@@ -4151,10 +4155,10 @@ describe('agent run runtime API', () => {
       expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('authoritative_v2');
     });
 
-    it('serves authoritative_v2 by default when the project says nothing', () => {
+    it('serves the Ask pipeline by default when the project says nothing', () => {
       const root = projectWithConfig({ agent: {} });
       expect(readProjectAskRuntimeMode(root)).toBeUndefined();
-      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('authoritative_v2');
+      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('pipeline_v3');
     });
 
     it('no longer accepts the deleted shadow mode', () => {
@@ -4183,7 +4187,7 @@ describe('agent run runtime API', () => {
       dirs.push(root);
       writeFileSync(join(root, 'dql.config.json'), '{ not json');
       expect(readProjectAskRuntimeMode(root)).toBeUndefined();
-      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('authoritative_v2');
+      expect(resolveAskAgentRuntimeMode(readProjectAskRuntimeMode(root))).toBe('pipeline_v3');
     });
   });
 
@@ -6228,7 +6232,7 @@ LIMIT \${top_n}
           server = created;
         },
         agentRunExecutors: {
-          conversation: ({ request }) => {
+          generated_answer: ({ request }) => {
             observedContext = request.conversationContext;
             return {
               summary: 'Replied from the prior Ask context without querying data.',
@@ -6283,7 +6287,7 @@ LIMIT \${top_n}
 
       expect(response.status).toBe(201);
       const payload = await response.json() as { run: any };
-      expect(payload.run.route).toBe('conversation');
+      expect(payload.run.route).toBe('generated_answer');
       // The injected executor deliberately returns a result artifact so the
       // engine presents it as review-required. The route itself is the
       // invariant: a context recap must not enter analytical planning.
@@ -6300,6 +6304,54 @@ LIMIT \${top_n}
         }
         server.close(() => resolve());
       });
+    }
+  });
+
+  it('an Idempotency-Key replays the original run instead of starting a second one, and conflicts on a different question', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-idempotency-'));
+    tempDirs.push(projectRoot);
+    let server: Server | undefined;
+    let executions = 0;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+        agentRunExecutors: {
+          generated_answer: () => {
+            executions += 1;
+            return {
+              summary: 'Replied.', answer: 'Hello.', status: 'needs_review', trustState: 'not_applicable', stopReason: 'conversational_reply',
+              artifacts: [{ id: 'answer:test', kind: 'answer', title: 'Reply', trustState: 'not_applicable', payload: { kind: 'uncertified', certification: 'not_applicable', reviewStatus: 'not_applicable', text: 'Hello.' } }],
+              evaluations: [], nextActions: [],
+            };
+          },
+        },
+      });
+      const submit = (question: string, key: string) => fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+        body: JSON.stringify({ question, requestedMode: 'ask' }),
+      });
+      const first = await submit('thanks, what can you do?', 'browser-request-1');
+      expect(first.status).toBe(201);
+      const firstRun = (await first.json() as { run: { id: string } }).run;
+      const replay = await submit('thanks, what can you do?', 'browser-request-1');
+      expect(replay.status).toBe(200);
+      const replayed = await replay.json() as { run: { id: string }; replayed?: boolean };
+      expect(replayed.replayed).toBe(true);
+      expect(replayed.run.id).toBe(firstRun.id);
+      expect(executions).toBe(1);
+      const conflict = await submit('thanks, what else can you do?', 'browser-request-1');
+      expect(conflict.status).toBe(409);
+      expect((await conflict.json() as { code: string }).code).toBe('IDEMPOTENCY_CONFLICT');
+      const fresh = await submit('thanks, what can you do?', 'browser-request-2');
+      expect(fresh.status).toBe(201);
+      expect(executions).toBe(2);
+    } finally {
+      await new Promise<void>((resolve) => { if (!server) { resolve(); return; } server.close(() => resolve()); });
     }
   });
 
@@ -6733,6 +6785,8 @@ block "customer_profile" {
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
+        // Legacy V2 lane under test; the server default is the Ask pipeline.
+        askAgentRuntimeMode: 'authoritative_v2',
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,
         connection: { driver: 'file' },
@@ -7267,6 +7321,8 @@ block "inner_top_n_customer_profile" {
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
+        // Legacy V2 lane under test; the server default is the Ask pipeline.
+        askAgentRuntimeMode: 'authoritative_v2',
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,
         connection: { driver: 'file' },
@@ -7336,6 +7392,8 @@ block "inner_top_n_customer_profile" {
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
+        // Legacy V2 lane under test; the server default is the Ask pipeline.
+        askAgentRuntimeMode: 'authoritative_v2',
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,
         connection: { driver: 'file' },
@@ -7420,6 +7478,8 @@ block "inner_top_n_customer_profile" {
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
+        // Legacy V2 lane under test; the server default is the Ask pipeline.
+        askAgentRuntimeMode: 'authoritative_v2',
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,
         connection: { driver: 'file' },
@@ -7507,6 +7567,8 @@ block "inner_top_n_customer_profile" {
       try {
         const port = await startLocalServer({
           rootDir: projectRoot,
+          // Legacy V2 lane under test; the server default is the Ask pipeline.
+          askAgentRuntimeMode: 'authoritative_v2',
           projectRoot,
           executor: { executeQuery } as unknown as QueryExecutor,
           // Match the disposable Answerability warehouse target. The V2
@@ -8343,6 +8405,8 @@ block "inner_top_n_customer_profile" {
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
+        // Legacy V2 lane under test; the server default is the Ask pipeline.
+        askAgentRuntimeMode: 'authoritative_v2',
         projectRoot,
         // Execute through the ordinary local semantic adapter path. The query
         // executor is a bounded warehouse seam; retrieval/indexing, candidate
@@ -9648,6 +9712,8 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
+        // Legacy V2 lane under test; the server default is the Ask pipeline.
+        askAgentRuntimeMode: 'authoritative_v2',
         projectRoot,
         connection: { driver: 'file' },
         executor: { executeQuery } as unknown as QueryExecutor,
@@ -13072,6 +13138,8 @@ block "customer_revenue" {
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
+        // Legacy V2 lane under test; the server default is the Ask pipeline.
+        askAgentRuntimeMode: 'authoritative_v2',
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,
         connection: { driver: 'duckdb', filepath: ':memory:' },

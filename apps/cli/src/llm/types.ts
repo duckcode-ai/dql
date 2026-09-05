@@ -206,7 +206,7 @@ export interface AgentRunRequest {
    * request JSON.  The provider adapter uses it only to enable the bounded
    * tool loop; SQL/trust/execution remain host-owned.
    */
-  askAgentRuntimeMode?: 'authoritative_v2';
+  askAgentRuntimeMode?: 'authoritative_v2' | 'pipeline_v3';
   askAgentV2State?: AskAgentStateV4;
   /** Process-local engine capability; public request parsers never hydrate it. */
   askAgentV2ExecutionCapability?: AskV2ExecutionCapabilityV1;

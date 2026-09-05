@@ -1,0 +1,19 @@
+{
+  "project": "jaffle-golden",
+  "manifestVersion": 3,
+  "layout": { "version": 2, "mode": "oss-dbt-workspace", "skillsPath": "skills" },
+  "identity": { "owner": "analytics@jaffle.shop" },
+  "modeling": { "mode": "dbt-first" },
+  "dbt": { "projectDir": ".", "manifestPath": "target/manifest.json" },
+  "connections": { "default": { "driver": "sqlite", "filepath": ":memory:" } },
+  "semanticLayer": { "provider": "dbt", "projectPath": "." },
+  "agent": {
+    "runtimeValueGrounding": {
+      "mode": "safe_automatic",
+      "searchSafeColumns": [
+        "dev.customers.customer_name", "dev.customers.customer_type", "dev.locations.location_name",
+        "dev.products.product_name", "dev.products.product_type", "dev.order_items.product_name", "dev.supplies.supply_name"
+      ]
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "key": "21c7ab90762301fad1a08d086c08e8b3",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show total supply cost broken down by product.\",\"measures\":[{\"ref\":\"column:dev.supplies.supply_cost\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"dimension:supplies.product_id\",\"role\":\"key\"}],\"display\":[\"dimension:supplies.supply_name\"],\"expectedShape\":\"breakdown\",\"unresolved\":[{\"clause\":\"supply cost by product\",\"options\":[\"dimension:supplies.product_id\",\"dimension:supplies.supply_name\"],\"material\":true,\"question\":\"Should this be grouped by the raw product_id key (supplies grain) since there is no product_name join available in the supplies model, or do you want product names from the products model joined in?\"}],\"provenance\":{\"column:dev.supplies.supply_cost\":\"q:supply cost\",\"dimension:supplies.product_id\":\"q:by product\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:10:28.808Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "21c7ab90762301fad1a08d086c08e8b32f059d779227ccef7988a0b209794605",
+    "postCanonicalHash": "21c7ab90762301fad1a08d086c08e8b32f059d779227ccef7988a0b209794605",
+    "appliedRuleClasses": []
+  }
+}

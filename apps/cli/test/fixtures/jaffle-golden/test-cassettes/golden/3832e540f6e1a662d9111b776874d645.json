@@ -1,0 +1,23 @@
+{
+  "key": "3832e540f6e1a662d9111b776874d645",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Compare food revenue and drink (beverage) revenue as two measures.\",\"measures\":[{\"ref\":\"metric:order_item.food_revenue\",\"aggregation\":\"sum\"},{\"ref\":\"metric:order_item.drink_revenue\",\"aggregation\":\"sum\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.food_revenue\":\"q:food revenue\",\"metric:order_item.drink_revenue\":\"q:drink revenue\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:25:27.876Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "3832e540f6e1a662d9111b776874d645573237d44d0a321d823da6374be9a0a1",
+    "postCanonicalHash": "3832e540f6e1a662d9111b776874d645573237d44d0a321d823da6374be9a0a1",
+    "appliedRuleClasses": []
+  }
+}

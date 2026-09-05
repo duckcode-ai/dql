@@ -1,0 +1,8 @@
+block "revenue_by_product_name" {
+  status = "draft"
+  domain = "order_item"
+  type = "semantic"
+  description = "TOtal revenue by product"
+  metric = "revenue"
+  dimensions = ["product_name"]
+}

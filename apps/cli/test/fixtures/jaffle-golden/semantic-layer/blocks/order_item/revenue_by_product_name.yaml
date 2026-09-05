@@ -1,0 +1,14 @@
+name: revenue_by_product_name
+block: revenue_by_product_name
+domain: order_item
+description: "TOtal revenue by product"
+tags:
+  - ai-generated
+  - review-required
+source:
+  provider: dql
+  objectType: block
+  objectId: revenue_by_product_name
+import:
+  sourceKind: ai-generated
+reviewStatus: draft

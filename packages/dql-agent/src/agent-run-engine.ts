@@ -1,5 +1,6 @@
 import { composeAnswer, type TerminalIncidentCode } from './ask-runtime/compose-answer.js';
 import type { AnswerRefusalCode } from './answer-loop.js';
+import type { AskPipelineReceiptV9 } from './ask-pipeline/outcomes.js';
 import { createHash, randomUUID } from "node:crypto";
 import {
   normalizeProviderEgressReceiptV1,
@@ -736,6 +737,8 @@ export interface AgentRun {
   /** Additive concise Ask inspector. V1-V6 remain readable. */
   /** Additive V2 tool-runtime receipt. V1-V6 readers remain unchanged. */
   diagnosticReceiptV8?: AgentRunDiagnosticReceiptV8;
+  /** Additive Ask-pipeline receipt: intent, every prepared candidate and refusal, the executed SQL fingerprint, verbatim failures. */
+  diagnosticReceiptV9?: AskPipelineReceiptV9;
   /** Server-owned Ask rollout mode that produced this run; old runs omit it. */
   askAgentRuntimeMode?: AskRuntimeModeV2;
   /** Fact-driven result envelope generated after the accepted executor result. */
@@ -854,6 +857,8 @@ export interface AgentRouteExecutorResult {
   clarificationOptions?: AgentRunClarificationOption[];
   repairAttempts?: number;
   providerEgressReceipts?: ProviderEgressReceiptV1[];
+  /** The Ask pipeline's receipt; the engine persists it on the run root as `diagnosticReceiptV9`. */
+  askPipelineReceipt?: AskPipelineReceiptV9;
   telemetry?: AgentRunTelemetryV1;
   /** Content-free narration outcome; persisted by the run engine. */
   narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
@@ -3088,6 +3093,7 @@ export class AgentRunEngine {
       ...(finalResult.narrationIntegrityReceipt ? {
         narrationIntegrityReceipt: finalResult.narrationIntegrityReceipt,
       } : {}),
+      ...(finalResult.askPipelineReceipt ? { diagnosticReceiptV9: finalResult.askPipelineReceipt } : {}),
       ...(finalResult.askAnalystState ? { askAnalystState: finalResult.askAnalystState } : {}),
       ...(finalResult.businessAnswer ? { businessAnswer: finalResult.businessAnswer } : {}),
       escalationAttempts,
@@ -3099,6 +3105,10 @@ export class AgentRunEngine {
   }
 
   private evaluate(context: AgentRunGateContext): AgentRunEvaluation[] {
+    // The Ask pipeline proves its own answer (entailment, compilation, the
+    // filter and fan-out proofs). The legacy gates re-read the question with
+    // regexes and would re-judge a proven answer; its evaluations stand.
+    if (context.request.askAgentRuntimeMode === 'pipeline_v3') return context.result.evaluations ?? [];
     const gate = this.gates[context.route];
     if (gate) return gate(context);
     return context.result.evaluations
@@ -3871,7 +3881,10 @@ function enforceOrdinaryAnalyticalPlanBoundary(
   // loop.  Do not let V1's rescue/reinterpretation policy create a second
   // authority before the tool runtime can try the next safe tier.
   if (decision.askAgentV2Decision?.mode === 'authoritative_v2'
-    || request.askAgentRuntimeMode === 'authoritative_v2') {
+    || request.askAgentRuntimeMode === 'authoritative_v2'
+    // The Ask pipeline interprets the question itself, once, with the model;
+    // no regex here may pre-empt it into a block or a conversational reply.
+    || request.askAgentRuntimeMode === 'pipeline_v3') {
     return decision;
   }
   // AskAnalystRuntimeV1 has already retrieved, planned, verified and (when

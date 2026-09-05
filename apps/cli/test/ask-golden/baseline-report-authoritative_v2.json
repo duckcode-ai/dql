@@ -1,0 +1,762 @@
+{
+  "build": {
+    "commit": "f964bb5caade101f8a139e18c09f161af6dfe6fa",
+    "dirty": "true",
+    "contentFingerprint": "29324da3201964c8",
+    "mode": "default",
+    "provider": "live:/Users/Kranthi_1/jaffle-shop-duckdb",
+    "fixture": "jaffle-golden"
+  },
+  "passed": 17,
+  "total": 34,
+  "cases": [
+    {
+      "lane": "questions",
+      "id": "top-beverage-customers",
+      "question": "who are the top customers for beverage product category",
+      "pass": false,
+      "reasons": [
+        "no result rows: generated_answer/blocked/blocked — No governed query was run for this question because it does not name a measure this project can compute. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run for t"
+      ],
+      "route": "generated_answer",
+      "status": "blocked",
+      "trust": "blocked",
+      "stop": "blocked",
+      "answerKind": "governed",
+      "text": "No governed query was run for this question because it does not name a measure this project can compute. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run for this question because it does not name a ",
+      "sql": "",
+      "providerRoundTrips": 10,
+      "block": "semantic:jaffle_shop:entity:customers.customer",
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "top-customers",
+      "question": "who are the top customers",
+      "pass": true,
+      "reasons": [],
+      "route": "certified_answer",
+      "status": "completed",
+      "trust": "certified",
+      "stop": "certified_answer_found",
+      "answerKind": "governed",
+      "columns": [
+        "customer_name",
+        "customer_type",
+        "count_lifetime_orders",
+        "lifetime_spend",
+        "first_ordered_at",
+        "last_ordered_at"
+      ],
+      "rowCount": 10,
+      "text": "The query returned 10 rows across 6 columns. Across the 10 returned rows, Lifetime Spend totals $17,970.96. Mr. Matthew Meyer leads with $3,089.80 — 17.2% of the returned total. Returned result 1: Mr. Matthew Meyer — Customer Type: returnin",
+      "sql": "SELECT customer_name, customer_type, count_lifetime_orders, lifetime_spend, first_ordered_at, last_ordered_at FROM dev.customers ORDER BY lifetime_spend DESC, customer_name LIMIT 10",
+      "providerRoundTrips": 0,
+      "block": "commerce::block::customer_profile",
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "top-5-customers-by-revenue",
+      "question": "top 5 customers by revenue",
+      "pass": false,
+      "reasons": [
+        "no result rows: generated_answer/blocked/blocked — No governed query was run for this question because \"revenue\" does not bind to exactly one column of the models retrieved for it. Name the measure and the model to use, or model it and re-sync.\nNo gov"
+      ],
+      "route": "generated_answer",
+      "status": "blocked",
+      "trust": "blocked",
+      "stop": "blocked",
+      "answerKind": "governed",
+      "text": "No governed query was run for this question because \"revenue\" does not bind to exactly one column of the models retrieved for it. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run for this question be",
+      "sql": "",
+      "providerRoundTrips": 10,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "beverage-revenue-total",
+      "question": "beverage revenue",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "drink_revenue"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 1 column. Drink Revenue is $13,770.00. Result 1: 13770.\nSemantic metric",
+      "sql": "SELECT SUM(case when is_drink_item then product_price else 0 end) AS drink_revenue FROM dev.order_items LIMIT 200",
+      "providerRoundTrips": 2,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "total-revenue",
+      "question": "total revenue",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "revenue"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 1 column. Revenue is $19,385.00. Result 1: 19385.\nSemantic metric",
+      "sql": "SELECT SUM(product_price) AS revenue FROM dev.order_items LIMIT 200",
+      "providerRoundTrips": 0,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "revenue-by-month",
+      "question": "revenue by month",
+      "pass": true,
+      "reasons": [],
+      "route": "certified_answer",
+      "status": "completed",
+      "trust": "certified",
+      "stop": "certified_answer_found",
+      "answerKind": "governed",
+      "columns": [
+        "month",
+        "gross_revenue",
+        "order_count"
+      ],
+      "rowCount": 12,
+      "text": "The query returned 12 rows across 3 columns. Across the 12 returned rows, Gross Revenue totals $20,547.82. 2024-11-01 leads with $2,084.97 — 10.2% of the returned total. Result 1: 2024-09-01 — Gross Revenue: $1,546.51; Order Count: 159. Res",
+      "sql": "SELECT date_trunc('month', ordered_at) AS month, SUM(order_total) AS gross_revenue, COUNT(*) AS order_count FROM dev.orders GROUP BY 1 ORDER BY 1",
+      "providerRoundTrips": 0,
+      "block": "commerce::block::monthly_revenue",
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "orders-per-customer",
+      "question": "how many orders did each customer place",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "customer_name",
+        "count_lifetime_orders"
+      ],
+      "rowCount": 12,
+      "text": "The query returned 12 rows across 2 columns. Across the 12 returned rows, Count Lifetime Orders totals 2,085. Melissa Lopez leads with 231 — 11.1% of the returned total. Result 1: Aaron Gardner — Count Lifetime Orders: 31. Result 2: Amy Wol",
+      "sql": "SELECT customer_name AS customer_name, SUM(count_lifetime_orders) AS count_lifetime_orders FROM dev.customers GROUP BY customer_name LIMIT 200",
+      "providerRoundTrips": 2,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "revenue-by-location",
+      "question": "what is the total revenue by location",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "location_name",
+        "revenue"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 2 columns. Revenue is $19,385.00. Result 1: Philadelphia — Revenue: $19,385.00.\nSemantic metric",
+      "sql": "SELECT locations.location_name AS location_name, SUM(order_item.product_price) AS revenue FROM dev.order_items AS order_item LEFT JOIN dev.orders AS orders ON order_item.order_id = orders.order_id LEFT JOIN dev.locations AS locations ON orders.location_id = locations.location_id GROUP BY locations.location_name LIMIT 200",
+      "providerRoundTrips": 0,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "top-products-by-revenue",
+      "question": "top 10 products by revenue",
+      "pass": false,
+      "reasons": [
+        "user text describes the machinery",
+        "no result rows: blocked/blocked/blocked — This analytical run reached its time limit before it finished. A timeout alone does not prove a cross-model join or semantic-modeling problem. Open Trust & Steps to see the last recorded phase; retry "
+      ],
+      "route": "blocked",
+      "status": "blocked",
+      "trust": "blocked",
+      "stop": "blocked",
+      "text": "This analytical run reached its time limit before it finished. A timeout alone does not prove a cross-model join or semantic-modeling problem. Open Trust & Steps to see the last recorded phase; retry the same bounded question or use Researc",
+      "sql": "",
+      "providerRoundTrips": 3,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "beverage-revenue-by-product",
+      "question": "beverage revenue by product",
+      "pass": true,
+      "reasons": [],
+      "route": "certified_answer",
+      "status": "completed",
+      "trust": "certified",
+      "stop": "certified_answer_found",
+      "answerKind": "governed",
+      "columns": [
+        "product_name",
+        "beverage_revenue",
+        "items_sold"
+      ],
+      "rowCount": 5,
+      "text": "The query returned 5 rows across 3 columns. Across the 5 returned rows, Beverage Revenue totals $13,770.00. for richer or pourover  leads with $3,430.00 — 24.9% of the returned total. Result 1: for richer or pourover  — Beverage Revenue: $3",
+      "sql": "SELECT products.product_name, SUM(order_items.product_price) AS beverage_revenue, COUNT(*) AS items_sold FROM dev.order_items AS order_items JOIN dev.products AS products ON order_items.product_id = products.product_id WHERE products.is_drink_item = true GROUP BY 1 ORDER BY beverage_revenue DESC, products.product_name",
+      "providerRoundTrips": 0,
+      "block": "commerce::block::beverage_revenue_by_product",
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "revenue-by-product-type",
+      "question": "revenue by product type",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "product_type",
+        "revenue"
+      ],
+      "rowCount": 2,
+      "text": "The query returned 2 rows across 2 columns. Across the 2 returned rows, Revenue totals $19,385.00. beverage leads with $13,770.00 — 71.0% of the returned total. Result 1: beverage — Revenue: $13,770.00. Result 2: jaffle — Revenue: $5,615.00",
+      "sql": "SELECT products.product_type AS product_type, SUM(order_item.product_price) AS revenue FROM dev.order_items AS order_item LEFT JOIN dev.products AS products ON order_item.product_id = products.product_id GROUP BY products.product_type LIMIT 200",
+      "providerRoundTrips": 0,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "food-vs-drink",
+      "question": "compare food and drink revenue",
+      "pass": false,
+      "reasons": [
+        "rows differ from reference: column food_revenue (aliases food_revenue) not in result columns drink_revenue"
+      ],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "drink_revenue"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 1 column. Drink Revenue is $13,770.00. Result 1: 13770.\nSemantic metric",
+      "sql": "SELECT SUM(case when is_drink_item then product_price else 0 end) AS drink_revenue FROM dev.order_items LIMIT 200",
+      "providerRoundTrips": 0,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "ryan-byrd-total-revenue",
+      "question": "what is the total revenue for \"Ryan Byrd\"",
+      "pass": false,
+      "reasons": [
+        "no result rows: generated_answer/blocked/blocked — No governed query was run for this question because it needs a filter that no governed query here can prove. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run f"
+      ],
+      "route": "generated_answer",
+      "status": "blocked",
+      "trust": "blocked",
+      "stop": "blocked",
+      "answerKind": "governed",
+      "text": "No governed query was run for this question because it needs a filter that no governed query here can prove. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run for this question because it needs a filt",
+      "sql": "",
+      "providerRoundTrips": 10,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "ryan-byrd-both-revenues",
+      "question": "what is the \"Ryan byrd\" revenue by total revenue and beverage revenue? give me both",
+      "pass": false,
+      "reasons": [
+        "no result rows: generated_answer/needs_review/human_review_required — The query completed, but no fact-linked narrative was retained. Open the result to review the validated data.\nAnswered 1 of 2 analytical clauses; the remaining clauses need review."
+      ],
+      "route": "generated_answer",
+      "status": "needs_review",
+      "trust": "governed",
+      "stop": "human_review_required",
+      "answerKind": "governed",
+      "text": "The query completed, but no fact-linked narrative was retained. Open the result to review the validated data.\nAnswered 1 of 2 analytical clauses; the remaining clauses need review.",
+      "sql": " ",
+      "providerRoundTrips": 2,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "orders-by-customer-type",
+      "question": "how many orders by customer type",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "customer_type",
+        "orders"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 2 columns. Orders is 2,085. Result 1: returning — Orders: 2,085.\nSemantic metric",
+      "sql": "SELECT customers.customer_type AS customer_type, SUM(1) AS orders FROM dev.orders AS orders LEFT JOIN dev.customers AS customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_type LIMIT 200",
+      "providerRoundTrips": 2,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "average-order-value",
+      "question": "what is the average order value",
+      "pass": false,
+      "reasons": [
+        "trust review_required does not satisfy any"
+      ],
+      "route": "generated_answer",
+      "status": "needs_review",
+      "trust": "review_required",
+      "stop": "human_review_required",
+      "answerKind": "governed",
+      "columns": [
+        "order_total"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 1 column. Order Total is 9.86. Result 1: 9.855069544364508.\nGoverned relational program",
+      "sql": "SELECT AVG(\"order_total\") AS \"order_total\" FROM \"orders\" ORDER BY \"order_total\" DESC LIMIT 200",
+      "providerRoundTrips": 5,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "large-orders-count",
+      "question": "how many large orders were there",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "large_orders"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 1 column. Large Orders is 93. Result 1: 93.\nSemantic metric",
+      "sql": "SELECT SUM(1) AS large_orders FROM dev.orders WHERE (order_total >= 20) LIMIT 200",
+      "providerRoundTrips": 2,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "drink-orders-by-month",
+      "question": "drink orders by month",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "ordered_at_month",
+        "drink_orders"
+      ],
+      "rowCount": 12,
+      "text": "The query returned 12 rows across 2 columns. Across the 12 returned rows, Drink Orders totals 2,085. 2024-12-01 leads with 190 — 9.1% of the returned total. Result 1: 2024-09-01 — Drink Orders: 159. Result 2: 2024-10-01 — Drink Orders: 175.",
+      "sql": "SELECT STRFTIME('%Y-%m-01', \"jaffle_shop\".\"dev\".\"orders\".ordered_at) AS ordered_at_month, SUM(1) AS drink_orders FROM dev.orders WHERE (is_drink_order = true) GROUP BY STRFTIME('%Y-%m-01', \"jaffle_shop\".\"dev\".\"orders\".ordered_at)",
+      "providerRoundTrips": 2,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "customer-profile-ryan",
+      "question": "show me the customer profile for Ryan Byrd",
+      "pass": false,
+      "reasons": [
+        "no result rows: generated_answer/blocked/blocked — No governed query was run for this question because it does not name a measure this project can compute. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run for t"
+      ],
+      "route": "generated_answer",
+      "status": "blocked",
+      "trust": "blocked",
+      "stop": "blocked",
+      "answerKind": "governed",
+      "text": "No governed query was run for this question because it does not name a measure this project can compute. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run for this question because it does not name a ",
+      "sql": "",
+      "providerRoundTrips": 10,
+      "block": "commerce::entity::customer",
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "supplies-cost-by-product",
+      "question": "supply cost by product",
+      "pass": false,
+      "reasons": [
+        "no result rows: generated_answer/blocked/blocked — No governed query was run for this question because \"cost\" does not bind to exactly one column of the models retrieved for it. Name the measure and the model to use, or model it and re-sync.\nNo govern"
+      ],
+      "route": "generated_answer",
+      "status": "blocked",
+      "trust": "blocked",
+      "stop": "blocked",
+      "answerKind": "governed",
+      "text": "No governed query was run for this question because \"cost\" does not bind to exactly one column of the models retrieved for it. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run for this question becau",
+      "sql": "",
+      "providerRoundTrips": 10,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "misspelt-beverage-category",
+      "question": "I need to get the bevereage catogery",
+      "pass": false,
+      "reasons": [
+        "rows differ from reference: column beverage_revenue (aliases beverage_revenue, drink_revenue, revenue) not in result columns product_name, product_id",
+        "trust review_required does not satisfy any"
+      ],
+      "route": "generated_answer",
+      "status": "needs_review",
+      "trust": "review_required",
+      "stop": "human_review_required",
+      "answerKind": "governed",
+      "columns": [
+        "product_name",
+        "product_id"
+      ],
+      "rowCount": 5,
+      "text": "The query returned 5 rows across 2 columns. Result 1: vanilla ice — Product Id: 1. Result 2: tangaroo — Product Id: 1. Result 3: for richer or pourover  — Product Id: 1. Result 4: chai and mighty — Product Id: 1. Result 5: adele-ade — Produ",
+      "sql": "SELECT \"product_name\" AS \"product_name\", COUNT(\"product_id\") AS \"product_id\" FROM \"products\" WHERE \"is_drink_item\" = TRUE GROUP BY \"product_name\" ORDER BY \"product_id\" DESC LIMIT 200",
+      "providerRoundTrips": 4,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "unmodeled-term",
+      "question": "churn rate by region",
+      "pass": true,
+      "reasons": [],
+      "route": "generated_answer",
+      "status": "blocked",
+      "trust": "blocked",
+      "stop": "blocked",
+      "answerKind": "governed",
+      "text": "Part of this question is not modeled in this project yet, so no governed query can answer it as asked.\nPart of this question is not modeled in this project yet, so no governed query can answer it as asked.",
+      "sql": "",
+      "providerRoundTrips": 0,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "greeting",
+      "question": "hi",
+      "pass": true,
+      "reasons": [],
+      "route": "conversation",
+      "status": "completed",
+      "trust": "not_applicable",
+      "stop": "conversational_reply",
+      "answerKind": "conversational",
+      "text": "Hi! I can help you explore your commerce data — things like monthly revenue trends, top beverage customers, or customer lifetime value.\n\nWhat would you like to look into?\nReplied conversationally.",
+      "sql": "",
+      "providerRoundTrips": 0,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "off-topic",
+      "question": "what is the weather in Chicago",
+      "pass": false,
+      "reasons": [
+        "expected an honest gap, got semantic_answer/completed with 1 rows"
+      ],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "revenue"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 1 column. Revenue is $19,385.00. Result 1: 19385.\nSemantic metric",
+      "sql": "SELECT SUM(product_price) AS revenue FROM dev.order_items LIMIT 200",
+      "providerRoundTrips": 4,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "customers-with-most-orders",
+      "question": "which customers placed the most orders",
+      "pass": false,
+      "reasons": [
+        "rows differ from reference: row 5 differs: expected {\"customer_id\":\"b4413ac0-2fc9-4c91-b188-71c109d9be8f\",\"customer_name\":\"Amy Wolf\",\"order_count\":218}, got {\"customer_name\":\"Brittany Johnson\",\"count_lifetime_orders\":218}",
+        "trust review_required does not satisfy governed"
+      ],
+      "route": "generated_answer",
+      "status": "needs_review",
+      "trust": "review_required",
+      "stop": "human_review_required",
+      "answerKind": "governed",
+      "columns": [
+        "customer_name",
+        "count_lifetime_orders"
+      ],
+      "rowCount": 10,
+      "text": "The query returned 10 rows across 2 columns. Across the 10 returned rows, Count Lifetime Orders totals 2,025. Melissa Lopez leads with 231 — 11.4% of the returned total. Returned result 1: Melissa Lopez — Count Lifetime Orders: 231. Returne",
+      "sql": "SELECT \"customer_name\" AS \"customer_name\", MAX(\"count_lifetime_orders\") AS \"count_lifetime_orders\" FROM \"dev\".\"customers\" GROUP BY \"customer_name\" ORDER BY \"count_lifetime_orders\" DESC LIMIT 10",
+      "providerRoundTrips": 2,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "revenue-by-customer-type",
+      "question": "revenue by customer type",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "customer_type",
+        "revenue"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 2 columns. Revenue is $19,385.00. Result 1: returning — Revenue: $19,385.00.\nSemantic metric",
+      "sql": "SELECT customers.customer_type AS customer_type, SUM(order_item.product_price) AS revenue FROM dev.order_items AS order_item LEFT JOIN dev.orders AS orders ON order_item.order_id = orders.order_id LEFT JOIN dev.customers AS customers ON orders.customer_id = customers.customer_id GROUP BY customers.customer_type LIMIT 200",
+      "providerRoundTrips": 0,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "food-revenue-by-location",
+      "question": "food revenue by location",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "location_name",
+        "food_revenue"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 2 columns. Food Revenue is $5,615.00. Result 1: Philadelphia — Food Revenue: $5,615.00.\nSemantic metric",
+      "sql": "SELECT locations.location_name AS location_name, SUM(case when order_item.is_food_item then order_item.product_price else 0 end) AS food_revenue FROM dev.order_items AS order_item LEFT JOIN dev.orders AS orders ON order_item.order_id = orders.order_id LEFT JOIN dev.locations AS locations ON orders.location_id = locations.location_id GROUP BY locations.location_name LIMIT 200",
+      "providerRoundTrips": 0,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "order-count-total",
+      "question": "how many orders are there",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "orders"
+      ],
+      "rowCount": 1,
+      "text": "The query returned 1 row across 1 column. Orders is 2,085. Result 1: 2085.\nSemantic metric",
+      "sql": "SELECT SUM(1) AS orders FROM dev.orders LIMIT 200",
+      "providerRoundTrips": 2,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "questions",
+      "id": "lifetime-spend-pretax-top",
+      "question": "top customers by lifetime spend before tax",
+      "pass": true,
+      "reasons": [],
+      "route": "semantic_answer",
+      "status": "completed",
+      "trust": "governed",
+      "stop": "governed_semantic_answer",
+      "answerKind": "governed",
+      "columns": [
+        "customer_name",
+        "lifetime_spend_pretax"
+      ],
+      "rowCount": 10,
+      "text": "The query returned 10 rows across 2 columns. Across the 10 returned rows, Lifetime Spend Pretax totals $16,954.00. Mr. Matthew Meyer leads with $2,915.00 — 17.2% of the returned total. Returned result 1: Mr. Matthew Meyer — Lifetime Spend P",
+      "sql": "SELECT customer_name AS customer_name, SUM(lifetime_spend_pretax) AS lifetime_spend_pretax FROM dev.customers GROUP BY customer_name ORDER BY lifetime_spend_pretax DESC LIMIT 10",
+      "providerRoundTrips": 2,
+      "repeats": 1,
+      "stable": true
+    },
+    {
+      "lane": "conversation",
+      "id": "q1-top-beverage-customers",
+      "question": "who are the top customers for beverage product category",
+      "pass": false,
+      "reasons": [
+        "no result rows: generated_answer/blocked/blocked — No governed query was run for this question because it does not name a measure this project can compute. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run for t"
+      ],
+      "route": "generated_answer",
+      "status": "blocked",
+      "trust": "blocked",
+      "stop": "blocked",
+      "answerKind": "governed",
+      "text": "No governed query was run for this question because it does not name a measure this project can compute. Name the measure and the model to use, or model it and re-sync.\nNo governed query was run for this question because it does not name a ",
+      "sql": "",
+      "providerRoundTrips": 10,
+      "block": "semantic:jaffle_shop:entity:customers.customer",
+      "threadId": "thr_mtnu1ygg_c5kk5g",
+      "keeps": []
+    },
+    {
+      "lane": "conversation",
+      "id": "q2-include-customer-name",
+      "question": "Can you include the customer name in the results",
+      "pass": false,
+      "reasons": [
+        "rows differ from reference: column drink_revenue (aliases drink_revenue, beverage_revenue, revenue) not in result columns customer_name, customer_type, count_lifetime_orders, lifetime_spend, first_ordered_at, last_ordered_at",
+        "forbidden route certified_answer",
+        "forbidden block customer_profile",
+        "row count 12 above 10"
+      ],
+      "route": "certified_answer",
+      "status": "completed",
+      "trust": "certified",
+      "stop": "certified_answer_found",
+      "answerKind": "governed",
+      "columns": [
+        "customer_name",
+        "customer_type",
+        "count_lifetime_orders",
+        "lifetime_spend",
+        "first_ordered_at",
+        "last_ordered_at"
+      ],
+      "rowCount": 12,
+      "text": "The query returned 12 rows across 6 columns. Across the 12 returned rows, Lifetime Spend totals $20,547.82. Mr. Matthew Meyer leads with $3,089.80 — 15.0% of the returned total. Result 1: Mr. Matthew Meyer — Customer Type: returning; Count ",
+      "sql": "SELECT customer_name, customer_type, count_lifetime_orders, lifetime_spend, first_ordered_at, last_ordered_at FROM dev.customers ORDER BY lifetime_spend DESC, customer_name",
+      "providerRoundTrips": 0,
+      "block": "commerce::block::customer_profile",
+      "threadId": "thr_mtnu1ygg_c5kk5g",
+      "keeps": [
+        "beverage scope",
+        "customer grain",
+        "ranking",
+        "limit 10"
+      ]
+    },
+    {
+      "lane": "conversation",
+      "id": "q3-beverage-correction",
+      "question": "I need to get the bevereage catogery",
+      "pass": false,
+      "reasons": [
+        "rows differ from reference: column drink_revenue (aliases drink_revenue, beverage_revenue, revenue) not in result columns product_name, product_id",
+        "trust review_required does not satisfy governed"
+      ],
+      "route": "generated_answer",
+      "status": "needs_review",
+      "trust": "review_required",
+      "stop": "human_review_required",
+      "answerKind": "governed",
+      "columns": [
+        "product_name",
+        "product_id"
+      ],
+      "rowCount": 5,
+      "text": "The query returned 5 rows across 2 columns. Result 1: vanilla ice — Product Id: 1. Result 2: tangaroo — Product Id: 1. Result 3: for richer or pourover  — Product Id: 1. Result 4: chai and mighty — Product Id: 1. Result 5: adele-ade — Produ",
+      "sql": "SELECT \"product_name\" AS \"product_name\", COUNT(\"product_id\") AS \"product_id\" FROM \"products\" WHERE \"is_drink_item\" = TRUE GROUP BY \"product_name\" ORDER BY \"product_id\" DESC LIMIT 200",
+      "providerRoundTrips": 1,
+      "threadId": "thr_mtnu1ygg_c5kk5g",
+      "keeps": [
+        "beverage scope",
+        "customer grain",
+        "ranking",
+        "limit 10"
+      ]
+    },
+    {
+      "lane": "conversation",
+      "id": "q4-ryan-byrd-both",
+      "question": "what is the \"Ryan byrd\" revenue by total revenue and beverage revenue? give me both",
+      "pass": false,
+      "reasons": [
+        "no result rows: generated_answer/blocked/human_review_required — Created review-required agent output.\nCreated review-required agent output."
+      ],
+      "route": "generated_answer",
+      "status": "blocked",
+      "trust": "review_required",
+      "stop": "human_review_required",
+      "answerKind": "governed",
+      "text": "Created review-required agent output.\nCreated review-required agent output.",
+      "sql": "",
+      "providerRoundTrips": 10,
+      "threadId": "thr_mtnu1ygg_c5kk5g",
+      "keeps": []
+    },
+    {
+      "lane": "conversation",
+      "id": "q5-ryan-byrd-both-retry",
+      "question": "what is the \"Ryan byrd\" revenue by total revenue and beverage revenue? give me both",
+      "pass": false,
+      "reasons": [
+        "no result rows: generated_answer/blocked/human_review_required — Created review-required agent output.\nCreated review-required agent output."
+      ],
+      "route": "generated_answer",
+      "status": "blocked",
+      "trust": "review_required",
+      "stop": "human_review_required",
+      "answerKind": "governed",
+      "text": "Created review-required agent output.\nCreated review-required agent output.",
+      "sql": "",
+      "providerRoundTrips": 9,
+      "threadId": "thr_mtnu1ygg_c5kk5g",
+      "keeps": []
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "key": "127449fe12bf70f78993e0317164cd35",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by their number of orders placed, showing the most orders first.\",\"measures\":[{\"ref\":\"metric:orders.orders\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"ordering\":{\"ref\":\"metric:orders.orders\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:orders.orders\":\"q:placed the most orders\",\"entity:orders.customer\":\"q:which customers\",\"dimension:customers.customer_name\":\"q:which customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:05:08.605Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "127449fe12bf70f78993e0317164cd35dc2ea8611af6ced9603dc083224b65e6",
+    "postCanonicalHash": "127449fe12bf70f78993e0317164cd35dc2ea8611af6ced9603dc083224b65e6",
+    "appliedRuleClasses": []
+  }
+}

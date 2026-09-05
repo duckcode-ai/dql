@@ -1,0 +1,79 @@
+{
+  "key": "c95dc50b38fad0378930b3b7700b96f8",
+  "operation": "generate_with_tools",
+  "text": "",
+  "toolCalls": [
+    {
+      "name": "propose_plan",
+      "args": {
+        "measures": [
+          {
+            "id": "semantic:metric:customers.average_order_value"
+          }
+        ]
+      }
+    },
+    {
+      "name": "propose_plan",
+      "args": {
+        "measures": [
+          {
+            "id": "semantic:metric:customers.average_order_value"
+          }
+        ]
+      }
+    },
+    {
+      "name": "propose_plan",
+      "args": {
+        "measures": [
+          {
+            "id": "orders.order_total",
+            "aggregation": "avg",
+            "alias": "average_order_value"
+          }
+        ]
+      }
+    },
+    {
+      "name": "propose_plan",
+      "args": {
+        "measures": [
+          {
+            "id": "dbt::model.jaffle_shop.orders.order_total",
+            "aggregation": "avg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "finish_answer",
+      "args": {
+        "answer": "The average order value has been computed from the governed `orders` mart (average of `order_total` across all orders). The query executed successfully at the governed_relational tier.",
+        "evidenceIds": [
+          "dbt::model.jaffle_shop.orders"
+        ]
+      }
+    }
+  ],
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T03:36:32.029Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "user",
+      "system"
+    ],
+    "preCanonicalHash": "c95dc50b38fad0378930b3b7700b96f8a8afda1e21f3f758063353edce8e6781",
+    "postCanonicalHash": "c95dc50b38fad0378930b3b7700b96f8a8afda1e21f3f758063353edce8e6781",
+    "appliedRuleClasses": []
+  }
+}

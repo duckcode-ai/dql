@@ -1,0 +1,24 @@
+{
+  "key": "c40689b955db8fcde26ec19fb7c5ff9e",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"A ranking of customers by beverage revenue, including customer name, beverage order count, and beverage product variety, using the certified top beverage customers block.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"the bevereage catogery\",\"options\":[],\"material\":false}],\"provenance\":{\"block:commerce.top_beverage_customers\":\"inherited\"},\"reply\":\"The top beverage customers block already scopes to beverage items only (is_drink_item = true), so all rows shown are beverage-category results; there isn't a separate 'category' column to add beyond the block's columns (customer_name, beverage_revenue, beverage_orders, beverage_product_types).\"}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:16:31.571Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "c40689b955db8fcde26ec19fb7c5ff9ef27458b11c2dc8d4fd20f4b95e132806",
+    "postCanonicalHash": "c40689b955db8fcde26ec19fb7c5ff9ef27458b11c2dc8d4fd20f4b95e132806",
+    "appliedRuleClasses": []
+  }
+}

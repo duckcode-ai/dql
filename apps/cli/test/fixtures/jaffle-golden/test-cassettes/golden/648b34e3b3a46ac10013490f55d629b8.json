@@ -1,0 +1,23 @@
+{
+  "key": "648b34e3b3a46ac10013490f55d629b8",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants the total revenue, meaning gross order revenue including tax, but the vocabulary also defines product/order-item revenue excluding tax, so the exact scope is ambiguous.\",\"measures\":[],\"expectedShape\":\"scalar\",\"unresolved\":[{\"clause\":\"total revenue\",\"options\":[\"metric:orders.order_total\",\"metric:order_item.revenue\"],\"material\":true,\"question\":\"Do you mean gross order revenue including tax, or product revenue excluding tax?\"}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:15:12.759Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "648b34e3b3a46ac10013490f55d629b83246a2d7856e32721b0e6f5325032792",
+    "postCanonicalHash": "648b34e3b3a46ac10013490f55d629b83246a2d7856e32721b0e6f5325032792",
+    "appliedRuleClasses": []
+  }
+}

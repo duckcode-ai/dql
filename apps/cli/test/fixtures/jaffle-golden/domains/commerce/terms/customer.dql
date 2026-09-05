@@ -1,0 +1,15 @@
+// dql-format: 1
+
+term "Customer" {
+  domain = "commerce"
+  type = "entity"
+  status = "certified"
+  description = "A Jaffle Shop customer represented by one row in the customers mart."
+  owner = "analytics@jaffle.shop"
+  tags = ["entity", "commerce"]
+  identifiers = ["customer_id"]
+  synonyms = ["buyer", "shopper"]
+  businessOwner = "Jaffle Shop Growth Team"
+  businessRules = ["Use dev.customers for customer-level lifetime attributes."]
+  caveats = ["A customer profile is one row per customer; order-item analysis must aggregate before presenting customer totals."]
+}

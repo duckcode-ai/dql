@@ -1,0 +1,52 @@
+{
+  "key": "cad6a22c04e2bf77881df81bc25e7831",
+  "operation": "generate_with_tools",
+  "text": "",
+  "toolCalls": [
+    {
+      "name": "propose_plan",
+      "args": {
+        "measures": [
+          {
+            "id": "semantic:metric:customers.count_lifetime_orders"
+          }
+        ],
+        "dimensions": [
+          {
+            "id": "semantic:jaffle_shop:dimension:customers.customer_name"
+          }
+        ]
+      }
+    },
+    {
+      "name": "finish_answer",
+      "args": {
+        "answer": "The plan measuring the count of lifetime orders per customer (semantic metric customers.count_lifetime_orders, broken down by customer) executed successfully and returned 12 rows — one row per customer, each with their order count.",
+        "evidenceIds": [
+          "semantic:metric:customers.count_lifetime_orders",
+          "semantic:jaffle_shop:dimension:customers.customer_name"
+        ]
+      }
+    }
+  ],
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T03:34:22.057Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "user",
+      "system"
+    ],
+    "preCanonicalHash": "cad6a22c04e2bf77881df81bc25e783155d815eb65f999964b303c8bbaf905ba",
+    "postCanonicalHash": "cad6a22c04e2bf77881df81bc25e783155d815eb65f999964b303c8bbaf905ba",
+    "appliedRuleClasses": []
+  }
+}

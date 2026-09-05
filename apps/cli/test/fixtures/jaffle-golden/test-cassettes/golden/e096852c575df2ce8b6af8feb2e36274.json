@@ -1,0 +1,23 @@
+{
+  "key": "e096852c575df2ce8b6af8feb2e36274",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants beverage revenue and item count broken down by product, matching the certified beverage revenue by product block.\",\"measures\":[{\"ref\":\"block:commerce.beverage_revenue_by_product\"}],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:beverage revenue by product\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:25:22.515Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "e096852c575df2ce8b6af8feb2e362748b8208746a3cae3ed7112740dca87f7b",
+    "postCanonicalHash": "e096852c575df2ce8b6af8feb2e362748b8208746a3cae3ed7112740dca87f7b",
+    "appliedRuleClasses": []
+  }
+}

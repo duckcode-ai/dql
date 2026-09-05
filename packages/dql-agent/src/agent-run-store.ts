@@ -191,6 +191,13 @@ export class SqliteAgentRunStore implements AgentRunStore {
         fingerprint TEXT NOT NULL,
         PRIMARY KEY (run_id, fingerprint)
       );
+      CREATE TABLE IF NOT EXISTS agent_run_requests (
+        request_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_run_requests_run ON agent_run_requests(run_id);
     `);
     this.finalizeInterruptedRuns();
     if (options.legacyJsonPath) this.migrateLegacyJson(options.legacyJsonPath);
@@ -417,6 +424,25 @@ export class SqliteAgentRunStore implements AgentRunStore {
   get(id: string): AgentRun | undefined {
     const row = this.db.prepare('SELECT payload_json FROM agent_runs WHERE id = ?').get(id) as { payload_json: string } | undefined;
     return row ? this.readRun(row.payload_json) : undefined;
+  }
+
+  /**
+   * Durable request identity. A submission that carries an Idempotency-Key
+   * claims it here BEFORE any expensive work; a replay of the same key finds
+   * the original run instead of starting another, and a different question
+   * under the same key is a conflict, never a silent second execution.
+   */
+  claimRequest(requestId: string, runId: string, fingerprint: string): { runId: string; fingerprint: string; createdAt: string; existing: boolean } {
+    const existing = this.requestClaim(requestId);
+    if (existing) return { ...existing, existing: true };
+    const createdAt = new Date().toISOString();
+    this.db.prepare('INSERT INTO agent_run_requests (request_id, run_id, request_fingerprint, created_at) VALUES (?, ?, ?, ?)').run(requestId, runId, fingerprint, createdAt);
+    return { runId, fingerprint, createdAt, existing: false };
+  }
+
+  requestClaim(requestId: string): { runId: string; fingerprint: string; createdAt: string } | undefined {
+    const row = this.db.prepare('SELECT run_id, request_fingerprint, created_at FROM agent_run_requests WHERE request_id = ?').get(requestId) as { run_id: string; request_fingerprint: string; created_at: string } | undefined;
+    return row ? { runId: row.run_id, fingerprint: row.request_fingerprint, createdAt: row.created_at } : undefined;
   }
 
   getProgress(id: string): AgentRunProgressV1 | undefined {

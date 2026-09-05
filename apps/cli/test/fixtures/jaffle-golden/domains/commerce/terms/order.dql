@@ -1,0 +1,15 @@
+// dql-format: 1
+
+term "Order" {
+  domain = "commerce"
+  type = "entity"
+  status = "certified"
+  description = "One completed Jaffle Shop order in the orders mart."
+  owner = "analytics@jaffle.shop"
+  tags = ["entity", "commerce"]
+  identifiers = ["order_id"]
+  synonyms = ["purchase", "transaction"]
+  businessOwner = "Jaffle Shop Growth Team"
+  businessRules = ["The orders mart is one row per order."]
+  caveats = ["Count distinct order_id when starting from order_items."]
+}

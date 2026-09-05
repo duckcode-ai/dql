@@ -1,0 +1,180 @@
+{
+  "_comment": "The five verbatim turns of the Sept 3 2026 jaffle-shop session, misspellings and the identical Q5 retry included. Each turn is judged as an EDIT of the analysis before it: what it must keep, what it adds, and the rows it must return over the jaffle-golden seed.",
+  "turns": [
+    {
+      "id": "q1-top-beverage-customers",
+      "question": "who are the top customers for beverage product category",
+      "sql": "SELECT c.customer_id, c.customer_name, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_id, c.customer_name ORDER BY drink_revenue DESC LIMIT 10",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer",
+          "order_id__customer"
+        ],
+        "customer_name": [
+          "customer_name"
+        ],
+        "drink_revenue": [
+          "drink_revenue",
+          "beverage_revenue",
+          "revenue"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "ordered": true,
+      "tier": "any",
+      "keeps": [],
+      "note": "Both are correct: the certified top_beverage_customers block served as published (it groups by customer name; the caveat that two customers sharing a name would merge is recorded on the answer), or a governed semantic/relational answer keyed by customer id with the name displayed. The identity rule binds what the pipeline composes, not what the team certified."
+    },
+    {
+      "id": "q2-include-customer-name",
+      "question": "Can you include the customer name in the results",
+      "sql": "SELECT c.customer_id, c.customer_name, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_id, c.customer_name ORDER BY drink_revenue DESC LIMIT 10",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer",
+          "order_id__customer"
+        ],
+        "customer_name": [
+          "customer_name"
+        ],
+        "drink_revenue": [
+          "drink_revenue",
+          "beverage_revenue",
+          "revenue"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "requiredColumns": [
+        "customer_name"
+      ],
+      "ordered": true,
+      "tier": "any",
+      "keeps": [
+        "beverage scope",
+        "customer grain",
+        "ranking",
+        "limit 10"
+      ],
+      "forbids": {
+        "block": "customer_profile",
+        "rowCountAbove": 10
+      },
+      "note": "Both are correct: the certified top_beverage_customers block served as published (it groups by customer name; the caveat that two customers sharing a name would merge is recorded on the answer), or a governed semantic/relational answer keyed by customer id with the name displayed. The identity rule binds what the pipeline composes, not what the team certified."
+    },
+    {
+      "id": "q3-beverage-correction",
+      "question": "I need to get the bevereage catogery",
+      "outcome": "clarify_or_rows",
+      "sql": "SELECT c.customer_id, c.customer_name, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_id, c.customer_name ORDER BY drink_revenue DESC LIMIT 10",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer",
+          "order_id__customer"
+        ],
+        "customer_name": [
+          "customer_name"
+        ],
+        "drink_revenue": [
+          "drink_revenue",
+          "beverage_revenue",
+          "revenue"
+        ]
+      },
+      "identity": [
+        "customer_id",
+        "customer_name"
+      ],
+      "ordered": true,
+      "tier": "governed",
+      "keeps": [
+        "beverage scope",
+        "customer grain",
+        "ranking",
+        "limit 10"
+      ],
+      "forbids": {
+        "booleanBreakdown": true
+      },
+      "note": "Read as a correction it retains the beverage customer ranking; if the interpreter finds it materially ambiguous it asks one bounded clarification. A drink-revenue table grouped by true/false is wrong either way."
+    },
+    {
+      "id": "q4-ryan-byrd-both",
+      "question": "what is the \"Ryan byrd\" revenue by total revenue and beverage revenue? give me both",
+      "sql": "SELECT SUM(oi.product_price) AS revenue, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id WHERE lower(c.customer_name) = 'ryan byrd'",
+      "columns": {
+        "revenue": [
+          "revenue",
+          "total_revenue"
+        ],
+        "drink_revenue": [
+          "drink_revenue",
+          "beverage_revenue"
+        ]
+      },
+      "tier": "governed",
+      "keeps": [],
+      "note": "A new analysis: one customer, two measures of the same fact grain. The prior ranking is dropped deliberately and the beverage restriction applies only to the beverage measure.",
+      "outcome": "clarify_or_rows",
+      "alternatives": [
+        {
+          "sql": "SELECT (SELECT SUM(o.order_total) FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id WHERE lower(c.customer_name)='ryan byrd') AS revenue, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id WHERE lower(c.customer_name) = 'ryan byrd'",
+          "columns": {
+            "revenue": [
+              "order_total",
+              "total_revenue",
+              "revenue"
+            ],
+            "drink_revenue": [
+              "drink_revenue",
+              "beverage_revenue"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "q5-ryan-byrd-both-retry",
+      "question": "what is the \"Ryan byrd\" revenue by total revenue and beverage revenue? give me both",
+      "sql": "SELECT SUM(oi.product_price) AS revenue, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id WHERE lower(c.customer_name) = 'ryan byrd'",
+      "columns": {
+        "revenue": [
+          "revenue",
+          "total_revenue"
+        ],
+        "drink_revenue": [
+          "drink_revenue",
+          "beverage_revenue"
+        ]
+      },
+      "tier": "governed",
+      "keeps": [],
+      "note": "The identical retry must answer again with fresh data, not repeat an impossible preparation.",
+      "outcome": "clarify_or_rows",
+      "alternatives": [
+        {
+          "sql": "SELECT (SELECT SUM(o.order_total) FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id WHERE lower(c.customer_name)='ryan byrd') AS revenue, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS drink_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id WHERE lower(c.customer_name) = 'ryan byrd'",
+          "columns": {
+            "revenue": [
+              "order_total",
+              "total_revenue",
+              "revenue"
+            ],
+            "drink_revenue": [
+              "drink_revenue",
+              "beverage_revenue"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

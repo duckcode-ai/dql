@@ -1671,8 +1671,10 @@ export interface AgentRun {
   diagnosticReceiptV5?: AgentRunDiagnosticReceiptV5;
   diagnosticReceiptV6?: AgentRunDiagnosticReceiptV6;
   diagnosticReceiptV8?: AgentRunDiagnosticReceiptV8;
+  /** Additive Ask-pipeline receipt (intent, candidates, refusals, executed SQL fingerprint, verbatim failures). */
+  diagnosticReceiptV9?: Record<string, unknown>;
   /** Server-owned rollout mode; this is never client-controlled. */
-  askAgentRuntimeMode?: 'authoritative_v2';
+  askAgentRuntimeMode?: 'authoritative_v2' | 'pipeline_v3';
   businessAnswer?: AgentRunBusinessAnswerV1;
   /** Persisted server-owned runtime checkpoint; client consumes the narrow stable shape only. */
   askAnalystState?: AskAnalystRuntimeStateV1;
@@ -3346,8 +3348,33 @@ async function streamAgentRunResponse(
  * callers that construct an untyped payload.
  */
 function serializeCreateAgentRunInput(input: CreateAgentRunInput): string {
-  const { runId: _discardedRunId, ...safeInput } = input as CreateAgentRunInput & { runId?: unknown };
+  const { runId: _discardedRunId, requestId: _discardedRequestId, ...safeInput } = input as CreateAgentRunInput & { runId?: unknown; requestId?: unknown };
   return JSON.stringify(safeInput);
+}
+
+/**
+ * One durable identity per submission. It is minted in the browser BEFORE the
+ * request leaves, remembered for a few minutes keyed by what was asked, and
+ * sent as `Idempotency-Key`, so a retry after a lost stream (or a reload that
+ * resubmits the same question in the same thread) attaches to the original
+ * run instead of starting another.
+ */
+function agentRunRequestIdentity(input: CreateAgentRunInput): string {
+  const explicit = (input as CreateAgentRunInput & { requestId?: unknown }).requestId;
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+  const key = `dql-ask-request:${JSON.stringify({ q: input.question, t: (input as { threadId?: string }).threadId ?? null, m: input.requestedMode ?? null, e: input.selectedEvidenceId ?? null })}`;
+  try {
+    const remembered = sessionStorage.getItem(key);
+    if (remembered) {
+      const parsed = JSON.parse(remembered) as { id: string; at: number };
+      if (Date.now() - parsed.at < 5 * 60_000) return parsed.id;
+    }
+    const id = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    sessionStorage.setItem(key, JSON.stringify({ id, at: Date.now() }));
+    return id;
+  } catch {
+    return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
 }
 
 /**
@@ -4261,6 +4288,7 @@ export const api = {
   async createAgentRun(input: CreateAgentRunInput): Promise<AgentRun> {
     const raw = await request<{ run: AgentRun }>('/api/agent-runs', {
       method: 'POST',
+      headers: { 'Idempotency-Key': agentRunRequestIdentity(input) },
       body: serializeCreateAgentRunInput(input),
     });
     return raw.run;
@@ -4275,7 +4303,7 @@ export const api = {
     try {
       res = await fetch(`${BASE}/api/agent-runs?stream=1`, {
         method: 'POST',
-        headers: withServerAuthorization({ 'Content-Type': 'application/json' }),
+        headers: withServerAuthorization({ 'Content-Type': 'application/json', 'Idempotency-Key': agentRunRequestIdentity(input) }),
         body: serializeCreateAgentRunInput(input),
         signal,
       });

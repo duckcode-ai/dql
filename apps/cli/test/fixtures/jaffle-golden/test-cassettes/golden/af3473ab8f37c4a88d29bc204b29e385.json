@@ -1,0 +1,23 @@
+{
+  "key": "af3473ab8f37c4a88d29bc204b29e385",
+  "operation": "generate",
+  "text": "Looking at this question: \"top 5 customers by revenue\" — a ranking of customers by revenue, no qualifier scoping it to beverage/food/order-total.\n\nPer the Revenue term, there are two distinct governed definitions that both plausibly apply here: gross order revenue (order_total, includes tax) at the orders grain, and lifetime customer spend (lifetime_spend / lifetime_spend_pretax) at the customer grain. Since \"revenue\" for customers isn't a single named metric but the business term explicitly distinguishes order-level (tax-inclusive) vs product-level (pretax) treatment, and the customer entity has its own lifetime spend metrics with a pretax/gross split, this is material to the answer.\n\n```json\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank the top 5 customers by their revenue.\",\"measures\":[{\"ref\":\"metric:orders.order_total\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:orders.order_total\",\"direction\":\"desc\"},\"limit\":5,\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"revenue\",\"options\":[\"metric:orders.order_total\",\"metric:customers.lifetime_spend\",\"metric:customers.lifetime_spend_pretax\"],\"material\":true,\"question\":\"Does \\\"revenue\\\" mean gross order revenue (including tax) or customer lifetime spend (gross or pre-tax)?\"}],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"entity:orders.customer\":\"q:customers\",\"dimension:customers.customer_name\":\"q:customers\"}}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:19:55.578Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "af3473ab8f37c4a88d29bc204b29e38543362d8cad351120a7d7994d7c1353db",
+    "postCanonicalHash": "af3473ab8f37c4a88d29bc204b29e38543362d8cad351120a7d7994d7c1353db",
+    "appliedRuleClasses": []
+  }
+}

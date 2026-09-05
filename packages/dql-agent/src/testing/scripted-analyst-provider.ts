@@ -97,6 +97,76 @@ function cooperativeMove(prompt: string, priorCalls: number): string {
   return toolCall('finish_answer', { answer: 'Nothing admitted fits this question.', evidenceIds: [] });
 }
 
+/** The Ask pipeline's interpreter prompt: the same personas answer it with intents instead of tool calls. */
+const INTENT_PROMPT_MARKER = 'as a JSON AnalyticalIntent';
+
+function refsOf(prompt: string, prefix: string): string[] {
+  return [...new Set([...prompt.matchAll(new RegExp(`(?:^|\\s)(${prefix}:[A-Za-z0-9_.-]+)`, 'g'))].map((match) => match[1]!))];
+}
+
+/** A cooperative interpreter: first metric (or a numeric column), keyed by the first entity, showing the first label. */
+function cooperativeIntent(prompt: string): string {
+  // The question is the last QUESTION: line; prefer refs whose words appear in it.
+  const question = (prompt.match(/QUESTION:\s*(.+)$/m)?.[1] ?? '').toLowerCase();
+  const words = new Set(question.split(/[^a-z0-9_]+/).filter((word) => word.length > 2).map((word) => word.replace(/s$/, "")));
+  const overlap = (ref: string) => ref.split(/[:.]/).pop()!.split('_').filter((token) => words.has(token.replace(/s$/, ''))).length;
+  const byFit = (refs: string[]) => [...refs].sort((a, b) => overlap(b) - overlap(a));
+  const metrics = byFit(refsOf(prompt, 'metric'));
+  const blocks = byFit(refsOf(prompt, 'block')).filter((ref) => overlap(ref) > 0);
+  const entities = refsOf(prompt, 'entity');
+  const labels = refsOf(prompt, 'dimension').filter((ref) => /(^|[._])(name|label|title)$/i.test(ref));
+  const numericColumn = refsOf(prompt, 'column').find((ref) => /(revenue|amount|spend|arr|total|count|quantity|price|cost|value|sum|net|gross|mrr|units)/i.test(ref));
+  // Like the V2 cooperative analyst: the first certified block it was shown, else the first metric, else a numeric column.
+  // A block only when it shares a NON-entity word with the question ("beverage", "revenue"), never on "customers" alone.
+  const entityWords = new Set(['customer', 'product', 'order', 'location', 'account', 'supply', 'item']);
+  const fitsBlock = (ref: string) => ref.split(/[:.]/).pop()!.split('_').some((token) => words.has(token.replace(/s$/, '')) && !entityWords.has(token.replace(/s$/, '')));
+  const chosenBlock = blocks.find(fitsBlock);
+  const measure = chosenBlock ? { ref: chosenBlock } : metrics[0] ? { ref: metrics[0] } : numericColumn ? { ref: numericColumn, aggregation: 'sum' } : undefined;
+  // A qualifier the vocabulary can express becomes a scope on the measure, the way a real interpreter reads "beverage revenue".
+  const drinkFlag = refsOf(prompt, 'dimension').find((ref) => /is_drink_item$/.test(ref)) ?? refsOf(prompt, 'column').find((ref) => /is_drink_item$/.test(ref));
+  const productType = refsOf(prompt, 'dimension').find((ref) => /product_type$/.test(ref)) ?? refsOf(prompt, 'column').find((ref) => /product_type$/.test(ref));
+  const wantsBeverage = /\b(beverage|drink)s?\b/.test(question) && measure && !measure.ref.startsWith('block:') && !/drink|beverage/.test(measure.ref);
+  const scope = wantsBeverage && drinkFlag ? [{ ref: drinkFlag, op: 'is_true', values: [], source: 'question' }] : wantsBeverage && productType ? [{ ref: productType, op: 'eq', values: ['drink'], source: 'question' }] : undefined;
+  if (!measure) {
+    return JSON.stringify({ version: 1, kind: 'conversation', reading: 'nothing here fits', reply: 'Nothing in this project fits that question.', measures: [], groupBy: [], display: [], filters: [], expectedShape: 'scalar', unresolved: [], provenance: {} });
+  }
+  const keyed = !measure.ref.startsWith('block:') && entities[0];
+  return JSON.stringify({
+    version: 1, kind: 'analytics', reading: `${measure.ref}${keyed ? ` by ${entities[0]}` : ''}`,
+    measures: [scope ? { ...measure, scope } : measure],
+    groupBy: keyed ? [{ ref: entities[0], role: 'key' }] : [],
+    display: keyed && labels[0] ? [labels[0]] : [],
+    filters: [],
+    ...(keyed ? { ordering: { ref: measure.ref, direction: 'desc' }, limit: 10 } : {}),
+    expectedShape: keyed ? 'ranking' : 'scalar', unresolved: [], provenance: { [measure.ref]: 'q:question' },
+  });
+}
+
+function intentMove(persona: ScriptedAnalystPersona, prompt: string, index: number): string {
+  switch (persona) {
+    case 'cooperative':
+      return cooperativeIntent(prompt);
+    case 'lazy':
+      return JSON.stringify({ version: 1, kind: 'conversation', reading: 'declined', reply: 'I would rather not run anything.', measures: [], groupBy: [], display: [], filters: [], expectedShape: 'scalar', unresolved: [], provenance: {} });
+    case 'wrong_ids_then_corrects':
+      if (index === 0) {
+        return JSON.stringify({ version: 1, kind: 'analytics', reading: 'invented', measures: [{ ref: 'metric:invented_mart.invented_total' }], groupBy: [], display: [], filters: [], expectedShape: 'scalar', unresolved: [], provenance: {} });
+      }
+      return cooperativeIntent(prompt);
+    case 'browser':
+      return 'Let me first look at the relations in more detail before I commit to anything.';
+    case 'crashes_second_dispatch':
+      if (index === 0) {
+        return JSON.stringify({ version: 1, kind: 'analytics', reading: 'invented', measures: [{ ref: 'metric:invented_mart.invented_total' }], groupBy: [], display: [], filters: [], expectedShape: 'scalar', unresolved: [], provenance: {} });
+      }
+      throw new Error('Claude Code exited before producing an answer');
+    case 'garbage':
+      return 'Sure! Based on my understanding you probably want: SELECT * FROM everything LIMIT 10;';
+    default:
+      return '';
+  }
+}
+
 export function createScriptedAnalystProvider(persona: ScriptedAnalystPersona): ScriptedAnalystProvider {
   const calls: AgentMessage[][] = [];
   const provider: ScriptedAnalystProvider = {
@@ -109,6 +179,7 @@ export function createScriptedAnalystProvider(persona: ScriptedAnalystPersona): 
       options?.onProviderDispatch?.({ provider: 'ollama', operation: 'generate', attemptIndex: 1, envelope: { messages } });
       const prompt = messages.map((message) => message.content).join('\n');
       const index = calls.length - 1;
+      if (prompt.includes(INTENT_PROMPT_MARKER)) return intentMove(persona, prompt, index);
       switch (persona) {
         case 'cooperative':
           return cooperativeMove(prompt, index);

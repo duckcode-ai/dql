@@ -1,0 +1,52 @@
+// dql-format: 1
+
+block "top_beverage_customers" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  description = "Top customers ranked by beverage revenue, with beverage order count and product variety. One row per customer."
+  owner = "analytics@jaffle.shop"
+  tags = ["beverage", "customer", "revenue", "ranking"]
+  pattern = "ranking"
+  grain = "one row per customer in the beverage purchase ranking"
+  entities = ["order_item", "product"]
+  terms = ["Customer", "Revenue", "Beverage", "Order"]
+  outputs = ["customer_name", "beverage_revenue", "beverage_orders", "beverage_product_types"]
+  dimensions = ["customer_name"]
+  allowedFilters = []
+  sourceSystems = ["dbt:customers", "dbt:order_items", "dbt:products"]
+  replacementFor = []
+  reviewCadence = "monthly"
+  llmContext = "Use for questions about top customers who bought beverages or different beverage types. Rank by beverage_revenue, and include beverage_product_types so the answer explains variety as distinct beverage products."
+  examples = [
+    { question = "Who are the top customers by beverage revenue?" },
+    { question = "Which customers bought the most different types of beverage product?" }
+  ]
+
+  query = """
+    SELECT
+      customers.customer_name,
+      SUM(order_items.product_price) AS beverage_revenue,
+      COUNT(DISTINCT order_items.order_id) AS beverage_orders,
+      COUNT(DISTINCT products.product_id) AS beverage_product_types
+    FROM dev.order_items AS order_items
+    JOIN dev.products AS products
+      ON order_items.product_id = products.product_id
+    JOIN dev.orders AS orders
+      ON order_items.order_id = orders.order_id
+    JOIN dev.customers AS customers
+      ON orders.customer_id = customers.customer_id
+    WHERE products.is_drink_item = true
+    GROUP BY customers.customer_name
+    ORDER BY beverage_revenue DESC, beverage_product_types DESC, customer_name
+    LIMIT 10
+  """
+
+  visualization {
+    chart = "table"
+  }
+
+  tests {
+    assert row_count > 0
+  }
+}

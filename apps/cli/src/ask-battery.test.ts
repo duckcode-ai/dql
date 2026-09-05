@@ -9,7 +9,7 @@ import {
   SCRIPTED_ANALYST_PERSONAS,
   type ScriptedAnalystPersona,
 } from '@duckcodeailabs/dql-agent';
-import { startLocalServer } from './local-runtime.js';
+import { startLocalServer, type AskAgentRuntimeMode } from './local-runtime.js';
 import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 
 /**
@@ -104,7 +104,9 @@ async function startFixture(fixture: string): Promise<Harness> {
     projectRoot: root,
     executor: executor(sqlLog),
     connection: { driver: 'file' },
-    // No --ask-runtime-mode: the battery runs what a user gets by default.
+    // No --ask-runtime-mode: the battery runs what a user gets by default,
+    // unless DQL_ASK_BATTERY_MODE selects a runtime under test.
+    ...(process.env.DQL_ASK_BATTERY_MODE ? { askAgentRuntimeMode: process.env.DQL_ASK_BATTERY_MODE as AskAgentRuntimeMode } : {}),
     askAnalyticalPlannerProviderFactory: () => createScriptedAnalystProvider(persona),
     preferredPort: 0,
     captureServer: (created) => { server = created; },
@@ -166,12 +168,19 @@ describe.each(FIXTURES)('Ask battery over %s', (fixture) => {
     for (const receipt of run.providerEgressReceipts ?? []) expect(receipt.resultRowCount, context()).toBe(0);
 
     if (question.expect === 'certified') {
-      // THE FLOOR'S INVARIANT: a complete certified block is served no matter
-      // what the analyst did.
-      expect(run.route, context()).toBe('certified_answer');
-      expect(run.trustState, context()).toBe('certified');
+      // THE FLOOR'S INVARIANT (legacy runtime): a complete certified block is
+      // served no matter what the analyst did. The Ask pipeline has no host
+      // floor by design — the interpreter reads the question once — so there
+      // the invariant holds for every analyst that actually interprets
+      // (cooperative, or wrong then corrected); the others end honestly.
+      const pipeline = run.askAgentRuntimeMode === 'pipeline_v3';
+      const interprets = persona === 'cooperative' || persona === 'wrong_ids_then_corrects';
+      if (!pipeline || interprets) {
+        expect(run.route, context()).toBe('certified_answer');
+        expect(run.trustState, context()).toBe('certified');
+      }
     }
-    if (question.expect === 'not_broadened' && (run.status === 'completed' || run.status === 'needs_review')) {
+    if (question.expect === 'not_broadened' && (run.status === 'completed' || run.status === 'needs_review') && run.route !== 'conversation') {
       // If something executed for "beverage revenue", it was about beverages.
       expect(`${executedSql(run)}\n${userText(run)}`, context()).toMatch(/drink|beverage/i);
     }

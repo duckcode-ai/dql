@@ -1,0 +1,24 @@
+{
+  "key": "6983f566208da438e553fc6613db34ce",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants beverage product revenue broken down by product, using the certified beverage revenue by product block.\",\"measures\":[{\"ref\":\"block:commerce.beverage_revenue_by_product\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:bevereage catogery\",\"block:commerce.top_beverage_customers\":\"removed:question now asks for beverage breakdown by product category, not customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:21:19.672Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "6983f566208da438e553fc6613db34ce08bcd69a028cbbc5d0a6a22ed1a87a19",
+    "postCanonicalHash": "6983f566208da438e553fc6613db34ce08bcd69a028cbbc5d0a6a22ed1a87a19",
+    "appliedRuleClasses": []
+  }
+}

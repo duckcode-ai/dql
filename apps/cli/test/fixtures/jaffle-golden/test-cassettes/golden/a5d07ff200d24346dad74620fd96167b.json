@@ -1,0 +1,23 @@
+{
+  "key": "a5d07ff200d24346dad74620fd96167b",
+  "operation": "generate",
+  "text": "```json\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for a churn rate broken down by region, but neither a churn metric nor a region dimension exists in the vocabulary.\",\"measures\":[],\"groupBy\":[],\"unresolved\":[{\"question\":\"There is no churn metric and no region/geography dimension defined in the vocabulary—could you clarify what data should represent churn and region?\",\"material\":true,\"options\":[]}],\"provenance\":{}}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:04:58.776Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "a5d07ff200d24346dad74620fd96167be3f844c727c84d974a44af8f4f927570",
+    "postCanonicalHash": "a5d07ff200d24346dad74620fd96167be3f844c727c84d974a44af8f4f927570",
+    "appliedRuleClasses": []
+  }
+}

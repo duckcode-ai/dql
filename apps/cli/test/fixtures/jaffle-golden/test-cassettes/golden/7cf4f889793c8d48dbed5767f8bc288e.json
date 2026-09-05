@@ -1,0 +1,23 @@
+{
+  "key": "7cf4f889793c8d48dbed5767f8bc288e",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants the average order value across all orders.\",\"measures\":[{\"ref\":\"metric:customers.average_order_value\",\"aggregation\":\"sum\"}],\"expectedShape\":\"scalar\",\"provenance\":{\"metric:customers.average_order_value\":\"q:average order value\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:25:41.260Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "7cf4f889793c8d48dbed5767f8bc288eaf10386e6e8e07760bc2c757bfe5afc6",
+    "postCanonicalHash": "7cf4f889793c8d48dbed5767f8bc288eaf10386e6e8e07760bc2c757bfe5afc6",
+    "appliedRuleClasses": []
+  }
+}

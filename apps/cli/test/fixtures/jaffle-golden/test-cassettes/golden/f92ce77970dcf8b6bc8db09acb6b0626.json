@@ -1,0 +1,23 @@
+{
+  "key": "f92ce77970dcf8b6bc8db09acb6b0626",
+  "operation": "generate",
+  "text": "```json\n{\n  \"kind\": \"analytics\",\n  \"reading\": \"Rank customers by their beverage (drink-scoped) revenue, showing the top customers.\",\n  \"measures\": [\"metric:order_item.drink_revenue\"],\n  \"groupBy\": [\n    {\"ref\": \"entity:orders.customer\", \"role\": \"key\"},\n    {\"ref\": \"dimension:customers.customer_name\", \"role\": \"label\"}\n  ],\n  \"display\": [\"dimension:customers.customer_name\"],\n  \"filters\": [],\n  \"order\": {\"by\": \"metric:order_item.drink_revenue\", \"direction\": \"desc\"},\n  \"limit\": 10,\n  \"time\": null,\n  \"unresolved\": [],\n  \"provenance\": {\n    \"metric:order_item.drink_revenue\": \"q:beverage product category\",\n    \"entity:orders.customer\": \"q:top customers\",\n    \"dimension:customers.customer_name\": \"q:top customers\"\n  }\n}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T04:56:27.920Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "f92ce77970dcf8b6bc8db09acb6b062630a6eb49255840da1a5ac6810f10a78d",
+    "postCanonicalHash": "f92ce77970dcf8b6bc8db09acb6b062630a6eb49255840da1a5ac6810f10a78d",
+    "appliedRuleClasses": []
+  }
+}

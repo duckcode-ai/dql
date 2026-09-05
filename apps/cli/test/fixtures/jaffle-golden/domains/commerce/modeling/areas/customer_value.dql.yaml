@@ -1,0 +1,25 @@
+domain: commerce
+area:
+  id: customer_value
+  name: Customer value
+  description: Understand customer identity, lifetime value, and beverage purchasing behaviour.
+  intent_examples:
+    - Who are the top customers by beverage revenue?
+    - Give me a complete customer profile.
+  references: [order, order_item, product]
+entities:
+  - id: customer
+    dbt_model: model.jaffle_shop.customers
+    business_name: Customer
+    business_context: One Jaffle Shop customer with lifetime order and spend attributes.
+    analytical_role: dimension
+    owner: analytics@jaffle.shop
+relationships:
+  - id: order_to_customer
+    from: order
+    to: customer
+    keys: [{ from: customer_id, to: customer_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+    owner: analytics@jaffle.shop

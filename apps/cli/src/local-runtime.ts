@@ -600,6 +600,8 @@ import {
   type SemanticRuntimeQueryRequest,
   parseSemanticDimensionSelection,
 } from './semantic-runtime.js';
+import { createAskPipelineRouteExecutor } from './ask-pipeline-host/host.js';
+import type { AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import {
   getSemanticRuntimeSettings,
   saveTestedSemanticRuntimeSettings,
@@ -852,15 +854,57 @@ export interface LocalServerOptions {
  * startup so an operator can run an explicit authoritative canary.
  */
 export const ASK_AGENT_RUNTIME_MODES = [
+  // The interpreter-first Ask pipeline (intent → prepare → execute): the
+  // default since its golden harness went green on the live provider.
+  'pipeline_v3',
+  // The legacy V2 kernel, kept as an explicit operator rollback until it is
+  // deleted; never selected unless configured.
   'authoritative_v2',
 ] as const satisfies readonly AskRuntimeModeV2[];
 
 export type AskAgentRuntimeMode = typeof ASK_AGENT_RUNTIME_MODES[number];
 
+/**
+ * A Research hypothesis executed through the Ask pipeline, read back as the
+ * governed answer the dossier expects: an executed result is a governed or
+ * certified answer with its SQL and rows; anything else is a typed no-answer
+ * carrying the pipeline's own sentence.
+ */
+export function agentAnswerFromPipelineBranch(result: AgentRouteExecutorResult): AgentAnswer {
+  const payload = (result.artifacts ?? []).map((artifact) => artifact.payload as Record<string, unknown> | undefined).find((candidate) => candidate && (candidate.result || candidate.executionError || candidate.gap));
+  const rows = payload?.result as AgentResultPayload | undefined;
+  const text = result.answer ?? result.summary ?? '';
+  if (result.status === 'completed' && rows && Array.isArray(rows.rows)) {
+    const certified = result.trustState === 'certified';
+    return {
+      kind: certified ? 'certified' : 'uncertified',
+      sourceTier: certified ? 'certified_artifact' : 'semantic_layer',
+      certification: certified ? 'certified' : 'governed',
+      reviewStatus: certified ? 'certified' : 'governed',
+      text,
+      answer: text,
+      ...(typeof payload?.sql === 'string' ? { sql: payload.sql } : {}),
+      result: rows,
+      ...(payload?.dqlArtifact !== undefined ? { dqlArtifact: payload.dqlArtifact as AgentAnswer['dqlArtifact'] } : {}),
+      citations: [],
+      considered: [],
+    } as AgentAnswer;
+  }
+  return {
+    kind: 'no_answer',
+    text,
+    answer: text,
+    refusalCode: result.answerRefusalCode ?? (result.status === 'needs_clarification' ? 'ambiguous' : 'grounding_gap'),
+    ...(typeof payload?.executionError === 'string' ? { executionError: payload.executionError } : {}),
+    citations: [],
+    considered: [],
+  } as AgentAnswer;
+}
+
 export function resolveAskAgentRuntimeMode(
   value: unknown,
 ): AskAgentRuntimeMode {
-  if (value === undefined) return 'authoritative_v2';
+  if (value === undefined) return 'pipeline_v3';
   if (typeof value === 'string' && (ASK_AGENT_RUNTIME_MODES as readonly string[]).includes(value)) {
     return value as AskAgentRuntimeMode;
   }
@@ -3142,6 +3186,8 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
     contract: {
       ...(requestedShape ?? {}),
       ...(clarificationSelection ? { clarificationSelection } : {}),
+      // The pipeline's executed intent: the next turn edits THIS, not prose.
+      ...(payload?.askIntentV1 && typeof payload.askIntentV1 === 'object' ? { askIntentV1: payload.askIntentV1 } : {}),
     },
   };
 }
@@ -7553,7 +7599,94 @@ function analyticalFailureSummary(
     if (governedAnswer.result) delete governedAnswer.result.dqlArtifact;
   }
 
-  const answerRunExecutor: AgentRouteExecutor = async ({ runId, request, route, routeDecision, attempt, repairHint, emit }) => {
+  const askPipelineExecutor = createAskPipelineRouteExecutor({
+    projectRoot,
+    executor,
+    resolveConnection: resolveAgentRunExecutionConnection,
+    getSemanticLayer: () => semanticLayer,
+    getManifest: () => {
+      const snapshot = projectSnapshot();
+      return { manifest: snapshot.manifest, snapshotId: snapshot.snapshotId };
+    },
+    selectProvider: async (request) => {
+      // Host-only test/embedding seam, the same one the legacy runtime honours:
+      // an injected provider is the interpreter; it never comes from a payload.
+      if (opts.askAnalyticalPlannerProviderFactory) {
+        const injected = await opts.askAnalyticalPlannerProviderFactory({ projectRoot, request });
+        return injected ?? undefined;
+      }
+      const requested = agentRunWorkspaceValue(request, 'provider');
+      const selected = await selectAssistProvider(projectRoot, requested as ProviderSettingsId | undefined);
+      return selected?.provider;
+    },
+    compileSemantic: async (request, connection) => {
+      if (!semanticLayer) throw new Error('no semantic layer is loaded');
+      const connectionName = projectConfig.defaultConnectionName;
+      const tableMapping = await resolveSemanticTableMapping(executor, connection, semanticLayer, projectRoot, connectionName);
+      // A full runtime that cannot actually run here (MetricFlow without a
+      // parsed semantic manifest) must not veto the native composer: the
+      // pipeline prepares on whatever engine can compile, and says which.
+      const planned = await resolvePlannedSemanticAdapter(projectRoot, undefined);
+      const plannedAdapter = planned === 'metricflow-cli' && !existsSync(join(projectRoot, 'target', 'semantic_manifest.json')) ? 'native' : planned;
+      const compiled = await compileSemanticRuntimeQuery({ ...request, engine: plannedAdapter }, {
+        projectRoot,
+        projectConfig,
+        detectedProvider: semanticDetectedProvider,
+        semanticLayer,
+        driver: connection.driver,
+        tableMapping,
+      });
+      if (!compiled) {
+        throw new Error(`the ${plannedAdapter} semantic engine could not compose metrics ${request.metrics.join(', ')}${request.dimensions.length ? ` by ${request.dimensions.join(', ')}` : ''}: no join path or grouping satisfied every metric`);
+      }
+      return {
+        sql: compiled.sql.trim(),
+        engine: compiled.engine,
+        ...(compiled.fanoutProbeSql ? { fanoutProbeSql: compiled.fanoutProbeSql } : {}),
+        ...(compiled.strategy ? { strategy: compiled.strategy } : {}),
+      };
+    },
+    dispatchOptions: (purpose, request) => {
+      const trace = createProviderDispatchTrace({
+        observer: askTraceObserverForV1(request),
+        phase: purpose === 'resolve' ? 'agent_control' : 'tool_followup',
+        purpose: 'answer_generation',
+        admit: (event) => {
+          const ledger = agentRunProviderEvidenceContext.getStore();
+          if (ledger) {
+            return ledger.observe(event, { purpose: 'answer_generation', dispatchPhase: purpose === 'resolve' ? 'agent_control' : 'tool_followup', optIn: false });
+          }
+          const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
+          assertProviderPayloadAllowed(envelope, { allowResultRows: false, maxResultRows: 0, purpose: 'answer_generation' });
+          return envelope;
+        },
+      });
+      return { options: trace.options, settle: trace.settle };
+    },
+    priorIntent: (request) => {
+      const store = getConversationStore();
+      if (!store || !request.threadId) return undefined;
+      const turns = store.recentTurns(request.threadId, 6).sort((a, b) => b.seq - a.seq);
+      for (const turn of turns) {
+        const intent = (turn.contract as Record<string, unknown> | undefined)?.askIntentV1;
+        if (!intent || typeof intent !== 'object') continue;
+        if (turn.runStatus && !['completed', 'needs_review'].includes(turn.runStatus)) continue;
+        return { intent: intent as AnalyticalIntentV1, ...(turn.answerSummary ? { summary: turn.answerSummary } : {}) };
+      }
+      return undefined;
+    },
+    buildIdentity: () => ({ runtime: 'pipeline_v3', snapshotId: projectSnapshot().snapshotId }),
+  });
+
+  const answerRunExecutor: AgentRouteExecutor = async (executionContext) => {
+    const { runId, request, route, routeDecision, attempt, repairHint, emit } = executionContext;
+    // THE ASK PIPELINE. One interpreter, every tier prepared before anything
+    // is committed. When selected it is the whole answer path; nothing below
+    // this line runs for an Ask turn.
+    if (request.askAgentRuntimeMode === 'pipeline_v3' && !request.researchBranch && request.requestedMode !== 'research' && route !== 'research') {
+      if (!request.runId) request.runId = runId;
+      return askPipelineExecutor(executionContext);
+    }
     // `AgentRunEngine` owns the canonical run ID when HTTP callers omit one.
     // Bind that server-issued value to the same request object before the
     // provider/SQL handoff: the prepared context pack is keyed by this object,
@@ -10215,7 +10348,21 @@ function analyticalFailureSummary(
                   const executableBranchRoute = branchRoute === 'certified_answer'
                     || branchRoute === 'semantic_answer'
                     || branchRoute === 'generated_answer';
-                  const governedAnswer: AgentAnswer = branchPlanFrozen
+                  // Under the Ask pipeline every hypothesis is an ordinary
+                  // bounded Ask: the interpreter reads the branch question,
+                  // the host prepares every governed tier, and the child's
+                  // artifacts carry the same sql/result shape the dossier
+                  // reads. No frozen-plan handshake exists to wait for.
+                  const governedAnswer: AgentAnswer = request.askAgentRuntimeMode === 'pipeline_v3'
+                    ? agentAnswerFromPipelineBranch(await askPipelineExecutor({
+                      runId: child.id,
+                      request: { ...branchRequest, askAgentRuntimeMode: 'pipeline_v3' },
+                      route: 'generated_answer',
+                      maxRepairAttempts: 0,
+                      attempt: 0,
+                      emit: (event) => emit({ ...event, message: `[${branchId}] ${event.message ?? ''}`.trim() }),
+                    }))
+                    : branchPlanFrozen
                     && frozenBranchRoute === branchRoute
                     && executableBranchRoute
                     ? await runGovernedAgentAnswerForRun(
@@ -10293,6 +10440,7 @@ function analyticalFailureSummary(
                   stopReason: branchFailed ? 'execution_failed' : 'completed',
                   branchBudgetMs: branchBudget.branchBudgetMs,
                   evidenceKind: 'analytical_result',
+                  ...(branchFailed && (branchRun.error ?? branchRun.summary) ? { failure: String(branchRun.error ?? branchRun.summary).slice(0, 600) } : {}),
                 });
                 if (branchFailed) {
                   const message = branchRun.error
@@ -12835,13 +12983,32 @@ function analyticalFailureSummary(
   // distinguish the authoritative-V2 Research entry from the legacy forced
   // `requestedMode: research` shortcut. Public JSON parsing never accepts
   // this field.
-  const agentRunRouter = createAskAgentRuntimeV2({
-    mode: askAgentRuntimeMode,
+  const legacyAskRouter = createAskAgentRuntimeV2({
+    mode: askAgentRuntimeMode === 'pipeline_v3' ? 'authoritative_v2' : askAgentRuntimeMode,
     // Forced non-Ask modes (sql, block, app, modeling, skill) never reach a
     // router: the engine routes them deterministically itself. Every Ask
     // request is V2's. One memoized retrieval a turn.
     getEvidence: memoizedAgentRunEvidence,
   });
+  const agentRunRouter = askAgentRuntimeMode === 'pipeline_v3'
+    // The pipeline reads the question once, inside its executor; the router
+    // only says "answer". No retrieval, no certified fast path, no regex
+    // classification happens before the interpreter has spoken. Explicit
+    // Research keeps its bounded branch runtime until the pipeline owns it.
+    ? {
+        mode: askAgentRuntimeMode,
+        decide: async (request: AgentRunRequest): Promise<IntentDecision> => {
+          if (request.requestedMode === 'research') return legacyAskRouter.decide({ ...request, askAgentRuntimeMode: 'authoritative_v2' });
+          return {
+            action: 'answer',
+            confidence: 1,
+            reason: 'Ask pipeline: the interpreter resolves the intent and the host prepares every governed tier.',
+            followsUp: Boolean(request.threadId),
+            source: 'heuristic',
+          };
+        },
+      }
+    : legacyAskRouter;
 
   // P0: one row per run with retention + old-run compaction. The legacy JSON
   // store rewrote the entire file (123 MB observed) twice per answered question;
@@ -16166,7 +16333,7 @@ function analyticalFailureSummary(
   const writeAgentRunSse = (
     response: ServerResponse,
     event: string,
-    data: AgentRun | AgentRunEvent | { error: string } | { runId?: string; delta: string } | { runId?: string; operationId?: string },
+    data: AgentRun | AgentRunEvent | { error: string } | { runId?: string; delta: string } | { runId?: string; operationId?: string; replayed?: boolean },
   ) => {
     response.write(`event: ${event}\n`);
     response.write(`data: ${serializeJSON(data)}\n\n`);
@@ -17585,6 +17752,7 @@ function analyticalFailureSummary(
         ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
         ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
         ...(run?.diagnosticReceiptV8 ? { runtimeReceiptV8: run.diagnosticReceiptV8 } : {}),
+        ...(run?.diagnosticReceiptV9 ? { runtimeReceiptV9: run.diagnosticReceiptV9 } : {}),
         ...(run?.askAgentRuntimeMode ? { runtimeMode: run.askAgentRuntimeMode } : {}),
       }));
       return;
@@ -17672,6 +17840,7 @@ function analyticalFailureSummary(
         ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
         ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
         ...(run?.diagnosticReceiptV8 ? { runtimeReceiptV8: run.diagnosticReceiptV8 } : {}),
+        ...(run?.diagnosticReceiptV9 ? { runtimeReceiptV9: run.diagnosticReceiptV9 } : {}),
         ...(run?.askAgentRuntimeMode ? { runtimeMode: run.askAgentRuntimeMode } : {}),
       }));
       return;
@@ -18422,11 +18591,73 @@ function analyticalFailureSummary(
           markUnavailablePluralPriorResultSet(parsed.request);
         }
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
+        // REQUEST IDENTITY. A browser that lost its stream before the accepted
+        // event used to resubmit and start a second run doing the same work.
+        // With an Idempotency-Key the submission is claimed before anything
+        // runs; a replay attaches to the original run, a changed question
+        // under the same key conflicts, and an unknown outcome stays explicit.
+        const idempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'].trim().slice(0, 200) : '';
+        const requestFingerprint = idempotencyKey
+          ? createHash('sha256').update(JSON.stringify({
+            question: parsed.request.question,
+            requestedMode: parsed.request.requestedMode ?? null,
+            threadId: parsed.request.threadId ?? null,
+            selectedEvidenceId: parsed.request.selectedEvidenceId ?? null,
+            executionTarget: parsed.request.executionTarget ?? null,
+          })).digest('hex')
+          : '';
+        const priorClaim = idempotencyKey ? agentRunStore.requestClaim(idempotencyKey) : undefined;
+        if (priorClaim) {
+          if (priorClaim.fingerprint !== requestFingerprint) {
+            res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ error: 'This request identity was already used for a different submission.', code: 'IDEMPOTENCY_CONFLICT', runId: priorClaim.runId }));
+            return;
+          }
+          const priorRun = await agentRunStore.get(priorClaim.runId);
+          const inFlight = activeAgentRunControllers.has(priorClaim.runId);
+          if (priorRun && !inFlight) {
+            if (wantsStream) {
+              res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+              writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-accepted', { runId: priorClaim.runId, replayed: true });
+              writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', slimAgentRunForTransport(priorRun));
+              res.end();
+            } else {
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(serializeJSON({ run: slimAgentRunForTransport(priorRun), replayed: true }));
+            }
+            return;
+          }
+          if (inFlight) {
+            // Attach to the original run: report progress from the store until it settles.
+            if (wantsStream) {
+              res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+              writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-accepted', { runId: priorClaim.runId, replayed: true });
+              const deadline = Date.now() + 10 * 60_000;
+              while (Date.now() < deadline && !res.destroyed) {
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                if (activeAgentRunControllers.has(priorClaim.runId)) continue;
+                const settled = await agentRunStore.get(priorClaim.runId);
+                if (settled) writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', slimAgentRunForTransport(settled));
+                else writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-error', { error: 'The original submission ended without a stored run; check the run list before asking again.' });
+                break;
+              }
+              if (!res.writableEnded) res.end();
+            } else {
+              res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(serializeJSON({ runId: priorClaim.runId, status: 'running', replayed: true }));
+            }
+            return;
+          }
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'An earlier submission with this request identity ended with an unknown outcome. Check the run list before asking again.', code: 'REQUEST_OUTCOME_UNKNOWN', runId: priorClaim.runId }));
+          return;
+        }
         // The public body may carry UI correlation data, but the run identity
         // is server-owned. Mint it before every controller/SSE/engine handoff
         // so no client-provided string can bind a SQL capability or operation.
         const runId = randomUUID();
         parsed.request.runId = runId;
+        if (idempotencyKey) agentRunStore.claimRequest(idempotencyKey, runId, requestFingerprint);
         // This is host-selected rollout state, never user ingress. In
         // particular, it lets `AgentRunEngine` route explicit Research through
         // the authoritative V2 kernel once while retaining legacy/shadow
@@ -40929,6 +41160,8 @@ export interface ResearchBranchReceiptV1 {
   evidenceKind?: 'analytical_result' | 'lineage_graph';
   /** Present only for a content-safe `check_lineage` structural receipt. */
   lineageStatus?: ResearchLineageEvidenceReceiptV1['status'];
+  /** Why a failed analytical branch stopped, verbatim, so the dossier is diagnosable without re-running it. */
+  failure?: string;
 }
 
 /**

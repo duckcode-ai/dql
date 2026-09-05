@@ -1,0 +1,23 @@
+{
+  "key": "4555a46eeaefc7fec51b42ae98bebd8c",
+  "operation": "generate",
+  "text": "```json\n{\n  \"kind\": \"analytics\",\n  \"reading\": \"The user wants the top customers ranked by beverage revenue, which matches the certified top_beverage_customers block.\",\n  \"measures\": [\n    {\"ref\": \"block:commerce.top_beverage_customers\", \"role\": \"measure\"}\n  ],\n  \"groupBy\": [\n    {\"ref\": \"entity:customers.customer\", \"role\": \"key\"},\n    {\"ref\": \"dimension:customers.customer_name\", \"role\": \"display\"}\n  ],\n  \"shape\": {\n    \"type\": \"ranking\",\n    \"order\": \"desc\",\n    \"limit\": 10\n  },\n  \"unresolved\": [],\n  \"provenance\": {\n    \"block:commerce.top_beverage_customers\": \"q:top customers for beverage product category\",\n    \"entity:customers.customer\": \"inherited\",\n    \"dimension:customers.customer_name\": \"inherited\"\n  }\n}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T04:54:21.822Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "4555a46eeaefc7fec51b42ae98bebd8ce9ee7ada83be0bf9a1da95e103ae37df",
+    "postCanonicalHash": "4555a46eeaefc7fec51b42ae98bebd8ce9ee7ada83be0bf9a1da95e103ae37df",
+    "appliedRuleClasses": []
+  }
+}

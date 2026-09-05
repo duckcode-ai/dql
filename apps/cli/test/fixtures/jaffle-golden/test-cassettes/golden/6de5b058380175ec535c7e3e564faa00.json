@@ -1,0 +1,23 @@
+{
+  "key": "6de5b058380175ec535c7e3e564faa00",
+  "operation": "generate",
+  "text": "```json\n{\n  \"kind\": \"analytics\",\n  \"reading\": \"The user wants the top customers ranked by beverage revenue, which matches the certified block exactly.\",\n  \"measures\": [\"block:commerce.top_beverage_customers\"],\n  \"groupBy\": [],\n  \"display\": [],\n  \"filters\": [],\n  \"unresolved\": [],\n  \"provenance\": {\n    \"block:commerce.top_beverage_customers\": \"q:top customers for beverage product category\"\n  }\n}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T04:56:22.720Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "6de5b058380175ec535c7e3e564faa00f7394d585aedf9767e399401ce9ba4a4",
+    "postCanonicalHash": "6de5b058380175ec535c7e3e564faa00f7394d585aedf9767e399401ce9ba4a4",
+    "appliedRuleClasses": []
+  }
+}

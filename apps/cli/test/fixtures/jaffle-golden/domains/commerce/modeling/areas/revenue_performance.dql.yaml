@@ -1,0 +1,72 @@
+domain: commerce
+area:
+  id: revenue_performance
+  name: Revenue performance
+  description: Understand revenue, product mix, and beverage performance from order-level data.
+  intent_examples:
+    - How has revenue changed by month?
+    - Which beverage products generate the most revenue?
+entities:
+  - id: order
+    dbt_model: model.jaffle_shop.orders
+    business_name: Order
+    business_context: One completed Jaffle Shop order, including gross order total and ordered time.
+    analytical_role: event
+    owner: analytics@jaffle.shop
+  - id: order_item
+    dbt_model: model.jaffle_shop.order_items
+    business_name: Order item
+    business_context: One product purchased in one order; this is the revenue grain for product and beverage analysis.
+    analytical_role: event
+    owner: analytics@jaffle.shop
+  - id: product
+    dbt_model: model.jaffle_shop.products
+    business_name: Product
+    business_context: The purchasable food or beverage item.
+    analytical_role: dimension
+    owner: analytics@jaffle.shop
+  - id: location
+    dbt_model: model.jaffle_shop.locations
+    business_name: Location
+    business_context: The Jaffle Shop location that fulfills an order.
+    analytical_role: dimension
+    owner: analytics@jaffle.shop
+  - id: supply
+    dbt_model: model.jaffle_shop.supplies
+    business_name: Supply
+    business_context: One supply line (ingredient or packaging) consumed by one product, with its unit supply cost.
+    analytical_role: event
+    owner: analytics@jaffle.shop
+relationships:
+  - id: order_item_to_order
+    from: order_item
+    to: order
+    keys: [{ from: order_id, to: order_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+    owner: analytics@jaffle.shop
+  - id: order_item_to_product
+    from: order_item
+    to: product
+    keys: [{ from: product_id, to: product_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+    owner: analytics@jaffle.shop
+  - id: order_to_location
+    from: order
+    to: location
+    keys: [{ from: location_id, to: location_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+    owner: analytics@jaffle.shop
+  - id: supply_to_product
+    from: supply
+    to: product
+    keys: [{ from: product_id, to: product_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+    owner: analytics@jaffle.shop

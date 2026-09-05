@@ -2061,3 +2061,7 @@ export { probeSemanticJoinFanout } from './semantic-bridge/fanout-probe.js';
 export type { SemanticFanoutProbeFailureCodeV1, SemanticFanoutProbeResultV1 } from './semantic-bridge/fanout-probe.js';
 export { deterministicDisplayKeyClarification } from './ask-runtime/display-key-clarification.js';
 export type { DisplayKeyClarificationV1, DisplayKeyClarificationOptionV1 } from './ask-runtime/display-key-clarification.js';
+
+// Ask pipeline (intent → prepare → execute): the interpreter-first runtime.
+export * from './ask-pipeline/index.js';
+export { generateStructured, extractFirstJsonObject, type StructuredReply } from './providers/structured-output.js';

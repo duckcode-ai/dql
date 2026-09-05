@@ -1,0 +1,23 @@
+{
+  "key": "ddf36ee0836a5775c1bf4417b7047446",
+  "operation": "generate",
+  "text": "Looking at this question: \"total revenue by location\" — this is a breakdown by location entity, using the governed Revenue term. Since the question says \"total revenue\" with no drink/food qualifier, and the Revenue term states gross order revenue uses `dev.orders.order_total` while product revenue excludes tax — these are two distinct definitions with no single governing term picking one over the other for an unqualified \"total revenue\" by location. This is material because the numbers would differ.\n\nThe location entity key is `entity:locations.location`, with `dimension:locations.location_name` as display label.\n\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Break down total revenue by location.\",\"measures\":[{\"ref\":\"metric:orders.order_total\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:locations.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"expectedShape\":\"breakdown\",\"unresolved\":[{\"material\":true,\"options\":[\"metric:orders.order_total\",\"metric:order_item.revenue\"],\"question\":\"Should 'total revenue' mean gross order total including tax, or pretax product revenue from order items?\"}],\"provenance\":{\"metric:orders.order_total\":\"q:total revenue\",\"entity:locations.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:04:00.942Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "ddf36ee0836a5775c1bf4417b70474462cbb9c96c42fcccc6bb34d726d611b26",
+    "postCanonicalHash": "ddf36ee0836a5775c1bf4417b70474462cbb9c96c42fcccc6bb34d726d611b26",
+    "appliedRuleClasses": []
+  }
+}

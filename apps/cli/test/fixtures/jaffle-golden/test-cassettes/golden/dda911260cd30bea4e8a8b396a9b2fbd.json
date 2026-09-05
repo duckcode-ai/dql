@@ -1,0 +1,23 @@
+{
+  "key": "dda911260cd30bea4e8a8b396a9b2fbd",
+  "operation": "generate",
+  "text": "This question is too vague to interpret as a specific analytical request. \"I need to get the beverage category\" doesn't specify what measure, breakdown, or shape of answer is wanted — for example, do you want beverage revenue by product, a count of beverage items, or something else?\n\n```json\n{\"version\":1,\"kind\":\"conversation\",\"reading\":\"The user asked to 'get the beverage category' without specifying what measure, breakdown, or analysis they want.\",\"reply\":\"Could you clarify what you'd like to know about beverages? For example: beverage revenue by product, top beverage products, or a list of beverage items?\"}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:04:55.797Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "dda911260cd30bea4e8a8b396a9b2fbdca2d9699506b7b9ce244dd9b66ab09db",
+    "postCanonicalHash": "dda911260cd30bea4e8a8b396a9b2fbdca2d9699506b7b9ce244dd9b66ab09db",
+    "appliedRuleClasses": []
+  }
+}

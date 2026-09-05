@@ -1,0 +1,23 @@
+{
+  "key": "89555063f0b117c46b9ed7bbe494fde5",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question is missing what to measure or show about the beverage category, so it's unclear what specific analysis is needed.\",\"measures\":[],\"unresolved\":[{\"clause\":\"I need to get the bevereage catogery\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:16:03.199Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "89555063f0b117c46b9ed7bbe494fde5ea3e0438c658ddf591015850fe203661",
+    "postCanonicalHash": "89555063f0b117c46b9ed7bbe494fde5ea3e0438c658ddf591015850fe203661",
+    "appliedRuleClasses": []
+  }
+}

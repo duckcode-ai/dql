@@ -1,0 +1,29 @@
+domain: commerce
+area:
+  id: Revenue_models
+  name: Revenue Models
+  description: Subject area created automatically when modeling started. Rename or split it at any time.
+entities:
+  - id: stg-locations
+    dbt_model: model.jaffle_shop.stg_locations
+    business_name: Stg Locations
+    status: draft
+  - id: stg-order-items
+    dbt_model: model.jaffle_shop.stg_order_items
+    business_name: Stg Order Items
+    status: draft
+  - id: supplies
+    dbt_model: model.jaffle_shop.supplies
+    business_name: Supplies
+    status: draft
+relationships:
+  - id: stg-order-items_to_stg-orders
+    from: stg-order-items
+    to: stg-orders
+    keys:
+      - from: order_id
+        to: order_id
+    cardinality: many_to_one
+    fanout: unknown
+    status: draft
+    rationale: Declared by the dbt relationships test test.jaffle_shop.relationships_stg_order_items_order_id__order_id__ref_stg_orders_.dbe9930c54. Validate against the warehouse before certifying.

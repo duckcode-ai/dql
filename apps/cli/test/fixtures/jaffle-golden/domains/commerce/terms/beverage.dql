@@ -1,0 +1,14 @@
+// dql-format: 1
+
+term "Beverage" {
+  domain = "commerce"
+  type = "category"
+  status = "certified"
+  description = "A product where dev.products.is_drink_item is true."
+  owner = "analytics@jaffle.shop"
+  tags = ["product", "beverage"]
+  synonyms = ["drink", "drinks"]
+  businessOwner = "Jaffle Shop Growth Team"
+  businessRules = ["Filter on products.is_drink_item = true for beverage analysis."]
+  caveats = ["Qualify is_drink_item with the products table in joins because order_items also contains a flag with the same name."]
+}

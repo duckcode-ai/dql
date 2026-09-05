@@ -63,6 +63,18 @@ describe('SqliteAgentRunStore', () => {
     store.close();
   });
 
+  it('claims a request identity once and reports the original claim on every replay', () => {
+    const store = new SqliteAgentRunStore({ path: join(tmp(), 'runs.sqlite') });
+    expect(store.requestClaim('req-1')).toBeUndefined();
+    const first = store.claimRequest('req-1', 'run-a', 'fp-a');
+    expect(first).toMatchObject({ runId: 'run-a', fingerprint: 'fp-a', existing: false });
+    const again = store.claimRequest('req-1', 'run-b', 'fp-b');
+    expect(again).toMatchObject({ runId: 'run-a', fingerprint: 'fp-a', existing: true });
+    expect(store.requestClaim('req-1')?.runId).toBe('run-a');
+    store.claimRequest('req-2', 'run-b', 'fp-b');
+    expect(store.requestClaim('req-2')?.runId).toBe('run-b');
+  });
+
   it('updates in place when the same run id is saved twice', () => {
     const store = new SqliteAgentRunStore({ path: join(tmp(), 'runs.sqlite') });
     store.save(run('a', '2026-07-20T10:00:00Z'));

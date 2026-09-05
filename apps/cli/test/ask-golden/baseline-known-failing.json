@@ -1,0 +1,20 @@
+{
+  "_comment": "Documented baseline of the LEGACY authoritative_v2 runtime, measured live on the Claude subscription CLI at commit f964bb5caade on Sept 4 2026 (17/34). Consulted ONLY when DQL_ASK_GOLDEN_MODE is authoritative_v2; it never exempts pipeline_v3. Remove an entry when the legacy runtime starts passing it.",
+  "top-beverage-customers": "no result rows: generated_answer/blocked/blocked \u2014 No governed query was run for this question because it does not name a measure this project can compute. Name [generated_answer/blocked/blocked rt=10]",
+  "top-5-customers-by-revenue": "no result rows: generated_answer/blocked/blocked \u2014 No governed query was run for this question because \"revenue\" does not bind to exactly one column of the mode [generated_answer/blocked/blocked rt=10]",
+  "top-products-by-revenue": "user text describes the machinery [blocked/blocked/blocked rt=3]",
+  "food-vs-drink": "rows differ from reference: column food_revenue (aliases food_revenue) not in result columns drink_revenue [semantic_answer/completed/governed rt=0]",
+  "ryan-byrd-total-revenue": "no result rows: generated_answer/blocked/blocked \u2014 No governed query was run for this question because it needs a filter that no governed query here can prove.  [generated_answer/blocked/blocked rt=10]",
+  "ryan-byrd-both-revenues": "no result rows: generated_answer/needs_review/human_review_required \u2014 The query completed, but no fact-linked narrative was retained. Open the result to review  [generated_answer/needs_review/governed rt=2]",
+  "average-order-value": "trust review_required does not satisfy any [generated_answer/needs_review/review_required rt=5]",
+  "customer-profile-ryan": "no result rows: generated_answer/blocked/blocked \u2014 No governed query was run for this question because it does not name a measure this project can compute. Name [generated_answer/blocked/blocked rt=10]",
+  "supplies-cost-by-product": "no result rows: generated_answer/blocked/blocked \u2014 No governed query was run for this question because \"cost\" does not bind to exactly one column of the models  [generated_answer/blocked/blocked rt=10]",
+  "misspelt-beverage-category": "rows differ from reference: column beverage_revenue (aliases beverage_revenue, drink_revenue, revenue) not in result columns product_name, product_id [generated_answer/needs_review/review_required rt=4]",
+  "off-topic": "expected an honest gap, got semantic_answer/completed with 1 rows [semantic_answer/completed/governed rt=4]",
+  "customers-with-most-orders": "rows differ from reference: row 5 differs: expected {\"customer_id\":\"b4413ac0-2fc9-4c91-b188-71c109d9be8f\",\"customer_name\":\"Amy Wolf\",\"order_count\":218}, got {\"c [generated_answer/needs_review/review_required rt=2]",
+  "q1-top-beverage-customers": "no result rows: generated_answer/blocked/blocked \u2014 No governed query was run for this question because it does not name a measure this project can compute. Name [generated_answer/blocked/blocked rt=10]",
+  "q2-include-customer-name": "rows differ from reference: column drink_revenue (aliases drink_revenue, beverage_revenue, revenue) not in result columns customer_name, customer_type, count_li [certified_answer/completed/certified rt=0]",
+  "q3-beverage-correction": "rows differ from reference: column drink_revenue (aliases drink_revenue, beverage_revenue, revenue) not in result columns product_name, product_id [generated_answer/needs_review/review_required rt=1]",
+  "q4-ryan-byrd-both": "no result rows: generated_answer/blocked/human_review_required \u2014 Created review-required agent output.\nCreated review-required agent output. [generated_answer/blocked/review_required rt=10]",
+  "q5-ryan-byrd-both-retry": "no result rows: generated_answer/blocked/human_review_required \u2014 Created review-required agent output.\nCreated review-required agent output. [generated_answer/blocked/review_required rt=9]"
+}

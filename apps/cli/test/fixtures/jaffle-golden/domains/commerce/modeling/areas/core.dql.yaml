@@ -1,0 +1,18 @@
+domain: commerce
+area:
+  id: core
+  name: Jaffle Shop
+  description: Subject area created automatically when modeling started. Rename or split it at any time.
+entities:
+  - id: stg-orders
+    dbt_model: model.jaffle_shop.stg_orders
+    business_name: Stg Orders
+    status: draft
+  - id: stg-products
+    dbt_model: model.jaffle_shop.stg_products
+    business_name: Stg Products
+    status: draft
+  - id: stg-supplies
+    dbt_model: model.jaffle_shop.stg_supplies
+    business_name: Stg Supplies
+    status: draft

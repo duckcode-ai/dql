@@ -1,0 +1,23 @@
+{
+  "key": "1e31a60fd623a330046a578b8134461f",
+  "operation": "generate",
+  "text": "Looking at this question: \"top 10 products by revenue\" — this is a ranking of products (grouped by product entity key, with product_name as display label) by revenue.\n\nPer rule 8b, \"Revenue\" is a governed business term: product revenue from order_items excludes tax (metric:order_item.revenue), distinct from order total revenue which includes tax. Since the question says \"products\" (not \"orders\"), the product-level revenue metric is the correct governed default — no ambiguity to clarify since the term explicitly ties \"product revenue\" to order_items.\n\n```json\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank the top 10 products by total product revenue (excluding tax).\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:order_item.product\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"ordering\":{\"ref\":\"metric:order_item.revenue\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"entity:order_item.product\":\"q:products\",\"dimension:products.product_name\":\"q:products\"}}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:09:47.676Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "1e31a60fd623a330046a578b8134461f0d14523bae23ceec7efcb567bd8b2bb5",
+    "postCanonicalHash": "1e31a60fd623a330046a578b8134461f0d14523bae23ceec7efcb567bd8b2bb5",
+    "appliedRuleClasses": []
+  }
+}

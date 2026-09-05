@@ -1,0 +1,23 @@
+{
+  "key": "48c625f608ca95af8b4bd5e236529498",
+  "operation": "generate",
+  "text": "```json\n{\n  \"kind\": \"conversation\",\n  \"reading\": \"The user is greeting me.\",\n  \"reply\": \"Hi! I can help you explore Jaffle Shop analytics—revenue, orders, customers, products, and more. What would you like to know?\",\n  \"measures\": [],\n  \"groupBy\": [],\n  \"filters\": [],\n  \"unresolved\": [],\n  \"provenance\": {}\n}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T04:54:35.315Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "48c625f608ca95af8b4bd5e23652949862480187d8528224eee3a790eefd13ea",
+    "postCanonicalHash": "48c625f608ca95af8b4bd5e23652949862480187d8528224eee3a790eefd13ea",
+    "appliedRuleClasses": []
+  }
+}

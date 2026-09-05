@@ -3444,6 +3444,9 @@ function AnalyticalHowAnswered({
   const authoritativeV8 = authoritativeV8CompactInspectorProjection(
     run.diagnosticReceiptV8 ?? contract.runtimeReceiptV8,
   );
+  // The Ask pipeline leaves its receipt on the answer artifact: what it read,
+  // which tiers it prepared, what refused and why, what executed.
+  const askPipeline = recordOf(run.diagnosticReceiptV9) ?? recordOf((run.artifacts ?? []).map((artifact) => recordOf(artifact.payload)).find((payload) => payload?.askPipeline)?.askPipeline);
   // A completed V8 finish_answer is the server-owned terminal outcome. A
   // stale legacy planning failure in the answer artifact must not turn that
   // validated execution back into a compact-panel failure.
@@ -3706,7 +3709,9 @@ function AnalyticalHowAnswered({
         </button>
       ) : null}
 
-      {authoritativeV8
+      {askPipeline
+        ? <InspectorAskPipelineStory receipt={askPipeline} t={t} />
+        : authoritativeV8
         ? <InspectorAuthoritativeV8DecisionStory projection={authoritativeV8} t={t} />
         : runtimeDecisionSummary
           ? <InspectorRuntimeDecisionStory summary={runtimeDecisionSummary} t={t} />
@@ -3893,6 +3898,75 @@ export function InspectorAuthoritativeV8DecisionStory({
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: successful ? 'var(--status-success)' : 'var(--status-warning)', fontSize: 12, fontWeight: 750, marginBottom: 8 }}>
         {successful ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />}
         Authoritative Ask decision story
+      </div>
+      <InspectorRows rows={rows} t={t} mono />
+    </section>
+  );
+}
+
+/**
+ * THE ASK PIPELINE STORY. One interpretation, every tier prepared before
+ * anything committed, the proofs that ran. Every line comes from the receipt
+ * the pipeline persisted on the answer; nothing here is inferred from prose.
+ */
+export function InspectorAskPipelineStory({ receipt, t }: { receipt: Record<string, unknown>; t: Theme }): JSX.Element {
+  const intent = recordOf(receipt.intent);
+  const refOf = (value: unknown): string => {
+    const record = recordOf(value);
+    return typeof record?.ref === 'string' ? record.ref : typeof value === 'string' ? value : '';
+  };
+  const clause = (value: unknown): string => {
+    const record = recordOf(value);
+    if (!record) return '';
+    const values = stringList(record.values).join('/') || (Array.isArray(record.values) ? record.values.map(displayValue).join('/') : '');
+    return `${displayValue(record.ref)} ${displayValue(record.op)} ${values}`.trim();
+  };
+  const measures = recordList(intent?.measures).map((measure) => {
+    const scope = recordList(measure.scope).map(clause).filter(Boolean);
+    return `${displayValue(measure.ref)}${scope.length ? ` where ${scope.join(' and ')}` : ''}`;
+  });
+  const groupBy = recordList(intent?.groupBy).map((group) => `${displayValue(group.ref)} (${displayValue(group.role)}${group.grain ? `, ${displayValue(group.grain)}` : ''})`);
+  const display = stringList(intent?.display);
+  const filters = recordList(intent?.filters).map(clause).filter(Boolean);
+  const ordering = recordOf(intent?.ordering);
+  const tiers = recordList(receipt.tiers).map((attempt) => `${displayValue(attempt.tier)}: ${displayValue(attempt.outcome)}${attempt.detail ? ` (${displayValue(attempt.detail)})` : ''}`);
+  const candidates = recordList(receipt.candidates);
+  const executed = recordOf(receipt.executed);
+  const chosen = executed ? candidates.find((candidate) => candidate.tier === executed.tier) : undefined;
+  const dispatches = recordList(receipt.dispatches);
+  const failure = recordOf(receipt.failure);
+  const refusals = recordList(receipt.refusals).map((refusal) => `${displayValue(refusal.tier)}/${displayValue(refusal.code)}: ${displayValue(refusal.message)}`);
+  const timings = recordOf(receipt.timings);
+  const successful = Boolean(executed) && !failure;
+  const rows: Array<[string, string]> = [
+    ['Read as', typeof intent?.reading === 'string' && intent.reading ? intent.reading : 'The interpreter did not produce a reading'],
+    ['Measures', measures.join('; ')],
+    ['Grouped by', groupBy.join('; ')],
+    ['Displayed', display.join(', ')],
+    ['Filters', filters.join(' and ')],
+    ['Ordering', ordering ? `${displayValue(ordering.ref)} ${displayValue(ordering.direction)}${intent?.limit ? ` · top ${displayValue(intent.limit)}` : ''}` : intent?.limit ? `top ${displayValue(intent.limit)}` : ''],
+    ['Tiers tried', tiers.join(' · ')],
+    ['Prepared', chosen ? `${displayValue(chosen.tier)} · ${displayValue(chosen.trust)} · ${stringList(chosen.proof).join(' ')}` : candidates.length ? candidates.map((candidate) => `${displayValue(candidate.tier)} (${displayValue(candidate.trust)})`).join(', ') : 'nothing prepared'],
+    ['Executed', executed ? `${displayValue(executed.rowCount)} rows in ${displayValue(executed.ms)} ms · ${stringList(executed.proofs).join(' ')}` : 'no warehouse query ran'],
+    ['Model calls', dispatches.length ? `${dispatches.length} (${dispatches.map((dispatch) => `${displayValue(dispatch.purpose)} ${displayValue(dispatch.ms)} ms`).join(', ')})` : '0'],
+    ['Reuse', typeof receipt.reuse === 'string' && receipt.reuse !== 'none' ? `${receipt.reuse} reused` : ''],
+    ['Stopped', failure ? `${displayValue(failure.stage)}: ${displayValue(failure.message)}` : ''],
+    ['Refusals', refusals.join('\n')],
+    ['Timings', timings ? Object.entries(timings).map(([stage, ms]) => `${stage} ${displayValue(ms)} ms`).join(' · ') : ''],
+    ['Vocabulary', displayValue(receipt.vocabularyFingerprint)],
+  ];
+  return (
+    <section
+      aria-label="Ask pipeline story"
+      style={{
+        padding: '10px 12px', borderRadius: 8,
+        border: `1px solid ${successful ? 'var(--status-success-border)' : 'var(--status-warning-border)'}`,
+        background: successful ? 'var(--status-success-bg)' : 'var(--status-warning-bg)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: successful ? 'var(--status-success)' : 'var(--status-warning)', fontSize: 12, fontWeight: 750, marginBottom: 8 }}>
+        {successful ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />}
+        Ask pipeline story
       </div>
       <InspectorRows rows={rows} t={t} mono />
     </section>

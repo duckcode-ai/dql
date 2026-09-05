@@ -1,0 +1,23 @@
+{
+  "key": "f652df55f7dd57f8676336f7dab4de48",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for a churn rate broken down by region, but this project's vocabulary has no churn metric and no region dimension.\",\"measures\":[],\"groupBy\":[],\"filters\":[],\"unresolved\":[{\"clause\":\"churn rate by region\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:20:55.105Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "f652df55f7dd57f8676336f7dab4de48f4824100c378434b38f2db11ff90e81a",
+    "postCanonicalHash": "f652df55f7dd57f8676336f7dab4de48f4824100c378434b38f2db11ff90e81a",
+    "appliedRuleClasses": []
+  }
+}

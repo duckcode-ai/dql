@@ -1,0 +1,23 @@
+{
+  "key": "8e8603a4bfb4ce4e57bc430cceb1c926",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Ranking of customers by their count of lifetime orders, showing the top 10.\",\"measures\":[{\"ref\":\"metric:customers.count_lifetime_orders\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"ordering\":{\"ref\":\"metric:customers.count_lifetime_orders\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:customers.count_lifetime_orders\":\"q:placed the most orders\",\"entity:customers.customer\":\"q:which customers\",\"dimension:customers.customer_name\":\"q:which customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:16:12.897Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "8e8603a4bfb4ce4e57bc430cceb1c9262a9b707f18f5bc46d0367009ecf47c4b",
+    "postCanonicalHash": "8e8603a4bfb4ce4e57bc430cceb1c9262a9b707f18f5bc46d0367009ecf47c4b",
+    "appliedRuleClasses": []
+  }
+}

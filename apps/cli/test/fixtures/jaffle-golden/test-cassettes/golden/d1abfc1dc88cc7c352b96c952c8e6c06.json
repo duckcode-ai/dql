@@ -1,0 +1,23 @@
+{
+  "key": "d1abfc1dc88cc7c352b96c952c8e6c06",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants the total beverage (drink) revenue.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\",\"aggregation\":\"sum\"}],\"expectedShape\":\"scalar\",\"provenance\":{\"metric:order_item.drink_revenue\":\"q:beverage revenue\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:09:27.900Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d1abfc1dc88cc7c352b96c952c8e6c060a9b36b99218eafd5c615e5a825e003d",
+    "postCanonicalHash": "d1abfc1dc88cc7c352b96c952c8e6c060a9b36b99218eafd5c615e5a825e003d",
+    "appliedRuleClasses": []
+  }
+}

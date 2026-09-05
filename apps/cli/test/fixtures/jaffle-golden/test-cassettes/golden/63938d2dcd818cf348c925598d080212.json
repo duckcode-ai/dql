@@ -1,0 +1,23 @@
+{
+  "key": "63938d2dcd818cf348c925598d080212",
+  "operation": "generate",
+  "text": "```json\n{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show beverage (drink) revenue broken down by product.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:order_item.is_drink_item\",\"op\":\"eq\",\"values\":[\"true\"],\"source\":\"question\"}],\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:order_item.product\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"expectedShape\":\"breakdown\",\"provenance\":{\"metric:order_item.revenue\":\"q:beverage revenue\",\"dimension:order_item.is_drink_item\":\"q:beverage\",\"entity:order_item.product\":\"q:by product\",\"dimension:products.product_name\":\"q:by product\"}}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:04:12.409Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "63938d2dcd818cf348c925598d08021271c691ef9b85bd909884557c6e4e272d",
+    "postCanonicalHash": "63938d2dcd818cf348c925598d08021271c691ef9b85bd909884557c6e4e272d",
+    "appliedRuleClasses": []
+  }
+}

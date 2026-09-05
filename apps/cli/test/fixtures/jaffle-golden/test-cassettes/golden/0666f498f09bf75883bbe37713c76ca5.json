@@ -1,0 +1,23 @@
+{
+  "key": "0666f498f09bf75883bbe37713c76ca5",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for weather data in Chicago, which is not something this project holds.\",\"measures\":[],\"unresolved\":[{\"clause\":\"what is the weather in Chicago\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-05T05:16:10.109Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "0666f498f09bf75883bbe37713c76ca5fec8445ef6a0327ac7f3a19533dd2e07",
+    "postCanonicalHash": "0666f498f09bf75883bbe37713c76ca5fec8445ef6a0327ac7f3a19533dd2e07",
+    "appliedRuleClasses": []
+  }
+}
