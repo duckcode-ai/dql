@@ -243,6 +243,9 @@ export class ClaudeCodeCliProvider implements AgentProvider {
   static async detect(command = 'claude'): Promise<CliAuthStatus> {
     const res = await runProcess(command, ['auth', 'status', '--json'], { timeoutMs: 8000 });
     if (res.spawnError) return { installed: false, loggedIn: false, detail: 'Claude Code CLI not found on PATH.' };
+    // A binary that answers nothing in 8 s is installed but not ready (hung,
+    // updating, or waiting on a prompt); that is a different fix from "not installed".
+    if (res.timedOut) return { installed: true, loggedIn: false, detail: `\`${command} auth status\` did not answer within 8 seconds; the CLI may be hung or mid-update. Run it in a terminal, or point DQL at a responsive install.` };
     try {
       const parsed = JSON.parse(res.stdout.trim()) as {
         loggedIn?: boolean; authMethod?: string; subscriptionType?: string; email?: string;
@@ -403,14 +406,27 @@ export class ClaudeCodeCliProvider implements AgentProvider {
   }
 }
 
-/** Parse `claude -p --output-format json` stdout (a single result object). */
-export function parseClaudeResult(stdout: string): { text: string; isError: boolean } | undefined {
+/**
+ * Parse `claude -p --output-format json` stdout (a single result object).
+ *
+ * With `--json-schema`, newer Claude Code releases put the validated object
+ * in `structured_output` and leave `result` empty or as a prose summary
+ * ("ok: true, n: 7"); older releases repeat the JSON in `result`. The
+ * structured object is the answer whenever it is present; `result` is the
+ * answer otherwise. An error wrapper is an error whatever else it carries.
+ */
+export function parseClaudeResult(stdout: string): { text: string; isError: boolean; structured?: boolean } | undefined {
   const trimmed = stdout.trim();
   if (!trimmed) return undefined;
-  const tryParse = (raw: string): { text: string; isError: boolean } | undefined => {
+  const tryParse = (raw: string): { text: string; isError: boolean; structured?: boolean } | undefined => {
     try {
-      const obj = JSON.parse(raw) as { result?: unknown; is_error?: unknown };
-      return { text: typeof obj.result === 'string' ? obj.result : '', isError: obj.is_error === true };
+      const obj = JSON.parse(raw) as { result?: unknown; is_error?: unknown; structured_output?: unknown };
+      const isError = obj.is_error === true;
+      const structured = obj.structured_output;
+      if (!isError && structured !== undefined && structured !== null && typeof structured === 'object') {
+        return { text: JSON.stringify(structured), isError, structured: true };
+      }
+      return { text: typeof obj.result === 'string' ? obj.result : '', isError };
     } catch {
       return undefined;
     }

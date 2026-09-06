@@ -477,6 +477,16 @@ the question string again.
    unserved clause is named in a gap, and a time grouping never stands for a
    categorical breakdown noun. A dimension with no expression is its own
    column, so the dbt column description defines it.
+19. **The structured reply is the answer.** With a response schema, Claude
+   Code may return the validated object in `structured_output` and leave
+   `result` empty or as prose (2.1.87 does; 2.1.227 repeats the JSON in
+   `result`). The adapter returns the structured object whenever the wrapper
+   carries one and `result` otherwise; an error wrapper is an error whatever
+   else it carries. A readiness probe that does not answer within 8 s reports
+   the CLI as installed but not ready, never as missing. A certified block
+   served as published for a question it cannot answer with identity carries
+   governed trust with the block as its source, never the certified badge
+   (`AGT-066`).
 
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn

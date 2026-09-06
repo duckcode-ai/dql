@@ -950,7 +950,8 @@ describe('a label-only certified block is the answer of last resort, after the r
     expect(provider.calls).toHaveLength(2);
     expect(outcome.kind).toBe('answered');
     if (outcome.kind !== 'answered') return;
-    expect(outcome.candidate.trust).toBe('certified');
+    expect(outcome.candidate.tier).toBe('certified');
+    expect(outcome.candidate.trust).toBe('governed');
     expect(outcome.candidate.proof.join(' ')).toMatch(/served as published because no keyed governed answer could be composed/);
     expect(outcome.text).toMatch(/recertify it with the entity key/);
     expect(outcome.receipt.refusals.some((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message))).toBe(false);

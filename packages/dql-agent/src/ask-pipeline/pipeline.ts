@@ -192,7 +192,9 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   if (!candidate) {
     const fallback = prepared?.fallbacks?.[0] ?? firstPrepared?.fallbacks?.[0];
     if (fallback) {
-      candidate = fallback;
+      // Served from the certified block, but not certified FOR this question:
+      // the badge is governed, the source stays the block.
+      candidate = { ...fallback, trust: 'governed' };
       if (firstPrepared && fallback === firstPrepared.fallbacks[0]) intent = firstIntent ?? intent;
       receipt.intent = intent;
       for (let index = receipt.refusals.length - 1; index >= 0; index -= 1) {
@@ -254,6 +256,6 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   timings.total = Math.round(now() - started);
   const result: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(intent, executed.result, input.vocabulary) };
   // A certified block served as published with an identity caveat says so in the answer.
-  const caveats = candidate.trust === 'certified' ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line) => `${line.replace(/; the certified block is served as published$/, '')}; recertify it with the entity key to keep them apart`) : [];
+  const caveats = candidate.tier === 'certified' ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line) => `${line.replace(/; the certified block is served as published$/, '')}; recertify it with the entity key to keep them apart`) : [];
   return { kind: 'answered', intent, candidate, result, text: composeAnsweredText(intent, result, input.vocabulary, candidate.trust, { notes: receipt.grounding, caveats }), receipt };
 }

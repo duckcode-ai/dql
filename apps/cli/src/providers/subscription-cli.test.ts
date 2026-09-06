@@ -30,6 +30,24 @@ describe('a CLI timeout is a typed provider error', () => {
   });
 });
 
+describe('parseClaudeResult with a schema (structured_output)', () => {
+  it('a validated object wins over an empty or narrated result', () => {
+    expect(parseClaudeResult(JSON.stringify({ is_error: false, result: '', structured_output: { ok: true } }))).toEqual({ text: '{"ok":true}', isError: false, structured: true });
+    expect(parseClaudeResult(JSON.stringify({ is_error: false, result: 'ok: true, n: 7', structured_output: { ok: true, n: 7, items: [{ a: [1, 2] }] } }))).toEqual({ text: '{"ok":true,"n":7,"items":[{"a":[1,2]}]}', isError: false, structured: true });
+  });
+  it('an older release that repeats the JSON in result still parses, and a missing structured field falls back to result', () => {
+    expect(parseClaudeResult(JSON.stringify({ is_error: false, result: '{"ok":true}' }))).toEqual({ text: '{"ok":true}', isError: false });
+    expect(parseClaudeResult(JSON.stringify({ is_error: false, result: 'Done.', structured_output: null }))).toEqual({ text: 'Done.', isError: false });
+  });
+  it('an error wrapper stays an error even when it carries a structured field', () => {
+    expect(parseClaudeResult(JSON.stringify({ is_error: true, result: 'Not logged in · Please run /login', structured_output: { ok: true } }))).toEqual({ text: 'Not logged in · Please run /login', isError: true });
+  });
+  it('the last-JSON-line fallback reads structured output too', () => {
+    const stdout = 'warning: something\n' + JSON.stringify({ is_error: false, result: '', structured_output: { n: 1 } });
+    expect(parseClaudeResult(stdout)).toEqual({ text: '{"n":1}', isError: false, structured: true });
+  });
+});
+
 describe('parseClaudeResult', () => {
   it('extracts .result and is_error from a single JSON object', () => {
     const json = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'Revenue is $2.8M.' });

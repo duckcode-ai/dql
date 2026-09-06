@@ -180,8 +180,10 @@ describe.each(FIXTURES)('Ask battery over %s', (fixture) => {
         // served for a ranking: two products sharing a name would merge. The
         // pipeline composes the keyed governed answer and keeps the block as
         // refused evidence with its identity reason (owner decision, AGT-064).
-        const labelOnlyBlockRefused = pipeline && (run.diagnosticReceiptV9?.refusals ?? [])
-          .some((refusal: { tier?: string; message?: string }) => refusal.tier === 'certified' && /identity key/.test(refusal.message ?? ''));
+        const labelOnlyBlockRefused = pipeline && ((run.diagnosticReceiptV9?.refusals ?? [])
+          .some((refusal: { tier?: string; message?: string }) => refusal.tier === 'certified' && /identity key/.test(refusal.message ?? ''))
+          || (run.diagnosticReceiptV9?.tiers ?? []).some((tier: { detail?: string }) => /served as published/.test(tier.detail ?? ''))
+          || /served as published because no keyed governed answer could be composed/.test(userText(run)));
         if (labelOnlyBlockRefused) {
           expect(run.route, context()).toBe('generated_answer');
           expect(run.trustState, context()).toBe('governed');
