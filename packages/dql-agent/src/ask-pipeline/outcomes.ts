@@ -100,6 +100,8 @@ export function describeResultColumns(intent: AnalyticalIntentV1, result: Pick<E
     if (!entry) return {};
     if (entry.displayFormat) return { kind: entry.displayFormat.kind, ...(entry.displayFormat.kind === 'currency' ? { unit: entry.displayFormat.currency ?? 'USD' } : entry.displayFormat.kind === 'percent' ? { unit: 'fraction' } : {}), ...(entry.displayFormat.decimals !== undefined ? { decimals: entry.displayFormat.decimals } : {}) };
     if (entry.metricType === 'ratio') return { kind: 'percent', unit: 'fraction' };
+    // A derived formula that multiplies by 100 is already in points (growth, margin %).
+    if (entry.metricType === 'derived' && /\*\s*100(?![0-9.])/.test(entry.expr ?? '')) return { kind: 'percent', unit: 'percentage_points' };
     const aggregate = (entry.physical?.aggregate ?? entry.aggregation ?? '').toLowerCase();
     if (aggregate === 'count' || aggregate === 'count_distinct') return { kind: 'count' };
     // dbt counts are often a SUM over 1 (`order_count: expr: 1, agg: sum`), or a sum named as a count.
@@ -178,6 +180,13 @@ export function composeAnsweredText(intent: AnalyticalIntentV1, result: Executed
   }
   // Identity: several members share the asked-for name; the rows keep them apart.
   for (const note of extras.notes ?? []) if (note.startsWith('identity:')) lines.push(`${note.slice('identity:'.length).trim().replace(/[.\s]+$/, '')}.`);
+  // Definitions: a grouping or filter dimension with a governed description
+  // is explained ("new" is a customer with one lifetime order).
+  const defined = [...intent.groupBy.map((group) => group.ref), ...intent.filters.map((predicate) => predicate.ref)]
+    .map((ref) => vocabulary.get(ref))
+    .filter((entry, index, all): entry is NonNullable<typeof entry> => Boolean(entry && entry.kind === 'dimension' && entry.description && all.indexOf(entry) === index))
+    .slice(0, 2);
+  if (defined.length) lines.push(`Definitions: ${defined.map((entry) => `${entry.label ?? entry.name}: ${entry.description!.replace(/\s+/g, ' ').slice(0, 200).replace(/[.\s]+$/, '')}`).join('; ')}.`);
   lines.push(trust === 'certified' ? 'Source: a certified block.' : trust === 'governed' ? 'Source: the governed semantic layer and join paths.' : 'Source: review-required SQL.');
   for (const caveat of extras.caveats ?? []) lines.push(caveat.replace(/[.\s]+$/, '') + '.');
   return lines.join(' ');

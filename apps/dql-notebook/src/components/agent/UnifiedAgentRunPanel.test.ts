@@ -42,6 +42,7 @@ let askRunCaptureWarning: typeof UnifiedAgentRunPanelModule.askRunCaptureWarning
 let askFailureOriginTyped: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
 let askFailurePresentation: typeof UnifiedAgentRunPanelModule.ASK_FAILURE_PRESENTATION;
 let extractResult: typeof UnifiedAgentRunPanelModule.extractResult;
+let adoptablePendingRun: typeof UnifiedAgentRunPanelModule.adoptablePendingRun;
 let selectedResultBindingForSelection: typeof UnifiedAgentRunPanelModule.selectedResultBindingForSelection;
 let resolveComposerRequestedMode: typeof UnifiedAgentRunPanelModule.resolveComposerRequestedMode;
 let researchResultRowsOptInForRun: typeof UnifiedAgentRunPanelModule.researchResultRowsOptInForRun;
@@ -97,6 +98,7 @@ beforeAll(async () => {
     askFailureOriginTyped = module.askFailureOrigin;
     askFailurePresentation = module.ASK_FAILURE_PRESENTATION;
     extractResult = module.extractResult;
+    adoptablePendingRun = module.adoptablePendingRun;
     selectedResultBindingForSelection = module.selectedResultBindingForSelection;
     resolveComposerRequestedMode = module.resolveComposerRequestedMode;
     researchResultRowsOptInForRun = module.researchResultRowsOptInForRun;
@@ -401,6 +403,29 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     expect(selectAgentExecutionConnection(names, 'analytics', 'deleted-connection')).toBe('analytics');
     expect(selectAgentExecutionConnection(names, 'missing-default')).toBe('analytics');
     expect(selectAgentExecutionConnection([], 'analytics')).toBeUndefined();
+  });
+
+  it('UI-027 the units contract travels with the rows out of the artifact', () => {
+    const result = extractResult({
+      result: {
+        columns: ['aov'], rows: [{ aov: 10.2 }], rowCount: 1,
+        columnsMeta: [{ name: 'aov', kind: 'currency', unit: 'USD' }, { bogus: true }],
+      },
+    });
+    expect(result?.columnsMeta).toEqual([{ name: 'aov', kind: 'currency', unit: 'USD' }]);
+    expect(extractResult({ result: { columns: ['n'], rows: [{ n: 1 }], rowCount: 1 } })?.columnsMeta).toBeUndefined();
+  });
+
+  it('UI-026 a thread-less pending run is adopted only by the tab that submitted it', () => {
+    const runs = [
+      { id: 'r-old', question: 'a', startedAt: '2026-09-06T10:00:00.000Z', submissionId: 'sub-a' },
+      { id: 'r-new', question: 'b', startedAt: '2026-09-06T10:01:00.000Z', submissionId: 'sub-b' },
+      { id: 'r-thr', question: 'c', startedAt: '2026-09-06T10:02:00.000Z', threadId: 'thr-1', submissionId: 'sub-c' },
+      { id: 'r-legacy', question: 'd', startedAt: '2026-09-06T10:03:00.000Z' },
+    ];
+    expect(adoptablePendingRun(runs, undefined, (id) => id === 'sub-a')?.id).toBe('r-old');
+    expect(adoptablePendingRun(runs, undefined, () => false)).toBeUndefined();
+    expect(adoptablePendingRun(runs, 'thr-1', () => false)?.id).toBe('r-thr');
   });
 
   it('normalizes positional connector rows before the result renderer indexes them (AGT-032)', () => {
@@ -2082,6 +2107,14 @@ describe('failure card origin and detail', () => {
     for (const origin of ['warehouse', 'dql_compilation', 'governance_gate', 'retrieval_gap', 'provider', 'host']) {
       expect(askFailureOrigin(runWith({ warehouseFailure: { origin } }))).toBe(origin);
     }
+  });
+
+  it('a no-data outcome is headed neutrally, never as a modeling gap or a failed run', () => {
+    expect(askFailureOrigin(runWith({ refusalCode: 'no_data' }))).toBe('no_data');
+    expect(askFailureOrigin(runWith({ gap: { kind: 'not_retrieved', message: 'no rows fell inside 2026-01-01..2026-02-01' } }))).toBe('no_data');
+    expect(askFailureOrigin(runWith({ refusalCode: 'modeling_gap', gap: { kind: 'not_modeled' } }))).toBe('modeling_gap');
+    expect(ASK_FAILURE_PRESENTATION.no_data.title).toBe('No matching data');
+    expect(ASK_FAILURE_PRESENTATION.no_data.title).not.toMatch(/could not|couldn/i);
   });
 
   it('recognizes provider failures even when an older run has no warehouse attribution', () => {

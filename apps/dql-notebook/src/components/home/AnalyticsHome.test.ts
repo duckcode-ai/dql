@@ -144,6 +144,35 @@ describe('Ask AI Notebook repair handoff', () => {
     expect(resolveActiveConversationId({ tab: 'conv-gone', shared: 'other-project' }, known)).toBeUndefined();
   });
 
+  it('UI-026 the URL thread names the tab\'s chat before any stored pointer', () => {
+    const known = new Set(['conv-a', 'conv-b']);
+    const byThread = new Map([['thr-b', 'conv-b']]);
+    expect(resolveActiveConversationId({ url: 'thr-b', tab: 'conv-a', shared: 'conv-a' }, known, byThread)).toBe('conv-b');
+    expect(resolveActiveConversationId({ url: 'thr-unknown', tab: 'conv-a', shared: 'conv-b' }, known, byThread)).toBe('conv-a');
+  });
+
+  it('UI-026 reconciliation follows the thread when the conversation id was rewritten, and a bound tab never gets the newest chat', () => {
+    const threads = [
+      { id: 'thr_new', surface: 'ask', title: 'Newest', archived: false, createdAt: '2026-09-06T10:00:00.000Z', updatedAt: '2026-09-06T10:00:00.000Z' },
+      { id: 'thr_mine', surface: 'ask', title: 'Mine', archived: false, createdAt: '2026-09-05T10:00:00.000Z', updatedAt: '2026-09-05T10:00:00.000Z' },
+    ] as AgentConversationThreadListResponse['threads'];
+    const byThread = reconcileAskConversationCache({
+      local: [], threads, activeId: 'conv_local_mine', activeThreadId: 'thr_mine', tabHadBinding: true,
+      cachedProjectIdentity: 'p1', serverProjectIdentity: 'p1',
+    });
+    expect(byThread.activeId).toBe('conv_server_thr_mine');
+    const bound = reconcileAskConversationCache({
+      local: [], threads, activeId: 'conv_local_gone', tabHadBinding: true, createConversationId: () => 'conv_fresh',
+      cachedProjectIdentity: 'p1', serverProjectIdentity: 'p1',
+    });
+    expect(bound.activeId).toBe('conv_fresh');
+    const fresh = reconcileAskConversationCache({
+      local: [], threads, activeId: 'conv_local_gone', tabHadBinding: false,
+      cachedProjectIdentity: 'p1', serverProjectIdentity: 'p1',
+    });
+    expect(fresh.activeId).toBe('conv_server_thr_new');
+  });
+
   it('API-008 rebuilds Ask history from durable server threads after browser storage is reset', () => {
     const recovered = mergePersistedAskConversations([], [{
       id: 'thr_revenue',

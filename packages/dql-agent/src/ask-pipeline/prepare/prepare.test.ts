@@ -3,6 +3,7 @@ import { extractBlockContract } from '../block-contract.js';
 import { parseIntent, type AnalyticalIntentV1 } from '../intent.js';
 import { buildVocabularyIndex, type VocabularySource } from '../vocabulary.js';
 import { bindSemanticRequest, composeRelational, entails, prepare } from './index.js';
+import { prepareCertified } from './certified.js';
 import type { PrepareDeps } from './types.js';
 
 const source: VocabularySource = {
@@ -10,6 +11,9 @@ const source: VocabularySource = {
     { name: 'revenue', model: 'order_item', aggregation: 'sum', expr: 'SUM(product_price)', physical: { relation: 'dev.order_items', expr: '"dev"."order_items"."product_price"', aggregate: 'sum' } },
     { name: 'drink_revenue', model: 'order_item', aggregation: 'sum', expr: 'SUM(case when is_drink_item then product_price else 0 end)', description: 'Revenue from drink items', physical: { relation: 'dev.order_items', expr: 'case when "dev"."order_items"."is_drink_item" then "dev"."order_items"."product_price" else 0 end', aggregate: 'sum' } },
     { name: 'order_total', model: 'orders', aggregation: 'sum', physical: { relation: 'dev.orders', expr: '"dev"."orders"."order_total"', aggregate: 'sum' } },
+    { name: 'order_cost', model: 'orders', aggregation: 'sum', physical: { relation: 'dev.orders', expr: '"dev"."orders"."order_cost"', aggregate: 'sum' } },
+    { name: 'order_gross_profit', model: 'order_item', type: 'derived', expr: 'revenue - cost', derived: { expr: 'revenue - cost', inputs: [{ alias: 'revenue', ref: 'metric:order_item.revenue' }, { alias: 'cost', ref: 'metric:orders.order_cost' }] } },
+    { name: 'revenue_growth_mom', model: 'order_item', type: 'derived', expr: '(current_revenue - revenue_prev_month)*100/revenue_prev_month', engineOnly: 'a prior-period offset on revenue' },
   ],
   dimensions: [
     { name: 'customer_name', model: 'customers', dataType: 'string', physical: { relation: 'dev.customers', column: 'customer_name' } },
@@ -47,15 +51,39 @@ const intent = (raw: Record<string, unknown>): AnalyticalIntentV1 => {
 };
 
 describe('certified entailment', () => {
-  it('a block named by ref that groups by a label is served as published, with the identity caveat recorded', () => {
+  it('a block named by ref that groups by a label is not entailed: identity is never certified away', () => {
     const verdict = entails(vocabulary.get('block:commerce.top_beverage_customers')!, intent({ measures: [{ ref: 'block:commerce.top_beverage_customers' }], expectedShape: 'ranking' }), vocabulary);
-    expect(verdict.ok).toBe(true);
-    expect(verdict.caveats.join(' ')).toMatch(/label.*no identity key/);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.missing.join(' ')).toMatch(/label.*no identity key.*composed by entity key/);
+    const prepared = prepareCertified(intent({ measures: [{ ref: 'block:commerce.top_beverage_customers' }], expectedShape: 'ranking' }), vocabulary, deps);
+    expect(prepared.candidates).toEqual([]);
+    expect(prepared.refusals[0]).toMatchObject({ tier: 'certified', code: 'block_not_applicable', repairable: true });
+    // The block is kept as a fallback: the answer of last resort, never a dead end.
+    expect(prepared.fallbacks).toHaveLength(1);
+    expect(prepared.fallbacks[0]!.proof.join(' ')).toMatch(/served as published because no keyed governed answer could be composed/);
+  });
+  it('preparation never chooses the label-only block itself: it is handed to the pipeline as the answer of last resort', async () => {
+    const result = await prepare({ intent: intent({ measures: [{ ref: 'block:commerce.top_beverage_customers' }], expectedShape: 'ranking' }), vocabulary, deps });
+    expect(result.chosen).toBeUndefined();
+    expect(result.fallbacks).toHaveLength(1);
+    expect(result.fallbacks[0]!.proof.join(' ')).toMatch(/no identity key.*served as published/);
+    expect(result.refusals.some((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message) && refusal.repairable)).toBe(true);
+  });
+  it('a time window the block cannot bound is not entailed; one over an output column is applied with its bounds', () => {
+    const window = { start: '2025-01-01', end: '2026-01-01', expression: 'in 2025' };
+    const unbounded = entails(vocabulary.get('block:commerce.beverage_by_customer_id')!, intent({ measures: [{ ref: 'block:commerce.beverage_by_customer_id' }], expectedShape: 'ranking', time: { ref: 'dimension:order_item.ordered_at', window } }), vocabulary);
+    expect(unbounded.ok).toBe(false);
+    expect(unbounded.missing.join(' ')).toMatch(/no output for the time window 2025-01-01..2026-01-01/);
+    const bounded = buildVocabularyIndex({ ...source, blocks: [{ name: 'daily_revenue', domain: 'commerce', certified: true, contract: extractBlockContract({ name: 'daily_revenue', domain: 'commerce', sql: 'SELECT ordered_at, SUM(order_total) AS gross_revenue FROM dev.orders GROUP BY ordered_at', declaredOutputs: ['ordered_at', 'gross_revenue'] }), sql: 'SELECT ordered_at, SUM(order_total) AS gross_revenue FROM dev.orders GROUP BY ordered_at' }] });
+    const prepared = prepareCertified(intent({ measures: [{ ref: 'block:commerce.daily_revenue' }], expectedShape: 'trend', time: { ref: 'dimension:orders.ordered_at', window } }), bounded, { ...deps, blockSql: (ref) => bounded.get(ref)?.sql });
+    expect(prepared.candidates).toHaveLength(1);
+    expect(prepared.candidates[0]!.sql).toMatch(/block."ordered_at" >= \? AND block."ordered_at" < \?/);
+    expect(prepared.candidates[0]!.params).toEqual(['2025-01-01', '2026-01-01']);
   });
   it('a label-grouped block matched only through its measures must prove identity', () => {
     const verdict = entails(vocabulary.get('block:commerce.top_beverage_customers')!, intent({ measures: [{ ref: 'metric:order_item.revenue', scope: [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [], source: 'question' }] }], groupBy: [{ ref: 'entity:customers.customer', role: 'key' }], display: ['dimension:customers.customer_name'], ordering: { ref: 'measure:0', direction: 'desc' }, limit: 10, expectedShape: 'ranking' }), vocabulary);
     expect(verdict.ok).toBe(false);
-    expect(verdict.missing.join(' ')).toMatch(/recertify it with the key column/);
+    expect(verdict.missing.join(' ')).toMatch(/composed by entity key/);
   });
   it('a keyed block named exactly is entailed', () => {
     const verdict = entails(vocabulary.get('block:commerce.beverage_by_customer_id')!, intent({ measures: [{ ref: 'block:commerce.beverage_by_customer_id' }], expectedShape: 'ranking' }), vocabulary);
@@ -76,7 +104,7 @@ describe('semantic binding', () => {
     }), vocabulary);
     expect(bound.request).toEqual({
       metrics: ['drink_revenue'], dimensions: ['customers.customer', 'customers.customer_name'],
-      filters: [{ dimension: 'customers.customer_name', operator: '=', values: ['Ryan byrd'] }], orderBy: [{ name: 'drink_revenue', direction: 'desc' }], limit: 10,
+      filters: [{ dimension: 'customers.customer_name', operator: 'equals', values: ['Ryan byrd'] }], orderBy: [{ name: 'drink_revenue', direction: 'desc' }], limit: 10,
     });
   });
   it('a per-measure scope the metric does not embody is not semantic', () => {
@@ -150,7 +178,7 @@ describe('relational ratio and population', () => {
     expect(sql).toMatch(/^WITH island_1 AS/);
     expect(sql).toContain('SUM("dev"."order_items"."product_price") AS "__num_1"');
     expect(sql).toContain('SUM("dev"."orders"."order_total") AS "__den_1"');
-    expect(sql).toMatch(/CAST\(island_1\."__num_1" AS DOUBLE\) \/ NULLIF\(island_2\."__den_1", 0\) AS "revenue_share"/);
+    expect(sql).toMatch(/CAST\(island_1\."__num_1" AS DOUBLE\) \/ NULLIF\(CAST\(island_2\."__den_1" AS DOUBLE\), 0\) AS "revenue_share"/);
     expect(composed.candidate!.columns).toEqual(['revenue_share']);
     expect(composed.candidate!.proof.join(' ')).toMatch(/revenue_share = .* \/ .*, divided after each part is aggregated/);
   });
@@ -168,7 +196,7 @@ describe('relational ratio and population', () => {
     }), vocabulary, deps);
     const sql = composed.candidate!.sql;
     expect(sql).toMatch(/^WITH island_1 AS/);
-    expect(sql).toMatch(/island_1\."customer_id" AS "customer_id", island_1\."customer_name" AS "customer_name", island_1\."revenue" AS "revenue", CAST\(island_1\."__num_2" AS DOUBLE\) \/ NULLIF\(island_1\."__den_2", 0\) AS "drink_share"/);
+    expect(sql).toMatch(/island_1\."customer_id" AS "customer_id", island_1\."customer_name" AS "customer_name", island_1\."revenue" AS "revenue", CAST\(island_1\."__num_2" AS DOUBLE\) \/ NULLIF\(CAST\(island_1\."__den_2" AS DOUBLE\), 0\) AS "drink_share"/);
     expect(sql).toMatch(/ORDER BY "drink_share" DESC\nLIMIT 5$/);
   });
   it('population "all" enumerates every member from the entity relation and zero-fills additive measures only', () => {
@@ -203,5 +231,29 @@ describe('relational ratio and population', () => {
     const block = vocabulary.get('block:commerce.beverage_by_customer_id')!;
     expect(entails(block, intent({ measures: [{ derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.order_total' } }] }), vocabulary).missing[0]).toMatch(/derived ratio/);
     expect(entails(block, intent({ measures: [{ ref: 'block:commerce.beverage_by_customer_id' }], population: 'all' }), vocabulary).missing[0]).toMatch(/every member/);
+  });
+});
+
+describe('derived metrics across relations', () => {
+  it('a derived formula over two relations is evaluated after each input is aggregated on its own island', () => {
+    const composed = composeRelational(intent({ measures: [{ ref: 'metric:order_item.order_gross_profit' }], expectedShape: 'scalar', time: { ref: 'dimension:order_item.ordered_at', window: { start: '2025-01-01', end: '2026-01-01' } } }), vocabulary, deps);
+    const sql = composed.candidate!.sql;
+    expect(sql).toMatch(/^WITH island_1 AS/);
+    expect(sql).toContain('SUM("dev"."order_items"."product_price") AS "__in_1_revenue"');
+    expect(sql).toContain('SUM("dev"."orders"."order_cost") AS "__in_1_cost"');
+    expect(sql).toContain('(CAST(island_1."__in_1_revenue" AS DOUBLE) - CAST(island_2."__in_1_cost" AS DOUBLE)) AS "order_gross_profit"');
+    expect(sql).toContain('WHERE "dev"."orders"."ordered_at" >= ? AND "dev"."orders"."ordered_at" < ?');
+    expect(composed.candidate!.proof.join(' ')).toMatch(/order_gross_profit = revenue - cost, with revenue = .* on dev\.order_items, cost = .* on dev\.orders/);
+  });
+  it('a ratio whose numerator is a derived formula composes through the same islands, divisors guarded', () => {
+    const composed = composeRelational(intent({ measures: [{ ref: 'metric:order_item.order_gross_profit' }, { derived: { kind: 'ratio', numerator: 'metric:order_item.order_gross_profit', denominator: 'metric:order_item.revenue' }, alias: 'gross_margin' }], expectedShape: 'comparison' }), vocabulary, deps);
+    const sql = composed.candidate!.sql;
+    expect(sql).toContain('(CAST(island_1."__num_2_revenue" AS DOUBLE) - CAST(island_2."__num_2_cost" AS DOUBLE)) / NULLIF(CAST(island_1."__den_2" AS DOUBLE), 0) AS "gross_margin"');
+    expect(composed.candidate!.columns).toEqual(['order_gross_profit', 'gross_margin']);
+  });
+  it('a metric the semantic engine alone can compute is refused with its reason, never approximated', () => {
+    const composed = composeRelational(intent({ measures: [{ ref: 'metric:order_item.revenue_growth_mom' }], groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }], expectedShape: 'trend' }), vocabulary, deps);
+    expect(composed.candidate).toBeUndefined();
+    expect(composed.refusal?.message).toMatch(/needs the semantic engine: a prior-period offset on revenue; the relational tier will not approximate it/);
   });
 });

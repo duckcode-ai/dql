@@ -3151,6 +3151,7 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
       ? {
           columns,
           rowsSample,
+          ...(Array.isArray(result?.columnsMeta) ? { columnsMeta: result.columnsMeta.filter((meta): meta is { name: string; kind: string } => Boolean(meta && typeof meta === 'object' && typeof (meta as { name?: unknown }).name === 'string' && typeof (meta as { kind?: unknown }).kind === 'string')) } : {}),
           dimensionValues,
           ...(memberSets?.length ? { memberSets } : {}),
           ...(resultFingerprint ? { resultFingerprint } : {}),
@@ -5961,6 +5962,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const requested = agentRunWorkspaceValue(request, 'provider');
       const selected = await selectAssistProvider(projectRoot, requested as ProviderSettingsId | undefined);
       return selected?.provider;
+    },
+    // The engine the semantic candidate will compile on, decided the same
+    // way `compileSemantic` decides it, so the binder speaks its dialect.
+    semanticEngine: async () => {
+      const planned = await resolvePlannedSemanticAdapter(projectRoot, undefined);
+      return planned === 'metricflow-cli' && !existsSync(join(projectRoot, 'target', 'semantic_manifest.json')) ? 'native' : planned;
     },
     compileSemantic: async (request, connection) => {
       if (!semanticLayer) throw new Error('no semantic layer is loaded');

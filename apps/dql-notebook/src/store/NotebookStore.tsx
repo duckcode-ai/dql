@@ -64,6 +64,8 @@ function readInitialMainView(): NotebookState['mainView'] {
   if (typeof window === 'undefined') return 'apps';
   const askTraceRoute = askTraceRouteFromPathname(window.location?.pathname);
   if (askTraceRoute) return askTraceRoute.mainView;
+  // `/ask` (with or without a thread) reopens Ask: a reload never lands on Apps.
+  if (window.location?.pathname === '/ask') return 'ask';
   const params = new URLSearchParams(window.location.search);
   return params.has('domain') || params.has('domainSection') || params.has('modelArea')
     ? 'domains'

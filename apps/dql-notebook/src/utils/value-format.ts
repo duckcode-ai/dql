@@ -134,8 +134,8 @@ export function formatDisplayValue(
   return String(value);
 }
 
-export function formatChartValue(column: string, value: number, format?: string): string {
-  return formatDisplayValue(column, value, [value], { compact: true, format });
+export function formatChartValue(column: string, value: number, format?: string, meta?: DisplayColumnMeta): string {
+  return formatDisplayValue(column, value, [value], { compact: true, format, ...(meta ? { meta } : {}) });
 }
 
 function formatMonth(value: unknown): string | undefined {

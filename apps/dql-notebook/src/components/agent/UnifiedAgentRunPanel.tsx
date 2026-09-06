@@ -688,6 +688,7 @@ export function UnifiedAgentRunPanel({
     // request and the pairing key between this question item and its answer;
     // the question text is neither, so asking twice starts two runs.
     let submissionId = mintAgentRunSubmissionId();
+    rememberTabSubmission(submissionId);
     const userItem: ThreadItem = { kind: 'user', id: makeId('user'), text };
     setItems((current) => [...current, userItem]);
     setInput('');
@@ -819,6 +820,7 @@ export function UnifiedAgentRunPanel({
         // A collision on a fresh identity: mint another and resend exactly once.
         clearSubmissionInput(submissionId);
         submissionId = mintAgentRunSubmissionId();
+        rememberTabSubmission(submissionId);
         pending = { ...pending, submissionId };
         pendingRunRef.current = pending;
         saveActiveAgentRun(pending);
@@ -1475,10 +1477,39 @@ export function mergeFinishedRun(current: ThreadItem[], run: AgentRun, pending: 
   ];
 }
 
+const TAB_SUBMISSIONS_STORAGE_KEY = 'dql.agent.tab-submissions.v1';
+
+/** The submissions this tab minted; a thread-less pending run is adopted only by the tab that started it. */
+function rememberTabSubmission(submissionId: string): void {
+  try {
+    const parsed: unknown = JSON.parse(window.sessionStorage.getItem(TAB_SUBMISSIONS_STORAGE_KEY) ?? '[]');
+    const ids = Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+    window.sessionStorage.setItem(TAB_SUBMISSIONS_STORAGE_KEY, JSON.stringify([...ids.filter((id) => id !== submissionId), submissionId].slice(-24)));
+  } catch { /* per-tab memory unavailable */ }
+}
+
+function tabOwnsSubmission(submissionId: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(window.sessionStorage.getItem(TAB_SUBMISSIONS_STORAGE_KEY) ?? '[]');
+    return Array.isArray(parsed) && parsed.includes(submissionId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Which pending run a view adopts on mount: the run of its thread, or a
+ * thread-less run this tab itself submitted. A reload in one tab never
+ * attaches another tab's new-chat run.
+ */
+export function adoptablePendingRun(runs: PendingAgentRun[], threadId: string | undefined, owns: (submissionId: string) => boolean): PendingAgentRun | undefined {
+  const ordered = [...runs].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  if (threadId) return ordered.find((entry) => entry.threadId === threadId);
+  return ordered.find((entry) => !entry.threadId && Boolean(entry.submissionId) && owns(entry.submissionId!));
+}
+
 function findActiveAgentRun(threadId?: string): PendingAgentRun | undefined {
-  const runs = readActiveAgentRuns().sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-  if (threadId) return runs.find((entry) => entry.threadId === threadId);
-  return runs.find((entry) => !entry.threadId);
+  return adoptablePendingRun(readActiveAgentRuns(), threadId, tabOwnsSubmission);
 }
 
 const THINKING_MODE_STORAGE_KEY = 'dql.agent.thinkingMode';
@@ -1713,12 +1744,13 @@ function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
               ? 'certified_answer_found'
               : 'artifact_created';
   const columns = (turn.result?.columns ?? []).filter((column): column is string => typeof column === 'string');
+  const columnsMeta = (turn.result?.columnsMeta ?? []).filter((meta): meta is NonNullable<AgentConversationTurn['result']>['columnsMeta'] extends (infer M)[] | undefined ? M : never => Boolean(meta && typeof meta === 'object' && typeof (meta as { name?: unknown }).name === 'string'));
   // Stored samples are positional arrays; rebuild keyed rows for the result view.
   const rows = (turn.result?.rowsSample ?? [])
     .filter((row): row is unknown[] => Array.isArray(row))
     .map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index]])));
   const result = columns.length > 0
-    ? { columns, rows, rowCount: turn.result?.rowCount ?? rows.length }
+    ? { columns, rows, rowCount: turn.result?.rowCount ?? rows.length, ...(columnsMeta.length ? { columnsMeta } : {}) }
     : undefined;
   const artifact: AgentRunArtifact | undefined = result || turn.sql || turn.dqlArtifact || turn.sourceCertifiedBlock
     ? {
@@ -2803,7 +2835,7 @@ function AskRunCard(props: AskRunCardProps) {
   const outcomeLabel = cancelled
     ? 'Stopped by user'
     : blocked
-    ? 'Couldn’t run this query'
+    ? (askFailureOrigin(run) === 'no_data' ? 'No matching data' : 'Couldn’t run this query')
     : needsClarification
       ? 'Needs clarification'
       : certified
@@ -4475,6 +4507,7 @@ export function researchSourceFromRun(run: AgentRun): Record<string, unknown> {
         columns: result.columns,
         rows: result.rows.slice(0, 24),
         rowCount: result.rowCount,
+        ...(result.columnsMeta?.length ? { columnsMeta: result.columnsMeta } : {}),
       },
     } : {}),
   };
@@ -6082,6 +6115,9 @@ export function extractResult(payload: Record<string, unknown>): QueryResult | u
       columns,
       rows,
       rowCount: normalized.rowCount,
+      // The units contract travels with the rows: without it the KPI card,
+      // the chart and the headline fall back to guessing from column names.
+      ...(normalized.columnsMeta?.length ? { columnsMeta: normalized.columnsMeta } : {}),
       ...(normalized.resultFingerprint ? { resultFingerprint: normalized.resultFingerprint } : {}),
       ...(normalized.executionReceipt ? { executionReceipt: normalized.executionReceipt } : {}),
       ...(normalized.trustState ? { trustState: normalized.trustState } : {}),
@@ -6909,6 +6945,10 @@ const ASK_FAILURE_PRESENTATION: Record<string, { title: string; hint: string }> 
     title: 'The governed model does not cover this question',
     hint: 'No query ran. Add or review the missing metric, dimension, relationship, or allocation rule.',
   },
+  no_data: {
+    title: 'No matching data',
+    hint: 'The governed query ran and returned no rows for the requested period or filter. The data may end before it.',
+  },
   proof_integrity: {
     title: 'Not executed: exact semantic proof was not established',
     hint: 'DQL could not establish the exact metric, requested grain, join keys, and fanout proof. Warehouse success cannot create that authority.',
@@ -6964,6 +7004,7 @@ function askFailureOrigin(run: AgentRun): string {
       warehouseFailure?: { origin?: unknown };
       providerFailure?: { code?: unknown };
       refusalCode?: unknown;
+      gap?: { kind?: unknown };
       executionError?: unknown;
       analyticalFailure?: { code?: unknown; phase?: unknown };
       aggregationSafetyProof?: { status?: unknown };
@@ -6971,6 +7012,7 @@ function askFailureOrigin(run: AgentRun): string {
     const origin = payload?.warehouseFailure?.origin;
     const code = typeof payload?.analyticalFailure?.code === 'string' ? payload.analyticalFailure.code : '';
     if (askCompilationFailureKind(rawPayload)) return 'compile';
+    if (payload?.refusalCode === 'no_data' || payload?.gap?.kind === 'not_retrieved') return 'no_data';
     if (payload?.refusalCode === 'modeling_gap') return 'modeling_gap';
     if (payload?.aggregationSafetyProof?.status === 'blocked') return 'proof_integrity';
     if (['IDENTIFIER_SCOPE_INVALID', 'EXECUTION_TARGET_MISMATCH', 'SEMANTIC_TARGET_BINDING_MISSING', 'SEMANTIC_SOURCE_DRIFT'].includes(code)) return 'identity_integrity';

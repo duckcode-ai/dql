@@ -142,6 +142,7 @@ export interface AgentAnswerEnvelope {
     columns?: unknown[];
     rows?: unknown[];
     rowCount?: number;
+    columnsMeta?: unknown[];
     resultFingerprint?: string;
     executionReceipt?: Record<string, unknown>;
     trustState?: string;
@@ -247,10 +248,15 @@ function normalizeAgentResult(answer: AgentAnswerEnvelope): QueryResult | null {
     }
     return Object.fromEntries(inferredColumns.map((column) => [column, undefined]));
   });
+  const columnsMeta = Array.isArray(result.columnsMeta)
+    ? result.columnsMeta.filter((meta): meta is QueryResult['columnsMeta'] extends (infer M)[] | undefined ? M : never =>
+        Boolean(meta && typeof meta === 'object' && typeof (meta as { name?: unknown }).name === 'string' && typeof (meta as { kind?: unknown }).kind === 'string'))
+    : [];
   return {
     columns: inferredColumns,
     rows,
     rowCount: typeof result.rowCount === 'number' ? result.rowCount : rows.length,
+    ...(columnsMeta.length ? { columnsMeta } : {}),
     ...(typeof result.resultFingerprint === 'string' ? { resultFingerprint: result.resultFingerprint } : {}),
     ...(result.executionReceipt && typeof result.executionReceipt === 'object' ? { executionReceipt: result.executionReceipt } : {}),
     ...(typeof result.trustState === 'string' ? { trustState: result.trustState } : {}),
@@ -900,14 +906,18 @@ function collectSemanticNames(answer: AgentAnswerEnvelope, kind: 'metric' | 'dim
   return (kind === 'metric' ? plan?.measures : plan?.dimensions) ?? [];
 }
 
-function extractHeadlineValue(answer: AgentAnswerEnvelope): string | undefined {
+export function extractHeadlineValue(answer: AgentAnswerEnvelope): string | undefined {
   const result = answer.result;
   if (result && Array.isArray(result.rows) && result.rows.length === 1) {
     const row = result.rows[0];
     if (row && typeof row === 'object' && !Array.isArray(row)) {
-      const values = Object.values(row as Record<string, unknown>);
-      if (values.length === 1 && (typeof values[0] === 'number' || typeof values[0] === 'string')) {
-        return String(values[0]);
+      const entries = Object.entries(row as Record<string, unknown>);
+      if (entries.length === 1 && (typeof entries[0]![1] === 'number' || typeof entries[0]![1] === 'string')) {
+        const [column, value] = entries[0]!;
+        // A declared unit renders the headline by contract; a legacy result
+        // keeps the raw value exactly as before.
+        const meta = normalizeAgentResult(answer)?.columnsMeta?.find((candidate) => candidate.name === column);
+        return meta ? formatDisplayValue(column, value, [value], { meta }) : String(value);
       }
     }
   }

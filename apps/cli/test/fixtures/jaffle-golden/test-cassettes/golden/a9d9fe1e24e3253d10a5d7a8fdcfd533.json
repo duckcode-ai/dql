@@ -1,0 +1,26 @@
+{
+  "key": "a9d9fe1e24e3253d10a5d7a8fdcfd533",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by their total beverage (drink) revenue, showing the top customers with their customer name.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\",\"aggregation\":\"sum\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:order_item.drink_revenue\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.drink_revenue\":\"inherited\",\"entity:orders.customer\":\"inherited\",\"dimension:customers.customer_name\":\"inherited\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-06T03:47:29.955Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 5,
+    "messageRoles": [
+      "system",
+      "user",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "a9d9fe1e24e3253d10a5d7a8fdcfd5339747df44d1b7327517d53423ee061f57",
+    "postCanonicalHash": "a9d9fe1e24e3253d10a5d7a8fdcfd5339747df44d1b7327517d53423ee061f57",
+    "appliedRuleClasses": []
+  }
+}

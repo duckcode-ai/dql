@@ -1,5 +1,5 @@
 import type { QueryResult } from '../../store/types';
-import { formatDisplayValue } from '../../utils/value-format';
+import { formatDisplayValue, type DisplayColumnMeta } from '../../utils/value-format';
 
 /**
  * Value formatting and column heuristics shared by the dashboard renderer and
@@ -18,7 +18,7 @@ export function formatDashboardValue(
   column: string,
   value: unknown,
   values: unknown[] = [],
-  options: { compact?: boolean; format?: string } = {},
+  options: { compact?: boolean; format?: string; meta?: DisplayColumnMeta } = {},
 ): string {
   if (value === null || value === undefined || value === '') return 'N/A';
   const formatted = formatDisplayValue(column, value, values, options);

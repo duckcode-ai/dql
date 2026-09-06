@@ -1,0 +1,24 @@
+{
+  "key": "b40d616662d9efe706aed6918a9c161b",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show beverage products ranked by their revenue and items sold (the beverage category breakdown).\",\"measures\":[{\"ref\":\"block:commerce.beverage_revenue_by_product\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:beverage category\",\"entity:orders.customer\":\"removed:switched from customer breakdown to beverage product category\",\"dimension:customers.customer_name\":\"removed:switched from customer breakdown to beverage product category\",\"metric:order_item.drink_revenue\":\"removed:replaced by certified beverage-by-product block\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-06T03:20:21.011Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "b40d616662d9efe706aed6918a9c161ba3dd2fa4821f7bb5278ed059f033f527",
+    "postCanonicalHash": "b40d616662d9efe706aed6918a9c161ba3dd2fa4821f7bb5278ed059f033f527",
+    "appliedRuleClasses": []
+  }
+}

@@ -40,7 +40,7 @@ import { createSeededSqliteExecutor, type GoldenSeed, type SeededSqliteExecutor 
 
 type Outcome = 'rows' | 'clarify_or_rows' | 'gap' | 'conversation';
 type Tier = 'certified' | 'governed' | 'any' | 'none';
-interface Reference { sql: string; columns: Record<string, string[]> }
+interface Reference { sql: string; columns: Record<string, string[]>; identity?: string[] }
 interface GoldenCase extends Reference {
   id: string; question: string; outcome?: Outcome; tier: Tier;
   identity?: string[]; keys?: string[]; ordered?: boolean; requiredColumns?: string[];
@@ -112,7 +112,7 @@ interface RowMatch { ok: boolean; reason?: string; mapped?: Record<string, strin
 
 function matchReference(reference: Reference, spec: GoldenCase, actualColumns: string[], actualRows: Row[]): RowMatch {
   const mapped: Record<string, string> = {};
-  const identity = new Set(spec.identity ?? []);
+  const identity = new Set(reference.identity ?? spec.identity ?? []);
   for (const [name, aliases] of Object.entries(reference.columns)) {
     const found = findColumn(actualColumns, [name, ...aliases]);
     if (found) mapped[name] = found;

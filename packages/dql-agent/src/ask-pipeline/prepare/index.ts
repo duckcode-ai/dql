@@ -26,8 +26,13 @@ export async function prepare(input: PrepareInput): Promise<PrepareResult> {
     attempts.push({ tier, outcome: result.candidates.length ? 'prepared' : 'refused', ...(result.refusals[0] ? { detail: `${result.refusals[0].code}: ${result.refusals[0].message.slice(0, 200)}` } : {}) });
   };
   const excluded = new Set(input.excludeTiers ?? []);
+  let certifiedFallbacks: PreparedCandidate[] = [];
   if (excluded.has('certified')) attempts.push({ tier: 'certified', outcome: 'skipped', detail: 'failed an execution proof' });
-  else record('certified', prepareCertified(input.intent, input.vocabulary, input.deps));
+  else {
+    const certified = prepareCertified(input.intent, input.vocabulary, input.deps);
+    record('certified', certified);
+    certifiedFallbacks = certified.fallbacks;
+  }
   if (excluded.has('semantic')) attempts.push({ tier: 'semantic', outcome: 'skipped', detail: 'failed an execution proof' });
   else if (candidates.length === 0) record('semantic', await prepareSemantic(input.intent, input.vocabulary, input.deps));
   else attempts.push({ tier: 'semantic', outcome: 'skipped' });
@@ -39,5 +44,8 @@ export async function prepare(input: PrepareInput): Promise<PrepareResult> {
     attempts.push({ tier: 'exploratory', outcome: 'refused', detail: 'exploration_not_opted_in' });
   }
   candidates.sort((a, b) => TRUST_RANK[a.trust] - TRUST_RANK[b.trust] || TIER_RANK[a.tier] - TIER_RANK[b.tier]);
-  return { candidates, refusals, attempts, ...(candidates[0] ? { chosen: candidates[0] } : {}) };
+  // A label-only certified block is evidence while a keyed answer can be
+  // composed; the pipeline serves it as published only after its repair
+  // re-ask produced nothing better, never before.
+  return { candidates, refusals, attempts, fallbacks: candidates.length === 0 ? certifiedFallbacks : [], ...(candidates[0] ? { chosen: candidates[0] } : {}) };
 }

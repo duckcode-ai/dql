@@ -1,0 +1,23 @@
+{
+  "key": "f0901035ba7fdd5736a4b273366f2f20",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Building on the top beverage customers view, break down beverage (drink) revenue by product and by customer type to identify what is driving the high beverage revenue.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\"}],\"groupBy\":[{\"ref\":\"entity:products.product\",\"role\":\"key\"},{\"ref\":\"dimension:customers.customer_type\",\"role\":\"categorical\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"ordering\":{\"ref\":\"metric:order_item.drink_revenue\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:order_item.drink_revenue\":\"q:beverage revenue\",\"entity:products.product\":\"q:by product\",\"dimension:products.product_name\":\"q:by product\",\"dimension:customers.customer_type\":\"q:by customer type\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-06T03:07:56.493Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "f0901035ba7fdd5736a4b273366f2f20772b4040239a784599dbe1ade2062439",
+    "postCanonicalHash": "f0901035ba7fdd5736a4b273366f2f20772b4040239a784599dbe1ade2062439",
+    "appliedRuleClasses": []
+  }
+}

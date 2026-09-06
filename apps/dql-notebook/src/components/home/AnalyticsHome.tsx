@@ -11,6 +11,7 @@ import type { Cell } from '../../store/types';
 import { initialDomainScope, persistDomainScope, type DomainScope } from './domain-scope';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { focusInsertedNotebookCell } from '../../utils/notebook-cell-focus';
+import { askLocationHref, askThreadIdFromLocation } from './ask-location';
 import {
   correctionProvenanceForDraft,
   useOpenAnswerInNotebook,
@@ -311,6 +312,7 @@ export async function hydrateInitialAskConversationList(input: {
   getDeletedThreadIds: () => ReadonlySet<string>;
   getConversations: () => Conversation[];
   getActiveId: () => string;
+  getTabHadBinding?: () => boolean;
   getMutationEpochByConversationId: () => ReadonlyMap<string, number>;
   getCachedProjectIdentity: () => string | undefined;
   createConversationId?: () => string;
@@ -333,6 +335,8 @@ export async function hydrateInitialAskConversationList(input: {
       local: input.getConversations(),
       threads: visibleAskThreads,
       activeId: input.getActiveId(),
+      activeThreadId: input.getConversations().find((conversation) => conversation.id === input.getActiveId())?.threadId,
+      tabHadBinding: input.getTabHadBinding?.() ?? false,
       deletedThreadIds,
       cachedProjectIdentity: input.getCachedProjectIdentity(),
       serverProjectIdentity: projectIdentity,
@@ -354,6 +358,10 @@ export function reconcileAskConversationCache(input: {
   local: Conversation[];
   threads: AgentConversationThread[];
   activeId: string;
+  /** The server thread the active chat had, so a rewritten conversation id still resolves. */
+  activeThreadId?: string;
+  /** This tab had a chat of its own (URL thread or per-tab pointer): on a miss it gets a new empty chat, never the newest one. */
+  tabHadBinding?: boolean;
   deletedThreadIds?: ReadonlySet<string>;
   cachedProjectIdentity?: string;
   serverProjectIdentity?: string;
@@ -383,9 +391,12 @@ export function reconcileAskConversationCache(input: {
     authoritativeConversations,
     postRequestAskConversationCreations(input),
   );
+  const byThread = input.activeThreadId ? conversations.find((conversation) => conversation.threadId === input.activeThreadId)?.id : undefined;
   const activeId = conversations.some((conversation) => conversation.id === input.activeId)
     ? input.activeId
-    : conversations[0]?.id ?? (input.createConversationId ?? makeConversationId)();
+    : byThread
+      ?? (input.tabHadBinding ? undefined : conversations[0]?.id)
+      ?? (input.createConversationId ?? makeConversationId)();
   return {
     conversations,
     activeId,
@@ -507,7 +518,8 @@ function clearAskConversationBrowserCache(): void {
   try {
     window.localStorage.removeItem(STORAGE_KEY);
     window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
-    try { window.sessionStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY); } catch { /* per-tab memory unavailable */ }
+    // The per-tab pointer is this tab's identity, not shared cache; the
+    // reconciliation that ordered the reset has already chosen this tab's chat.
     window.localStorage.removeItem(DELETED_THREAD_STORAGE_KEY);
     window.localStorage.removeItem(PROJECT_IDENTITY_STORAGE_KEY);
   } catch {
@@ -585,19 +597,34 @@ function loadConversations(): Conversation[] {
  * per tab), then the browser-wide last selection as a fallback for a new
  * tab. Two tabs never overwrite each other's place.
  */
-export function resolveActiveConversationId(stored: { tab?: string | null; shared?: string | null }, known: ReadonlySet<string>): string | undefined {
+export function resolveActiveConversationId(
+  stored: { url?: string | null; tab?: string | null; shared?: string | null },
+  known: ReadonlySet<string>,
+  byThread: ReadonlyMap<string, string> = new Map(),
+): string | undefined {
+  const fromUrl = stored.url ? byThread.get(stored.url) : undefined;
+  if (fromUrl && known.has(fromUrl)) return fromUrl;
   if (stored.tab && known.has(stored.tab)) return stored.tab;
   if (stored.shared && known.has(stored.shared)) return stored.shared;
   return undefined;
 }
 
-function loadActiveConversationId(known: ReadonlySet<string>): string | undefined {
-  if (typeof window === 'undefined') return undefined;
+/** What this tab already knew about its chat before the server list arrived. */
+function readTabBinding(): { url?: string; tab: string | null } {
+  if (typeof window === 'undefined') return { tab: null };
   let tab: string | null = null;
-  let shared: string | null = null;
   try { tab = window.sessionStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY); } catch { /* per-tab memory unavailable */ }
+  return { url: askThreadIdFromLocation(window.location), tab };
+}
+
+function loadActiveConversationId(conversations: Conversation[]): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const { url, tab } = readTabBinding();
+  let shared: string | null = null;
   try { shared = window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY); } catch { /* best-effort */ }
-  return resolveActiveConversationId({ tab, shared }, known);
+  const known = new Set(conversations.map((conversation) => conversation.id));
+  const byThread = new Map(conversations.flatMap((conversation) => conversation.threadId ? [[conversation.threadId, conversation.id] as const] : []));
+  return resolveActiveConversationId({ url, tab, shared }, known, byThread);
 }
 
 // Strip fields that only matter during a LIVE run before writing to disk. Event
@@ -757,10 +784,13 @@ export function AnalyticsHome() {
   // Keep the selected thread across a page remount/reload. The panel's pending-run
   // handoff uses this server thread id to reconnect rather than asking again.
   const [activeId, setActiveId] = useState<string>(() => {
-    const stored = loadActiveConversationId(new Set(conversations.map((conversation) => conversation.id)));
+    const stored = loadActiveConversationId(conversations);
     return stored ?? makeConversationId();
   });
   const activeIdRef = React.useRef(activeId);
+  // Whether this tab arrived with a chat of its own (URL thread or per-tab
+  // pointer). A tab that did never falls back to the newest chat.
+  const tabHadBindingRef = React.useRef<boolean>((() => { const binding = readTabBinding(); return Boolean(binding.url || binding.tab); })());
   // Switching conversations remounts the panel. A running panel now persists its
   // run id and reconnects on remount, but keeping the selected conversation stable
   // still avoids an unnecessary context switch while an answer is in progress.
@@ -771,6 +801,14 @@ export function AnalyticsHome() {
     try { window.sessionStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeId); } catch { /* per-tab memory unavailable */ }
     try { window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeId); } catch { /* best-effort */ }
   }, [activeId]);
+  // The tab's URL names its chat once the chat has a server thread.
+  const activeConversationThreadId = conversations.find((conversation) => conversation.id === activeId)?.threadId;
+  useEffect(() => {
+    if (typeof window === 'undefined' || !/^\/(ask)?$/.test(window.location.pathname)) return;
+    const next = askLocationHref(activeConversationThreadId, window.location.hash);
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (next !== current) window.history.replaceState(window.history.state, '', next);
+  }, [activeId, activeConversationThreadId]);
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -804,6 +842,7 @@ export function AnalyticsHome() {
       getDeletedThreadIds: loadDeletedThreadIds,
       getConversations: () => conversationsRef.current,
       getActiveId: () => activeIdRef.current,
+      getTabHadBinding: () => tabHadBindingRef.current,
       getMutationEpochByConversationId: () => conversationMutationEpochByIdRef.current,
       getCachedProjectIdentity: loadAskConversationProjectIdentity,
     })
@@ -919,11 +958,13 @@ export function AnalyticsHome() {
   const newChat = useCallback(() => {
     if (!historyVerified || isRunning) return;
     const nextActiveId = makeConversationId();
+    tabHadBindingRef.current = true;
     activeIdRef.current = nextActiveId;
     setActiveId(nextActiveId);
   }, [historyVerified, isRunning]);
   const selectConversation = useCallback((id: string) => {
     if (!historyVerified || isRunning) return;
+    tabHadBindingRef.current = true;
     activeIdRef.current = id;
     setActiveId(id);
   }, [historyVerified, isRunning]);

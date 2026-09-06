@@ -76,6 +76,35 @@ metrics:
     expect(metricNames).not.toContain('yaml_only_metric');
   });
 
+  it('a semantic dimension with no description inherits the dbt column description', () => {
+    writeManifest({
+      nodes: {
+        'model.demo.customers': {
+          name: 'customers', resource_type: 'model',
+          columns: { customer_type: { name: 'customer_type', description: "Options are 'new' or 'returning'." }, signed_up_at: { name: 'signed_up_at', description: 'When the customer signed up.' } },
+        },
+      },
+      semantic_models: {
+        'semantic_model.demo.customers': {
+          name: 'customers', model: "ref('customers')", defaults: { agg_time_dimension: 'signed_up_at' },
+          entities: [{ name: 'customer_id', type: 'primary' }],
+          dimensions: [
+            { name: 'customer_type', type: 'categorical' },
+            { name: 'described', type: 'categorical', description: 'Declared on the semantic model.', expr: 'customer_type' },
+            { name: 'signed_up_at', type: 'time', type_params: { time_granularity: 'day' } },
+          ],
+          measures: [{ name: 'customer_count', agg: 'count' }],
+        },
+      },
+      metrics: { 'metric.demo.total_customers': { name: 'total_customers', type: 'simple', type_params: { measure: 'customer_count' } } },
+    });
+    const layer = new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+    const cube = layer.listCubes().find((c) => c.name === 'customers')!;
+    expect(cube.dimensions.find((d) => d.name === 'customer_type')?.description).toBe("Options are 'new' or 'returning'.");
+    expect(cube.dimensions.find((d) => d.name === 'described')?.description).toBe('Declared on the semantic model.');
+    expect(cube.timeDimensions.find((d) => d.name === 'signed_up_at')?.description).toBe('When the customer signed up.');
+  });
+
   it('reads semantic_models and metrics from manifest.json', () => {
     writeManifest({
       semantic_models: {

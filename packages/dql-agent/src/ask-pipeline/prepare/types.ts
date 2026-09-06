@@ -105,6 +105,8 @@ export interface PrepareDeps {
   blockSql?: (blockRef: string) => string | undefined;
   /** Host-side policy check on a relation or column ref; a denial is terminal. */
   policyDenies?: (refs: string[]) => string | undefined;
+  /** The semantic engine that will compile this run's semantic candidate, when the host knows it beforehand. */
+  engine?: 'native' | 'metricflow-cli' | 'dbt-cloud';
 }
 
 export interface PrepareInput {
@@ -120,6 +122,8 @@ export interface PrepareResult {
   candidates: PreparedCandidate[];
   refusals: PreparedRefusal[];
   chosen?: PreparedCandidate;
+  /** Certified blocks refused only for label-only identity: served as published when a repair produced nothing better. */
+  fallbacks: PreparedCandidate[];
   /** Every tier that was tried, in order, and how it ended. */
   attempts: Array<{ tier: PrepareTier; outcome: 'prepared' | 'refused' | 'skipped'; detail?: string }>;
 }

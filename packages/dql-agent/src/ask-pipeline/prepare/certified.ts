@@ -19,6 +19,10 @@ export interface EntailmentVerdict {
   ok: boolean;
   missing: string[];
   caveats: string[];
+  /** Set when the only identity the block offers is a label; the block is a fallback, not the answer. */
+  identityNote?: string;
+  /** The output column a time window is applied over, when the block has one. */
+  windowColumn?: string;
 }
 
 const norm = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -64,13 +68,25 @@ export function entails(block: VocabularyEntry, intent: AnalyticalIntentV1, voca
   const grouping = contract.groupBy.length ? contract.groupBy : contract.outputs.filter((output) => !contract.measures.some((m) => norm(m.output) === norm(output)));
   const keyLike = (column: string) => /(^|_)(id|key|uuid|code|number)$/i.test(column);
   const labelLike = (column: string) => /(^|_)(name|label|title)(_|$)/i.test(column);
+  let identityNote: string | undefined;
   if (grouping.length > 0 && grouping.every(labelLike) && !grouping.some(keyLike)) {
     const note = `the block groups by ${grouping.join(', ')} (a label) with no identity key, so two entities sharing a name would merge`;
-    // A block the intent NAMES is the artifact the team certified for exactly
-    // this question; the pipeline records the caveat rather than overriding
-    // governance. A block matched through its measures must prove identity.
-    if (namesBlock) caveats.push(`${note}; the certified block is served as published`);
-    else missing.push(`${note}; recertify it with the key column, or ask for the metric by entity`);
+    // Identity is never certified away: even a block the intent names is
+    // evidence, not the answer, until it is recertified with the key. The
+    // refusal is repairable, so the interpreter re-expresses the analysis
+    // with the block's measures by entity and the keyed governed query answers.
+    identityNote = `${note}; the answer is composed by entity key instead, and the block can be recertified with the key column`;
+    missing.push(identityNote);
+  }
+  // A time window is applied over the block's output when an output column IS
+  // the window's time column; a block with no such column cannot bound the
+  // period, and a published SQL never has a window silently assumed.
+  let windowColumn: string | undefined;
+  if (intent.time?.window) {
+    const axis = intent.time.ref ? vocabulary.get(intent.time.ref) : undefined;
+    const wanted = [axis?.physical?.column, axis?.name, intent.time.ref ? leaf(intent.time.ref) : undefined].filter((name): name is string => Boolean(name)).map(norm);
+    windowColumn = contract.outputs.find((output) => wanted.includes(norm(output)));
+    if (!windowColumn) missing.push(`the block has no output for the time window ${intent.time.window.start}..${intent.time.window.end} (${wanted.join('/')}), so it cannot bound the period; the answer is composed from its measures instead`);
   }
   // Every grouping and display column must be an output.
   for (const group of intent.groupBy) {
@@ -115,7 +131,7 @@ export function entails(block: VocabularyEntry, intent: AnalyticalIntentV1, voca
     caveats.push(`the block returns at most ${contract.limit} rows`);
   }
   if (!contract.structural) caveats.push('the block SQL could not be read structurally; only its declarations were checked');
-  return { ok: missing.length === 0, missing, caveats };
+  return { ok: missing.length === 0, missing, caveats, ...(identityNote ? { identityNote } : {}), ...(windowColumn ? { windowColumn } : {}) };
 }
 
 function scopeMatches(op: string, values: string[], intentOp: string, intentValues: Array<string | number | boolean>): boolean {
@@ -132,17 +148,31 @@ function scopeMatches(op: string, values: string[], intentOp: string, intentValu
   return op === intentOp && values.join('|').toLowerCase() === intentValues.map(String).join('|').toLowerCase();
 }
 
-export function prepareCertified(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, deps: PrepareDeps): { candidates: PreparedCandidate[]; refusals: PreparedRefusal[] } {
+export interface CertifiedPreparation {
+  candidates: PreparedCandidate[];
+  refusals: PreparedRefusal[];
+  /**
+   * Blocks refused ONLY for label-only identity. They are not the answer
+   * while a keyed governed answer can be composed; when no other tier can
+   * prepare, the block is served as published with its identity caveat
+   * rather than a dead end.
+   */
+  fallbacks: PreparedCandidate[];
+}
+
+export function prepareCertified(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, deps: PrepareDeps): CertifiedPreparation {
   const blocks = vocabulary.entries.filter((entry) => entry.kind === 'block' && entry.certified);
-  if (blocks.length === 0) return { candidates: [], refusals: [{ tier: 'certified', code: 'no_certified_block', message: 'the project has no certified block', repairable: false }] };
+  if (blocks.length === 0) return { candidates: [], refusals: [{ tier: 'certified', code: 'no_certified_block', message: 'the project has no certified block', repairable: false }], fallbacks: [] };
   const candidates: PreparedCandidate[] = [];
   const refusals: PreparedRefusal[] = [];
+  const fallbacks: PreparedCandidate[] = [];
   const named = intent.measures.map((measure) => measure.ref).filter((ref) => ref.startsWith('block:'));
   const considered = named.length ? blocks.filter((block) => named.includes(block.ref)) : blocks;
   for (const block of considered) {
     const verdict = entails(block, intent, vocabulary);
     const source = deps.blockSql?.(block.ref) ?? block.sql;
-    if (verdict.ok && source) {
+    const identityOnly = !verdict.ok && verdict.identityNote !== undefined && verdict.missing.length === 1;
+    if ((verdict.ok || identityOnly) && source) {
       // Filters the block declares it accepts are applied OVER its output, so
       // the certified logic runs unchanged and the filter is provably present.
       const params: unknown[] = [];
@@ -164,11 +194,23 @@ export function prepareCertified(intent: AnalyticalIntentV1, vocabulary: Vocabul
         else if (predicate.op === 'is_false') applied.push(`block.${quoted} = FALSE`);
         else { params.push(value); applied.push(`block.${quoted} ${({ neq: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' } as Record<string, string>)[predicate.op] ?? '='} ?`); }
       }
+      if (intent.time?.window && verdict.windowColumn) {
+        const quoted = `"${verdict.windowColumn.replace(/"/g, '""')}"`;
+        params.push(intent.time.window.start, intent.time.window.end);
+        applied.push(`block.${quoted} >= ?`, `block.${quoted} < ?`);
+      }
       const sql = applied.length ? `SELECT * FROM (\n${source.trim().replace(/;\s*$/, '')}\n) AS block\nWHERE ${applied.join(' AND ')}` : source;
-      candidates.push({
+      const candidate: PreparedCandidate = {
         tier: 'certified', trust: 'certified', sql, ...(params.length ? { params } : {}), sourceRef: block.ref,
         proof: [`${block.ref} entails the intent: ${block.contract?.measures.map((m) => m.output).join(', ') || 'declared outputs'}${block.contract?.staticScope.length ? ` with scope ${block.contract.staticScope.map((s) => `${s.column} ${s.op}`).join(', ')}` : ''}${applied.length ? `; ${applied.length} declared filter${applied.length > 1 ? 's' : ''} applied over its output` : ''}`, ...verdict.caveats],
-      });
+      };
+      if (identityOnly) {
+        candidate.proof.push(`${verdict.identityNote!.split(';')[0]}; the certified block is served as published because no keyed governed answer could be composed`);
+        fallbacks.push(candidate);
+        refusals.push({ tier: 'certified', code: 'block_not_applicable', message: `${block.ref}: ${verdict.identityNote}`, repairable: named.includes(block.ref), detail: verdict });
+      } else {
+        candidates.push(candidate);
+      }
     } else if (named.includes(block.ref) || verdict.missing.length <= 2) {
       // A block the model named but which does not entail the intent is a
       // repairable refusal: the resolver can re-express the analysis with the
@@ -179,5 +221,5 @@ export function prepareCertified(intent: AnalyticalIntentV1, vocabulary: Vocabul
   if (candidates.length === 0 && refusals.length === 0) {
     refusals.push({ tier: 'certified', code: 'block_not_applicable', message: `no certified block entails the intent (${blocks.map((block) => block.ref).join(', ')})`, repairable: false });
   }
-  return { candidates, refusals };
+  return { candidates, refusals, fallbacks };
 }

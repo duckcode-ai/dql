@@ -65,6 +65,8 @@ export interface ConversationThread {
 export interface ConversationTurnResult {
   columns?: string[];
   rowsSample?: unknown[][];
+  /** Units per column (the executed result's contract), capped with the columns. */
+  columnsMeta?: Array<{ name: string; kind: string; unit?: string; decimals?: number; ref?: string; grain?: string }>;
   dimensionValues?: Record<string, string[]>;
   /**
    * Content-free identity of the canonical executed result.  Unlike a member
@@ -589,6 +591,7 @@ export class ConversationStore {
 function capTurnResult(result: ConversationTurnResult | undefined): ConversationTurnResult | undefined {
   if (!result) return undefined;
   const columns = result.columns?.slice(0, MAX_COLUMNS);
+  const columnsMeta = result.columnsMeta?.filter((meta) => meta && typeof meta.name === 'string' && typeof meta.kind === 'string').slice(0, MAX_COLUMNS);
   const rowsSample = result.rowsSample?.slice(0, MAX_SAMPLE_ROWS)
     .map((row) => Array.isArray(row) ? row.slice(0, MAX_COLUMNS) : row);
   const dimensionValues = result.dimensionValues
@@ -635,6 +638,7 @@ function capTurnResult(result: ConversationTurnResult | undefined): Conversation
   return {
     columns,
     rowsSample,
+    ...(columnsMeta?.length ? { columnsMeta } : {}),
     dimensionValues,
     ...(memberSets?.length ? { memberSets } : {}),
     ...(resultFingerprint ? { resultFingerprint } : {}),

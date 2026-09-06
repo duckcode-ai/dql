@@ -71,6 +71,8 @@ export function parseMetricFilter(filter: unknown): Array<{ column: string; cond
 export function buildVocabularySource(input: VocabularySourceInput): VocabularySource {
   const source: VocabularySource = { metrics: [], measures: [], dimensions: [], entities: [], models: [], blocks: [], relations: [], terms: [] };
   const relationColumns = new Map<string, Set<string>>();
+  // dbt column descriptions: the fallback definition for a semantic dimension that declares none.
+  const columnDescriptions = new Map<string, string>();
   const relationSeen = new Set<string>();
 
   const addRelation = (relation: { schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }> }) => {
@@ -78,6 +80,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     if (relationSeen.has(key)) return;
     relationSeen.add(key);
     relationColumns.set(key, new Set(relation.columns.map((column) => column.name)));
+    for (const column of relation.columns) if (column.description) columnDescriptions.set(`${key}.${column.name}`, column.description);
     source.relations!.push(relation);
   };
 
@@ -143,35 +146,60 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
           : base;
         physical = { relation, expr, aggregate };
       }
-      // A derived or ratio metric over simple metrics of one model binds as an expression of their aggregates.
+      // A derived or ratio metric binds physically ONLY when plain SQL can
+      // express it: every input a simple metric with no offset, window,
+      // cumulative grain or input filter, and no two inputs the same metric
+      // under different aliases (the prior-period trick). Anything with a
+      // time feature is the semantic engine's alone; the relational tier
+      // must refuse it rather than approximate it.
+      let derived: { expr: string; inputs: Array<{ alias: string; ref: string }> } | undefined = undefined;
+      let engineOnly: string | undefined;
       if (!physical && (metric.metricType === 'derived' || metric.metricType === 'ratio')) {
-        const params = metric.typeParams as { expr?: string; metrics?: Array<{ name?: string; alias?: string }>; numerator?: { name?: string } | string; denominator?: { name?: string } | string } | undefined;
-        const numerator = typeof params?.numerator === 'string' ? params.numerator : params?.numerator?.name;
-        const denominator = typeof params?.denominator === 'string' ? params.denominator : params?.denominator?.name;
-        const expression = metric.metricType === 'ratio' && numerator && denominator ? `${numerator} / NULLIF(${denominator}, 0)` : params?.expr;
-        const inputs = metric.metricType === 'ratio'
-          ? [numerator, denominator].filter((name): name is string => Boolean(name)).map((name) => ({ name, alias: name }))
-          : (params?.metrics ?? []).map((item) => ({ name: item.name ?? '', alias: item.alias ?? item.name ?? '' })).filter((item) => item.name);
-        const bound = inputs.map((item) => {
-          const inputMetric = layer.listMetrics().find((candidate) => candidate.name === item.name);
-          const inputModel = inputMetric?.cube ?? inputMetric?.semanticModelIds?.[0];
-          const inputMeasureName = (inputMetric?.typeParams?.measure as { name?: string } | undefined)?.name ?? item.name;
-          const inputMeasure = inputModel ? measureByKey.get(`${inputModel}:${inputMeasureName}`) : undefined;
-          const agg = inputMeasure?.agg?.toLowerCase();
-          if (!inputMetric || !inputModel || !inputMeasure || !agg || !AGGREGATES.has(agg) || (inputMetric.metricType && inputMetric.metricType !== 'simple')) return undefined;
-          const inputRelation = relationOfCube.get(inputModel);
-          if (!inputRelation) return undefined;
-          const inner = qualifyExpression(inputMeasure.expr ?? inputMeasure.name, inputRelation, cubeColumns(inputModel));
-          return { alias: item.alias, sql: agg === 'count_distinct' ? `COUNT(DISTINCT ${inner})` : `${agg.toUpperCase()}(${inner})`, relation: inputRelation };
-        });
-        if (expression && bound.length && bound.every(Boolean) && new Set(bound.map((item) => item!.relation)).size === 1) {
-          let expr = expression;
-          for (const item of bound) expr = expr.replace(new RegExp(`\\b${item!.alias}\\b`, 'g'), `(${item!.sql})`);
-          physical = { relation: bound[0]!.relation, expr, aggregate: 'derived' };
+        type InputSpec = { name?: string; alias?: string; offset_window?: unknown; offset_to_grain?: unknown; filter?: unknown };
+        const params = metric.typeParams as { expr?: string; metrics?: InputSpec[]; numerator?: InputSpec | string; denominator?: InputSpec | string; window?: unknown; grain_to_date?: unknown; cumulative_type_params?: unknown } | undefined;
+        const spec = (value: InputSpec | string | undefined): InputSpec | undefined => typeof value === 'string' ? { name: value } : value;
+        const numerator = spec(params?.numerator);
+        const denominator = spec(params?.denominator);
+        const expression = metric.metricType === 'ratio' && numerator?.name && denominator?.name ? `${numerator.name} / ${denominator.name}` : params?.expr;
+        const inputs: InputSpec[] = metric.metricType === 'ratio' ? [numerator, denominator].filter((item): item is InputSpec => Boolean(item?.name)) : (params?.metrics ?? []).filter((item) => item.name);
+        const timeFeature = inputs.find((item) => item.offset_window || item.offset_to_grain);
+        const filtered = inputs.find((item) => item.filter);
+        const names = inputs.map((item) => item.name);
+        if (timeFeature) engineOnly = `a prior-period offset on ${timeFeature.name}`;
+        else if (params?.window || params?.grain_to_date || params?.cumulative_type_params) engineOnly = 'a cumulative window';
+        else if (filtered) engineOnly = `an input-level filter on ${filtered.name}`;
+        else if (new Set(names).size !== names.length) engineOnly = 'the same input metric under several aliases';
+        if (!engineOnly) {
+          const bound = inputs.map((item) => {
+            const inputMetric = layer.listMetrics().find((candidate) => candidate.name === item.name);
+            const inputModel = inputMetric?.cube ?? inputMetric?.semanticModelIds?.[0];
+            const inputMeasureName = (inputMetric?.typeParams?.measure as { name?: string } | undefined)?.name ?? item.name;
+            const inputMeasure = inputModel ? measureByKey.get(`${inputModel}:${inputMeasureName}`) : undefined;
+            const agg = inputMeasure?.agg?.toLowerCase();
+            if (!inputMetric || !inputModel || !inputMeasure || !agg || !AGGREGATES.has(agg) || (inputMetric.metricType && inputMetric.metricType !== 'simple')) return undefined;
+            const inputRelation = relationOfCube.get(inputModel);
+            if (!inputRelation) return undefined;
+            const inner = qualifyExpression(inputMeasure.expr ?? inputMeasure.name, inputRelation, cubeColumns(inputModel));
+            return { alias: item.alias ?? item.name!, ref: `metric:${inputModel}.${inputMetric.name}`, sql: agg === 'count_distinct' ? `COUNT(DISTINCT ${inner})` : `${agg.toUpperCase()}(${inner})`, relation: inputRelation };
+          });
+          if (expression && bound.length && bound.every(Boolean)) {
+            const relations = new Set(bound.map((item) => item!.relation));
+            if (relations.size === 1) {
+              // One relation: the formula over the aggregates is one SELECT.
+              let expr = metric.metricType === 'ratio' ? `${numerator!.name} / NULLIF(${denominator!.name}, 0)` : expression;
+              for (const item of bound) expr = expr.replace(new RegExp(`\\b${item!.alias}\\b`, 'g'), `(${item!.sql})`);
+              physical = { relation: bound[0]!.relation, expr, aggregate: 'derived' };
+            } else {
+              // Several relations: each input is aggregated on its own
+              // relation and the formula is evaluated afterwards.
+              derived = { expr: expression, inputs: bound.map((item) => ({ alias: item!.alias, ref: item!.ref })) };
+            }
+          }
         }
       }
+      if (!physical && !derived && !engineOnly && metric.metricType && metric.metricType !== 'simple') engineOnly = `a ${metric.metricType} metric the relational tier cannot compose`;
       const scopeNote = filters.length ? ` Only where ${filters.map((filter) => `${filter.column} ${filter.condition}`).join(' and ')}.` : '';
-      const kindNote = !simple ? ` (${metric.metricType} metric: semantic engine only)` : '';
+      const kindNote = engineOnly ? ` (${metric.metricType} metric: semantic engine only, ${engineOnly})` : !simple && !physical && !derived ? ` (${metric.metricType} metric: semantic engine only)` : '';
       const timeRole = timeRoleOf(model, measure, metric);
       const displayFormat = displayFormatOf(metric.name);
       source.metrics!.push({
@@ -179,6 +207,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
         ...(aggregate ? { aggregation: aggregate } : {}), ...(metric.metricType ? { type: metric.metricType } : {}), expr: metric.sql, sourceId: metric.name,
         ...(metric.status ? { status: metric.status } : {}), ...(physical ? { physical } : {}),
         ...(timeRole ? { aggTimeDimension: timeRole } : {}), ...(displayFormat ? { displayFormat } : {}),
+        ...(derived ? { derived } : {}), ...(engineOnly ? { engineOnly } : {}),
       });
     }
     const metricNames = new Set(layer.listMetrics().map((metric) => metric.name));
@@ -200,9 +229,10 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       if (!dimension.cube) continue;
       timeNames.add(`${dimension.cube}:${dimension.name}`);
       const relation = relationOfCube.get(dimension.cube);
-      const column = isIdentifier(dimension.expr ?? dimension.sql) ? (dimension.expr ?? dimension.sql) : undefined;
+      const timeExpression = dimension.expr ?? dimension.sql;
+      const column = timeExpression === undefined || timeExpression === '' ? dimension.name : isIdentifier(timeExpression) ? timeExpression : undefined;
       source.dimensions!.push({
-        name: dimension.name, model: dimension.cube, label: dimension.label, description: dimension.description, dataType: 'timestamp', isTime: true,
+        name: dimension.name, model: dimension.cube, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: 'timestamp', isTime: true,
         ...(dimension.granularities?.length ? { timeGrains: dimension.granularities } : {}), sourceId: `${dimension.cube}.${dimension.name}`,
         ...(reach.get(dimension.cube)?.length ? { reachableFrom: reach.get(dimension.cube) } : {}),
         ...(relation && column ? { physical: { relation, column } } : {}),
@@ -211,9 +241,11 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     for (const dimension of layer.listDimensions(undefined, { includeVariants: true })) {
       if (!dimension.cube || timeNames.has(`${dimension.cube}:${dimension.name}`)) continue;
       const relation = relationOfCube.get(dimension.cube);
-      const column = isIdentifier(dimension.expr ?? dimension.sql) ? (dimension.expr ?? dimension.sql) : undefined;
+      // A dimension with no expression IS its column; dbt names it once.
+      const expression = dimension.expr ?? dimension.sql;
+      const column = expression === undefined || expression === '' ? dimension.name : isIdentifier(expression) ? expression : undefined;
       source.dimensions!.push({
-        name: dimension.name, model: dimension.cube, label: dimension.label, description: dimension.description, dataType: dimension.type,
+        name: dimension.name, model: dimension.cube, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: dimension.type,
         ...(dimension.isTimeDimension ? { isTime: true } : {}), sourceId: `${dimension.cube}.${dimension.name}`,
         ...(reach.get(dimension.cube)?.length ? { reachableFrom: reach.get(dimension.cube) } : {}),
         ...(relation && column ? { physical: { relation, column } } : {}),

@@ -176,8 +176,19 @@ describe.each(FIXTURES)('Ask battery over %s', (fixture) => {
       const pipeline = run.askAgentRuntimeMode === 'pipeline_v3';
       const interprets = persona === 'cooperative' || persona === 'wrong_ids_then_corrects';
       if (!pipeline || interprets) {
-        expect(run.route, context()).toBe('certified_answer');
-        expect(run.trustState, context()).toBe('certified');
+        // A certified block that groups only by a label (product_name) is not
+        // served for a ranking: two products sharing a name would merge. The
+        // pipeline composes the keyed governed answer and keeps the block as
+        // refused evidence with its identity reason (owner decision, AGT-064).
+        const labelOnlyBlockRefused = pipeline && (run.diagnosticReceiptV9?.refusals ?? [])
+          .some((refusal: { tier?: string; message?: string }) => refusal.tier === 'certified' && /identity key/.test(refusal.message ?? ''));
+        if (labelOnlyBlockRefused) {
+          expect(run.route, context()).toBe('generated_answer');
+          expect(run.trustState, context()).toBe('governed');
+        } else {
+          expect(run.route, context()).toBe('certified_answer');
+          expect(run.trustState, context()).toBe('certified');
+        }
       }
     }
     if (question.expect === 'not_broadened' && (run.status === 'completed' || run.status === 'needs_review') && run.route !== 'conversation') {

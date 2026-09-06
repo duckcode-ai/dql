@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ClaudeCodeCliProvider,
   CodexCliProvider,
+  ProviderTimeoutError,
   parseClaudeResult,
   parseCodexFinalMessage,
   resolveSubscriptionCliTimeoutMs,
@@ -15,6 +16,17 @@ describe('subscription CLI timeout', () => {
     expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: '1000' })).toBe(5_000);
     expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: '900000' })).toBe(300_000);
     expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: 'invalid' })).toBe(60_000);
+  });
+});
+
+describe('a CLI timeout is a typed provider error', () => {
+  it('carries the retry code, a reader sentence without the variable, and the hint as detail', () => {
+    const error = new ProviderTimeoutError(60_000);
+    expect(error.code).toBe('provider_timeout');
+    expect(error.message).toBe('The AI model did not respond within 60 seconds.');
+    expect(error.message).not.toContain('DQL_SUBSCRIPTION_CLI_TIMEOUT_MS');
+    expect(error.detail).toContain('DQL_SUBSCRIPTION_CLI_TIMEOUT_MS');
+    expect(error).toBeInstanceOf(Error);
   });
 });
 

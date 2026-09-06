@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { themes } from '../../themes/notebook-theme';
 import type { ThemeMode } from '../../themes/notebook-theme';
 import { TableOutput } from './TableOutput';
-import type { QueryResult, CellChartConfig } from '../../store/types';
+import type { QueryResult, CellChartConfig, ResultColumnMeta } from '../../store/types';
 import { formatChartValue, formatDisplayValue } from '../../utils/value-format';
 
 interface ChartOutputProps {
@@ -148,8 +148,13 @@ function getPalette(name?: string): string[] {
   return COLOR_PALETTES[name ?? 'default'] ?? COLOR_PALETTES.default;
 }
 
-function abbreviate(n: number, column = 'value', format?: CellChartConfig['format']): string {
-  return formatChartValue(column, n, format);
+function abbreviate(n: number, column = 'value', format?: CellChartConfig['format'], meta?: ResultColumnMeta): string {
+  return formatChartValue(column, n, format, meta);
+}
+
+/** The units contract for one column, when the result carries one. */
+function metaFor(result: QueryResult | undefined, column: string | undefined): ResultColumnMeta | undefined {
+  return column ? result?.columnsMeta?.find((meta) => meta.name === column) : undefined;
 }
 
 function formatDateLabel(val: string, maxLen = 8, monthBucket = false): string {
@@ -235,7 +240,7 @@ function BarChart({ result, themeMode, chartConfig, availableHeight, availableWi
               </text>
               <rect x={LABEL_W} y={y} width={barW} height={BAR_H} rx={3} fill={color} opacity={isHovered ? 1 : 0.88} style={{ transition: 'opacity 0.15s' }} />
               <text x={LABEL_W + barW + 6} y={y + BAR_H / 2 + 4} textAnchor="start" fontSize={11} fontFamily={t.fontMono} fill={t.textMuted}>
-                {abbreviate(item.value, valueCol, chartConfig?.format)}
+                {abbreviate(item.value, valueCol, chartConfig?.format, metaFor(result, valueCol))}
               </text>
             </g>
           );
@@ -303,7 +308,7 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
                       style={{ transition: 'opacity 0.15s' }} />
                     {hoveredIdx === key && (
                       <text x={LABEL_W + barW + 4} y={by + BAR_H / 2 + 3} fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>
-                        {abbreviate(val, col, chartConfig?.format)}
+                        {abbreviate(val, col, chartConfig?.format, metaFor(result, col))}
                       </text>
                     )}
                   </g>
@@ -371,7 +376,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
                       style={{ transition: 'opacity 0.15s' }} />
                     {hoveredIdx === key && w > 30 && (
                       <text x={x + w / 2} y={y + BAR_H / 2 + 4} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill="#fff" fontWeight={600}>
-                        {abbreviate(val, col, chartConfig?.format)}
+                        {abbreviate(val, col, chartConfig?.format, metaFor(result, col))}
                       </text>
                     )}
                   </g>
@@ -442,7 +447,7 @@ function LineChart({ result, themeMode, showArea, chartConfig, availableHeight, 
         {yTicks.map((tick, i) => (
           <g key={i}>
             <line x1={PAD_L} y1={tick.y} x2={PAD_L + chartW} y2={tick.y} stroke={t.tableBorder} strokeWidth={0.5} />
-            <text x={PAD_L - 6} y={tick.y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(tick.val, yCol, chartConfig?.format)}</text>
+            <text x={PAD_L - 6} y={tick.y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(tick.val, yCol, chartConfig?.format, metaFor(result, yCol))}</text>
           </g>
         ))}
         <path d={areaD} fill={lineColor} opacity={showArea ? 0.3 : 0.15} />
@@ -475,7 +480,7 @@ function LineChart({ result, themeMode, showArea, chartConfig, availableHeight, 
               {formatDateLabel(tooltip.label, 12)}
             </text>
             <text x={tooltip.x + 13} y={tooltip.y + 6} fontSize={11} fontFamily={t.fontMono} fill={t.textPrimary} fontWeight={600}>
-              {abbreviate(tooltip.value, yCol, chartConfig?.format)}
+              {abbreviate(tooltip.value, yCol, chartConfig?.format, metaFor(result, yCol))}
             </text>
           </g>
         )}
@@ -538,7 +543,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
           return (
             <g key={i}>
               <line x1={PAD_L} y1={y} x2={PAD_L + chartW} y2={y} stroke={t.tableBorder} strokeWidth={0.5} />
-              <text x={PAD_L - 6} y={y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val, yCol, chartConfig?.format)}</text>
+              <text x={PAD_L - 6} y={y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val, yCol, chartConfig?.format, metaFor(result, yCol))}</text>
             </g>
           );
         })}
@@ -547,7 +552,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
           const val = xMin + (xRange * i) / 5;
           const x = toSX(val);
           return (
-            <text key={i} x={x} y={PAD_T + chartH + 16} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val, xCol)}</text>
+            <text key={i} x={x} y={PAD_T + chartH + 16} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val, xCol, undefined, metaFor(result, xCol))}</text>
           );
         })}
         {/* Axes */}
@@ -570,7 +575,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
           <g>
             <rect x={toSX(data[hoveredIdx].x) + 8} y={toSY(data[hoveredIdx].y) - 24} width={100} height={28} rx={4} fill={t.cellBg} stroke={t.cellBorder} strokeWidth={1} />
             <text x={toSX(data[hoveredIdx].x) + 13} y={toSY(data[hoveredIdx].y) - 8} fontSize={10} fontFamily={t.fontMono} fill={t.textPrimary}>
-              ({abbreviate(data[hoveredIdx].x, xCol)}, {abbreviate(data[hoveredIdx].y, yCol, chartConfig?.format)})
+              ({abbreviate(data[hoveredIdx].x, xCol, undefined, metaFor(result, xCol))}, {abbreviate(data[hoveredIdx].y, yCol, chartConfig?.format, metaFor(result, yCol))})
             </text>
           </g>
         )}
@@ -629,7 +634,7 @@ function PieDonutChart({ result, themeMode, chartConfig, isDonut }: { result: Qu
         {isDonut && (
           <>
             <text x={CX} y={CY - 5} textAnchor="middle" fontSize={11} fontFamily={t.fontMono} fill={t.textSecondary}>
-              {hovered ? abbreviate(hovered.value, valueCol, chartConfig?.format) : abbreviate(total, valueCol, chartConfig?.format)}
+              {hovered ? abbreviate(hovered.value, valueCol, chartConfig?.format, metaFor(result, valueCol)) : abbreviate(total, valueCol, chartConfig?.format, metaFor(result, valueCol))}
             </text>
             <text x={CX} y={CY + 9} textAnchor="middle" fontSize={9} fontFamily={t.font} fill={t.textMuted}>
               {hovered ? `${hovered.pct.toFixed(1)}%` : 'total'}
@@ -710,7 +715,7 @@ function HeatmapChart({ result, themeMode }: { result: QueryResult; themeMode: T
                     {isH && (
                       <text x={LABEL_W + ci * CELL_W + CELL_W / 2} y={y + CELL_H / 2 + 4} textAnchor="middle"
                         fontSize={10} fontFamily={t.fontMono} fill="#fff" fontWeight={600}>
-                        {abbreviate(val, col)}
+                        {abbreviate(val, col, undefined, metaFor(result, col))}
                       </text>
                     )}
                   </g>
@@ -798,7 +803,7 @@ function HistogramChart({ result, themeMode, chartConfig }: { result: QueryResul
           const idx = bins.indexOf(bin);
           return (
             <text key={i} x={PAD_L + idx * barW + barW / 2} y={PAD_T + chartH + 16} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>
-              {abbreviate(bin.low, numCol, chartConfig?.format)}
+              {abbreviate(bin.low, numCol, chartConfig?.format, metaFor(result, numCol))}
             </text>
           );
         })}
@@ -853,7 +858,7 @@ function FunnelChart({ result, themeMode, chartConfig }: { result: QueryResult; 
                 {d.label}
               </text>
               <text x={CENTER} y={y + ROW_H / 2 + 13} textAnchor="middle" fontSize={9} fontFamily={t.fontMono} fill="rgba(255,255,255,0.7)">
-                {abbreviate(d.value, valueCol, chartConfig?.format)} ({(pct * 100).toFixed(0)}%)
+                {abbreviate(d.value, valueCol, chartConfig?.format, metaFor(result, valueCol))} ({(pct * 100).toFixed(0)}%)
               </text>
             </g>
           );
@@ -946,7 +951,7 @@ function SankeyChart({ result, themeMode, chartConfig }: { result: QueryResult; 
                 <g pointerEvents="none">
                   <rect x={midX - 72} y={midY - 18} width={144} height={36} rx={5} fill={t.cellBg} stroke={t.cellBorder} />
                   <text x={midX} y={midY - 3} textAnchor="middle" fontSize={9.5} fontFamily={t.font} fill={t.textSecondary}>{link.source} → {link.target}</text>
-                  <text x={midX} y={midY + 11} textAnchor="middle" fontSize={11} fontWeight={700} fontFamily={t.fontMono} fill={t.textPrimary}>{abbreviate(link.value, valueCol, chartConfig?.format)}</text>
+                  <text x={midX} y={midY + 11} textAnchor="middle" fontSize={11} fontWeight={700} fontFamily={t.fontMono} fill={t.textPrimary}>{abbreviate(link.value, valueCol, chartConfig?.format, metaFor(result, valueCol))}</text>
                 </g>
               ) : null}
             </g>
@@ -1019,7 +1024,7 @@ function WaterfallChart({ result, themeMode, chartConfig }: { result: QueryResul
           return (
             <g key={i}>
               <line x1={PAD_L} y1={y} x2={PAD_L + chartW} y2={y} stroke={t.tableBorder} strokeWidth={0.5} />
-              <text x={PAD_L - 6} y={y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val, valueCol, chartConfig?.format)}</text>
+              <text x={PAD_L - 6} y={y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val, valueCol, chartConfig?.format, metaFor(result, valueCol))}</text>
             </g>
           );
         })}
@@ -1043,7 +1048,7 @@ function WaterfallChart({ result, themeMode, chartConfig }: { result: QueryResul
                 fill={isPositive ? t.success : t.error} opacity={isH ? 1 : 0.8} style={{ transition: 'opacity 0.1s' }} />
               {isH && (
                 <text x={x + barW / 2} y={y1 - 4} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill={t.textPrimary}>
-                  {bar.value >= 0 ? '+' : ''}{abbreviate(bar.value, valueCol, chartConfig?.format)}
+                  {bar.value >= 0 ? '+' : ''}{abbreviate(bar.value, valueCol, chartConfig?.format, metaFor(result, valueCol))}
                 </text>
               )}
             </g>
@@ -1113,7 +1118,7 @@ function GaugeChart({ result, themeMode, chartConfig }: { result: QueryResult; t
         )}
         {/* Value text */}
         <text x={CX} y={CY - 4} textAnchor="middle" fontSize={28} fontFamily={t.fontMono} fill={color} fontWeight={700}>
-          {abbreviate(rawVal, yCol, chartConfig?.format)}
+          {abbreviate(rawVal, yCol, chartConfig?.format, metaFor(result, yCol))}
         </text>
         <text x={CX} y={CY + 16} textAnchor="middle" fontSize={11} fontFamily={t.font} fill={t.textMuted}>
           {label}
@@ -1128,12 +1133,12 @@ function GaugeChart({ result, themeMode, chartConfig }: { result: QueryResult; t
 // Format a KPI value honoring the tile's `format` option. Large numbers use
 // compact notation ($1.4M, 62K) so the hero figure never overflows a narrow
 // KPI tile.
-function formatKpiValue(column: string, raw: unknown, values: unknown[], format?: CellChartConfig['format']): string {
+function formatKpiValue(column: string, raw: unknown, values: unknown[], format?: CellChartConfig['format'], meta?: ResultColumnMeta): string {
   const num = Number(raw);
   if (raw === null || raw === undefined || (typeof raw !== 'number' && isNaN(num))) {
     return raw === null || raw === undefined ? '—' : String(raw);
   }
-  return formatDisplayValue(column, raw, values, { compact: Math.abs(num) >= 100_000, format });
+  return formatDisplayValue(column, raw, values, { compact: Math.abs(num) >= 100_000, format, ...(meta ? { meta } : {}) });
 }
 
 function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
@@ -1145,7 +1150,7 @@ function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; them
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y
     : result.columns.find((c) => isNumericValue(row[c])) ?? result.columns[0];
 
-  const displayVal = formatKpiValue(yCol, row[yCol], result.rows.map((item) => item[yCol]), chartConfig?.format);
+  const displayVal = formatKpiValue(yCol, row[yCol], result.rows.map((item) => item[yCol]), chartConfig?.format, metaFor(result, yCol));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', minHeight: 54, padding: '8px 4px', boxSizing: 'border-box', minWidth: 0 }}>

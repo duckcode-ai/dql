@@ -83,14 +83,22 @@ function predicateSql(dialect: SqlDialectLike, bound: BoundPredicate, params: un
 
 interface VisibleMeasure {
   alias: string;
-  kind: 'aggregate' | 'ratio';
-  /** The physical aggregate for `aggregate`; the parts for `ratio`. */
+  kind: 'aggregate' | 'ratio' | 'derived';
+  /** The physical aggregate for `aggregate`; the parts for `ratio`; the inputs and formula for `derived`. */
   physical?: PhysicalMeasure;
-  numerator?: PhysicalMeasure;
-  denominator?: PhysicalMeasure;
+  numerator?: RatioPart;
+  denominator?: RatioPart;
+  inputs?: Array<{ alias: string; measure: PhysicalMeasure }>;
+  expr?: string;
   /** Additive aggregates read 0 under `population: all`; anything else stays null. */
   zeroFill: boolean;
 }
+
+/** A governed derived formula: input aliases, numbers, + - * / and parentheses, nothing else. */
+const DERIVED_FORMULA = /^[\sA-Za-z0-9_+\-*/().]+$/;
+
+/** One side of a ratio: a plain aggregate, or a derived formula over island aggregates. */
+type RatioPart = { measure: PhysicalMeasure } | { inputs: Array<{ alias: string; measure: PhysicalMeasure }>; expr: string };
 
 const ADDITIVE = new Set(['sum', 'count', 'count_distinct']);
 
@@ -112,6 +120,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   const bindMeasure = (ref: string, alias: string, aggregation: string | undefined, scope: IntentPredicate[]): PhysicalMeasure | PreparedRefusal => {
     const entry = vocabulary.get(ref);
     const physical = physicalOf(entry);
+    if (!physical && entry?.engineOnly) return { tier: 'relational', code: 'not_relational', message: `${ref} needs the semantic engine: ${entry.engineOnly}; the relational tier will not approximate it`, repairable: false };
     if (!physical) return { tier: 'relational', code: 'not_relational', message: `${ref} has no physical binding`, repairable: false };
     // The vocabulary owns a metric's aggregate; an intent aggregation applies to raw columns only.
     const aggregate = entry?.kind === 'column' ? (aggregation ?? physical.aggregate) : (physical.aggregate ?? aggregation);
@@ -123,18 +132,46 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     measures.push(bound);
     return bound;
   };
+  // A ratio part or a derived measure whose vocabulary entry is itself a
+  // cross-relation formula binds every input as its own island aggregate.
+  const bindFormula = (ref: string, prefix: string, scope: IntentPredicate[]): { inputs: Array<{ alias: string; measure: PhysicalMeasure }>; expr: string } | PreparedRefusal => {
+    const entry = vocabulary.get(ref)!;
+    if (!DERIVED_FORMULA.test(entry.derived!.expr)) return { tier: 'relational', code: 'not_relational', message: `${ref} has a formula the relational tier cannot evaluate safely`, repairable: false };
+    if (scope.length) return { tier: 'relational', code: 'not_relational', message: `${ref} is a derived metric and cannot take a per-measure scope`, repairable: false };
+    const inputs: Array<{ alias: string; measure: PhysicalMeasure }> = [];
+    for (const input of entry.derived!.inputs) {
+      const bound = bindMeasure(input.ref, `${prefix}_${input.alias}`, undefined, []);
+      if ('tier' in bound) return bound;
+      inputs.push({ alias: input.alias, measure: bound });
+    }
+    return { inputs, expr: entry.derived!.expr };
+  };
+  const bindPart = (ref: string, prefix: string, scope: IntentPredicate[]): RatioPart | PreparedRefusal => {
+    const entry = vocabulary.get(ref);
+    if (entry?.derived && !physicalOf(entry)) return bindFormula(ref, prefix, scope);
+    const bound = bindMeasure(ref, prefix, undefined, scope);
+    return 'tier' in bound ? bound : { measure: bound };
+  };
   for (const [index, measure] of intent.measures.entries()) {
     if (measure.derived) {
       const alias = measure.alias ?? measure.ref.replace(/^ratio:/, '').replace(/[^A-Za-z0-9_]+/g, '_');
-      const numerator = bindMeasure(measure.derived.numerator, `__num_${index + 1}`, undefined, measure.scope ?? []);
+      const numerator = bindPart(measure.derived.numerator, `__num_${index + 1}`, measure.scope ?? []);
       if ('tier' in numerator) return { refusal: numerator };
-      const denominator = bindMeasure(measure.derived.denominator, `__den_${index + 1}`, undefined, measure.scope ?? []);
+      const denominator = bindPart(measure.derived.denominator, `__den_${index + 1}`, measure.scope ?? []);
       if ('tier' in denominator) return { refusal: denominator };
       visible.push({ alias, kind: 'ratio', numerator, denominator, zeroFill: false });
       continue;
     }
     const entry = vocabulary.get(measure.ref);
     const alias = measure.alias ?? entry?.name ?? measure.ref.split('.').pop() ?? 'value';
+    if (entry?.derived && !physicalOf(entry)) {
+      // A derived metric over several relations: each input is its own
+      // island aggregate and the governed formula is evaluated afterwards.
+      const formula = bindFormula(measure.ref, `__in_${index + 1}`, measure.scope ?? []);
+      if ('tier' in formula) return { refusal: formula };
+      visible.push({ alias, kind: 'derived', inputs: formula.inputs, expr: formula.expr, zeroFill: false });
+      continue;
+    }
     const bound = bindMeasure(measure.ref, alias, measure.aggregation, measure.scope ?? []);
     if ('tier' in bound) return { refusal: bound };
     visible.push({ alias, kind: 'aggregate', physical: bound, zeroFill: ADDITIVE.has(bound.aggregate) });
@@ -263,16 +300,23 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   const q = (name: string) => dialect.quoteIdentifier(name);
   const names = islandOrder.map((_, index) => `island_${index + 1}`);
   const islandOf = (measure: PhysicalMeasure) => names[islandOrder.indexOf(measure.relation)]!;
+  // Every input alias becomes its island column; a divisor is guarded.
+  const renderFormula = (inputs: Array<{ alias: string; measure: PhysicalMeasure }>, expr: string): string => {
+    let formula = expr;
+    const sorted = [...inputs].sort((a, b) => b.alias.length - a.alias.length);
+    for (const input of sorted) formula = formula.replace(new RegExp(`\\b${input.alias}\\b`, 'g'), `CAST(${islandOf(input.measure)}.${q(input.measure.alias)} AS DOUBLE)`);
+    return `(${formula.replace(/\/\s*(CAST\([^()]*\([^()]*\)[^()]*\)|\([^()]*\)|[A-Za-z0-9_.]+)/g, (_match, divisor: string) => `/ NULLIF(${divisor}, 0)`)})`;
+  };
+  const renderPart = (part: RatioPart): string => 'measure' in part
+    ? `CAST(${islandOf(part.measure)}.${q(part.measure.alias)} AS DOUBLE)`
+    : renderFormula(part.inputs, part.expr);
   const projected = (measure: VisibleMeasure): string => {
-    if (measure.kind === 'ratio') {
-      const numerator = `${islandOf(measure.numerator!)}.${q(measure.numerator!.alias)}`;
-      const denominator = `${islandOf(measure.denominator!)}.${q(measure.denominator!.alias)}`;
-      return `CAST(${numerator} AS DOUBLE) / NULLIF(${denominator}, 0) AS ${q(measure.alias)}`;
-    }
+    if (measure.kind === 'ratio') return `${renderPart(measure.numerator!)} / NULLIF(${renderPart(measure.denominator!)}, 0) AS ${q(measure.alias)}`;
+    if (measure.kind === 'derived') return `${renderFormula(measure.inputs!, measure.expr!)} AS ${q(measure.alias)}`;
     const value = `${islandOf(measure.physical!)}.${q(measure.alias)}`;
     return `${population && measure.zeroFill ? `COALESCE(${value}, 0)` : value} AS ${q(measure.alias)}`;
   };
-  const needsProjection = population !== undefined || islandSql.length > 1 || visible.some((measure) => measure.kind === 'ratio');
+  const needsProjection = population !== undefined || islandSql.length > 1 || visible.some((measure) => measure.kind === 'ratio' || measure.kind === 'derived');
 
   // Ordering and limit apply to the final projection.
   let orderBy = '';
@@ -324,7 +368,8 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     if (islandSql.length > 1) proof.push(`composed as ${islandSql.length} aggregate islands (${islandOrder.join(' | ')}) joined on ${keys.length ? keys.join(', ') : 'a single row'}, so measures of different grains never multiply each other`);
     else if (!population) proof.push(`composed over ${[...joinedAll].join(', ')} along governed join paths${measures.some((m) => m.scope.length) ? ' with per-measure scope' : ''}`);
     for (const measure of visible) {
-      if (measure.kind === 'ratio') proof.push(`${measure.alias} = ${labelOf(vocabulary, measure.numerator!)} / ${labelOf(vocabulary, measure.denominator!)}, divided after each part is aggregated (null when the denominator is 0)`);
+      if (measure.kind === 'ratio') proof.push(`${measure.alias} = ${partLabel(vocabulary, measure.numerator!)} / ${partLabel(vocabulary, measure.denominator!)}, divided after each part is aggregated (null when the denominator is 0)`);
+      if (measure.kind === 'derived') proof.push(`${measure.alias} = ${measure.expr}, with ${measure.inputs!.map((input) => `${input.alias} = ${labelOf(vocabulary, input.measure)} on ${input.measure.relation}`).join(', ')}, evaluated after each input is aggregated on its own relation`);
     }
   }
   return {
@@ -334,6 +379,10 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
       proof,
     },
   };
+}
+
+function partLabel(vocabulary: VocabularyIndex, part: RatioPart): string {
+  return 'measure' in part ? labelOf(vocabulary, part.measure) : `(${part.expr})`;
 }
 
 function labelOf(vocabulary: VocabularyIndex, measure: PhysicalMeasure): string {

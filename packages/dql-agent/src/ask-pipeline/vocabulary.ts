@@ -49,6 +49,14 @@ export interface VocabularyEntry {
   timeRef?: string;
   /** For a metric: simple, ratio, derived, cumulative, conversion. */
   metricType?: string;
+  /**
+   * A derived metric over inputs on more than one relation: its formula and
+   * the governed inputs, for the relational composer to aggregate each input
+   * on its own relation and evaluate the formula afterwards.
+   */
+  derived?: { expr: string; inputs: Array<{ alias: string; ref: string }> };
+  /** Why only the semantic engine may compute this metric (a prior-period offset, a cumulative window). */
+  engineOnly?: string;
   /** For an entity: primary, foreign, unique, natural. */
   entityType?: string;
   /** How a value of this measure is displayed (currency, percent, count...). */
@@ -276,7 +284,7 @@ export function renderCard(entry: VocabularyEntry): string {
 // Building from host-neutral sources.
 
 export interface VocabularySource {
-  metrics?: Array<{ name: string; model?: string; label?: string; description?: string; aggregation?: string; type?: string; expr?: string; sourceId?: string; aliases?: string[]; status?: string; timeGrains?: string[]; physical?: VocabularyEntry['physical']; aggTimeDimension?: string; displayFormat?: VocabularyEntry['displayFormat'] }>;
+  metrics?: Array<{ name: string; model?: string; label?: string; description?: string; aggregation?: string; type?: string; expr?: string; sourceId?: string; aliases?: string[]; status?: string; timeGrains?: string[]; physical?: VocabularyEntry['physical']; aggTimeDimension?: string; displayFormat?: VocabularyEntry['displayFormat']; derived?: VocabularyEntry['derived']; engineOnly?: string }>;
   measures?: Array<{ name: string; model: string; label?: string; description?: string; aggregation?: string; expr?: string; sourceId?: string; physical?: VocabularyEntry['physical']; aggTimeDimension?: string; displayFormat?: VocabularyEntry['displayFormat'] }>;
   dimensions?: Array<{ name: string; model: string; label?: string; description?: string; dataType?: string; isTime?: boolean; timeGrains?: string[]; sourceId?: string; aliases?: string[]; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
   entities?: Array<{ name: string; model: string; type: string; label?: string; description?: string; sourceId?: string; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
@@ -321,6 +329,8 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       ...(metric.aggTimeDimension && metric.model ? { timeRef: `dimension:${metric.model}.${metric.aggTimeDimension}` } : {}),
       ...(metric.type ? { metricType: metric.type } : {}),
       ...(metric.displayFormat ? { displayFormat: metric.displayFormat } : {}),
+      ...(metric.derived ? { derived: metric.derived } : {}),
+      ...(metric.engineOnly ? { engineOnly: metric.engineOnly } : {}),
     });
   }
   for (const measure of source.measures ?? []) {

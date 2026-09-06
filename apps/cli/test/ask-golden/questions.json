@@ -27,8 +27,11 @@
         "customer_name"
       ],
       "ordered": true,
-      "tier": "any",
-      "note": "Both are correct: the certified top_beverage_customers block served as published (it groups by customer name; the caveat that two customers sharing a name would merge is recorded on the answer), or a governed semantic/relational answer keyed by customer id with the name displayed. The identity rule binds what the pipeline composes, not what the team certified."
+      "tier": "governed",
+      "note": "A ranking is keyed: the certified top_beverage_customers block groups by customer name with no identity key, so it is refused as not applicable (repairable), the interpreter re-expresses the analysis by entity, and the governed keyed answer is served with the block as evidence and a recertify next action. Identity is never certified away.",
+      "requiredColumns": [
+        "customer_id"
+      ]
     },
     {
       "id": "top-customers",
@@ -911,6 +914,111 @@
         }
       ],
       "note": "Two customers share this name. The label names several keys, so the answer is one row per customer, keyed, with the name displayed and an identity warning; never one merged number."
+    },
+    {
+      "id": "gross-margin-2025",
+      "question": "What was our gross profit in 2025, and our gross margin percentage?",
+      "sql": "SELECT (SELECT SUM(oi.product_price) FROM dev.order_items oi WHERE oi.ordered_at >= '2025-01-01' AND oi.ordered_at < '2026-01-01') - (SELECT SUM(o.order_cost) FROM dev.orders o WHERE o.ordered_at >= '2025-01-01' AND o.ordered_at < '2026-01-01') AS gross_profit, ((SELECT SUM(oi.product_price) FROM dev.order_items oi WHERE oi.ordered_at >= '2025-01-01' AND oi.ordered_at < '2026-01-01') - (SELECT SUM(o.order_cost) FROM dev.orders o WHERE o.ordered_at >= '2025-01-01' AND o.ordered_at < '2026-01-01')) * 1.0 / (SELECT SUM(oi.product_price) FROM dev.order_items oi WHERE oi.ordered_at >= '2025-01-01' AND oi.ordered_at < '2026-01-01') AS gross_margin",
+      "columns": {
+        "gross_profit": [
+          "order_gross_profit",
+          "gross_profit",
+          "profit"
+        ],
+        "gross_margin": [
+          "gross_margin",
+          "gross_margin_pct",
+          "margin",
+          "margin_pct",
+          "gross_margin_percentage"
+        ]
+      },
+      "tier": "governed",
+      "note": "order_gross_profit is a derived metric (revenue - order_cost) whose inputs live on two relations; the relational tier aggregates each on its own island and evaluates the formula, the margin is a disclosed ratio. On MetricFlow the same intent compiles with a metric_time window."
+    },
+    {
+      "id": "growth-jul-aug",
+      "question": "Compare August with July 2025 sales before tax and show the percentage growth.",
+      "outcome": "gap",
+      "tier": "none",
+      "note": "revenue_growth_mom uses a prior-period offset (offset_window 1 month). The native composer and the relational tier cannot express it, so on this fixture the turn is a gap that names the semantic-engine capability and executes nothing; a silently zero growth is the failure this case guards against. On the real workspace (MetricFlow) the built-product driver expects 10.78%."
+    },
+    {
+      "id": "unqualified-revenue",
+      "question": "How much revenue do we have?",
+      "sql": "SELECT SUM(product_price) AS revenue FROM dev.order_items",
+      "columns": {
+        "revenue": [
+          "revenue",
+          "total_revenue",
+          "sales"
+        ]
+      },
+      "tier": "governed",
+      "note": "The name wins: unqualified 'revenue' is the metric named revenue (pretax product revenue). order_total (including tax) is accepted only when the question qualifies it. Deterministic after interpretation; the provenance says 'governed default: the question names the metric revenue'."
+    },
+    {
+      "id": "revenue-including-tax",
+      "question": "How much revenue do we have including tax?",
+      "sql": "SELECT SUM(order_total) AS order_total FROM dev.orders",
+      "columns": {
+        "order_total": [
+          "order_total",
+          "total_revenue",
+          "revenue",
+          "gross_revenue",
+          "revenue_including_tax"
+        ]
+      },
+      "tier": "governed",
+      "note": "'including tax' is a qualifier: the gross order total stays."
+    },
+    {
+      "id": "new-vs-returning",
+      "question": "How much revenue comes from new versus returning customers?",
+      "sql": "SELECT c.customer_type, SUM(oi.product_price) AS revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id JOIN dev.customers c ON o.customer_id = c.customer_id GROUP BY c.customer_type",
+      "columns": {
+        "customer_type": [
+          "customer_type",
+          "customer__customer_type",
+          "type"
+        ],
+        "revenue": [
+          "revenue",
+          "total_revenue",
+          "sales"
+        ]
+      },
+      "identity": [
+        "customer_type"
+      ],
+      "tier": "governed",
+      "note": "Pretax revenue split between new and returning customers. Two governed readings: by the customer_type dimension (new = only the first order placed, returning = ordered more than once; the answer defines the type from the dbt column description), or per order by customer_order_number (the first order versus later ones; the reading line states it). Gross order_total is not accepted: the question says revenue.",
+      "alternatives": [
+        {
+          "sql": "SELECT SUM(CASE WHEN o.customer_order_number = 1 THEN oi.product_price ELSE 0 END) AS new_customer_revenue, SUM(CASE WHEN o.customer_order_number <> 1 THEN oi.product_price ELSE 0 END) AS returning_customer_revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id",
+          "columns": {
+            "new_customer_revenue": [
+              "new_customer_revenue",
+              "new_revenue",
+              "first_order_revenue"
+            ],
+            "returning_customer_revenue": [
+              "returning_customer_revenue",
+              "returning_revenue",
+              "repeat_revenue"
+            ]
+          },
+          "identity": []
+        }
+      ]
+    },
+    {
+      "id": "region-why-invest",
+      "question": "Why is our revenue down by region, and which region should we invest in?",
+      "outcome": "gap",
+      "tier": "none",
+      "note": "Region is not modeled and 'why'/'invest' ask for an explanation and a decision Ask does not compute: a named gap with zero SQL and the answerable reading (revenue) stated. Never the adjacent certified monthly trend."
     }
   ]
 }

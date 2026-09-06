@@ -3,7 +3,7 @@ import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { createAskPipelineRouteExecutor, groundIntentLiterals, normalizeExecutedRow, tracedProbes } from './host.js';
+import { createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, normalizeExecutedRow, tracedProbes } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -68,6 +68,16 @@ describe('the pipeline host without a warehouse', () => {
     const receipt = result.askPipelineReceipt;
     expect(receipt).toBeDefined();
     if (receipt?.failure?.stage === 'execute') expect(receipt.failure.message).toMatch(/No database connection is configured yet/);
+  });
+});
+
+describe('a gap is headed by what it is', () => {
+  it('no matching data is not a modeling gap', () => {
+    expect(gapPresentation('not_retrieved')).toEqual({ title: 'No matching data for that period', code: 'no_data' });
+    expect(gapPresentation('not_modeled').code).toBe('modeling_gap');
+    expect(gapPresentation('unsupported')).toEqual({ title: 'No governed answer', code: 'modeling_gap' });
+    expect(gapPresentation('denied').code).toBe('policy_blocked');
+    expect(gapPresentation('ambiguous').code).toBe('ambiguous');
   });
 });
 

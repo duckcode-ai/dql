@@ -414,6 +414,69 @@ the question string again.
    SQL or values. A browser tab reopens the chat it last had open (per-tab
    session storage) and a new tab falls back to the browser-wide last chat;
    two tabs never overwrite each other's place (`OBS-021`, `UI-025`).
+14. **Fail-closed metric bindings and engine-aware semantics.** A derived or
+   ratio metric binds to physical SQL only when SQL can express it: any input
+   with an offset window, an offset grain, a cumulative window or an input
+   filter, and any two inputs naming the same metric under different aliases,
+   leave the metric to the semantic engine and the relational tier refuses it
+   with that reason, never an approximation (month-over-month growth was
+   being served as zero). A plain formula over inputs on several relations
+   is composed as one island per input with the formula evaluated afterwards
+   (`+ - * /` only, divisors guarded), so gross profit and margin answer
+   relationally. The host tells the binder which engine will compile: on
+   MetricFlow and dbt Cloud a host-chosen window is `metric_time`, on the
+   native composer the concrete dimension; filter operators are emitted in
+   the long form every engine accepts. A derived formula that multiplies by
+   100 renders in percentage points (`AGT-063`).
+15. **The name wins; the whole question must apply.** After interpretation a
+   question word that exactly names a metric binds the intent to that metric
+   unless the question qualifies it (gross, including tax, order total,
+   lifetime), with provenance saying so; "revenue" is the pretax metric named
+   revenue, "revenue including tax" the order total. A question that asks why
+   or what to do (why, drivers, invest, recommend, should, forecast) ends as
+   an `unsupported` gap that names the operation, the answerable reading and
+   Research as the next step; a breakdown noun after by/per/across that
+   nothing accounts for ends as a `not_modeled` gap; neither executes.
+   Coverage of unused question words is a failed, non-repairing check. A
+   grouping or filter dimension with a governed description (or the dbt
+   column description) is defined in the answer. A certified block that
+   groups by a label with no identity key is never entailed, even when the
+   question names it: the interpreter re-expresses the analysis by entity and
+   the keyed governed answer is served with the block as source evidence and
+   a recertify action (`AGT-064`).
+16. **A slow interpreter is retried once; no data is not a modeling gap.** The
+   subscription CLI's deadline is a typed `provider_timeout` whose message is
+   one reader sentence and whose configuration hint is detail. The interpreter
+   retries such a timeout exactly once, on the same run and request, only when
+   the turn's remaining budget holds another full dispatch; any other provider
+   failure, a second timeout, or a cancellation ends the turn. The answer text
+   says the model took too long and to retry; the receipt keeps the provider's
+   words. A governed query that ran and matched no rows is headed "No matching
+   data" with the `no_data` refusal code, never as a modeling gap or a failed
+   run. A semantic-engine compile refusal reaches the reader as its first
+   line; the receipt keeps the whole message (`AGT-065`).
+17. **Units everywhere; a tab keeps its chat.** The result's units contract
+   (`columnsMeta`) survives every projection in the Notebook: the answer
+   table, the KPI card, chart axes and tooltips, the headline value, the
+   dashboard formatter, Research sources, and persisted conversation turns,
+   so a thread restored from the server renders by contract (`UI-027`). A
+   browser tab's Ask identity is its URL, `/ask?thread=<id>`: a reload
+   resolves the URL thread first, then the tab's own pointer, then the
+   browser-wide one; a tab that had a chat never falls back to the newest
+   chat, and reconciliation follows the server thread when a conversation id
+   was rewritten. A thread-less pending run is adopted only by the tab that
+   submitted it. Leaving Ask drops the thread from the URL (`UI-026`).
+18. **Corrections the retest gates forced.** A question word is spent by a
+   measure whose own name carries it ("beverage revenue" read as drink revenue
+   has used "revenue"); an entity noun ("customers") never names a metric; a
+   ratio or derived metric the question names never rebinds the parts of a
+   composed ratio; the reading line says when a measure was rebound. A
+   restriction on the only measure restricts the population ("beverage
+   revenue by product" lists the products that sold beverages, not every
+   product with a zero) unless the population is explicitly `all`. Every
+   unserved clause is named in a gap, and a time grouping never stands for a
+   categorical breakdown noun. A dimension with no expression is its own
+   column, so the dbt column description defines it.
 
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn

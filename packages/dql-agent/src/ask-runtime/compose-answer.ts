@@ -58,6 +58,7 @@ export interface ComposedAnswer {
 const REFUSAL_TITLES: Record<AnswerRefusalCode, string> = {
   policy_blocked: 'Blocked by a governance policy',
   modeling_gap: 'Not modeled yet',
+  no_data: 'No matching data',
   grounding_gap: 'Not enough context to answer safely',
   model_declined: 'The assistant declined to answer',
   provider_error: 'Could not finish working this one out',
@@ -69,6 +70,7 @@ const REFUSAL_TITLES: Record<AnswerRefusalCode, string> = {
 const REFUSAL_TEXT: Record<AnswerRefusalCode, string> = {
   grounding_gap: 'DQL could not match every part of this question to governed data, so no query was run.',
   modeling_gap: 'Part of this question is not modeled in this project yet, so no governed query can answer it as asked.',
+  no_data: 'The governed query ran and no rows matched the requested period or filter, so there is nothing to report for it.',
   ambiguous: 'One business choice is required before DQL can run this question.',
   provider_error: 'This question was not worked out to a query, so nothing about the data has been ruled out.',
   orchestration_budget_exhausted: 'DQL stopped this run at its own orchestration budget before the question was settled.',

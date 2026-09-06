@@ -53,6 +53,8 @@ interface DbtSemanticModel {
     relation_name?: string;
   };
   defaults?: { agg_time_dimension?: string };
+  /** dbt column descriptions of the underlying model, the fallback definition for a dimension that declares none. */
+  columnDescriptions?: Record<string, string>;
   entities?: Array<{
     name: string;
     type: string; // primary, foreign, unique, natural
@@ -289,19 +291,29 @@ function loadFromManifestJson(manifestPath: string, artifactKind: 'manifest' | '
     return null;
   }
 
+  // The dbt model behind a semantic model documents its columns; a semantic
+  // dimension that declares no description inherits that column's. The
+  // semantic manifest carries no nodes, so the sibling manifest.json is read
+  // for them.
+  const nodesSource = artifactKind === 'manifest' ? manifest : readSiblingManifestNodes(manifestPath);
+  const columnDescriptionsByModel = dbtNodeColumnDescriptions(nodesSource);
   const models: DbtSemanticModel[] = [];
   for (const node of artifactCollection(manifest.semantic_models)) {
     if (!node || typeof node !== 'object' || Array.isArray(node) || !('name' in node)) continue;
     const raw = node as DbtManifestSemanticModel;
+    const modelRef = typeof raw.model === 'string' ? raw.model : undefined;
+    const modelName = modelRef?.match(/ref\(\s*['"]([^'"]+)['"]/)?.[1] ?? raw.node_relation?.alias ?? raw.name;
+    const columnDescriptions = columnDescriptionsByModel.get(modelName);
     models.push({
       ...raw,
       name: raw.name,
       // node.model is already a string like "ref('stg_orders')" in manifests
-      model: typeof raw.model === 'string' ? raw.model : undefined,
+      model: modelRef,
       defaults: raw.defaults,
       entities: raw.entities,
       dimensions: raw.dimensions,
       measures: raw.measures,
+      ...(columnDescriptions ? { columnDescriptions } : {}),
     });
   }
 
@@ -388,6 +400,35 @@ interface DbtManifestModelNode {
   path?: string;
   unique_id?: string;
   fqn?: string[];
+}
+
+/** `model name → column name → description` from a manifest's model nodes. */
+function dbtNodeColumnDescriptions(manifest: Record<string, unknown> | undefined): Map<string, Record<string, string>> {
+  const out = new Map<string, Record<string, string>>();
+  if (!manifest) return out;
+  for (const node of artifactCollection(manifest.nodes)) {
+    const raw = asRecord(node);
+    if (raw.resource_type !== 'model' || typeof raw.name !== 'string') continue;
+    const descriptions: Record<string, string> = {};
+    for (const [columnKey, columnValue] of Object.entries(asRecord(raw.columns))) {
+      const column = asRecord(columnValue);
+      const name = firstString(column.name, columnKey);
+      const description = firstString(column.description);
+      if (name && description) descriptions[name] = description;
+    }
+    if (Object.keys(descriptions).length > 0) out.set(raw.name, descriptions);
+  }
+  return out;
+}
+
+function readSiblingManifestNodes(manifestPath: string): Record<string, unknown> | undefined {
+  const sibling = join(dirname(manifestPath), 'manifest.json');
+  if (resolve(sibling) === resolve(manifestPath) || !existsSync(sibling)) return undefined;
+  try {
+    return JSON.parse(readFileSync(sibling, 'utf-8')) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -771,7 +812,7 @@ function convertSemanticModel(
           timeDimensions.push({
         name: dim.name,
         label: dim.label ?? dim.name,
-        description: dim.description ?? '',
+        description: dim.description || model.columnDescriptions?.[dim.expr ?? dim.name] || '',
         sql: sqlExpr,
         type: 'date',
         table: tableName,
@@ -795,7 +836,7 @@ function convertSemanticModel(
         dimensions.push({
         name: dim.name,
         label: dim.label ?? dim.name,
-        description: dim.description ?? '',
+        description: dim.description || model.columnDescriptions?.[dim.expr ?? dim.name] || '',
         sql: sqlExpr,
         type: dqlType,
         table: tableName,

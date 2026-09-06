@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, buildIntentSystemPrompt, proveTimeRoles, resolveIntent, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyGovernedDefaults, bindExactNames, buildIntentSystemPrompt, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { runAskPipeline } from './pipeline.js';
@@ -613,7 +613,23 @@ describe('time roles under one window', () => {
     expect(bound.request?.metrics).toEqual(['revenue', 'orders']);
     expect(bound.derived).toEqual([{ alias: 'aov', numerator: 'revenue', denominator: 'orders' }]);
     const windowedRatio = { ...intent, time: { ref: 'dimension:order_item.ordered_at', window: { start: '2025-01-01', end: '2026-01-01' } }, provenance: { 'dimension:order_item.ordered_at': 'host:time window "in 2025" applied on the measures\' time role' } };
-    expect(bindSemanticRequest(windowedRatio, local).request?.filters).toEqual([{ dimension: 'order_item.ordered_at', operator: '>=', values: ['2025-01-01'] }, { dimension: 'order_item.ordered_at', operator: '<', values: ['2026-01-01'] }]);
+    expect(bindSemanticRequest(windowedRatio, local).request?.filters).toEqual([{ dimension: 'order_item.ordered_at', operator: 'gte', values: ['2025-01-01'] }, { dimension: 'order_item.ordered_at', operator: 'lt', values: ['2026-01-01'] }]);
+    // On MetricFlow and dbt Cloud a host-chosen window is every metric's own aggregation time.
+    expect(bindSemanticRequest(windowedRatio, local, 'metricflow-cli').request?.filters?.map((filter) => filter.dimension)).toEqual(['metric_time', 'metric_time']);
+    expect(bindSemanticRequest(windowedRatio, local, 'native').request?.filters?.map((filter) => filter.dimension)).toEqual(['order_item.ordered_at', 'order_item.ordered_at']);
+    // A month trend over a measure's own aggregation time is `metric_time` on
+    // MetricFlow (offset metrics resolve only on it), ordered by the same item.
+    const trend = { ...intent, measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time' as const, grain: 'month' as const }], ordering: { ref: 'dimension:order_item.ordered_at', direction: 'asc' as const }, time: { ref: 'dimension:order_item.ordered_at', window: { start: '2025-07-01', end: '2025-09-01' } } };
+    const onMetricFlow = bindSemanticRequest(trend, local, 'metricflow-cli').request!;
+    expect(onMetricFlow.timeDimension).toEqual({ name: 'metric_time', granularity: 'month' });
+    expect(onMetricFlow.orderBy).toEqual([{ name: 'metric_time', direction: 'asc' }]);
+    expect(onMetricFlow.filters?.map((filter) => filter.dimension)).toEqual(['metric_time', 'metric_time']);
+    const onNative = bindSemanticRequest(trend, local, 'native').request!;
+    expect(onNative.timeDimension).toEqual({ name: 'order_item.ordered_at', granularity: 'month' });
+    expect(onNative.orderBy).toEqual([{ name: 'order_item.ordered_at', direction: 'asc' }]);
+    // A time the question chose on another model stays concrete everywhere.
+    const cohort = { ...trend, groupBy: [{ ref: 'dimension:customers.first_ordered_at', role: 'time' as const, grain: 'year' as const }], ordering: undefined, time: undefined };
+    expect(bindSemanticRequest(cohort, local, 'metricflow-cli').request?.timeDimension).toEqual({ name: 'customers.first_ordered_at', granularity: 'year' });
     const ordered = bindSemanticRequest({ ...intent, ordering: { ref: 'measure:0', direction: 'desc' } }, local);
     expect(ordered.refusal?.message).toMatch(/ordering by the ratio/);
     const population = bindSemanticRequest({ ...intent, population: 'all' }, local);
@@ -662,6 +678,8 @@ describe('the units contract of a result', () => {
     expect(meta.find((item) => item.name === 'revenue')?.ref).toBe('metric:order_item.revenue');
     const counts = describeResultColumns(make({ measures: [{ ref: 'metric:orders.order_count_sum' }, { ref: 'metric:orders.count_order_items' }] }), { columns: ['order_count_sum', 'count_order_items'], rows: [] }, local);
     expect(counts.map((item) => item.kind)).toEqual(['count', 'count']);
+    const growth = buildVocabularyIndex({ metrics: [{ name: 'revenue_growth_mom', model: 'order_item', type: 'derived', expr: '(current_revenue - revenue_prev_month)*100/revenue_prev_month' }] });
+    expect(describeResultColumns(make({ measures: [{ ref: 'metric:order_item.revenue_growth_mom' }] }), { columns: ['revenue_growth_mom'], rows: [] }, growth)[0]).toMatchObject({ kind: 'percent', unit: 'percentage_points' });
   });
   it('a semantic column name that qualifies the dimension still finds its meta', () => {
     const intent = make({ measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }] });
@@ -682,5 +700,259 @@ describe('the units contract of a result', () => {
     expect(text).not.toMatch(/stored as/);
     const certified = composeAnsweredText(intent, { columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1, executionTimeMs: 1 }, local, 'certified', { caveats: ['the block groups by customer_name (a label) with no identity key, so two entities sharing a name would merge; recertify it with the entity key to keep them apart'] });
     expect(certified).toMatch(/Source: a certified block\. the block groups by customer_name .* recertify it with the entity key to keep them apart\.$/);
+  });
+});
+
+describe('the name wins: a question word that exactly names a metric binds to it', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const make = (raw: Record<string, unknown>) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar', ...raw }).intent!;
+  it('unqualified revenue replaces a confidently chosen sibling, and the provenance says why', () => {
+    const intent = make({ measures: [{ ref: 'metric:orders.order_total' }], provenance: { 'metric:orders.order_total': 'q:How much revenue do we have' } });
+    applyGovernedDefaults(intent, 'How much revenue do we have?', vocabulary);
+    expect(intent.measures[0]!.ref).toBe('metric:order_item.revenue');
+    expect(intent.provenance['metric:order_item.revenue']).toMatch(/governed default: the question names the metric "revenue"/);
+    expect(intent.reading).toBe('x; measured as Revenue because the question names the metric "revenue".');
+  });
+  it('a qualifier keeps the gross reading, and a metric the question names by alias stays', () => {
+    const gross = make({ measures: [{ ref: 'metric:orders.order_total' }] });
+    applyGovernedDefaults(gross, 'How much revenue do we have including tax?', vocabulary);
+    expect(gross.measures[0]!.ref).toBe('metric:orders.order_total');
+    const beverage = make({ measures: [{ ref: 'metric:order_item.drink_revenue' }] });
+    applyGovernedDefaults(beverage, 'what is the beverage revenue', vocabulary);
+    expect(beverage.measures[0]!.ref).toBe('metric:order_item.drink_revenue');
+  });
+  it('the rule also reaches ratio parts and ordering, and never fires when the question names several metrics', () => {
+    const ratio = make({ measures: [{ derived: { kind: 'ratio', numerator: 'metric:orders.order_total', denominator: 'metric:orders.orders' }, alias: 'aov' }], ordering: { ref: 'metric:orders.order_total', direction: 'desc' } });
+    bindExactNames(ratio, ' what is revenue per order ', new Set(), vocabulary);
+    expect(ratio.measures[0]!.derived).toEqual({ kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' });
+    expect(ratio.measures[0]!.ref).toBe('ratio:metric:order_item.revenue/metric:orders.orders');
+    expect(ratio.ordering?.ref).toBe('metric:order_item.revenue');
+    const two = make({ measures: [{ ref: 'metric:orders.order_total' }] });
+    bindExactNames(two, ' compare revenue and order total ', new Set(), vocabulary);
+    expect(two.measures[0]!.ref).toBe('metric:orders.order_total');
+  });
+  it('a measure whose own name spends the word is kept; only the sibling that does not is rebound', () => {
+    // "beverage revenue" read as drink_revenue has used "revenue" (no alias needed).
+    const plain = buildVocabularyIndex({ ...jaffle, metrics: jaffle.metrics!.map((metric) => metric.name === 'drink_revenue' ? { ...metric, aliases: [] } : metric) });
+    const beverage = make({ measures: [{ ref: 'metric:order_item.drink_revenue' }] });
+    bindExactNames(beverage, ' beverage revenue ', new Set(), plain);
+    expect(beverage.measures[0]!.ref).toBe('metric:order_item.drink_revenue');
+    const both = make({ measures: [{ ref: 'metric:orders.order_total' }, { ref: 'metric:order_item.drink_revenue' }] });
+    bindExactNames(both, ' total revenue and beverage revenue give me both ', new Set(), plain);
+    expect(both.measures.map((measure) => measure.ref)).toEqual(['metric:order_item.revenue', 'metric:order_item.drink_revenue']);
+  });
+  it('an entity noun in the question ("customers") is never the named metric, even without a grouping', () => {
+    const intent = make({ measures: [{ ref: 'metric:orders.order_total', scope: [{ ref: 'dimension:customers.customer_type', op: 'eq', values: ['new'], source: 'question' }] }, { ref: 'metric:orders.order_total', scope: [{ ref: 'dimension:customers.customer_type', op: 'eq', values: ['returning'], source: 'question' }] }] });
+    bindExactNames(intent, ' how much revenue comes from new versus returning customers ', new Set(), vocabulary);
+    expect(intent.measures.map((measure) => measure.ref)).toEqual(['metric:order_item.revenue', 'metric:order_item.revenue']);
+    expect(intent.measures[0]!.scope?.[0]?.values).toEqual(['new']);
+  });
+  it('a ratio or derived metric the question names never rebinds the parts of a composed ratio', () => {
+    const withAov = buildVocabularyIndex({ ...jaffle, metrics: [...jaffle.metrics!, { name: 'average_order_value', model: 'customers', label: 'Average Order Value', type: 'ratio', expr: 'lifetime_spend_pretax / count_lifetime_orders', aggregation: 'sum' }] });
+    const ratio = make({ measures: [{ derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' }, alias: 'average_order_value' }] });
+    bindExactNames(ratio, ' what is the average order value ', new Set(), withAov);
+    expect(ratio.measures[0]!.derived).toEqual({ kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.orders' });
+  });
+});
+
+describe('a restriction on the only measure restricts the population', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const make = (raw: Record<string, unknown>) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped', ...raw }).intent!;
+  const scope = [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [], source: 'question' }];
+  it('the sole scoped measure becomes a population filter with host provenance', () => {
+    const intent = make({ measures: [{ ref: 'metric:order_item.revenue', scope }], groupBy: [{ ref: 'entity:order_item.product', role: 'key' }] });
+    applyGovernedDefaults(intent, 'beverage revenue by product', vocabulary);
+    expect(intent.measures[0]!.scope).toBeUndefined();
+    expect(intent.filters).toEqual(scope);
+    expect(intent.provenance['filter:dimension:order_item.is_drink_item']).toMatch(/restricts the population/);
+  });
+  it('two measures, a ratio, or an explicit whole population keep their scopes', () => {
+    const two = make({ measures: [{ ref: 'metric:order_item.revenue', scope }, { ref: 'metric:order_item.revenue' }] });
+    applyGovernedDefaults(two, 'beverage revenue and revenue', vocabulary);
+    expect(two.measures[0]!.scope).toEqual(scope);
+    const all = make({ measures: [{ ref: 'metric:order_item.revenue', scope }], groupBy: [{ ref: 'entity:order_item.product', role: 'key' }], population: 'all' });
+    applyGovernedDefaults(all, 'beverage revenue for every product', vocabulary);
+    expect(all.measures[0]!.scope).toEqual(scope);
+    expect(all.filters).toEqual([]);
+  });
+});
+
+describe('full-question applicability', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const make = (raw: Record<string, unknown>) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:orders.order_total' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'trend', ...raw }).intent!;
+  it('why and where-to-invest are unsupported operations: a material clause, nothing executes', () => {
+    const intent = make({});
+    proveClauseCoverage('Why is our revenue down by region, and which region should we invest in?', intent, vocabulary);
+    expect(intent.unresolved).toHaveLength(2);
+    expect(intent.unresolved[0]).toMatchObject({ material: true, kind: 'unsupported', options: [] });
+    expect(intent.unresolved[0]!.question).toMatch(/Research can investigate/);
+    // The dropped breakdown is named too, even though the month grouping stands.
+    expect(intent.unresolved[1]).toMatchObject({ clause: 'by region', kind: 'not_modeled' });
+    const monthly = make({ measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }] });
+    proveClauseCoverage('revenue by region', monthly, vocabulary);
+    expect(monthly.unresolved[0]).toMatchObject({ clause: 'by region', kind: 'not_modeled' });
+  });
+  it('a breakdown noun nothing models, dropped by the interpreter, is a named gap; one the intent groups by is not', () => {
+    const dropped = make({});
+    proveClauseCoverage('show revenue by region', dropped, vocabulary);
+    expect(dropped.unresolved[0]).toMatchObject({ clause: 'by region', material: true, kind: 'not_modeled' });
+    const grouped = make({ measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:customers.customer_type', role: 'categorical' }] });
+    proveClauseCoverage('revenue by segment', grouped, vocabulary);
+    expect(grouped.unresolved).toEqual([]);
+    const month = make({ measures: [{ ref: 'metric:order_item.revenue' }] });
+    proveClauseCoverage('revenue by month', month, vocabulary);
+    expect(month.unresolved).toEqual([]);
+  });
+  it('the pipeline ends an unsupported clause as a gap that names it and the answerable reading, executing nothing', async () => {
+    const reply = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Monthly gross revenue trend.', measures: [{ ref: 'metric:orders.order_total' }], groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'trend' });
+    let executed = 0;
+    const outcome = await runAskPipeline({ question: 'Why is our revenue down by region, and which region should we invest in?', vocabulary, provider: { name: 'ollama', available: async () => true, generate: async () => reply }, prepareDeps: {}, executeDeps: { run: async () => { executed += 1; throw new Error('must not execute'); } } });
+    expect(outcome.kind).toBe('gap');
+    if (outcome.kind === 'gap') { expect(outcome.gap).toBe('unsupported'); expect(outcome.text).toMatch(/Research can investigate/); expect(outcome.text).toMatch(/Answerable from this reading/); }
+    expect(executed).toBe(0);
+    const branch = await runAskPipeline({ question: 'Beverage revenue is high because a few products dominate', vocabulary, provider: { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.drink_revenue' }], groupBy: [{ ref: 'entity:products.product', role: 'key' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'ranking' }) }, prepareDeps: {}, executeDeps: { run: async () => ({ columns: ['drink_revenue'], rows: [], rowCount: 0, executionTimeMs: 1 }) }, clauseCoverage: false });
+    // A hypothesis "because ..." is not a why-question: no unsupported clause, the branch prepares normally.
+    expect(branch.kind === 'gap' ? branch.gap : 'prepared').not.toBe('unsupported');
+    expect(branch.receipt.intent?.unresolved).toEqual([]);
+  });
+});
+
+describe('definitions in the answer', () => {
+  it('a grouped dimension with a governed description is defined in one sentence', () => {
+    const local = buildVocabularyIndex({
+      metrics: [{ name: 'revenue', model: 'order_item', aggregation: 'sum' }],
+      dimensions: [{ name: 'customer_type', model: 'customers', dataType: 'string', label: 'Customer type', description: "Options are 'new' or 'returning', indicating if a customer has ordered more than once or has only placed their first order." }],
+    });
+    const intent = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:customers.customer_type', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }).intent!;
+    const text = composeAnsweredText(intent, { columns: ['customer_type', 'revenue'], rows: [{ customer_type: 'new', revenue: 100 }, { customer_type: 'returning', revenue: 900 }], rowCount: 2, executionTimeMs: 1 }, local, 'governed');
+    expect(text).toMatch(/Definitions: Customer type: Options are 'new' or 'returning'/);
+  });
+});
+
+describe('a provider timeout is retried once, under the same run, when the budget allows', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const good = JSON.stringify({
+    version: 1, kind: 'analytics', reading: 'Revenue', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [],
+    expectedShape: 'scalar', unresolved: [], provenance: { 'metric:order_item.revenue': 'q:revenue' },
+  });
+  const timeout = () => Object.assign(new Error('The AI model did not respond within 60 seconds.'), { code: 'provider_timeout', detail: 'Retry, choose a faster model, or increase DQL_SUBSCRIPTION_CLI_TIMEOUT_MS.' });
+  function flaky(failures: number, error: () => Error = timeout): AgentProvider & { calls: number } {
+    const provider = {
+      name: 'ollama', calls: 0, available: async () => true,
+      generate: async () => { provider.calls += 1; if (provider.calls <= failures) throw error(); return good; },
+    };
+    return provider;
+  }
+  it('the typed code travels through the structured reply', async () => {
+    const { generateStructured } = await import('../providers/structured-output.js');
+    const reply = await generateStructured(flaky(1), [{ role: 'user', content: 'q' }], {});
+    expect(reply.error).toBe('provider_error');
+    expect(reply.code).toBe('provider_timeout');
+    expect(reply.detail).toContain('did not respond within 60 seconds');
+    expect(reply.detail).toContain('DQL_SUBSCRIPTION_CLI_TIMEOUT_MS');
+  });
+  it('one timeout then an answer is one resolution of two dispatches', async () => {
+    const provider = flaky(1);
+    const dispatches: string[] = [];
+    const result = await resolveIntent({ question: 'revenue', vocabulary, provider, budgetMs: 150_000, onDispatch: (event) => dispatches.push(event.purpose) });
+    expect(result.status).toBe('resolved');
+    expect(provider.calls).toBe(2);
+    expect(dispatches).toEqual(['resolve', 'correct']);
+  });
+  it('a second timeout ends the turn with the typed code', async () => {
+    const result = await resolveIntent({ question: 'revenue', vocabulary, provider: flaky(2), budgetMs: 150_000 });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') { expect(result.code).toBe('provider_timeout'); expect(result.attempts).toBe(2); }
+  });
+  it('no retry without room for another full dispatch, and none for other provider failures', async () => {
+    const provider = flaky(1);
+    const short = await resolveIntent({ question: 'revenue', vocabulary, provider, budgetMs: 60_000 });
+    expect(short.status).toBe('failed');
+    expect(provider.calls).toBe(1);
+    const other = flaky(1, () => new Error('Claude Code exited before producing an answer'));
+    const failed = await resolveIntent({ question: 'revenue', vocabulary, provider: other, budgetMs: 150_000 });
+    expect(failed.status).toBe('failed');
+    expect(other.calls).toBe(1);
+    if (failed.status === 'failed') expect(failed.code).toBeUndefined();
+  });
+  it('the pipeline says it in one sentence and keeps the provider words in the receipt', async () => {
+    const outcome = await runAskPipeline({ question: 'revenue', vocabulary, provider: flaky(3), prepareDeps: {}, executeDeps: { run: async () => { throw new Error('must not execute'); } }, deadlineMs: 150_000 });
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind !== 'failed') return;
+    expect(outcome.text).toBe('This could not be completed while reading the question: the AI model took too long to read the question; retry the same question');
+    expect(outcome.text).not.toContain('DQL_SUBSCRIPTION_CLI_TIMEOUT_MS');
+    expect(outcome.receipt.failure?.reason).toBe('provider_timeout');
+    expect(outcome.receipt.failure?.message).toContain('DQL_SUBSCRIPTION_CLI_TIMEOUT_MS');
+    expect(outcome.receipt.dispatches).toHaveLength(2);
+  });
+});
+
+describe('a compiler refusal reaches the reader as one line', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  it('the gap text carries the first line of the engine message and the receipt keeps it whole', async () => {
+    const reply = JSON.stringify({
+      version: 1, kind: 'analytics', reading: 'Revenue by customer name', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:customers.customer_name', role: 'categorical' }], display: [], filters: [],
+      expectedShape: 'grouped', unresolved: [], provenance: { 'metric:order_item.revenue': 'q:revenue', 'dimension:customers.customer_name': 'q:customer name' },
+    });
+    const engineMessage = 'Dimension customer_name is not reachable from order_item\n  Traceback (most recent call last):\n    File "metricflow/query.py", line 12\n  ValueError: unresolvable';
+    const outcome = await runAskPipeline({
+      question: 'revenue by customer name', vocabulary, provider: { name: 'ollama', available: async () => true, generate: async () => reply },
+      prepareDeps: { compileSemantic: async () => { throw new Error(engineMessage); } }, executeDeps: { run: async () => { throw new Error('must not execute'); } },
+    });
+    expect(outcome.kind).toBe('gap');
+    if (outcome.kind !== 'gap') return;
+    expect(outcome.gap).toBe('unsupported');
+    expect(outcome.message).toBe('the semantic engine could not compile this reading: Dimension customer_name is not reachable from order_item');
+    expect(outcome.text).not.toContain('Traceback');
+    expect(outcome.receipt.refusals.find((refusal) => refusal.code === 'semantic_compile_failed')?.message).toBe(engineMessage);
+  });
+});
+
+describe('a year the question names is never served as an all-time total', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const bare = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Total revenue for 2024', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [], expectedShape: 'scalar', unresolved: [], provenance: { 'metric:order_item.revenue': 'q:revenue' } });
+  const windowed = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Total revenue for 2024', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [], expectedShape: 'scalar', unresolved: [], provenance: { 'metric:order_item.revenue': 'q:revenue', 'dimension:order_item.ordered_at': 'q:2024' }, time: { ref: 'dimension:order_item.ordered_at', window: { start: '2024-01-01', end: '2025-01-01', expression: '2024' } } });
+  it('the window accounts for its years; a missing window leaves the year unaccounted', () => {
+    expect(droppedYears('revenue in 2024', parseIntent(JSON.parse(windowed)).intent!, vocabulary)).toEqual([]);
+    expect(droppedYears('revenue in 2024', parseIntent(JSON.parse(bare)).intent!, vocabulary)).toEqual(['2024']);
+    expect(droppedYears('top 10 customers', parseIntent(JSON.parse(bare)).intent!, vocabulary)).toEqual([]);
+  });
+  it('the interpreter is sent back once for the window, then the complete intent resolves', async () => {
+    const provider = scripted([bare, windowed]);
+    const result = await resolveIntent({ question: 'revenue in 2024', vocabulary, provider });
+    expect(result.status).toBe('resolved');
+    if (result.status === 'resolved') expect(result.intent.time?.window?.start).toBe('2024-01-01');
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1]!.at(-1)!.content).toMatch(/names the period "2024"/);
+  });
+  it('a second reading without the window ends as a gap, never a scalar', async () => {
+    const outcome = await runAskPipeline({ question: 'revenue in 2024', vocabulary, provider: scripted([bare, bare]), prepareDeps: {}, executeDeps: { run: async () => { throw new Error('must not execute'); } } });
+    expect(outcome.kind).toBe('gap');
+    if (outcome.kind === 'gap') expect(outcome.text).toMatch(/2024/);
+  });
+});
+
+describe('a label-only certified block is the answer of last resort, after the repair re-ask', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const namesBlock = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Top customers by beverage revenue', measures: [{ ref: 'block:commerce.top_beverage_customers' }], groupBy: [], display: [], filters: [], expectedShape: 'ranking', unresolved: [], provenance: { 'block:commerce.top_beverage_customers': 'q:top customers beverage' } });
+  const keyed = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Top customers by beverage revenue', measures: [{ ref: 'metric:order_item.drink_revenue' }], groupBy: [{ ref: 'entity:customers.customer', role: 'key' }], display: ['dimension:customers.customer_name'], filters: [], ordering: { ref: 'metric:order_item.drink_revenue', direction: 'desc' }, limit: 10, expectedShape: 'ranking', unresolved: [], provenance: { 'metric:order_item.drink_revenue': 'q:beverage', 'entity:customers.customer': 'q:customers' } });
+  const executed = { columns: ['customer_name', 'beverage_revenue'], rows: [{ customer_name: 'A', beverage_revenue: 1 }], rowCount: 1, executionTimeMs: 1 };
+  it('an interpreter that re-expresses the analysis by entity gets the keyed governed answer', async () => {
+    const provider = scripted([namesBlock, keyed]);
+    const outcome = await runAskPipeline({ question: 'who are the top customers for beverage', vocabulary, provider, prepareDeps: { blockSql: (ref) => (ref === 'block:commerce.top_beverage_customers' ? TOP_BEVERAGE_SQL : undefined), compileSemantic: async () => ({ sql: 'SELECT 1', engine: 'native' }) }, executeDeps: { run: async () => executed } });
+    expect(provider.calls).toHaveLength(2);
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.candidate.trust).toBe('governed');
+  });
+  it('an interpreter that keeps naming the block gets the block as published, with the identity caveat, not a gap', async () => {
+    const provider = scripted([namesBlock, namesBlock]);
+    const outcome = await runAskPipeline({ question: 'who are the top customers for beverage', vocabulary, provider, prepareDeps: { blockSql: (ref) => (ref === 'block:commerce.top_beverage_customers' ? TOP_BEVERAGE_SQL : undefined) }, executeDeps: { run: async () => executed } });
+    expect(provider.calls).toHaveLength(2);
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind !== 'answered') return;
+    expect(outcome.candidate.trust).toBe('certified');
+    expect(outcome.candidate.proof.join(' ')).toMatch(/served as published because no keyed governed answer could be composed/);
+    expect(outcome.text).toMatch(/recertify it with the entity key/);
+    expect(outcome.receipt.refusals.some((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message))).toBe(false);
   });
 });

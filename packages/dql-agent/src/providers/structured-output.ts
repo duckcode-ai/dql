@@ -13,6 +13,8 @@ export interface StructuredReply {
   json?: unknown;
   error?: 'empty' | 'unparseable' | 'provider_error';
   detail?: string;
+  /** A typed provider failure (`provider_timeout`), when the provider says which. */
+  code?: string;
 }
 
 export function extractFirstJsonObject(text: string): unknown | undefined {
@@ -53,7 +55,10 @@ export async function generateStructured(
   try {
     raw = await provider.generate(messages, { temperature: 0, ...options, responseJsonSchema: schema });
   } catch (error) {
-    return { raw: '', error: 'provider_error', detail: error instanceof Error ? error.message : String(error) };
+    const typed = error && typeof error === 'object' ? (error as { code?: unknown; detail?: unknown }) : undefined;
+    const code = typeof typed?.code === 'string' ? typed.code : undefined;
+    const hint = typeof typed?.detail === 'string' && typed.detail.trim() ? ` ${typed.detail.trim()}` : '';
+    return { raw: '', error: 'provider_error', detail: `${error instanceof Error ? error.message : String(error)}${hint}`, ...(code ? { code } : {}) };
   }
   if (!raw || !raw.trim()) return { raw: raw ?? '', error: 'empty' };
   const json = extractFirstJsonObject(raw);

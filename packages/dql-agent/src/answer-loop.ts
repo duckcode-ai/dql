@@ -47,7 +47,7 @@ export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'sema
  * from `ambiguous`: an attribution/export/proof policy is a metadata decision,
  * not a request for the analyst to rewrite an otherwise clear question.
  */
-export type AnswerRefusalCode = 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'orchestration_budget_exhausted' | 'policy_blocked' | 'execution_error';
+export type AnswerRefusalCode = 'grounding_gap' | 'modeling_gap' | 'no_data' | 'ambiguous' | 'model_declined' | 'provider_error' | 'orchestration_budget_exhausted' | 'policy_blocked' | 'execution_error';
 export type AnalysisDepth = CascadeAnalysisDepth;
 
 /**

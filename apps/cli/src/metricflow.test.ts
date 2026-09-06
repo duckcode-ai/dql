@@ -9,6 +9,7 @@ import {
   MetricFlowUnavailableError,
   repairMetricFlowGroupBy,
   parseMetricFlowDimensionList,
+  buildMetricFlowArgs,
 } from './metricflow.js';
 
 describe('MetricFlow compile wrapper', () => {
@@ -283,5 +284,20 @@ describe('parseMetricFlowDimensionList (mf list dimensions output)', () => {
 
   it('returns [] for output with no recognizable dimension lines', () => {
     expect(parseMetricFlowDimensionList('ERROR: could not connect to warehouse')).toEqual([]);
+  });
+});
+
+describe('buildMetricFlowArgs', () => {
+  it('orders by the time group-by item with its grain, exactly as MetricFlow names it', () => {
+    const args = buildMetricFlowArgs({
+      metrics: ['revenue', 'revenue_growth_mom'], dimensions: [],
+      timeDimension: { name: 'metric_time', granularity: 'month' },
+      orderBy: [{ name: 'metric_time', direction: 'asc' }, { name: 'revenue', direction: 'desc' }],
+      filters: [{ dimension: 'metric_time', operator: 'gte', values: ['2025-07-01'] }],
+    } as never, 'legacy-compile');
+    expect(args).toContain('--group-by');
+    expect(args[args.indexOf('--group-by') + 1]).toBe('metric_time__month');
+    const orders = args.flatMap((arg, index) => (arg === '--order' ? [args[index + 1]] : []));
+    expect(orders).toEqual(['metric_time__month asc', 'revenue desc']);
   });
 });

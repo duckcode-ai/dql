@@ -41,6 +41,8 @@ export interface AskPipelineHostDeps {
   selectProvider(request: AgentRunRequest): Promise<AgentProvider | undefined>;
   /** Compile on the project's active semantic engine; throws with the engine's message. */
   compileSemantic(request: SemanticCompileRequest, connection: ConnectionConfig): Promise<SemanticCompileOutput>;
+  /** The engine `compileSemantic` will use, known before preparation so the binder can speak its dialect. */
+  semanticEngine?(): Promise<'native' | 'metricflow-cli' | 'dbt-cloud'>;
   /** Wrap one physical provider call in the run's dispatch ledger. */
   dispatchOptions?(purpose: 'resolve' | 'correct' | 'repair', request: AgentRunRequest): { options: ProviderRunOptions; settle(outcome: 'ok' | 'error' | 'cancelled', error?: unknown): void };
   /** The executed intent of the last usable turn in this thread, when there is one. */
@@ -244,7 +246,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     return vocabulary;
   };
 
-  const prepareDeps = (connection: ConnectionConfig, vocabulary: VocabularyIndex): PrepareDeps => {
+  const prepareDeps = (connection: ConnectionConfig, vocabulary: VocabularyIndex, engine?: PrepareDeps['engine']): PrepareDeps => {
     const layer = deps.getSemanticLayer();
     const dialect = getDialect(connection.driver);
     const relationOfCube = new Map<string, string>();
@@ -276,6 +278,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       joinPath: (fromRelation, toRelation) => semanticJoinPath(fromRelation, toRelation) ?? declaredJoinPath(fromRelation, toRelation),
       dialect: { quoteIdentifier: (name) => dialect.quoteIdentifier(name), dateTrunc: (grain, expr) => dialect.dateTrunc(grain, expr), limitClause: (limit) => dialect.limitClause(limit) },
       blockSql: (ref) => vocabulary.get(ref)?.sql,
+      ...(engine ? { engine } : {}),
     };
   };
 
@@ -297,12 +300,14 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       connectionError = error;
     }
     const prior = request.threadId ? deps.priorIntent(request) : undefined;
+    let engine: PrepareDeps['engine'];
+    try { engine = await deps.semanticEngine?.(); } catch { engine = undefined; }
     emit({ type: 'executor.started', message: prior ? 'Reading the question as an edit of the previous analysis.' : 'Reading the question against the governed vocabulary.', route: 'generated_answer' });
     const outcome = await runAskPipeline({
       question: request.question,
       vocabulary,
       provider: withLedger(provider, deps, request),
-      prepareDeps: prepareDeps(connection ?? { driver: 'duckdb' } as ConnectionConfig, vocabulary),
+      prepareDeps: prepareDeps(connection ?? { driver: 'duckdb' } as ConnectionConfig, vocabulary, engine),
       executeDeps: {
         maxRows: deps.maxRows ?? 500,
         run: async (sql, params, options) => {
@@ -338,7 +343,12 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       ...(deps.guidance?.(request) ? { guidance: deps.guidance(request) } : {}),
       ...(connection && deps.probeLiteral && deps.literalProbeAllowed ? { groundLiterals: (intent: AnalyticalIntentV1) => groundIntentLiterals(intent, vocabulary, connection, tracedProbes(deps, request)) } : {}),
       explorationOptIn: explorationOptIn(request),
-      deadlineMs: 120_000,
+      // Research branches phrase hypotheses ("because", "drivers"); the
+      // full-question clause check is for questions a person asked.
+      clauseCoverage: request.requestedMode !== 'research',
+      // Room for one interpreter retry after a 60 s provider timeout plus
+      // the rest of the turn; the engine's own hard deadline still wins.
+      deadlineMs: 150_000,
       preparationCache,
       cacheScope: `${deps.getManifest().snapshotId}|${connection?.driver ?? 'none'}|${vocabulary.fingerprint}`,
       ...(deps.buildIdentity ? { build: deps.buildIdentity() } : {}),
@@ -386,6 +396,14 @@ function failure(runId: string, message: string, code: 'provider_error' | 'execu
   };
 }
 
+/** How a gap is headed: no matching data is not a modeling gap. */
+export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['gap']): { title: string; code: 'policy_blocked' | 'ambiguous' | 'no_data' | 'modeling_gap' } {
+  if (gap === 'denied') return { title: 'Blocked by policy', code: 'policy_blocked' };
+  if (gap === 'ambiguous') return { title: 'One detail is missing', code: 'ambiguous' };
+  if (gap === 'not_retrieved') return { title: 'No matching data for that period', code: 'no_data' };
+  return { title: 'No governed answer', code: 'modeling_gap' };
+}
+
 export function toExecutorResult(runId: string, outcome: PipelineOutcome, startedAt: number): AgentRouteExecutorResult {
   const receipt = outcome.receipt;
   const telemetry: AgentRouteExecutorResult['telemetry'] = {
@@ -415,7 +433,8 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
       { id: 'review-metadata-gap', label: 'Review what the project models', route: 'blocked' },
       ...(outcome.offerExploration ? [{ id: 'explore-review-required', label: 'Explore the physical tables (review-required)', route: 'generated_answer' as const }] : []),
     ];
-    return withReceipt({ summary: outcome.text, answer: outcome.text, status: 'blocked', trustState: 'blocked', stopReason: 'blocked', resolvedRoute: 'generated_answer', answerRefusalCode: outcome.gap === 'denied' ? 'policy_blocked' : outcome.gap === 'ambiguous' ? 'ambiguous' : 'modeling_gap', artifacts: [{ id: `${runId}:gap`, kind: 'answer', title: 'No governed answer', trustState: 'blocked', payload: { kind: 'no_answer', text: outcome.text, answer: outcome.text, gap: { kind: outcome.gap, message: outcome.message, nearest: outcome.nearest }, ...common } }], evaluations: [], nextActions, telemetry });
+    const presentation = gapPresentation(outcome.gap);
+    return withReceipt({ summary: outcome.text, answer: outcome.text, status: 'blocked', trustState: 'blocked', stopReason: 'blocked', resolvedRoute: 'generated_answer', answerRefusalCode: presentation.code, artifacts: [{ id: `${runId}:gap`, kind: 'answer', title: presentation.title, trustState: 'blocked', payload: { kind: 'no_answer', text: outcome.text, answer: outcome.text, gap: { kind: outcome.gap, message: outcome.message, nearest: outcome.nearest }, ...common } }], evaluations: [], nextActions, telemetry });
   }
   if (outcome.kind === 'failed') {
     return withReceipt({ summary: outcome.text, answer: outcome.text, status: 'blocked', trustState: 'blocked', stopReason: 'blocked', resolvedRoute: 'generated_answer', answerRefusalCode: outcome.stage === 'resolve' ? 'provider_error' : 'execution_error', artifacts: [{ id: `${runId}:failed`, kind: 'answer', title: outcome.stage === 'execute' ? 'The query failed on the warehouse' : 'Could not prepare the query', trustState: 'blocked', payload: { kind: 'no_answer', text: outcome.text, answer: outcome.text, executionError: outcome.message, failedStage: outcome.stage, ...common } }], evaluations: [], nextActions: [{ id: 'review-analytical-failure', label: 'Review the interpretation and the engine message', route: 'blocked' }], telemetry });
@@ -458,12 +477,19 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
       { id: 'pipeline-interpretation', label: 'Interpretation', passed: true, severity: 'info', message: `Read as: ${outcome.intent.reading || 'the intent below'}` },
       { id: 'pipeline-preparation', label: certified ? 'Certified entailment' : candidate.tier === 'semantic' ? 'Semantic compilation' : 'Governed composition', passed: true, severity: 'info', message: candidate.proof.join(' ') },
       ...(receipt.executed?.proofs ?? []).map((proof, index) => ({ id: `pipeline-execution-${index + 1}`, label: 'Execution proof', passed: true, severity: 'info' as const, message: proof })),
-      ...(receipt.uncovered?.length ? [{ id: 'pipeline-coverage', label: 'Question coverage', passed: true, severity: 'warning' as const, message: `The question mentioned ${receipt.uncovered.map((word) => `"${word}"`).join(', ')}, which this reading does not use. If that was the point, say it explicitly.` }] : []),
+      // Words the reading does not use are never a passed check; the
+      // evaluation carries no repair action, so it informs and does not loop.
+      ...(receipt.uncovered?.length ? [{ id: 'pipeline-coverage', label: 'Question coverage', passed: false, severity: 'warning' as const, message: `The question mentioned ${receipt.uncovered.map((word) => `"${word}"`).join(', ')}, which this reading does not use. If that was the point, say it explicitly.` }] : []),
       ...(receipt.grounding ?? []).filter((note) => note.startsWith('identity:') && /share the name/.test(note)).map((note, index) => ({ id: `pipeline-identity-${index + 1}`, label: 'Identity', passed: true, severity: 'warning' as const, message: note.slice('identity:'.length).trim() })),
-      ...(certified ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line, index) => ({ id: `pipeline-certified-identity-${index + 1}`, label: 'Certified block identity', passed: true, severity: 'warning' as const, message: `${line.replace(/; the certified block is served as published$/, '')}. Recertify the block with the entity key to keep same-named members apart.` })) : []),
+      // A certified block served as published with a label-only grouping
+      // says so: the answer cannot keep two same-named entities apart.
+      ...(certified ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line, index) => ({ id: `pipeline-certified-caveat-${index + 1}`, label: 'Certified block identity', passed: false, severity: 'warning' as const, message: `${line.replace(/^the block/, 'The block')}. Recertify it with the entity key to keep same-named members apart.` })) : []),
+      // A certified block refused for identity is shown as source evidence
+      // beside the keyed governed answer that replaced it.
+      ...receipt.refusals.filter((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message)).map((refusal, index) => ({ id: `pipeline-certified-identity-${index + 1}`, label: 'Certified source, not applicable', passed: false, severity: 'warning' as const, message: `${refusal.message.replace(/^block:/, 'Block ')}. The answer is composed by entity key; recertify the block with the key column to serve it as certified.` })),
     ],
     nextActions: [
-      ...(certified && candidate.proof.some((line) => /no identity key/.test(line)) ? [{ id: 'recertify-with-key', label: 'Recertify this block with the entity key', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const }] : []),
+      ...(receipt.refusals.some((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message)) || (certified && candidate.proof.some((line) => /no identity key/.test(line))) ? [{ id: 'recertify-with-key', label: 'Recertify this block with the entity key', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const }] : []),
       { id: 'create-block', label: 'Save as block', route: 'dql_block_draft', artifactKind: 'dql_block_draft' }, { id: 'research-gap', label: 'Research deeper', route: 'research' },
     ],
     telemetry,

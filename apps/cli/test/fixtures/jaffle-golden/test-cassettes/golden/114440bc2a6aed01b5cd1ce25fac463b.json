@@ -1,0 +1,26 @@
+{
+  "key": "114440bc2a6aed01b5cd1ce25fac463b",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"For customer Ryan Byrd, show total product revenue and beverage revenue side by side.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\"},{\"ref\":\"metric:order_item.drink_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:total revenue\",\"metric:order_item.drink_revenue\":\"q:beverage revenue\",\"dimension:customers.customer_name\":\"q:Ryan byrd\",\"entity:orders.customer\":\"removed:question asks for a single named customer's revenue figures, not a ranking or breakdown by customer, so grouping by the customer key is unnecessary\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-06T03:10:06.684Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 5,
+    "messageRoles": [
+      "system",
+      "user",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "114440bc2a6aed01b5cd1ce25fac463bfdeff59e07c0f7488ade05c43514254b",
+    "postCanonicalHash": "114440bc2a6aed01b5cd1ce25fac463bfdeff59e07c0f7488ade05c43514254b",
+    "appliedRuleClasses": []
+  }
+}

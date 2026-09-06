@@ -70,6 +70,8 @@ export interface IntentUnresolved {
   options: string[];
   material: boolean;
   question?: string;
+  /** Host-set: the clause asks for an operation Ask does not perform (a cause, a recommendation), not a missing model. */
+  kind?: 'not_modeled' | 'unsupported';
 }
 
 export interface AnalyticalIntentV1 {

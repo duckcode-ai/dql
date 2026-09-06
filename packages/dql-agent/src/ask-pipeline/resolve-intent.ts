@@ -31,6 +31,10 @@ export interface ResolveIntentInput {
   /** The executed intent of the previous turn, when this turn continues it. */
   prior?: AnalyticalIntentV1;
   priorAnswerSummary?: string;
+  /** Host: skip the full-question clause check (research branches phrase hypotheses, not questions). */
+  clauseCoverage?: boolean;
+  /** Milliseconds the run can still spend; a timed-out interpreter dispatch is retried once when this allows another. */
+  budgetMs?: number;
   /** Optional domain briefing / project guidance rendered above the cards. */
   guidance?: string;
   /** Character budget for the vocabulary cards. */
@@ -48,7 +52,7 @@ export type IntentResolution =
   | { status: 'clarify'; intent: AnalyticalIntentV1; question: string; options: string[]; attempts: number }
   | { status: 'conversation'; intent: AnalyticalIntentV1; reply: string; attempts: number }
   | { status: 'definition'; intent: AnalyticalIntentV1; reply: string; attempts: number }
-  | { status: 'failed'; reason: 'provider_error' | 'unparseable' | 'invalid'; detail: string; problems: IntentProblem[]; attempts: number };
+  | { status: 'failed'; reason: 'provider_error' | 'unparseable' | 'invalid'; detail: string; problems: IntentProblem[]; attempts: number; code?: string };
 
 const MEASURE_KINDS: VocabularyKind[] = ['metric', 'measure', 'column', 'block'];
 const RATIO_KINDS: VocabularyKind[] = ['metric', 'measure'];
@@ -421,6 +425,94 @@ export function applyGovernedDefaults(intent: AnalyticalIntentV1, question: stri
       } else intent.measures.push({ ref: chosen });
     }
   }
+  bindExactNames(intent, normalizedQuestion, grainWords, vocabulary);
+  promoteSoleMeasureScope(intent);
+}
+
+/** Words that qualify a money measure away from its plain named reading. */
+const MEASURE_QUALIFIERS = ['gross', 'including', 'incl', 'tax', 'after tax', 'net', 'order total', 'lifetime', 'ltv'];
+
+/**
+ * THE NAME WINS. A question word that exactly names a metric ("revenue")
+ * means that metric, unless the question qualifies it ("gross", "including
+ * tax", "order total"). A confidently chosen sibling (order_total for
+ * "how much revenue do we have") is replaced by the named metric and the
+ * provenance says so. Nothing happens when the question names no metric,
+ * names several, or already names the chosen one.
+ */
+export function bindExactNames(intent: AnalyticalIntentV1, normalizedQuestion: string, grainWords: Set<string>, vocabulary: VocabularyIndex): void {
+  if (MEASURE_QUALIFIERS.some((qualifier) => normalizedQuestion.includes(` ${qualifier} `))) return;
+  const namesOf = (entry: VocabularyEntry) => [entry.name, entry.label ?? '', ...entry.aliases].map(normalizeVocabularyText).filter((name) => name && !grainWords.has(name));
+  const namedByQuestion = (entry: VocabularyEntry | undefined) => Boolean(entry && namesOf(entry).some((name) => normalizedQuestion.includes(` ${name} `)));
+  // A word that names an entity or a model ("customers") is the thing being
+  // measured, never the measure, whether or not the intent groups by it.
+  const entityWords = new Set<string>();
+  for (const entry of vocabulary.entries) {
+    for (const word of [entry.kind === 'entity' ? entry.name : '', entry.kind === 'entity' ? entry.label ?? '' : '', entry.model ?? ''].map((value) => normalizeVocabularyText(value)).filter(Boolean)) {
+      entityWords.add(word);
+      entityWords.add(word.endsWith('s') ? word.slice(0, -1) : `${word}s`);
+    }
+  }
+  const exactByName = (entry: VocabularyEntry) => {
+    const name = normalizeVocabularyText(entry.name);
+    return normalizedQuestion.includes(` ${name} `) && !grainWords.has(name) && !entityWords.has(name);
+  };
+  // A metric outranks a measure of the same name (the metric wraps it).
+  const namedMetrics = vocabulary.entries.filter((entry) => entry.kind === 'metric' && exactByName(entry));
+  const named = namedMetrics.length ? namedMetrics : vocabulary.entries.filter((entry) => entry.kind === 'measure' && exactByName(entry));
+  if (named.length !== 1) return;
+  const target = named[0]!;
+  // A ratio, derived or windowed metric names a formula, not a base measure:
+  // the interpreter's period-versus-lifetime reading of it stands (rule 5b).
+  if (target.derived || target.engineOnly || (target.metricType && target.metricType !== 'simple')) return;
+  const used = new Set(intentRefs(intent));
+  if (used.has(target.ref)) return;
+  // The word is spent when the chosen measure's own name carries it:
+  // "beverage revenue" read as drink_revenue has used "revenue".
+  const targetWords = normalizeVocabularyText(target.name).split(' ').filter(Boolean);
+  const absorbs = (entry: VocabularyEntry) => {
+    const words = new Set(namesOf(entry).flatMap((name) => name.split(' ')));
+    return targetWords.every((word) => words.has(word));
+  };
+  const rebind = (ref: string): string => {
+    const entry = vocabulary.get(ref);
+    if (!entry || (entry.kind !== 'metric' && entry.kind !== 'measure') || namedByQuestion(entry) || absorbs(entry)) return ref;
+    intent.provenance[target.ref] = `${intent.provenance[ref] ?? `q:${target.name}`} (governed default: the question names the metric "${target.name}")`;
+    // The reading line stays honest about what was measured.
+    const measuredAs = `measured as ${target.label ?? target.name} because the question names the metric "${target.name}"`;
+    if (!intent.reading.includes(measuredAs)) intent.reading = `${intent.reading.replace(/[.\s]+$/, '')}; ${measuredAs}.`;
+    if (intent.ordering?.ref === ref) intent.ordering.ref = target.ref;
+    return target.ref;
+  };
+  for (const measure of intent.measures) {
+    if (measure.derived) {
+      measure.derived.numerator = rebind(measure.derived.numerator);
+      measure.derived.denominator = rebind(measure.derived.denominator);
+      if (measure.ref.startsWith('ratio:')) measure.ref = `ratio:${measure.derived.numerator}/${measure.derived.denominator}`;
+      continue;
+    }
+    measure.ref = rebind(measure.ref);
+  }
+}
+
+/**
+ * A restriction on the only measure restricts the population: "beverage
+ * revenue by product" lists the products that sold beverages, not every
+ * product with a zero. The numbers are the same either way; the rows are
+ * not. An explicit `population: 'all'` keeps the zeros; a ratio keeps its
+ * parts' scopes because each part restricts its own aggregate.
+ */
+export function promoteSoleMeasureScope(intent: AnalyticalIntentV1): void {
+  if (intent.measures.length !== 1 || intent.population === 'all') return;
+  const measure = intent.measures[0]!;
+  if (measure.derived || !measure.scope?.length) return;
+  const promoted = measure.scope;
+  delete measure.scope;
+  intent.filters = [...intent.filters, ...promoted];
+  for (const predicate of promoted) {
+    const key = `filter:${predicate.ref}`;
+    if (!intent.provenance[key]) intent.provenance[key] = `host:the restriction on the only measure (${measure.ref}) restricts the population`;
+  }
 }
 
 /**
@@ -539,6 +631,45 @@ export function proveTimeRoles(intent: AnalyticalIntentV1, vocabulary: Vocabular
   });
 }
 
+const CAUSAL_OPERATORS = ['why', 'because', 'driver', 'drivers', 'reason', 'reasons', 'invest', 'investment', 'recommend', 'recommendation', 'recommendations', 'should', 'decide', 'decision', 'forecast', 'predict', 'prediction', 'projection'];
+const BREAKDOWN_STOP = new Set(['day', 'week', 'month', 'quarter', 'year', 'date', 'time', 'period', 'each', 'the', 'total', 'far', 'now', 'default', 'itself', 'category', 'type', 'name']);
+
+/**
+ * FULL-QUESTION APPLICABILITY. A question that asks WHY, or what to DO, asks
+ * for an operation Ask does not perform on governed data; a breakdown "by
+ * <noun>" that nothing in the intent or the vocabulary accounts for asks for
+ * a model the project does not have. Either is a material clause: the turn
+ * ends as a named gap and nothing executes, instead of an adjacent trend
+ * being served as the answer.
+ */
+export function proveClauseCoverage(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): void {
+  if (intent.kind !== 'analytics') return;
+  if (intent.unresolved.some((clause) => clause.material)) return;
+  const words = normalizeVocabularyText(question).split(' ').filter(Boolean);
+  const operators = CAUSAL_OPERATORS.filter((word) => words.includes(word));
+  if (operators.length > 0) {
+    intent.unresolved.push({
+      clause: operators.join(', '),
+      options: [],
+      material: true,
+      kind: 'unsupported',
+      question: `Explaining why something happened or recommending what to do (${operators.join(', ')}) is not something Ask computes from governed data; Research can investigate the drivers.`,
+    });
+  }
+  // A breakdown the interpreter dropped: "by <noun>" with no categorical or
+  // key grouping standing for it (a time grouping cannot stand for "region").
+  if (!intent.groupBy.some((group) => group.role !== 'time')) {
+    const unaccounted = new Set(unaccountedQuestionWords(question, intent, vocabulary));
+    for (const match of question.toLowerCase().matchAll(/\b(?:by|per|across|for each)\s+([a-z][a-z_]+)/g)) {
+      const noun = match[1]!;
+      if (BREAKDOWN_STOP.has(noun) || !unaccounted.has(noun) && !unaccounted.has(noun.replace(/s$/, ''))) continue;
+      if (vocabulary.lookup(noun, { limit: 1, minScore: 0.55 }).length > 0) continue;
+      intent.unresolved.push({ clause: `by ${noun}`, options: [], material: true, kind: 'not_modeled', question: `This project has no "${noun}" to break the answer down by.` });
+      return;
+    }
+  }
+}
+
 /** An intent whose only content is what it left unresolved. */
 function isBareIntent(intent: AnalyticalIntentV1): boolean {
   return intent.measures.length === 0 && intent.groupBy.length === 0 && intent.display.length === 0 && intent.filters.length === 0 && !intent.time && !intent.ordering && !intent.limit;
@@ -551,6 +682,13 @@ const QUESTION_STOPWORDS = new Set([...CLAUSE_STOPWORDS, ...FOLLOW_UP_STOPWORDS,
  * (name, label, alias, description words): what the intent has not
  * accounted for.
  */
+const YEAR_WORD = /^(?:19|20)\d{2}$/;
+
+/** The years a question names that the intent's window, filters or scopes do not account for. */
+export function droppedYears(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
+  return unaccountedQuestionWords(question, intent, vocabulary).filter((word) => YEAR_WORD.test(word));
+}
+
 export function unaccountedQuestionWords(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
   const covered = new Set<string>();
   for (const ref of intentRefs(intent)) {
@@ -562,10 +700,20 @@ export function unaccountedQuestionWords(question: string, intent: AnalyticalInt
   // A grain the intent carries accounts for the question's time words.
   const GRAIN_WORDS: Record<string, string[]> = { day: ['day', 'daily'], week: ['week', 'weekly'], month: ['month', 'monthly'], quarter: ['quarter', 'quarterly'], year: ['year', 'yearly', 'annual', 'annually'] };
   for (const grain of [...intent.groupBy.map((group) => group.grain), intent.time?.grain]) for (const word of GRAIN_WORDS[grain ?? ''] ?? []) covered.add(word);
-  if (intent.time?.window) for (const word of normalizeVocabularyText(intent.time.window.expression ?? '').split(' ')) if (word) covered.add(word);
+  if (intent.time?.window) {
+    for (const word of normalizeVocabularyText(intent.time.window.expression ?? '').split(' ')) if (word) covered.add(word);
+    // A window accounts for the years it spans ("2024" → 2024-01-01..2025-01-01).
+    const start = Number(intent.time.window.start.slice(0, 4));
+    const end = Number(intent.time.window.end.slice(0, 4));
+    for (let year = start; year <= end; year += 1) covered.add(String(year));
+  }
+  for (const predicate of [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])]) {
+    for (const value of predicate.values) for (const word of normalizeVocabularyText(String(value)).split(' ')) if (word) covered.add(word);
+  }
   const out: string[] = [];
   for (const word of normalizeVocabularyText(question).split(' ')) {
-    if (word.length < 3 || QUESTION_STOPWORDS.has(word) || /^\d+$/.test(word)) continue;
+    // A year is a clause of its own; other numbers are not words.
+    if (word.length < 3 || QUESTION_STOPWORDS.has(word) || (/^\d+$/.test(word) && !YEAR_WORD.test(word))) continue;
     if (covered.has(word) || covered.has(singularWord(word))) continue;
     out.push(word);
   }
@@ -574,8 +722,12 @@ export function unaccountedQuestionWords(question: string, intent: AnalyticalInt
 
 const singularWord = (word: string): string => word.replace(/ies$/, 'y').replace(/(ses|xes|shes|ches)$/, (m) => m.slice(0, -2)).replace(/s$/, '');
 
+/** A retry after a provider timeout needs room for one more full dispatch (the subscription CLI's 60 s) plus 15 s for the rest of the turn. */
+const PROVIDER_TIMEOUT_RETRY_BUDGET_MS = 75_000;
+
 export async function resolveIntent(input: ResolveIntentInput): Promise<IntentResolution> {
   const maxAttempts = Math.max(1, Math.min(3, input.maxAttempts ?? 2));
+  let timeoutRetried = false;
   const now = input.now ?? (() => Date.now());
   const seeds = input.question.split(/[^A-Za-z0-9_']+/).filter((word) => word.length > 2);
   const cards = input.vocabulary.renderCards({ maxChars: input.cardBudget ?? 24_000, seeds });
@@ -588,12 +740,22 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   let attempts = 0;
   let lastProblems: IntentProblem[] = [];
   let lastDetail = '';
-  while (attempts < maxAttempts) {
+  while (attempts < maxAttempts + (timeoutRetried ? 1 : 0)) {
     attempts += 1;
     const started = now();
     const reply = await generateStructured(input.provider, messages, ANALYTICAL_INTENT_JSON_SCHEMA, input.providerOptions);
     input.onDispatch?.({ attempt: attempts, purpose: attempts === 1 ? 'resolve' : 'correct', raw: reply.raw, ms: now() - started });
-    if (reply.error === 'provider_error') return { status: 'failed', reason: 'provider_error', detail: reply.detail ?? 'provider error', problems: [], attempts };
+    if (reply.error === 'provider_error') {
+      // A provider that timed out is retried exactly once, on the same run
+      // and request, when the budget can hold another full dispatch. Any
+      // other provider failure ends the turn.
+      if (reply.code === 'provider_timeout' && !timeoutRetried && (input.budgetMs ?? 0) > PROVIDER_TIMEOUT_RETRY_BUDGET_MS) {
+        timeoutRetried = true;
+        lastDetail = reply.detail ?? 'provider timeout';
+        continue;
+      }
+      return { status: 'failed', reason: 'provider_error', detail: reply.detail ?? 'provider error', problems: [], attempts, ...(reply.code ? { code: reply.code } : {}) };
+    }
     if (reply.error) {
       lastDetail = reply.detail ?? reply.error;
       messages.push({ role: 'assistant', content: reply.raw || '(empty)' }, { role: 'user', content: 'That was not a single JSON object matching the schema. Reply with ONLY the JSON object.' });
@@ -623,6 +785,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     const askedQuestions = new Map(validation.intent.unresolved.map((clause) => [clause, clause.question]));
     applyGovernedDefaults(validation.intent, input.question, input.vocabulary);
     proveTimeRoles(validation.intent, input.vocabulary);
+    if (input.clauseCoverage !== false) proveClauseCoverage(input.question, validation.intent, input.vocabulary);
     // NO PARTIAL ANSWERS. When the interpreter wrote down nothing but a
     // clarification and the governed default supplied the only measure, the
     // rest of the question (a time axis, a grain, a member) is still
@@ -641,6 +804,21 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
           }
           for (const clause of defaulted) { clause.material = true; clause.question = askedQuestions.get(clause) ?? clause.question; }
         }
+      }
+    }
+    // NO PARTIAL ANSWERS, the period edition: a year the question names must
+    // be a window (or a filter) on the intent. The interpreter is sent back
+    // once for it; a second reading without it ends as a gap that names the
+    // window-less reading rather than an all-time total posing as the year.
+    if (validation.problems.length === 0 && validation.intent.kind === 'analytics' && !validation.intent.unresolved.some((clause) => clause.material)) {
+      const years = droppedYears(input.question, validation.intent, input.vocabulary);
+      if (years.length > 0) {
+        if (attempts < maxAttempts) {
+          lastDetail = `the question names the period ${years.join(', ')}; the intent carries no time window for it`;
+          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question names the period "${years.join(', ')}", but your intent carries no time window or filter for it. Resend the COMPLETE JSON intent with time.window covering ${years.join(', ')} (start and end dates, and the expression) on the measures' time dimension, keeping every other clause.` });
+          continue;
+        }
+        validation.intent.unresolved.push({ clause: years.join(', '), options: [], material: true, kind: 'not_modeled', question: `The period "${years.join(', ')}" could not be applied to this reading, so it was not answered as an all-time total.` });
       }
     }
     const material = validation.intent.unresolved.find((clause) => clause.material);

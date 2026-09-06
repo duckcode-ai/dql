@@ -114,6 +114,21 @@ function throwIfAlreadyCancelled(signal?: AbortSignal): void {
 
 const DEFAULT_SUBSCRIPTION_CLI_TIMEOUT_MS = 60_000;
 
+/**
+ * The CLI did not answer inside its deadline. `code` lets the pipeline retry
+ * the dispatch once; `message` is the sentence a reader gets; `detail` is
+ * the configuration hint, kept for the receipt and Inspect.
+ */
+export class ProviderTimeoutError extends Error {
+  readonly code = 'provider_timeout';
+  readonly detail: string;
+  constructor(timeoutMs: number) {
+    super(`The AI model did not respond within ${Math.round(timeoutMs / 1_000)} seconds.`);
+    this.name = 'ProviderTimeoutError';
+    this.detail = 'Retry, choose a faster model, or increase DQL_SUBSCRIPTION_CLI_TIMEOUT_MS.';
+  }
+}
+
 export function resolveSubscriptionCliTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const configured = Number(env.DQL_SUBSCRIPTION_CLI_TIMEOUT_MS);
   if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_SUBSCRIPTION_CLI_TIMEOUT_MS;
@@ -344,7 +359,7 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         console.error('[DQL_DEBUG cli]', JSON.stringify({ code: res.code, timedOut: res.timedOut, stderr: res.stderr.slice(0, 800), stdout: res.stdout.length > 1600 ? `${res.stdout.slice(0, 400)}…${res.stdout.slice(-1200)}` : res.stdout }));
       }
       if (res.timedOut) {
-        throw new Error(`Claude Code did not respond within ${Math.round(resolveSubscriptionCliTimeoutMs() / 1_000)} seconds. Retry, choose a faster model, or increase DQL_SUBSCRIPTION_CLI_TIMEOUT_MS.`);
+        throw new ProviderTimeoutError(resolveSubscriptionCliTimeoutMs());
       }
       if (res.spawnError) {
         throw new Error(`Claude Code CLI not found. Install it (https://claude.com/claude-code) and run \`claude /login\`, or switch to an API-key provider. (${res.spawnError.message})`);
@@ -505,7 +520,7 @@ export class CodexCliProvider implements AgentProvider {
       // reason (e.g. the run deadline's TimeoutError), never a parse error.
       throwIfAlreadyCancelled(options.signal);
       if (res.timedOut) {
-        throw new Error(`Codex did not respond within ${Math.round(resolveSubscriptionCliTimeoutMs() / 1_000)} seconds. Retry, choose a faster model, or increase DQL_SUBSCRIPTION_CLI_TIMEOUT_MS.`);
+        throw new ProviderTimeoutError(resolveSubscriptionCliTimeoutMs());
       }
       if (res.spawnError) {
         throw new Error(`Codex CLI not found. Install it and run \`codex login\` with your ChatGPT plan, or switch to an API-key provider. (${res.spawnError.message})`);

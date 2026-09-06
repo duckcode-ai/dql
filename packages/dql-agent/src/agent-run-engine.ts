@@ -824,7 +824,7 @@ export interface AgentRouteExecutorResult {
    * decline (`model_declined`) or grounding gap without inspecting prose. Absent
    * for any successful answer.
    */
-  answerRefusalCode?: 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'orchestration_budget_exhausted' | 'policy_blocked' | 'execution_error';
+  answerRefusalCode?: 'grounding_gap' | 'modeling_gap' | 'no_data' | 'ambiguous' | 'model_declined' | 'provider_error' | 'orchestration_budget_exhausted' | 'policy_blocked' | 'execution_error';
   artifacts?: AgentRunArtifact[];
   evaluations?: AgentRunEvaluation[];
   nextActions?: AgentRunNextAction[];
@@ -5862,7 +5862,7 @@ function computeStepOutcome(
  * user-actionable readings; the coarse code is still what machines branch on.
  */
 const REFUSAL_CODES = new Set<AnswerRefusalCode>([
-  'grounding_gap', 'modeling_gap', 'ambiguous', 'model_declined', 'provider_error',
+  'grounding_gap', 'modeling_gap', 'no_data', 'ambiguous', 'model_declined', 'provider_error',
   'orchestration_budget_exhausted', 'policy_blocked', 'execution_error',
 ]);
 

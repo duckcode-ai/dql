@@ -1,0 +1,23 @@
+{
+  "key": "4cbb8e24772f82caf5a3a58bf12c0c19",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top 10 products ranked by total revenue.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\"}],\"groupBy\":[{\"ref\":\"entity:order_item.product\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:order_item.revenue\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"entity:order_item.product\":\"q:products\",\"dimension:products.product_name\":\"q:products\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-06T02:57:56.723Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "4cbb8e24772f82caf5a3a58bf12c0c19c2b7361b7c298d79f7b0ea3b21053789",
+    "postCanonicalHash": "4cbb8e24772f82caf5a3a58bf12c0c19c2b7361b7c298d79f7b0ea3b21053789",
+    "appliedRuleClasses": []
+  }
+}

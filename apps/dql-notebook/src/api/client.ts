@@ -2002,6 +2002,8 @@ export interface AgentConversationThreadListResponse {
 export interface AgentConversationTurnResult {
   columns?: string[];
   rowsSample?: unknown[][];
+  /** Units per column, so a thread restored from the server renders by contract. */
+  columnsMeta?: Array<{ name: string; kind: 'currency' | 'percent' | 'number' | 'count' | 'duration' | 'date' | 'text' | 'boolean'; unit?: string; decimals?: number; ref?: string; grain?: string }>;
   dimensionValues?: Record<string, string[]>;
   measureColumns?: string[];
   rowCount?: number;

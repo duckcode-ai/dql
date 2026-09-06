@@ -579,7 +579,7 @@ export function repairMetricFlowGroupBy(
   };
 }
 
-function buildMetricFlowArgs(request: MetricFlowQueryRequest, mode: MetricFlowCompileMode): string[] {
+export function buildMetricFlowArgs(request: MetricFlowQueryRequest, mode: MetricFlowCompileMode): string[] {
   const args = mode === 'explain'
     ? ['query', '--explain', '--quiet']
     : ['query', '--compile'];
@@ -602,11 +602,14 @@ function buildMetricFlowArgs(request: MetricFlowQueryRequest, mode: MetricFlowCo
   }
   for (const order of request.orderBy ?? []) {
     if (!order.name) continue;
+    // An order-by must name a query item exactly: the time group-by carries
+    // its grain (`metric_time__month`), so ordering by it does too.
+    const name = request.timeDimension && order.name === request.timeDimension.name ? `${order.name}__${request.timeDimension.granularity}` : order.name;
     args.push('--order', mode === 'explain' && order.direction === 'desc'
-      ? `-${order.name}`
+      ? `-${name}`
       : mode === 'explain'
-        ? order.name
-        : `${order.name} ${order.direction ?? 'asc'}`);
+        ? name
+        : `${name} ${order.direction ?? 'asc'}`);
   }
   if (request.limit && Number.isFinite(request.limit)) {
     args.push('--limit', String(request.limit));
