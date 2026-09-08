@@ -131,11 +131,14 @@ export function describeResultColumns(intent: AnalyticalIntentV1, result: Pick<E
       const numerator = kindOfEntry(measure.derived.numerator, measure.derived.numeratorAggregation);
       const denominator = kindOfEntry(measure.derived.denominator, measure.derived.denominatorAggregation);
       // A share, rate or percentage is a fraction; a "per" ratio is a number
-      // in the numerator's unit (points per game), currency per count stays currency.
-      const fractionByName = /(pct|percent|percentage|share|rate|margin)/i.test(name);
+      // in the numerator's unit (points per game), currency per count stays
+      // currency. Nothing else may become a percent: when a repo's metadata
+      // gives no type for the operands they both read as text, and matching
+      // unknown against unknown once turned 3.26 rebounds a game into 326%.
+      const perName = /(^|[_\s])per([_\s]|$)/i.test(name);
+      const fractionByName = !perName && /(pct|percent|percentage|share|margin)|(^|[_\s])rate([_\s]|$)/i.test(name);
       const meta: Partial<ResultColumnMeta> = numerator.kind === 'currency' && (denominator.kind === 'count' || denominator.kind === 'number') ? { kind: 'currency', unit: 'USD' }
         : fractionByName || (numerator.kind === denominator.kind && numerator.kind === 'currency') ? { kind: 'percent', unit: 'fraction' }
-        : numerator.kind === denominator.kind && numerator.kind !== 'number' && numerator.kind !== 'count' ? { kind: 'percent', unit: 'fraction' }
         : { kind: 'number' };
       register(name, undefined, meta);
       continue;

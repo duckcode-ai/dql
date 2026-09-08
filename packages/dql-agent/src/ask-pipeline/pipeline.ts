@@ -30,6 +30,8 @@ export interface RunAskPipelineInput {
   prepareDeps: PrepareDeps;
   executeDeps: ExecuteDeps;
   prior?: AnalyticalIntentV1;
+  /** False when the prior turn was blocked: its question stands, its result does not exist. */
+  priorExecuted?: boolean;
   priorAnswerSummary?: string;
   guidance?: string;
   /** False for research branches: their questions are hypotheses, not asks for causes or decisions. */
@@ -69,8 +71,13 @@ function gapFromRefusals(refusals: PreparedRefusal[], intent: AnalyticalIntentV1
   const nearest = [...new Set(intent.measures.flatMap((measure) => vocabulary.suggest(measure.ref, 3).map((entry) => entry.ref)))].filter((ref) => !intent.measures.some((measure) => measure.ref === ref)).slice(0, 5);
   // The reader gets the first line of the engine's message; the receipt keeps it verbatim.
   if (compile) return { gap: 'unsupported', message: summarizeRefusal(compile), nearest };
-  const first = refusals.find((refusal) => refusal.tier !== 'exploratory');
-  return { gap: 'not_modeled', message: first?.message ?? 'no governed tier could prepare the intent', nearest };
+  // The deepest governed refusal is the one worth reading. A project with no
+  // certified blocks refuses at the certified tier for every question ever
+  // asked, so "the project has no certified block" tells nobody why THIS
+  // question stopped; the binding or composition failure underneath does.
+  const depth = (refusal: PreparedRefusal): number => (refusal.code === 'no_certified_block' ? 3 : refusal.tier === 'certified' ? 2 : refusal.tier === 'semantic' ? 1 : 0);
+  const deepest = [...refusals.filter((refusal) => refusal.tier !== 'exploratory')].sort((left, right) => depth(left) - depth(right))[0];
+  return { gap: 'not_modeled', message: deepest?.message ?? 'no governed tier could prepare the intent', nearest };
 }
 
 export async function runAskPipeline(input: RunAskPipelineInput): Promise<PipelineOutcome> {
@@ -97,7 +104,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // 1. Resolve.
   const resolveStarted = now();
   let resolution: IntentResolution = await resolveIntent({
-    question: input.question, vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorAnswerSummary: input.priorAnswerSummary, clauseCoverage: input.clauseCoverage, budgetMs: remaining(),
+    question: input.question, vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, priorAnswerSummary: input.priorAnswerSummary, clauseCoverage: input.clauseCoverage, budgetMs: remaining(),
     guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now,
     maxAttempts: remaining() > 15_000 ? 2 : 1,
     onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500) }),
@@ -124,6 +131,12 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   receipt.reading = resolution.intent.reading;
   if (resolution.status === 'clarify') {
     const options = resolution.options.map((ref) => ({ ref, label: label(ref), ...(input.vocabulary.get(ref)?.description ? { description: input.vocabulary.get(ref)!.description } : {}) }));
+    // A continuity question the host asked (which population does this
+    // follow-up mean?) has no options and no unresolved clause: it is a real
+    // question for the user, not a modeling gap.
+    if (options.length === 0 && !resolution.intent.unresolved.some((item) => item.material)) {
+      return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
+    }
     if (options.length === 0) {
       // Nothing to choose between: the project simply does not hold it.
       const materials = resolution.intent.unresolved.filter((item) => item.material);
@@ -189,7 +202,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     const repairStarted = now();
     resolution = await resolveIntent({
       question: `${input.question}\n\nThe previous interpretation could not be prepared. ${repairable.tier === 'certified' ? 'The certified block is not applicable: ' : 'The engine said: '}${repairable.message}. ${repairable.tier === 'certified' ? 'Express the analysis with metric, entity and dimension refs instead of the block.' : 'Choose refs the engine can bind.'}`,
-      vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage,
+      vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage,
       // The repair is held to the original question's obligations.
       ...(resolution.status === 'resolved' && resolution.ledger ? { ledger: resolution.ledger, ledgerRound: round + 1 } : {}),
       onDispatch: (event) => receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500) }),

@@ -53,7 +53,8 @@ export interface AskPipelineHostDeps {
   /** Wrap one physical provider call in the run's dispatch ledger. */
   dispatchOptions?(purpose: 'resolve' | 'correct' | 'repair', request: AgentRunRequest): { options: ProviderRunOptions; settle(outcome: 'ok' | 'error' | 'cancelled', error?: unknown): void };
   /** The executed intent of the last usable turn in this thread, when there is one. */
-  priorIntent(request: AgentRunRequest): { intent: AnalyticalIntentV1; summary?: string } | undefined;
+  /** The previous turn's typed reading. `executed: false` means it was blocked: its question stands, its result does not exist. */
+  priorIntent(request: AgentRunRequest): { intent: AnalyticalIntentV1; summary?: string; executed?: boolean } | undefined;
   guidance?(request: AgentRunRequest): string | undefined;
   buildIdentity?(): Record<string, string>;
   maxRows?: number;
@@ -355,7 +356,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
           return { columns, rows, rowCount: result.rowCount, executionTimeMs: result.executionTimeMs ?? Date.now() - started, ...(result.truncated ? { truncated: true } : {}) };
         },
       },
-      ...(prior ? { prior: prior.intent, priorAnswerSummary: prior.summary } : {}),
+      ...(prior ? { prior: prior.intent, ...(prior.executed === false ? { priorExecuted: false } : {}), ...(prior.summary ? { priorAnswerSummary: prior.summary } : {}) } : {}),
       ...(deps.guidance?.(request) ? { guidance: deps.guidance(request) } : {}),
       ...(connection && deps.probeLiteral && deps.literalProbeAllowed ? { groundLiterals: (intent: AnalyticalIntentV1) => groundIntentLiterals(intent, vocabulary, connection, tracedProbes(deps, request)) } : {}),
       explorationOptIn: explorationOptIn(request),

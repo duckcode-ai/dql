@@ -21,7 +21,35 @@ import type { PrepareDeps, PreparedCandidate, PreparedRefusal, SqlDialectLike } 
 
 interface PhysicalMeasure { alias: string; aggregate: string; expr: string; relation: string; scope: IntentPredicate[] }
 interface PhysicalColumn { alias: string; relation: string; column: string; expr: string; role: 'group' | 'display'; grain?: string }
-interface BoundPredicate { predicate: IntentPredicate; relation: string; column: string; boolean: boolean }
+interface BoundPredicate { predicate: IntentPredicate; relation: string; column: string; boolean: boolean; text: boolean }
+
+/**
+ * Case folding belongs to text. A year the interpreter wrote as the string
+ * "2017" against an integer season column must compile as a typed equality:
+ * LOWER(INTEGER) is not a function any warehouse has, and the whole query
+ * dies at the binder for a value that was always comparable.
+ */
+/**
+ * Whether a column holds text. The vocabulary's declared type decides; when a
+ * repo's metadata omits it, the column's role does (a key, a label or a
+ * categorical value is text, a numeric or time column is not). Unknown stays
+ * text, which is the behaviour every existing repo already compiles under.
+ */
+function isTextColumn(entry: { dataType?: string; roles?: readonly string[] } | undefined): boolean {
+  const dataType = entry?.dataType?.toLowerCase();
+  if (dataType) return /char|text|string|uuid|json|enum/.test(dataType) || !/int|decimal|numeric|float|double|real|bool|date|time|year/.test(dataType);
+  const roles = entry?.roles ?? [];
+  if (roles.includes('numeric') || roles.includes('time') || roles.includes('boolean')) return false;
+  return true;
+}
+
+function typedLiteral(value: unknown, isText: boolean): unknown {
+  if (isText || typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!/^-?\d+(?:\.\d+)?$/.test(trimmed)) return value;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) ? numeric : value;
+}
 
 const DEFAULT_DIALECT: SqlDialectLike = {
   quoteIdentifier: (name) => `"${name.replace(/"/g, '""')}"`,
@@ -62,21 +90,23 @@ function predicateSql(dialect: SqlDialectLike, bound: BoundPredicate, params: un
     const truth = asBoolean(predicate.values[0]) === (predicate.op === 'eq');
     return `${target} = ${truth ? 'TRUE' : 'FALSE'}`;
   }
+  const literal = (value: unknown) => typedLiteral(value, bound.text);
   switch (predicate.op) {
     case 'is_true': return `${target} = TRUE`;
     case 'is_false': return `${target} = FALSE`;
-    case 'in': return `${target} IN (${predicate.values.map(bind).join(', ')})`;
-    case 'not_in': return `${target} NOT IN (${predicate.values.map(bind).join(', ')})`;
-    case 'contains': return `LOWER(${target}) LIKE ${bind(`%${String(predicate.values[0] ?? '').toLowerCase()}%`)}`;
-    case 'neq': return `${target} <> ${bind(predicate.values[0])}`;
-    case 'gt': return `${target} > ${bind(predicate.values[0])}`;
-    case 'gte': return `${target} >= ${bind(predicate.values[0])}`;
-    case 'lt': return `${target} < ${bind(predicate.values[0])}`;
-    case 'lte': return `${target} <= ${bind(predicate.values[0])}`;
+    case 'in': return `${target} IN (${predicate.values.map((value) => bind(literal(value))).join(', ')})`;
+    case 'not_in': return `${target} NOT IN (${predicate.values.map((value) => bind(literal(value))).join(', ')})`;
+    // Containment is a text operation; a non-text column is cast for it.
+    case 'contains': return `LOWER(${bound.text ? target : `CAST(${target} AS VARCHAR)`}) LIKE ${bind(`%${String(predicate.values[0] ?? '').toLowerCase()}%`)}`;
+    case 'neq': return `${target} <> ${bind(literal(predicate.values[0]))}`;
+    case 'gt': return `${target} > ${bind(literal(predicate.values[0]))}`;
+    case 'gte': return `${target} >= ${bind(literal(predicate.values[0]))}`;
+    case 'lt': return `${target} < ${bind(literal(predicate.values[0]))}`;
+    case 'lte': return `${target} <= ${bind(literal(predicate.values[0]))}`;
     default: {
       const value = predicate.values[0];
       // Text equality is case-insensitive: a quoted "ryan byrd" must find Ryan Byrd.
-      return typeof value === 'string' ? `LOWER(${target}) = ${bind(value.toLowerCase())}` : `${target} = ${bind(value)}`;
+      return bound.text && typeof value === 'string' ? `LOWER(${target}) = ${bind(value.toLowerCase())}` : `${target} = ${bind(literal(value))}`;
     }
   }
 }
@@ -110,7 +140,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     const entry = vocabulary.get(predicate.ref);
     const physical = physicalOf(entry);
     if (!physical?.column) return { tier: 'relational', code: 'not_relational', message: `${predicate.ref} has no physical column binding`, repairable: false };
-    return { predicate, relation: physical.relation, column: physical.column, boolean: Boolean(entry?.roles.includes('boolean')) };
+    return { predicate, relation: physical.relation, column: physical.column, boolean: Boolean(entry?.roles.includes('boolean')), text: isTextColumn(entry) };
   };
 
   // Measures, each bound to the fact relation it reads. A ratio contributes

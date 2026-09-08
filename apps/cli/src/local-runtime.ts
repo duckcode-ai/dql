@@ -6017,11 +6017,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const store = getConversationStore();
       if (!store || !request.threadId) return undefined;
       const turns = store.recentTurns(request.threadId, 6).sort((a, b) => b.seq - a.seq);
+      // A blocked turn produced no rows, but its typed reading is still the
+      // question the user asked. It carries forward as an UNEXECUTED plan:
+      // the next turn may keep its restrictions, ranking and period, and may
+      // never claim its result. Without this a blocked turn resets the
+      // conversation and the next answer silently covers every row.
       for (const turn of turns) {
         const intent = (turn.contract as Record<string, unknown> | undefined)?.askIntentV1;
         if (!intent || typeof intent !== 'object') continue;
-        if (turn.runStatus && !['completed', 'needs_review'].includes(turn.runStatus)) continue;
-        return { intent: intent as AnalyticalIntentV1, ...(turn.answerSummary ? { summary: turn.answerSummary } : {}) };
+        const executed = !turn.runStatus || ['completed', 'needs_review'].includes(turn.runStatus);
+        return {
+          intent: intent as AnalyticalIntentV1,
+          ...(executed ? {} : { executed: false }),
+          ...(executed && turn.answerSummary ? { summary: turn.answerSummary } : {}),
+        };
       }
       return undefined;
     },

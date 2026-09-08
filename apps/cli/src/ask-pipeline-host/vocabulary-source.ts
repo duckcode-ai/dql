@@ -37,6 +37,42 @@ const SQL_WORDS = new Set(['case', 'when', 'then', 'else', 'end', 'and', 'or', '
  * is not a keyword, a function call, a number or part of a string literal is
  * treated as a column of the same relation.
  */
+const AGGREGATE_CALL = /^(sum|count|avg|min|max|median)\s*\(([\s\S]+)\)$/i;
+const NESTED_AGGREGATE = /\b(sum|count|avg|min|max|median)\s*\(/i;
+
+/**
+ * A native DQL metric or dimension declares its own relation and expression
+ * (`table`, `sql`, `type`) and carries no dbt cube or measure. Read the
+ * aggregate out of the expression when the author wrote one ("SUM(points)"),
+ * and take the declared type when they wrote the bare column ("points"). An
+ * expression that mixes aggregates (a ratio of sums) is left to the semantic
+ * engine: wrapping it in another aggregate would change its meaning.
+ */
+export function nativeAggregateBinding(sql: string | undefined, declaredType: string | undefined): { expr: string; aggregate: string } | undefined {
+  const text = (sql ?? '').trim();
+  if (!text) return undefined;
+  const call = AGGREGATE_CALL.exec(text);
+  if (call) {
+    // The outer parentheses must close the call, not two calls side by side.
+    let depth = 0;
+    for (let at = 0; at < call[2]!.length; at += 1) {
+      const char = call[2]![at];
+      if (char === '(') depth += 1;
+      else if (char === ')') depth -= 1;
+      if (depth < 0) return undefined;
+    }
+    if (depth !== 0) return undefined;
+    let aggregate = call[1]!.toLowerCase();
+    let inner = call[2]!.trim();
+    if (aggregate === 'count' && /^distinct\s+/i.test(inner)) { aggregate = 'count_distinct'; inner = inner.replace(/^distinct\s+/i, ''); }
+    if (NESTED_AGGREGATE.test(inner)) return undefined;
+    return AGGREGATES.has(aggregate) && inner ? { expr: inner, aggregate } : undefined;
+  }
+  if (NESTED_AGGREGATE.test(text)) return undefined;
+  const aggregate = (declaredType ?? '').toLowerCase();
+  return AGGREGATES.has(aggregate) ? { expr: text, aggregate } : undefined;
+}
+
 export function qualifyExpression(expr: string, relation: string, columns: Iterable<string>): string {
   const quoted = relation.split('.').map((part) => `"${part}"`).join('.');
   const literals: string[] = [];
@@ -197,6 +233,16 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
           }
         }
       }
+      // A native DQL metric has no cube and no measure, only its own table,
+      // expression and type. Without this binding the interpreter can name a
+      // metric that discovery admitted and no governed tier can execute.
+      if (!physical && !derived && !engineOnly && simple && filters.length === 0) {
+        const nativeRelation = normalizeRelationName(metric.table);
+        const native = nativeRelation && relationColumns.has(nativeRelation) ? nativeAggregateBinding(metric.sql, metric.type ?? metric.aggregation) : undefined;
+        if (nativeRelation && native) {
+          physical = { relation: nativeRelation, expr: qualifyExpression(native.expr, nativeRelation, relationColumns.get(nativeRelation) ?? []), aggregate: native.aggregate };
+        }
+      }
       if (!physical && !derived && !engineOnly && metric.metricType && metric.metricType !== 'simple') engineOnly = `a ${metric.metricType} metric the relational tier cannot compose`;
       const scopeNote = filters.length ? ` Only where ${filters.map((filter) => `${filter.column} ${filter.condition}`).join(' and ')}.` : '';
       const kindNote = engineOnly ? ` (${metric.metricType} metric: semantic engine only, ${engineOnly})` : !simple && !physical && !derived ? ` (${metric.metricType} metric: semantic engine only)` : '';
@@ -224,33 +270,44 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
         ...(timeRole ? { aggTimeDimension: timeRole } : {}), ...(displayFormat ? { displayFormat } : {}),
       });
     }
+    // A native DQL dimension names its own table instead of a cube. Its home
+    // is that relation, and its model name is the relation's own leaf so the
+    // ref stays stable (dimension:<table>.<name>).
+    const dimensionHome = (dimension: { cube?: string; table?: string }): { model: string; relation?: string } | undefined => {
+      if (dimension.cube) return { model: dimension.cube, ...(relationOfCube.get(dimension.cube) ? { relation: relationOfCube.get(dimension.cube) } : {}) };
+      const relation = normalizeRelationName(dimension.table);
+      if (!relation || !relationColumns.has(relation)) return undefined;
+      return { model: relation.split('.').pop()!, relation };
+    };
     const timeNames = new Set<string>();
     for (const dimension of layer.listTimeDimensions(undefined, { includeVariants: true })) {
-      if (!dimension.cube) continue;
-      const name = leafName(dimension.cube, dimension.name);
-      timeNames.add(`${dimension.cube}:${name}`);
-      const relation = relationOfCube.get(dimension.cube);
+      const home = dimensionHome(dimension);
+      if (!home) continue;
+      const name = leafName(home.model, dimension.name);
+      timeNames.add(`${home.model}:${name}`);
+      const relation = home.relation;
       const timeExpression = dimension.expr ?? dimension.sql;
       const column = timeExpression === undefined || timeExpression === '' ? name : isIdentifier(timeExpression) ? timeExpression : undefined;
       source.dimensions!.push({
-        name, model: dimension.cube, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: 'timestamp', isTime: true,
-        ...(dimension.granularities?.length ? { timeGrains: dimension.granularities } : {}), sourceId: `${dimension.cube}.${dimension.name}`,
-        ...(reach.get(dimension.cube)?.length ? { reachableFrom: reach.get(dimension.cube) } : {}),
+        name, model: home.model, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: 'timestamp', isTime: true,
+        ...(dimension.granularities?.length ? { timeGrains: dimension.granularities } : {}), sourceId: `${home.model}.${dimension.name}`,
+        ...(reach.get(home.model)?.length ? { reachableFrom: reach.get(home.model) } : {}),
         ...(relation && column ? { physical: { relation, column } } : {}),
       });
     }
     for (const dimension of layer.listDimensions(undefined, { includeVariants: true })) {
-      if (!dimension.cube) continue;
-      const name = leafName(dimension.cube, dimension.name);
-      if (timeNames.has(`${dimension.cube}:${name}`)) continue;
-      const relation = relationOfCube.get(dimension.cube);
+      const home = dimensionHome(dimension);
+      if (!home) continue;
+      const name = leafName(home.model, dimension.name);
+      if (timeNames.has(`${home.model}:${name}`)) continue;
+      const relation = home.relation;
       // A dimension with no expression IS its column; dbt names it once.
       const expression = dimension.expr ?? dimension.sql;
       const column = expression === undefined || expression === '' ? name : isIdentifier(expression) ? expression : undefined;
       source.dimensions!.push({
-        name, model: dimension.cube, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: dimension.type,
-        ...(dimension.isTimeDimension ? { isTime: true } : {}), sourceId: `${dimension.cube}.${dimension.name}`,
-        ...(reach.get(dimension.cube)?.length ? { reachableFrom: reach.get(dimension.cube) } : {}),
+        name, model: home.model, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: dimension.type,
+        ...(dimension.isTimeDimension ? { isTime: true } : {}), sourceId: `${home.model}.${dimension.name}`,
+        ...(reach.get(home.model)?.length ? { reachableFrom: reach.get(home.model) } : {}),
         ...(relation && column ? { physical: { relation, column } } : {}),
       });
     }

@@ -787,8 +787,10 @@ export function AnalyticsHome() {
 
   // A tab that arrives on /ask?thread=… keeps that identity through hydration.
   const pendingThreadIdRef = React.useRef<string | undefined>(typeof window === 'undefined' ? undefined : askThreadIdFromLocation(window.location));
-  const seeded = React.useRef(seedPendingThreadConversation(loadConversations(), pendingThreadIdRef.current));
-  const [conversations, setConversations] = useState<Conversation[]>(() => seeded.current.conversations);
+  // useRef is not lazy: seeding through useState keeps the browser cache from
+  // being parsed again on every render of a long conversation.
+  const [seeded] = useState(() => seedPendingThreadConversation(loadConversations(), pendingThreadIdRef.current));
+  const [conversations, setConversations] = useState<Conversation[]>(() => seeded.conversations);
   const conversationsRef = React.useRef(conversations);
   const [historyVerificationState, setHistoryVerificationState] = useState<AskHistoryVerificationState>('pending');
   const [historyRequestNonce, setHistoryRequestNonce] = useState(0);
@@ -809,7 +811,7 @@ export function AnalyticsHome() {
   // Keep the selected thread across a page remount/reload. The panel's pending-run
   // handoff uses this server thread id to reconnect rather than asking again.
   const [activeId, setActiveId] = useState<string>(() => {
-    const stored = seeded.current.activeId ?? loadActiveConversationId(conversations);
+    const stored = seeded.activeId ?? loadActiveConversationId(conversations);
     return stored ?? makeConversationId();
   });
   const activeIdRef = React.useRef(activeId);

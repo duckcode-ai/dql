@@ -31,6 +31,8 @@ export interface ResolveIntentInput {
   provider: AgentProvider;
   /** The executed intent of the previous turn, when this turn continues it. */
   prior?: AnalyticalIntentV1;
+  /** False when the prior turn was blocked: its question stands, its result does not exist. */
+  priorExecuted?: boolean;
   priorAnswerSummary?: string;
   /** Host: skip the full-question clause check (research branches phrase hypotheses, not questions). */
   clauseCoverage?: boolean;
@@ -122,9 +124,9 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
   ].join('\n');
 }
 
-function renderPrior(prior: AnalyticalIntentV1, summary?: string): string {
+function renderPrior(prior: AnalyticalIntentV1, summary?: string, executed = true): string {
   return [
-    'PREVIOUS ANALYSIS (executed):',
+    executed ? 'PREVIOUS ANALYSIS (executed):' : 'PREVIOUS READING (NOT executed: it was blocked, so it produced no rows. Keep its question — its measures, restrictions, period, ranking and limit — but never describe it as a result, and never refer to rows it did not produce):',
     JSON.stringify({
       reading: prior.reading || describeIntent(prior),
       measures: prior.measures, groupBy: prior.groupBy, display: prior.display, filters: prior.filters,
@@ -144,7 +146,29 @@ interface Validation { intent: AnalyticalIntentV1; problems: IntentProblem[]
  * problems with suggestions. A canonicalised ref replaces what the model
  * wrote so downstream code never sees an alias.
  */
-export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, prior?: AnalyticalIntentV1, question?: string): Validation {
+export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: VocabularyIndex, prior?: AnalyticalIntentV1, question?: string): Validation {
+  let intent = input;
+  // A period named on a field that is not a date is a VALUE, not a window: a
+  // season column holding 2017 answers "in 2017" as an equality. Rewriting it
+  // here keeps the restriction the question asked for instead of failing the
+  // whole reading on a field the interpreter chose reasonably.
+  const wholeYear = (window: { start?: string; end?: string } | undefined): string | undefined => {
+    const start = /^(\d{4})-01-01/.exec(window?.start ?? '');
+    const end = /^(\d{4})-01-01/.exec(window?.end ?? '');
+    return start && end && Number(end[1]) === Number(start[1]) + 1 ? start[1]! : undefined;
+  };
+  if (intent.time?.ref && intent.time.window) {
+    const entry = vocabulary.resolve(intent.time.ref);
+    const year = wholeYear(intent.time.window);
+    if (entry && !entry.roles.includes('time') && year && !intent.filters.some((filter) => filter.ref === entry.ref)) {
+      intent = {
+        ...intent,
+        filters: [...intent.filters, { ref: entry.ref, op: 'eq', values: [year], source: intent.time.window.expression ? 'question' : 'inherited' }],
+        provenance: { ...intent.provenance, [entry.ref]: `${intent.provenance[intent.time.ref] ?? `q:${intent.time.window.expression ?? year}`} (host: ${entry.ref} is not a date, so the period is a value on it)` },
+      };
+      delete (intent as { time?: unknown }).time;
+    }
+  }
   const problems: IntentProblem[] = [];
   let followUpReplacement: string | undefined;
   const canonical = (ref: string, kinds: VocabularyKind[], path: string, roleCheck?: (entry: VocabularyEntry) => string | undefined): string => {
@@ -329,7 +353,9 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
     next.provenance[`time:${prior.time.ref ?? 'window'}`] = 'inherited';
   }
   for (const ref of unaccountedInheritedRefs(prior, next)) {
-    problems.push({ path: 'provenance', message: `the previous analysis used ${ref}; keep it (provenance "inherited") or list it as "removed:<why>"` });
+    const entry = vocabulary.get(ref);
+    const name = entry?.label ?? entry?.name ?? ref;
+    problems.push({ path: 'provenance', message: `the previous analysis used ${name} [${ref}]; keep it (provenance "inherited") or list it as "removed:<why>"` });
   }
   // Display refs must not duplicate group-by refs; a key in display is harmless.
   const grouped = new Set(next.groupBy.map((group) => group.ref));
@@ -827,6 +853,47 @@ const singularWord = (word: string): string => word.replace(/ies$/, 'y').replace
 const CLAUSE_WORDS = (text: string) => (normalizeVocabularyText(text).split(' ').filter((word) => word.length > 2 && !QUESTION_STOPWORDS.has(word)));
 
 /** The obligations of the original question, from its first analytics reading. */
+/**
+ * What a follow-up quietly stopped restricting. "Add rebounds for those same
+ * players" after a top-ten ranking of 2017 is still those ten players: a
+ * reading that keeps the measures but loses the period, the threshold, the
+ * ranking or the limit has answered a different, larger question. The words
+ * that ask for the wider population ("all", "every", "overall") make it the
+ * user's choice instead.
+ */
+export function widenedPopulation(question: string, intent: AnalyticalIntentV1, prior: AnalyticalIntentV1 | undefined): string[] {
+  if (!prior || intent.kind !== 'analytics' || prior.kind !== 'analytics') return [];
+  if (/\b(all|every|overall|entire|whole|any)\b/i.test(question)) return [];
+  const removed = (ref: string) => (intent.provenance[ref] ?? '').startsWith('removed');
+  const priorMeasures = prior.measures.map((measure) => measure.ref);
+  // A message that names a new subject drops the prior measures on purpose;
+  // the provenance rule already holds it to account for them.
+  if (priorMeasures.length > 0 && priorMeasures.every((ref) => removed(ref))) return [];
+  const restricted = new Set([
+    ...intent.filters.map((filter) => filter.ref),
+    ...intent.measures.flatMap((measure) => (measure.scope ?? []).map((scope) => scope.ref)),
+    ...(intent.time?.ref ? [intent.time.ref] : []),
+  ]);
+  // A message that adds a restriction of its own ("what about Ryan Byrd")
+  // asks a DIFFERENT question, not a wider one; only a reading that restricts
+  // strictly less than the analysis it edits has widened.
+  const priorRestricted = new Set([
+    ...prior.filters.map((filter) => filter.ref),
+    ...prior.measures.flatMap((measure) => (measure.scope ?? []).map((scope) => scope.ref)),
+    ...(prior.time?.ref ? [prior.time.ref] : []),
+  ]);
+  if ([...restricted].some((ref) => !priorRestricted.has(ref))) return [];
+  const lost: string[] = [];
+  for (const filter of prior.filters) {
+    if (filter.on === 'aggregate') { if (!intent.filters.some((next) => next.on === 'aggregate')) lost.push(`the threshold "${filter.ref} ${filter.op} ${filter.values.join(', ')}"`); continue; }
+    if (!restricted.has(filter.ref) && !removed(filter.ref)) lost.push(`the restriction on ${filter.ref}`);
+  }
+  if (prior.time?.window && !intent.time?.window) lost.push('the period');
+  if (prior.limit !== undefined && intent.limit === undefined) lost.push(`the limit of ${prior.limit}`);
+  if (prior.ordering && !intent.ordering) lost.push('the ranking');
+  return lost;
+}
+
 export function buildLedger(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): IntentLedger {
   const time = intent.groupBy.find((group) => group.role === 'time' && group.grain);
   return {
@@ -898,11 +965,12 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   const system = buildIntentSystemPrompt({ cards, guidance: input.guidance, hasPrior: Boolean(input.prior), hints: spellingHints(input.question, input.vocabulary) });
   const messages: AgentMessage[] = [
     { role: 'system', content: system },
-    ...(input.prior ? [{ role: 'user' as const, content: renderPrior(input.prior, input.priorAnswerSummary) }] : []),
+    ...(input.prior ? [{ role: 'user' as const, content: renderPrior(input.prior, input.priorExecuted === false ? undefined : input.priorAnswerSummary, input.priorExecuted !== false) }] : []),
     { role: 'user', content: `QUESTION: ${input.question}` },
   ];
   let attempts = 0;
   let lastProblems: IntentProblem[] = [];
+  let lastIntent: AnalyticalIntentV1 | undefined;
   let lastDetail = '';
   let ledger: IntentLedger | undefined = input.ledger;
   const ledgerEntries: LedgerEntry[] = [];
@@ -1015,6 +1083,21 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     if (validation.problems.length === 0 && validation.intent.kind === 'analytics' && !validation.intent.unresolved.some((clause) => clause.material)) {
       // NO PARTIAL ANSWERS, the grain edition: "by month" is a time grouping,
       // never a scalar over the period. One re-ask, then a material clause.
+      // A follow-up may not quietly answer a wider population than the one it
+      // is editing: one correction, then the turn ends in a clarification.
+      const widened = widenedPopulation(input.question, validation.intent, input.prior);
+      if (widened.length > 0) {
+        if (attempts < maxAttempts) {
+          lastDetail = `the previous analysis restricted this to ${widened.join(', ')}; the reading dropped it`;
+          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `Your reading drops ${widened.join(', ')} from the previous analysis, so it would answer for a larger population than the one the message is editing. Resend the COMPLETE intent keeping it, or list it in provenance as "removed:<why>" if the message really asks for the wider population.` });
+          continue;
+        }
+        return {
+          status: 'clarify', intent: validation.intent, attempts, options: [],
+          question: `The previous analysis was restricted to ${widened.join(', ')}. Should this question keep that, or apply to every row?`,
+          ...(ledger ? { ledger, ledgerEntries } : {}),
+        };
+      }
       const grain = droppedGrain(input.question, validation.intent, input.vocabulary);
       if (grain) {
         if (attempts < maxAttempts) {
@@ -1042,8 +1125,19 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       return { status: 'resolved', intent: validation.intent, attempts, problems: [], ...(ledger ? { ledger, ledgerEntries } : {}) };
     }
     lastProblems = validation.problems;
+    lastIntent = validation.intent;
     lastDetail = validation.problems.map((problem) => `${problem.path}: ${problem.message}`).join('; ');
     messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: correctionMessage(validation.problems) });
+  }
+  // A reading that only failed to account for the PREVIOUS analysis's clauses
+  // is not a broken reading, it is an ambiguous continuation: ask which
+  // population the user meant instead of reporting an internal problem.
+  if (lastProblems.length > 0 && lastProblems.every((problem) => problem.path === 'provenance') && lastIntent) {
+    const clause = lastProblems.map((problem) => problem.message.replace(/^the previous analysis used /, '').replace(/\s*\[[^\]]*\]/, '').replace(/; keep it.*$/, '')).join(', ');
+    return {
+      status: 'clarify', intent: lastIntent, attempts, options: [],
+      question: `The previous analysis also used ${clause}. Should this question keep that, or apply without it?`,
+    };
   }
   return { status: 'failed', reason: lastProblems.length ? 'invalid' : 'unparseable', detail: lastDetail, problems: lastProblems, attempts };
 }

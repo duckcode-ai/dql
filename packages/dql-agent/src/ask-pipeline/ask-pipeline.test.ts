@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, auditLedger, bindExactNames, buildIntentSystemPrompt, buildLedger, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyGovernedDefaults, auditLedger, bindExactNames, buildIntentSystemPrompt, buildLedger, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { runAskPipeline } from './pipeline.js';
@@ -1136,5 +1136,69 @@ describe('a warehouse failure says which kind it was', () => {
     expect(outcome.kind).toBe('failed');
     expect(outcome.receipt.failure?.stage).toBe('resolve');
     expect(outcome.receipt.warehouse).toBeUndefined();
+  });
+});
+
+describe('a follow-up may not quietly answer for everyone', () => {
+  const vocabulary = buildVocabularyIndex({
+    dimensions: [
+      { name: 'player_id', model: 'journey', dataType: 'VARCHAR', physical: { relation: 'dev.journey', column: 'player_id' } },
+      { name: 'season', model: 'journey', dataType: 'INTEGER', physical: { relation: 'dev.journey', column: 'season' } },
+    ],
+    relations: [{ schema: 'dev', name: 'journey', columns: [{ name: 'player_id' }, { name: 'season', dataType: 'INTEGER' }, { name: 'points' }, { name: 'rebounds' }, { name: 'games_played' }] }],
+  });
+  const make = (raw: Record<string, unknown>) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'ranking', ...raw }).intent!;
+  const prior = make({
+    measures: [{ ref: 'column:dev.journey.points', aggregation: 'sum', alias: 'total_points' }],
+    groupBy: [{ ref: 'dimension:journey.player_id', role: 'key' }],
+    filters: [{ ref: 'dimension:journey.season', op: 'eq', values: ['2017'], source: 'question' }],
+    ordering: { ref: 'measure:0', direction: 'desc' }, limit: 10,
+  });
+  it('names the period, ranking and limit the reading dropped', () => {
+    const widened = make({ measures: [{ ref: 'column:dev.journey.rebounds', aggregation: 'sum', alias: 'total_rebounds' }], groupBy: [{ ref: 'dimension:journey.player_id', role: 'key' }] });
+    expect(widenedPopulation('Add rebounds for those same players', widened, prior))
+      .toEqual(['the restriction on dimension:journey.season', 'the limit of 10', 'the ranking']);
+    // Keeping them is not a widening.
+    const kept = make({
+      measures: [{ ref: 'column:dev.journey.rebounds', aggregation: 'sum', alias: 'total_rebounds' }],
+      groupBy: [{ ref: 'dimension:journey.player_id', role: 'key' }],
+      filters: [{ ref: 'dimension:journey.season', op: 'eq', values: ['2017'], source: 'inherited' }],
+      ordering: { ref: 'measure:0', direction: 'desc' }, limit: 10,
+    });
+    expect(widenedPopulation('Add rebounds for those same players', kept, prior)).toEqual([]);
+    // The user may ask for the wider population.
+    expect(widenedPopulation('now show rebounds for all players', widened, prior)).toEqual([]);
+    // A new subject accounts for the previous measures as removed.
+    const newSubject = make({ measures: [{ ref: 'column:dev.journey.rebounds', aggregation: 'sum' }], provenance: { 'column:dev.journey.points': 'removed:asks about rebounds only' } });
+    expect(widenedPopulation('what about rebounds by season', newSubject, prior)).toEqual([]);
+  });
+  it('the interpreter is corrected once, and a stubborn reading ends as a clarification with zero SQL', async () => {
+    const wide = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Rebounds by player', measures: [{ ref: 'column:dev.journey.rebounds', aggregation: 'sum', alias: 'total_rebounds' }], groupBy: [{ ref: 'dimension:journey.player_id', role: 'key' }], display: [], filters: [], unresolved: [], provenance: { 'column:dev.journey.player_id': 'inherited', 'column:dev.journey.points': 'removed:replaced by rebounds' }, expectedShape: 'ranking' });
+    let executed = 0;
+    const outcome = await runAskPipeline({
+      question: 'Add total rebounds for those same players', vocabulary, prior, provider: scripted([wide, wide]),
+      prepareDeps: { joinPath: () => [] }, executeDeps: { run: async () => { executed += 1; return { columns: [], rows: [], rowCount: 0, executionTimeMs: 1 }; } },
+    });
+    expect(executed).toBe(0);
+    if (outcome.kind !== 'clarify') throw new Error(`${outcome.kind}: ${JSON.stringify(outcome.receipt.intent?.unresolved ?? [])} dispatches=${outcome.receipt.dispatches.length}`);
+    // Either continuity question is safe: the turn ends by asking which
+    // population was meant, and no query runs.
+    expect(outcome.question).toMatch(/previous analysis (also used|was restricted to)/);
+    expect(outcome.question).not.toMatch(/dimension:|column:/);
+  });
+});
+
+describe('a period named on a field that is not a date', () => {
+  const vocabulary = buildVocabularyIndex({
+    dimensions: [{ name: 'season', model: 'journey', dataType: 'INTEGER', physical: { relation: 'dev.journey', column: 'season' } }],
+    relations: [{ schema: 'dev', name: 'journey', columns: [{ name: 'season', dataType: 'INTEGER' }, { name: 'points' }] }],
+  });
+  it('is read as a value on that field instead of failing the whole reading', () => {
+    const raw = parseIntent({ version: 1, kind: 'analytics', reading: 'Points in 2017', measures: [{ ref: 'column:dev.journey.points', aggregation: 'sum', alias: 'total_points' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar', time: { ref: 'dimension:journey.season', window: { start: '2017-01-01', end: '2018-01-01', expression: 'in 2017' } } }).intent!;
+    const validated = validateIntentRefs(raw, vocabulary);
+    expect(validated.problems).toEqual([]);
+    expect(validated.intent.time).toBeUndefined();
+    expect(validated.intent.filters).toEqual([expect.objectContaining({ ref: 'dimension:journey.season', op: 'eq', values: ['2017'] })]);
+    expect(validated.intent.provenance['dimension:journey.season']).toMatch(/not a date/);
   });
 });

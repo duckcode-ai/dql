@@ -332,3 +332,35 @@ describe('a ratio over physical columns with a threshold on the aggregate', () =
     expect(validateIntentRefs(bare, nba).problems.map((problem) => problem.message)).toEqual([expect.stringMatching(/needs numeratorAggregation/), expect.stringMatching(/needs numeratorAggregation/)]);
   });
 });
+
+describe('predicates compile against the column\'s type', () => {
+  const typed = buildVocabularyIndex({
+    dimensions: [
+      { name: 'season', model: 'journey', dataType: 'INTEGER', physical: { relation: 'dev.journey', column: 'season' } },
+      { name: 'player_name', model: 'journey', dataType: 'VARCHAR', physical: { relation: 'dev.journey', column: 'player_name' } },
+      { name: 'points', model: 'journey', dataType: 'DOUBLE', physical: { relation: 'dev.journey', column: 'points' } },
+    ],
+    relations: [{ schema: 'dev', name: 'journey', columns: [{ name: 'season', dataType: 'INTEGER' }, { name: 'player_name', dataType: 'VARCHAR' }, { name: 'points', dataType: 'DOUBLE' }] }],
+  });
+  const compose = (filters: unknown[]) => composeRelational(intent({
+    measures: [{ ref: 'column:dev.journey.points', aggregation: 'sum', alias: 'total_points' }],
+    groupBy: [{ ref: 'dimension:journey.player_name', role: 'categorical' }], filters: filters as never, expectedShape: 'ranking',
+  }), typed, { ...deps, joinPath: () => [] });
+  it('a year written as a string against an integer column is a typed equality, never LOWER(INTEGER)', () => {
+    const composed = compose([{ ref: 'dimension:journey.season', op: 'eq', values: ['2017'], source: 'question' }]);
+    expect(composed.refusal).toBeUndefined();
+    expect(composed.candidate!.sql).toContain('"dev"."journey"."season" = ?');
+    expect(composed.candidate!.sql).not.toMatch(/LOWER\("dev"\."journey"\."season"\)/);
+    expect(composed.candidate!.params).toEqual([2017]);
+  });
+  it('text equality stays case-insensitive, and every operator respects the type', () => {
+    const text = compose([{ ref: 'dimension:journey.player_name', op: 'eq', values: ['ryan byrd'], source: 'question' }]);
+    expect(text.candidate!.sql).toContain('LOWER("dev"."journey"."player_name") = ?');
+    const inList = compose([{ ref: 'dimension:journey.season', op: 'in', values: ['2016', '2017'], source: 'question' }]);
+    expect(inList.candidate!.params).toEqual([2016, 2017]);
+    const bound = compose([{ ref: 'dimension:journey.season', op: 'gte', values: ['2016'], source: 'question' }]);
+    expect(bound.candidate!.params).toEqual([2016]);
+    const like = compose([{ ref: 'dimension:journey.season', op: 'contains', values: ['201'], source: 'question' }]);
+    expect(like.candidate!.sql).toContain('LOWER(CAST("dev"."journey"."season" AS VARCHAR)) LIKE ?');
+  });
+});

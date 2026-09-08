@@ -553,6 +553,28 @@ the question string again.
    analysis, an unapproved semantic tile or a pending draft makes it a count
    (`UI-027`).
 
+26. **A semantic layer binds through whatever it declares.** A metric that
+   names a dbt cube and measure binds through them; a metric that declares
+   its own `table`, `sql` and `type` binds through those, and its dimensions
+   bind to that relation. The aggregate is read out of the expression when
+   the author wrote one and taken from the declared type when they wrote the
+   bare column; a formula of aggregates stays with the semantic engine. A
+   predicate compiles against the column's declared type: case folding is for
+   text, a numeric literal written as a string binds as a number, and
+   containment casts. A period named on a field that is not a date is a value
+   on that field, not a window (`AGT-072`).
+
+27. **A blocked turn keeps its question and loses its result.** The previous
+   turn's typed reading carries forward even when it executed nothing, marked
+   as an unexecuted plan: the next turn may keep its restrictions, period,
+   ranking and limit, and may never describe its rows. A follow-up that
+   restricts strictly less than the analysis it edits is corrected once and
+   then ends by asking which population was meant, so a lost cohort never
+   becomes an answer for every row. A gap names the deepest governed refusal,
+   not the certified tier's standing absence of blocks. A ratio is a percent
+   only from a display contract or a vetted alias; a "per" ratio is a number
+   in the numerator's unit (`AGT-073`).
+
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn
 conversation, hand-reviewed reference SQL executed against a seeded SQLite

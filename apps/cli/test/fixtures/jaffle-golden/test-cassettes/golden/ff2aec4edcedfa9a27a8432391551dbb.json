@@ -1,0 +1,24 @@
+{
+  "key": "ff2aec4edcedfa9a27a8432391551dbb",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show customer Ryan Byrd's total product revenue and beverage (drink) revenue, both measures side by side.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"aggregation\":\"sum\"},{\"ref\":\"metric:order_item.drink_revenue\",\"aggregation\":\"sum\",\"scope\":[{\"ref\":\"dimension:order_item.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"inherited\"}]}],\"groupBy\":[],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"inherited\",\"metric:order_item.drink_revenue\":\"inherited\",\"dimension:order_item.is_drink_item\":\"inherited\",\"dimension:customers.customer_name\":\"q:Ryan byrd\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T19:13:11.662Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "ff2aec4edcedfa9a27a8432391551dbbb51fa1a2e5178c57f87b0569287dd43d",
+    "postCanonicalHash": "ff2aec4edcedfa9a27a8432391551dbbb51fa1a2e5178c57f87b0569287dd43d",
+    "appliedRuleClasses": []
+  }
+}
