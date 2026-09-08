@@ -1,0 +1,23 @@
+{
+  "key": "911fcc63b8c1938c712e747c251a77ca",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Monthly gross order revenue and order count, trended by calendar month.\",\"measures\":[{\"ref\":\"block:commerce.monthly_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"block:commerce.monthly_revenue\":\"q:revenue by month\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T01:22:05.113Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "911fcc63b8c1938c712e747c251a77cae96036ad5190f1ff9e7d373e63b54597",
+    "postCanonicalHash": "911fcc63b8c1938c712e747c251a77cae96036ad5190f1ff9e7d373e63b54597",
+    "appliedRuleClasses": []
+  }
+}

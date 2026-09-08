@@ -45,17 +45,29 @@ interface GoldenCase extends Reference {
   id: string; question: string; outcome?: Outcome; tier: Tier;
   identity?: string[]; keys?: string[]; ordered?: boolean; requiredColumns?: string[];
   alternatives?: Reference[]; note?: string;
-  keeps?: string[]; forbids?: { route?: string; block?: string; rowCountAbove?: number; booleanBreakdown?: boolean };
+  keeps?: string[]; forbids?: { route?: string; block?: string; rowCountAbove?: number; booleanBreakdown?: boolean; sql?: boolean };
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
-const goldenDir = resolve(here, '../test/ask-golden');
-const fixtureDir = resolve(here, '../test/fixtures/jaffle-golden');
+/**
+ * `DQL_ASK_GOLDEN_FIXTURE` selects the fixture: `jaffle-golden` (default; its
+ * cases live at test/ask-golden/*.json) or another fixture directory whose
+ * cases live at test/ask-golden/<fixture>/*.json (e.g. `nba-golden`: a
+ * Snowflake-shaped dbt project with no semantic layer, parameterized
+ * certified blocks and non-unique player names).
+ */
+const FIXTURE = process.env.DQL_ASK_GOLDEN_FIXTURE ?? 'jaffle-golden';
+const goldenDir = FIXTURE === 'jaffle-golden' ? resolve(here, '../test/ask-golden') : resolve(here, '../test/ask-golden', FIXTURE);
+const fixtureDir = resolve(here, '../test/fixtures', FIXTURE);
 const questions = (JSON.parse(readFileSync(join(goldenDir, 'questions.json'), 'utf8')) as { questions: GoldenCase[] }).questions;
 const conversation = (JSON.parse(readFileSync(join(goldenDir, 'conversation.json'), 'utf8')) as { turns: GoldenCase[] }).turns;
 const seed = JSON.parse(readFileSync(join(fixtureDir, 'seeds', 'seed.json'), 'utf8')) as GoldenSeed;
 
 const LIVE = process.env.DQL_ASK_GOLDEN_LIVE === '1';
+// The built product scales its run deadline for a subscription CLI (~35 s a
+// dispatch on a larger vocabulary); under vitest that scale is off, so a live
+// lane sets it explicitly. Replay is instant and keeps the strict deadline.
+if (LIVE && !process.env.DQL_AGENT_DEADLINE_SCALE) process.env.DQL_AGENT_DEADLINE_SCALE = '4';
 const RECORD = process.env.DQL_ASK_GOLDEN_RECORD === '1';
 const REPEAT = Math.max(1, Number(process.env.DQL_ASK_GOLDEN_REPEAT ?? '1') || 1);
 /** `DQL_ASK_GOLDEN_KEEP=1` leaves the temporary project (and its run/trace stores) on disk for inspection. */
@@ -76,7 +88,7 @@ function buildIdentity(): Record<string, string> {
   const dirty = git('git status --porcelain -- apps/cli/src packages/dql-agent/src packages/dql-core/src');
   const diff = git('git diff -- apps/cli/src packages/dql-agent/src packages/dql-core/src');
   const content = createHash('sha256').update(sha).update(dirty).update(diff).digest('hex').slice(0, 16);
-  return { commit: sha, dirty: dirty ? 'true' : 'false', contentFingerprint: content, mode: MODE ?? 'default', provider: LIVE ? `live:${PROVIDER_PROJECT}` : 'cassette-replay', fixture: 'jaffle-golden' };
+  return { commit: sha, dirty: dirty ? 'true' : 'false', contentFingerprint: content, mode: MODE ?? 'default', provider: LIVE ? `live:${PROVIDER_PROJECT}` : 'cassette-replay', fixture: FIXTURE };
 }
 
 // ── row comparison ──────────────────────────────────────────────────────────
@@ -262,17 +274,32 @@ function judge(spec: GoldenCase, run: any, run0?: any): Verdict {
     steps: (run?.steps ?? []).map((step: any) => `${step.route}:${step.status}:${step.attempt ?? ''}`),
     repairAttempts: run?.repairAttempts, escalationAttempts: run?.escalationAttempts,
     failedEvaluations: (run?.evaluations ?? []).filter((e: any) => e && e.passed === false).map((e: any) => `${e.id}:${String(e.message).slice(0, 160)}`),
+    failure: run?.diagnosticReceiptV9?.failure ? `${run.diagnosticReceiptV9.failure.stage}/${run.diagnosticReceiptV9.failure.reason}: ${String(run.diagnosticReceiptV9.failure.message).slice(0, 160)}` : run?.diagnosticReceiptV9 ? undefined : `no pipeline receipt: ${String(run?.answer ?? '').slice(0, 120)}`,
+    refusalCode: run?.answerRefusalCode ?? run?.artifacts?.find?.((artifact: any) => artifact?.payload?.refusalCode)?.payload?.refusalCode,
+    runKeys: run?.diagnosticReceiptV9 ? undefined : Object.keys(run ?? {}).slice(0, 40),
     ...pipelineObserved(run),
   };
   if (INFRASTRUCTURE.test(userText(run))) reasons.push('user text describes the machinery');
   const isClarify = run?.status === 'needs_clarification' || run?.route === 'clarify';
-  const isGap = run?.status === 'blocked' || (run?.route === 'generated_answer' && !result);
+  // An honest gap is a pipeline verdict (not modeled, no data, ambiguous,
+  // policy), never a provider or warehouse failure wearing a blocked status.
+  // The V9 receipt is dropped on the engine's provider-failure path (a known
+  // gap, tracked for Slice C), so the V1 receipt and the route decision are
+  // consulted too.
+  // A run without a pipeline receipt never reported a verdict (the engine
+  // drops the receipt on its provider-failure path; tracked for Slice C).
+  const receipt = run?.diagnosticReceiptV9;
+  const failure = receipt?.failure ?? (receipt ? undefined : { stage: 'engine', reason: 'no_receipt', message: run?.answer ?? run?.summary ?? 'no pipeline receipt on the run' });
+  const refusalCode = run?.answerRefusalCode ?? run?.artifacts?.find?.((artifact: any) => artifact?.payload?.refusalCode)?.payload?.refusalCode;
+  const honestGapCode = refusalCode === undefined || ['modeling_gap', 'no_data', 'ambiguous', 'policy_blocked', 'grounding_gap'].includes(String(refusalCode));
+  const isGap = (run?.status === 'blocked' || (run?.route === 'generated_answer' && !result)) && !failure && honestGapCode;
   if (outcome === 'conversation') {
     if (run?.route !== 'conversation') reasons.push(`expected a conversational reply, got route ${run?.route}`);
     return { pass: reasons.length === 0, reasons, observed };
   }
   if (outcome === 'gap') {
-    if (!isGap && !isClarify) reasons.push(`expected an honest gap, got ${run?.route}/${run?.status} with ${result?.rows.length ?? 0} rows`);
+    if (!isGap && !isClarify) reasons.push(`expected an honest gap, got ${run?.route}/${run?.status}${failure ? ` (failure: ${String(failure.message).slice(0, 120)})` : ''}${refusalCode ? ` [${refusalCode}]` : ''} with ${result?.rows.length ?? 0} rows`);
+    if (spec.forbids?.sql && (run?.telemetry?.sqlExecutions ?? 0) > 0) reasons.push(`a gap must execute nothing; ${run.telemetry.sqlExecutions} SQL executed`);
     return { pass: reasons.length === 0, reasons, observed };
   }
   if (outcome === 'clarify_or_rows' && isClarify) return { pass: reasons.length === 0, reasons, observed };
@@ -308,7 +335,7 @@ describe('golden reference SQL agrees with the seed', () => {
     expect(rows.length, spec.sql).toBeGreaterThan(0);
     for (const alternative of spec.alternatives ?? []) expect(local.query(alternative.sql).length).toBeGreaterThan(0);
   });
-  it('the seed holds Ryan Byrd, the twelve golden customers, and two customers named Jordan Lee', () => {
+  it.skipIf(FIXTURE !== 'jaffle-golden')('the seed holds Ryan Byrd, the twelve golden customers, and two customers named Jordan Lee', () => {
     expect(local.query(`SELECT customer_name FROM dev.customers WHERE lower(customer_name) = 'ryan byrd'`)).toHaveLength(1);
     expect(local.query(`SELECT customer_id FROM dev.customers WHERE lower(customer_name) = 'jordan lee'`)).toHaveLength(2);
     expect(local.query('SELECT customer_id FROM dev.customers')).toHaveLength(14);
@@ -324,7 +351,7 @@ describe('golden harness', () => {
     if (harness && KEEP) console.log(`[ask-golden] kept project root ${harness.root}`);
     const out = join(tmpdir(), 'dql-ask-golden');
     mkdirSync(out, { recursive: true });
-    const file = join(out, `${new Date().toISOString().replace(/[:.]/g, '-')}-${MODE ?? 'default'}.json`);
+    const file = join(out, `${new Date().toISOString().replace(/[:.]/g, '-')}-${FIXTURE}-${MODE ?? 'default'}.json`);
     const passed = report.filter((entry) => entry.pass).length;
     writeFileSync(file, JSON.stringify({ build: buildIdentity(), passed, total: report.length, cases: report }, null, 2));
     // eslint-disable-next-line no-console
@@ -356,7 +383,7 @@ describe('golden harness', () => {
   // branch is an ordinary bounded Ask through the interpreter and the host's
   // tiers, and the dossier reads their sql/result artifacts. At least one
   // branch must execute with rows; the root may end completed or reviewable.
-  describe.skipIf(!LIVE || (ONLY.size > 0 && !ONLY.has('research-beverage-drivers')))('research', () => {
+  describe.skipIf(!LIVE || FIXTURE !== 'jaffle-golden' || (ONLY.size > 0 && !ONLY.has('research-beverage-drivers')))('research', () => {
     it('research-beverage-drivers executes hypothesis branches through the pipeline', async () => {
       const response = await fetch(`${harness!.base}/api/agent-runs`, {
         method: 'POST',

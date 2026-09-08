@@ -82,6 +82,13 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     version: 1, vocabularyFingerprint: input.vocabulary.fingerprint, dispatches: [], candidates: [], refusals: [], tiers: [], timings, reuse: 'none',
     ...(input.build ? { build: input.build } : {}),
   };
+  // Every warehouse dispatch is counted; a failed statement is an attempt, not "no query ran".
+  const countedExecute: typeof executeCandidate = async (...args) => {
+    receipt.warehouse = { attempts: (receipt.warehouse?.attempts ?? 0) + 1, failures: receipt.warehouse?.failures ?? 0 };
+    const executed = await executeCandidate(...args);
+    if (!executed.ok && executed.code === 'execution_failed') receipt.warehouse.failures += 1;
+    return executed;
+  };
   const label = labelFor(input.vocabulary);
   const remaining = () => (deadline ? deadline - now() : Number.POSITIVE_INFINITY);
   const mark = (stage: string, from: number) => { timings[stage] = Math.round(now() - from); input.trace?.({ stage, detail: timings[stage] }); };
@@ -95,6 +102,12 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500) }),
   });
   mark('resolve', resolveStarted);
+  const recordLedger = (resolved: IntentResolution) => {
+    if (resolved.status !== 'resolved' && resolved.status !== 'clarify') return;
+    if (!resolved.ledger) return;
+    receipt.ledger = { clauses: resolved.ledger.clauses.map((clause) => ({ clause: clause.clause, ...(clause.kind ? { kind: clause.kind } : {}) })), ...(resolved.ledger.timeGrain ? { timeGrain: resolved.ledger.timeGrain } : {}), measures: resolved.ledger.measures, entries: [...(receipt.ledger?.entries ?? []), ...(resolved.ledgerEntries ?? [])] };
+  };
+  recordLedger(resolution);
   if (resolution.status === 'failed') {
     // The reader gets one sentence; the receipt keeps the provider's words.
     const timedOut = resolution.reason === 'provider_error' && resolution.code === 'provider_timeout';
@@ -176,9 +189,12 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     resolution = await resolveIntent({
       question: `${input.question}\n\nThe previous interpretation could not be prepared. ${repairable.tier === 'certified' ? 'The certified block is not applicable: ' : 'The engine said: '}${repairable.message}. ${repairable.tier === 'certified' ? 'Express the analysis with metric, entity and dimension refs instead of the block.' : 'Choose refs the engine can bind.'}`,
       vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage,
+      // The repair is held to the original question's obligations.
+      ...(resolution.status === 'resolved' && resolution.ledger ? { ledger: resolution.ledger, ledgerRound: round + 1 } : {}),
       onDispatch: (event) => receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500) }),
     });
     mark('resolve_repair', repairStarted);
+    recordLedger(resolution);
     if (resolution.status !== 'resolved') {
       receipt.failure = { stage: 'prepare', reason: `repair_${resolution.status}`, message: resolution.status === 'failed' ? resolution.detail : resolution.status === 'clarify' ? resolution.question : resolution.status, ...(resolution.status === 'failed' ? { problems: resolution.problems } : {}) };
       break;
@@ -215,7 +231,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // the same intent; an unchanged attempt is never repeated.
   const excluded: PreparedCandidate['tier'][] = [];
   let executeStarted = now();
-  let executed = await executeCandidate(candidate, intent, input.executeDeps);
+  let executed = await countedExecute(candidate, intent, input.executeDeps);
   mark('execute', executeStarted);
   while (!executed.ok && (executed.code === 'filter_not_applied' || executed.code === 'fanout_detected') && excluded.length < 3 && remaining() > 5_000) {
     receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);
@@ -231,7 +247,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     }
     candidate = again.chosen;
     executeStarted = now();
-    executed = await executeCandidate(candidate, intent, input.executeDeps);
+    executed = await countedExecute(candidate, intent, input.executeDeps);
     mark(`execute_${excluded.length + 1}`, executeStarted);
   }
   if (!executed.ok && executed.code === 'no_rows_matched') {
@@ -257,5 +273,21 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   const result: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(intent, executed.result, input.vocabulary) };
   // A certified block served as published with an identity caveat says so in the answer.
   const caveats = candidate.tier === 'certified' ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line) => `${line.replace(/; the certified block is served as published$/, '')}; recertify it with the entity key to keep them apart`) : [];
-  return { kind: 'answered', intent, candidate, result, text: composeAnsweredText(intent, result, input.vocabulary, candidate.trust, { notes: receipt.grounding, caveats }), receipt };
+  // A member the host did not resolve to a key is matched by text, and the
+  // answer says so: the reading may name a person, the predicate names a
+  // string. A `contains` match can cover several members.
+  const grounded = new Set((receipt.grounding ?? []).map((note) => note.toLowerCase()));
+  const textMatches = [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])]
+    .filter((predicate) => (predicate.op === 'contains' || predicate.op === 'eq' || predicate.op === 'in') && predicate.values.some((value) => typeof value === 'string'))
+    .filter((predicate) => { const entry = input.vocabulary.get(predicate.ref); return Boolean(entry && (entry.kind === 'dimension' || entry.kind === 'column') && !entry.roles.includes('time') && !entry.roles.includes('numeric') && !entry.roles.includes('boolean')); })
+    .filter((predicate) => !predicate.values.some((value) => [...grounded].some((note) => note.includes(String(value).toLowerCase()))))
+    .map((predicate) => {
+      const entry = input.vocabulary.get(predicate.ref)!;
+      const label = entry.label ?? entry.name;
+      const literal = predicate.values.map((value) => JSON.stringify(String(value))).join(', ');
+      return predicate.op === 'contains'
+        ? `identity: ${label} matched by text containing ${literal}; that can cover several members, none was resolved to a key`
+        : `identity: ${label} matched by exact text ${literal}, not resolved to a key`;
+    });
+  return { kind: 'answered', intent, candidate, result, text: composeAnsweredText(intent, result, input.vocabulary, candidate.trust, { notes: [...(receipt.grounding ?? []), ...textMatches], caveats }), receipt };
 }

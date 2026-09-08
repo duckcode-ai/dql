@@ -146,18 +146,18 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     }
     return { inputs, expr: entry.derived!.expr };
   };
-  const bindPart = (ref: string, prefix: string, scope: IntentPredicate[]): RatioPart | PreparedRefusal => {
+  const bindPart = (ref: string, prefix: string, scope: IntentPredicate[], aggregation?: string): RatioPart | PreparedRefusal => {
     const entry = vocabulary.get(ref);
     if (entry?.derived && !physicalOf(entry)) return bindFormula(ref, prefix, scope);
-    const bound = bindMeasure(ref, prefix, undefined, scope);
+    const bound = bindMeasure(ref, prefix, aggregation, scope);
     return 'tier' in bound ? bound : { measure: bound };
   };
   for (const [index, measure] of intent.measures.entries()) {
     if (measure.derived) {
       const alias = measure.alias ?? measure.ref.replace(/^ratio:/, '').replace(/[^A-Za-z0-9_]+/g, '_');
-      const numerator = bindPart(measure.derived.numerator, `__num_${index + 1}`, measure.scope ?? []);
+      const numerator = bindPart(measure.derived.numerator, `__num_${index + 1}`, measure.scope ?? [], measure.derived.numeratorAggregation);
       if ('tier' in numerator) return { refusal: numerator };
-      const denominator = bindPart(measure.derived.denominator, `__den_${index + 1}`, measure.scope ?? []);
+      const denominator = bindPart(measure.derived.denominator, `__den_${index + 1}`, measure.scope ?? [], measure.derived.denominatorAggregation);
       if ('tier' in denominator) return { refusal: denominator };
       visible.push({ alias, kind: 'ratio', numerator, denominator, zeroFill: false });
       continue;
@@ -195,7 +195,10 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
 
   // Global filters and the time window, shared by every island.
   const filters: BoundPredicate[] = [];
+  // A threshold on an aggregated measure applies over the composed result.
+  const thresholds = intent.filters.filter((predicate) => predicate.on === 'aggregate' || /^measure:\d+$/.test(predicate.ref));
   for (const predicate of intent.filters) {
+    if (thresholds.includes(predicate)) continue;
     const bound = bindPredicate(predicate);
     if ('tier' in bound) return { refusal: bound };
     filters.push(bound);
@@ -268,13 +271,8 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
       }
     }
     for (const relation of joined) joinedAll.add(relation);
-    const where: string[] = [];
-    for (const filter of filters) where.push(predicateSql(dialect, filter, params));
-    if (islandWindow) {
-      const target = qualify(dialect, islandWindow.relation, islandWindow.column);
-      params.push(islandWindow.start, islandWindow.end);
-      where.push(`${target} >= ?`, `${target} < ?`);
-    }
+    // Positional parameters bind in text order: the SELECT list (measure scopes)
+    // precedes the WHERE clause (filters, window), so scopes push first.
     const measureSql = islandMeasures.map((measure) => {
       if (measure.aggregate === 'derived') return `${measure.expr} AS ${dialect.quoteIdentifier(measure.alias)}`;
       const conditions = (scopes.get(measure) ?? []).map((scope) => predicateSql(dialect, scope, params));
@@ -285,6 +283,13 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
           : `CASE WHEN ${conditions.join(' AND ')} THEN ${measure.expr} ELSE 0 END`;
       return `${AGG_SQL[measure.aggregate]!(expr)} AS ${dialect.quoteIdentifier(measure.alias)}`;
     });
+    const where: string[] = [];
+    for (const filter of filters) where.push(predicateSql(dialect, filter, params));
+    if (islandWindow) {
+      const target = qualify(dialect, islandWindow.relation, islandWindow.column);
+      params.push(islandWindow.start, islandWindow.end);
+      where.push(`${target} >= ?`, `${target} < ?`);
+    }
     const select = [...columns.map((column) => `${column.expr} AS ${dialect.quoteIdentifier(column.alias)}`), ...measureSql];
     islandSql.push([
       `SELECT ${select.join(', ')}`,
@@ -317,6 +322,28 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     return `${population && measure.zeroFill ? `COALESCE(${value}, 0)` : value} AS ${q(measure.alias)}`;
   };
   const needsProjection = population !== undefined || islandSql.length > 1 || visible.some((measure) => measure.kind === 'ratio' || measure.kind === 'derived');
+  // Thresholds are rendered over the aggregated columns by alias.
+  const thresholdSql = (extraParams: unknown[]): string[] => thresholds.map((predicate) => {
+    const at = Number(predicate.ref.slice('measure:'.length));
+    const alias = visible[at]?.alias;
+    if (!alias) return '';
+    const bind = (value: unknown) => { extraParams.push(value); return '?'; };
+    const target = dialect.quoteIdentifier(alias);
+    switch (predicate.op) {
+      case 'gt': return `${target} > ${bind(predicate.values[0])}`;
+      case 'gte': return `${target} >= ${bind(predicate.values[0])}`;
+      case 'lt': return `${target} < ${bind(predicate.values[0])}`;
+      case 'lte': return `${target} <= ${bind(predicate.values[0])}`;
+      case 'eq': return `${target} = ${bind(predicate.values[0])}`;
+      case 'neq': return `${target} <> ${bind(predicate.values[0])}`;
+      default: return '';
+    }
+  }).filter(Boolean);
+  for (const predicate of thresholds) {
+    const at = Number(predicate.ref.slice('measure:'.length));
+    if (!visible[at]) return refuse('not_relational', `${predicate.ref} names no measure of this reading`, true);
+    if (!['gt', 'gte', 'lt', 'lte', 'eq', 'neq'].includes(predicate.op)) return refuse('not_relational', `a threshold on ${visible[at]!.alias} needs a comparison, not ${predicate.op}`, true);
+  }
 
   // Ordering and limit apply to the final projection.
   let orderBy = '';
@@ -332,8 +359,16 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   let sql: string;
   const proof: string[] = [];
   const keys = columns.map((column) => column.alias);
+  const thresholdParams: unknown[] = [];
+  const thresholdWhere = thresholdSql(thresholdParams);
+  const withThresholds = (body: string): string => {
+    if (!thresholdWhere.length) return body + orderBy + limit;
+    params.push(...thresholdParams);
+    proof.push(`applied after aggregation: ${thresholds.map((predicate) => `${visible[Number(predicate.ref.slice('measure:'.length))]!.alias} ${predicate.op} ${predicate.values.join('/')}`).join(', ')}`);
+    return `SELECT * FROM (\n${body}\n) AS aggregated\nWHERE ${thresholdWhere.join(' AND ')}${orderBy}${limit}`;
+  };
   if (!needsProjection) {
-    sql = islandSql[0]! + orderBy + limit;
+    sql = withThresholds(islandSql[0]!);
     proof.push(`composed over ${[...joinedAll].join(', ')} along governed join paths${measures.some((m) => m.scope.length) ? ' with per-measure scope' : ''}`);
   } else {
     const ctes = islandSql.map((body, index) => `${names[index]} AS (\n${body}\n)`);
@@ -364,7 +399,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
         ...joins,
       ].join('\n');
     }
-    sql = `WITH ${ctes.join(',\n')}\n${outer}${orderBy}${limit}`;
+    sql = withThresholds(`WITH ${ctes.join(',\n')}\n${outer}`);
     if (islandSql.length > 1) proof.push(`composed as ${islandSql.length} aggregate islands (${islandOrder.join(' | ')}) joined on ${keys.length ? keys.join(', ') : 'a single row'}, so measures of different grains never multiply each other`);
     else if (!population) proof.push(`composed over ${[...joinedAll].join(', ')} along governed join paths${measures.some((m) => m.scope.length) ? ' with per-measure scope' : ''}`);
     for (const measure of visible) {

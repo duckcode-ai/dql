@@ -8,6 +8,7 @@ import {
   unaccountedInheritedRefs,
   type AnalyticalIntentV1,
   type IntentPredicate,
+  type IntentUnresolved,
 } from './intent.js';
 import { normalizeVocabularyText, trigramSimilarity, type VocabularyEntry, type VocabularyIndex, type VocabularyKind } from './vocabulary.js';
 
@@ -35,6 +36,10 @@ export interface ResolveIntentInput {
   clauseCoverage?: boolean;
   /** Milliseconds the run can still spend; a timed-out interpreter dispatch is retried once when this allows another. */
   budgetMs?: number;
+  /** The obligations of the original question, when this resolution is a repair of an earlier reading. */
+  ledger?: IntentLedger;
+  /** Round number for ledger entries (0 = the first resolution, 1 = the pipeline's repair). */
+  ledgerRound?: number;
   /** Optional domain briefing / project guidance rendered above the cards. */
   guidance?: string;
   /** Character budget for the vocabulary cards. */
@@ -47,15 +52,36 @@ export interface ResolveIntentInput {
 
 export interface IntentProblem { path: string; message: string; suggestions?: string[] }
 
+/**
+ * What the ORIGINAL question obliged, written down from the first reading and
+ * immutable afterwards. A later reading (a schema correction, a guard's
+ * re-ask, the pipeline's repair after a refused preparation) may discharge an
+ * obligation by binding refs that account for it, or keep it listed as
+ * unresolved; it may never silently drop it. "Closest available" is not a
+ * discharge: a block stands in for a measure only through its own outputs.
+ */
+export interface IntentLedger {
+  /** Material clauses the first reading declared it could not resolve. */
+  clauses: Array<{ clause: string; kind?: IntentUnresolved['kind']; question?: string; words: string[] }>;
+  /** The first reading's time grouping (a monthly trend is never a ranking). */
+  timeGrain?: { ref: string; grain: string };
+  /** The first reading's measures by ref (a block may replace one only through its outputs). */
+  measures: string[];
+  /** Question words no ref of the first reading accounted for (informational; the coverage guards use them). */
+  unaccounted: string[];
+}
+
+export interface LedgerEntry { clause: string; kind?: string; disposition: 'discharged' | 'unresolved' | 'dropped' | 'restored'; by?: string; round: number }
+
 export type IntentResolution =
-  | { status: 'resolved'; intent: AnalyticalIntentV1; attempts: number; problems: IntentProblem[] }
-  | { status: 'clarify'; intent: AnalyticalIntentV1; question: string; options: string[]; attempts: number }
+  | { status: 'resolved'; intent: AnalyticalIntentV1; attempts: number; problems: IntentProblem[]; ledger?: IntentLedger; ledgerEntries?: LedgerEntry[] }
+  | { status: 'clarify'; intent: AnalyticalIntentV1; question: string; options: string[]; attempts: number; ledger?: IntentLedger; ledgerEntries?: LedgerEntry[] }
   | { status: 'conversation'; intent: AnalyticalIntentV1; reply: string; attempts: number }
   | { status: 'definition'; intent: AnalyticalIntentV1; reply: string; attempts: number }
   | { status: 'failed'; reason: 'provider_error' | 'unparseable' | 'invalid'; detail: string; problems: IntentProblem[]; attempts: number; code?: string };
 
 const MEASURE_KINDS: VocabularyKind[] = ['metric', 'measure', 'column', 'block'];
-const RATIO_KINDS: VocabularyKind[] = ['metric', 'measure'];
+const RATIO_KINDS: VocabularyKind[] = ['metric', 'measure', 'column'];
 const GROUP_KINDS: VocabularyKind[] = ['dimension', 'entity', 'column'];
 const DISPLAY_KINDS: VocabularyKind[] = ['dimension', 'entity', 'column'];
 const FILTER_KINDS: VocabularyKind[] = ['dimension', 'entity', 'column'];
@@ -70,6 +96,8 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
     '3. A QUOTED OR PROPER-NAME LITERAL IS A FILTER VALUE on the dimension that holds such values (customer names on customer_name, product names on product_name). Keep the literal exactly as written; the host matches it case-insensitively.',
     '4. PREFER THE GOVERNED DEFINITION. If a metric already expresses the measure the question asks for, use it; only fall back to column refs with an aggregation when no metric fits. A certified block may be named as the ONLY measure ref when the question asks for exactly what the block declares (same measure, same scope, same grain, same ranking); a block-named intent carries NO groupBy, display or filters of its own because the block already fixes them. If you are not sure the block matches exactly, express the analysis with metric and dimension refs instead.',
     '5. SHAPE. "top/best/highest N" is a ranking: ordering desc on the measure and a limit (default 10 when "top" has no number). "by <thing>" is a breakdown. "how many/what is the total" with no breakdown is a scalar. "X and Y" for one subject is a comparison.',
+    '5c. A RATIO OVER RAW COLUMNS. When the project has no metric for a part (a dbt project with no semantic layer), a ratio part may be a `column:` ref with its aggregation: `derived: {"kind":"ratio","numerator":"column:<relation>.<col>","numeratorAggregation":"sum","denominator":"column:<relation>.<col2>","denominatorAggregation":"count_distinct"}` (points per game = sum of points / count_distinct of game ids over the rows that count as games). Never invent a measure name.',
+    '5d. A THRESHOLD ON AN AGGREGATE. "with at least 20 games", "minimum 100 attempts" is a filter on the aggregated measure, not on rows: add that measure (with an alias) and a filter `{"ref":"measure:<index of that measure>","op":"gte","values":[20]}`; it applies after aggregation.',
     '5b. A RATIO OF TWO GOVERNED MEASURES. "average order value", "revenue per order", "X per Y", "share of", "margin %" is a measure with `derived: {"kind":"ratio","numerator":<metric ref>,"denominator":<metric ref>}` and an `alias`, and no `ref` (average order value = the revenue metric / the order-count metric). A governed derived or ratio metric (its card shows `= formula` and `time <dim>`) may be used instead ONLY when it measures the same thing over the same time role as the question: a metric built from lifetime per-customer measures (lifetime spend / lifetime orders, time = the customer\'s first order date) is a cohort average, so "average order value in 2025", "by month", "last quarter" is NEVER that metric; it is the derived ratio of the period\'s revenue and orders. Use the cohort metric only when the question names the cohort itself ("customers first acquired in 2025", "customers who joined in").',
     '6. TIME. A time axis ("by month") is a groupBy with role time and a grain, using the time dimension of the SAME model as the measure (an order total is by the orders model\'s time, an order-line revenue by the order line model\'s time). A time window ("last quarter", "in 2025") is `time.window` with an ISO half-open range plus the expression. Measures under one window must share their `time` role (see the cards); when they do not, add an `unresolved` entry with material=true and the two time dimension refs as options instead of choosing.',
     '7. CLARIFY ONLY WHAT IS MATERIAL. If two vocabulary entries are both plausible and the answer would differ (for example pretax product revenue vs order total including tax when the question says only "total revenue" and the project defines both), add an `unresolved` entry with material=true, the options as refs, and a one-sentence question. But: a metric whose NAME is the word the question uses ("revenue" is metric revenue, "lifetime spend" is metric lifetime_spend) IS the meaning; clarify only when the question adds a qualifier the vocabulary distinguishes ("gross", "including tax", "order revenue"). Never clarify which of two refs to use when they identify the same entity (a key column on the measure\'s model vs the entity on its own model): pick the one on the measure\'s model. Do not clarify spelling mistakes or obvious paraphrases; resolve them. Never ask whether a dimension or entity is reachable from a measure\'s model, or which join to take: the host proves join paths and grain after you answer. A material clause is only ever a choice between two or more refs, or an empty options list for something this project does not hold.',
@@ -133,17 +161,51 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
     if (roleProblem) problems.push({ path, message: roleProblem, suggestions: vocabulary.lookup(entry.name, { kinds, limit: 4 }).map((hit) => hit.entry.ref) });
     return entry.ref;
   };
-  const predicate = (p: IntentPredicate, path: string): IntentPredicate => ({ ...p, ref: canonical(p.ref, FILTER_KINDS, path) });
+  // A predicate on an aggregated measure ("at least 20 games") names the
+  // measure (`measure:<index>` or its alias) and is applied after aggregation.
+  const aggregateRef = (ref: string): string | undefined => {
+    if (/^measure:\d+$/.test(ref)) return ref;
+    const at = intent.measures.findIndex((measure) => measure.alias && measure.alias.toLowerCase() === ref.toLowerCase());
+    return at >= 0 ? `measure:${at}` : undefined;
+  };
+  const predicate = (p: IntentPredicate, path: string): IntentPredicate => {
+    const aggregate = aggregateRef(p.ref);
+    if (aggregate) return { ...p, ref: aggregate, on: 'aggregate' };
+    return { ...p, ref: canonical(p.ref, FILTER_KINDS, path) };
+  };
+  // A dbt-inventory model exposes every numeric column both as a dimension
+  // and as a physical column. Aggregating it is a measure over the column:
+  // the dimension ref is read as its column ref rather than refused.
+  const asMeasureRef = (ref: string, aggregation?: string): string => {
+    const entry = vocabulary.resolve(ref);
+    if (!entry || entry.kind !== 'dimension' || !entry.physical?.relation || !entry.physical.column) return ref;
+    // Counting is a measure over any column; other aggregates need a number.
+    const counting = aggregation === 'count' || aggregation === 'count_distinct';
+    if (!counting && !entry.roles.includes('numeric')) return ref;
+    const column = vocabulary.get(`column:${entry.physical.relation}.${entry.physical.column}`);
+    return column ? column.ref : ref;
+  };
+  // Ordering by a measure's alias ("total_points") names that measure.
+  const orderingRef = (ref: string): string => {
+    if (/^measure:\d+$/.test(ref) || vocabulary.resolve(ref)) return ref;
+    // The alias may arrive dressed as a ref ("metric:total_points").
+    const bare = ref.replace(/^(?:metric|measure|column|dimension):/, '').toLowerCase();
+    const at = intent.measures.findIndex((measure) => measure.alias && measure.alias.toLowerCase() === bare);
+    return at >= 0 ? `measure:${at}` : ref;
+  };
   const measures = intent.measures.map((measure, index) => {
     if (measure.derived) {
-      // A ratio's parts are governed metrics or measures, never columns or blocks.
-      const numerator = canonical(measure.derived.numerator, RATIO_KINDS, `measures[${index}].derived.numerator`);
-      const denominator = canonical(measure.derived.denominator, RATIO_KINDS, `measures[${index}].derived.denominator`);
+      // A ratio's parts are governed metrics or measures, or physical columns
+      // with an explicit aggregation when the project has no metric for them.
+      const columnPart = (ref: string, aggregation: string | undefined, path: string) => canonical(asMeasureRef(ref, aggregation), RATIO_KINDS, path, (entry) =>
+        entry.kind === 'column' && !aggregation ? `${entry.ref} is a raw column; a ratio part over a column needs numeratorAggregation/denominatorAggregation` : undefined);
+      const numerator = columnPart(measure.derived.numerator, measure.derived.numeratorAggregation, `measures[${index}].derived.numerator`);
+      const denominator = columnPart(measure.derived.denominator, measure.derived.denominatorAggregation, `measures[${index}].derived.denominator`);
       const scope = measure.scope?.map((p, at) => predicate(p, `measures[${index}].scope[${at}]`));
       const ref = measure.ref.startsWith('ratio:') ? `ratio:${numerator}/${denominator}` : measure.ref;
-      return { ...measure, ref, derived: { kind: 'ratio' as const, numerator, denominator }, ...(scope?.length ? { scope } : {}) };
+      return { ...measure, ref, derived: { ...measure.derived, kind: 'ratio' as const, numerator, denominator }, ...(scope?.length ? { scope } : {}) };
     }
-    const ref = canonical(measure.ref, MEASURE_KINDS, `measures[${index}].ref`, (entry) =>
+    const ref = canonical(asMeasureRef(measure.ref, measure.aggregation), MEASURE_KINDS, `measures[${index}].ref`, (entry) =>
       entry.kind === 'column' && !measure.aggregation ? `${entry.ref} is a raw column; a column measure needs an aggregation` : undefined);
     const scope = measure.scope?.map((p, at) => predicate(p, `measures[${index}].scope[${at}]`));
     // A metric that already embodies a restriction ("drink_revenue" is
@@ -185,7 +247,7 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
   const display = intent.display.map((ref, index) => canonical(ref, DISPLAY_KINDS, `display[${index}]`));
   const filters = intent.filters.map((p, index) => predicate(p, `filters[${index}]`));
   const ordering = intent.ordering
-    ? { ...intent.ordering, ref: intent.ordering.ref.startsWith('measure:') && /^measure:\d+$/.test(intent.ordering.ref) ? intent.ordering.ref : canonical(intent.ordering.ref, [...MEASURE_KINDS, ...GROUP_KINDS], 'ordering.ref') }
+    ? { ...intent.ordering, ref: /^measure:\d+$/.test(orderingRef(intent.ordering.ref)) ? orderingRef(intent.ordering.ref) : canonical(asMeasureRef(intent.ordering.ref), [...MEASURE_KINDS, ...GROUP_KINDS], 'ordering.ref') }
     : undefined;
   let time = intent.time?.ref ? { ...intent.time, ref: canonical(intent.time.ref, ['dimension', 'column'], 'time.ref', (entry) => entry.roles.includes('time') ? undefined : `${entry.ref} is not a time dimension`) } : intent.time;
   let windowDefault: string | undefined;
@@ -240,7 +302,7 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
   // is sent back with those entries: a numeric column with no metric is
   // still a measure with an aggregation, never a modeling gap.
   for (const clause of next.unresolved) {
-    if (!clause.material || clause.options.length > 0) continue;
+    if (!clause.material || clause.options.length > 0 || clause.origin === 'ledger') continue;
     const words = (clause.clause.toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) ?? []).filter((word) => !CLAUSE_STOPWORDS.has(word));
     const hits = new Map<string, VocabularyEntry>();
     for (let i = 0; i < words.length; i += 1) {
@@ -259,6 +321,12 @@ export function validateIntentRefs(intent: AnalyticalIntentV1, vocabulary: Vocab
       message: `"${clause.clause}" is modeled: ${[...hits.keys()].join(', ')}. ${measureLike.length ? `Use ${measureLike.map((entry) => entry.ref).join(' or ')} as a measure (a numeric column takes an aggregation such as sum) instead of reporting a gap.` : 'Use these refs instead of reporting a gap.'}`,
       suggestions: [...hits.keys()],
     });
+  }
+  // A follow-up keeps the previous period unless the message names one: an
+  // edit of a 2017 ranking is still about 2017.
+  if (prior?.time?.window && next.kind === 'analytics' && !next.time?.window && question !== undefined && !namesPeriod(question)) {
+    next.time = { ...(next.time ?? {}), ...prior.time };
+    next.provenance[`time:${prior.time.ref ?? 'window'}`] = 'inherited';
   }
   for (const ref of unaccountedInheritedRefs(prior, next)) {
     problems.push({ path: 'provenance', message: `the previous analysis used ${ref}; keep it (provenance "inherited") or list it as "removed:<why>"` });
@@ -632,6 +700,12 @@ export function proveTimeRoles(intent: AnalyticalIntentV1, vocabulary: Vocabular
 }
 
 const CAUSAL_OPERATORS = ['why', 'because', 'driver', 'drivers', 'reason', 'reasons', 'invest', 'investment', 'recommend', 'recommendation', 'recommendations', 'should', 'decide', 'decision', 'forecast', 'predict', 'prediction', 'projection'];
+
+/** The causal or decision words a question carries (why, drivers, should, invest...). */
+export function causalOperatorsIn(question: string): string[] {
+  const words = normalizeVocabularyText(question).split(' ').filter(Boolean);
+  return CAUSAL_OPERATORS.filter((word) => words.includes(word));
+}
 const BREAKDOWN_STOP = new Set(['day', 'week', 'month', 'quarter', 'year', 'date', 'time', 'period', 'each', 'the', 'total', 'far', 'now', 'default', 'itself', 'category', 'type', 'name']);
 
 /**
@@ -646,7 +720,7 @@ export function proveClauseCoverage(question: string, intent: AnalyticalIntentV1
   if (intent.kind !== 'analytics') return;
   if (intent.unresolved.some((clause) => clause.material)) return;
   const words = normalizeVocabularyText(question).split(' ').filter(Boolean);
-  const operators = CAUSAL_OPERATORS.filter((word) => words.includes(word));
+  const operators = causalOperatorsIn(question);
   if (operators.length > 0) {
     intent.unresolved.push({
       clause: operators.join(', '),
@@ -683,26 +757,49 @@ const QUESTION_STOPWORDS = new Set([...CLAUSE_STOPWORDS, ...FOLLOW_UP_STOPWORDS,
  * accounted for.
  */
 const YEAR_WORD = /^(?:19|20)\d{2}$/;
+const PERIOD_WORDS = /\b(?:(?:19|20)\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|q[1-4]|today|yesterday|week|month|quarter|year|season|ytd|mtd|qtd|all[- ]time|lifetime|overall|ever|since|until|before|after|between|last|past|recent|latest|current|this|now)\b/i;
+/** Whether a message names a period of its own (a year, a month, a relative window, "all time"). */
+export function namesPeriod(question: string): boolean {
+  return PERIOD_WORDS.test(question);
+}
 
 /** The years a question names that the intent's window, filters or scopes do not account for. */
 export function droppedYears(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
   return unaccountedQuestionWords(question, intent, vocabulary).filter((word) => YEAR_WORD.test(word));
 }
 
-export function unaccountedQuestionWords(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
+const GRAIN_OF_WORD: Record<string, string> = { day: 'day', daily: 'day', week: 'week', weekly: 'week', month: 'month', monthly: 'month', quarter: 'quarter', quarterly: 'quarter' };
+
+/** A breakdown grain the question asks for ("by month", "monthly", "weekly") that the reading carries no time grouping for. */
+export function droppedGrain(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string | undefined {
+  if (intent.groupBy.some((group) => group.role === 'time' && group.grain)) return undefined;
+  const unaccounted = unaccountedQuestionWords(question, intent, vocabulary);
+  const word = unaccounted.find((candidate) => GRAIN_OF_WORD[candidate]);
+  return word ? GRAIN_OF_WORD[word] : undefined;
+}
+
+/**
+ * The words an intent accounts for: its refs' names, labels, aliases and
+ * descriptions, its grains, its window and its filter values. With
+ * `blockThroughContract`, a block accounts only for its own contract (name,
+ * outputs, measures), never for its description or examples: "closest
+ * available" is not accounting for a question.
+ */
+export function coveredWords(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, options: { blockThroughContract?: boolean } = {}): Set<string> {
   const covered = new Set<string>();
   for (const ref of intentRefs(intent)) {
     const entry = vocabulary.get(ref);
-    for (const text of [entry?.name, entry?.label, entry?.model, ...(entry?.aliases ?? []), entry?.description ?? '', ref]) {
+    const texts = options.blockThroughContract && entry?.kind === 'block'
+      ? [entry.name, ...(entry.contract?.outputs ?? []), ...(entry.contract?.measures.map((measure) => measure.output) ?? [])]
+      : [entry?.name, entry?.label, entry?.model, ...(entry?.aliases ?? []), entry?.description ?? '', ref];
+    for (const text of texts) {
       for (const word of normalizeVocabularyText(text ?? '').split(' ')) if (word) { covered.add(word); covered.add(singularWord(word)); }
     }
   }
-  // A grain the intent carries accounts for the question's time words.
   const GRAIN_WORDS: Record<string, string[]> = { day: ['day', 'daily'], week: ['week', 'weekly'], month: ['month', 'monthly'], quarter: ['quarter', 'quarterly'], year: ['year', 'yearly', 'annual', 'annually'] };
   for (const grain of [...intent.groupBy.map((group) => group.grain), intent.time?.grain]) for (const word of GRAIN_WORDS[grain ?? ''] ?? []) covered.add(word);
   if (intent.time?.window) {
     for (const word of normalizeVocabularyText(intent.time.window.expression ?? '').split(' ')) if (word) covered.add(word);
-    // A window accounts for the years it spans ("2024" → 2024-01-01..2025-01-01).
     const start = Number(intent.time.window.start.slice(0, 4));
     const end = Number(intent.time.window.end.slice(0, 4));
     for (let year = start; year <= end; year += 1) covered.add(String(year));
@@ -710,6 +807,11 @@ export function unaccountedQuestionWords(question: string, intent: AnalyticalInt
   for (const predicate of [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])]) {
     for (const value of predicate.values) for (const word of normalizeVocabularyText(String(value)).split(' ')) if (word) covered.add(word);
   }
+  return covered;
+}
+
+export function unaccountedQuestionWords(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
+  const covered = coveredWords(intent, vocabulary);
   const out: string[] = [];
   for (const word of normalizeVocabularyText(question).split(' ')) {
     // A year is a clause of its own; other numbers are not words.
@@ -721,6 +823,68 @@ export function unaccountedQuestionWords(question: string, intent: AnalyticalInt
 }
 
 const singularWord = (word: string): string => word.replace(/ies$/, 'y').replace(/(ses|xes|shes|ches)$/, (m) => m.slice(0, -2)).replace(/s$/, '');
+
+const CLAUSE_WORDS = (text: string) => (normalizeVocabularyText(text).split(' ').filter((word) => word.length > 2 && !QUESTION_STOPWORDS.has(word)));
+
+/** The obligations of the original question, from its first analytics reading. */
+export function buildLedger(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): IntentLedger {
+  const time = intent.groupBy.find((group) => group.role === 'time' && group.grain);
+  return {
+    clauses: intent.unresolved.filter((clause) => clause.material).map((clause) => ({ clause: clause.clause, ...(clause.kind ? { kind: clause.kind } : {}), ...(clause.question ? { question: clause.question } : {}), words: CLAUSE_WORDS(clause.clause) })),
+    ...(time?.grain ? { timeGrain: { ref: time.ref, grain: time.grain } } : {}),
+    measures: intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]),
+    unaccounted: unaccountedQuestionWords(question, intent, vocabulary),
+  };
+}
+
+/** Words of a ledger clause that the intent now accounts for (a block only through its contract). */
+function accountedWords(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): Set<string> {
+  return coveredWords(intent, vocabulary, { blockThroughContract: true });
+}
+
+/**
+ * Hold a later reading to the ledger. A clause is discharged when the reading
+ * binds refs that account for its words, kept when it is still listed as
+ * unresolved, and dropped otherwise. A first-reading monthly grain that the
+ * later reading lost, or a measure the later reading replaced by a block that
+ * does not carry it, is a drop too.
+ */
+export function auditLedger(question: string, intent: AnalyticalIntentV1, ledger: IntentLedger, vocabulary: VocabularyIndex): { entries: Omit<LedgerEntry, 'round'>[]; dropped: IntentLedger['clauses'] } {
+  const entries: Omit<LedgerEntry, 'round'>[] = [];
+  const dropped: IntentLedger['clauses'] = [];
+  const covered = accountedWords(intent, vocabulary);
+  const listed = new Set(intent.unresolved.filter((clause) => clause.material).map((clause) => normalizeVocabularyText(clause.clause)));
+  for (const item of ledger.clauses) {
+    const words = item.words.filter((word) => !/^\d+$/.test(word));
+    const discharged = words.length > 0 && words.every((word) => covered.has(word) || covered.has(singularWord(word)));
+    if (discharged) { entries.push({ clause: item.clause, kind: item.kind, disposition: 'discharged', by: 'refs' }); continue; }
+    const stillListed = listed.has(normalizeVocabularyText(item.clause)) || intent.unresolved.some((clause) => clause.material && words.some((word) => normalizeVocabularyText(clause.clause).includes(word)));
+    if (stillListed) { entries.push({ clause: item.clause, kind: item.kind, disposition: 'unresolved' }); continue; }
+    entries.push({ clause: item.clause, kind: item.kind, disposition: 'dropped' });
+    dropped.push(item);
+  }
+  if (ledger.timeGrain && !intent.groupBy.some((group) => group.role === 'time' && group.grain === ledger.timeGrain!.grain)) {
+    const clause = `by ${ledger.timeGrain.grain}`;
+    entries.push({ clause, kind: 'not_modeled', disposition: 'dropped' });
+    dropped.push({ clause, kind: 'not_modeled', question: `The question asked for a ${ledger.timeGrain.grain} breakdown; a reading without that grain does not answer it.`, words: [ledger.timeGrain.grain] });
+  }
+  const blocks = intent.measures.map((measure) => vocabulary.get(measure.ref)).filter((entry): entry is VocabularyEntry => entry?.kind === 'block');
+  if (blocks.length > 0 && ledger.measures.length > 0) {
+    for (const ref of ledger.measures) {
+      if (intentRefs(intent).includes(ref)) continue;
+      const entry = vocabulary.get(ref);
+      if (!entry || entry.kind === 'block') continue;
+      const name = normalizeVocabularyText(entry.physical?.column ?? entry.name);
+      const carried = blocks.some((block) => [...(block.contract?.outputs ?? []), ...(block.contract?.measures.map((measure) => measure.sourceColumn ?? measure.output) ?? [])].some((column) => normalizeVocabularyText(column) === name));
+      if (carried) continue;
+      const clause = entry.label ?? entry.name;
+      entries.push({ clause, disposition: 'dropped' });
+      dropped.push({ clause, question: `The question was read as ${clause}; the block ${blocks.map((block) => block.name).join(', ')} does not carry it, so it does not answer the question.`, words: CLAUSE_WORDS(clause) });
+    }
+  }
+  void question;
+  return { entries, dropped };
+}
 
 /** A retry after a provider timeout needs room for one more full dispatch (the subscription CLI's 60 s) plus 15 s for the rest of the turn. */
 const PROVIDER_TIMEOUT_RETRY_BUDGET_MS = 75_000;
@@ -740,6 +904,10 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   let attempts = 0;
   let lastProblems: IntentProblem[] = [];
   let lastDetail = '';
+  let ledger: IntentLedger | undefined = input.ledger;
+  const ledgerEntries: LedgerEntry[] = [];
+  const round = input.ledgerRound ?? 0;
+  let ledgerCorrected = false;
   while (attempts < maxAttempts + (timeoutRetried ? 1 : 0)) {
     attempts += 1;
     const started = now();
@@ -768,8 +936,42 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: correctionMessage(parsed.errors) });
       continue;
     }
-    if (parsed.intent.kind === 'conversation') return { status: 'conversation', intent: parsed.intent, reply: parsed.intent.reply ?? parsed.intent.reading, attempts };
+    if (parsed.intent.kind === 'conversation') {
+      // A why/should question over the previous analysis is not small talk:
+      // a conversational reply would judge or explain from rows it cannot
+      // compute, so it ends as the unsupported gap the analysis deserves,
+      // naming what the previous reading can still answer.
+      const operators = causalOperatorsIn(input.question);
+      if (input.prior && operators.length > 0) {
+        const question = `Explaining why something happened or recommending what to do (${operators.join(', ')}) is not something Ask computes from governed data; Research can investigate the drivers.`;
+        const intent: AnalyticalIntentV1 = { ...input.prior, reading: parsed.intent.reading, unresolved: [{ clause: operators.join(', '), options: [], material: true, kind: 'unsupported', question }] };
+        return { status: 'clarify', intent, question, options: [], attempts };
+      }
+      return { status: 'conversation', intent: parsed.intent, reply: parsed.intent.reply ?? parsed.intent.reading, attempts };
+    }
     if (parsed.intent.kind === 'definition') return { status: 'definition', intent: parsed.intent, reply: parsed.intent.reply ?? parsed.intent.reading, attempts };
+    // The first analytics reading of the original question writes the ledger;
+    // every later reading is held to it.
+    if (!ledger) ledger = buildLedger(input.question, parsed.intent, input.vocabulary);
+    else {
+      const audit = auditLedger(input.question, parsed.intent, ledger, input.vocabulary);
+      ledgerEntries.push(...audit.entries.map((entry) => ({ ...entry, round })));
+      if (audit.dropped.length > 0) {
+        if (!ledgerCorrected && attempts < maxAttempts) {
+          ledgerCorrected = true;
+          lastDetail = `the reading dropped what the question asked for: ${audit.dropped.map((item) => item.clause).join('; ')}`;
+          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `Your reading dropped part of the question: ${audit.dropped.map((item) => `"${item.clause}"`).join(', ')}. A correction may bind these to governed refs that actually carry them, or keep them listed in unresolved as material with no options; it may not replace them with the closest available block or measure. Resend the COMPLETE JSON intent.` });
+          continue;
+        }
+        // A second drop: the obligations come back as material clauses, so
+        // the turn ends in the gap the question deserved, never in a
+        // substitute answer.
+        for (const item of audit.dropped) {
+          parsed.intent.unresolved.push({ clause: item.clause, options: [], material: true, kind: item.kind ?? 'not_modeled', origin: 'ledger', question: item.question ?? `"${item.clause}" is something the project does not model as asked.` });
+          ledgerEntries.push({ clause: item.clause, kind: item.kind, disposition: 'restored', round });
+        }
+      }
+    }
     // The follow-up guard sends the interpreter back once. When its second
     // reading still replaces the previous analysis with words that name
     // nothing new, both readings are plausible and the user decides.
@@ -811,6 +1013,17 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     // once for it; a second reading without it ends as a gap that names the
     // window-less reading rather than an all-time total posing as the year.
     if (validation.problems.length === 0 && validation.intent.kind === 'analytics' && !validation.intent.unresolved.some((clause) => clause.material)) {
+      // NO PARTIAL ANSWERS, the grain edition: "by month" is a time grouping,
+      // never a scalar over the period. One re-ask, then a material clause.
+      const grain = droppedGrain(input.question, validation.intent, input.vocabulary);
+      if (grain) {
+        if (attempts < maxAttempts) {
+          lastDetail = `the question asks for a ${grain} breakdown; the reading carries no time grouping`;
+          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question asks for a ${grain} breakdown, but your intent has no groupBy with role "time" and grain "${grain}". Resend the COMPLETE JSON intent with that time grouping on the measures' time dimension, keeping every other clause.` });
+          continue;
+        }
+        validation.intent.unresolved.push({ clause: `by ${grain}`, options: [], material: true, kind: 'not_modeled', origin: 'ledger', question: `The question asked for a ${grain} breakdown; a reading without that grain does not answer it.` });
+      }
       const years = droppedYears(input.question, validation.intent, input.vocabulary);
       if (years.length > 0) {
         if (attempts < maxAttempts) {
@@ -824,9 +1037,9 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     const material = validation.intent.unresolved.find((clause) => clause.material);
     if (validation.problems.length === 0 || (material && validation.problems.every((problem) => problem.path === 'measures'))) {
       if (material) {
-        return { status: 'clarify', intent: validation.intent, question: material.question ?? `Which did you mean for "${material.clause}"?`, options: material.options, attempts };
+        return { status: 'clarify', intent: validation.intent, question: material.question ?? `Which did you mean for "${material.clause}"?`, options: material.options, attempts, ...(ledger ? { ledger, ledgerEntries } : {}) };
       }
-      return { status: 'resolved', intent: validation.intent, attempts, problems: [] };
+      return { status: 'resolved', intent: validation.intent, attempts, problems: [], ...(ledger ? { ledger, ledgerEntries } : {}) };
     }
     lastProblems = validation.problems;
     lastDetail = validation.problems.map((problem) => `${problem.path}: ${problem.message}`).join('; ');

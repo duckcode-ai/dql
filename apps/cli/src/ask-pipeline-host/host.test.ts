@@ -3,7 +3,7 @@ import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, normalizeExecutedRow, tracedProbes } from './host.js';
+import { createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, normalizeExecutedRow, prepareBlockForAsk, tracedProbes } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -182,5 +182,51 @@ describe('physical trace spans', () => {
     // Without a tracer the deps are handed through untouched.
     const plain = { literalProbeAllowed: () => true, probeLiteral: async () => [] };
     expect(tracedProbes(plain, request)).toBe(plain);
+  });
+});
+
+describe('a certified block is compiled and bound like every other surface runs it', () => {
+  const blockSource = `// dql-format: 1
+block "top_players" {
+  domain = "nba"
+  type = "custom"
+  status = "certified"
+  description = "Top players by points between two calendar years."
+  owner = "x"
+  outputs = ["player_name", "total_points"]
+  params {
+    season_start = 2016
+    season_end = 2017
+    top_n = 5
+  }
+  query = """
+    SELECT player_name, SUM(pts) AS total_points FROM dev.player_game_stats
+    WHERE CAST(strftime('%Y', game_date) AS INTEGER) BETWEEN \${season_start} AND \${season_end}
+    GROUP BY player_name ORDER BY total_points DESC LIMIT \${top_n}
+  """
+}
+`;
+  it('binds declared defaults and values the question states, in placeholder order, and leaves no template', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const root = mkdtempSync(join(tmpdir(), 'dql-block-'));
+    mkdirSync(join(root, 'blocks'), { recursive: true });
+    writeFileSync(join(root, 'blocks', 'top_players.dql'), blockSource);
+    const entry = { ref: 'block:nba.top_players', kind: 'block', name: 'top_players', aliases: [], roles: [], sourcePath: 'blocks/top_players.dql', contract: { outputs: ['player_name', 'total_points'], measures: [], groupBy: [], staticScope: [], allowedFilters: [], parameters: ['season_start', 'season_end', 'top_n'], structural: true } } as never;
+    const prepared = prepareBlockForAsk(root, entry, { question: 'Top 3 players by points in 2016 and 2017' }, 'sqlite');
+    expect(prepared && 'sql' in prepared ? prepared.sql : prepared).toMatch(/BETWEEN \$1 AND \$2[\s\S]*LIMIT \$3/);
+    if (!prepared || !('sql' in prepared)) return;
+    expect(prepared.sql).not.toMatch(/\$\{/);
+    expect(prepared.params).toEqual([2016, 2017, 3]);
+    expect(prepared.parameters.map((parameter) => `${parameter.name}:${parameter.source}`)).toEqual(['season_start:question', 'season_end:question', 'top_n:question']);
+    const defaults = prepareBlockForAsk(root, entry, { question: 'who are the top players' }, 'sqlite');
+    expect(defaults && 'params' in defaults ? defaults.params : defaults).toEqual([2016, 2017, 5]);
+  });
+  it('a block without a declaration on disk is usable only when it has no parameters', () => {
+    const plain = { ref: 'block:x.plain', kind: 'block', name: 'plain', aliases: [], roles: [], sql: 'SELECT 1 AS one' } as never;
+    expect(prepareBlockForAsk('/nowhere', plain, {})).toEqual({ sql: 'SELECT 1 AS one', params: [], parameters: [] });
+    const templated = { ref: 'block:x.t', kind: 'block', name: 't', aliases: [], roles: [], sql: 'SELECT 1 WHERE y = ${limit}' } as never;
+    expect(prepareBlockForAsk('/nowhere', templated, {})).toMatchObject({ error: expect.stringMatching(/not available/) });
   });
 });

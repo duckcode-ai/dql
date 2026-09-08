@@ -1,0 +1,23 @@
+{
+  "key": "45b765ad6a8bcf95d4b8cef2d02c9781",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top scoring players by total points across games dated in calendar year 2030.\",\"measures\":[{\"ref\":\"block:nba.top_players_by_total_points\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"time\":{\"ref\":\"dimension:games.game_date\",\"window\":{\"start\":\"2030-01-01\",\"end\":\"2031-01-01\",\"expression\":\"in 2030\"}},\"unresolved\":[],\"provenance\":{\"block:nba.top_players_by_total_points\":\"q:scoring leaders\",\"dimension:games.game_date\":\"q:calendar 2030\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T01:38:34.312Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "45b765ad6a8bcf95d4b8cef2d02c978159f18aaec682d70c6d2c3eb42162eb30",
+    "postCanonicalHash": "45b765ad6a8bcf95d4b8cef2d02c978159f18aaec682d70c6d2c3eb42162eb30",
+    "appliedRuleClasses": []
+  }
+}

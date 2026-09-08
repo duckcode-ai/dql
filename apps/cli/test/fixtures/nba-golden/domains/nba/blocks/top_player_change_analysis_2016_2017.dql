@@ -1,0 +1,40 @@
+// dql-format: 1
+
+block "top_player_change_analysis_2016_2017" {
+  domain = "nba"
+  type = "custom"
+  status = "certified"
+  description = "Review-required draft comparing the top scorers of calendar 2016 and 2017 by rank and total points."
+  owner = "sports-analytics@nba.test"
+  tags = ["nba", "players", "scoring", "change-analysis", "review-required"]
+  pattern = "ranking"
+  grain = "player_name"
+  entities = ["player"]
+  outputs = ["year", "player_rank", "player_name", "total_points"]
+  dimensions = ["year", "player_name"]
+  allowedFilters = []
+  sourceSystems = ["dbt:player_game_stats"]
+  reviewCadence = "monthly"
+  llmContext = "Draft under review: ranks the top five scorers of each calendar year (2016, 2017) by total points."
+
+  query = """
+    WITH player_year AS (
+      SELECT CAST(strftime('%Y', game_date) AS INTEGER) AS year, player_name, SUM(pts) AS total_points
+      FROM dev.player_game_stats
+      WHERE CAST(strftime('%Y', game_date) AS INTEGER) BETWEEN 2016 AND 2017
+      GROUP BY 1, 2
+    ), ranked AS (
+      SELECT year, player_name, total_points, ROW_NUMBER() OVER (PARTITION BY year ORDER BY total_points DESC) AS player_rank
+      FROM player_year
+    )
+    SELECT year, player_rank, player_name, total_points FROM ranked WHERE player_rank <= 5 ORDER BY year, player_rank
+  """
+
+  visualization {
+    chart = "table"
+  }
+
+  tests {
+    assert row_count > 0
+  }
+}

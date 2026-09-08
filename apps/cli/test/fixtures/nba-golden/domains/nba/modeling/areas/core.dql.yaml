@@ -1,0 +1,58 @@
+domain: nba
+area:
+  id: core
+  name: Player and team games
+  description: Player box-score statistics per game and game results for calendar 2016 and 2017.
+  intent_examples:
+    - Who scored the most points in 2017?
+    - Which teams won the most games in 2017?
+entities:
+  - id: player_game
+    dbt_model: model.nba_golden.player_game_stats
+    business_name: Player game
+    business_context: One player's box-score line in one game (points, rebounds, assists, shooting). played is 1 when the player took part, 0 for a DNP listing.
+    analytical_role: event
+    owner: sports-analytics@nba.test
+  - id: game
+    dbt_model: model.nba_golden.games
+    business_name: Game
+    business_context: One game with its date, season code, home and visitor teams, points and the home win flag.
+    analytical_role: event
+    owner: sports-analytics@nba.test
+  - id: team
+    dbt_model: model.nba_golden.teams
+    business_name: Team
+    business_context: An NBA franchise.
+    analytical_role: dimension
+    owner: sports-analytics@nba.test
+  - id: player
+    dbt_model: model.nba_golden.players
+    business_name: Player
+    business_context: A player identified by a stable player id; several players can share a name.
+    analytical_role: dimension
+    owner: sports-analytics@nba.test
+relationships:
+  - id: player_game_to_game
+    from: player_game
+    to: game
+    keys: [{ from: game_id, to: game_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+    owner: sports-analytics@nba.test
+  - id: player_game_to_team
+    from: player_game
+    to: team
+    keys: [{ from: team_id, to: team_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+    owner: sports-analytics@nba.test
+  - id: player_game_to_player
+    from: player_game
+    to: player
+    keys: [{ from: player_id, to: player_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+    owner: sports-analytics@nba.test

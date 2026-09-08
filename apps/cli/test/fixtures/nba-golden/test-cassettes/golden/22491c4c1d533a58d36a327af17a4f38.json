@@ -1,0 +1,23 @@
+{
+  "key": "22491c4c1d533a58d36a327af17a4f38",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by the sum of their points scored in games dated in calendar years 2016 and 2017 combined, showing each player's name and number of games played, limited to the top 5.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"},{\"ref\":\"column:dev.player_game_stats.game_id\",\"aggregation\":\"count_distinct\",\"alias\":\"games_played\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"inherited\"}]}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"column:dev.player_game_stats.pts\",\"direction\":\"desc\"},\"limit\":5,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2016-01-01\",\"end\":\"2018-01-01\",\"expression\":\"calendar years 2016 and 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.pts\":\"q:total points\",\"column:dev.player_game_stats.game_id\":\"q:games played too\",\"dimension:player_game_stats.played\":\"inherited\",\"dimension:player_game_stats.player_id\":\"q:top five players\",\"dimension:player_game_stats.player_name\":\"q:players\",\"dimension:player_game_stats.game_date\":\"q:calendar years 2016 and 2017 combined\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T01:43:44.517Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "22491c4c1d533a58d36a327af17a4f381939ef4b125d6bb043ffe3b6114a6160",
+    "postCanonicalHash": "22491c4c1d533a58d36a327af17a4f381939ef4b125d6bb043ffe3b6114a6160",
+    "appliedRuleClasses": []
+  }
+}

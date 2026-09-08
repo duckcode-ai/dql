@@ -1,0 +1,12 @@
+// dql-format: 1
+
+domain "NBA" {
+  id = "nba"
+  owner = "sports-analytics@nba.test"
+  businessOwner = "Basketball Operations"
+  boundedContext = "Player and team game statistics for calendar 2016 and 2017: scoring, rebounds, assists, shooting, results."
+  sourceSystems = ["dbt:games", "dbt:player_game_stats", "dbt:teams", "dbt:players"]
+  primaryTerms = ["Player", "Team", "Game", "Points"]
+  reviewCadence = "monthly"
+  tags = ["nba", "basketball"]
+}

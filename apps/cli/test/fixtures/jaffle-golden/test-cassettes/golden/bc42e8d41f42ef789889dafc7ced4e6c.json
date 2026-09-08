@@ -1,0 +1,25 @@
+{
+  "key": "bc42e8d41f42ef789889dafc7ced4e6c",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks why revenue is down and which region to invest in; this project has no region dimension or causal/recommendation capability, but it does hold a monthly revenue trend that shows the revenue movement referenced.\",\"measures\":[{\"ref\":\"block:commerce.monthly_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[{\"clause\":\"revenue down by region, and which region to invest in\",\"options\":[\"block:commerce.beverage_revenue_by_product\",\"block:commerce.monthly_revenue\",\"block:commerce.top_beverage_customers\"],\"material\":true,\"question\":\"This project has no 'region' concept and cannot produce causal explanations or investment recommendations; would the monthly revenue trend (shown here) work instead, or did you mean a breakdown by location or product?\"}],\"provenance\":{\"block:commerce.monthly_revenue\":\"q:revenue down\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T01:32:47.525Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "bc42e8d41f42ef789889dafc7ced4e6cddd5db0a03c35ad2df7da9a87a45780b",
+    "postCanonicalHash": "bc42e8d41f42ef789889dafc7ced4e6cddd5db0a03c35ad2df7da9a87a45780b",
+    "appliedRuleClasses": []
+  }
+}

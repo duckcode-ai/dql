@@ -1,0 +1,23 @@
+{
+  "key": "cca21959d40b62e530e42507e5bab97c",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total points scored by the player named 'Totally Imaginary Person' in calendar year 2017.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"dimension:player_game_stats.player_name\",\"op\":\"eq\",\"values\":[\"Totally Imaginary Person\"],\"source\":\"question\"}],\"expectedShape\":\"lookup\",\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:scoring\",\"dimension:player_game_stats.player_id\":\"q:player\",\"dimension:player_game_stats.player_name\":\"q:the player Totally Imaginary Person\",\"dimension:player_game_stats.game_date\":\"q:in 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T01:39:18.432Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "cca21959d40b62e530e42507e5bab97c284530488441b112a484deebe4cce038",
+    "postCanonicalHash": "cca21959d40b62e530e42507e5bab97c284530488441b112a484deebe4cce038",
+    "appliedRuleClasses": []
+  }
+}

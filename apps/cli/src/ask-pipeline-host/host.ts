@@ -1,4 +1,8 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { buildExecutionPlan } from '@duckcodeailabs/dql-notebook';
+import { prepareBlockInvocation } from '../block-invocation.js';
 import { writeFileSync } from 'node:fs';
 import type { ConnectionConfig, QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { getDialect, type DQLManifest, type SemanticLayer } from '@duckcodeailabs/dql-core';
@@ -19,6 +23,8 @@ import {
   type SemanticCompileOutput,
   type SemanticCompileRequest,
   type VocabularyIndex,
+  type PreparedBlock,
+  type VocabularyEntry,
 } from '@duckcodeailabs/dql-agent';
 import { buildProjectVocabulary, normalizeRelationName } from './vocabulary-source.js';
 
@@ -278,6 +284,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       joinPath: (fromRelation, toRelation) => semanticJoinPath(fromRelation, toRelation) ?? declaredJoinPath(fromRelation, toRelation),
       dialect: { quoteIdentifier: (name) => dialect.quoteIdentifier(name), dateTrunc: (grain, expr) => dialect.dateTrunc(grain, expr), limitClause: (limit) => dialect.limitClause(limit) },
       blockSql: (ref) => vocabulary.get(ref)?.sql,
+      prepareBlock: (ref, context) => prepareBlockForAsk(deps.projectRoot, vocabulary.get(ref), context, connection?.driver),
       ...(engine ? { engine } : {}),
     };
   };
@@ -402,6 +409,50 @@ export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['
   if (gap === 'ambiguous') return { title: 'One detail is missing', code: 'ambiguous' };
   if (gap === 'not_retrieved') return { title: 'No matching data for that period', code: 'no_data' };
   return { title: 'No governed answer', code: 'modeling_gap' };
+}
+
+/**
+ * A certified block, compiled and bound the way Block Studio, Apps and the
+ * Notebook run it: values from the shared invocation contract (declared
+ * defaults, values the question states outright, explicit inputs), SQL
+ * lowered by the DQL compiler to positional placeholders, and the bound
+ * values in placeholder order. No template placeholder survives.
+ */
+export function prepareBlockForAsk(projectRoot: string, entry: VocabularyEntry | undefined, context: { question?: string }, driver?: string): PreparedBlock | undefined {
+  if (!entry || entry.kind !== 'block') return undefined;
+  if (!entry.sourcePath) {
+    // No declaration on disk: the raw query is only usable without parameters.
+    return entry.sql && !/\$\{/.test(entry.sql) ? { sql: entry.sql, params: [], parameters: [] } : { error: 'the block declaration is not available to bind its parameters' };
+  }
+  let source: string;
+  try {
+    source = readFileSync(join(projectRoot, entry.sourcePath), 'utf8');
+  } catch (error) {
+    return { error: `the block source could not be read (${entry.sourcePath}): ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const invocation = prepareBlockInvocation({ block: entry.name, source, question: context.question, surface: 'ask_ai' });
+  if (invocation.errors.length) return { error: invocation.errors.join(' '), unresolved: invocation.unresolvedParameters };
+  if (invocation.unresolvedParameters.length) return { error: `it still needs values for ${invocation.unresolvedParameters.join(', ')}`, unresolved: invocation.unresolvedParameters };
+  let plan: ReturnType<typeof buildExecutionPlan>;
+  try {
+    plan = buildExecutionPlan({ id: `ask-${entry.name}`, type: 'dql', source, title: entry.name }, { ...(driver ? { driver } : {}), parameters: invocation.values });
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+  if (!plan?.sql) return { error: 'the block produced no executable SQL' };
+  const specs = [...plan.sqlParams].sort((left, right) => left.position - right.position);
+  // The invocation's resolved values win (a question's "top 3" over the declared default); the plan's variables are the declared defaults.
+  const params = specs.map((spec) => (invocation.values[spec.name] !== undefined ? invocation.values[spec.name] : plan.variables[spec.name] !== undefined ? plan.variables[spec.name] : spec.literalValue));
+  const missing = specs.filter((spec, index) => params[index] === undefined).map((spec) => spec.name);
+  if (missing.length) return { error: `no value bound for ${missing.join(', ')}`, unresolved: missing };
+  if (/\$\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}/.test(plan.sql)) return { error: 'a template placeholder survived compilation' };
+  const sources = new Map(invocation.resolvedParameters.map((parameter) => [parameter.name, parameter.source]));
+  return {
+    sql: plan.sql,
+    params,
+    parameters: specs.map((spec, index) => ({ name: spec.name, position: spec.position, value: params[index], source: sources.get(spec.name) ?? 'default' })),
+    ...(entry.contract?.outputs?.length ? { outputs: entry.contract.outputs } : {}),
+  };
 }
 
 export function toExecutorResult(runId: string, outcome: PipelineOutcome, startedAt: number): AgentRouteExecutorResult {

@@ -1,0 +1,23 @@
+{
+  "key": "51ce1ca3f14c9c1d91f50a7ed3df34e6",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for a causal explanation of a revenue decline broken down by region and a recommendation on which region to invest in, but this project has no region dimension (only individual locations) and cannot produce causal explanations or investment recommendations.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[{\"clause\":\"revenue down by region\",\"options\":[],\"material\":true,\"question\":\"This project has no 'region' concept (only individual locations via location_name) and no way to explain a decline causally or produce investment recommendations — can you rephrase as a revenue breakdown by location over a time window instead?\"}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T01:32:28.478Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "51ce1ca3f14c9c1d91f50a7ed3df34e61f0fb6de465c49b2560dcbe5c1dea2d7",
+    "postCanonicalHash": "51ce1ca3f14c9c1d91f50a7ed3df34e61f0fb6de465c49b2560dcbe5c1dea2d7",
+    "appliedRuleClasses": []
+  }
+}

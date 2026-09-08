@@ -170,12 +170,28 @@ export function prepareCertified(intent: AnalyticalIntentV1, vocabulary: Vocabul
   const considered = named.length ? blocks.filter((block) => named.includes(block.ref)) : blocks;
   for (const block of considered) {
     const verdict = entails(block, intent, vocabulary);
-    const source = deps.blockSql?.(block.ref) ?? block.sql;
+    // The block is compiled and bound like every other surface runs it. The
+    // raw-text path survives only for blocks without template parameters.
+    const prepared = deps.prepareBlock?.(block.ref, { question: intent.reading });
+    if (prepared && 'error' in prepared) {
+      refusals.push({ tier: 'certified', code: 'block_not_applicable', message: `${block.ref}: its parameters could not be bound: ${prepared.error}`, repairable: false, detail: { unresolved: prepared.unresolved ?? [] } });
+      continue;
+    }
+    const rawSource = prepared ? undefined : (deps.blockSql?.(block.ref) ?? block.sql);
+    if (rawSource && /\$\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}/.test(rawSource)) {
+      refusals.push({ tier: 'certified', code: 'block_not_applicable', message: `${block.ref}: declares template parameters that this host does not bind`, repairable: false });
+      continue;
+    }
+    const source = prepared?.sql ?? rawSource;
     const identityOnly = !verdict.ok && verdict.identityNote !== undefined && verdict.missing.length === 1;
     if ((verdict.ok || identityOnly) && source) {
       // Filters the block declares it accepts are applied OVER its output, so
       // the certified logic runs unchanged and the filter is provably present.
-      const params: unknown[] = [];
+      const params: unknown[] = prepared ? [...prepared.params] : [];
+      // Applied predicates continue the block's positional numbering; a block
+      // without parameters keeps the composer's `?` placeholders.
+      const placeholder = () => { if (!prepared) return '?'; return `$${params.length}`; };
+      const bind = (value: unknown) => { params.push(value); return placeholder(); };
       const outputs = new Set((block.contract?.outputs ?? []).map(norm));
       const applied: string[] = [];
       const blockPredicates = [...intent.filters, ...intent.measures.filter((measure) => measure.ref === block.ref).flatMap((measure) => measure.scope ?? [])];
@@ -187,22 +203,21 @@ export function prepareCertified(intent: AnalyticalIntentV1, vocabulary: Vocabul
         if (!output || !outputs.has(norm(column))) continue;
         const quoted = `"${output.replace(/"/g, '""')}"`;
         const value = predicate.values[0];
-        if (predicate.op === 'eq' && typeof value === 'string') { params.push(value.toLowerCase()); applied.push(`LOWER(CAST(block.${quoted} AS TEXT)) = ?`); }
-        else if (predicate.op === 'eq') { params.push(value); applied.push(`block.${quoted} = ?`); }
-        else if (predicate.op === 'in') { for (const item of predicate.values) params.push(typeof item === 'string' ? item.toLowerCase() : item); applied.push(`LOWER(CAST(block.${quoted} AS TEXT)) IN (${predicate.values.map(() => '?').join(', ')})`); }
+        if (predicate.op === 'eq' && typeof value === 'string') applied.push(`LOWER(CAST(block.${quoted} AS TEXT)) = ${bind(value.toLowerCase())}`);
+        else if (predicate.op === 'eq') applied.push(`block.${quoted} = ${bind(value)}`);
+        else if (predicate.op === 'in') applied.push(`LOWER(CAST(block.${quoted} AS TEXT)) IN (${predicate.values.map((item) => bind(typeof item === 'string' ? item.toLowerCase() : item)).join(', ')})`);
         else if (predicate.op === 'is_true') applied.push(`block.${quoted} = TRUE`);
         else if (predicate.op === 'is_false') applied.push(`block.${quoted} = FALSE`);
-        else { params.push(value); applied.push(`block.${quoted} ${({ neq: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' } as Record<string, string>)[predicate.op] ?? '='} ?`); }
+        else applied.push(`block.${quoted} ${({ neq: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' } as Record<string, string>)[predicate.op] ?? '='} ${bind(value)}`);
       }
       if (intent.time?.window && verdict.windowColumn) {
         const quoted = `"${verdict.windowColumn.replace(/"/g, '""')}"`;
-        params.push(intent.time.window.start, intent.time.window.end);
-        applied.push(`block.${quoted} >= ?`, `block.${quoted} < ?`);
+        applied.push(`block.${quoted} >= ${bind(intent.time.window.start)}`, `block.${quoted} < ${bind(intent.time.window.end)}`);
       }
       const sql = applied.length ? `SELECT * FROM (\n${source.trim().replace(/;\s*$/, '')}\n) AS block\nWHERE ${applied.join(' AND ')}` : source;
       const candidate: PreparedCandidate = {
         tier: 'certified', trust: 'certified', sql, ...(params.length ? { params } : {}), sourceRef: block.ref,
-        proof: [`${block.ref} entails the intent: ${block.contract?.measures.map((m) => m.output).join(', ') || 'declared outputs'}${block.contract?.staticScope.length ? ` with scope ${block.contract.staticScope.map((s) => `${s.column} ${s.op}`).join(', ')}` : ''}${applied.length ? `; ${applied.length} declared filter${applied.length > 1 ? 's' : ''} applied over its output` : ''}`, ...verdict.caveats],
+        proof: [`${block.ref} entails the intent: ${block.contract?.measures.map((m) => m.output).join(', ') || 'declared outputs'}${block.contract?.staticScope.length ? ` with scope ${block.contract.staticScope.map((s) => `${s.column} ${s.op}`).join(', ')}` : ''}${applied.length ? `; ${applied.length} declared filter${applied.length > 1 ? 's' : ''} applied over its output` : ''}`, ...(prepared?.parameters.length ? [`parameters bound: ${prepared.parameters.map((parameter) => `${parameter.name} = ${JSON.stringify(parameter.value)} (${parameter.source})`).join(', ')}`] : []), ...verdict.caveats],
       };
       if (identityOnly) {
         candidate.proof.push(`${verdict.identityNote!.split(';')[0]}; the certified block is served as published because no keyed governed answer could be composed`);

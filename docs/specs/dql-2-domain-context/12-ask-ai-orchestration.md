@@ -487,6 +487,51 @@ the question string again.
    served as published for a question it cannot answer with identity carries
    governed trust with the block as its source, never the certified badge
    (`AGT-066`).
+20. **The question is preserved through every repair.** The first analytics
+   reading of the original question writes an immutable ledger: its material
+   unresolved clauses, its time grain and its measures. Every later reading
+   (a schema correction, a guard's re-ask, the pipeline's repair after a
+   refused preparation) is audited against it: a clause is discharged only by
+   refs that account for its words (a block only through its own contract,
+   never through its description), kept when still listed as unresolved, and
+   otherwise dropped; a first drop is sent back once, a second restores the
+   clause as material so the turn ends in the gap the question deserved.
+   "Closest available" is never an answer to a different question. The ledger
+   and each reading's disposition are in the receipt (`AGT-067`).
+21. **Blocks compile like blocks; contradictory metadata is not certified.**
+   The certified tier and the served-as-evidence fallback obtain a block from
+   the same prepared-block contract every other surface uses: values from the
+   shared invocation (declared defaults, values the question states, explicit
+   inputs), SQL lowered by the DQL compiler to positional placeholders, bound
+   values in placeholder order; unbound parameters refuse before SQL and no
+   template placeholder survives. A block whose status says certified while
+   its description or tags say review-required is not certified evidence.
+   A dbt-inventory model names each column once (`dimension:<model>.<column>`),
+   never `<model>.<model>.<column>` (`AGT-068`).
+22. **Ratios and thresholds without a semantic layer.** A ratio part may be a
+   physical column with an explicit aggregation (`numeratorAggregation`,
+   `denominatorAggregation`: sum, avg, count, count_distinct, min, max) when
+   the project has no metric for it; the interpreter never mints a measure
+   name. The relational composer aggregates both parts as islands at one
+   proven grain and divides with `NULLIF`. A threshold on an aggregate
+   ("at least 20 games") is a filter on `measure:<index>` applied after
+   aggregation, rendered over the composed result by alias, never as a row
+   filter. An aggregated numeric column exposed as a dimension is read as its
+   column; counting is a measure over any column; ordering by a measure's
+   alias names that measure. A why/should question over the previous analysis
+   is never answered conversationally: it ends as the unsupported gap that
+   names what the previous reading can still answer (`AGT-069`).
+
+23. **A period survives the follow-up, and parameters bind in text order.** A
+   follow-up inherits the previous analysis's time window unless its own
+   message names a period; the inheritance is recorded in provenance, so
+   "rank them by points per game" after "only 2017" stays inside 2017. Every
+   composed program binds its positional parameters in the order they appear
+   in the SQL text: per-measure scopes are in the projection and bind before
+   the WHERE clause's filters and window bounds. A scoped aggregate beside a
+   member filter and a window therefore compares the values it was given, and
+   an empty aggregate means the data is empty, never that the binding slipped
+   (`AGT-070`).
 
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn

@@ -1,0 +1,23 @@
+{
+  "key": "14249cdb2aae2cd7efaec4d44587b1a5",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show beverage revenue for the top beverage customers.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:Show revenue by top beverage customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T01:33:11.208Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "14249cdb2aae2cd7efaec4d44587b1a54bceb06af9eb60e7e4cd3da4da66684a",
+    "postCanonicalHash": "14249cdb2aae2cd7efaec4d44587b1a54bceb06af9eb60e7e4cd3da4da66684a",
+    "appliedRuleClasses": []
+  }
+}

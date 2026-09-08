@@ -13,6 +13,10 @@ import type { VocabularyIndex } from '../vocabulary.js';
 export type PrepareTier = 'certified' | 'semantic' | 'relational' | 'exploratory';
 export type PrepareTrust = 'certified' | 'governed' | 'review_required';
 
+export type PreparedBlock =
+  | { sql: string; params: unknown[]; parameters: Array<{ name: string; position: number; value: unknown; source: string }>; outputs?: string[] }
+  | { error: string; unresolved?: string[] };
+
 export interface PreparedCandidate {
   tier: PrepareTier;
   trust: PrepareTrust;
@@ -102,7 +106,15 @@ export interface PrepareDeps {
   /** Dialect for relational composition. */
   dialect?: SqlDialectLike;
   /** Certified block source text by block ref. */
+  /** @deprecated Raw block query text; a block with template parameters is refused on this path. Prefer `prepareBlock`. */
   blockSql?: (blockRef: string) => string | undefined;
+  /**
+   * The block compiled and bound the way every other surface runs it: SQL with
+   * positional placeholders (`$1..$n`), the bound values in order, and the
+   * declared parameters with the value each received. Unresolved required
+   * parameters are an error, not a guess.
+   */
+  prepareBlock?: (blockRef: string, context: { question?: string }) => PreparedBlock | undefined;
   /** Host-side policy check on a relation or column ref; a denial is terminal. */
   policyDenies?: (refs: string[]) => string | undefined;
   /** The semantic engine that will compile this run's semantic candidate, when the host knows it beforehand. */

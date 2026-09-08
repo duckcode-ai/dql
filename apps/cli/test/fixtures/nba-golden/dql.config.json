@@ -1,0 +1,16 @@
+{
+  "project": "nba-golden",
+  "manifestVersion": 3,
+  "layout": { "version": 2, "mode": "oss-dbt-workspace", "skillsPath": "skills" },
+  "identity": { "owner": "sports-analytics@nba.test" },
+  "modeling": { "mode": "dbt-first" },
+  "dbt": { "projectDir": ".", "manifestPath": "target/manifest.json" },
+  "connections": { "default": { "driver": "sqlite", "filepath": ":memory:" } },
+  "semanticLayer": { "provider": "dbt", "projectPath": "." },
+  "agent": {
+    "runtimeValueGrounding": {
+      "mode": "safe_automatic",
+      "searchSafeColumns": ["dev.player_game_stats.player_name", "dev.players.player_name", "dev.teams.team_name", "dev.teams.city", "dev.teams.nickname"]
+    }
+  }
+}

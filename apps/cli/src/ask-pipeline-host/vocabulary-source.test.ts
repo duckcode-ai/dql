@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
 import { modelingJoinPaths } from './host.js';
-import { normalizeRelationName, parseMetricFilter, qualifyExpression, buildVocabularySource } from './vocabulary-source.js';
+import { leafName, normalizeRelationName, parseMetricFilter, qualifyExpression, buildVocabularySource } from './vocabulary-source.js';
 
 describe('vocabulary source helpers', () => {
   it('qualifies bare columns in a measure expression, leaving keywords, functions and literals alone', () => {
@@ -136,5 +136,36 @@ describe('a dimension without a governed description is defined by its dbt colum
     expect(type.description).toMatch(/ordered more than once/);
     expect(type.physical).toEqual({ relation: 'dev.customers', column: 'customer_type' });
     expect(source.dimensions!.find((dimension) => dimension.name === 'first_ordered_at')!.description).toBe('The timestamp of the first order.');
+  });
+});
+
+describe('a dbt-inventory model names its columns once', () => {
+  const layer = {
+    listCubes: () => [{ name: 'player_game_stats', table: 'dev.player_game_stats', dimensions: [{ name: 'player_game_stats.pts', type: 'number' }, { name: 'player_game_stats.game_date', type: 'date' }], measures: [] }],
+    listMetrics: () => [], listMeasures: () => [],
+    listTimeDimensions: () => [{ name: 'player_game_stats.game_date', cube: 'player_game_stats', type: 'date', sql: 'game_date', granularities: ['day'] }],
+    listDimensions: () => [{ name: 'player_game_stats.pts', cube: 'player_game_stats', type: 'number', sql: 'pts' }, { name: 'player_game_stats.game_date', cube: 'player_game_stats', type: 'date', sql: 'game_date', isTimeDimension: true }],
+    listEntities: () => [], listSemanticModels: () => [{ name: 'player_game_stats', defaults: {} }], findJoinPath: () => [], displayFormatFor: () => undefined,
+  } as unknown as SemanticLayer;
+  const source = buildVocabularySource({ manifest: undefined, semanticLayer: layer, relations: [] } as never);
+  it('the prefix is stripped from dimensions and relation columns', () => {
+    expect(leafName('player_game_stats', 'player_game_stats.pts')).toBe('pts');
+    expect(leafName('player_game_stats', 'pts')).toBe('pts');
+    expect(source.dimensions!.map((dimension) => dimension.name).sort()).toEqual(['game_date', 'pts']);
+    expect(source.dimensions!.find((dimension) => dimension.name === 'pts')?.physical).toEqual({ relation: 'dev.player_game_stats', column: 'pts' });
+    expect(source.relations!.find((relation) => relation.name === 'player_game_stats')?.columns.map((column) => column.name)).toEqual(['pts', 'game_date']);
+  });
+});
+
+describe('contradictory block metadata is never certified evidence', () => {
+  it('a certified block whose description or tags say review-required is left out', () => {
+    const manifest = { blocks: {
+      a: { name: 'a', status: 'certified', filePath: 'blocks/a.dql', description: 'Review-required draft comparing scorers', sql: 'SELECT 1 AS x', declaredOutputs: ['x'], tags: [] },
+      b: { name: 'b', status: 'certified', filePath: 'blocks/b.dql', description: 'Top scorers', sql: 'SELECT 1 AS x', declaredOutputs: ['x'], tags: ['review-required'] },
+      c: { name: 'c', status: 'certified', filePath: 'blocks/c.dql', description: 'Top scorers', sql: 'SELECT 1 AS x', declaredOutputs: ['x'], tags: ['scoring'] },
+    } } as unknown as DQLManifest;
+    const source = buildVocabularySource({ manifest, semanticLayer: undefined, relations: [] } as never);
+    expect(source.blocks!.map((block) => block.name)).toEqual(['c']);
+    expect(source.blocks![0]!.sourcePath).toBe('blocks/c.dql');
   });
 });

@@ -1,0 +1,944 @@
+{
+ "metadata": {
+  "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+  "dbt_version": "1.10.13",
+  "generated_at": "2026-09-07T00:00:00Z",
+  "invocation_id": "nba-golden",
+  "env": {},
+  "project_name": "nba_golden",
+  "project_id": "nba-golden",
+  "user_id": null,
+  "send_anonymous_usage_stats": false,
+  "adapter_type": "sqlite"
+ },
+ "nodes": {
+  "model.nba_golden.games": {
+   "database": "nba_golden",
+   "schema": "dev",
+   "name": "games",
+   "resource_type": "model",
+   "package_name": "nba_golden",
+   "path": "marts/games.sql",
+   "original_file_path": "models/marts/games.sql",
+   "unique_id": "model.nba_golden.games",
+   "fqn": [
+    "nba_golden",
+    "marts",
+    "games"
+   ],
+   "alias": "games",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "config": {
+    "enabled": true,
+    "alias": null,
+    "schema": null,
+    "database": null,
+    "tags": [],
+    "meta": {},
+    "group": null,
+    "materialized": "table",
+    "incremental_strategy": null,
+    "persist_docs": {},
+    "quoting": {},
+    "column_types": {},
+    "full_refresh": null,
+    "unique_key": null,
+    "on_schema_change": "ignore",
+    "grants": {},
+    "packages": [],
+    "docs": {
+     "show": true,
+     "node_color": null
+    },
+    "contract": {
+     "enforced": false,
+     "alias_types": true
+    },
+    "access": "protected"
+   },
+   "tags": [],
+   "description": "One row per game dated in calendar 2016 or 2017: date, NBA season code, home and visitor teams, points and the home win flag.",
+   "columns": {
+    "game_id": {
+     "name": "game_id",
+     "description": "Unique game identifier.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "game_date": {
+     "name": "game_date",
+     "description": "Calendar date the game was played (YYYY-MM-DD).",
+     "meta": {},
+     "data_type": "date",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "season": {
+     "name": "season",
+     "description": "NBA season code: the year the season started (2016 = the 2016-17 season). Not the calendar year.",
+     "meta": {},
+     "data_type": "integer",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "home_team_id": {
+     "name": "home_team_id",
+     "description": "Home team id.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "visitor_team_id": {
+     "name": "visitor_team_id",
+     "description": "Visiting team id.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "pts_home": {
+     "name": "pts_home",
+     "description": "Points scored by the home team.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "pts_away": {
+     "name": "pts_away",
+     "description": "Points scored by the visiting team.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "home_team_wins": {
+     "name": "home_team_wins",
+     "description": "1 when the home team won, 0 when the visitor won.",
+     "meta": {},
+     "data_type": "integer",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    }
+   },
+   "meta": {},
+   "group": null,
+   "docs": {
+    "show": true,
+    "node_color": null
+   },
+   "patch_path": "nba_golden://models/marts/games.yml",
+   "build_path": null,
+   "unrendered_config": {
+    "materialized": "table"
+   },
+   "created_at": 1750000000.0,
+   "relation_name": "\"nba_golden\".\"dev\".\"games\"",
+   "raw_code": "select * from games",
+   "language": "sql",
+   "refs": [],
+   "sources": [],
+   "metrics": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "compiled_path": null,
+   "compiled": false,
+   "extra_ctes_injected": false,
+   "extra_ctes": [],
+   "contract": {
+    "enforced": false,
+    "alias_types": true,
+    "checksum": null
+   },
+   "access": "protected",
+   "constraints": [],
+   "version": null,
+   "latest_version": null,
+   "deprecation_date": null,
+   "primary_key": [],
+   "time_spine": null
+  },
+  "model.nba_golden.player_game_stats": {
+   "database": "nba_golden",
+   "schema": "dev",
+   "name": "player_game_stats",
+   "resource_type": "model",
+   "package_name": "nba_golden",
+   "path": "marts/player_game_stats.sql",
+   "original_file_path": "models/marts/player_game_stats.sql",
+   "unique_id": "model.nba_golden.player_game_stats",
+   "fqn": [
+    "nba_golden",
+    "marts",
+    "player_game_stats"
+   ],
+   "alias": "player_game_stats",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "config": {
+    "enabled": true,
+    "alias": null,
+    "schema": null,
+    "database": null,
+    "tags": [],
+    "meta": {},
+    "group": null,
+    "materialized": "table",
+    "incremental_strategy": null,
+    "persist_docs": {},
+    "quoting": {},
+    "column_types": {},
+    "full_refresh": null,
+    "unique_key": null,
+    "on_schema_change": "ignore",
+    "grants": {},
+    "packages": [],
+    "docs": {
+     "show": true,
+     "node_color": null
+    },
+    "contract": {
+     "enforced": false,
+     "alias_types": true
+    },
+    "access": "protected"
+   },
+   "tags": [],
+   "description": "One row per player per game: the player's box-score line. A DNP listing keeps a row with played = 0 and zero statistics.",
+   "columns": {
+    "game_id": {
+     "name": "game_id",
+     "description": "The game.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "game_date": {
+     "name": "game_date",
+     "description": "Calendar date of the game (YYYY-MM-DD).",
+     "meta": {},
+     "data_type": "date",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "season": {
+     "name": "season",
+     "description": "NBA season code of the game (the year the season started).",
+     "meta": {},
+     "data_type": "integer",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "player_id": {
+     "name": "player_id",
+     "description": "Stable player id; the identity of a player. Several players can share a name.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "player_name": {
+     "name": "player_name",
+     "description": "Player display name; not unique.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "team_id": {
+     "name": "team_id",
+     "description": "The team the player played for in this game.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "played": {
+     "name": "played",
+     "description": "1 when the player took part in the game (no DNP comment), 0 otherwise. The games-played denominator is the count of rows with played = 1.",
+     "meta": {},
+     "data_type": "integer",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "pts": {
+     "name": "pts",
+     "description": "Points scored.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "reb": {
+     "name": "reb",
+     "description": "Total rebounds.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "ast": {
+     "name": "ast",
+     "description": "Assists.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "stl": {
+     "name": "stl",
+     "description": "Steals.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "blk": {
+     "name": "blk",
+     "description": "Blocks.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "turnover": {
+     "name": "turnover",
+     "description": "Turnovers.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "fgm": {
+     "name": "fgm",
+     "description": "Field goals made.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "fga": {
+     "name": "fga",
+     "description": "Field goals attempted.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "fg3m": {
+     "name": "fg3m",
+     "description": "Three-pointers made.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "fg3a": {
+     "name": "fg3a",
+     "description": "Three-pointers attempted.",
+     "meta": {},
+     "data_type": "real",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    }
+   },
+   "meta": {},
+   "group": null,
+   "docs": {
+    "show": true,
+    "node_color": null
+   },
+   "patch_path": "nba_golden://models/marts/player_game_stats.yml",
+   "build_path": null,
+   "unrendered_config": {
+    "materialized": "table"
+   },
+   "created_at": 1750000000.0,
+   "relation_name": "\"nba_golden\".\"dev\".\"player_game_stats\"",
+   "raw_code": "select * from player_game_stats",
+   "language": "sql",
+   "refs": [],
+   "sources": [],
+   "metrics": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "compiled_path": null,
+   "compiled": false,
+   "extra_ctes_injected": false,
+   "extra_ctes": [],
+   "contract": {
+    "enforced": false,
+    "alias_types": true,
+    "checksum": null
+   },
+   "access": "protected",
+   "constraints": [],
+   "version": null,
+   "latest_version": null,
+   "deprecation_date": null,
+   "primary_key": [],
+   "time_spine": null
+  },
+  "model.nba_golden.teams": {
+   "database": "nba_golden",
+   "schema": "dev",
+   "name": "teams",
+   "resource_type": "model",
+   "package_name": "nba_golden",
+   "path": "marts/teams.sql",
+   "original_file_path": "models/marts/teams.sql",
+   "unique_id": "model.nba_golden.teams",
+   "fqn": [
+    "nba_golden",
+    "marts",
+    "teams"
+   ],
+   "alias": "teams",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "config": {
+    "enabled": true,
+    "alias": null,
+    "schema": null,
+    "database": null,
+    "tags": [],
+    "meta": {},
+    "group": null,
+    "materialized": "table",
+    "incremental_strategy": null,
+    "persist_docs": {},
+    "quoting": {},
+    "column_types": {},
+    "full_refresh": null,
+    "unique_key": null,
+    "on_schema_change": "ignore",
+    "grants": {},
+    "packages": [],
+    "docs": {
+     "show": true,
+     "node_color": null
+    },
+    "contract": {
+     "enforced": false,
+     "alias_types": true
+    },
+    "access": "protected"
+   },
+   "tags": [],
+   "description": "One row per NBA team.",
+   "columns": {
+    "team_id": {
+     "name": "team_id",
+     "description": "Team id.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "team_name": {
+     "name": "team_name",
+     "description": "Team name (city and nickname).",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "city": {
+     "name": "city",
+     "description": "Team city.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "nickname": {
+     "name": "nickname",
+     "description": "Team nickname.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "abbreviation": {
+     "name": "abbreviation",
+     "description": "Three-letter abbreviation.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    }
+   },
+   "meta": {},
+   "group": null,
+   "docs": {
+    "show": true,
+    "node_color": null
+   },
+   "patch_path": "nba_golden://models/marts/teams.yml",
+   "build_path": null,
+   "unrendered_config": {
+    "materialized": "table"
+   },
+   "created_at": 1750000000.0,
+   "relation_name": "\"nba_golden\".\"dev\".\"teams\"",
+   "raw_code": "select * from teams",
+   "language": "sql",
+   "refs": [],
+   "sources": [],
+   "metrics": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "compiled_path": null,
+   "compiled": false,
+   "extra_ctes_injected": false,
+   "extra_ctes": [],
+   "contract": {
+    "enforced": false,
+    "alias_types": true,
+    "checksum": null
+   },
+   "access": "protected",
+   "constraints": [],
+   "version": null,
+   "latest_version": null,
+   "deprecation_date": null,
+   "primary_key": [],
+   "time_spine": null
+  },
+  "model.nba_golden.players": {
+   "database": "nba_golden",
+   "schema": "dev",
+   "name": "players",
+   "resource_type": "model",
+   "package_name": "nba_golden",
+   "path": "marts/players.sql",
+   "original_file_path": "models/marts/players.sql",
+   "unique_id": "model.nba_golden.players",
+   "fqn": [
+    "nba_golden",
+    "marts",
+    "players"
+   ],
+   "alias": "players",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "config": {
+    "enabled": true,
+    "alias": null,
+    "schema": null,
+    "database": null,
+    "tags": [],
+    "meta": {},
+    "group": null,
+    "materialized": "table",
+    "incremental_strategy": null,
+    "persist_docs": {},
+    "quoting": {},
+    "column_types": {},
+    "full_refresh": null,
+    "unique_key": null,
+    "on_schema_change": "ignore",
+    "grants": {},
+    "packages": [],
+    "docs": {
+     "show": true,
+     "node_color": null
+    },
+    "contract": {
+     "enforced": false,
+     "alias_types": true
+    },
+    "access": "protected"
+   },
+   "tags": [],
+   "description": "One row per player in the cohort, keyed by player id.",
+   "columns": {
+    "player_id": {
+     "name": "player_id",
+     "description": "Stable player id.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "player_name": {
+     "name": "player_name",
+     "description": "Player display name; not unique.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    }
+   },
+   "meta": {},
+   "group": null,
+   "docs": {
+    "show": true,
+    "node_color": null
+   },
+   "patch_path": "nba_golden://models/marts/players.yml",
+   "build_path": null,
+   "unrendered_config": {
+    "materialized": "table"
+   },
+   "created_at": 1750000000.0,
+   "relation_name": "\"nba_golden\".\"dev\".\"players\"",
+   "raw_code": "select * from players",
+   "language": "sql",
+   "refs": [],
+   "sources": [],
+   "metrics": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "compiled_path": null,
+   "compiled": false,
+   "extra_ctes_injected": false,
+   "extra_ctes": [],
+   "contract": {
+    "enforced": false,
+    "alias_types": true,
+    "checksum": null
+   },
+   "access": "protected",
+   "constraints": [],
+   "version": null,
+   "latest_version": null,
+   "deprecation_date": null,
+   "primary_key": [],
+   "time_spine": null
+  }
+ },
+ "sources": {},
+ "macros": {},
+ "docs": {},
+ "exposures": {},
+ "metrics": {},
+ "groups": {},
+ "selectors": {},
+ "disabled": {},
+ "parent_map": {
+  "model.nba_golden.games": [],
+  "model.nba_golden.player_game_stats": [],
+  "model.nba_golden.teams": [],
+  "model.nba_golden.players": []
+ },
+ "child_map": {
+  "model.nba_golden.games": [],
+  "model.nba_golden.player_game_stats": [],
+  "model.nba_golden.teams": [],
+  "model.nba_golden.players": []
+ },
+ "group_map": {},
+ "saved_queries": {},
+ "semantic_models": {},
+ "unit_tests": {}
+}

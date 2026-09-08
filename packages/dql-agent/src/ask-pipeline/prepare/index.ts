@@ -2,6 +2,7 @@ import { prepareCertified } from './certified.js';
 import { prepareRelational } from './relational.js';
 import { prepareSemantic } from './semantic.js';
 import type { PrepareInput, PrepareResult, PreparedCandidate, PreparedRefusal } from './types.js';
+export type { PreparedBlock } from './types.js';
 
 export * from './types.js';
 export { entails } from './certified.js';

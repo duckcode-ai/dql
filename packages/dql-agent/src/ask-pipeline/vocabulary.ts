@@ -21,6 +21,8 @@ export type VocabularyKind = 'metric' | 'measure' | 'dimension' | 'entity' | 'bl
 export type VocabularyRole = 'measure' | 'key' | 'label' | 'categorical' | 'time' | 'boolean' | 'numeric' | 'text' | 'certified';
 
 export interface VocabularyEntry {
+  /** Project-relative path of a block's DQL source, for hosts that compile and bind it. */
+  sourcePath?: string;
   ref: string;
   kind: VocabularyKind;
   name: string;
@@ -289,7 +291,7 @@ export interface VocabularySource {
   dimensions?: Array<{ name: string; model: string; label?: string; description?: string; dataType?: string; isTime?: boolean; timeGrains?: string[]; sourceId?: string; aliases?: string[]; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
   entities?: Array<{ name: string; model: string; type: string; label?: string; description?: string; sourceId?: string; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
   models?: Array<{ name: string; label?: string; description?: string; relation?: string }>;
-  blocks?: Array<{ name: string; domain?: string; description?: string; certified: boolean; status?: string; contract: BlockContractV1; examples?: string[]; tags?: string[]; sourceId?: string; sql?: string }>;
+  blocks?: Array<{ name: string; domain?: string; description?: string; certified: boolean; status?: string; contract: BlockContractV1; examples?: string[]; tags?: string[]; sourceId?: string; sql?: string; sourcePath?: string }>;
   relations?: Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; sourceId?: string }>;
   terms?: Array<{ name: string; synonyms?: string[]; description?: string; metricRefs?: string[] }>;
 }
@@ -412,6 +414,7 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       ...(block.examples?.length ? { examples: block.examples } : {}),
       ...(block.sourceId ? { sourceId: block.sourceId } : {}),
       ...(block.sql ? { sql: block.sql } : {}),
+      ...(block.sourcePath ? { sourcePath: block.sourcePath } : {}),
     });
   }
   for (const relation of source.relations ?? []) {

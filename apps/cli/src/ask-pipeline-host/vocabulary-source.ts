@@ -101,7 +101,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       const relation = normalizeRelationName(cube.table) ?? cube.name;
       relationOfCube.set(cube.name, relation);
       if (!relationSeen.has(relation)) {
-        addRelation({ ...(relation.includes('.') ? { schema: relation.split('.')[0] } : {}), name: relation.split('.').pop()!, ...(cube.description ? { description: cube.description } : {}), columns: [...cube.dimensions.map((d) => ({ name: d.name, dataType: d.type })), ...cube.measures.map((m) => ({ name: m.name }))] });
+        addRelation({ ...(relation.includes('.') ? { schema: relation.split('.')[0] } : {}), name: relation.split('.').pop()!, ...(cube.description ? { description: cube.description } : {}), columns: [...cube.dimensions.map((d) => ({ name: leafName(cube.name, d.name), dataType: d.type })), ...cube.measures.map((m) => ({ name: leafName(cube.name, m.name) }))] });
       }
     }
     const columnsOf = (cubeName: string) => relationColumns.get(relationOfCube.get(cubeName) ?? '') ?? new Set<string>();
@@ -227,25 +227,28 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     const timeNames = new Set<string>();
     for (const dimension of layer.listTimeDimensions(undefined, { includeVariants: true })) {
       if (!dimension.cube) continue;
-      timeNames.add(`${dimension.cube}:${dimension.name}`);
+      const name = leafName(dimension.cube, dimension.name);
+      timeNames.add(`${dimension.cube}:${name}`);
       const relation = relationOfCube.get(dimension.cube);
       const timeExpression = dimension.expr ?? dimension.sql;
-      const column = timeExpression === undefined || timeExpression === '' ? dimension.name : isIdentifier(timeExpression) ? timeExpression : undefined;
+      const column = timeExpression === undefined || timeExpression === '' ? name : isIdentifier(timeExpression) ? timeExpression : undefined;
       source.dimensions!.push({
-        name: dimension.name, model: dimension.cube, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: 'timestamp', isTime: true,
+        name, model: dimension.cube, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: 'timestamp', isTime: true,
         ...(dimension.granularities?.length ? { timeGrains: dimension.granularities } : {}), sourceId: `${dimension.cube}.${dimension.name}`,
         ...(reach.get(dimension.cube)?.length ? { reachableFrom: reach.get(dimension.cube) } : {}),
         ...(relation && column ? { physical: { relation, column } } : {}),
       });
     }
     for (const dimension of layer.listDimensions(undefined, { includeVariants: true })) {
-      if (!dimension.cube || timeNames.has(`${dimension.cube}:${dimension.name}`)) continue;
+      if (!dimension.cube) continue;
+      const name = leafName(dimension.cube, dimension.name);
+      if (timeNames.has(`${dimension.cube}:${name}`)) continue;
       const relation = relationOfCube.get(dimension.cube);
       // A dimension with no expression IS its column; dbt names it once.
       const expression = dimension.expr ?? dimension.sql;
-      const column = expression === undefined || expression === '' ? dimension.name : isIdentifier(expression) ? expression : undefined;
+      const column = expression === undefined || expression === '' ? name : isIdentifier(expression) ? expression : undefined;
       source.dimensions!.push({
-        name: dimension.name, model: dimension.cube, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: dimension.type,
+        name, model: dimension.cube, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: dimension.type,
         ...(dimension.isTimeDimension ? { isTime: true } : {}), sourceId: `${dimension.cube}.${dimension.name}`,
         ...(reach.get(dimension.cube)?.length ? { reachableFrom: reach.get(dimension.cube) } : {}),
         ...(relation && column ? { physical: { relation, column } } : {}),
@@ -269,8 +272,14 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
   for (const block of Object.values(input.manifest?.blocks ?? {})) {
     const certified = (block.status ?? '').toLowerCase() === 'certified';
     if (!certified) continue;
+    // Certification is one state. A block whose status says certified while
+    // its own description or tags say it still needs review is contradictory
+    // metadata, and a contradiction is never served as certified evidence.
+    const reviewRequired = /review[\s-]*required/i.test(block.description ?? '') || (block.tags ?? []).some((tag) => /review[\s-]*required/i.test(tag));
+    if (reviewRequired) continue;
     source.blocks!.push({
       name: block.name, ...(block.domain ? { domain: block.domain } : {}), ...(block.description ? { description: block.description } : {}), certified, status: block.status,
+      ...(block.filePath ? { sourcePath: block.filePath } : {}),
       contract: extractBlockContract({
         name: block.name, domain: block.domain, sql: block.sql, declaredOutputs: block.declaredOutputs, dimensions: block.dimensions, allowedFilters: block.allowedFilters,
         parameters: block.parameters?.map((parameter) => parameter.name), grain: block.grain, entities: block.entities, tableDependencies: block.tableDependencies, rawTableRefs: block.rawTableRefs,
@@ -286,6 +295,15 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     source.terms!.push({ name: term.name, ...(term.synonyms?.length ? { synonyms: term.synonyms } : {}), ...(description ? { description } : {}), ...(term.metricRefs?.length ? { metricRefs: term.metricRefs } : {}) });
   }
   return source;
+}
+
+/**
+ * The dbt model inventory names a column dimension `<model>.<column>`; the
+ * vocabulary names the column once (`dimension:<model>.<column>`, physical
+ * column `<column>`), never `<model>.<model>.<column>`.
+ */
+export function leafName(cube: string, name: string): string {
+  return name.startsWith(`${cube}.`) ? name.slice(cube.length + 1) : name;
 }
 
 export function buildProjectVocabulary(input: VocabularySourceInput): VocabularyIndex {

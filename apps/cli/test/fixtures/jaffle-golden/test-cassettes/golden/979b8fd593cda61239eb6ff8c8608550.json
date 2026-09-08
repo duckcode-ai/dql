@@ -1,0 +1,23 @@
+{
+  "key": "979b8fd593cda61239eb6ff8c8608550",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross profit (revenue minus cost) and gross margin percentage (gross profit divided by revenue) for orders placed in 2025.\",\"measures\":[{\"ref\":\"metric:order_item.order_gross_profit\",\"alias\":\"gross_profit\"},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"metric:order_item.order_gross_profit\",\"denominator\":\"metric:order_item.revenue\"},\"alias\":\"gross_margin_pct\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"time\":{\"ref\":\"dimension:order_item.ordered_at\",\"window\":{\"start\":\"2025-01-01\",\"end\":\"2026-01-01\",\"expression\":\"in 2025\"}},\"unresolved\":[],\"provenance\":{\"metric:order_item.order_gross_profit\":\"q:gross profit\",\"metric:order_item.revenue\":\"q:gross margin percentage\",\"dimension:order_item.ordered_at\":\"q:in 2025\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T01:30:40.228Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "979b8fd593cda61239eb6ff8c86085509bcaa42d64d0be34ee48e467f722af1b",
+    "postCanonicalHash": "979b8fd593cda61239eb6ff8c86085509bcaa42d64d0be34ee48e467f722af1b",
+    "appliedRuleClasses": []
+  }
+}

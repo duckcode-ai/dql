@@ -1,0 +1,23 @@
+{
+  "key": "f0f89134deacd9b85e14a6875e902393",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show revenue and its month-over-month growth percentage over time.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\"},{\"ref\":\"metric:order_item.revenue_growth_mom\"}],\"groupBy\":[{\"ref\":\"dimension:order_item.ordered_at\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue over time\",\"metric:order_item.revenue_growth_mom\":\"q:revenue growth mom\",\"dimension:order_item.ordered_at\":\"q:over time\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T01:33:47.381Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "f0f89134deacd9b85e14a6875e902393822a14e2e4cd30a26761ac5021b8334d",
+    "postCanonicalHash": "f0f89134deacd9b85e14a6875e902393822a14e2e4cd30a26761ac5021b8334d",
+    "appliedRuleClasses": []
+  }
+}

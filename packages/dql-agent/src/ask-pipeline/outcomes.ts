@@ -35,6 +35,10 @@ export interface PipelineReceipt {
   grounding?: string[];
   /** Why resolution or execution stopped, verbatim, when it did. */
   failure?: { stage: 'resolve' | 'prepare' | 'execute'; reason?: string; message: string; problems?: Array<{ path: string; message: string; suggestions?: string[] }> };
+  /** Warehouse statements this run dispatched and how many failed; `executed` is the one that succeeded. A failed attempt is never "no query ran". */
+  warehouse?: { attempts: number; failures: number };
+  /** The original question's obligations and what each later reading did with them. */
+  ledger?: { clauses: Array<{ clause: string; kind?: string }>; timeGrain?: { ref: string; grain: string }; measures: string[]; entries: Array<{ clause: string; kind?: string; disposition: string; by?: string; round: number }> };
 }
 
 /**
@@ -95,9 +99,11 @@ export function describeResultColumns(intent: AnalyticalIntentV1, result: Pick<E
   const lower = (value: string) => value.toLowerCase();
   const entryOf = (ref: string) => vocabulary.get(ref);
   const byName = new Map<string, { ref?: string; meta: Partial<ResultColumnMeta> }>();
-  const kindOfEntry = (ref: string): Partial<ResultColumnMeta> => {
+  const kindOfEntry = (ref: string, aggregation?: string): Partial<ResultColumnMeta> => {
     const entry = entryOf(ref);
     if (!entry) return {};
+    // A column part of a ratio carries its own aggregation: counting is a count.
+    if (aggregation === 'count' || aggregation === 'count_distinct') return { kind: 'count' };
     if (entry.displayFormat) return { kind: entry.displayFormat.kind, ...(entry.displayFormat.kind === 'currency' ? { unit: entry.displayFormat.currency ?? 'USD' } : entry.displayFormat.kind === 'percent' ? { unit: 'fraction' } : {}), ...(entry.displayFormat.decimals !== undefined ? { decimals: entry.displayFormat.decimals } : {}) };
     if (entry.metricType === 'ratio') return { kind: 'percent', unit: 'fraction' };
     // A derived formula that multiplies by 100 is already in points (growth, margin %).
@@ -121,10 +127,15 @@ export function describeResultColumns(intent: AnalyticalIntentV1, result: Pick<E
     const entry = entryOf(measure.ref);
     const name = measure.alias ?? entry?.name ?? measure.ref.replace(/^ratio:/, '').replace(/[^A-Za-z0-9_]+/g, '_');
     if (measure.derived) {
-      const numerator = kindOfEntry(measure.derived.numerator);
-      const denominator = kindOfEntry(measure.derived.denominator);
+      const numerator = kindOfEntry(measure.derived.numerator, measure.derived.numeratorAggregation);
+      const denominator = kindOfEntry(measure.derived.denominator, measure.derived.denominatorAggregation);
+      // A share, rate or percentage is a fraction; a "per" ratio is a number
+      // in the numerator's unit (points per game), currency per count stays currency.
+      const fractionByName = /(pct|percent|percentage|share|rate|margin)/i.test(name);
       const meta: Partial<ResultColumnMeta> = numerator.kind === 'currency' && (denominator.kind === 'count' || denominator.kind === 'number') ? { kind: 'currency', unit: 'USD' }
-        : numerator.kind === denominator.kind ? { kind: 'percent', unit: 'fraction' } : { kind: 'number' };
+        : fractionByName || (numerator.kind === denominator.kind && numerator.kind === 'currency') ? { kind: 'percent', unit: 'fraction' }
+        : numerator.kind === denominator.kind && numerator.kind !== 'number' && numerator.kind !== 'count' ? { kind: 'percent', unit: 'fraction' }
+        : { kind: 'number' };
       register(name, undefined, meta);
       continue;
     }

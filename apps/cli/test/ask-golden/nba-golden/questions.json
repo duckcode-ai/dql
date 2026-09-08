@@ -1,0 +1,405 @@
+{
+  "questions": [
+    {
+      "id": "nb08-top-scorer-2017",
+      "question": "Who scored the most points in calendar year 2017?",
+      "sql": "SELECT player_id, player_name, SUM(pts) AS total_points FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY player_id, player_name ORDER BY total_points DESC LIMIT 1",
+      "columns": {
+        "player_id": [
+          "player_id",
+          "player",
+          "player_game_stats__player_id"
+        ],
+        "player_name": [
+          "player_name",
+          "name"
+        ],
+        "total_points": [
+          "total_points",
+          "points",
+          "pts",
+          "total_pts",
+          "sum_pts"
+        ]
+      },
+      "identity": [
+        "player_id",
+        "player_name"
+      ],
+      "requiredColumns": [
+        "player_id"
+      ],
+      "tier": "governed",
+      "note": "Calendar 2017 (game_date), not the season code. One keyed row; the name is a label."
+    },
+    {
+      "id": "nb07-season-2016-17",
+      "question": "Who are the top five scorers in the 2016-17 NBA season?",
+      "sql": "SELECT player_id, player_name, SUM(pts) AS total_points FROM dev.player_game_stats WHERE season = 2016 GROUP BY player_id, player_name ORDER BY total_points DESC LIMIT 5",
+      "columns": {
+        "player_id": [
+          "player_id",
+          "player",
+          "player_game_stats__player_id"
+        ],
+        "player_name": [
+          "player_name",
+          "name"
+        ],
+        "total_points": [
+          "total_points",
+          "points",
+          "pts",
+          "total_pts",
+          "sum_pts"
+        ]
+      },
+      "identity": [
+        "player_id",
+        "player_name"
+      ],
+      "requiredColumns": [
+        "player_id"
+      ],
+      "ordered": true,
+      "tier": "governed",
+      "outcome": "clarify_or_rows",
+      "note": "The 2016-17 season is season code 2016 (the year the season started), which the games and player_game_stats columns describe. A clarification between season code and calendar year is also accepted; calendar 2016 is not."
+    },
+    {
+      "id": "nb19-monthly-2017",
+      "question": "Show monthly scoring totals during calendar 2017.",
+      "sql": "SELECT date(game_date, 'start of month') AS month, SUM(pts) AS total_points FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY 1 ORDER BY 1",
+      "columns": {
+        "month": [
+          "month",
+          "game_date",
+          "game_date__month",
+          "metric_time__month",
+          "game_month"
+        ],
+        "total_points": [
+          "total_points",
+          "points",
+          "pts",
+          "total_pts",
+          "sum_pts",
+          "scoring"
+        ]
+      },
+      "keys": [
+        "month"
+      ],
+      "tier": "governed",
+      "note": "A monthly grain over calendar 2017 from the seeded cohort; the block that ranks scorers over two years is never a substitute for a monthly trend."
+    },
+    {
+      "id": "nb15-double-doubles",
+      "question": "Which players recorded the most double-doubles in 2017?",
+      "tier": "none",
+      "outcome": "gap",
+      "note": "Double-doubles are a per-game classification nothing models; the answer is a named gap with zero SQL, never the top-scorers block as the closest measure.",
+      "forbids": {
+        "sql": true
+      }
+    },
+    {
+      "id": "nb22-2030",
+      "question": "Show scoring leaders in calendar 2030.",
+      "tier": "none",
+      "outcome": "gap",
+      "note": "The data ends in 2017: no rows match 2030 and the outcome is no matching data, never fabricated leaders or an older year."
+    },
+    {
+      "id": "nb23-imaginary-player",
+      "question": "Show scoring for the player Totally Imaginary Person in 2017.",
+      "tier": "none",
+      "outcome": "gap",
+      "note": "No player has that name: the member probe finds nothing and the outcome is a gap, never an unrelated substitute."
+    },
+    {
+      "id": "nb28-injury",
+      "question": "Which players are most likely to get injured next season?",
+      "tier": "none",
+      "outcome": "gap",
+      "note": "Injury likelihood is a prediction nothing models; a change-analysis block is not a closest measure. Zero SQL.",
+      "forbids": {
+        "sql": true
+      }
+    },
+    {
+      "id": "nb29-ticket-revenue",
+      "question": "How much ticket revenue did the Lakers generate in 2017?",
+      "tier": "none",
+      "outcome": "gap",
+      "note": "Ticket revenue is not modeled; points are never converted into currency. Zero SQL.",
+      "forbids": {
+        "sql": true
+      }
+    },
+    {
+      "id": "nb21-this-season",
+      "question": "Who are the top scorers this season?",
+      "tier": "none",
+      "outcome": "gap",
+      "note": "The data covers calendar 2016 and 2017 only; the current season is out of coverage, so the outcome is no matching data or a clarification, never a silent 2017."
+    },
+    {
+      "id": "nb09-lebron-vs-curry",
+      "question": "Compare LeBron James and Stephen Curry in 2017 on points, rebounds and assists per game.",
+      "sql": "SELECT player_id, player_name, SUM(pts) * 1.0 / SUM(played) AS points_per_game, SUM(reb) * 1.0 / SUM(played) AS rebounds_per_game, SUM(ast) * 1.0 / SUM(played) AS assists_per_game FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 AND player_name IN ('LeBron James', 'Stephen Curry') GROUP BY player_id, player_name ORDER BY player_name",
+      "columns": {
+        "player_id": [
+          "player_id",
+          "player",
+          "player_game_stats__player_id"
+        ],
+        "player_name": [
+          "player_name",
+          "name"
+        ],
+        "points_per_game": [
+          "points_per_game",
+          "ppg",
+          "avg_points_per_game",
+          "points_per_game_played"
+        ],
+        "rebounds_per_game": [
+          "rebounds_per_game",
+          "rpg",
+          "avg_rebounds_per_game"
+        ],
+        "assists_per_game": [
+          "assists_per_game",
+          "apg",
+          "avg_assists_per_game"
+        ]
+      },
+      "identity": [
+        "player_id",
+        "player_name"
+      ],
+      "requiredColumns": [
+        "player_id"
+      ],
+      "tier": "governed",
+      "alternatives": [
+        {
+          "sql": "SELECT player_id, player_name, SUM(pts) * 1.0 / COUNT(DISTINCT game_id) AS points_per_game, SUM(reb) * 1.0 / COUNT(DISTINCT game_id) AS rebounds_per_game, SUM(ast) * 1.0 / COUNT(DISTINCT game_id) AS assists_per_game FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 AND player_name IN ('LeBron James', 'Stephen Curry') GROUP BY player_id, player_name",
+          "columns": {
+            "player_id": [
+              "player_id",
+              "player",
+              "player_game_stats__player_id"
+            ],
+            "player_name": [
+              "player_name",
+              "name"
+            ],
+            "points_per_game": [
+              "points_per_game",
+              "ppg",
+              "avg_points_per_game",
+              "points_per_game_played"
+            ],
+            "rebounds_per_game": [
+              "rebounds_per_game",
+              "rpg",
+              "avg_rebounds_per_game"
+            ],
+            "assists_per_game": [
+              "assists_per_game",
+              "apg",
+              "avg_assists_per_game"
+            ]
+          }
+        }
+      ],
+      "note": "Two named players, keyed; per-game denominators are games taken part in (played = 1) or game records. Ratios over the physical columns, no semantic metric exists."
+    },
+    {
+      "id": "nb12-field-goal-pct",
+      "question": "Who are our most efficient shooters in 2017? Use field-goal percentage and at least 100 attempts.",
+      "sql": "SELECT player_id, player_name, SUM(fgm) * 1.0 / SUM(fga) AS field_goal_pct FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY player_id, player_name HAVING SUM(fga) >= 100 ORDER BY field_goal_pct DESC LIMIT 10",
+      "columns": {
+        "player_id": [
+          "player_id",
+          "player",
+          "player_game_stats__player_id"
+        ],
+        "player_name": [
+          "player_name",
+          "name"
+        ],
+        "field_goal_pct": [
+          "field_goal_pct",
+          "fg_pct",
+          "field_goal_percentage",
+          "shooting_pct",
+          "efficiency",
+          "fg_percentage"
+        ]
+      },
+      "identity": [
+        "player_id",
+        "player_name"
+      ],
+      "requiredColumns": [
+        "player_id"
+      ],
+      "ordered": true,
+      "tier": "governed",
+      "alternatives": [
+        {
+          "sql": "SELECT player_id, player_name, SUM(fgm) * 1.0 / SUM(fga) AS field_goal_pct FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY player_id, player_name HAVING SUM(fga) >= 100 ORDER BY field_goal_pct DESC",
+          "columns": {
+            "player_id": [
+              "player_id",
+              "player",
+              "player_game_stats__player_id"
+            ],
+            "player_name": [
+              "player_name",
+              "name"
+            ],
+            "field_goal_pct": [
+              "field_goal_pct",
+              "fg_pct",
+              "field_goal_percentage",
+              "shooting_pct",
+              "efficiency",
+              "fg_percentage"
+            ]
+          }
+        }
+      ],
+      "note": "sum(made)/sum(attempts), never an average of per-game percentages; the 100-attempt minimum applies after aggregation. Ten or all qualifying players."
+    },
+    {
+      "id": "nb13-three-pointers",
+      "question": "Who made the most three-pointers in 2017? Show attempts and shooting percentage too.",
+      "sql": "SELECT player_id, player_name, SUM(fg3m) AS three_pointers_made, SUM(fg3a) AS three_point_attempts, SUM(fg3m) * 1.0 / SUM(fg3a) AS three_point_pct FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY player_id, player_name ORDER BY three_pointers_made DESC LIMIT 1",
+      "columns": {
+        "player_id": [
+          "player_id",
+          "player",
+          "player_game_stats__player_id"
+        ],
+        "player_name": [
+          "player_name",
+          "name"
+        ],
+        "three_pointers_made": [
+          "three_pointers_made",
+          "fg3m",
+          "threes_made",
+          "three_point_makes",
+          "total_three_pointers"
+        ],
+        "three_point_attempts": [
+          "three_point_attempts",
+          "fg3a",
+          "threes_attempted",
+          "three_pointers_attempted"
+        ],
+        "three_point_pct": [
+          "three_point_pct",
+          "fg3_pct",
+          "three_point_percentage",
+          "shooting_pct",
+          "three_point_shooting_pct"
+        ]
+      },
+      "identity": [
+        "player_id",
+        "player_name"
+      ],
+      "requiredColumns": [
+        "player_id"
+      ],
+      "tier": "governed",
+      "note": "Ranked by makes; attempts and the ratio of sums shown beside."
+    },
+    {
+      "id": "nb14-assist-turnover",
+      "question": "Who had the best assist-to-turnover ratio in 2017 with at least 20 games?",
+      "sql": "SELECT player_id, player_name, SUM(ast) * 1.0 / SUM(turnover) AS assist_to_turnover_ratio FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY player_id, player_name HAVING SUM(played) >= 20 ORDER BY assist_to_turnover_ratio DESC LIMIT 1",
+      "columns": {
+        "player_id": [
+          "player_id",
+          "player",
+          "player_game_stats__player_id"
+        ],
+        "player_name": [
+          "player_name",
+          "name"
+        ],
+        "assist_to_turnover_ratio": [
+          "assist_to_turnover_ratio",
+          "ast_to_ratio",
+          "assist_turnover_ratio",
+          "assists_per_turnover",
+          "ast_tov_ratio",
+          "ast_to_turnover_ratio"
+        ]
+      },
+      "identity": [
+        "player_id",
+        "player_name"
+      ],
+      "requiredColumns": [
+        "player_id"
+      ],
+      "ordered": true,
+      "tier": "governed",
+      "alternatives": [
+        {
+          "sql": "SELECT player_id, player_name, SUM(ast) * 1.0 / SUM(turnover) AS assist_to_turnover_ratio FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY player_id, player_name HAVING COUNT(DISTINCT game_id) >= 20 ORDER BY assist_to_turnover_ratio DESC LIMIT 1",
+          "columns": {
+            "player_id": [
+              "player_id",
+              "player",
+              "player_game_stats__player_id"
+            ],
+            "player_name": [
+              "player_name",
+              "name"
+            ],
+            "assist_to_turnover_ratio": [
+              "assist_to_turnover_ratio",
+              "ast_to_ratio",
+              "assist_turnover_ratio",
+              "assists_per_turnover",
+              "ast_tov_ratio",
+              "ast_to_turnover_ratio"
+            ]
+          }
+        },
+        {
+          "sql": "SELECT player_id, player_name, SUM(ast) * 1.0 / SUM(turnover) AS assist_to_turnover_ratio FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY player_id, player_name HAVING COUNT(DISTINCT CASE WHEN played = 1 THEN game_id END) >= 20 ORDER BY assist_to_turnover_ratio DESC LIMIT 10",
+          "columns": {
+            "player_id": [
+              "player_id",
+              "player",
+              "player_game_stats__player_id"
+            ],
+            "player_name": [
+              "player_name",
+              "name"
+            ],
+            "assist_to_turnover_ratio": [
+              "assist_to_turnover_ratio",
+              "ast_to_ratio",
+              "assist_turnover_ratio",
+              "assists_per_turnover",
+              "ast_tov_ratio",
+              "ast_to_turnover_ratio"
+            ]
+          },
+          "note": "the superlative answered as a ranking whose first row is the best"
+        }
+      ],
+      "note": "A ratio of sums with a games threshold after aggregation; the best one player."
+    }
+  ]
+}

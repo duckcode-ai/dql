@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from '../block-contract.js';
 import { parseIntent, type AnalyticalIntentV1 } from '../intent.js';
+import { validateIntentRefs } from '../resolve-intent.js';
 import { buildVocabularyIndex, type VocabularySource } from '../vocabulary.js';
 import { bindSemanticRequest, composeRelational, entails, prepare } from './index.js';
 import { prepareCertified } from './certified.js';
@@ -255,5 +256,79 @@ describe('derived metrics across relations', () => {
     const composed = composeRelational(intent({ measures: [{ ref: 'metric:order_item.revenue_growth_mom' }], groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }], expectedShape: 'trend' }), vocabulary, deps);
     expect(composed.candidate).toBeUndefined();
     expect(composed.refusal?.message).toMatch(/needs the semantic engine: a prior-period offset on revenue; the relational tier will not approximate it/);
+  });
+});
+
+describe('a certified block runs through the prepared-block contract', () => {
+  const keyed = intent({ measures: [{ ref: 'block:commerce.beverage_by_customer_id' }], expectedShape: 'ranking' });
+  it('the compiled SQL and bound parameters are the candidate; applied predicates continue the numbering', () => {
+    const prepared = prepareCertified(keyed, vocabulary, { ...deps, prepareBlock: () => ({ sql: 'SELECT customer_id, SUM(product_price) AS beverage_revenue FROM dev.order_items WHERE year BETWEEN $1 AND $2 GROUP BY customer_id LIMIT $3', params: [2016, 2017, 10], parameters: [{ name: 'season_start', position: 1, value: 2016, source: 'default' }, { name: 'season_end', position: 2, value: 2017, source: 'default' }, { name: 'top_n', position: 3, value: 10, source: 'question' }] }) });
+    expect(prepared.candidates).toHaveLength(1);
+    expect(prepared.candidates[0]!.sql).toMatch(/BETWEEN \$1 AND \$2/);
+    expect(prepared.candidates[0]!.params).toEqual([2016, 2017, 10]);
+    expect(prepared.candidates[0]!.proof.join(' ')).toMatch(/parameters bound: season_start = 2016 \(default\)/);
+  });
+  it('unbound parameters refuse before SQL; a raw block with template parameters is never executed', () => {
+    const unbound = prepareCertified(keyed, vocabulary, { ...deps, prepareBlock: () => ({ error: 'it still needs values for region', unresolved: ['region'] }) });
+    expect(unbound.candidates).toEqual([]);
+    expect(unbound.refusals[0]!.message).toMatch(/parameters could not be bound: it still needs values for region/);
+    const raw = prepareCertified(keyed, vocabulary, { ...deps, blockSql: () => 'SELECT customer_id FROM dev.order_items LIMIT ${top_n}' });
+    expect(raw.candidates).toEqual([]);
+    expect(raw.refusals[0]!.message).toMatch(/template parameters that this host does not bind/);
+  });
+});
+
+describe('a ratio over physical columns with a threshold on the aggregate', () => {
+  const nba = buildVocabularyIndex({
+    dimensions: [
+      { name: 'player_id', model: 'player_game_stats', dataType: 'string', physical: { relation: 'dev.player_game_stats', column: 'player_id' } },
+      { name: 'player_name', model: 'player_game_stats', dataType: 'string', physical: { relation: 'dev.player_game_stats', column: 'player_name' } },
+      { name: 'game_date', model: 'player_game_stats', dataType: 'date', isTime: true, physical: { relation: 'dev.player_game_stats', column: 'game_date' } },
+    ],
+    relations: [{ schema: 'dev', name: 'player_game_stats', columns: [{ name: 'player_id', dataType: 'VARCHAR' }, { name: 'player_name', dataType: 'VARCHAR' }, { name: 'game_id', dataType: 'VARCHAR' }, { name: 'pts', dataType: 'DOUBLE' }, { name: 'played', dataType: 'INTEGER' }, { name: 'game_date', dataType: 'DATE' }] }],
+  });
+  const ppg = intent({
+    measures: [
+      { alias: 'games_played', ref: 'column:dev.player_game_stats.played', aggregation: 'sum' },
+      { alias: 'points_per_game', derived: { kind: 'ratio', numerator: 'column:dev.player_game_stats.pts', numeratorAggregation: 'sum', denominator: 'column:dev.player_game_stats.played', denominatorAggregation: 'sum' } },
+    ],
+    groupBy: [{ ref: 'dimension:player_game_stats.player_id', role: 'key' }], display: ['dimension:player_game_stats.player_name'],
+    filters: [{ ref: 'measure:0', op: 'gte', values: [20], source: 'question' }],
+    ordering: { ref: 'measure:1', direction: 'desc' }, limit: 10, expectedShape: 'ranking',
+  });
+  it('composes both parts as island aggregates, divides with NULLIF, and applies the threshold after aggregation', () => {
+    const composed = composeRelational(ppg, nba, { ...deps, joinPath: () => [] });
+    expect(composed.refusal).toBeUndefined();
+    const sql = composed.candidate!.sql;
+    expect(sql).toMatch(/SUM\("dev"."player_game_stats"."pts"\) AS "__num_2"/);
+    expect(sql).toMatch(/SUM\("dev"."player_game_stats"."played"\) AS "__den_2"/);
+    expect(sql).toMatch(/NULLIF\(CAST\(island_1."__den_2" AS DOUBLE\), 0\) AS "points_per_game"/);
+    expect(sql).toMatch(/SELECT \* FROM \(\n[\s\S]*\) AS aggregated\nWHERE "games_played" >= \?\nORDER BY "points_per_game" DESC/);
+    expect(composed.candidate!.params?.at(-1)).toBe(20);
+    expect(composed.candidate!.proof.join(' ')).toMatch(/applied after aggregation: games_played gte 20/);
+  });
+  it('a scoped measure beside a window and a member filter binds its parameters in text order: scope, filters, window', () => {
+    const composed = composeRelational(intent({
+      measures: [
+        { alias: 'total_points', ref: 'column:dev.player_game_stats.pts', aggregation: 'sum' },
+        { alias: 'games_played', ref: 'column:dev.player_game_stats.game_id', aggregation: 'count_distinct', scope: [{ ref: 'column:dev.player_game_stats.played', op: 'eq', values: [1], source: 'question' }] },
+      ],
+      groupBy: [{ ref: 'dimension:player_game_stats.player_id', role: 'key' }], display: ['dimension:player_game_stats.player_name'],
+      filters: [{ ref: 'dimension:player_game_stats.player_name', op: 'in', values: ['LeBron James', 'Stephen Curry'], source: 'question' }],
+      time: { ref: 'dimension:player_game_stats.game_date', window: { start: '2017-01-01', end: '2018-01-01' } }, expectedShape: 'comparison',
+    }), nba, { ...deps, joinPath: () => [] });
+    expect(composed.refusal).toBeUndefined();
+    const sql = composed.candidate!.sql;
+    expect(sql.indexOf('"played" = ?')).toBeLessThan(sql.indexOf('"player_name" IN'));
+    expect(sql.indexOf('"player_name" IN')).toBeLessThan(sql.indexOf('"game_date" >= ?'));
+    expect(composed.candidate!.params).toEqual([1, 'LeBron James', 'Stephen Curry', '2017-01-01', '2018-01-01']);
+  });
+  it('the validator reads column parts through their aggregation and a threshold by alias as the measure', () => {
+    const raw = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ alias: 'games_played', ref: 'column:dev.player_game_stats.played', aggregation: 'sum' }, { alias: 'points_per_game', derived: { kind: 'ratio', numerator: 'column:dev.player_game_stats.pts', numeratorAggregation: 'sum', denominator: 'column:dev.player_game_stats.played', denominatorAggregation: 'sum' } }], groupBy: [{ ref: 'dimension:player_game_stats.player_id', role: 'key' }], display: [], filters: [{ ref: 'games_played', op: 'gte', values: [20], source: 'question' }], unresolved: [], provenance: {}, expectedShape: 'ranking' }).intent!;
+    const validation = validateIntentRefs(raw, nba);
+    expect(validation.problems).toEqual([]);
+    expect(validation.intent.filters[0]).toMatchObject({ ref: 'measure:0', on: 'aggregate' });
+    const bare = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ alias: 'ppg', derived: { kind: 'ratio', numerator: 'column:dev.player_game_stats.pts', denominator: 'column:dev.player_game_stats.played' } }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }).intent!;
+    expect(validateIntentRefs(bare, nba).problems.map((problem) => problem.message)).toEqual([expect.stringMatching(/needs numeratorAggregation/), expect.stringMatching(/needs numeratorAggregation/)]);
   });
 });

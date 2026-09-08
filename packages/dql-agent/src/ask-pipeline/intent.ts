@@ -31,6 +31,8 @@ export interface IntentPredicate {
   op: PredicateOperator;
   values: Array<string | number | boolean>;
   source: ClauseSource;
+  /** Host-set: the predicate tests an aggregated measure (`ref` is `measure:<index>`), applied after aggregation. */
+  on?: 'aggregate';
 }
 
 /** A measure computed from two governed measures: `numerator / denominator`, disclosed as such. */
@@ -38,6 +40,9 @@ export interface IntentDerivedMeasure {
   kind: 'ratio';
   numerator: string;
   denominator: string;
+  /** When a part is a physical column rather than a governed metric, how it is aggregated. */
+  numeratorAggregation?: string;
+  denominatorAggregation?: string;
 }
 
 export interface IntentMeasure {
@@ -72,6 +77,8 @@ export interface IntentUnresolved {
   question?: string;
   /** Host-set: the clause asks for an operation Ask does not perform (a cause, a recommendation), not a missing model. */
   kind?: 'not_modeled' | 'unsupported';
+  /** Host-set: restored from the original question's ledger after a reading dropped it; never re-litigated against the vocabulary. */
+  origin?: 'ledger';
 }
 
 export interface AnalyticalIntentV1 {
@@ -117,7 +124,7 @@ export const ANALYTICAL_INTENT_JSON_SCHEMA: Record<string, unknown> = {
           ref: { type: 'string' },
           derived: {
             type: 'object', additionalProperties: false, required: ['kind', 'numerator', 'denominator'],
-            properties: { kind: { type: 'string', enum: ['ratio'] }, numerator: { type: 'string' }, denominator: { type: 'string' } },
+            properties: { kind: { type: 'string', enum: ['ratio'] }, numerator: { type: 'string' }, denominator: { type: 'string' }, numeratorAggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'] }, denominatorAggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'] } },
           },
           aggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max', 'median'] },
           alias: { type: 'string', maxLength: 80 },
@@ -207,7 +214,8 @@ function parsePredicate(value: unknown, path: string, errors: IntentShapeError[]
   const values = rawValues.filter((item): item is string | number | boolean => ['string', 'number', 'boolean'].includes(typeof item)).slice(0, 24);
   if (op && !['is_true', 'is_false'].includes(op) && values.length === 0) errors.push({ path: `${path}.values`, message: 'values must not be empty' });
   const source = typeof value.source === 'string' && SOURCES.has(value.source as ClauseSource) ? value.source as ClauseSource : 'question';
-  return ref && op ? { ref, op, values, source } : undefined;
+  const on = value.on === 'aggregate' || /^measure:\d+$/.test(ref) ? 'aggregate' as const : undefined;
+  return ref && op ? { ref, op, values, source, ...(on ? { on } : {}) } : undefined;
 }
 
 /**
@@ -229,7 +237,8 @@ export function parseIntent(raw: unknown): { intent?: AnalyticalIntentV1; errors
       const numerator = typeof raw.numerator === 'string' ? raw.numerator.trim() : '';
       const denominator = typeof raw.denominator === 'string' ? raw.denominator.trim() : '';
       if (raw.kind !== 'ratio' || !numerator || !denominator) { errors.push({ path: `measures[${index}].derived`, message: 'a derived measure is {kind: "ratio", numerator: <ref>, denominator: <ref>}' }); continue; }
-      derived = { kind: 'ratio', numerator, denominator };
+      const partAggregation = (value: unknown): string | undefined => (typeof value === 'string' && ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'].includes(value) ? value : undefined);
+      derived = { kind: 'ratio', numerator, denominator, ...(partAggregation(raw.numeratorAggregation) ? { numeratorAggregation: partAggregation(raw.numeratorAggregation) } : {}), ...(partAggregation(raw.denominatorAggregation) ? { denominatorAggregation: partAggregation(raw.denominatorAggregation) } : {}) };
     }
     const ref = typeof item.ref === 'string' && item.ref.trim() ? item.ref.trim() : derived ? `ratio:${derived.numerator}/${derived.denominator}` : '';
     if (!ref) { errors.push({ path: `measures[${index}]`, message: 'measure needs a ref, or a derived ratio' }); continue; }
