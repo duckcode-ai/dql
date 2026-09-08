@@ -1,0 +1,23 @@
+{
+  "key": "947c369b6ddc824a2c27d655580e0da7",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total product revenue (excluding tax) for every location, including locations with zero orders.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\"}],\"groupBy\":[{\"ref\":\"entity:locations.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"population\":\"all\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"entity:locations.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T21:21:20.595Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "947c369b6ddc824a2c27d655580e0da765c67753398473ac2a59547bc26a6b9a",
+    "postCanonicalHash": "947c369b6ddc824a2c27d655580e0da765c67753398473ac2a59547bc26a6b9a",
+    "appliedRuleClasses": []
+  }
+}

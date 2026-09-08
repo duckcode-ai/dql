@@ -364,3 +364,43 @@ describe('predicates compile against the column\'s type', () => {
     expect(like.candidate!.sql).toContain('LOWER(CAST("dev"."journey"."season" AS VARCHAR)) LIKE ?');
   });
 });
+
+describe('a share of the whole period divides by an ungrouped denominator', () => {
+  const nba = buildVocabularyIndex({
+    metrics: [{ name: 'total_points', aggregation: 'sum', physical: { relation: 'dev.season_facts', expr: '"dev"."season_facts"."total_points"', aggregate: 'sum' } }],
+    dimensions: [
+      { name: 'player_id', model: 'season_facts', dataType: 'number', physical: { relation: 'dev.season_facts', column: 'player_id' } },
+      { name: 'season', model: 'season_facts', dataType: 'number', physical: { relation: 'dev.season_facts', column: 'season' } },
+    ],
+    relations: [{ schema: 'dev', name: 'season_facts', columns: [{ name: 'player_id', dataType: 'INTEGER' }, { name: 'season', dataType: 'INTEGER' }, { name: 'total_points', dataType: 'INTEGER' }] }],
+  });
+  it('the denominator island has no GROUP BY, shares the filters, and is summed before the limit', () => {
+    const composed = composeRelational(intent({
+      measures: [
+        { ref: 'metric:total_points', alias: 'total_points' },
+        { alias: 'share_of_points', derived: { kind: 'ratio', numerator: 'metric:total_points', denominator: 'metric:total_points', denominatorScope: 'overall' } },
+      ],
+      groupBy: [{ ref: 'dimension:season_facts.player_id', role: 'key' }],
+      filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: ['2017'], source: 'question' }],
+      ordering: { ref: 'measure:0', direction: 'desc' }, limit: 5, expectedShape: 'ranking',
+    }), nba, { ...deps, joinPath: () => [] });
+    expect(composed.refusal).toBeUndefined();
+    const sql = composed.candidate!.sql;
+    // Two islands on one relation: the grouped one and the overall one.
+    expect(sql).toMatch(/island_1 AS \(\nSELECT "dev"\."season_facts"\."player_id" AS "player_id"[\s\S]*GROUP BY "dev"\."season_facts"\."player_id"\n\)/);
+    expect(sql).toMatch(/island_2 AS \(\nSELECT SUM\("dev"\."season_facts"\."total_points"\) AS "__den_2"\nFROM "dev"\."season_facts"\nWHERE "dev"\."season_facts"\."season" = \?\n\)/);
+    expect(sql).toMatch(/FROM island_1\nCROSS JOIN island_2/);
+    expect(sql).toMatch(/CAST\(island_1\."__num_2" AS DOUBLE\) \/ NULLIF\(CAST\(island_2\."__den_2" AS DOUBLE\), 0\) AS "share_of_points"/);
+    expect(sql).toMatch(/ORDER BY "total_points" DESC\nLIMIT 5$/);
+    // The season filter binds once per island, as a number.
+    expect(composed.candidate!.params).toEqual([2017, 2017]);
+    expect(composed.candidate!.proof.join(' ')).toMatch(/over every row of the period/);
+  });
+  it('a native `number` type is numeric, not text', () => {
+    const composed = composeRelational(intent({
+      measures: [{ ref: 'metric:total_points' }], filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: ['2017'], source: 'question' }], expectedShape: 'scalar',
+    }), nba, { ...deps, joinPath: () => [] });
+    expect(composed.candidate!.sql).not.toMatch(/LOWER/);
+    expect(composed.candidate!.params).toEqual([2017]);
+  });
+});

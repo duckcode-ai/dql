@@ -318,7 +318,44 @@
         "player_id"
       ],
       "tier": "governed",
-      "note": "Ranked by makes; attempts and the ratio of sums shown beside."
+      "note": "Ranked by makes; attempts and the ratio of sums shown beside.",
+      "alternatives": [
+        {
+          "sql": "SELECT player_id, player_name, SUM(fg3m) AS three_pointers_made, SUM(fg3a) AS three_point_attempts, SUM(fg3m) * 1.0 / SUM(fg3a) AS three_point_pct FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY player_id, player_name ORDER BY three_pointers_made DESC LIMIT 10",
+          "columns": {
+            "player_id": [
+              "player_id",
+              "player",
+              "player_game_stats__player_id"
+            ],
+            "player_name": [
+              "player_name",
+              "name"
+            ],
+            "three_pointers_made": [
+              "three_pointers_made",
+              "fg3m",
+              "threes_made",
+              "three_point_makes",
+              "total_three_pointers"
+            ],
+            "three_point_attempts": [
+              "three_point_attempts",
+              "fg3a",
+              "threes_attempted",
+              "three_pointers_attempted"
+            ],
+            "three_point_pct": [
+              "three_point_pct",
+              "fg3_pct",
+              "three_point_percentage",
+              "shooting_pct",
+              "three_point_shooting_pct"
+            ]
+          },
+          "note": "the superlative answered as a ranking whose first row is the leader"
+        }
+      ]
     },
     {
       "id": "nb14-assist-turnover",

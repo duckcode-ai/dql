@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, auditLedger, bindExactNames, buildIntentSystemPrompt, buildLedger, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyGovernedDefaults, auditLedger, bindExactNames, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { runAskPipeline } from './pipeline.js';
-import { buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
+import { suggestSameGrainColumns, buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
 import { extractFirstJsonObject } from '../providers/structured-output.js';
 
@@ -1200,5 +1200,77 @@ describe('a period named on a field that is not a date', () => {
     expect(validated.intent.time).toBeUndefined();
     expect(validated.intent.filters).toEqual([expect.objectContaining({ ref: 'dimension:journey.season', op: 'eq', values: ['2017'] })]);
     expect(validated.intent.provenance['dimension:journey.season']).toMatch(/not a date/);
+  });
+});
+
+describe('meaning before execution: shares, calendar periods and units', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'total_points', aggregation: 'sum', physical: { relation: 'dev.season_facts', expr: '"dev"."season_facts"."total_points"', aggregate: 'sum' } }],
+    dimensions: [
+      { name: 'player_id', model: 'season_facts', dataType: 'number', physical: { relation: 'dev.season_facts', column: 'player_id' } },
+      { name: 'season', model: 'season_facts', dataType: 'number', description: 'Season value carried by the source; it is not silently converted to a calendar year', physical: { relation: 'dev.season_facts', column: 'season' } },
+      { name: 'game_date', model: 'game_facts', dataType: 'date', isTime: true, physical: { relation: 'dev.game_facts', column: 'game_date' } },
+    ],
+    relations: [
+      { schema: 'dev', name: 'season_facts', columns: [{ name: 'player_id' }, { name: 'season', dataType: 'INTEGER' }, { name: 'total_points' }] },
+      { schema: 'dev', name: 'game_facts', columns: [{ name: 'game_date', dataType: 'DATE' }, { name: 'points' }] },
+    ],
+  });
+  const make = (raw: Record<string, unknown>) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'ranking', ...raw }).intent!;
+  it('a measure divided by itself becomes a share of the whole period when its name says so, and is sent back otherwise', () => {
+    const share = validateIntentRefs(make({ measures: [{ alias: 'share_of_points', derived: { kind: 'ratio', numerator: 'metric:total_points', denominator: 'metric:total_points' } }], groupBy: [{ ref: 'dimension:season_facts.player_id', role: 'key' }] }), vocabulary);
+    expect(share.problems).toEqual([]);
+    expect(share.intent.measures[0]!.derived?.denominatorScope).toBe('overall');
+    expect(share.intent.provenance['measures[0].denominatorScope']).toMatch(/whole period/);
+    const rate = validateIntentRefs(make({ measures: [{ alias: 'points_rate', derived: { kind: 'ratio', numerator: 'metric:total_points', denominator: 'metric:total_points' } }] }), vocabulary);
+    expect(rate.problems.map((problem) => problem.message)).toEqual([expect.stringMatching(/divided by itself is 1 for every row/)]);
+  });
+  it('a calendar period restricted on a non-date field is named with the date dimensions that would honour it', () => {
+    const seasonal = make({ measures: [{ ref: 'metric:total_points' }], filters: [{ ref: 'dimension:season_facts.season', op: 'in', values: [2016, 2017], source: 'question' }] });
+    const basis = calendarBasisProblem('top players by total points in calendar years 2016 and 2017', seasonal, vocabulary);
+    expect(basis).toMatchObject({ field: 'dimension:season_facts.season', dates: ['dimension:game_facts.game_date'] });
+    expect(basis?.measuresAt[0]).toBe('column:dev.game_facts.points (sum, for metric:total_points)');
+    // Without the calendar word the season value is what was asked for.
+    expect(calendarBasisProblem('top players by total points in 2017', seasonal, vocabulary)).toBeUndefined();
+    // A date restriction honours it.
+    const dated = make({ measures: [{ ref: 'metric:total_points' }], time: { ref: 'dimension:game_facts.game_date', window: { start: '2017-01-01', end: '2018-01-01' } } });
+    expect(calendarBasisProblem('total points in calendar 2017', dated, vocabulary)).toBeUndefined();
+  });
+  it('the interpreter is corrected once, then the turn asks which basis was meant, with zero SQL', async () => {
+    const seasonal = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Points by season', measures: [{ ref: 'metric:total_points' }], groupBy: [], display: [], filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: [2017], source: 'question' }], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+    let executed = 0;
+    const outcome = await runAskPipeline({ question: 'total points in calendar year 2017', vocabulary, provider: scripted([seasonal, seasonal]), prepareDeps: { joinPath: () => [] }, executeDeps: { run: async () => { executed += 1; return { columns: [], rows: [], rowCount: 0, executionTimeMs: 1 }; } } });
+    expect(executed).toBe(0);
+    expect(outcome.kind).toBe('clarify');
+    if (outcome.kind === 'clarify') {
+      expect(outcome.question).toMatch(/calendar period.*not a date/);
+      expect(outcome.options.map((option) => option.ref)).toEqual(['dimension:game_facts.game_date']);
+    }
+    expect(outcome.receipt.dispatches).toHaveLength(2);
+  });
+  it('points are a number, never dollars; money words still are', () => {
+    const rows = (name: string) => ({ columns: [name], rows: [{ [name]: 12 }], rowCount: 1, executionTimeMs: 1 });
+    expect(describeResultColumns(make({ measures: [{ ref: 'metric:total_points' }], expectedShape: 'scalar' }), rows('total_points'), vocabulary)[0]).toMatchObject({ name: 'total_points', kind: 'number' });
+    const money = buildVocabularyIndex({ metrics: [{ name: 'order_total', aggregation: 'sum' }, { name: 'revenue', aggregation: 'sum' }, { name: 'total_value', aggregation: 'sum' }] });
+    expect(describeResultColumns(make({ measures: [{ ref: 'metric:order_total' }], expectedShape: 'scalar' }), rows('order_total'), money)[0]!.kind).toBe('currency');
+    expect(describeResultColumns(make({ measures: [{ ref: 'metric:revenue' }], expectedShape: 'scalar' }), rows('revenue'), money)[0]!.kind).toBe('currency');
+    expect(describeResultColumns(make({ measures: [{ ref: 'metric:total_value' }], expectedShape: 'scalar' }), rows('total_value'), money)[0]!.kind).toBe('number');
+  });
+});
+
+describe('the same fact at another grain', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'total_points', aggregation: 'sum', physical: { relation: 'dev.season_facts', expr: '"dev"."season_facts"."total_points"', aggregate: 'sum' } }],
+    relations: [
+      { schema: 'dev', name: 'season_facts', columns: [{ name: 'player_id' }, { name: 'total_points', dataType: 'INTEGER' }, { name: 'games_played', dataType: 'INTEGER' }] },
+      { schema: 'dev', name: 'game_facts', columns: [{ name: 'game_id', dataType: 'VARCHAR' }, { name: 'game_date', dataType: 'DATE' }, { name: 'points', dataType: 'DOUBLE' }, { name: 'assists', dataType: 'DOUBLE' }] },
+    ],
+  });
+  it('matches a metric and a counted column to the date relation by name stem', () => {
+    expect(suggestSameGrainColumns(vocabulary, ['metric:total_points', 'column:dev.season_facts.games_played'], 'dev.game_facts')).toEqual([
+      { from: 'metric:total_points', to: 'column:dev.game_facts.points', aggregation: 'sum' },
+      { from: 'column:dev.season_facts.games_played', to: 'column:dev.game_facts.game_id', aggregation: 'count_distinct' },
+    ]);
+    expect(suggestSameGrainColumns(vocabulary, ['column:dev.season_facts.player_id'], 'dev.game_facts')).toEqual([]);
   });
 });

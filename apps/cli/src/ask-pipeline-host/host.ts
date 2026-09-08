@@ -7,6 +7,7 @@ import { writeFileSync } from 'node:fs';
 import type { ConnectionConfig, QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { getDialect, type DQLManifest, type SemanticLayer } from '@duckcodeailabs/dql-core';
 import {
+  buildVocabularyIndex,
   classifyWarehouseError,
   runAskPipeline,
   type AgentProvider,
@@ -27,7 +28,7 @@ import {
   type PreparedBlock,
   type VocabularyEntry,
 } from '@duckcodeailabs/dql-agent';
-import { buildProjectVocabulary, normalizeRelationName } from './vocabulary-source.js';
+import { buildProjectVocabulary, buildVocabularySource, normalizeRelationName, type VocabularySourceInput } from './vocabulary-source.js';
 
 /**
  * THE ASK PIPELINE HOST.
@@ -78,6 +79,71 @@ export type AskHostTraceSpan =
 const fingerprintText = (value: string): string => createHash('sha256').update(value).digest('hex').slice(0, 24);
 
 interface VocabularyCacheEntry { key: string; vocabulary: VocabularyIndex }
+
+type ProbedRelation = NonNullable<VocabularySourceInput['relations']>[number];
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+
+/**
+ * The information_schema lookup for a handful of NAMED relations: identifiers
+ * only, a bounded predicate list, a row cap. It reads column names and types,
+ * never row values, so it is a metadata point lookup rather than discovery.
+ */
+export function relationColumnsProbeSql(relations: string[], maxRelations = 8): string | undefined {
+  const predicates: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of relations) {
+    const parts = raw.replace(/["`[\]]/g, '').trim().split('.').filter(Boolean);
+    const table = parts.at(-1);
+    const schema = parts.length >= 2 ? parts.at(-2) : undefined;
+    if (!table || !IDENTIFIER.test(table) || (schema && !IDENTIFIER.test(schema))) continue;
+    const key = `${schema ?? ''}.${table}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    predicates.push(schema
+      ? `(LOWER(table_schema) = '${schema.toLowerCase()}' AND LOWER(table_name) = '${table.toLowerCase()}')`
+      : `(LOWER(table_name) = '${table.toLowerCase()}')`);
+    if (predicates.length >= maxRelations) break;
+  }
+  if (predicates.length === 0) return undefined;
+  return [
+    'SELECT table_schema, table_name, column_name, data_type',
+    'FROM information_schema.columns',
+    "WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')",
+    `  AND (${predicates.join(' OR ')})`,
+    'ORDER BY table_schema, table_name, ordinal_position',
+    'LIMIT 800',
+  ].join('\n');
+}
+
+/** Probe rows grouped into relations the vocabulary can merge. */
+export function relationsFromProbeRows(rows: Array<Record<string, unknown>>): ProbedRelation[] {
+  const byRelation = new Map<string, ProbedRelation>();
+  for (const row of rows) {
+    const record = Object.fromEntries(Object.entries(row).map(([key, value]) => [key.toLowerCase(), value]));
+    const schema = typeof record.table_schema === 'string' ? record.table_schema : undefined;
+    const name = typeof record.table_name === 'string' ? record.table_name : undefined;
+    const column = typeof record.column_name === 'string' ? record.column_name : undefined;
+    if (!name || !column) continue;
+    const key = schema ? `${schema}.${name}` : name;
+    const relation = byRelation.get(key) ?? { ...(schema ? { schema } : {}), name, columns: [] };
+    relation.columns.push({ name: column, ...(typeof record.data_type === 'string' && record.data_type ? { dataType: record.data_type } : {}) });
+    byRelation.set(key, relation);
+  }
+  return [...byRelation.values()];
+}
+
+/**
+ * Relations the vocabulary knows by name but not by column: a table the
+ * semantic layer or a dbt source references that no manifest documented, or
+ * one documented without types. A partial description is not evidence that
+ * the other columns are absent.
+ */
+export function relationsNeedingColumns(source: ReturnType<typeof buildVocabularySource>, max = 48): string[] {
+  return (source.relations ?? [])
+    .filter((relation) => relation.columns.length === 0 || relation.columns.some((column) => !column.dataType))
+    .map((relation) => (relation.schema ? `${relation.schema}.${relation.name}` : relation.name))
+    .slice(0, max);
+}
 
 /**
  * GROUND MEMBER LITERALS. A question says "Ryan byrd"; the warehouse holds
@@ -240,12 +306,38 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
   let vocabularyCache: VocabularyCacheEntry | undefined;
   const preparationCache = new Map<string, PreparedCandidate>();
 
-  const vocabularyFor = (): VocabularyIndex => {
+  // The warehouse completes what the metadata left out. For every relation
+  // the vocabulary names without columns or without types, one bounded
+  // information_schema lookup fills them in, once per snapshot and
+  // connection. A failure leaves the metadata as it was.
+  const probedColumns = new Map<string, ProbedRelation[]>();
+  const probeColumns = async (connection: ConnectionConfig | undefined, base: ReturnType<typeof buildVocabularySource>, snapshotId: string): Promise<ProbedRelation[]> => {
+    if (!connection) return [];
+    const cacheKey = `${snapshotId}|${connectionKey(connection)}`;
+    const cached = probedColumns.get(cacheKey);
+    if (cached) return cached;
+    const wanted = relationsNeedingColumns(base);
+    const found: ProbedRelation[] = [];
+    for (let at = 0; at < wanted.length; at += 8) {
+      const sql = relationColumnsProbeSql(wanted.slice(at, at + 8));
+      if (!sql) continue;
+      try {
+        const result = await deps.executor.executeQuery(sql, [], {}, connection);
+        found.push(...relationsFromProbeRows((result.rows ?? []) as Array<Record<string, unknown>>));
+      } catch { /* the metadata stands as it was */ }
+    }
+    probedColumns.set(cacheKey, found);
+    return found;
+  };
+  const vocabularyFor = async (connection?: ConnectionConfig): Promise<VocabularyIndex> => {
     const { manifest, snapshotId } = deps.getManifest();
     const layer = deps.getSemanticLayer();
-    const key = `${snapshotId}|${layer ? layer.listCubes().map((cube) => cube.name).join(',') : 'no-semantic'}`;
+    const input: VocabularySourceInput = { ...(layer ? { semanticLayer: layer } : {}), ...(manifest ? { manifest } : {}) };
+    const key = `${snapshotId}|${layer ? layer.listCubes().map((cube) => cube.name).join(',') : 'no-semantic'}|${connection ? connectionKey(connection) : 'no-connection'}`;
     if (vocabularyCache?.key === key) return vocabularyCache.vocabulary;
-    const vocabulary = buildProjectVocabulary({ ...(layer ? { semanticLayer: layer } : {}), ...(manifest ? { manifest } : {}) });
+    const base = buildVocabularySource(input);
+    const probed = await probeColumns(connection, base, snapshotId);
+    const vocabulary = probed.length ? buildProjectVocabulary({ ...input, relations: probed }) : buildVocabularyIndex(base);
     vocabularyCache = { key, vocabulary };
     // Debug aid: DQL_ASK_PIPELINE_DUMP_VOCABULARY=<file> writes the cards the interpreter reads.
     if (process.env.DQL_ASK_PIPELINE_DUMP_VOCABULARY) {
@@ -293,7 +385,6 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
 
   return async ({ runId, request, emit }) => {
     const startedAt = Date.now();
-    const vocabulary = vocabularyFor();
     const provider = await deps.selectProvider(request);
     if (!provider) {
       return failure(runId, 'No AI model is configured for this project, so the question could not be interpreted.', 'provider_error', startedAt);
@@ -308,6 +399,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     } catch (error) {
       connectionError = error;
     }
+    const vocabulary = await vocabularyFor(connection);
     const prior = request.threadId ? deps.priorIntent(request) : undefined;
     let engine: PrepareDeps['engine'];
     try { engine = await deps.semanticEngine?.(); } catch { engine = undefined; }

@@ -1,0 +1,23 @@
+{
+  "key": "75e7175768f411b77eb2ffe3f14922de",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Which player (by player id) scored the most total points across games dated in calendar year 2017?\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"dimension:player_game_stats.pts\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in calendar year 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:scored the most points\",\"dimension:player_game_stats.player_id\":\"q:Who scored\",\"dimension:player_game_stats.player_name\":\"q:Who scored\",\"dimension:player_game_stats.game_date\":\"q:calendar year 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T21:28:13.763Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "75e7175768f411b77eb2ffe3f14922de5fd9dcf8d052b0d642c9567f610c3ead",
+    "postCanonicalHash": "75e7175768f411b77eb2ffe3f14922de5fd9dcf8d052b0d642c9567f610c3ead",
+    "appliedRuleClasses": []
+  }
+}

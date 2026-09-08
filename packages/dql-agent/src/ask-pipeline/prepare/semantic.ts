@@ -38,6 +38,7 @@ export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: Voca
   const asked = new Set<string>();
   for (const measure of intent.measures) {
     if (measure.derived) {
+      if (measure.derived.denominatorScope === 'overall') return { refusal: { tier: 'semantic', code: 'not_semantic', message: `${measure.alias ?? measure.ref} divides by the whole period; the semantic tier computes ratios at one grouping only`, repairable: false } };
       // A ratio is two governed metrics compiled together and divided after execution.
       const parts = [measure.derived.numerator, measure.derived.denominator].map((ref) => entry(ref));
       if (parts.some((part) => !part || (part.kind !== 'metric' && part.kind !== 'measure'))) {

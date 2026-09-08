@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
 import { modelingJoinPaths } from './host.js';
-import { leafName, nativeAggregateBinding, normalizeRelationName, parseMetricFilter, qualifyExpression, buildVocabularySource } from './vocabulary-source.js';
+import { leafName, nativeAggregateBinding, nativeFormulaBinding, normalizeRelationName, parseMetricFilter, qualifyExpression, buildVocabularySource } from './vocabulary-source.js';
 
 describe('vocabulary source helpers', () => {
   it('qualifies bare columns in a measure expression, leaving keywords, functions and literals alone', () => {
@@ -204,13 +204,37 @@ describe('a native DQL semantic layer binds through its own table', () => {
   it('a metric with no cube and no measure still executes: table, expression and type are its binding', () => {
     const total = source.metrics!.find((metric) => metric.name === 'total_points');
     expect(total?.physical).toEqual({ relation: 'TRANSFORMED.local_player_season_facts', expr: '"TRANSFORMED"."local_player_season_facts"."points"', aggregate: 'sum' });
-    // A ratio of aggregates is not a simple physical binding.
-    expect(source.metrics!.find((metric) => metric.name === 'points_per_game')?.physical).toBeUndefined();
+    // A ratio of aggregates binds as a derived aggregate, emitted as written.
+    expect(source.metrics!.find((metric) => metric.name === 'points_per_game')?.physical).toMatchObject({ aggregate: 'derived' });
   });
   it('its dimensions are admitted with their own relation, named by that relation', () => {
     const season = source.dimensions!.find((dimension) => dimension.name === 'season');
     expect(season).toMatchObject({ model: 'local_player_season_facts', physical: { relation: 'TRANSFORMED.local_player_season_facts', column: 'season' } });
     const date = source.dimensions!.find((dimension) => dimension.name === 'game_date');
     expect(date).toMatchObject({ model: 'local_player_game_facts', isTime: true, physical: { relation: 'TRANSFORMED.local_player_game_facts', column: 'game_date' } });
+  });
+});
+
+describe('a native metric written as a formula of aggregates', () => {
+  it('is recognised as a formula only when every function is an aggregate or a null guard', () => {
+    expect(nativeFormulaBinding('SUM(total_points) / NULLIF(SUM(games_played), 0)')).toBe('SUM(total_points) / NULLIF(SUM(games_played), 0)');
+    expect(nativeFormulaBinding('SUM(made) / SUM(attempted)')).toBe('SUM(made) / SUM(attempted)');
+    expect(nativeFormulaBinding('SUM(points)')).toBeUndefined();
+    expect(nativeFormulaBinding('points')).toBeUndefined();
+    expect(nativeFormulaBinding('SUM(points) OVER (PARTITION BY x)')).toBeUndefined();
+    expect(nativeFormulaBinding('(SELECT SUM(points) FROM t) / 2')).toBeUndefined();
+  });
+  it('binds as a derived aggregate over its own table, emitted as written', () => {
+    const layer = {
+      listCubes: () => [],
+      listMetrics: () => [{ name: 'points_per_game', label: 'Points per game', description: '', sql: 'SUM(total_points) / NULLIF(SUM(games_played), 0)', type: 'custom', table: 'TRANSFORMED.local_player_season_facts' }],
+      listMeasures: () => [], listTimeDimensions: () => [], listDimensions: () => [], listEntities: () => [], listSemanticModels: () => [], findJoinPath: () => [], displayFormatFor: () => undefined,
+    } as unknown as SemanticLayer;
+    const source = buildVocabularySource({ manifest: undefined, semanticLayer: layer, relations: [{ schema: 'TRANSFORMED', name: 'local_player_season_facts', columns: [{ name: 'total_points' }, { name: 'games_played' }] }] } as never);
+    expect(source.metrics!.find((metric) => metric.name === 'points_per_game')?.physical).toEqual({
+      relation: 'TRANSFORMED.local_player_season_facts',
+      expr: 'SUM("TRANSFORMED"."local_player_season_facts"."total_points") / NULLIF(SUM("TRANSFORMED"."local_player_season_facts"."games_played"), 0)',
+      aggregate: 'derived',
+    });
   });
 });

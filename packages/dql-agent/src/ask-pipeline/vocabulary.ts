@@ -310,6 +310,37 @@ function columnRoles(name: string, dataType: string | undefined, isTime?: boolea
   return ['categorical'];
 }
 
+const STEM_STOP = new Set(['total', 'sum', 'count', 'avg', 'average', 'num', 'number', 'of', 'per', 'the', 'all', 'distinct', 'played']);
+const stems = (name: string): string[] => name.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 2 && !STEM_STOP.has(word)).map((word) => word.replace(/s$/, ''));
+
+/**
+ * The same fact at another grain. A metric defined on a season table has no
+ * join to the game table that carries the calendar date, but the game table
+ * usually holds the column the metric sums. Each measure is matched to the
+ * target relation's columns by word stem (total_points -> points,
+ * games_played -> game_id counted distinct) so a correction can say exactly
+ * what to aggregate instead of asking the reader to guess.
+ */
+export function suggestSameGrainColumns(vocabulary: VocabularyIndex, measureRefs: string[], relation: string): Array<{ from: string; to: string; aggregation: string }> {
+  const columns = vocabulary.entries.filter((entry) => entry.kind === 'column' && (entry.physical?.relation ?? entry.model) === relation);
+  const out: Array<{ from: string; to: string; aggregation: string }> = [];
+  for (const ref of measureRefs) {
+    const entry = vocabulary.get(ref);
+    if (!entry) continue;
+    const words = stems(entry.name);
+    if (words.length === 0) continue;
+    const scored = columns
+      .map((column) => ({ column, score: stems(column.name).filter((stem) => words.some((word) => stem === word || stem.startsWith(word) || word.startsWith(stem))).length }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.column.name.length - right.column.name.length);
+    const best = scored[0]?.column;
+    if (!best) continue;
+    const counted = best.roles.includes('key') || /(^|_)(id|key)$/i.test(best.name);
+    out.push({ from: ref, to: best.ref, aggregation: counted ? 'count_distinct' : (entry.aggregation === 'count_distinct' || entry.aggregation === 'count' ? 'count_distinct' : 'sum') });
+  }
+  return out;
+}
+
 export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex {
   const entries: VocabularyEntry[] = [];
   for (const metric of source.metrics ?? []) {

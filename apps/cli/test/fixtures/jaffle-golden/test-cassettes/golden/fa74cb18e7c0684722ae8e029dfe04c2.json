@@ -1,0 +1,23 @@
+{
+  "key": "fa74cb18e7c0684722ae8e029dfe04c2",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Break down the drink revenue percentage by product and by customer type to investigate what is driving high beverage revenue.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue_pct\"}],\"groupBy\":[{\"ref\":\"entity:order_item.product\",\"role\":\"key\"},{\"ref\":\"dimension:customers.customer_type\",\"role\":\"categorical\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:order_item.drink_revenue_pct\":\"q:Focus on drink revenue pct\",\"entity:order_item.product\":\"q:by product\",\"dimension:products.product_name\":\"q:by product\",\"dimension:customers.customer_type\":\"q:by customer type\"},\"ordering\":{\"ref\":\"metric:order_item.drink_revenue_pct\",\"direction\":\"desc\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T21:25:26.465Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "fa74cb18e7c0684722ae8e029dfe04c2b4586aa46cbc7d0f338ccb181bfdbbf8",
+    "postCanonicalHash": "fa74cb18e7c0684722ae8e029dfe04c2b4586aa46cbc7d0f338ccb181bfdbbf8",
+    "appliedRuleClasses": []
+  }
+}

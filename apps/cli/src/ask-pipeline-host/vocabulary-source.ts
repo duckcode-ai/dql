@@ -48,6 +48,25 @@ const NESTED_AGGREGATE = /\b(sum|count|avg|min|max|median)\s*\(/i;
  * expression that mixes aggregates (a ratio of sums) is left to the semantic
  * engine: wrapping it in another aggregate would change its meaning.
  */
+const SAFE_FORMULA = /^[\sA-Za-z0-9_."'(),+\-*\/]+$/;
+/**
+ * A native metric written as a formula of aggregates over its own columns.
+ * Accepted when every function is an aggregate or NULLIF/COALESCE, the
+ * arithmetic is + - * / and parentheses, and at least one aggregate is
+ * present; anything else (a subquery, a window, a CASE the formula regex
+ * cannot vouch for) stays with the semantic engine.
+ */
+export function nativeFormulaBinding(sql: string | undefined): string | undefined {
+  const text = (sql ?? '').trim();
+  if (!text || !SAFE_FORMULA.test(text) || !NESTED_AGGREGATE.test(text)) return undefined;
+  if (/\b(select|from|where|over|partition|join|union|case|when|with|limit|order)\b/i.test(text)) return undefined;
+  const functions = [...text.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)].map((match) => match[1]!.toLowerCase());
+  if (!functions.every((name) => AGGREGATES.has(name) || name === 'nullif' || name === 'coalesce' || name === 'cast')) return undefined;
+  // A single bare aggregate call is the simple path's job, not a formula.
+  if (nativeAggregateBinding(text, undefined)) return undefined;
+  return text;
+}
+
 export function nativeAggregateBinding(sql: string | undefined, declaredType: string | undefined): { expr: string; aggregate: string } | undefined {
   const text = (sql ?? '').trim();
   if (!text) return undefined;
@@ -111,13 +130,30 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
   const columnDescriptions = new Map<string, string>();
   const relationSeen = new Set<string>();
 
+  // A relation may be described more than once: by a partial dbt manifest
+  // (a few documented columns, no types) and by the warehouse itself (every
+  // column, typed). The first description is not the last word: later ones
+  // ADD the columns and types the earlier lacked, so a column the manifest
+  // never mentioned is still a column, and a typed literal compiles by type.
   const addRelation = (relation: { schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }> }) => {
     const key = relation.schema ? `${relation.schema}.${relation.name}` : relation.name;
-    if (relationSeen.has(key)) return;
+    if (relationSeen.has(key)) {
+      const existing = source.relations!.find((item) => (item.schema ? `${item.schema}.${item.name}` : item.name) === key);
+      const names = relationColumns.get(key) ?? new Set<string>();
+      for (const column of relation.columns) {
+        const known = existing?.columns.find((item) => item.name.toLowerCase() === column.name.toLowerCase());
+        if (!known) { existing?.columns.push(column); names.add(column.name); }
+        else if (!known.dataType && column.dataType) known.dataType = column.dataType;
+        if (column.description && !columnDescriptions.has(`${key}.${column.name}`)) columnDescriptions.set(`${key}.${column.name}`, column.description);
+      }
+      relationColumns.set(key, names);
+      if (existing && !existing.description && relation.description) existing.description = relation.description;
+      return;
+    }
     relationSeen.add(key);
     relationColumns.set(key, new Set(relation.columns.map((column) => column.name)));
     for (const column of relation.columns) if (column.description) columnDescriptions.set(`${key}.${column.name}`, column.description);
-    source.relations!.push(relation);
+    source.relations!.push({ ...relation, columns: relation.columns.map((column) => ({ ...column })) });
   };
 
   // Physical relations: dbt sources recorded in the manifest, then anything the host introspected.
@@ -242,6 +278,15 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
         if (nativeRelation && native) {
           physical = { relation: nativeRelation, expr: qualifyExpression(native.expr, nativeRelation, relationColumns.get(nativeRelation) ?? []), aggregate: native.aggregate };
         }
+      }
+      // A native metric whose expression is a formula OF aggregates over its
+      // own table (points per game = SUM(points) / NULLIF(SUM(games), 0))
+      // binds as a derived aggregate: the formula is emitted as written inside
+      // the grouped query, never wrapped in another SUM or AVG.
+      if (!physical && !derived && !engineOnly && filters.length === 0) {
+        const nativeRelation = normalizeRelationName(metric.table);
+        const formula = nativeRelation && relationColumns.has(nativeRelation) ? nativeFormulaBinding(metric.sql) : undefined;
+        if (nativeRelation && formula) physical = { relation: nativeRelation, expr: qualifyExpression(formula, nativeRelation, relationColumns.get(nativeRelation) ?? []), aggregate: 'derived' };
       }
       if (!physical && !derived && !engineOnly && metric.metricType && metric.metricType !== 'simple') engineOnly = `a ${metric.metricType} metric the relational tier cannot compose`;
       const scopeNote = filters.length ? ` Only where ${filters.map((filter) => `${filter.column} ${filter.condition}`).join(' and ')}.` : '';

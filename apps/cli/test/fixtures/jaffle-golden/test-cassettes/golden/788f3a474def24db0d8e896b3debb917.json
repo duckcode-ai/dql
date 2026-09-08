@@ -1,0 +1,23 @@
+{
+  "key": "788f3a474def24db0d8e896b3debb917",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross revenue including tax across all orders.\",\"measures\":[{\"ref\":\"metric:orders.order_total\",\"aggregation\":\"sum\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:revenue including tax\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T21:23:16.387Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "788f3a474def24db0d8e896b3debb9170e7ee2cc94b6fb9a9d08da41ac6426f5",
+    "postCanonicalHash": "788f3a474def24db0d8e896b3debb9170e7ee2cc94b6fb9a9d08da41ac6426f5",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "d80f05c3dd00954bb4d3dde6344af656",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for a causal explanation of a revenue decline broken down by region, and a recommendation on which region to invest in.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"revenue down by region / which region to invest in\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T21:23:54.126Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d80f05c3dd00954bb4d3dde6344af65682b772cd578d6dba71f2c5e69d575659",
+    "postCanonicalHash": "d80f05c3dd00954bb4d3dde6344af65682b772cd578d6dba71f2c5e69d575659",
+    "appliedRuleClasses": []
+  }
+}

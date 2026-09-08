@@ -1,0 +1,23 @@
+{
+  "key": "41fb33f907335439a7493e038426aa7e",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user asks for the top point scorers for the current season, but this project's game and player-stats data only covers calendar years 2016 and 2017, so there is no data for a \\\"current\\\" (2026) season.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"top scorers this season\",\"options\":[],\"material\":true,\"question\":\"This project only has NBA game and player-stat data for the 2016 and 2017 seasons; there is no data for the current season. Which season (e.g. 2016 or 2017) would you like the top scorers for?\"}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T21:31:42.939Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "41fb33f907335439a7493e038426aa7e8a19358f0b54b4498159d556442631e1",
+    "postCanonicalHash": "41fb33f907335439a7493e038426aa7e8a19358f0b54b4498159d556442631e1",
+    "appliedRuleClasses": []
+  }
+}

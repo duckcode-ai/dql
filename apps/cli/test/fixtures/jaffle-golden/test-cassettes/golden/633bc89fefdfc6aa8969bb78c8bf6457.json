@@ -1,0 +1,24 @@
+{
+  "key": "633bc89fefdfc6aa8969bb78c8bf6457",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by beverage revenue using the certified top beverage customers view, showing beverage revenue, beverage order count, and beverage product variety per customer.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:I need to get the bevereage catogery\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T21:26:16.661Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "633bc89fefdfc6aa8969bb78c8bf64571118ca9eee05b529d7e6b73703716eaf",
+    "postCanonicalHash": "633bc89fefdfc6aa8969bb78c8bf64571118ca9eee05b529d7e6b73703716eaf",
+    "appliedRuleClasses": []
+  }
+}

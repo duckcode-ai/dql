@@ -1,0 +1,25 @@
+{
+  "key": "989e91817e8584af4e02f0239fadca5b",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top point scorers for the most recent season in this dataset (season 2017, i.e. the 2017-18 season), ranked by total points scored.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"dimension:player_game_stats.season\",\"op\":\"eq\",\"values\":[2017],\"source\":\"question\"}],\"ordering\":{\"ref\":\"column:dev.player_game_stats.pts\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.pts\":\"q:top scorers\",\"dimension:player_game_stats.player_id\":\"q:top scorers\",\"dimension:player_game_stats.player_name\":\"q:top scorers\",\"dimension:player_game_stats.season\":\"q:this season\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T21:32:15.395Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "989e91817e8584af4e02f0239fadca5b40dead9aa36245e75605c0fcbddd6cf8",
+    "postCanonicalHash": "989e91817e8584af4e02f0239fadca5b40dead9aa36245e75605c0fcbddd6cf8",
+    "appliedRuleClasses": []
+  }
+}

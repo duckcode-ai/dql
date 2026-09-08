@@ -43,6 +43,12 @@ export interface IntentDerivedMeasure {
   /** When a part is a physical column rather than a governed metric, how it is aggregated. */
   numeratorAggregation?: string;
   denominatorAggregation?: string;
+  /**
+   * `overall`: the denominator is the same aggregate over EVERY row of the
+   * period, not the row's own group. "Share of all points" divides a player's
+   * points by everyone's points; without this a share is 1 for every row.
+   */
+  denominatorScope?: 'overall';
 }
 
 export interface IntentMeasure {
@@ -124,7 +130,7 @@ export const ANALYTICAL_INTENT_JSON_SCHEMA: Record<string, unknown> = {
           ref: { type: 'string' },
           derived: {
             type: 'object', additionalProperties: false, required: ['kind', 'numerator', 'denominator'],
-            properties: { kind: { type: 'string', enum: ['ratio'] }, numerator: { type: 'string' }, denominator: { type: 'string' }, numeratorAggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'] }, denominatorAggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'] } },
+            properties: { kind: { type: 'string', enum: ['ratio'] }, numerator: { type: 'string' }, denominator: { type: 'string' }, numeratorAggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'] }, denominatorAggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'] }, denominatorScope: { type: 'string', enum: ['overall'] } },
           },
           aggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max', 'median'] },
           alias: { type: 'string', maxLength: 80 },
@@ -238,7 +244,7 @@ export function parseIntent(raw: unknown): { intent?: AnalyticalIntentV1; errors
       const denominator = typeof raw.denominator === 'string' ? raw.denominator.trim() : '';
       if (raw.kind !== 'ratio' || !numerator || !denominator) { errors.push({ path: `measures[${index}].derived`, message: 'a derived measure is {kind: "ratio", numerator: <ref>, denominator: <ref>}' }); continue; }
       const partAggregation = (value: unknown): string | undefined => (typeof value === 'string' && ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'].includes(value) ? value : undefined);
-      derived = { kind: 'ratio', numerator, denominator, ...(partAggregation(raw.numeratorAggregation) ? { numeratorAggregation: partAggregation(raw.numeratorAggregation) } : {}), ...(partAggregation(raw.denominatorAggregation) ? { denominatorAggregation: partAggregation(raw.denominatorAggregation) } : {}) };
+      derived = { kind: 'ratio', numerator, denominator, ...(partAggregation(raw.numeratorAggregation) ? { numeratorAggregation: partAggregation(raw.numeratorAggregation) } : {}), ...(partAggregation(raw.denominatorAggregation) ? { denominatorAggregation: partAggregation(raw.denominatorAggregation) } : {}), ...(raw.denominatorScope === 'overall' ? { denominatorScope: 'overall' as const } : {}) };
     }
     const ref = typeof item.ref === 'string' && item.ref.trim() ? item.ref.trim() : derived ? `ratio:${derived.numerator}/${derived.denominator}` : '';
     if (!ref) { errors.push({ path: `measures[${index}]`, message: 'measure needs a ref, or a derived ratio' }); continue; }

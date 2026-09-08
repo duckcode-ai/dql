@@ -1,0 +1,23 @@
+{
+  "key": "b07cfb19b1ef21e72154c36ee2b6b962",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants total revenue, but the project defines two distinct revenue measures with different scope and tax treatment.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[{\"clause\":\"total revenue\",\"options\":[\"metric:orders.order_total\",\"metric:order_item.revenue\"],\"material\":true,\"question\":\"Do you mean gross order revenue including tax (order_total) or product revenue excluding tax (order_item revenue)?\"}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-08T21:13:03.705Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b07cfb19b1ef21e72154c36ee2b6b962f8d4f9984fbd5f7a86ec556b1bd8150a",
+    "postCanonicalHash": "b07cfb19b1ef21e72154c36ee2b6b962f8d4f9984fbd5f7a86ec556b1bd8150a",
+    "appliedRuleClasses": []
+  }
+}

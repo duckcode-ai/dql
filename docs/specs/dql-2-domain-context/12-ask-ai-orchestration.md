@@ -575,6 +575,33 @@ the question string again.
    only from a display contract or a vetted alias; a "per" ratio is a number
    in the numerator's unit (`AGT-073`).
 
+28. **Meaning is proven before a query is accepted.** A calendar period is
+   the dates, never a season, fiscal or cohort field that holds the same
+   number: a reading that restricts such a field for a question that says
+   "calendar" is corrected once, naming the date dimensions and the columns
+   of their relations that carry the same facts, and then asks which basis
+   was meant. A material clause whose options include one date dimension is
+   resolved to it when the question names the calendar basis. A share of the
+   whole period divides by the same aggregate over every row of the period
+   (`denominatorScope: 'overall'`, an ungrouped island cross-joined and
+   summed before any ranking or limit); a measure divided by itself at the
+   same grouping is sent back, and a name that says share, percent or
+   concentration takes the overall denominator as a governed default. A
+   currency unit needs a display contract or a name that says money; a name
+   that says percent is a fraction; anything else is a number (`AGT-074`).
+
+29. **The warehouse completes what the metadata left out.** A relation the
+   vocabulary names without columns, or with untyped columns, is filled in
+   by one bounded `information_schema` lookup per snapshot and connection,
+   so a table the semantic layer references but no manifest documented still
+   offers its columns and types, and a partial description is never read as
+   evidence that the other columns are absent. A native metric written as a
+   formula of aggregates over its own table binds as a derived aggregate and
+   is emitted as written. A column of unknown type compares by what the
+   literal is. The same-grain suggestion names, for a measure defined on
+   another relation, the column of the date's relation that carries the same
+   fact, and the join-path refusal is repairable with it (`AGT-075`).
+
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn
 conversation, hand-reviewed reference SQL executed against a seeded SQLite

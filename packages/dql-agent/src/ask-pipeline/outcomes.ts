@@ -87,7 +87,12 @@ export function formatValue(value: unknown, meta?: ResultColumnMeta): string {
   return String(value);
 }
 
-const CURRENCY_NAME = /(^|_)(revenue|sales|spend|amount|price|cost|profit|income|total|value|tax|fee|fees)(_|$)/i;
+// A name establishes currency only when it says money. "total", "amount" and
+// "value" are generic: total_points is not dollars, and a repo that means
+// money by them declares a display format.
+// A column or metric NAMED as a percentage holds a fraction unless it declares otherwise.
+const PERCENT_NAME = /(^|_)(pct|percent|percentage)(_|$)/i;
+const CURRENCY_NAME = /(^|_)(revenue|sales|spend|price|cost|profit|income|tax|fee|fees|salary|wage|wages|payment|payments|budget|margin_amount|gmv|arr|mrr)(_|$)|(^|_)(order|invoice|bill|payment|sale|purchase|transaction)_(total|amount|value)(_|$)/i;
 const COUNT_NAME = /(^|_)(count|orders|customers|items|units|quantity|num|number)(_|$)/i;
 const UTC_DAY = /^\d{4}-\d{2}-\d{2}(T00:00:00(?:\.0+)?(?:Z|\+00:00))?$/;
 
@@ -116,6 +121,7 @@ export function describeResultColumns(intent: AnalyticalIntentV1, result: Pick<E
     if (aggregate === 'sum' && (/^1$/.test(summedExpr) || /^\s*1\s*$/.test(entry.expr ?? '') || COUNT_NAME.test(entry.name) || COUNT_NAME.test(entry.label ?? '') || /(^|_)count(_|$)/i.test(summedExpr))) return { kind: 'count' };
     if (entry.roles.includes('time')) return { kind: 'date' };
     if (entry.roles.includes('boolean') || entry.dataType?.toLowerCase() === 'boolean') return { kind: 'boolean' };
+    if (PERCENT_NAME.test(entry.name)) return { kind: 'percent', unit: 'fraction' };
     if (entry.kind === 'metric' || entry.kind === 'measure') return CURRENCY_NAME.test(entry.name) ? { kind: 'currency', unit: 'USD' } : { kind: 'number' };
     if (/(int|decimal|numeric|double|float|real|bigint)/i.test(entry.dataType ?? '')) return { kind: 'number' };
     return { kind: 'text' };
