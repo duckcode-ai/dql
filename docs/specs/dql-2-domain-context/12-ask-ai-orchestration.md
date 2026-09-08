@@ -533,6 +533,26 @@ the question string again.
    an empty aggregate means the data is empty, never that the binding slipped
    (`AGT-070`).
 
+24. **A warehouse failure says which kind it was.** The driver's message is
+   classified into a suspended warehouse, a relation the connection cannot
+   see, a relation it may not read, a relation already known to be missing,
+   or a SQL fault; the answer names the class and the next action and still
+   quotes the warehouse verbatim, and the receipt carries the class and the
+   relations. A relation one query proved missing is refused before the next
+   query on that connection, and a later success forgets it. The receipt
+   counts what the host sent to the warehouse (attempted, failed, succeeded),
+   so a run that reached the warehouse and got nothing back never reads as a
+   run that tried nothing (`AGT-071`).
+
+25. **A tab's identity survives hydration, and a badge is a rollup.** A URL
+   that names a thread the browser cache does not hold is a pending identity:
+   the tab seeds a placeholder chat carrying that thread, and the URL is not
+   rewritten until the server maps the thread or denies it. An app's header
+   badge says "All certified" only when every tile that carries evidence is a
+   certified block with no review outstanding; a saved insight, a draft
+   analysis, an unapproved semantic tile or a pending draft makes it a count
+   (`UI-027`).
+
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn
 conversation, hand-reviewed reference SQL executed against a seeded SQLite

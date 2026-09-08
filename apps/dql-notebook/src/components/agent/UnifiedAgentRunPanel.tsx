@@ -3413,6 +3413,9 @@ interface AskPipelineActivity {
   toolCalls: number;
   executionAttempts: number;
   repairs: number;
+  /** Queries the host sent to the warehouse, and how many came back with an error. */
+  warehouseAttempts?: number;
+  warehouseFailures?: number;
 }
 
 /**
@@ -3429,11 +3432,16 @@ export function pipelineV9Activity(
   const dispatches = receipt.dispatches.map((entry) => recordOf(entry)).filter((entry): entry is Record<string, unknown> => Boolean(entry));
   const candidates = Array.isArray(receipt.candidates) ? receipt.candidates.length : 0;
   const refusals = Array.isArray(receipt.refusals) ? receipt.refusals.length : 0;
+  const warehouse = recordOf(receipt.warehouse);
+  const count = (value: unknown): number | undefined => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined);
+  const executions = count(warehouse?.executions);
   return {
     providerDispatches: dispatches.length,
     toolCalls: candidates + refusals,
-    executionAttempts: recordOf(receipt.executed) ? 1 : 0,
+    executionAttempts: executions ?? (recordOf(receipt.executed) ? 1 : 0),
     repairs: dispatches.filter((entry) => typeof entry.purpose === 'string' && /repair|correct/i.test(entry.purpose)).length,
+    ...(count(warehouse?.attempts) === undefined ? {} : { warehouseAttempts: count(warehouse?.attempts) }),
+    ...(count(warehouse?.failures) === undefined ? {} : { warehouseFailures: count(warehouse?.failures) }),
   };
 }
 
@@ -3501,7 +3509,7 @@ export function agentRunPerformanceRows(
 ): Array<[string, string]> | undefined {
   if (trace) {
     const physical = canonicalPhysicalTraceFacts(trace);
-    const v8Activity = authoritativeV8Activity(run, trace) ?? pipelineV9Activity(run, trace);
+    const v8Activity: (NonNullable<AskTraceDataV1['runtimeReceiptV8']>['activity'] & Partial<AskPipelineActivity>) | AskPipelineActivity | undefined = authoritativeV8Activity(run, trace) ?? pipelineV9Activity(run, trace);
     const v8Projection = authoritativeV8CompactInspectorProjection(trace.runtimeReceiptV8 ?? run.diagnosticReceiptV8);
     const providerAttempts = v8Activity?.providerDispatches ?? physical.providerAttempts;
     const toolCalls = v8Activity?.toolCalls ?? physical.toolCalls;
@@ -3530,6 +3538,11 @@ export function agentRunPerformanceRows(
       ['Orchestration', orchestrationDurationMs === undefined ? 'Not recorded' : formatTelemetryDuration(orchestrationDurationMs)],
       ['Stages', physical.stages],
       ['Calls', `${providerAttempts} provider · ${toolCalls} tool · ${executions} SQL · ${repairs} repair`],
+      // A run that reached the warehouse and got nothing back must say so:
+      // "0 SQL" alone reads as "nothing was tried".
+      ...(v8Activity?.warehouseAttempts
+        ? [['Warehouse calls', `${v8Activity.warehouseAttempts} attempted · ${v8Activity.warehouseAttempts - (v8Activity.warehouseFailures ?? 0)} successful${v8Activity.warehouseFailures ? ` · ${v8Activity.warehouseFailures} failed` : ''}`] as [string, string]]
+        : []),
       ['Provider rows', providerRows],
       ['Trace evidence', authoritativeV8Activity(run, trace) ? 'Authoritative V2 receipt (canonical physical egress and execution counts)' : v8Activity ? 'Ask pipeline receipt (dispatch, preparation and execution counts)' : 'Canonical local physical trace'],
       ...(askRuntimeEvidenceLabel(trace.runtimeMode ?? run.askAgentRuntimeMode)

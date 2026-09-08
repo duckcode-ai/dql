@@ -1,5 +1,5 @@
 import { describeIntent, type AnalyticalIntentV1 } from './intent.js';
-import type { ExecutedRows, ResultColumnMeta } from './execute.js';
+import type { ExecutedRows, ResultColumnMeta, WarehouseFailure } from './execute.js';
 import type { PreparedCandidate, PreparedRefusal } from './prepare/types.js';
 import type { VocabularyIndex } from './vocabulary.js';
 
@@ -34,9 +34,10 @@ export interface PipelineReceipt {
   /** Member literals the host grounded against allowlisted columns before preparing (canonical value, or that none matched). */
   grounding?: string[];
   /** Why resolution or execution stopped, verbatim, when it did. */
-  failure?: { stage: 'resolve' | 'prepare' | 'execute'; reason?: string; message: string; problems?: Array<{ path: string; message: string; suggestions?: string[] }> };
+  failure?: { stage: 'resolve' | 'prepare' | 'execute'; reason?: string; message: string; problems?: Array<{ path: string; message: string; suggestions?: string[] }>; warehouse?: WarehouseFailure };
   /** Warehouse statements this run dispatched and how many failed; `executed` is the one that succeeded. A failed attempt is never "no query ran". */
-  warehouse?: { attempts: number; failures: number };
+  /** What the host sent to the warehouse for this run: queries attempted, of which failed and succeeded. */
+  warehouse?: { attempts: number; failures: number; executions?: number };
   /** The original question's obligations and what each later reading did with them. */
   ledger?: { clauses: Array<{ clause: string; kind?: string }>; timeGrain?: { ref: string; grain: string }; measures: string[]; entries: Array<{ clause: string; kind?: string; disposition: string; by?: string; round: number }> };
 }
@@ -216,7 +217,20 @@ export function composeGapText(gap: GapKind, message: string, nearest: string[],
   return `No governed query was run because ${because}: ${message}.${near}${offer}`;
 }
 
-export function composeFailedText(stage: 'resolve' | 'prepare' | 'execute', message: string): string {
+export function composeFailedText(stage: 'resolve' | 'prepare' | 'execute', message: string, warehouse?: WarehouseFailure): string {
   const where = stage === 'resolve' ? 'while reading the question' : stage === 'prepare' ? 'while preparing the query; no warehouse query ran' : 'on the warehouse';
+  if (stage === 'execute' && warehouse) {
+    const named = warehouse.relations.length ? ` ${warehouse.relations.join(', ')}` : '';
+    const lead = warehouse.class === 'warehouse_suspended'
+      ? 'The warehouse is not running, so the query could not execute. Resume it and ask the same question again.'
+      : warehouse.class === 'relation_missing'
+        ? `The connection cannot see${named || ' the table this query needs'}, although the catalog lists it. The catalog and the warehouse disagree; refresh the catalog or point the connection at the database that has it.`
+        : warehouse.class === 'relation_denied'
+          ? `This connection is not allowed to read${named || ' the table this query needs'}. Grant it access, or ask with data it can read.`
+          : warehouse.class === 'catalog_stale'
+            ? `No query was sent:${named || ' a table this query needs'} is already known to be missing on this connection.`
+            : undefined;
+    if (lead) return `${lead} The warehouse said: ${message}`;
+  }
   return `This could not be completed ${where}: ${message}`;
 }

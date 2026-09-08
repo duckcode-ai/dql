@@ -609,6 +609,28 @@ export function resolveActiveConversationId(
   return undefined;
 }
 
+/**
+ * A URL that names a thread the browser cache does not hold is a PENDING
+ * identity, not an unknown one: the link may have been opened in another
+ * browser, or the cache may have been cleared, while the thread itself lives
+ * on the server. The tab seeds a placeholder chat carrying that thread so
+ * reconciliation can map it by thread id, and so the URL is never rewritten
+ * to a fresh empty chat before the server has answered.
+ */
+export function seedPendingThreadConversation(
+  conversations: Conversation[],
+  threadId: string | undefined,
+  now: () => string = () => new Date().toISOString(),
+  createId: () => string = makeConversationId,
+): { conversations: Conversation[]; activeId?: string } {
+  if (!threadId) return { conversations };
+  const existing = conversations.find((conversation) => conversation.threadId === threadId);
+  if (existing) return { conversations, activeId: existing.id };
+  const stamp = now();
+  const placeholder: Conversation = { id: createId(), title: 'Restoring chat…', createdAt: stamp, updatedAt: stamp, items: [], threadId };
+  return { conversations: [placeholder, ...conversations], activeId: placeholder.id };
+}
+
 /** What this tab already knew about its chat before the server list arrived. */
 function readTabBinding(): { url?: string; tab: string | null } {
   if (typeof window === 'undefined') return { tab: null };
@@ -763,7 +785,10 @@ export function AnalyticsHome() {
   const t = themes[state.themeMode];
   const [domainContext, setDomainContext] = useState<DomainScope | undefined>(() => initialDomainScope());
 
-  const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations());
+  // A tab that arrives on /ask?thread=… keeps that identity through hydration.
+  const pendingThreadIdRef = React.useRef<string | undefined>(typeof window === 'undefined' ? undefined : askThreadIdFromLocation(window.location));
+  const seeded = React.useRef(seedPendingThreadConversation(loadConversations(), pendingThreadIdRef.current));
+  const [conversations, setConversations] = useState<Conversation[]>(() => seeded.current.conversations);
   const conversationsRef = React.useRef(conversations);
   const [historyVerificationState, setHistoryVerificationState] = useState<AskHistoryVerificationState>('pending');
   const [historyRequestNonce, setHistoryRequestNonce] = useState(0);
@@ -784,7 +809,7 @@ export function AnalyticsHome() {
   // Keep the selected thread across a page remount/reload. The panel's pending-run
   // handoff uses this server thread id to reconnect rather than asking again.
   const [activeId, setActiveId] = useState<string>(() => {
-    const stored = loadActiveConversationId(conversations);
+    const stored = seeded.current.activeId ?? loadActiveConversationId(conversations);
     return stored ?? makeConversationId();
   });
   const activeIdRef = React.useRef(activeId);
@@ -805,6 +830,9 @@ export function AnalyticsHome() {
   const activeConversationThreadId = conversations.find((conversation) => conversation.id === activeId)?.threadId;
   useEffect(() => {
     if (typeof window === 'undefined' || !/^\/(ask)?$/.test(window.location.pathname)) return;
+    // While the URL's thread is still pending, the address bar keeps it: a
+    // rewrite here would erase the identity the tab was opened with.
+    if (pendingThreadIdRef.current && pendingThreadIdRef.current !== activeConversationThreadId) return;
     const next = askLocationHref(activeConversationThreadId, window.location.hash);
     const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
     if (next !== current) window.history.replaceState(window.history.state, '', next);
@@ -848,6 +876,9 @@ export function AnalyticsHome() {
     })
       .then(({ projectIdentity, reconciliation }) => {
         if (cancelled) return;
+        // The server has now either mapped this tab's URL thread or denied it;
+        // either way the identity is settled and the URL may be written again.
+        pendingThreadIdRef.current = undefined;
         const activeAtReconciliation = activeIdRef.current;
         if (reconciliation.resetBrowserCache) clearAskConversationBrowserCache();
         persistAskConversationProjectIdentity(projectIdentity);
@@ -957,6 +988,8 @@ export function AnalyticsHome() {
 
   const newChat = useCallback(() => {
     if (!historyVerified || isRunning) return;
+    // An explicit choice settles the identity even if the server never answered.
+    pendingThreadIdRef.current = undefined;
     const nextActiveId = makeConversationId();
     tabHadBindingRef.current = true;
     activeIdRef.current = nextActiveId;
@@ -964,6 +997,7 @@ export function AnalyticsHome() {
   }, [historyVerified, isRunning]);
   const selectConversation = useCallback((id: string) => {
     if (!historyVerified || isRunning) return;
+    pendingThreadIdRef.current = undefined;
     tabHadBindingRef.current = true;
     activeIdRef.current = id;
     setActiveId(id);

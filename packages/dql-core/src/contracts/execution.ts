@@ -90,6 +90,9 @@ export interface AgentRunTelemetryV1 {
   sqlExecutions: number;
   repairs: number;
   egressReceipts: number;
+  /** Queries the host sent to the warehouse, and how many of them failed. */
+  sqlAttempts?: number;
+  sqlFailures?: number;
   warehouseDurationMs?: number;
   fallbackReason?: string;
 }
@@ -118,6 +121,8 @@ export function normalizeAgentRunTelemetryV1(value: unknown): AgentRunTelemetryV
   if ([providerRoundTrips, toolCalls, sqlExecutions, repairs, egressReceipts].some((count) => count === undefined)) {
     return undefined;
   }
+  const sqlAttempts = nonNegativeInteger(record.sqlAttempts);
+  const sqlFailures = nonNegativeInteger(record.sqlFailures);
   const warehouseDurationMs = boundedDuration(record.warehouseDurationMs);
   const fallbackReason = safeCode(record.fallbackReason);
   return {
@@ -128,6 +133,8 @@ export function normalizeAgentRunTelemetryV1(value: unknown): AgentRunTelemetryV
     sqlExecutions: sqlExecutions!,
     repairs: repairs!,
     egressReceipts: egressReceipts!,
+    ...(sqlAttempts === undefined ? {} : { sqlAttempts }),
+    ...(sqlFailures === undefined ? {} : { sqlFailures }),
     ...(warehouseDurationMs === undefined ? {} : { warehouseDurationMs }),
     ...(fallbackReason ? { fallbackReason } : {}),
   };

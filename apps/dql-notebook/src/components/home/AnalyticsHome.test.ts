@@ -16,6 +16,7 @@ let AskHistoryVerificationGate: typeof AnalyticsHomeModule.AskHistoryVerificatio
 let askResearchTracePath: typeof AnalyticsHomeModule.askResearchTracePath;
 let openAskResearchTrace: typeof AnalyticsHomeModule.openAskResearchTrace;
 let resolveActiveConversationId: typeof AnalyticsHomeModule.resolveActiveConversationId;
+let seedPendingThreadConversation: typeof AnalyticsHomeModule.seedPendingThreadConversation;
 
 describe('Ask AI Notebook repair handoff', () => {
   beforeAll(async () => {
@@ -32,6 +33,7 @@ describe('Ask AI Notebook repair handoff', () => {
       askResearchTracePath,
       openAskResearchTrace,
       resolveActiveConversationId,
+      seedPendingThreadConversation,
     } = await import('./AnalyticsHome'));
   });
 
@@ -142,6 +144,46 @@ describe('Ask AI Notebook repair handoff', () => {
     expect(resolveActiveConversationId({ tab: null, shared: 'conv-b' }, known)).toBe('conv-b');
     expect(resolveActiveConversationId({ tab: 'conv-gone', shared: 'conv-b' }, known)).toBe('conv-b');
     expect(resolveActiveConversationId({ tab: 'conv-gone', shared: 'other-project' }, known)).toBeUndefined();
+  });
+
+  it('a URL thread the browser cache does not hold is pending, not unknown', () => {
+    const now = () => '2026-09-08T00:00:00.000Z';
+    const cached = [{ id: 'conv-a', title: 'Cached', createdAt: now(), updatedAt: now(), items: [], threadId: 'thr-a' }];
+    // A thread the cache holds is simply selected: no placeholder is created.
+    const known = seedPendingThreadConversation(cached, 'thr-a', now, () => 'conv-new');
+    expect(known.activeId).toBe('conv-a');
+    expect(known.conversations).toHaveLength(1);
+    // A thread it does not hold gets a placeholder that CARRIES the thread, so
+    // reconciliation can map it once the server answers.
+    const pending = seedPendingThreadConversation(cached, 'thr-z', now, () => 'conv-new');
+    expect(pending.activeId).toBe('conv-new');
+    expect(pending.conversations[0]).toMatchObject({ id: 'conv-new', threadId: 'thr-z', items: [] });
+    expect(pending.conversations).toHaveLength(2);
+    // The placeholder resolves to the server's own conversation for that thread.
+    const reconciled = reconcileAskConversationCache({
+      local: pending.conversations,
+      threads: [{ id: 'thr-z', title: 'Server chat', surface: 'ask', createdAt: now(), updatedAt: now() }] as unknown as AgentConversationThreadListResponse['threads'],
+      activeId: 'conv-new',
+      activeThreadId: 'thr-z',
+      tabHadBinding: true,
+      cachedProjectIdentity: 'p1',
+      serverProjectIdentity: 'p1',
+    });
+    expect(reconciled.conversations.find((conversation) => conversation.id === reconciled.activeId)?.threadId).toBe('thr-z');
+    // A thread the server denies leaves the tab with a fresh empty chat, never the newest one.
+    const denied = reconcileAskConversationCache({
+      local: pending.conversations,
+      threads: [{ id: 'thr-a', title: 'Cached', surface: 'ask', createdAt: now(), updatedAt: now() }] as unknown as AgentConversationThreadListResponse['threads'],
+      activeId: 'conv-new',
+      activeThreadId: 'thr-z',
+      tabHadBinding: true,
+      cachedProjectIdentity: 'p1',
+      serverProjectIdentity: 'p1',
+      createConversationId: () => 'conv-fresh',
+    });
+    expect(denied.activeId).toBe('conv-fresh');
+    // No URL thread at all changes nothing.
+    expect(seedPendingThreadConversation(cached, undefined, now, () => 'conv-new')).toEqual({ conversations: cached });
   });
 
   it('UI-026 the URL thread names the tab\'s chat before any stored pointer', () => {

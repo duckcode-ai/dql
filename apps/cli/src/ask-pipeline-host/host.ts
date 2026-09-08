@@ -7,6 +7,7 @@ import { writeFileSync } from 'node:fs';
 import type { ConnectionConfig, QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { getDialect, type DQLManifest, type SemanticLayer } from '@duckcodeailabs/dql-core';
 import {
+  classifyWarehouseError,
   runAskPipeline,
   type AgentProvider,
   type AgentRouteExecutor,
@@ -319,6 +320,12 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         maxRows: deps.maxRows ?? 500,
         run: async (sql, params, options) => {
           if (!connection) throw connectionError instanceof Error ? connectionError : new Error(String(connectionError ?? 'No database connection is configured.'));
+          // A relation this connection has already proven it cannot see is
+          // refused before SQL: the catalog lists it, the warehouse does not
+          // have it, and a second round trip would say the same thing.
+          const cacheKey = connectionKey(connection);
+          const known = knownMissingRelation(cacheKey, sql);
+          if (known) throw new Error(`'${known}' is known to be missing on this connection: the catalog lists it, the warehouse does not have it`);
           const started = Date.now();
           const executor = deps.executor as QueryExecutor & { executePositional?: QueryExecutor['executePositional'] };
           const span = deps.traceExecution?.(request, { name: 'sql.execute', sqlFingerprint: fingerprintText(`${sql}\n${JSON.stringify(params ?? [])}`), purpose: options.purpose ?? 'query', ...(options.tier ? { tier: options.tier } : {}) });
@@ -332,8 +339,10 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
               })();
           } catch (error) {
             span?.finish('error', { safeErrorCode: 'sql_failure' });
+            recordRelationEvidence(cacheKey, sql, classifyWarehouseError(error instanceof Error ? error.message : String(error)));
             throw error;
           }
+          recordRelationEvidence(cacheKey, sql);
           span?.finish('ok', { rowCount: result.rowCount, resultFingerprint: createHash('sha256').update(JSON.stringify({ columns: result.columns, rows: result.rows })).digest('hex') });
           // An executor may describe columns as objects or as bare names.
           const columns = result.columns.length
@@ -455,6 +464,73 @@ export function prepareBlockForAsk(projectRoot: string, entry: VocabularyEntry |
   };
 }
 
+/**
+ * What a connection has proven it cannot see. The catalog is a snapshot of the
+ * project's models; the connection is the warehouse as it is right now. When
+ * the two disagree the disagreement is durable for the session: asking the
+ * same missing table again costs another failed round trip and tells the
+ * reader nothing new, so the second question is refused before SQL.
+ */
+const missingByConnection = new Map<string, Set<string>>();
+
+/** A stable key for a connection: the account and database, never a credential. */
+export function connectionKey(connection: ConnectionConfig): string {
+  return [connection.driver, connection.account, connection.host, connection.port, connection.database ?? connection.catalog, connection.filepath, connection.schema]
+    .filter((part) => part !== undefined && part !== '')
+    .join('|');
+}
+
+/** Relation names as SQL writes them, lowercased and unquoted. */
+function relationsInSql(sql: string): string[] {
+  const found = new Set<string>();
+  for (const match of sql.matchAll(/(?:FROM|JOIN)\s+((?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)){0,2})/gi)) {
+    const name = (match[1] ?? '').replace(/["`[\]]/g, '').replace(/\s+/g, '').toLowerCase();
+    if (name) found.add(name);
+  }
+  return [...found];
+}
+
+/** The tail of a qualified name, so dev.orders matches analytics.dev.orders. */
+function relationTail(name: string): string {
+  const parts = name.toLowerCase().replace(/["`[\]]/g, '').split('.');
+  return parts.slice(-2).join('.');
+}
+
+/** The relation this query reads that the connection is already known to lack. */
+export function knownMissingRelation(key: string, sql: string): string | undefined {
+  const missing = missingByConnection.get(key);
+  if (!missing || missing.size === 0) return undefined;
+  const tails = new Map([...missing].map((name) => [relationTail(name), name]));
+  for (const relation of relationsInSql(sql)) {
+    const hit = tails.get(relationTail(relation));
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/** Record what a failed query proved about the connection, and what a successful one disproved. */
+export function recordRelationEvidence(key: string, sql: string, failure?: { class: string; relations: string[] }): void {
+  if (!failure) {
+    const missing = missingByConnection.get(key);
+    if (!missing) return;
+    for (const relation of relationsInSql(sql)) {
+      for (const name of [...missing]) if (relationTail(name) === relationTail(relation)) missing.delete(name);
+    }
+    return;
+  }
+  if (failure.class !== 'relation_missing') return;
+  const named = failure.relations.length ? failure.relations : relationsInSql(sql);
+  if (named.length !== 1) return;
+  const missing = missingByConnection.get(key) ?? new Set<string>();
+  missing.add(named[0]!);
+  missingByConnection.set(key, missing);
+}
+
+/** Test seam: forget everything learned about connections. */
+export function resetRelationEvidence(): void {
+  missingByConnection.clear();
+}
+
 export function toExecutorResult(runId: string, outcome: PipelineOutcome, startedAt: number): AgentRouteExecutorResult {
   const receipt = outcome.receipt;
   const telemetry: AgentRouteExecutorResult['telemetry'] = {
@@ -466,7 +542,8 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     },
     providerRoundTrips: receipt.dispatches.length,
     toolCalls: receipt.candidates.length + receipt.refusals.length,
-    sqlExecutions: receipt.executed ? 1 : 0,
+    sqlExecutions: receipt.warehouse?.executions ?? (receipt.executed ? 1 : 0),
+    ...(receipt.warehouse ? { sqlAttempts: receipt.warehouse.attempts, sqlFailures: receipt.warehouse.failures } : {}),
     repairs: receipt.dispatches.filter((dispatch) => dispatch.purpose.includes('repair')).length,
     egressReceipts: receipt.dispatches.length,
   };

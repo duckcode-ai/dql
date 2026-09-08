@@ -83,7 +83,52 @@ export function applyDerivedColumns(result: ExecutedRows, derived: NonNullable<P
 
 export type ExecutionOutcome =
   | { ok: true; result: ExecutedRows; proofs: string[] }
-  | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed' | 'no_rows_matched'; message: string; proofs: string[]; cause?: EmptyAggregateCause };
+  | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed' | 'no_rows_matched'; message: string; proofs: string[]; cause?: EmptyAggregateCause; warehouse?: WarehouseFailure };
+
+/**
+ * What the warehouse said, in a class the answer can name. A driver message is
+ * the only evidence a host has for why a query did not run, and "could not be
+ * completed" reads the same for a suspended warehouse, a table the connection
+ * cannot see, and a genuine SQL fault, which are three different next actions.
+ */
+export interface WarehouseFailure {
+  class: 'warehouse_suspended' | 'relation_missing' | 'relation_denied' | 'catalog_stale' | 'sql_error';
+  relations: string[];
+}
+
+const RELATION_TOKEN = /'([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){0,2})'|"([A-Za-z_][\w$]*(?:"\."[A-Za-z_][\w$]*){0,2})"/g;
+
+/** Relation names a driver mentioned, as written. */
+function relationsIn(message: string): string[] {
+  const found = new Set<string>();
+  for (const match of message.matchAll(RELATION_TOKEN)) {
+    const name = (match[1] ?? match[2] ?? '').replace(/"/g, '');
+    if (name && /[A-Za-z]/.test(name)) found.add(name);
+  }
+  return [...found];
+}
+
+/**
+ * Classify a driver error. The order matters: a message that names both a
+ * privilege and a missing object is a privilege problem, and Snowflake's
+ * "does not exist or not authorized" is reported as missing because the
+ * catalog is what disagrees with the connection.
+ */
+export function classifyWarehouseError(message: string): WarehouseFailure {
+  const text = message.toLowerCase();
+  const relations = relationsIn(message);
+  if (/known to be missing|catalog lists it/.test(text)) return { class: 'catalog_stale', relations };
+  if (/warehouse/.test(text) && /suspend|not running|is stopped|cannot be resumed|no active warehouse|no running warehouse/.test(text)) {
+    return { class: 'warehouse_suspended', relations };
+  }
+  if (/permission denied|access denied|insufficient privileg|not authorized to|access control error|is not allowed to/.test(text)) {
+    return { class: 'relation_denied', relations };
+  }
+  if (/does not exist|doesn't exist|not found|no such table|unknown table|undefined table|invalid identifier|cannot be found/.test(text)) {
+    return { class: 'relation_missing', relations };
+  }
+  return { class: 'sql_error', relations };
+}
 
 /** Why a single all-null aggregate row is empty: the restriction that matched nothing. */
 export type EmptyAggregateCause = { kind: 'member'; literals: string[] } | { kind: 'window'; start: string; end: string } | { kind: 'predicate'; refs: string[] };
@@ -160,6 +205,7 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
     if (cause) return { ok: false, code: 'no_rows_matched', message: describeEmptyAggregate(cause), proofs, cause };
     return { ok: true, result, proofs };
   } catch (error) {
-    return { ok: false, code: 'execution_failed', message: error instanceof Error ? error.message : String(error), proofs };
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, code: 'execution_failed', message, proofs, warehouse: classifyWarehouseError(message) };
   }
 }

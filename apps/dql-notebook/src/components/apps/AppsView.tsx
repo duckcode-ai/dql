@@ -87,6 +87,7 @@ import {
   removeDashboardFilterFromDocument,
 } from './dashboard-filters';
 import { semanticApprovalState } from './app-semantic-approval';
+import { appCertificationRollup } from './app-certification';
 import { authoredDomainOptions, resolveAuthoredDomainId, type AuthoredDomainOption } from '../domains/authored-domain-options';
 import { useOperations } from '../../operations/OperationsProvider';
 import { appLibraryLaunchExpanded, type AppLibraryLaunchPreference } from './app-library-launch';
@@ -1923,8 +1924,9 @@ function AppWorkspaceSurface({
   onOpenLineageNode: (nodeId: string) => void;
 }) {
   const dispatch = useDispatch();
-  const certifiedCount = dashboardDoc?.dashboard.layout.items.filter((item) => Boolean(item.block)).length ?? 0;
   const draftCount = appDoc?.drafts?.length ?? 0;
+  const certification = appCertificationRollup(dashboardDoc?.dashboard.layout.items, draftCount);
+  const certifiedCount = certification.certified;
   const dashboardBlockIds = useMemo(() => {
     return getCopilotBlockTiles(dashboardDoc?.dashboard ?? null).map((item) => item.blockId);
   }, [dashboardDoc]);
@@ -2162,7 +2164,9 @@ function AppWorkspaceSurface({
           <span>Apps</span>
         </button>
         <span className="dql-app-crumb"><b>{app?.id ?? 'app'}</b></span>
-        <StatusSeal tone="certified">{draftCount > 0 ? `${certifiedCount} certified` : 'All certified'}</StatusSeal>
+        <StatusSeal tone={certification.allCertified ? 'certified' : 'draft'}>
+          {certification.allCertified ? 'All certified' : `${certifiedCount} of ${certification.total} certified`}
+        </StatusSeal>
         {draftCount > 0 ? <StatusSeal tone="draft">{draftCount} draft</StatusSeal> : null}
 
         <span className="dql-app-topbar-divider" aria-hidden="true" />

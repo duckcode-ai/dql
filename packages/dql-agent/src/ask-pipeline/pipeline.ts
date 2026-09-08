@@ -84,9 +84,10 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   };
   // Every warehouse dispatch is counted; a failed statement is an attempt, not "no query ran".
   const countedExecute: typeof executeCandidate = async (...args) => {
-    receipt.warehouse = { attempts: (receipt.warehouse?.attempts ?? 0) + 1, failures: receipt.warehouse?.failures ?? 0 };
+    receipt.warehouse = { attempts: (receipt.warehouse?.attempts ?? 0) + 1, failures: receipt.warehouse?.failures ?? 0, executions: receipt.warehouse?.executions ?? 0 };
     const executed = await executeCandidate(...args);
     if (!executed.ok && executed.code === 'execution_failed') receipt.warehouse.failures += 1;
+    else receipt.warehouse.executions = (receipt.warehouse.executions ?? 0) + 1;
     return executed;
   };
   const label = labelFor(input.vocabulary);
@@ -263,8 +264,8 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   }
   if (!executed.ok) {
     receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);
-    receipt.failure = { stage: 'execute', reason: executed.code, message: executed.message };
-    return { kind: 'failed', stage: 'execute', message: executed.message, text: composeFailedText('execute', executed.message), receipt, intent };
+    receipt.failure = { stage: 'execute', reason: executed.code, message: executed.message, ...(executed.warehouse ? { warehouse: executed.warehouse } : {}) };
+    return { kind: 'failed', stage: 'execute', message: executed.message, text: composeFailedText('execute', executed.message, executed.warehouse), receipt, intent };
   }
   const cacheKey = `${input.cacheScope ?? ''}|${intentExecutionFingerprint(intent)}`;
   input.preparationCache?.set(cacheKey, candidate);

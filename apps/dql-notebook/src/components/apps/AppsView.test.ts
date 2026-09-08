@@ -9,6 +9,7 @@ import {
   removeDashboardFilterFromDocument,
 } from './dashboard-filters';
 import { semanticApprovalState } from './app-semantic-approval';
+import { appCertificationRollup } from './app-certification';
 
 type RuntimeFilter = NonNullable<DashboardDocumentResponse['dashboard']['filters']>[number] & {
   sourceBlockId?: string;
@@ -258,5 +259,28 @@ describe('Coverage for a filter the author never declared', () => {
     // The run disagrees; the author's declaration wins for a declared filter.
     const coverage = dashboardFilterCoverage(dashboard, 'region', { tiles: [{ tileId: 'a', filterableColumns: [] }] });
     expect(coverage.applied).toEqual(['a']);
+  });
+});
+
+describe('the app header badge is a rollup of the tiles, not a count of blocks', () => {
+  type Tile = DashboardDocumentResponse['dashboard']['layout']['items'][number];
+  const tile = (i: string, extra: Partial<Tile>): Tile => ({ i, x: 0, y: 0, w: 4, h: 4, viz: { type: 'table' }, ...extra } as Tile);
+  it('one review-required, saved-insight or draft tile is enough for the app not to be all certified', () => {
+    const certified = [tile('a', { block: { blockId: 'b1' } }), tile('b', { block: { blockId: 'b2' }, sourceClass: 'certified_block' })];
+    expect(appCertificationRollup(certified)).toEqual({ certified: 2, total: 2, allCertified: true });
+    // Prose carries no evidence and is counted neither way.
+    expect(appCertificationRollup([...certified, tile('c', { text: { markdown: 'Summary' } })]).allCertified).toBe(true);
+    const withReview = [...certified, tile('d', { block: { blockId: 'b3' }, review: { status: 'required' } })];
+    expect(appCertificationRollup(withReview)).toEqual({ certified: 2, total: 3, allCertified: false });
+    const withPin = [...certified, tile('e', { aiPin: { id: 'pin-1' } })];
+    expect(appCertificationRollup(withPin)).toMatchObject({ certified: 2, total: 3, allCertified: false });
+    const withSemantic = [...certified, tile('f', { semantic: { id: 's1' } as never })];
+    expect(appCertificationRollup(withSemantic).allCertified).toBe(false);
+    const withTrust = [...certified, tile('g', { block: { blockId: 'b4' }, trustState: 'review_required' })];
+    expect(appCertificationRollup(withTrust).allCertified).toBe(false);
+    // A pending draft in the app is a review state of its own.
+    expect(appCertificationRollup(certified, 1).allCertified).toBe(false);
+    // An empty dashboard certifies nothing.
+    expect(appCertificationRollup([])).toEqual({ certified: 0, total: 0, allCertified: false });
   });
 });

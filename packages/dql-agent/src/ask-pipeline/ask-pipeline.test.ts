@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
-import { applyDerivedColumns, executeCandidate } from './execute.js';
+import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
 import { applyGovernedDefaults, auditLedger, bindExactNames, buildIntentSystemPrompt, buildLedger, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
@@ -1100,6 +1100,41 @@ describe('an ungrounded member literal is disclosed as a text match', () => {
     const outcome = await runAskPipeline({ question: "Show Curry's revenue", vocabulary, provider: scripted([reply]), prepareDeps: { joinPath }, executeDeps: { run: async () => ({ columns: ['revenue'], rows: [{ revenue: 12 }], rowCount: 1, executionTimeMs: 1 }) } });
     if (outcome.kind !== 'answered') throw new Error(`${outcome.kind}: ${JSON.stringify(outcome.receipt.refusals.map((r) => `${r.tier}:${r.code}:${r.message.slice(0, 200)}`))} ${'text' in outcome ? outcome.text : ''}`);
     expect(outcome.text).toMatch(/matched by text containing "Curry"; that can cover several members/);
-    expect(outcome.receipt.warehouse).toEqual({ attempts: 1, failures: 0 });
+    expect(outcome.receipt.warehouse).toEqual({ attempts: 1, failures: 0, executions: 1 });
+  });
+});
+
+describe('a warehouse failure says which kind it was', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'revenue', model: 'order_item', aggregation: 'sum', physical: { relation: 'dev.order_items', expr: '"dev"."order_items"."product_price"', aggregate: 'sum' } }],
+    relations: [{ schema: 'dev', name: 'order_items', columns: [{ name: 'product_price', dataType: 'DOUBLE' }] }],
+  });
+  const reply = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Total revenue', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+  const failing = async (message: string) => {
+    const outcome = await runAskPipeline({ question: 'total revenue', vocabulary, provider: scripted([reply]), prepareDeps: {}, executeDeps: { run: async () => { throw new Error(message); } } });
+    if (outcome.kind !== 'failed') throw new Error(`expected a failure, got ${outcome.kind}`);
+    return outcome;
+  };
+  it('classifies the driver message and names the next action, and the receipt keeps the class', async () => {
+    expect(classifyWarehouseError('Warehouse \'COMPUTE_WH\' is suspended and cannot be resumed.').class).toBe('warehouse_suspended');
+    expect(classifyWarehouseError("Object 'ANALYTICS.DEV.GAMES' does not exist or not authorized.")).toEqual({ class: 'relation_missing', relations: ['ANALYTICS.DEV.GAMES'] });
+    expect(classifyWarehouseError('SQL access control error: Insufficient privileges to operate on table \'GAMES\'').class).toBe('relation_denied');
+    expect(classifyWarehouseError('syntax error at or near "SELCT"').class).toBe('sql_error');
+    const suspended = await failing('Warehouse \'COMPUTE_WH\' is suspended; no active warehouse selected.');
+    expect(suspended.text).toMatch(/warehouse is not running.*Resume it/i);
+    expect(suspended.receipt.failure?.warehouse?.class).toBe('warehouse_suspended');
+    expect(suspended.receipt.warehouse).toEqual({ attempts: 1, failures: 1, executions: 0 });
+    const missing = await failing("Object 'ANALYTICS.DEV.ORDER_ITEMS' does not exist or not authorized.");
+    expect(missing.text).toMatch(/cannot see ANALYTICS\.DEV\.ORDER_ITEMS.*catalog lists it/i);
+    const denied = await failing("Insufficient privileges to operate on table 'ORDER_ITEMS'");
+    expect(denied.text).toMatch(/not allowed to read ORDER_ITEMS/i);
+    const broken = await failing('syntax error at position 7');
+    expect(broken.text).toMatch(/could not be completed on the warehouse: syntax error/);
+  });
+  it('a provider failure still leaves a receipt that records the failure, so it is never read as a modeling gap', async () => {
+    const outcome = await runAskPipeline({ question: 'total revenue', vocabulary, provider: { generate: async () => { throw new Error('the model did not respond'); } } as never, prepareDeps: {}, executeDeps: { run: async () => ({ columns: [], rows: [], rowCount: 0, executionTimeMs: 1 }) } });
+    expect(outcome.kind).toBe('failed');
+    expect(outcome.receipt.failure?.stage).toBe('resolve');
+    expect(outcome.receipt.warehouse).toBeUndefined();
   });
 });

@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
-import { buildVocabularyIndex, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, normalizeExecutedRow, prepareBlockForAsk, tracedProbes } from './host.js';
+import { buildVocabularyIndex, classifyWarehouseError, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
+import { connectionKey, createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, knownMissingRelation, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -228,5 +228,37 @@ block "top_players" {
     expect(prepareBlockForAsk('/nowhere', plain, {})).toEqual({ sql: 'SELECT 1 AS one', params: [], parameters: [] });
     const templated = { ref: 'block:x.t', kind: 'block', name: 't', aliases: [], roles: [], sql: 'SELECT 1 WHERE y = ${limit}' } as never;
     expect(prepareBlockForAsk('/nowhere', templated, {})).toMatchObject({ error: expect.stringMatching(/not available/) });
+  });
+});
+
+describe('a connection remembers what it cannot see', () => {
+  const key = 'snowflake|acme|ANALYTICS';
+  it('a relation the warehouse denied once is refused before the next query, and a success forgets it', () => {
+    resetRelationEvidence();
+    const sql = 'SELECT COUNT(*) FROM "ANALYTICS"."DEV"."FCT_PLAYER_JOURNEY" AS j JOIN "ANALYTICS"."DEV"."GAMES" g ON g.id = j.id';
+    expect(knownMissingRelation(key, sql)).toBeUndefined();
+    recordRelationEvidence(key, sql, classifyWarehouseError("Object 'ANALYTICS.DEV.FCT_PLAYER_JOURNEY' does not exist or not authorized."));
+    expect(knownMissingRelation(key, sql)).toBe('ANALYTICS.DEV.FCT_PLAYER_JOURNEY');
+    // Another connection knows nothing about it.
+    expect(knownMissingRelation('duckdb|jaffle', sql)).toBeUndefined();
+    // The same table under a different qualifier is the same table.
+    expect(knownMissingRelation(key, 'SELECT 1 FROM dev.fct_player_journey')).toBe('ANALYTICS.DEV.FCT_PLAYER_JOURNEY');
+    recordRelationEvidence(key, 'SELECT 1 FROM dev.fct_player_journey');
+    expect(knownMissingRelation(key, sql)).toBeUndefined();
+  });
+  it('a failure that names no single relation teaches nothing, and a syntax error is never a missing table', () => {
+    resetRelationEvidence();
+    recordRelationEvidence(key, 'SELECT 1 FROM a.b JOIN a.c ON TRUE', classifyWarehouseError('SQL compilation error: object does not exist'));
+    expect(knownMissingRelation(key, 'SELECT 1 FROM a.b')).toBeUndefined();
+    recordRelationEvidence(key, 'SELECT 1 FROM a.b', classifyWarehouseError('SQL compilation error: syntax error line 1 at position 7'));
+    expect(knownMissingRelation(key, 'SELECT 1 FROM a.b')).toBeUndefined();
+  });
+  it('the key is the account and database, never a credential', () => {
+    const config = { driver: 'snowflake', account: 'acme', database: 'ANALYTICS', schema: 'DEV', username: 'svc', password: 'secret', token: 'tok' } as ConnectionConfig;
+    const composed = connectionKey(config);
+    expect(composed).toContain('acme');
+    expect(composed).toContain('ANALYTICS');
+    expect(composed).not.toContain('secret');
+    expect(composed).not.toContain('tok');
   });
 });
