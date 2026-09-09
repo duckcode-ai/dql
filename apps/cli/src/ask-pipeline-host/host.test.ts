@@ -74,6 +74,10 @@ describe('the pipeline host without a warehouse', () => {
 describe('a gap is headed by what it is', () => {
   it('no matching data is not a modeling gap', () => {
     expect(gapPresentation('not_retrieved')).toEqual({ title: 'No matching data for that period', code: 'no_data' });
+    // The heading names what came back empty, not always the period.
+    expect(gapPresentation('not_retrieved', 'no rows matched "Totally Imaginary Person" on the warehouse').title).toBe('No matching data for that name');
+    expect(gapPresentation('not_retrieved', 'no rows matched the restriction on is_drink_item').title).toBe('No matching data under those filters');
+    expect(gapPresentation('not_retrieved', 'no rows fell inside the window 2030-01-01..2031-01-01').title).toBe('No matching data for that period');
     expect(gapPresentation('not_modeled').code).toBe('modeling_gap');
     expect(gapPresentation('unsupported')).toEqual({ title: 'No governed answer', code: 'modeling_gap' });
     expect(gapPresentation('denied').code).toBe('policy_blocked');

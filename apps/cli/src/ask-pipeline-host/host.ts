@@ -616,10 +616,17 @@ export function sharedKeyColumn(factColumns: Iterable<string>, labelColumns: Ite
   return shared.find((column) => /(^|_)(id|key)$/i.test(column)) ?? undefined;
 }
 
-export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['gap']): { title: string; code: 'policy_blocked' | 'ambiguous' | 'no_data' | 'modeling_gap' } {
+export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['gap'], message?: string): { title: string; code: 'policy_blocked' | 'ambiguous' | 'no_data' | 'modeling_gap' } {
   if (gap === 'denied') return { title: 'Blocked by policy', code: 'policy_blocked' };
   if (gap === 'ambiguous') return { title: 'One detail is missing', code: 'ambiguous' };
-  if (gap === 'not_retrieved') return { title: 'No matching data for that period', code: 'no_data' };
+  // The heading names what actually came back empty. A card titled "for that
+  // period" over a body about a member nobody could find contradicts itself,
+  // and the reader believes the heading.
+  if (gap === 'not_retrieved') {
+    if (message && /no rows matched\s+"/.test(message)) return { title: 'No matching data for that name', code: 'no_data' };
+    if (message && /no rows matched the restriction/.test(message)) return { title: 'No matching data under those filters', code: 'no_data' };
+    return { title: 'No matching data for that period', code: 'no_data' };
+  }
   return { title: 'No governed answer', code: 'modeling_gap' };
 }
 
@@ -764,7 +771,7 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
       { id: 'review-metadata-gap', label: 'Review what the project models', route: 'blocked' },
       ...(outcome.offerExploration ? [{ id: 'explore-review-required', label: 'Explore the physical tables (review-required)', route: 'generated_answer' as const }] : []),
     ];
-    const presentation = gapPresentation(outcome.gap);
+    const presentation = gapPresentation(outcome.gap, outcome.message);
     return withReceipt({ summary: outcome.text, answer: outcome.text, status: 'blocked', trustState: 'blocked', stopReason: 'blocked', resolvedRoute: 'generated_answer', answerRefusalCode: presentation.code, artifacts: [{ id: `${runId}:gap`, kind: 'answer', title: presentation.title, trustState: 'blocked', payload: { kind: 'no_answer', text: outcome.text, answer: outcome.text, gap: { kind: outcome.gap, message: outcome.message, nearest: outcome.nearest }, ...common } }], evaluations: [], nextActions, telemetry });
   }
   if (outcome.kind === 'failed') {
