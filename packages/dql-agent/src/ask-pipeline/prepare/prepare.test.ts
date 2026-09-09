@@ -4,6 +4,8 @@ import { parseIntent, type AnalyticalIntentV1 } from '../intent.js';
 import { validateIntentRefs } from '../resolve-intent.js';
 import { buildVocabularyIndex, type VocabularySource } from '../vocabulary.js';
 import { bindSemanticRequest, composeRelational, entails, prepare } from './index.js';
+import { scopeFormulaAggregates } from './relational.js';
+import { resolveTie } from '../execute.js';
 import { prepareCertified } from './certified.js';
 import type { PrepareDeps } from './types.js';
 
@@ -483,5 +485,107 @@ describe('what changed between two periods', () => {
     expect(composeRelational(unordered, vocabulary, { blockSql: () => undefined }).refusal?.message).toContain('arbitrary');
     // A lookup asks for a few rows, not for the best ones.
     expect(composeRelational({ ...unordered, expectedShape: 'lookup' }, vocabulary, { blockSql: () => undefined }).refusal).toBeUndefined();
+  });
+});
+
+describe('a stored rate carries its own period', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [
+      // A native formula metric: one expression, two aggregates inside it.
+      { name: 'points_per_game', label: 'Points per game', physical: { relation: 'dev.season_facts', expr: 'SUM("dev"."season_facts"."total_points") / NULLIF(SUM("dev"."season_facts"."games_played"), 0)', aggregate: 'derived' } },
+      { name: 'games_played', label: 'Games played', aggregation: 'sum', physical: { relation: 'dev.season_facts', expr: '"dev"."season_facts"."games_played"', aggregate: 'sum' } },
+    ],
+    dimensions: [
+      { name: 'season', model: 'season_facts', dataType: 'number', physical: { relation: 'dev.season_facts', column: 'season' } },
+      { name: 'player_id', model: 'season_facts', dataType: 'number', physical: { relation: 'dev.season_facts', column: 'player_id' } },
+    ],
+    relations: [{ schema: 'dev', name: 'season_facts', columns: [{ name: 'total_points' }, { name: 'games_played' }, { name: 'season', dataType: 'INTEGER' }, { name: 'player_id', dataType: 'INTEGER' }] }],
+  });
+  const inSeason = (year: number) => [{ ref: 'dimension:season_facts.season', op: 'eq' as const, values: [year], source: 'question' as const }];
+  const reading = (measures: AnalyticalIntentV1['measures']): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'points per game 2016 versus 2017', measures,
+    groupBy: [{ ref: 'dimension:season_facts.player_id', role: 'key' }], display: [], filters: [],
+    ordering: { ref: 'ppg_change', direction: 'desc' }, limit: 5, expectedShape: 'ranking', unresolved: [], provenance: {},
+  });
+
+  it('restricts each aggregate of the formula, never the quotient', () => {
+    expect(scopeFormulaAggregates('SUM(a) / NULLIF(SUM(b), 0)', () => ['x = 1']))
+      .toBe('SUM(CASE WHEN x = 1 THEN a ELSE 0 END) / NULLIF(SUM(CASE WHEN x = 1 THEN b ELSE 0 END), 0)');
+    // Only a sum reads 0 for an excluded row.
+    expect(scopeFormulaAggregates('COUNT(DISTINCT g) * AVG(p)', () => ['x = 1']))
+      .toBe('COUNT(DISTINCT CASE WHEN x = 1 THEN g END) * AVG(CASE WHEN x = 1 THEN p END)');
+    // A formula holding something this cannot prove is refused, not approximated.
+    expect(scopeFormulaAggregates('SUM(rank() OVER ())', () => ['x = 1'])).toBeUndefined();
+    expect(scopeFormulaAggregates('42', () => ['x = 1'])).toBeUndefined();
+    // Each aggregate renders the restriction again, so each placeholder is bound.
+    let rendered = 0;
+    scopeFormulaAggregates('SUM(a) / NULLIF(SUM(b), 0)', () => { rendered += 1; return ['x = ?']; });
+    expect(rendered).toBe(2);
+  });
+
+  it('composes a two-period comparison of a stored rate, and the change between them', () => {
+    const prepared = composeRelational(reading([
+      { ref: 'metric:points_per_game', alias: 'ppg_2016', scope: inSeason(2016) },
+      { ref: 'metric:points_per_game', alias: 'ppg_2017', scope: inSeason(2017) },
+      { ref: 'change:ppg_2017-ppg_2016', alias: 'ppg_change', change: { base: 'ppg_2016', comparison: 'ppg_2017', as: 'absolute' } },
+    ]), vocabulary, { blockSql: () => undefined });
+    expect(prepared.refusal).toBeUndefined();
+    const sql = prepared.candidate!.sql;
+    expect(sql).toContain('AS "ppg_2016"');
+    expect(sql).toContain('AS "ppg_2017"');
+    // Each period restricts the aggregates inside the rate, so the two rates
+    // are two different populations rather than one repeated.
+    expect((sql.match(/CASE WHEN "dev"\."season_facts"\."season" = \?/g) ?? []).length).toBe(4);
+    expect(sql).toContain('AS "ppg_change"');
+  });
+
+  it('a threshold on each period is a threshold on each period', () => {
+    const prepared = composeRelational({
+      ...reading([
+        { ref: 'metric:points_per_game', alias: 'ppg_2016', scope: inSeason(2016) },
+        { ref: 'metric:points_per_game', alias: 'ppg_2017', scope: inSeason(2017) },
+        { ref: 'metric:games_played', alias: 'games_2016', scope: inSeason(2016) },
+        { ref: 'metric:games_played', alias: 'games_2017', scope: inSeason(2017) },
+        { ref: 'change:ppg_2017-ppg_2016', alias: 'ppg_change', change: { base: 'ppg_2016', comparison: 'ppg_2017', as: 'absolute' } },
+      ]),
+      filters: [
+        { ref: 'measure:2', op: 'gte', values: [20], source: 'question', on: 'aggregate' },
+        { ref: 'measure:3', op: 'gte', values: [20], source: 'question', on: 'aggregate' },
+      ],
+    }, vocabulary, { blockSql: () => undefined });
+    expect(prepared.refusal).toBeUndefined();
+    expect(prepared.candidate!.sql).toContain('"games_2016" >= ?');
+    expect(prepared.candidate!.sql).toContain('"games_2017" >= ?');
+  });
+});
+
+describe('a superlative that ties has several answers', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'assists', label: 'Assists', aggregation: 'sum', physical: { relation: 'dev.game_facts', expr: '"dev"."game_facts"."assists"', aggregate: 'sum' } }],
+    dimensions: [{ name: 'player', model: 'game_facts', dataType: 'string', physical: { relation: 'dev.game_facts', column: 'player_name' } }],
+    relations: [{ schema: 'dev', name: 'game_facts', columns: [{ name: 'assists' }, { name: 'player_name' }] }],
+  });
+  const best: AnalyticalIntentV1 = {
+    version: 1, kind: 'analytics', reading: 'the best', measures: [{ ref: 'metric:assists', alias: 'assists' }],
+    groupBy: [{ ref: 'dimension:game_facts.player', role: 'categorical' }], display: [], filters: [],
+    ordering: { ref: 'metric:assists', direction: 'desc' }, limit: 1, expectedShape: 'ranking', unresolved: [], provenance: {},
+  };
+
+  it('fetches one row more than it shows, and says which column decides', () => {
+    const prepared = composeRelational(best, vocabulary, { blockSql: () => undefined });
+    expect(prepared.candidate!.sql).toContain('LIMIT 2');
+    expect(prepared.candidate!.tieProbe).toEqual({ column: 'assists', limit: 1 });
+    // A ranking the question sized itself fetches exactly what it shows.
+    expect(composeRelational({ ...best, limit: 5 }, vocabulary, { blockSql: () => undefined }).candidate!.sql).toContain('LIMIT 5');
+  });
+
+  it('keeps every row that ties, and drops the extra row when nothing ties', () => {
+    const rows = (top: number, second: number) => ({ columns: ['player', 'assists'], rowCount: 2, executionTimeMs: 1, rows: [{ player: 'Rudez', assists: top }, { player: 'Morrow', assists: second }] });
+    const tied = resolveTie(rows(6.5, 6.5), { column: 'assists', limit: 1 });
+    expect(tied.result.rows).toHaveLength(2);
+    expect(tied.note).toMatch(/2 rows tie on assists at 6.5/);
+    const clear = resolveTie(rows(9, 6.5), { column: 'assists', limit: 1 });
+    expect(clear.result.rows).toHaveLength(1);
+    expect(clear.note).toBeUndefined();
   });
 });

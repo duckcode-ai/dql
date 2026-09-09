@@ -42,6 +42,13 @@ export interface PreparedCandidate {
    * helper columns are dropped unless the intent asked for them.
    */
   derived?: Array<{ alias: string; numerator: string; denominator: string; keepInputs?: boolean }>;
+  /**
+   * A superlative fetched ONE MORE ROW than it will show, so that a tie at the
+   * boundary can be seen rather than silently resolved by whatever order the
+   * warehouse happened to return. Execution trims to `limit`, or keeps the
+   * rows that tie and says so.
+   */
+  tieProbe?: { column: string; limit: number };
 }
 
 export type PrepareRefusalCode =
@@ -58,6 +65,8 @@ export type PrepareRefusalCode =
   | 'policy_denied';
 
 export interface PreparedRefusal {
+  /** The two relations a `join_path_required` refusal could not connect. */
+  relations?: [string, string];
   tier: PrepareTier;
   code: PrepareRefusalCode;
   /** Verbatim: what the compiler, composer or entailment check actually said. */
@@ -103,6 +112,13 @@ export interface PrepareDeps {
   compileSemantic?: (request: SemanticCompileRequest) => Promise<SemanticCompileOutput>;
   /** Join steps from one physical relation to another, or undefined when no governed path exists. */
   joinPath?: (fromRelation: string, toRelation: string) => RelationalJoinStep[] | undefined;
+  /**
+   * Ask the WAREHOUSE whether a relationship holds that nobody declared: the
+   * key is unique in the label relation, and every key the facts carry appears
+   * there. A proof admits the join as a governed default and is remembered for
+   * the snapshot; anything short of both proofs admits nothing.
+   */
+  proveJoinPath?: (fromRelation: string, toRelation: string) => Promise<RelationalJoinStep[] | undefined>;
   /** Dialect for relational composition. */
   dialect?: SqlDialectLike;
   /** Certified block source text by block ref. */

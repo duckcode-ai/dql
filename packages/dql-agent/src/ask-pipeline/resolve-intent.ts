@@ -568,6 +568,36 @@ export function applyGovernedDefaults(intent: AnalyticalIntentV1, question: stri
   bindExactNames(intent, normalizedQuestion, grainWords, vocabulary);
   preferGovernedDefinition(intent, vocabulary);
   promoteSoleMeasureScope(intent);
+  freezeSuperlativeShape(intent, question);
+}
+
+const SUPERLATIVE = /\b(most|best|highest|largest|greatest|lowest|worst|fewest|smallest|least|top|led)\b/i;
+/** "Who ARE the top scorers", "which teamS": the question asks for a list. */
+const PLURAL_SUBJECT = /\b(who|which|what)\s+(are|were|have)\b|\bwhich\s+[a-z]+s\b|\b(players|teams|customers|users|products|stores|people|ones|scorers|shooters|items|orders|accounts)\b/i;
+/**
+ * A count the question states outright: "top five", "ten players", "3 stores".
+ * A THRESHOLD is not a count — "with at least 20 games" sizes the cohort, not
+ * the answer, and reading it as a count is how "who had the best ratio" came
+ * back as ten rows.
+ */
+const COUNT_WORD = /\b(top|first|bottom|last|best|worst)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|twenty)\b|(?<!\b(?:at least|at most|least|most|minimum|maximum|more than|fewer than|less than|over|under|above|below|with|min|max)\s)\b(\d+|two|three|four|five|six|seven|eight|nine|ten|twenty)\s+[a-z]+s\b/i;
+
+/**
+ * ONE QUESTION, ONE SHAPE. "Who scored the most points in 2017?" asks for the
+ * one who did. The interpreter answers it with ten rows as readily as with
+ * one, so the same question asked twice came back in two different shapes —
+ * and a reader comparing them cannot tell whether the product changed its mind
+ * about the data or only about the presentation. A singular superlative that
+ * states no count of its own is therefore one row, decided here rather than
+ * per dispatch. A plural subject ("who are the top scorers") and a stated
+ * count ("top five") both leave the reading exactly as it was.
+ */
+export function freezeSuperlativeShape(intent: AnalyticalIntentV1, question: string): void {
+  if (intent.kind !== 'analytics' || !intent.ordering || intent.limit === 1) return;
+  if (!SUPERLATIVE.test(question) || PLURAL_SUBJECT.test(question) || COUNT_WORD.test(question)) return;
+  if (!/\b(who|which|what)\b/i.test(question)) return;
+  intent.limit = 1;
+  intent.provenance.limit = 'host:the question asks which one, so the answer is one row';
 }
 
 const COLUMN_REF = /^column:(.+)\.([^.]+)$/;

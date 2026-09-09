@@ -4,8 +4,8 @@ import { executeCandidate, fillPeriodGaps, type ExecuteDeps, type ExecutedRows }
 import { describeIntent, intentExecutionFingerprint, type AnalyticalIntentV1, type IntentPredicate } from './intent.js';
 import { composeAnsweredText, composeFailedText, composeGapText, describeResultColumns, labelFor, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
 import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal, type PrepareResult } from './prepare/index.js';
-import { resolveIntent, uncoveredQuestionTerms, unmetFacets, type IntentResolution } from './resolve-intent.js';
-import type { VocabularyIndex } from './vocabulary.js';
+import { keepMembersApart, resolveIntent, uncoveredQuestionTerms, unmetFacets, type IntentResolution } from './resolve-intent.js';
+import type { VocabularyEntry, VocabularyIndex } from './vocabulary.js';
 
 /**
  * INTENT → PREPARE → EXECUTE, as one host-neutral function.
@@ -61,6 +61,12 @@ export interface RunAskPipelineInput {
    * both rather than reporting the surname as unknown.
    */
   suggestMembers?: (ref: string, literal: string) => Promise<string[]>;
+  /**
+   * The member the user picked from an identity clarification: the dimension
+   * and the values chosen. A name that reads several people is settled by the
+   * person asking, never by the interpreter's prose or by adding them up.
+   */
+  memberSelection?: { ref: string; values: string[] };
 }
 
 const fingerprintSql = (sql: string) => `sha256:${createHash('sha256').update(sql).digest('hex').slice(0, 24)}`;
@@ -122,6 +128,181 @@ export function unmetDisplayObligation(
   };
 }
 
+/** Words a capitalised run may start with and still be a name the question stresses. */
+const NAME_STOPWORDS = new Set(['the', 'a', 'an', 'and', 'or', 'of', 'in', 'on', 'for', 'by', 'to', 'from', 'at', 'with', 'show', 'give', 'compare', 'how', 'what', 'which', 'who', 'whose', 'when', 'where', 'why', 'did', 'do', 'does', 'is', 'are', 'was', 'were', 'our', 'my', 'their', 'his', 'her', 'its']);
+
+/**
+ * A NAME THE QUESTION LEANS ON. Capitalised runs of the question that are not
+ * its first word, not vocabulary words, and not numbers: the candidates for
+ * "whose facts is this about". This is a hint, never a proof — everything
+ * built on it must be confirmed against the warehouse before it changes an
+ * answer.
+ */
+export function namesInQuestion(question: string, vocabulary: VocabularyIndex): string[] {
+  const names: string[] = [];
+  for (const sentence of question.split(/(?<=[.?!])\s+/)) {
+    const tokens = [...sentence.matchAll(/[A-Za-z][A-Za-z'`.-]*/g)];
+    let run: string[] = [];
+    let runStart = -1;
+    const flush = () => {
+      if (run.length > 0) {
+        const first = run[0]!.toLowerCase();
+        const capitalisedStart = runStart > 0 || run.length > 1;
+        // A possessive is the name plus grammar: "LeBron James's" is a man.
+        if (capitalisedStart && !NAME_STOPWORDS.has(first)) names.push(run.join(' ').replace(/['’]s$/i, '').replace(/[.'’]+$/, ''));
+      }
+      run = [];
+    };
+    for (const [index, token] of tokens.entries()) {
+      const word = token[0];
+      if (/^[A-Z]/.test(word) && !NAME_STOPWORDS.has(word.toLowerCase())) {
+        if (run.length === 0) runStart = index;
+        run.push(word);
+        continue;
+      }
+      flush();
+    }
+    flush();
+  }
+  // A word this project already names something by is a term, not a person.
+  return [...new Set(names)].filter((name) => !vocabulary.lookup(name, { limit: 1, minScore: 0.9 }).length);
+}
+
+/**
+ * THE SUBJECT THE READING CLAIMS MUST BE IN THE POPULATION. An interpretation
+ * that says "LeBron James's total points" and restricts nobody answers for
+ * every player in the warehouse under one man's name, and every check passes:
+ * the SQL is valid, the filters it does carry are all applied, the number is
+ * real. The host therefore checks the reading's own claim against its own
+ * filters, and where a name is missing it asks the warehouse whether that name
+ * is a member. A member it confirms becomes the restriction the reading
+ * promised; a name the warehouse does not hold changes nothing, because this
+ * reading of prose is a hint and a hint may not rewrite an answer.
+ */
+export async function bindNamedSubject(
+  intent: AnalyticalIntentV1,
+  question: string,
+  vocabulary: VocabularyIndex,
+  suggestMembers: (ref: string, literal: string) => Promise<string[]>,
+  maxProbes = 3,
+): Promise<string[]> {
+  if (intent.kind !== 'analytics') return [];
+  // A filter carries a name only when it carries THAT name. "Curry" is not
+  // Stephen Curry: a broader match is exactly the case where the reading names
+  // one person and the query reads several, and it is what this proves away.
+  const bound = new Set(intent.filters.flatMap((filter) => filter.values.filter((value): value is string => typeof value === 'string').map((value) => value.toLowerCase())));
+  const claimed = namesInQuestion(question, vocabulary)
+    .filter((name) => intent.reading.toLowerCase().includes(name.toLowerCase()))
+    .filter((name) => !bound.has(name.toLowerCase()));
+  if (claimed.length === 0) return [];
+  // Only the label columns of the relations this reading already reads.
+  const relations = new Set(intent.measures.flatMap((measure) => {
+    const refs = measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref];
+    return refs.map((ref) => vocabulary.get(ref)?.physical?.relation).filter((relation): relation is string => Boolean(relation));
+  }));
+  // A column that can hold a person's name: not a date, a number, a flag or a
+  // key. The role is a hint and not every project spells its label columns the
+  // same way — a dimension called "player" over a player_name column is a
+  // label whatever the heuristic said — so the columns a name COULD live in
+  // are probed, most likely first, and the warehouse decides.
+  const named = (entry: VocabularyEntry): boolean =>
+    (entry.kind === 'dimension' || entry.kind === 'column')
+    && Boolean(entry.physical?.relation)
+    && !entry.roles.some((role) => role === 'time' || role === 'numeric' || role === 'boolean' || role === 'key' || role === 'measure');
+  const rank = (entry: VocabularyEntry): number =>
+    Number(relations.has(entry.physical!.relation)) * 2 + Number(entry.roles.includes('label'));
+  const labels = vocabulary.entries.filter(named).sort((left, right) => rank(right) - rank(left));
+  const notes: string[] = [];
+  let probes = 0;
+  for (const name of claimed) {
+    for (const entry of labels) {
+      if (probes >= maxProbes) return notes;
+      probes += 1;
+      let members: string[] = [];
+      try { members = await suggestMembers(entry.ref, name); } catch { continue; }
+      const exact = members.find((member) => member.toLowerCase() === name.toLowerCase());
+      if (!exact) continue;
+      // A broader restriction on the same column is REPLACED, not added to:
+      // "contains Curry" beside "is Stephen Curry" would read as both.
+      const existing = intent.filters.findIndex((filter) => filter.ref === entry.ref && filter.on !== 'aggregate');
+      const broadened = existing >= 0;
+      const applied: IntentPredicate = { ref: entry.ref, op: 'eq', values: [exact], source: 'question' };
+      if (broadened) intent.filters[existing] = applied; else intent.filters.push(applied);
+      intent.provenance[entry.ref] = `host:the reading is about ${exact}, and the warehouse holds that member: the reading's own subject is what the query reads`;
+      notes.push(`identity: the reading names ${JSON.stringify(exact)} and the restriction ${broadened ? 'was broader than that name' : 'was missing'}; ${entry.label ?? entry.name} holds that member exactly, so the query reads it`);
+      return notes;
+    }
+  }
+  return notes;
+}
+
+/** The id an identity clarification option carries: the dimension, and the values the user picked. */
+export function memberOptionId(ref: string, values: string[]): string {
+  return `member:${ref}=${JSON.stringify(values)}`;
+}
+
+/** The dimension and values behind such an id; anything else is not one. */
+export function parseMemberOption(id: string): { ref: string; values: string[] } | undefined {
+  if (!id.startsWith('member:')) return undefined;
+  const split = id.indexOf('=');
+  if (split <= 'member:'.length) return undefined;
+  const ref = id.slice('member:'.length, split);
+  try {
+    const values = JSON.parse(id.slice(split + 1)) as unknown;
+    if (!Array.isArray(values) || values.some((value) => typeof value !== 'string') || values.length === 0) return undefined;
+    return { ref, values: values as string[] };
+  } catch { return undefined; }
+}
+
+/**
+ * THE MEMBER THE USER PICKED. An identity clarification comes back as the
+ * dimension and the values chosen: the reading's filter on that dimension
+ * becomes exactly those values, and several chosen members are separated so
+ * each one keeps its own row. The user settles an identity the data could not.
+ */
+export function applyMemberSelection(intent: AnalyticalIntentV1, selection: { ref: string; values: string[] }, vocabulary: VocabularyIndex): void {
+  if (intent.kind !== 'analytics' || selection.values.length === 0) return;
+  const applied: IntentPredicate = { ref: selection.ref, op: selection.values.length === 1 ? 'eq' : 'in', values: [...selection.values], source: 'clarification' };
+  const index = intent.filters.findIndex((filter) => filter.ref === selection.ref && filter.on !== 'aggregate');
+  if (index >= 0) intent.filters[index] = applied; else intent.filters.push(applied);
+  intent.provenance[selection.ref] = `clarification:the ${selection.values.length === 1 ? 'member' : 'members'} you chose`;
+  const subject = selection.values.join(', ');
+  if (!selection.values.every((value) => intent.reading.toLowerCase().includes(value.toLowerCase()))) {
+    intent.reading = `${intent.reading.replace(/[.\s]+$/, '')} — for ${subject}.`;
+  }
+  if (selection.values.length > 1) keepMembersApart(intent, vocabulary);
+}
+
+/**
+ * THE SUBJECT AND THE POPULATION ARE THE SAME THING. A member filter carrying
+ * several values reads several members; with no breakdown at all, their facts
+ * are added into one row that belongs to nobody — and the prose above it will
+ * still name whoever the interpreter had in mind. The proof is structural: it
+ * never reads the prose, and it runs before an executable is accepted, so no
+ * path that widens a filter can serve one name over many people's numbers.
+ */
+export function proveSubjectMatchesPopulation(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string | undefined {
+  if (intent.kind !== 'analytics' || intent.groupBy.length > 0) return undefined;
+  for (const filter of intent.filters) {
+    if (filter.on === 'aggregate') continue;
+    const values = filter.values.filter((value): value is string => typeof value === 'string');
+    if (values.length < 2) continue;
+    const entry = vocabulary.get(filter.ref);
+    if (!entry || (entry.kind !== 'dimension' && entry.kind !== 'column' && entry.kind !== 'entity')) continue;
+    if (entry.roles.includes('time') || entry.roles.includes('numeric') || entry.roles.includes('boolean')) continue;
+    return `${entry.label ?? entry.name} reads ${values.length} members (${values.join(', ')}) and the reading separates none of them: one row would carry all of their facts together`;
+  }
+  return undefined;
+}
+
+/** Guidance that carries a settled identity into the reading the interpreter writes. */
+function memberGuidance(input: RunAskPipelineInput): string | undefined {
+  if (!input.memberSelection) return input.guidance;
+  const chosen = input.memberSelection.values.join(', ');
+  const said = `The person asking has settled who this is about: ${chosen}. Read the question about ${input.memberSelection.values.length === 1 ? 'that member' : 'those members'} and name no other.`;
+  return input.guidance ? `${input.guidance}\n${said}` : said;
+}
+
 export async function runAskPipeline(input: RunAskPipelineInput): Promise<PipelineOutcome> {
   const now = input.now ?? (() => Date.now());
   const started = now();
@@ -147,7 +328,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   const resolveStarted = now();
   let resolution: IntentResolution = await resolveIntent({
     question: input.question, vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, priorAnswerSummary: input.priorAnswerSummary, clauseCoverage: input.clauseCoverage, budgetMs: remaining(), ...(input.selection ? { selection: input.selection } : {}),
-    guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now,
+    guidance: memberGuidance(input), cardBudget: input.cardBudget, providerOptions: input.providerOptions, now,
     maxAttempts: remaining() > 15_000 ? 2 : 1,
     onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500) }),
   });
@@ -171,6 +352,22 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   }
   receipt.intent = resolution.intent;
   receipt.reading = resolution.intent.reading;
+  // A DESCRIPTION IS NOT A RECOMMENDATION, AND REFUSING ONE SHOULD NOT WITHHOLD
+  // THE OTHER. "Which of these should we build around, and why?" carries a
+  // reading this project can measure and a judgment it cannot compute. Naming
+  // the measurable part in prose and running nothing leaves the reader to ask
+  // the same question again in smaller words; so the comparison is delivered,
+  // and the judgment is refused out loud rather than quietly attempted.
+  let judgmentCaveat: string | undefined;
+  if (resolution.status === 'clarify') {
+    const material = resolution.intent.unresolved.filter((clause) => clause.material);
+    const operators = material.filter((clause) => clause.kind === 'unsupported' && clause.options.length === 0);
+    if (operators.length > 0 && operators.length === material.length && resolution.intent.measures.length > 0) {
+      for (const clause of operators) clause.material = false;
+      judgmentCaveat = `${operators.map((clause) => `"${clause.clause}"`).join(' and ')} ${operators.length === 1 ? 'is' : 'are'} not computed here: what follows is the measured comparison, not a recommendation and not a cause. Research can investigate the drivers`;
+      resolution = { status: 'resolved', intent: resolution.intent, attempts: resolution.attempts, problems: [], ...(resolution.ledger ? { ledger: resolution.ledger } : {}), ...(resolution.ledgerEntries ? { ledgerEntries: resolution.ledgerEntries } : {}) };
+    }
+  }
   if (resolution.status === 'clarify') {
     const options = resolution.options.map((ref) => ({ ref, label: label(ref), ...(input.vocabulary.get(ref)?.description ? { description: input.vocabulary.get(ref)!.description } : {}) }));
     // A continuity question the host asked (which population does this
@@ -208,6 +405,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
   }
   let intent = resolution.intent;
+  if (input.memberSelection) applyMemberSelection(intent, input.memberSelection, input.vocabulary);
   // What the first reading promised to SHOW. A repair may drop a label the
   // engine could not reach; the answer must say so rather than quietly
   // identifying its rows by an opaque key.
@@ -223,11 +421,33 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     }
     mark('ground', groundStarted);
   }
+  // A name the reading leans on that the filters never carried is bound from
+  // the warehouse before anything is prepared.
+  if (input.suggestMembers && remaining() > 8_000) {
+    try {
+      const bound = await bindNamedSubject(intent, input.question, input.vocabulary, input.suggestMembers);
+      if (bound.length) receipt.grounding = [...(receipt.grounding ?? []), ...bound];
+    } catch { /* a probe that fails leaves the reading as the interpreter wrote it */ }
+  }
+  // Whatever produced this reading — the interpreter, a follow-up edit, the
+  // host's own grounding — a single row may not carry several members' facts.
+  if (proveSubjectMatchesPopulation(intent, input.vocabulary)) keepMembersApart(intent, input.vocabulary);
+  const merged = proveSubjectMatchesPopulation(intent, input.vocabulary);
+  if (merged) {
+    receipt.failure = { stage: 'prepare', reason: 'subject_population_mismatch', message: merged };
+    return { kind: 'gap', gap: 'ambiguous', message: merged, nearest: [], text: `${composeGapText('ambiguous', merged, [], false)} Name the one you mean, or ask for them side by side.`, receipt, intent, offerExploration: false };
+  }
+  // Grounding and the host's own proofs replace the intent object, so the
+  // receipt must be repointed: a receipt showing a reading the query did not
+  // run is exactly the mismatch this pipeline exists to prevent.
+  receipt.intent = intent;
+  receipt.reading = intent.reading;
   const uncovered = uncoveredQuestionTerms(input.question, intent, input.vocabulary);
   if (uncovered.length) receipt.uncovered = uncovered;
 
   // 2. Prepare (with cache and one bounded repair).
   const attempted = new Set<string>();
+  let provedJoin = false;
   let prepared: PrepareResult | undefined;
   let firstPrepared: PrepareResult | undefined;
   let firstIntent: AnalyticalIntentV1 | undefined;
@@ -252,6 +472,25 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     receipt.refusals.push(...prepared.refusals);
     receipt.tiers.push(...prepared.attempts.map((attempt) => ({ round, ...attempt })));
     if (prepared.chosen) { candidate = prepared.chosen; break; }
+    // A RELATIONSHIP NOBODY DECLARED MAY STILL HOLD. Before spending a
+    // dispatch on rewriting the question, ask the warehouse whether the key
+    // this reading needs is unique in the relation that carries the label and
+    // covers every row of the facts. A proof admits the join and the same
+    // reading is prepared again; no proof, and the refusal stands.
+    const needsJoin = prepared.refusals.find((refusal) => refusal.code === 'join_path_required' && refusal.relations);
+    if (needsJoin?.relations && input.prepareDeps.proveJoinPath && !provedJoin && remaining() > 8_000) {
+      provedJoin = true;
+      const proveStarted = now();
+      let proven: unknown;
+      try { proven = await input.prepareDeps.proveJoinPath(needsJoin.relations[0], needsJoin.relations[1]); } catch { proven = undefined; }
+      mark('prove_join', proveStarted);
+      if (proven) {
+        receipt.grounding = [...(receipt.grounding ?? []), `relationship: no declared relationship reaches ${needsJoin.relations[1]} from ${needsJoin.relations[0]}, and the warehouse proved one (the key is unique there and covers every row of the facts)`];
+        attempted.delete(cacheKey);
+        round -= 1;
+        continue;
+      }
+    }
     // One bounded repair: a repairable compile refusal goes back to the resolver with the engine's words.
     const repairable = prepared.refusals.find((refusal) => refusal.repairable);
     if (!repairable || round > 0 || remaining() < 12_000) break;
@@ -347,6 +586,24 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       } catch { /* a probe that fails leaves the honest no-match in place */ }
     }
     if (candidates.length > 0) {
+      // SEVERAL PEOPLE ARE NOT ONE PERSON. A singular name that matched no
+      // member exactly, and several members that contain it, is a question:
+      // which one? Adding their facts together answers about nobody, and the
+      // reading above that row would still name whichever one it had in mind.
+      const ambiguous = candidates.find((item) => item.values.length > 1 && item.predicate.op === 'eq' && item.predicate.values.length === 1);
+      if (ambiguous) {
+        const literal = String(ambiguous.predicate.values[0]);
+        const name = label(ambiguous.predicate.ref);
+        const options = [
+          ...ambiguous.values.map((value) => ({ ref: memberOptionId(ambiguous.predicate.ref, [value]), label: value })),
+          { ref: memberOptionId(ambiguous.predicate.ref, ambiguous.values), label: `All ${ambiguous.values.length}, one row each`, description: ambiguous.values.join(', ') },
+        ];
+        const question = `${JSON.stringify(literal)} matches ${ambiguous.values.length} members of ${name}: ${ambiguous.values.join(', ')}. Which one do you mean?`;
+        receipt.grounding = [...(receipt.grounding ?? []), `identity: ${name} ${JSON.stringify(literal)} matched no member exactly and names ${ambiguous.values.length} members (${ambiguous.values.join(', ')}); the turn asked which one instead of adding them together`];
+        receipt.tiers.push({ round: 9, tier: candidate.tier, outcome: 'refused', detail: `member_ambiguous: ${ambiguous.values.length} members contain ${JSON.stringify(literal)}` });
+        receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: 0, ms: Math.round(now() - executeStarted), proofs: executed.proofs };
+        return { kind: 'clarify', intent, question, options, text: question, receipt };
+      }
       const notes: string[] = [];
       const widened: AnalyticalIntentV1 = {
         ...intent,
@@ -357,11 +614,20 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
           return { ...predicate, op: 'in' as const, values: found.values };
         }),
       };
-      receipt.grounding = [...(receipt.grounding ?? []), ...notes];
-      const again = await prepare({ intent: widened, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: input.explorationOptIn });
-      if (again.chosen) {
-        const retried = await countedExecute(again.chosen, widened, input.executeDeps);
-        if (retried.ok) { candidate = again.chosen; executed = retried; intent = widened; receipt.intent = widened; }
+      // A set that widened to several members keeps them apart, and the
+      // executable is not accepted until the population it reads is the
+      // subject the reading claims.
+      keepMembersApart(widened, input.vocabulary);
+      const merged = proveSubjectMatchesPopulation(widened, input.vocabulary);
+      if (!merged) {
+        receipt.grounding = [...(receipt.grounding ?? []), ...notes];
+        const again = await prepare({ intent: widened, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: input.explorationOptIn });
+        if (again.chosen) {
+          const retried = await countedExecute(again.chosen, widened, input.executeDeps);
+          if (retried.ok) { candidate = again.chosen; executed = retried; intent = widened; receipt.intent = widened; }
+        }
+      } else {
+        receipt.grounding = [...(receipt.grounding ?? []), `identity: the widened reading was not run because ${merged}`];
       }
     }
   }
@@ -391,6 +657,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   const filled = fillPeriodGaps(intent, described);
   const result = filled.result;
   // A certified block served as published with an identity caveat says so in the answer.
+  const tieNote = executed.proofs.find((line) => line.startsWith('tie: '))?.slice('tie: '.length);
   const caveats = candidate.tier === 'certified' ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line) => `${line.replace(/; the certified block is served as published$/, '')}; recertify it with the entity key to keep them apart`) : [];
   // THE LABEL THE QUESTION ASKED FOR. "Which teams" is answered by names; when
   // the repair dropped the label because no governed relationship reaches it,
@@ -400,6 +667,10 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   if (filled.added > 0) receipt.executed = { ...receipt.executed!, proofs: [...(receipt.executed?.proofs ?? []), `${filled.added} ${intent.groupBy.find((group) => group.role === 'time')?.grain ?? 'period'}s of the window held no rows and are shown as zero`] };
   // A request that listed its parts is answered part by part: the ones no ref
   // is named for are said out loud, not left for the reader to notice.
+  // Several rows tied for the top: the answer names the tie rather than
+  // presenting one of them as the single best.
+  if (tieNote) caveats.push(tieNote);
+  if (judgmentCaveat) caveats.unshift(judgmentCaveat);
   const facets = unmetFacets(input.question, intent, input.vocabulary);
   if (facets.length > 0) {
     const message = `this answer carries nothing for ${facets.map((facet) => `"${facet}"`).join(', ')}: no governed metric or dimension of this project is named for ${facets.length === 1 ? 'it' : 'them'}`;

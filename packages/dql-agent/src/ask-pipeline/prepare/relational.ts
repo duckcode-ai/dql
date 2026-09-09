@@ -68,6 +68,79 @@ const AGG_SQL: Record<string, (expr: string) => string> = {
   min: (e) => `MIN(${e})`, max: (e) => `MAX(${e})`, median: (e) => `MEDIAN(${e})`,
 };
 
+/** The aggregates a CASE can restrict truthfully, and what an excluded row reads as. */
+const SCOPABLE_AGGREGATES = new Set(['sum', 'count', 'count_distinct', 'avg', 'min', 'max', 'median']);
+const PASS_THROUGH_FUNCTIONS = new Set(['nullif', 'coalesce', 'cast', 'abs', 'round']);
+
+/**
+ * A RESTRICTED AGGREGATE. The restriction goes INSIDE the aggregate, so two
+ * measures of one relation keep their own populations. Only a sum may read 0
+ * for an excluded row: a count would count it, an average would be dragged
+ * toward zero by it, and a minimum would become it.
+ */
+export function restrictedAggregateArgument(expr: string, aggregate: string, conditions: string[]): string {
+  if (conditions.length === 0) return expr;
+  return `CASE WHEN ${conditions.join(' AND ')} THEN ${expr}${aggregate === 'sum' ? ' ELSE 0' : ''} END`;
+}
+
+/**
+ * A FORMULA CAN CARRY A PERIOD. A stored rate is one expression —
+ * SUM(points) / NULLIF(SUM(games), 0) — and a per-measure restriction belongs
+ * inside each of its aggregates, never around the quotient: restricting a
+ * quotient restricts nothing, which is why "points per game in 2016 versus
+ * 2017" could not be composed at all. Every aggregate call is rewritten by the
+ * rule above; a formula holding anything this cannot prove (a call inside a
+ * call, a function that is neither an aggregate nor plain arithmetic) is
+ * refused rather than approximated.
+ */
+export function scopeFormulaAggregates(expr: string, renderConditions: () => string[]): string | undefined {
+  // The restriction is rendered ONCE PER AGGREGATE, not once: each occurrence
+  // carries its own placeholders, and a bound value belongs to exactly one.
+  const first = renderConditions();
+  if (first.length === 0) return expr;
+  let conditions = first;
+  let uses = 0;
+  let out = '';
+  let at = 0;
+  let wrapped = 0;
+  while (at < expr.length) {
+    const call = /([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(expr.slice(at));
+    if (!call) { out += expr.slice(at); break; }
+    const open = at + call.index + call[0]!.length;
+    out += expr.slice(at, open);
+    const name = call[1]!.toLowerCase();
+    if (!SCOPABLE_AGGREGATES.has(name)) {
+      // Plain arithmetic wrappers are passed through and their arguments are
+      // scanned for aggregates of their own; anything else is not proven.
+      if (!PASS_THROUGH_FUNCTIONS.has(name)) return undefined;
+      at = open;
+      continue;
+    }
+    let depth = 1;
+    let cursor = open;
+    while (cursor < expr.length && depth > 0) {
+      const char = expr[cursor];
+      if (char === '(') depth += 1;
+      else if (char === ')') depth -= 1;
+      cursor += 1;
+    }
+    if (depth !== 0) return undefined;
+    const inner = expr.slice(open, cursor - 1);
+    const distinct = /^\s*distinct\s+/i.exec(inner);
+    const argument = distinct ? inner.slice(distinct[0].length) : inner;
+    // Only plain arithmetic may live inside a restricted aggregate: an
+    // aggregate of an aggregate, a window function, anything unrecognised, is
+    // not something this rewrite can prove truthful.
+    if ([...argument.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)].some((inner) => !PASS_THROUGH_FUNCTIONS.has(inner[1]!.toLowerCase()))) return undefined;
+    if (uses > 0) conditions = renderConditions();
+    uses += 1;
+    out += `${distinct ? 'DISTINCT ' : ''}${restrictedAggregateArgument(argument, distinct ? 'count_distinct' : name, conditions)})`;
+    wrapped += 1;
+    at = cursor;
+  }
+  return wrapped > 0 ? out : undefined;
+}
+
 function qualifyRelation(dialect: SqlDialectLike, relation: string): string {
   return relation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
 }
@@ -170,9 +243,13 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     // The vocabulary owns a metric's aggregate; an intent aggregation applies to raw columns only.
     const aggregate = entry?.kind === 'column' ? (aggregation ?? physical.aggregate) : (physical.aggregate ?? aggregation);
     if (!aggregate || (!AGG_SQL[aggregate] && aggregate !== 'derived')) return { tier: 'relational', code: 'not_relational', message: `${ref} needs an aggregation`, repairable: true };
-    if (aggregate === 'derived' && scope.length) return { tier: 'relational', code: 'not_relational', message: `${ref} is a derived metric and cannot take a per-measure scope`, repairable: false };
     const expr = physical.expr ?? (physical.column ? qualify(dialect, physical.relation, physical.column) : undefined);
     if (!expr) return { tier: 'relational', code: 'not_relational', message: `${ref} has no expression`, repairable: false };
+    // A stored rate carries its own period by restricting each aggregate in
+    // its formula; a formula this cannot rewrite says so instead.
+    if (aggregate === 'derived' && scope.length && !scopeFormulaAggregates(expr, () => ['1 = 1'])) {
+      return { tier: 'relational', code: 'not_relational', message: `${ref} is a derived metric whose formula cannot carry a per-measure restriction`, repairable: false };
+    }
     const bound: PhysicalMeasure = { alias, aggregate, expr, relation: physical.relation, scope, ...(overall ? { overall: true } : {}) };
     measures.push(bound);
     return bound;
@@ -182,10 +259,10 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   const bindFormula = (ref: string, prefix: string, scope: IntentPredicate[]): { inputs: Array<{ alias: string; measure: PhysicalMeasure }>; expr: string } | PreparedRefusal => {
     const entry = vocabulary.get(ref)!;
     if (!DERIVED_FORMULA.test(entry.derived!.expr)) return { tier: 'relational', code: 'not_relational', message: `${ref} has a formula the relational tier cannot evaluate safely`, repairable: false };
-    if (scope.length) return { tier: 'relational', code: 'not_relational', message: `${ref} is a derived metric and cannot take a per-measure scope`, repairable: false };
     const inputs: Array<{ alias: string; measure: PhysicalMeasure }> = [];
     for (const input of entry.derived!.inputs) {
-      const bound = bindMeasure(input.ref, `${prefix}_${input.alias}`, undefined, []);
+      // A restriction on the formula is a restriction on each of its inputs.
+      const bound = bindMeasure(input.ref, `${prefix}_${input.alias}`, undefined, scope);
       if ('tier' in bound) return bound;
       inputs.push({ alias: input.alias, measure: bound });
     }
@@ -335,10 +412,17 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     // player_name column of the game table are the same column, spelled twice.
     // A name that is merely similar is never substituted — that stays a
     // refusal the interpreter can repair.
+    // A dimension counts as much as a raw column: a project that declares the
+    // season on both its season table and its game table has spelled one
+    // column twice, and which spelling the reading happened to name should not
+    // decide whether the question can be answered.
     const sameNameOnBase = (relation: string, column: string): boolean =>
       relation !== base
       && (deps.joinPath?.(base, relation)?.length ?? 0) === 0
-      && vocabulary.entries.some((candidate) => candidate.kind === 'column' && (candidate.physical?.relation ?? candidate.model) === base && candidate.name.toLowerCase() === column.toLowerCase());
+      && vocabulary.entries.some((candidate) =>
+        (candidate.kind === 'column' || candidate.kind === 'dimension')
+        && (candidate.physical?.relation ?? candidate.model) === base
+        && (candidate.physical?.column ?? candidate.name).toLowerCase() === column.toLowerCase());
     const islandColumnsBound = islandColumns.map((column) => {
       if (!sameNameOnBase(column.relation, column.column)) return column;
       const bound = qualify(dialect, base, column.column);
@@ -350,7 +434,18 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
       rebound.add(`${filter.relation}.${filter.column} read from ${base}.${filter.column}, the same column on the relation the measures come from`);
       return { ...filter, relation: base };
     });
-    const needed = new Set<string>([...islandColumnsBound.map((c) => c.relation), ...islandFilters.map((f) => f.relation), ...(islandWindow ? [islandWindow.relation] : []), ...islandMeasures.flatMap((m) => (scopes.get(m) ?? []).map((s) => s.relation))]);
+    // A measure's own restriction is read the same way: "season = 2016" on the
+    // season table restricts the game table's season column just as truthfully
+    // when that is where this island's facts live.
+    const islandScopes = new Map<PhysicalMeasure, BoundPredicate[]>();
+    for (const measure of islandMeasures) {
+      islandScopes.set(measure, (scopes.get(measure) ?? []).map((scope) => {
+        if (!sameNameOnBase(scope.relation, scope.column)) return scope;
+        rebound.add(`${scope.relation}.${scope.column} read from ${base}.${scope.column}, the same column on the relation the measures come from`);
+        return { ...scope, relation: base };
+      }));
+    }
+    const needed = new Set<string>([...islandColumnsBound.map((c) => c.relation), ...islandFilters.map((f) => f.relation), ...(islandWindow ? [islandWindow.relation] : []), ...islandMeasures.flatMap((m) => (islandScopes.get(m) ?? []).map((s) => s.relation))]);
     const joins: string[] = [];
     const joined = new Set([base]);
     for (const relation of needed) {
@@ -365,7 +460,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
         const fields = suggestSameRelationFields(vocabulary, [...intent.filters.map((filter) => filter.ref), ...intent.groupBy.map((group) => group.ref), ...intent.display], base);
         const hint = moved.length ? ` The same facts exist on ${relation}: ${moved.map((item) => `${item.from} -> ${item.to} (${item.aggregation})`).join('; ')}; read every measure from there and keep the period.` : '';
         const fieldHint = fields.length ? ` The same fields exist on ${base}: ${fields.map((item) => `${item.from} -> ${item.to}`).join('; ')}; restrict and group there instead.` : '';
-        return refuse('join_path_required', `no governed join path from ${base} to ${relation}; read the question over one relation, taking the measures from the relation that carries the period or grouping.${hint}${fieldHint}`, true);
+        return { refusal: { tier: 'relational', code: 'join_path_required', message: `no governed join path from ${base} to ${relation}; read the question over one relation, taking the measures from the relation that carries the period or grouping.${hint}${fieldHint}`, repairable: true, relations: [base, relation] } };
       }
       for (const step of path) {
         if (joined.has(step.relation)) continue;
@@ -376,16 +471,21 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     for (const relation of joined) joinedAll.add(relation);
     // Positional parameters bind in text order: the SELECT list (measure scopes)
     // precedes the WHERE clause (filters, window), so scopes push first.
+    let unscopable: string | undefined;
     const measureSql = islandMeasures.map((measure) => {
-      if (measure.aggregate === 'derived') return `${measure.expr} AS ${dialect.quoteIdentifier(measure.alias)}`;
-      const conditions = (scopes.get(measure) ?? []).map((scope) => predicateSql(dialect, scope, params));
-      const expr = conditions.length === 0
-        ? measure.expr
-        : measure.aggregate === 'count' || measure.aggregate === 'count_distinct'
-          ? `CASE WHEN ${conditions.join(' AND ')} THEN ${measure.expr} END`
-          : `CASE WHEN ${conditions.join(' AND ')} THEN ${measure.expr} ELSE 0 END`;
+      const scope = islandScopes.get(measure) ?? [];
+      // Rendering a predicate pushes its bound values, so a formula that
+      // repeats the restriction renders it again rather than reusing the text.
+      const render = () => scope.map((predicate) => predicateSql(dialect, predicate, params));
+      if (measure.aggregate === 'derived') {
+        const scoped = scope.length === 0 ? measure.expr : scopeFormulaAggregates(measure.expr, render);
+        if (!scoped) { unscopable = measure.alias; return ''; }
+        return `${scoped} AS ${dialect.quoteIdentifier(measure.alias)}`;
+      }
+      const expr = restrictedAggregateArgument(measure.expr, measure.aggregate, render());
       return `${AGG_SQL[measure.aggregate]!(expr)} AS ${dialect.quoteIdentifier(measure.alias)}`;
     });
+    if (unscopable) return refuse('not_relational', `${unscopable} is a derived metric whose formula cannot carry a per-measure restriction`, false);
     const where: string[] = [];
     for (const filter of islandFilters) where.push(predicateSql(dialect, filter, params));
     if (islandWindow) {
@@ -470,6 +570,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   if (intent.limit !== undefined && !intent.ordering && intent.expectedShape !== 'lookup') {
     return refuse('relational_compose_failed', `this reading takes the first ${intent.limit} rows with no ordering, so which rows come back is arbitrary; order by one of ${visible.map((measure) => measure.alias).join(', ')}`, true);
   }
+  let orderingAlias: string | undefined;
   if (intent.ordering) {
     const measureIndex = intent.ordering.ref.startsWith('measure:') ? Number(intent.ordering.ref.slice('measure:'.length)) || 0 : intent.measures.findIndex((measure) => measure.ref === intent.ordering!.ref);
     const target = measureIndex >= 0
@@ -481,10 +582,15 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     // them the top ten.
     if (!target) return refuse('relational_compose_failed', `the ordering ${intent.ordering.ref} names nothing this reading projects; order by one of ${[...visible.map((measure) => measure.alias), ...columns.map((column) => column.alias)].join(', ')}`, true);
     orderBy = `\nORDER BY ${dialect.quoteIdentifier(target)} ${intent.ordering.direction.toUpperCase()}`;
+    orderingAlias = target;
   } else if (columns.some((column) => column.grain)) {
     orderBy = `\nORDER BY ${columns.filter((column) => column.grain).map((column) => dialect.quoteIdentifier(column.alias)).join(', ')}`;
   }
-  const limit = intent.limit ? `\n${dialect.limitClause(intent.limit)}` : '';
+  // A question that asks for THE best fetches one row more than it shows: two
+  // rows with the same value are two leaders, and picking one of them without
+  // saying so is a coin toss presented as an answer.
+  const tieProbe = intent.limit === 1 && orderingAlias ? { column: orderingAlias, limit: 1 } : undefined;
+  const limit = intent.limit ? `\n${dialect.limitClause(intent.limit + (tieProbe ? 1 : 0))}` : '';
 
   let sql: string;
   const proof: string[] = [...rebound];
@@ -544,7 +650,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     candidate: {
       tier: 'relational', trust: 'governed', sql, params,
       columns: [...columns.map((column) => column.alias), ...visible.map((measure) => measure.alias)],
-      proof,
+      proof, ...(tieProbe ? { tieProbe } : {}),
     },
   };
 }

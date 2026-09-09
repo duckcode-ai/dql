@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
-import { runAskPipeline, unmetDisplayObligation } from './pipeline.js';
+import { applyMemberSelection, bindNamedSubject, memberOptionId, namesInQuestion, parseMemberOption, proveSubjectMatchesPopulation, runAskPipeline, unmetDisplayObligation } from './pipeline.js';
 import { fillPeriodGaps } from './execute.js';
 import { suggestSameGrainColumns, suggestSameRelationFields, buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
@@ -1041,13 +1041,29 @@ describe('a why/should question over the previous analysis is never answered as 
   const vocabulary = buildVocabularyIndex(jaffle);
   const prior = parseIntent({ version: 1, kind: 'analytics', reading: 'Top customers by beverage revenue', measures: [{ ref: 'metric:order_item.drink_revenue' }], groupBy: [{ ref: 'entity:customers.customer', role: 'key' }], display: [], filters: [], limit: 10, unresolved: [], provenance: {}, expectedShape: 'ranking' }).intent!;
   const chat = JSON.stringify({ version: 1, kind: 'conversation', reading: 'A judgment call', reply: 'Melissa Lopez stands out as the one to build around because she leads the ranking.', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
-  it('ends as the unsupported gap naming the answerable reading, with zero SQL', async () => {
-    let executed = 0;
-    const outcome = await runAskPipeline({ question: 'Which of those customers should we build our loyalty program around, and why?', vocabulary, provider: scripted([chat]), prior, prepareDeps: {}, executeDeps: { run: async () => { executed += 1; throw new Error('must not execute'); } } });
-    expect(executed).toBe(0);
-    expect(outcome.kind).toBe('gap');
-    if (outcome.kind === 'gap') { expect(outcome.gap).toBe('unsupported'); expect(outcome.text).toMatch(/Research can investigate/); expect(outcome.text).not.toMatch(/stands out/); }
+  it('delivers the measured comparison and refuses the judgment, never the interpreter\'s own opinion', async () => {
+    // A vocabulary the relational tier can actually compose, so the question
+    // reaches an answer rather than a binding refusal.
+    const composable = buildVocabularyIndex({
+      metrics: [{ name: 'points', label: 'Points', aggregation: 'sum', physical: { relation: 'dev.season_facts', column: 'points', aggregate: 'sum' } }],
+      dimensions: [{ name: 'player', model: 'season_facts', label: 'Player', dataType: 'string', physical: { relation: 'dev.season_facts', column: 'player_name' } }],
+    });
+    const ranking = parseIntent({ version: 1, kind: 'analytics', reading: 'Top players by points', measures: [{ ref: 'metric:points' }], groupBy: [{ ref: 'dimension:season_facts.player', role: 'categorical' }], display: [], filters: [], ordering: { ref: 'metric:points', direction: 'desc' }, limit: 10, unresolved: [], provenance: {}, expectedShape: 'ranking' }).intent!;
+    const opinion = JSON.stringify({ version: 1, kind: 'conversation', reading: 'A judgment call', reply: 'Melissa Lopez stands out as the one to build around because she leads the ranking.', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+    const outcome = await runAskPipeline({
+      question: 'Which of those players should we build our team around, and why?', vocabulary: composable, provider: scripted([opinion]), prior: ranking,
+      prepareDeps: { blockSql: () => undefined },
+      executeDeps: { run: async () => ({ columns: ['player', 'points'], rows: [{ player: 'Harden', points: 2888 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind !== 'answered') return;
+    // The judgment is named as NOT computed, and the model's own opinion of
+    // who "stands out" never reaches the reader.
+    expect(outcome.text).toMatch(/not computed here/);
+    expect(outcome.text).toMatch(/Research can investigate/);
+    expect(outcome.text).not.toMatch(/stands out/);
   });
+
   it('a greeting with no prior stays a conversation', async () => {
     const result = await resolveIntent({ question: 'why hello there', vocabulary, provider: scripted([chat]) });
     expect(result.status).toBe('conversation');
@@ -1598,5 +1614,217 @@ describe('a match that covers several members', () => {
     const grouped: AnalyticalIntentV1 = { ...asked('contains', ['Curry']), groupBy: [{ ref: 'dimension:season_facts.player_id', role: 'key' }] };
     keepMembersApart(grouped, vocabulary);
     expect(grouped.groupBy).toHaveLength(1);
+  });
+});
+
+describe('a name that reads several people is a question, not a sum', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'points_scored', label: 'Points scored', aggregation: 'sum', physical: { relation: 'dev.season_facts', column: 'points', aggregate: 'sum' } }],
+    dimensions: [
+      { name: 'player', model: 'season_facts', label: 'Player', dataType: 'string', physical: { relation: 'dev.season_facts', column: 'player_name' } },
+      { name: 'player_id', model: 'season_facts', label: 'Player ID', dataType: 'number', physical: { relation: 'dev.season_facts', column: 'player_id' } },
+    ],
+  });
+  const CURRYS = ['Eddy Curry', 'JamesOn Curry', 'Michael Curry', 'Seth Curry', 'Stephen Curry'];
+  const reply = (op: 'eq' | 'in') => JSON.stringify({
+    version: 1, kind: 'analytics', reading: "Stephen Curry's points.",
+    measures: [{ ref: 'metric:points_scored' }], groupBy: [], display: [],
+    filters: [{ ref: 'dimension:season_facts.player', op, values: ['Curry'], source: 'question' }],
+    unresolved: [], provenance: {}, expectedShape: 'scalar',
+  });
+  const provider = (op: 'eq' | 'in'): AgentProvider => ({ name: 'ollama', available: async () => true, generate: async () => reply(op) });
+  const run = async (op: 'eq' | 'in', found: string[], rows: Array<Record<string, unknown>>) => {
+    const runs: Array<{ sql: string; params: unknown[] }> = [];
+    const outcome = await runAskPipeline({
+      question: "Show Curry's performance.", vocabulary, provider: provider(op), prepareDeps: {},
+      executeDeps: { run: async (sql, params) => {
+        runs.push({ sql, params: params ?? [] });
+        return runs.length === 1
+          ? { columns: ['points_scored'], rows: [{ points_scored: null }], rowCount: 1, executionTimeMs: 1 }
+          : { columns: Object.keys(rows[0] ?? { points_scored: 0 }), rows, rowCount: rows.length, executionTimeMs: 1 };
+      } },
+      suggestMembers: async () => found,
+    });
+    return { outcome, runs };
+  };
+
+  it('five members behind one singular name end the turn in a question, and nothing is aggregated', async () => {
+    const { outcome, runs } = await run('eq', CURRYS, []);
+    expect(outcome.kind).toBe('clarify');
+    if (outcome.kind !== 'clarify') return;
+    expect(outcome.question).toMatch(/matches 5 members of Player/);
+    expect(outcome.options.map((option) => option.label)).toEqual([...CURRYS, 'All 5, one row each']);
+    // Nothing ran a second time, and no answer or result was persisted.
+    expect(runs).toHaveLength(1);
+    expect(outcome.receipt.grounding?.join(' ')).toMatch(/asked which one instead of adding them together/);
+    expect(outcome.receipt.executed?.rowCount).toBe(0);
+  });
+
+  it('each option carries the member it names, and the set carries all of them', async () => {
+    const { outcome } = await run('eq', CURRYS, []);
+    if (outcome.kind !== 'clarify') throw new Error('expected a clarification');
+    expect(parseMemberOption(outcome.options[4]!.ref)).toEqual({ ref: 'dimension:season_facts.player', values: ['Stephen Curry'] });
+    expect(parseMemberOption(outcome.options[5]!.ref)).toEqual({ ref: 'dimension:season_facts.player', values: CURRYS });
+    expect(parseMemberOption('dimension:season_facts.player')).toBeUndefined();
+    expect(parseMemberOption(memberOptionId('dimension:x', ['a=b']))).toEqual({ ref: 'dimension:x', values: ['a=b'] });
+  });
+
+  it('one member behind the name is canonicalised and answered, naming only that member', async () => {
+    const { outcome, runs } = await run('eq', ['Stephen Curry'], [{ points_scored: 2388 }]);
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind !== 'answered') return;
+    expect(runs).toHaveLength(2);
+    expect(runs[1]!.params).toContain('Stephen Curry');
+    expect(outcome.intent.filters[0]!.values).toEqual(['Stephen Curry']);
+  });
+
+  it('a set that widens to several members keeps each one its own row', async () => {
+    const { outcome } = await run('in', CURRYS, [{ player_id: 201939, player: 'Stephen Curry', points_scored: 2388 }]);
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind !== 'answered') return;
+    expect(outcome.intent.groupBy).toEqual([{ ref: 'dimension:season_facts.player_id', role: 'key' }]);
+    expect(outcome.intent.display).toEqual(['dimension:season_facts.player']);
+  });
+
+  it('the member the user chose is the member the query reads', async () => {
+    const intent: AnalyticalIntentV1 = {
+      version: 1, kind: 'analytics', reading: "Curry's points in 2017.", measures: [{ ref: 'metric:points_scored' }], groupBy: [], display: [],
+      filters: [{ ref: 'dimension:season_facts.player', op: 'eq', values: ['Curry'], source: 'question' }],
+      expectedShape: 'scalar', unresolved: [], provenance: {},
+    };
+    applyMemberSelection(intent, { ref: 'dimension:season_facts.player', values: ['Seth Curry'] }, vocabulary);
+    expect(intent.filters).toEqual([{ ref: 'dimension:season_facts.player', op: 'eq', values: ['Seth Curry'], source: 'clarification' }]);
+    expect(intent.reading).toContain('Seth Curry');
+    expect(intent.provenance['dimension:season_facts.player']).toMatch(/member you chose/);
+  });
+
+  it('choosing all of them separates them', async () => {
+    const intent: AnalyticalIntentV1 = {
+      version: 1, kind: 'analytics', reading: "Curry's points.", measures: [{ ref: 'metric:points_scored' }], groupBy: [], display: [],
+      filters: [{ ref: 'dimension:season_facts.player', op: 'eq', values: ['Curry'], source: 'question' }],
+      expectedShape: 'scalar', unresolved: [], provenance: {},
+    };
+    applyMemberSelection(intent, { ref: 'dimension:season_facts.player', values: CURRYS }, vocabulary);
+    expect(intent.filters[0]!.op).toBe('in');
+    expect(intent.groupBy).toEqual([{ ref: 'dimension:season_facts.player_id', role: 'key' }]);
+    expect(proveSubjectMatchesPopulation(intent, vocabulary)).toBeUndefined();
+  });
+
+  it('a single row that would carry several members is proven impossible before it runs', async () => {
+    const merged: AnalyticalIntentV1 = {
+      version: 1, kind: 'analytics', reading: "Stephen Curry's points.", measures: [{ ref: 'metric:points_scored' }], groupBy: [], display: [],
+      filters: [{ ref: 'dimension:season_facts.player', op: 'in', values: CURRYS, source: 'question' }],
+      expectedShape: 'scalar', unresolved: [], provenance: {},
+    };
+    expect(proveSubjectMatchesPopulation(merged, vocabulary)).toMatch(/reads 5 members .* separates none of them/);
+    // A reading that already separates them, and a single member, both pass.
+    expect(proveSubjectMatchesPopulation({ ...merged, groupBy: [{ ref: 'dimension:season_facts.player_id', role: 'key' }] }, vocabulary)).toBeUndefined();
+    expect(proveSubjectMatchesPopulation({ ...merged, filters: [{ ...merged.filters[0]!, op: 'eq', values: ['Stephen Curry'] }] }, vocabulary)).toBeUndefined();
+  });
+
+  it('an interpretation that merges members is never prepared, and says so', async () => {
+    const merging: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({
+      version: 1, kind: 'analytics', reading: "Stephen Curry's points.", measures: [{ ref: 'metric:points_scored' }], groupBy: [], display: [],
+      filters: [{ ref: 'dimension:season_facts.player', op: 'in', values: CURRYS, source: 'question' }],
+      unresolved: [], provenance: {}, expectedShape: 'scalar',
+    }) };
+    let executed = 0;
+    const outcome = await runAskPipeline({
+      question: "Show Stephen Curry's performance.", vocabulary, provider: merging, prepareDeps: {},
+      executeDeps: { run: async () => { executed += 1; return { columns: ['points_scored'], rows: [{ points_scored: 3002 }], rowCount: 1, executionTimeMs: 1 }; } },
+    });
+    // The host separates them rather than refusing, so the rows are honest.
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.intent.groupBy).toEqual([{ ref: 'dimension:season_facts.player_id', role: 'key' }]);
+    expect(executed).toBe(1);
+  });
+});
+
+describe('a subject the reading claims is a subject the query reads', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'points_scored', label: 'Points scored', aggregation: 'sum', physical: { relation: 'dev.season_facts', column: 'points', aggregate: 'sum' } }],
+    dimensions: [
+      { name: 'player_name', model: 'season_facts', label: 'Player', dataType: 'string', physical: { relation: 'dev.season_facts', column: 'player_name' } },
+    ],
+  });
+  const reading = (text: string, filters: AnalyticalIntentV1['filters'] = []): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: text, measures: [{ ref: 'metric:points_scored' }], groupBy: [], display: [], filters,
+    expectedShape: 'scalar', unresolved: [], provenance: {},
+  });
+
+  it('reads the names a question leans on, and passes over its ordinary words', () => {
+    expect(namesInQuestion("How did LeBron James's total points change from calendar 2016 to calendar 2017?", vocabulary)).toContain('LeBron James');
+    expect(namesInQuestion('Who scored the most points in calendar year 2017?', vocabulary)).toEqual([]);
+    expect(namesInQuestion('Show monthly scoring totals during calendar 2017.', vocabulary)).toEqual([]);
+  });
+
+  it('binds the member the reading is about when the warehouse holds it', async () => {
+    const intent = reading("Compare LeBron James's total points in 2016 versus 2017.");
+    const notes = await bindNamedSubject(intent, "How did LeBron James's total points change?", vocabulary, async () => ['LeBron James']);
+    expect(intent.filters).toEqual([{ ref: 'dimension:season_facts.player_name', op: 'eq', values: ['LeBron James'], source: 'question' }]);
+    expect(notes[0]).toMatch(/the restriction was missing/);
+    expect(intent.provenance['dimension:season_facts.player_name']).toMatch(/the reading's own subject is what the query reads/);
+  });
+
+  it('changes nothing when the name is not a member, or the filter already carries it', async () => {
+    const absent = reading('Total points for the Lakers.');
+    expect(await bindNamedSubject(absent, 'How much did the Lakers score?', vocabulary, async () => [])).toEqual([]);
+    expect(absent.filters).toEqual([]);
+    const already = reading("LeBron James's points.", [{ ref: 'dimension:season_facts.player_name', op: 'eq', values: ['LeBron James'], source: 'question' }]);
+    expect(await bindNamedSubject(already, 'How many points did LeBron James score?', vocabulary, async () => { throw new Error('must not probe'); })).toEqual([]);
+    // A BROADER restriction is not that name: "contains Curry" under a reading
+    // about Stephen Curry is narrowed to the member the reading claims.
+    const broad = reading("Stephen Curry's points.", [{ ref: 'dimension:season_facts.player_name', op: 'contains', values: ['Curry'], source: 'question' }]);
+    const narrowed = await bindNamedSubject(broad, "Show Stephen Curry's performance.", vocabulary, async () => ['Seth Curry', 'Stephen Curry']);
+    expect(broad.filters).toEqual([{ ref: 'dimension:season_facts.player_name', op: 'eq', values: ['Stephen Curry'], source: 'question' }]);
+    expect(narrowed[0]).toMatch(/was broader than that name/);
+  });
+
+  it('a name the reading never mentions is not bound, however the question spells it', async () => {
+    const unclaimed = reading('Total points by month.');
+    let probed = 0;
+    expect(await bindNamedSubject(unclaimed, 'Show LeBron James by month.', vocabulary, async () => { probed += 1; return ['LeBron James']; })).toEqual([]);
+    expect(probed).toBe(0);
+  });
+});
+
+describe('one question, one shape', () => {
+  const ranking = (limit?: number): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:points' }], groupBy: [], display: [], filters: [],
+    ordering: { ref: 'metric:points', direction: 'desc' }, ...(limit === undefined ? {} : { limit }),
+    expectedShape: 'ranking', unresolved: [], provenance: {},
+  });
+  const limitFor = (question: string, limit?: number) => {
+    const intent = ranking(limit);
+    freezeSuperlativeShape(intent, question);
+    return intent.limit;
+  };
+
+  it('a singular superlative is one row, however many the interpreter asked for', () => {
+    expect(limitFor('Who scored the most points in calendar year 2017?', 10)).toBe(1);
+    expect(limitFor('Who made the most three-pointers in 2017?', 10)).toBe(1);
+    expect(limitFor('Which player had the best assist-to-turnover ratio?', 25)).toBe(1);
+    // A THRESHOLD is not a count: "with at least 20 games" sizes the cohort
+    // the question ranks, not the number of rows it asks for.
+    expect(limitFor('Who had the best assist-to-turnover ratio in 2017 with at least 20 games?', 10)).toBe(1);
+    expect(limitFor('Who led scoring in 2017?', 10)).toBe(1);
+  });
+
+  it('a plural subject or a stated count is left exactly as it was', () => {
+    expect(limitFor('Who are the top scorers this season?', 10)).toBe(10);
+    expect(limitFor('Which teams won the most games in the 2017 season?', 10)).toBe(10);
+    expect(limitFor('Who are our top five players by total points?', 5)).toBe(5);
+    expect(limitFor('Show me the top ten players by points.', 10)).toBe(10);
+    // Nothing superlative, and nothing ordered, are both left alone.
+    expect(limitFor('How many points did LeBron James score in 2017?', 10)).toBe(10);
+    const unordered: AnalyticalIntentV1 = { ...ranking(10), ordering: undefined };
+    freezeSuperlativeShape(unordered, 'Who scored the most points?');
+    expect(unordered.limit).toBe(10);
+  });
+
+  it('says why the shape is what it is', () => {
+    const intent = ranking(10);
+    freezeSuperlativeShape(intent, 'Who scored the most points in 2017?');
+    expect(intent.provenance.limit).toMatch(/asks which one/);
   });
 });

@@ -9,6 +9,7 @@ import { getDialect, type DQLManifest, type SemanticLayer } from '@duckcodeailab
 import {
   buildVocabularyIndex,
   classifyWarehouseError,
+  parseMemberOption,
   runAskPipeline,
   type AgentProvider,
   type AgentRouteExecutor,
@@ -346,8 +347,14 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     return vocabulary;
   };
 
+  // A relationship the warehouse proved holds for as long as the snapshot and
+  // the connection do; proving it twice would ask the same question twice.
+  const provenJoins = new Map<string, Map<string, RelationalJoinStep[]>>();
   const prepareDeps = (connection: ConnectionConfig, vocabulary: VocabularyIndex, engine?: PrepareDeps['engine']): PrepareDeps => {
     const layer = deps.getSemanticLayer();
+    const provenScope = `${deps.getManifest().snapshotId}|${connectionKey(connection)}`;
+    if (!provenJoins.has(provenScope)) provenJoins.set(provenScope, new Map());
+    const provenJoinPath = provenJoins.get(provenScope)!;
     const dialect = getDialect(connection.driver);
     const relationOfCube = new Map<string, string>();
     const cubeOfRelation = new Map<string, string>();
@@ -375,7 +382,31 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       ...(layer ? { compileSemantic: (request) => deps.compileSemantic(request, connection) } : {}),
       // Two governed join sources, in order: the semantic layer's entity
       // joins, then the relationships the team declared in Domain Studio.
-      joinPath: (fromRelation, toRelation) => semanticJoinPath(fromRelation, toRelation) ?? declaredJoinPath(fromRelation, toRelation),
+      joinPath: (fromRelation, toRelation) => semanticJoinPath(fromRelation, toRelation) ?? provenJoinPath.get(`${fromRelation}->${toRelation}`) ?? declaredJoinPath(fromRelation, toRelation),
+      proveJoinPath: async (fromRelation, toRelation) => {
+        const executor = deps.executor as QueryExecutor & { executePositional?: QueryExecutor['executePositional'] };
+        if (!connection || typeof executor.executePositional !== 'function') return undefined;
+        const cached = provenJoinPath.get(`${fromRelation}->${toRelation}`);
+        if (cached) return cached;
+        const columnsOf = (relation: string): string[] => vocabulary.entries.find((entry) => entry.kind === 'relation' && entry.ref.endsWith(relation))?.columns ?? [];
+        const column = sharedKeyColumn(columnsOf(fromRelation), columnsOf(toRelation));
+        if (!column) return undefined;
+        try {
+          const proof = await executor.executePositional(relationshipProofSql(fromRelation, toRelation, column, (name) => dialect.quoteIdentifier(name)), [], connection, { maxRows: 1 });
+          const row = (proof.rows as Array<Record<string, unknown>>)[0] ?? {};
+          const rows = Number(row.label_rows ?? 0);
+          const keys = Number(row.label_keys ?? 0);
+          const uncovered = Number(row.uncovered ?? 1);
+          // Unique there, and covering every row here: anything else is not a
+          // relationship, it is a guess that would multiply or drop rows.
+          if (rows === 0 || rows !== keys || uncovered !== 0) return undefined;
+          const left = fromRelation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
+          const right = toRelation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
+          const step = [{ relation: toRelation, on: `${left}.${dialect.quoteIdentifier(column)} = ${right}.${dialect.quoteIdentifier(column)}` }];
+          provenJoinPath.set(`${fromRelation}->${toRelation}`, step);
+          return step;
+        } catch { return undefined; }
+      },
       dialect: { quoteIdentifier: (name) => dialect.quoteIdentifier(name), dateTrunc: (grain, expr) => dialect.dateTrunc(grain, expr), limitClause: (limit) => dialect.limitClause(limit) },
       blockSql: (ref) => vocabulary.get(ref)?.sql,
       prepareBlock: (ref, context) => prepareBlockForAsk(deps.projectRoot, vocabulary.get(ref), context, connection?.driver),
@@ -470,6 +501,9 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       // follows must carry it: a selection that only reaches the prompt can be
       // ignored, and the question then comes back a second time.
       ...(selectedMeaning(request, vocabulary) ? { selection: selectedMeaning(request, vocabulary)! } : {}),
+      // An identity the user settled is carried the same way: the option names
+      // the dimension and the member, so the next turn reads that person.
+      ...(selectedMember(request) ? { memberSelection: selectedMember(request)! } : {}),
       explorationOptIn: explorationOptIn(request),
       // Research branches phrase hypotheses ("because", "drivers"); the
       // full-question clause check is for questions a person asked.
@@ -530,6 +564,15 @@ function failure(runId: string, message: string, code: 'provider_error' | 'execu
  * vocabulary holds. A selection the vocabulary cannot resolve is ignored here
  * (the router validates the id separately); it is never turned into SQL.
  */
+export function selectedMember(request: AgentRunRequest): { ref: string; values: string[] } | undefined {
+  const id = request.selectedEvidenceId?.trim();
+  return id ? parseMemberOption(id) : undefined;
+}
+
+/**
+ * The clarification option the user picked, when it names something this
+ * vocabulary holds.
+ */
 export function selectedMeaning(request: AgentRunRequest, vocabulary: VocabularyIndex): { ref: string; label?: string } | undefined {
   const id = request.selectedEvidenceId?.trim();
   if (!id) return undefined;
@@ -547,6 +590,30 @@ export function selectedMeaning(request: AgentRunRequest, vocabulary: Vocabulary
 export function memberCandidatesSql(relation: string, column: string, quote: (name: string) => string, limit = 7): string {
   const qualified = relation.split('.').map((part) => quote(part)).join('.');
   return `SELECT DISTINCT ${quote(column)} AS member FROM ${qualified} WHERE ${quote(column)} IS NOT NULL AND LOWER(CAST(${quote(column)} AS VARCHAR)) LIKE ? ORDER BY 1 LIMIT ${limit}`;
+}
+
+/**
+ * THE TWO THINGS A RELATIONSHIP MUST PROVE. A key that repeats in the relation
+ * carrying the label multiplies the facts joined to it, and a key the label
+ * relation does not hold drops rows silently — so a join nobody declared is
+ * admitted only when the warehouse says the key is unique there AND every key
+ * the facts carry appears there. One statement answers both.
+ */
+export function relationshipProofSql(factRelation: string, labelRelation: string, column: string, quote: (name: string) => string): string {
+  const fact = factRelation.split('.').map((part) => quote(part)).join('.');
+  const label = labelRelation.split('.').map((part) => quote(part)).join('.');
+  const key = quote(column);
+  return `SELECT (SELECT COUNT(*) FROM ${label}) AS label_rows,`
+    + ` (SELECT COUNT(DISTINCT ${key}) FROM ${label}) AS label_keys,`
+    + ` (SELECT COUNT(*) FROM (SELECT DISTINCT ${key} AS k FROM ${fact} WHERE ${key} IS NOT NULL) AS f`
+    + ` LEFT JOIN ${label} AS l ON f.k = l.${key} WHERE l.${key} IS NULL) AS uncovered`;
+}
+
+/** A key both relations spell the same way, and that reads like an identifier. */
+export function sharedKeyColumn(factColumns: Iterable<string>, labelColumns: Iterable<string>): string | undefined {
+  const label = new Map([...labelColumns].map((column) => [column.toLowerCase(), column]));
+  const shared = [...factColumns].filter((column) => label.has(column.toLowerCase()));
+  return shared.find((column) => /(^|_)(id|key)$/i.test(column)) ?? undefined;
 }
 
 export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['gap']): { title: string; code: 'policy_blocked' | 'ambiguous' | 'no_data' | 'modeling_gap' } {
@@ -689,7 +756,7 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     return withReceipt({ summary: outcome.kind === 'definition' ? 'Explained a governed definition.' : 'Replied conversationally.', answer: outcome.reply, answerKind: 'conversational', status: 'completed', trustState: 'not_applicable', stopReason: 'conversational_reply', resolvedRoute: 'conversation', artifacts: [], evaluations: [], nextActions: [], telemetry });
   }
   if (outcome.kind === 'clarify') {
-    const clarificationOptions: NonNullable<AgentRouteExecutorResult['clarificationOptions']> = outcome.options.map((option) => ({ id: option.ref, label: option.label, ...(option.description ? { description: option.description } : {}), kind: 'vocabulary' }));
+    const clarificationOptions: NonNullable<AgentRouteExecutorResult['clarificationOptions']> = outcome.options.map((option) => ({ id: option.ref, label: option.label, ...(option.description ? { description: option.description } : {}), kind: option.ref.startsWith('member:') ? 'member' : 'vocabulary' }));
     return withReceipt({ summary: outcome.question, answer: outcome.question, status: 'needs_clarification', trustState: 'not_applicable', stopReason: 'needs_clarification', resolvedRoute: 'clarify', answerRefusalCode: 'ambiguous', clarificationOptions, artifacts: [{ id: `${runId}:clarify`, kind: 'answer', title: 'One question before running this', trustState: 'not_applicable', payload: { kind: 'no_answer', text: outcome.question, answer: outcome.question, ...common } }], evaluations: [], nextActions: [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }], telemetry });
   }
   if (outcome.kind === 'gap') {

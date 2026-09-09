@@ -227,12 +227,19 @@
     {
       "id": "nb05-build-around",
       "question": "Which of those players should we build our team around, and why?",
-      "tier": "none",
-      "outcome": "gap",
-      "note": "A recommendation with a why: unsupported by Ask, named as such with Research offered; zero SQL and no invented judgment.",
+      "tier": "any",
+      "outcome": "answered_with_caveat",
+      "note": "A recommendation with a why: the measured comparison is delivered, the judgment and the cause are refused in the answer, and Research is offered. Ask never recommends.",
       "forbids": {
-        "sql": true
-      }
+        "says": [
+          "I recommend",
+          "you should build"
+        ]
+      },
+      "saysAll": [
+        "not computed here",
+        "Research"
+      ]
     }
   ]
 }

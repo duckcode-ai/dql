@@ -38,14 +38,14 @@ import { createSeededSqliteExecutor, type GoldenSeed, type SeededSqliteExecutor 
  * suite carries no known-failure exemptions: every case must pass.
  */
 
-type Outcome = 'rows' | 'clarify_or_rows' | 'gap' | 'conversation';
+type Outcome = 'rows' | 'clarify_or_rows' | 'gap' | 'conversation' | 'answered_with_caveat';
 type Tier = 'certified' | 'governed' | 'any' | 'none';
 interface Reference { sql: string; columns: Record<string, string[]>; identity?: string[] }
 interface GoldenCase extends Reference {
   id: string; question: string; outcome?: Outcome; tier: Tier;
   identity?: string[]; keys?: string[]; ordered?: boolean; requiredColumns?: string[];
   alternatives?: Reference[]; note?: string;
-  keeps?: string[]; forbids?: { route?: string; block?: string; rowCountAbove?: number; booleanBreakdown?: boolean; sql?: boolean };
+  keeps?: string[]; saysAll?: string[]; forbids?: { route?: string; block?: string; rowCountAbove?: number; booleanBreakdown?: boolean; sql?: boolean; says?: string[] };
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -300,6 +300,14 @@ function judge(spec: GoldenCase, run: any, run0?: any): Verdict {
   if (outcome === 'gap') {
     if (!isGap && !isClarify) reasons.push(`expected an honest gap, got ${run?.route}/${run?.status}${failure ? ` (failure: ${String(failure.message).slice(0, 120)})` : ''}${refusalCode ? ` [${refusalCode}]` : ''} with ${result?.rows.length ?? 0} rows`);
     if (spec.forbids?.sql && (run?.telemetry?.sqlExecutions ?? 0) > 0) reasons.push(`a gap must execute nothing; ${run.telemetry.sqlExecutions} SQL executed`);
+    return { pass: reasons.length === 0, reasons, observed };
+  }
+  // An answer that must SAY something: the measured part is delivered and the
+  // part this project does not compute is refused in the text.
+  if (outcome === 'answered_with_caveat') {
+    if (isGap || isClarify) reasons.push(`expected an answer with a caveat, got ${run?.route}/${run?.status}${refusalCode ? ` [${refusalCode}]` : ''}`);
+    for (const phrase of spec.saysAll ?? []) if (!userText(run).toLowerCase().includes(phrase.toLowerCase())) reasons.push(`the answer never says ${JSON.stringify(phrase)}`);
+    for (const phrase of spec.forbids?.says ?? []) if (userText(run).toLowerCase().includes(phrase.toLowerCase())) reasons.push(`the answer says ${JSON.stringify(phrase)}`);
     return { pass: reasons.length === 0, reasons, observed };
   }
   if (outcome === 'clarify_or_rows' && isClarify) return { pass: reasons.length === 0, reasons, observed };

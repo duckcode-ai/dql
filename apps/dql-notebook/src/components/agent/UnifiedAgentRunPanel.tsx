@@ -3054,7 +3054,7 @@ function ClarificationChoiceList({
           type="button"
           className="dql-hover dql-lift"
           onClick={() => onSelect(option)}
-          title={`Use governed evidence ${option.id}`}
+          title={option.kind === 'member' ? `Read the question about ${option.label}` : `Use governed evidence ${option.id}`}
           style={{ display: 'grid', gap: 3, width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: t.textPrimary, cursor: 'pointer', textAlign: 'left', fontFamily: t.font }}
         >
           <span style={{ fontSize: 12.5, fontWeight: 700 }}>{option.label}</span>

@@ -81,6 +81,32 @@ export function applyDerivedColumns(result: ExecutedRows, derived: NonNullable<P
   return { ...result, columns, rows };
 }
 
+/**
+ * A SUPERLATIVE THAT TIES HAS SEVERAL ANSWERS. The query fetched one row more
+ * than it shows; when that row carries the same value as the last one kept,
+ * every row sharing the top value is kept and the answer says they tie. When
+ * it does not, the extra row is dropped and nothing about it is said.
+ */
+export function resolveTie(result: ExecutedRows, probe: NonNullable<PreparedCandidate['tieProbe']>): { result: ExecutedRows; note?: string } {
+  if (result.rows.length <= probe.limit) return { result };
+  const valueOf = (row: Record<string, unknown> | undefined): unknown => {
+    if (!row) return undefined;
+    if (probe.column in row) return row[probe.column];
+    const key = Object.keys(row).find((candidate) => candidate.toLowerCase() === probe.column.toLowerCase());
+    return key === undefined ? undefined : row[key];
+  };
+  const last = valueOf(result.rows[probe.limit - 1]);
+  const next = valueOf(result.rows[probe.limit]);
+  if (last === undefined || next === undefined || String(last) !== String(next)) {
+    return { result: { ...result, rows: result.rows.slice(0, probe.limit), rowCount: probe.limit } };
+  }
+  const tied = result.rows.filter((row) => String(valueOf(row)) === String(last));
+  return {
+    result: { ...result, rows: tied, rowCount: tied.length },
+    note: `${tied.length} rows tie on ${probe.column} at ${String(last)}: all of them are shown, because no rule in this question chooses between them`,
+  };
+}
+
 export type ExecutionOutcome =
   | { ok: true; result: ExecutedRows; proofs: string[] }
   | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed' | 'no_rows_matched'; message: string; proofs: string[]; cause?: EmptyAggregateCause; warehouse?: WarehouseFailure };
@@ -198,7 +224,10 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
   }
   try {
     const executed = await deps.run(candidate.sql, candidate.params, { maxRows: deps.maxRows ?? 500, purpose: 'query', tier: candidate.tier });
-    const result = candidate.derived?.length ? applyDerivedColumns(executed, candidate.derived) : executed;
+    const computed = candidate.derived?.length ? applyDerivedColumns(executed, candidate.derived) : executed;
+    const tie = candidate.tieProbe ? resolveTie(computed, candidate.tieProbe) : { result: computed };
+    const result = tie.result;
+    if (tie.note) proofs.push(`tie: ${tie.note}`);
     proofs.push(`executed on the warehouse: ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} in ${Math.round(result.executionTimeMs)} ms`);
     if (candidate.derived?.length) proofs.push(`ratio${candidate.derived.length > 1 ? 's' : ''} ${candidate.derived.map((item) => `${item.alias} = ${item.numerator} / ${item.denominator}`).join('; ')} computed from the executed columns`);
     const cause = emptyAggregateCause(intent, result);
