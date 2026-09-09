@@ -139,7 +139,15 @@ export function describeResultColumns(intent: AnalyticalIntentV1, result: Pick<E
   };
   for (const measure of intent.measures) {
     const entry = entryOf(measure.ref);
-    const name = measure.alias ?? entry?.name ?? measure.ref.replace(/^ratio:/, '').replace(/[^A-Za-z0-9_]+/g, '_');
+    const name = measure.alias ?? entry?.name ?? measure.ref.replace(/^ratio:/, '').replace(/^change:/, '').replace(/[^A-Za-z0-9_]+/g, '_');
+    if (measure.change) {
+      // A percentage change is a fraction of the earlier value; an absolute
+      // change keeps the unit of what it compares.
+      if (measure.change.as === 'percent') { register(name, undefined, { kind: 'percent', unit: 'fraction' }); continue; }
+      const compared = intent.measures.find((item) => (item.alias ?? '') === measure.change!.base);
+      register(name, undefined, compared && !compared.derived && !compared.change ? kindOfEntry(compared.ref, compared.aggregation) : { kind: 'number' });
+      continue;
+    }
     if (measure.derived) {
       const numerator = kindOfEntry(measure.derived.numerator, measure.derived.numeratorAggregation);
       const denominator = kindOfEntry(measure.derived.denominator, measure.derived.denominatorAggregation);

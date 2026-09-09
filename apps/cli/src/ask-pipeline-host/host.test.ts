@@ -3,7 +3,7 @@ import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { connectionKey, createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, knownMissingRelation, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes } from './host.js';
+import { connectionKey, createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -260,5 +260,15 @@ describe('a connection remembers what it cannot see', () => {
     expect(composed).toContain('ANALYTICS');
     expect(composed).not.toContain('secret');
     expect(composed).not.toContain('tok');
+  });
+});
+
+describe('the members a name could mean', () => {
+  it('reads the column the query already filtered, bounded and case-insensitively', () => {
+    const sql = memberCandidatesSql('TRANSFORMED.local_player_game_facts', 'player_name', (name) => `"${name}"`);
+    expect(sql).toContain('FROM "TRANSFORMED"."local_player_game_facts"');
+    expect(sql).toContain('LOWER(CAST("player_name" AS VARCHAR)) LIKE ?');
+    expect(sql).toContain('LIMIT 7');
+    expect(sql).toContain('DISTINCT');
   });
 });

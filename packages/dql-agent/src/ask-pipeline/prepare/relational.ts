@@ -126,13 +126,15 @@ function predicateSql(dialect: SqlDialectLike, bound: BoundPredicate, params: un
 
 interface VisibleMeasure {
   alias: string;
-  kind: 'aggregate' | 'ratio' | 'derived';
+  kind: 'aggregate' | 'ratio' | 'derived' | 'change';
   /** The physical aggregate for `aggregate`; the parts for `ratio`; the inputs and formula for `derived`. */
   physical?: PhysicalMeasure;
   numerator?: RatioPart;
   denominator?: RatioPart;
   inputs?: Array<{ alias: string; measure: PhysicalMeasure }>;
   expr?: string;
+  /** A change: the aliases of the two measures it subtracts, and how it reports them. */
+  change?: { base: string; comparison: string; as: 'absolute' | 'percent' };
   /** Additive aggregates read 0 under `population: all`; anything else stays null. */
   zeroFill: boolean;
 }
@@ -199,6 +201,12 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     return 'tier' in bound ? bound : { measure: bound };
   };
   for (const [index, measure] of intent.measures.entries()) {
+    if (measure.change) {
+      // Its parts are two measures of this reading; they are resolved after the
+      // loop, when every alias is known.
+      visible.push({ alias: measure.alias ?? `change_${index + 1}`, kind: 'change', change: measure.change, zeroFill: false });
+      continue;
+    }
     if (measure.derived) {
       const alias = measure.alias ?? measure.ref.replace(/^ratio:/, '').replace(/[^A-Za-z0-9_]+/g, '_');
       const numerator = bindPart(measure.derived.numerator, `__num_${index + 1}`, measure.scope ?? [], measure.derived.numeratorAggregation);
@@ -223,6 +231,15 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     visible.push({ alias, kind: 'aggregate', physical: bound, zeroFill: ADDITIVE.has(bound.aggregate) });
   }
   if (measures.length === 0) return refuse('not_relational', 'no measure to compose');
+  // A change subtracts two measures of this reading. Both must be plain
+  // aggregates that are actually projected, or the difference is a name with
+  // nothing behind it.
+  for (const measure of visible) {
+    if (measure.kind !== 'change') continue;
+    const parts = [measure.change!.base, measure.change!.comparison];
+    const missing = parts.filter((alias) => !visible.some((item) => item.kind === 'aggregate' && item.alias === alias));
+    if (missing.length) return refuse('relational_compose_failed', `${measure.alias} compares ${parts.join(' and ')}, and this reading has no measure aliased ${missing.join(', ')}; give each period its own measure with that alias`, true);
+  }
 
   // Grouping and display columns, shared by every island.
   const columns: PhysicalColumn[] = [];
@@ -405,13 +422,23 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   const renderPart = (part: RatioPart): string => 'measure' in part
     ? `CAST(${islandOf(part.measure)}.${q(part.measure.alias)} AS DOUBLE)`
     : renderFormula(part.inputs, part.expr);
+  const columnOfAlias = (alias: string): string => {
+    const target = visible.find((item) => item.alias === alias && item.physical)!;
+    return `CAST(${islandOf(target.physical!)}.${q(target.alias)} AS DOUBLE)`;
+  };
   const projected = (measure: VisibleMeasure): string => {
+    if (measure.kind === 'change') {
+      const base = columnOfAlias(measure.change!.base);
+      const comparison = columnOfAlias(measure.change!.comparison);
+      const difference = `(${comparison} - ${base})`;
+      return `${measure.change!.as === 'percent' ? `(${difference} / NULLIF(${base}, 0))` : difference} AS ${q(measure.alias)}`;
+    }
     if (measure.kind === 'ratio') return `${renderPart(measure.numerator!)} / NULLIF(${renderPart(measure.denominator!)}, 0) AS ${q(measure.alias)}`;
     if (measure.kind === 'derived') return `${renderFormula(measure.inputs!, measure.expr!)} AS ${q(measure.alias)}`;
     const value = `${islandOf(measure.physical!)}.${q(measure.alias)}`;
     return `${population && measure.zeroFill ? `COALESCE(${value}, 0)` : value} AS ${q(measure.alias)}`;
   };
-  const needsProjection = population !== undefined || islandSql.length > 1 || visible.some((measure) => measure.kind === 'ratio' || measure.kind === 'derived');
+  const needsProjection = population !== undefined || islandSql.length > 1 || visible.some((measure) => measure.kind === 'ratio' || measure.kind === 'derived' || measure.kind === 'change');
   // Thresholds are rendered over the aggregated columns by alias.
   const thresholdSql = (extraParams: unknown[]): string[] => thresholds.map((predicate) => {
     const at = Number(predicate.ref.slice('measure:'.length));
@@ -437,6 +464,12 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
 
   // Ordering and limit apply to the final projection.
   let orderBy = '';
+  // A limit with no ordering returns whichever rows the warehouse happened to
+  // produce and calls them the top ones. A lookup may take any few rows; a
+  // ranking may not.
+  if (intent.limit !== undefined && !intent.ordering && intent.expectedShape !== 'lookup') {
+    return refuse('relational_compose_failed', `this reading takes the first ${intent.limit} rows with no ordering, so which rows come back is arbitrary; order by one of ${visible.map((measure) => measure.alias).join(', ')}`, true);
+  }
   if (intent.ordering) {
     const measureIndex = intent.ordering.ref.startsWith('measure:') ? Number(intent.ordering.ref.slice('measure:'.length)) || 0 : intent.measures.findIndex((measure) => measure.ref === intent.ordering!.ref);
     const target = measureIndex >= 0
@@ -503,6 +536,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     else if (!population) proof.push(`composed over ${[...joinedAll].join(', ')} along governed join paths${measures.some((m) => m.scope.length) ? ' with per-measure scope' : ''}`);
     for (const measure of visible) {
       if (measure.kind === 'ratio') proof.push(`${measure.alias} = ${partLabel(vocabulary, measure.numerator!)} / ${partLabel(vocabulary, measure.denominator!)}${'measure' in measure.denominator! && measure.denominator.measure.overall ? ' over every row of the period (the denominator is not grouped, and is summed before any ranking or limit)' : ''}, divided after each part is aggregated (null when the denominator is 0)`);
+      if (measure.kind === 'change') proof.push(`${measure.alias} = ${measure.change!.comparison} - ${measure.change!.base}${measure.change!.as === 'percent' ? `, over ${measure.change!.base}` : ''}, computed after both are aggregated${measure.change!.as === 'percent' ? ' (null when the earlier value is 0)' : ''}`);
       if (measure.kind === 'derived') proof.push(`${measure.alias} = ${measure.expr}, with ${measure.inputs!.map((input) => `${input.alias} = ${labelOf(vocabulary, input.measure)} on ${input.measure.relation}`).join(', ')}, evaluated after each input is aggregated on its own relation`);
     }
   }

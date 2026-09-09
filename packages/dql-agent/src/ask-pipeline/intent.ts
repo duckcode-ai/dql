@@ -51,11 +51,32 @@ export interface IntentDerivedMeasure {
   denominatorScope?: 'overall';
 }
 
+/**
+ * WHAT CHANGED BETWEEN TWO MEASURES OF THIS READING.
+ *
+ * "How did X change from 2016 to 2017, show the percentage change" is three
+ * outputs: the two period totals, and the difference between them. The parts
+ * are the ALIASES of two measures already in this reading (each restricted to
+ * its own period), not vocabulary refs: the periods are what differ, the fact
+ * is the same. Without this the reading returns two numbers and the sentence
+ * "showing the percentage change" is a claim nothing computed.
+ */
+export interface IntentChangeMeasure {
+  /** Alias of the earlier measure. */
+  base: string;
+  /** Alias of the later measure. */
+  comparison: string;
+  /** `absolute`: comparison − base. `percent`: that difference over the base. */
+  as: 'absolute' | 'percent';
+}
+
 export interface IntentMeasure {
   /** A vocabulary ref, or `ratio:<numerator>/<denominator>` when `derived` is set. */
   ref: string;
   /** A ratio of two governed measures; the parts are the refs the host proves, `ref` is only a name. */
   derived?: IntentDerivedMeasure;
+  /** The difference between two measures of this reading, by their aliases. */
+  change?: IntentChangeMeasure;
   /** Restriction that belongs to THIS measure only ("beverage revenue" → is_drink_item on this measure). */
   scope?: IntentPredicate[];
   /** Required for a `column:` ref; ignored for metrics, measures and blocks. */
@@ -131,6 +152,10 @@ export const ANALYTICAL_INTENT_JSON_SCHEMA: Record<string, unknown> = {
           derived: {
             type: 'object', additionalProperties: false, required: ['kind', 'numerator', 'denominator'],
             properties: { kind: { type: 'string', enum: ['ratio'] }, numerator: { type: 'string' }, denominator: { type: 'string' }, numeratorAggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'] }, denominatorAggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'] }, denominatorScope: { type: 'string', enum: ['overall'] } },
+          },
+          change: {
+            type: 'object', additionalProperties: false, required: ['base', 'comparison', 'as'],
+            properties: { base: { type: 'string' }, comparison: { type: 'string' }, as: { type: 'string', enum: ['absolute', 'percent'] } },
           },
           aggregation: { type: 'string', enum: ['sum', 'avg', 'count', 'count_distinct', 'min', 'max', 'median'] },
           alias: { type: 'string', maxLength: 80 },
@@ -237,6 +262,14 @@ export function parseIntent(raw: unknown): { intent?: AnalyticalIntentV1; errors
   const measures: IntentMeasure[] = [];
   for (const [index, item] of (Array.isArray(raw.measures) ? raw.measures : []).slice(0, 8).entries()) {
     if (!isRecord(item)) { errors.push({ path: `measures[${index}]`, message: 'measure needs a ref' }); continue; }
+    let change: IntentChangeMeasure | undefined;
+    if (item.change !== undefined && item.change !== null) {
+      const raw = isRecord(item.change) ? item.change : {};
+      const base = typeof raw.base === 'string' ? raw.base.trim() : '';
+      const comparison = typeof raw.comparison === 'string' ? raw.comparison.trim() : '';
+      if (!base || !comparison) { errors.push({ path: `measures[${index}].change`, message: 'a change measure is {base: <alias>, comparison: <alias>, as: "absolute"|"percent"}' }); continue; }
+      change = { base, comparison, as: raw.as === 'percent' ? 'percent' : 'absolute' };
+    }
     let derived: IntentDerivedMeasure | undefined;
     if (item.derived !== undefined && item.derived !== null) {
       const raw = isRecord(item.derived) ? item.derived : {};
@@ -246,13 +279,15 @@ export function parseIntent(raw: unknown): { intent?: AnalyticalIntentV1; errors
       const partAggregation = (value: unknown): string | undefined => (typeof value === 'string' && ['sum', 'avg', 'count', 'count_distinct', 'min', 'max'].includes(value) ? value : undefined);
       derived = { kind: 'ratio', numerator, denominator, ...(partAggregation(raw.numeratorAggregation) ? { numeratorAggregation: partAggregation(raw.numeratorAggregation) } : {}), ...(partAggregation(raw.denominatorAggregation) ? { denominatorAggregation: partAggregation(raw.denominatorAggregation) } : {}), ...(raw.denominatorScope === 'overall' ? { denominatorScope: 'overall' as const } : {}) };
     }
-    const ref = typeof item.ref === 'string' && item.ref.trim() ? item.ref.trim() : derived ? `ratio:${derived.numerator}/${derived.denominator}` : '';
-    if (!ref) { errors.push({ path: `measures[${index}]`, message: 'measure needs a ref, or a derived ratio' }); continue; }
+    const ref = typeof item.ref === 'string' && item.ref.trim() && !change ? item.ref.trim()
+      : change ? `change:${change.comparison}-${change.base}`
+      : derived ? `ratio:${derived.numerator}/${derived.denominator}` : '';
+    if (!ref) { errors.push({ path: `measures[${index}]`, message: 'measure needs a ref, a derived ratio, or a change' }); continue; }
     const aggregation = typeof item.aggregation === 'string' && AGGREGATIONS.has(item.aggregation) ? item.aggregation as IntentMeasure['aggregation'] : undefined;
     const scope = Array.isArray(item.scope)
       ? item.scope.slice(0, 4).map((predicate, at) => parsePredicate(predicate, `measures[${index}].scope[${at}]`, errors)).filter((p): p is IntentPredicate => Boolean(p))
       : undefined;
-    measures.push({ ref, ...(derived ? { derived } : {}), ...(aggregation ? { aggregation } : {}), ...(scope?.length ? { scope } : {}), ...(typeof item.alias === 'string' && item.alias.trim() ? { alias: item.alias.trim().slice(0, 80) } : {}) });
+    measures.push({ ref, ...(change ? { change } : {}), ...(derived ? { derived } : {}), ...(aggregation ? { aggregation } : {}), ...(scope?.length ? { scope } : {}), ...(typeof item.alias === 'string' && item.alias.trim() ? { alias: item.alias.trim().slice(0, 80) } : {}) });
   }
   const groupBy: IntentGroupBy[] = [];
   for (const [index, item] of (Array.isArray(raw.groupBy) ? raw.groupBy : []).slice(0, 6).entries()) {
@@ -329,7 +364,7 @@ export function intentExecutionFingerprint(intent: AnalyticalIntentV1): string {
   const executable = {
     // New fields join the fingerprint only when present, so an intent
     // without them hashes exactly as it did before they existed.
-    measures: intent.measures.map((measure) => ({ ref: measure.ref, aggregation: measure.aggregation ?? null, scope: (measure.scope ?? []).map((p) => ({ ref: p.ref, op: p.op, values: p.values })), ...(measure.derived ? { derived: measure.derived } : {}) })),
+    measures: intent.measures.map((measure) => ({ ref: measure.ref, aggregation: measure.aggregation ?? null, scope: (measure.scope ?? []).map((p) => ({ ref: p.ref, op: p.op, values: p.values })), ...(measure.derived ? { derived: measure.derived } : {}), ...(measure.change ? { change: measure.change } : {}) })),
     groupBy: intent.groupBy.map((group) => ({ ref: group.ref, role: group.role, grain: group.grain ?? null })),
     display: [...intent.display].sort(),
     filters: intent.filters.map((p) => ({ ref: p.ref, op: p.op, values: [...p.values].map(String).sort() })),
@@ -346,6 +381,9 @@ export function intentRefs(intent: AnalyticalIntentV1): string[] {
   const refs = new Set<string>();
   for (const measure of intent.measures) {
     // A ratio's identity is its parts; its own ref is only a name.
+    // A change names two measures OF THIS READING by alias; it holds no
+    // vocabulary ref of its own and there is nothing here to authorize.
+    if (measure.change) continue;
     if (measure.derived) { refs.add(measure.derived.numerator); refs.add(measure.derived.denominator); } else refs.add(measure.ref);
     for (const p of measure.scope ?? []) refs.add(p.ref);
   }
@@ -374,7 +412,8 @@ export function describeIntent(intent: AnalyticalIntentV1, label: (ref: string) 
   if (intent.kind !== 'analytics') return intent.reading || intent.kind;
   const measures = intent.measures.map((measure) => {
     const scope = (measure.scope ?? []).map((p) => `${label(p.ref)} ${p.op} ${p.values.join('/')}`).join(', ');
-    const name = measure.derived ? `${label(measure.derived.numerator)} per ${label(measure.derived.denominator)}` : label(measure.ref);
+    const name = measure.change ? `the ${measure.change.as === 'percent' ? 'percentage change' : 'change'} from ${measure.change.base} to ${measure.change.comparison}`
+      : measure.derived ? `${label(measure.derived.numerator)} per ${label(measure.derived.denominator)}` : label(measure.ref);
     return scope ? `${name} where ${scope}` : name;
   }).join(' and ');
   const by = intent.groupBy.length ? ` by ${intent.groupBy.map((group) => `${label(group.ref)}${group.grain ? ` (${group.grain})` : ''}`).join(', ')}` : '';

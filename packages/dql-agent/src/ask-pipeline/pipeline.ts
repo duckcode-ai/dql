@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { AgentProvider, ProviderRunOptions } from '../providers/types.js';
 import { executeCandidate, fillPeriodGaps, type ExecuteDeps, type ExecutedRows } from './execute.js';
-import { describeIntent, intentExecutionFingerprint, type AnalyticalIntentV1 } from './intent.js';
+import { describeIntent, intentExecutionFingerprint, type AnalyticalIntentV1, type IntentPredicate } from './intent.js';
 import { composeAnsweredText, composeFailedText, composeGapText, describeResultColumns, labelFor, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
 import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal, type PrepareResult } from './prepare/index.js';
-import { resolveIntent, uncoveredQuestionTerms, type IntentResolution } from './resolve-intent.js';
+import { resolveIntent, uncoveredQuestionTerms, unmetFacets, type IntentResolution } from './resolve-intent.js';
 import type { VocabularyIndex } from './vocabulary.js';
 
 /**
@@ -54,6 +54,13 @@ export interface RunAskPipelineInput {
    * project explicitly allowlists, and say so. Never invents a value.
    */
   groundLiterals?: (intent: AnalyticalIntentV1) => Promise<{ intent: AnalyticalIntentV1; notes: string[] }>;
+  /**
+   * The members of a column whose stored value CONTAINS a literal, asked only
+   * after an exact match on that same column returned nothing. "Curry" is not
+   * absent from the data; it names two players, and the honest answer shows
+   * both rather than reporting the surname as unknown.
+   */
+  suggestMembers?: (ref: string, literal: string) => Promise<string[]>;
 }
 
 const fingerprintSql = (sql: string) => `sha256:${createHash('sha256').update(sql).digest('hex').slice(0, 24)}`;
@@ -180,16 +187,23 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       // No partial answers: nothing executes, but the reading that WAS
       // answerable is named so the user can ask for exactly that.
       const answerable = resolution.intent.measures.length > 0 ? ` Answerable from this reading: ${describeIntent(resolution.intent, label).replace(/[.\s]+$/, '')}.` : '';
+      // When the reading itself carries nothing, name the measures this
+      // project does hold for the words the question used: a refusal that
+      // points at the answerable neighbour is worth more than a full stop.
+      const nearestMeasures = resolution.intent.measures.length === 0
+        ? [...new Set(input.vocabulary.lookup(input.question, { limit: 6, minScore: 0.5 }).map((hit) => hit.entry).filter((entry) => entry.kind === 'metric' || entry.kind === 'measure').map((entry) => entry.label ?? entry.name))].slice(0, 3)
+        : [];
+      const offered = nearestMeasures.length ? ` This project does measure ${nearestMeasures.join(', ')}: ask for ${nearestMeasures.length === 1 ? 'it' : 'one of them'} over a period and I can show it.` : '';
       if (material?.kind === 'unsupported') {
         // Every clause the project cannot serve is named, not only the first.
         const message = materials.map((item) => item.question ?? `"${item.clause}" asks for an operation Ask does not perform`).map((text) => text.replace(/[.\s]+$/, '')).join('. ');
-        return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: `${composeGapText('unsupported', message.replace(/[.\s]+$/, ''), [], false)}${answerable}`, receipt, intent: resolution.intent, offerExploration: false };
+        return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: `${composeGapText('unsupported', message.replace(/[.\s]+$/, ''), [], false)}${answerable}${offered}`, receipt, intent: resolution.intent, offerExploration: false };
       }
       const nearest = input.vocabulary.lookup(clause, { limit: 4, minScore: 0.5 }).map((hit) => label(hit.entry.ref));
       // A clause that came with its own explanation says more than the
       // generic sentence: read it out instead of restating the clause.
       const message = material?.question ?? `"${clause}" is not something this project's governed data describes`;
-      return { kind: 'gap', gap: 'not_modeled', message, nearest, text: `${composeGapText('not_modeled', message.replace(/[.\s]+$/, ''), nearest, false)}${answerable}`, receipt, intent: resolution.intent, offerExploration: false };
+      return { kind: 'gap', gap: 'not_modeled', message, nearest, text: `${composeGapText('not_modeled', message.replace(/[.\s]+$/, ''), nearest, false)}${answerable}${offered}`, receipt, intent: resolution.intent, offerExploration: false };
     }
     return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
   }
@@ -306,6 +320,40 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     executed = await countedExecute(candidate, intent, input.executeDeps);
     mark(`execute_${excluded.length + 1}`, executeStarted);
   }
+  // A NAME THAT MATCHED NOTHING EXACTLY MAY NAME SEVERAL MEMBERS. The query
+  // already filtered that column, so asking which of its values contain the
+  // literal is no wider a reach; one match is canonicalised, several are all
+  // shown and named, and too many stay an honest no-match.
+  if (!executed.ok && executed.code === 'no_rows_matched' && executed.cause?.kind === 'member' && input.suggestMembers && remaining() > 5_000) {
+    const candidates: Array<{ predicate: IntentPredicate; values: string[] }> = [];
+    for (const predicate of intent.filters) {
+      if (predicate.op !== 'eq' && predicate.op !== 'in') continue;
+      const literal = predicate.values.find((value): value is string => typeof value === 'string' && value.trim().length > 2);
+      if (!literal || !executed.cause.literals.includes(literal)) continue;
+      try {
+        const found = await input.suggestMembers(predicate.ref, literal);
+        if (found.length > 0 && found.length <= 6 && !found.some((value) => value.toLowerCase() === literal.toLowerCase())) candidates.push({ predicate, values: found });
+      } catch { /* a probe that fails leaves the honest no-match in place */ }
+    }
+    if (candidates.length > 0) {
+      const notes: string[] = [];
+      const widened: AnalyticalIntentV1 = {
+        ...intent,
+        filters: intent.filters.map((predicate) => {
+          const found = candidates.find((item) => item.predicate === predicate);
+          if (!found) return predicate;
+          notes.push(`identity: ${label(predicate.ref)} ${JSON.stringify(String(predicate.values[0]))} matched no member exactly; ${found.values.length === 1 ? 'it is' : 'these are'} the ${found.values.length === 1 ? 'member' : `${found.values.length} members`} whose name contains it: ${found.values.join(', ')}`);
+          return { ...predicate, op: 'in' as const, values: found.values };
+        }),
+      };
+      receipt.grounding = [...(receipt.grounding ?? []), ...notes];
+      const again = await prepare({ intent: widened, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: input.explorationOptIn });
+      if (again.chosen) {
+        const retried = await countedExecute(again.chosen, widened, input.executeDeps);
+        if (retried.ok) { candidate = again.chosen; executed = retried; intent = widened; receipt.intent = widened; }
+      }
+    }
+  }
   if (!executed.ok && executed.code === 'no_rows_matched') {
     receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);
     receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: 0, ms: Math.round(now() - executeStarted), proofs: executed.proofs };
@@ -339,6 +387,14 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // the answer is served, but the omission is named and the check does not
   // pass: opaque identifiers are not the answer to "which".
   if (filled.added > 0) receipt.executed = { ...receipt.executed!, proofs: [...(receipt.executed?.proofs ?? []), `${filled.added} ${intent.groupBy.find((group) => group.role === 'time')?.grain ?? 'period'}s of the window held no rows and are shown as zero`] };
+  // A request that listed its parts is answered part by part: the ones no ref
+  // is named for are said out loud, not left for the reader to notice.
+  const facets = unmetFacets(input.question, intent, input.vocabulary);
+  if (facets.length > 0) {
+    const message = `this answer carries nothing for ${facets.map((facet) => `"${facet}"`).join(', ')}: no governed metric or dimension of this project is named for ${facets.length === 1 ? 'it' : 'them'}`;
+    receipt.unmet = [...(receipt.unmet ?? []), { obligation: 'coverage', message }];
+    caveats.push(message);
+  }
   const unmetLabel = unmetDisplayObligation(requestedDisplay, intent, receipt.refusals, label, input.question);
   if (unmetLabel) {
     receipt.unmet = [...(receipt.unmet ?? []), { obligation: 'display_label', message: unmetLabel.message, refs: unmetLabel.refs }];

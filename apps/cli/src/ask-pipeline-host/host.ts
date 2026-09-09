@@ -451,6 +451,21 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       ...(prior ? { prior: prior.intent, ...(prior.executed === false ? { priorExecuted: false } : {}), ...(prior.summary ? { priorAnswerSummary: prior.summary } : {}) } : {}),
       ...(deps.guidance?.(request) ? { guidance: deps.guidance(request) } : {}),
       ...(connection && deps.probeLiteral && deps.literalProbeAllowed ? { groundLiterals: (intent: AnalyticalIntentV1) => groundIntentLiterals(intent, vocabulary, connection, tracedProbes(deps, request)) } : {}),
+      // A name that matched nothing exactly may still name members of the same
+      // column the query already read.
+      suggestMembers: async (ref: string, literal: string) => {
+        const entry = vocabulary.get(ref);
+        const relation = entry?.physical?.relation;
+        const column = entry?.physical?.column;
+        if (!connection || !relation || !column || !entry || entry.roles.includes('time') || entry.roles.includes('numeric') || entry.roles.includes('boolean')) return [];
+        const executor = deps.executor as QueryExecutor & { executePositional?: QueryExecutor['executePositional'] };
+        if (typeof executor.executePositional !== 'function') return [];
+        const sql = memberCandidatesSql(relation, column, (name) => `"${name.replace(/"/g, '""')}"`);
+        const found = await executor.executePositional(sql, [`%${literal.toLowerCase()}%`], connection, { maxRows: 8 });
+        return (found.rows as Array<Record<string, unknown>>)
+          .map((row) => row.member)
+          .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+      },
       // The option the user clicked is a governed ref, and the turn that
       // follows must carry it: a selection that only reaches the prompt can be
       // ignored, and the question then comes back a second time.
@@ -520,6 +535,18 @@ export function selectedMeaning(request: AgentRunRequest, vocabulary: Vocabulary
   if (!id) return undefined;
   const entry = vocabulary.get(id) ?? vocabulary.resolve(id);
   return entry ? { ref: entry.ref, ...(entry.label ? { label: entry.label } : {}) } : undefined;
+}
+
+/**
+ * The members of one column whose stored value CONTAINS a literal. Asked only
+ * after a query that already filtered that column came back empty, so it opens
+ * nothing new: it reads the column the answer was about, bounded to a handful
+ * of values, and text columns only. "Curry" is not missing from the data — it
+ * names two players.
+ */
+export function memberCandidatesSql(relation: string, column: string, quote: (name: string) => string, limit = 7): string {
+  const qualified = relation.split('.').map((part) => quote(part)).join('.');
+  return `SELECT DISTINCT ${quote(column)} AS member FROM ${qualified} WHERE ${quote(column)} IS NOT NULL AND LOWER(CAST(${quote(column)} AS VARCHAR)) LIKE ? ORDER BY 1 LIMIT ${limit}`;
 }
 
 export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['gap']): { title: string; code: 'policy_blocked' | 'ambiguous' | 'no_data' | 'modeling_gap' } {

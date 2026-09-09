@@ -114,6 +114,7 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
     '5. SHAPE. "top/best/highest N" is a ranking: ordering desc on the measure and a limit (default 10 when "top" has no number). "by <thing>" is a breakdown. "how many/what is the total" with no breakdown is a scalar. "X and Y" for one subject is a comparison.',
     '5c. A RATIO OVER RAW COLUMNS. When the project has no metric for a part (a dbt project with no semantic layer), a ratio part may be a `column:` ref with its aggregation: `derived: {"kind":"ratio","numerator":"column:<relation>.<col>","numeratorAggregation":"sum","denominator":"column:<relation>.<col2>","denominatorAggregation":"count_distinct"}` (points per game = sum of points / count_distinct of game ids over the rows that count as games). Never invent a measure name.',
     '5e. A STORED RATE IS NOT AN AVERAGE OF RATES. A column that already holds a percentage or a per-unit rate (field_goal_pct, win_rate, margin_pct) is one row\'s rate: averaging it over many rows weights a player with three attempts like one with three hundred. When the parts exist (made and attempted, wins and games), write the ratio of their sums; use the stored column only when the answer is about one row, or when the project has no parts to divide.',
+    '5f. A COMPARISON BETWEEN TWO PERIODS IS TWO SCOPED MEASURES, NEVER A GROUPING. "from 2016 to 2017", "this year versus last": write the SAME measure twice, each with its own period in `scope` and its own `alias` (points_2016, points_2017). Grouping by the period instead returns one row per period per entity and answers a different question. Then, when the question asks for the change, the difference, the growth or the improvement, add ONE more measure `{"change":{"base":"points_2016","comparison":"points_2017","as":"percent"},"alias":"points_change_pct"}` — `as` is "percent" when the question says percentage/percent change and "absolute" otherwise. A superlative over that difference ("improved the most", "biggest increase") orders by that change measure, descending, with the limit the question asks for; a threshold that applies to EACH period is one scoped measure per period with its own threshold filter.',
     '5d. A THRESHOLD ON AN AGGREGATE. "with at least 20 games", "minimum 100 attempts" is a filter on the aggregated measure, not on rows: add that measure (with an alias) and a filter `{"ref":"measure:<index of that measure>","op":"gte","values":[20]}`; it applies after aggregation.',
     '5b. A RATIO OF TWO GOVERNED MEASURES. "average order value", "revenue per order", "X per Y", "share of", "margin %" is a measure with `derived: {"kind":"ratio","numerator":<metric ref>,"denominator":<metric ref>}` and an `alias`, and no `ref` (average order value = the revenue metric / the order-count metric). A governed derived or ratio metric (its card shows `= formula` and `time <dim>`) may be used instead ONLY when it measures the same thing over the same time role as the question: a metric built from lifetime per-customer measures (lifetime spend / lifetime orders, time = the customer\'s first order date) is a cohort average, so "average order value in 2025", "by month", "last quarter" is NEVER that metric; it is the derived ratio of the period\'s revenue and orders. Use the cohort metric only when the question names the cohort itself ("customers first acquired in 2025", "customers who joined in"). "share of ALL", "% of total", "concentration": the denominator is the SAME measure over every row of the period, written `"denominatorScope":"overall"` on the derived ratio (a measure divided by itself without it is 1 for every row).',
     '6. TIME. A time axis ("by month") is a groupBy with role time and a grain, using the time dimension of the SAME model as the measure (an order total is by the orders model\'s time, an order-line revenue by the order line model\'s time). A time window ("last quarter", "in 2025") is `time.window` with an ISO half-open range plus the expression. Measures under one window must share their `time` role (see the cards); when they do not, add an `unresolved` entry with material=true and the two time dimension refs as options instead of choosing.',
@@ -582,8 +583,32 @@ export function scopedColumnOf(expr: string): { column: string; scoped: boolean 
 export function applySelectedMeaning(intent: AnalyticalIntentV1, selection: { ref: string; label?: string }, vocabulary: VocabularyIndex): void {
   const entry = vocabulary.get(selection.ref);
   if (!entry || intent.kind !== 'analytics') return;
+  let decided: IntentUnresolved | undefined;
   for (const clause of intent.unresolved) {
-    if (clause.options.includes(selection.ref)) { clause.material = false; clause.question = `Read "${clause.clause}" as ${entry.label ?? entry.name}: you chose it.`; }
+    if (!clause.options.includes(selection.ref)) continue;
+    clause.material = false;
+    clause.question = `Read "${clause.clause}" as ${entry.label ?? entry.name}: you chose it.`;
+    decided = clause;
+    // The options of that clause were alternatives: the ones the user did not
+    // pick stop restricting the reading, or the answer keeps the basis they
+    // rejected beside the one they chose.
+    const rejected = clause.options.filter((option) => option !== selection.ref);
+    intent.filters = intent.filters.filter((filter) => !rejected.includes(filter.ref));
+    intent.groupBy = intent.groupBy.filter((group) => !rejected.includes(group.ref));
+    for (const measure of intent.measures) if (measure.scope?.length) measure.scope = measure.scope.filter((scope) => !rejected.includes(scope.ref));
+  }
+  // A PERIOD BASIS is not a breakdown. Choosing the date a period is measured
+  // on rebinds the period to it — with the year the clause names — and never
+  // adds a time grouping the question did not ask for.
+  if (decided && entry.roles.includes('time')) {
+    const year = /\b(19|20)\d{2}\b/.exec(`${decided.clause} ${decided.question ?? ''}`)?.[0];
+    intent.time = {
+      ref: selection.ref,
+      ...(intent.time?.grain ? { grain: intent.time.grain } : {}),
+      ...(year ? { window: { start: `${year}-01-01`, end: `${Number(year) + 1}-01-01`, expression: decided.clause } } : intent.time?.window ? { window: intent.time.window } : {}),
+    };
+    intent.provenance[selection.ref] = 'clarification:the period basis you chose';
+    return;
   }
   const used = intentRefs(intent);
   if (used.includes(selection.ref)) return;
@@ -1090,6 +1115,62 @@ export function relativePeriodProblem(question: string, intent: AnalyticalIntent
   return { phrase: match[0], unit, fields };
 }
 
+const CHANGE_WORDS = /\b(percentage change|percent change|change|changed|difference|growth|grew|increase|increased|decrease|decreased|improve|improved|improvement|decline|declined|drop|dropped|fell|rose)\b/i;
+
+/**
+ * THE OUTPUT THE QUESTION ASKED FOR. "Show the percentage change" is a column,
+ * not a turn of phrase: a reading that returns the two totals and says it shows
+ * the change has claimed something nothing computed. A time breakdown answers
+ * "how did it change" on its own, and a measure whose own name carries the word
+ * (a growth metric) has already accounted for it; anything else owes a change
+ * measure.
+ */
+export function droppedChange(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string | undefined {
+  if (intent.kind !== 'analytics' || intent.measures.length === 0) return undefined;
+  if (intent.measures.some((measure) => measure.change)) return undefined;
+  if (intent.groupBy.some((group) => group.role === 'time' && group.grain)) return undefined;
+  const unaccounted = unaccountedQuestionWords(question, intent, vocabulary);
+  const asked = unaccounted.find((word) => CHANGE_WORDS.test(word));
+  if (!asked) return undefined;
+  // Two measures to compare, or nothing to subtract.
+  const comparable = intent.measures.filter((measure) => measure.alias && !measure.derived && !measure.change);
+  return comparable.length >= 2 ? asked : undefined;
+}
+
+const FACET_LIST = /\b(?:including|include|includes|covering|along with|as well as)\b\s+(.{3,160})$/i;
+const FACET_STOPWORDS = new Set(['his', 'her', 'their', 'its', 'our', 'my', 'your', 'the', 'a', 'an', 'and', 'or', 'also', 'other', 'any', 'all', 'each', 'every', 'some', 'please', 'data', 'details', 'detail', 'information', 'info', 'stats', 'numbers']);
+
+/**
+ * EACH FACET THE QUESTION LISTED IS ANSWERED OR NAMED. "A complete profile of
+ * X, including his career, teams and achievements" is three requests; a table
+ * of season points answers one of them, and calling that a complete profile is
+ * the claim that does the damage. A facet counts as carried only when a ref the
+ * reading uses is NAMED for it — a description that happens to mention the word
+ * is not the same as an output that answers it.
+ */
+export function unmetFacets(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
+  if (intent.kind !== 'analytics' || intent.measures.length === 0) return [];
+  const tail = FACET_LIST.exec(question)?.[1];
+  if (!tail) return [];
+  const named = new Set<string>();
+  for (const ref of intentRefs(intent)) {
+    const entry = vocabulary.get(ref);
+    for (const text of [entry?.name, entry?.label, ...(entry?.aliases ?? [])]) {
+      for (const word of normalizeVocabularyText(text ?? '').split(' ')) if (word) { named.add(word); named.add(singularWord(word)); }
+    }
+  }
+  for (const grain of [...intent.groupBy.map((group) => group.grain), intent.time?.grain]) if (grain) named.add(grain);
+  const facets = tail.split(/,| and | plus /i).map((facet) => facet.trim().replace(/[.?!]+$/, '')).filter(Boolean);
+  const unmet: string[] = [];
+  for (const facet of facets) {
+    const words = normalizeVocabularyText(facet).split(' ').filter((word) => word.length > 2 && !FACET_STOPWORDS.has(word));
+    if (words.length === 0) continue;
+    if (words.every((word) => named.has(word) || named.has(singularWord(word)))) continue;
+    unmet.push(facet);
+  }
+  return unmet.slice(0, 4);
+}
+
 export function widenedPopulation(question: string, intent: AnalyticalIntentV1, prior: AnalyticalIntentV1 | undefined): string[] {
   if (!prior || intent.kind !== 'analytics' || prior.kind !== 'analytics') return [];
   if (/\b(all|every|overall|entire|whole|any)\b/i.test(question)) return [];
@@ -1308,7 +1389,10 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     // The follow-up guard sends the interpreter back once. When its second
     // reading still replaces the previous analysis with words that name
     // nothing new, both readings are plausible and the user decides.
-    const validation = validateIntentRefs(parsed.intent, input.vocabulary, input.prior, input.question);
+    // A turn that carries a chosen meaning is not editing the previous turn's
+    // reading; it is finishing this one. Holding its repair to the refs the
+    // selection replaced rejects exactly the plan the engine asked for.
+    const validation = validateIntentRefs(parsed.intent, input.vocabulary, input.selection ? undefined : input.prior, input.question);
     if (validation.followUpReplacement && attempts > 1 && input.prior) {
       const options = [...new Set([...input.prior.measures.map((measure) => measure.ref), ...validation.intent.measures.map((measure) => measure.ref)])];
       const label = (ref: string) => input.vocabulary.get(ref)?.label ?? input.vocabulary.get(ref)?.name ?? ref;
@@ -1399,6 +1483,17 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
           question: `The previous analysis was restricted to ${widened.join(', ')}. Should this question keep that, or apply to every row?`,
           ...(ledger ? { ledger, ledgerEntries } : {}),
         };
+      }
+      // The change the question asked for is a column of the answer.
+      const change = droppedChange(input.question, validation.intent, input.vocabulary);
+      if (change) {
+        const aliases = validation.intent.measures.filter((measure) => measure.alias && !measure.derived && !measure.change).map((measure) => measure.alias!);
+        if (attempts < maxAttempts) {
+          lastDetail = `the question asks for the ${change}; the reading returns the parts and never computes it`;
+          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question asks for the ${change}, and your reading returns ${aliases.join(' and ')} without it. Resend the COMPLETE intent with one more measure that computes it: {"change":{"base":"${aliases[0]}","comparison":"${aliases[1]}","as":"${/percent|percentage/i.test(input.question) ? 'percent' : 'absolute'}"},"alias":"<name>"}. If the answer ranks by that difference, order by it and keep the limit.` });
+          continue;
+        }
+        validation.intent.unresolved.push({ clause: change, options: [], material: true, kind: 'not_modeled', origin: 'ledger', question: `The question asked for the ${change} between the periods; this reading returns ${aliases.join(' and ')} and never computes it, so it was not answered as if it had.` });
       }
       const grain = droppedGrain(input.question, validation.intent, input.vocabulary);
       if (grain) {

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, identityClauseWords, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, droppedChange, identityClauseWords, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { runAskPipeline, unmetDisplayObligation } from './pipeline.js';
@@ -1430,6 +1430,28 @@ describe('a meaning the user already picked', () => {
     expect(intent.provenance['metric:total_points']).toContain('clarification');
   });
 
+  it('applies a chosen period basis as the period, drops the basis the user rejected, and adds no breakdown', () => {
+    const periodVocabulary = buildVocabularyIndex({
+      metrics: [{ name: 'field_goals', label: 'Field goals', aggregation: 'sum' }],
+      dimensions: [
+        { name: 'season', model: 'season_facts', label: 'Source season', dataType: 'number' },
+        { name: 'game_date', model: 'game_facts', dataType: 'date', isTime: true },
+      ],
+    });
+    const intent: AnalyticalIntentV1 = {
+      version: 1, kind: 'analytics', reading: 'efficiency in 2017',
+      measures: [{ ref: 'metric:field_goals', alias: 'fg' }], groupBy: [], display: [],
+      filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: [2017], source: 'question' }],
+      expectedShape: 'ranking', provenance: {},
+      unresolved: [{ clause: 'in 2017', material: true, options: ['dimension:season_facts.season', 'dimension:game_facts.game_date'], question: "Does '2017' mean the source season or the calendar year?" }],
+    };
+    applySelectedMeaning(intent, { ref: 'dimension:game_facts.game_date' }, periodVocabulary);
+    expect(intent.time).toEqual({ ref: 'dimension:game_facts.game_date', window: { start: '2017-01-01', end: '2018-01-01', expression: 'in 2017' } });
+    expect(intent.filters).toEqual([]);
+    expect(intent.groupBy).toEqual([]);
+    expect(intent.unresolved.every((clause) => !clause.material)).toBe(true);
+  });
+
   it('groups by a chosen dimension, and never doubles a ref the reading already carries', () => {
     const grouped = unresolvedIntent();
     applySelectedMeaning(grouped, { ref: 'dimension:season_facts.player' }, vocabulary);
@@ -1494,5 +1516,55 @@ describe('the same field on the relation that carries the period', () => {
   it('moves a name filter to the name column, not to the id that shares its stem', () => {
     expect(suggestSameRelationFields(vocabulary, ['dimension:season_facts.player'], 'dev.game_facts'))
       .toEqual([{ from: 'dimension:season_facts.player', to: 'column:dev.game_facts.player_name' }]);
+  });
+});
+
+describe('the change the question asked for is a column', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'points_scored', label: 'Points scored', aggregation: 'sum' }, { name: 'revenue_growth_mom', label: 'Revenue growth', type: 'derived', expr: 'revenue / revenue_prior * 100' }],
+    dimensions: [{ name: 'game_date', model: 'game_facts', dataType: 'date', isTime: true }],
+  });
+  const two = (extra: Partial<AnalyticalIntentV1> = {}): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'points in 2016 and 2017',
+    measures: [{ ref: 'metric:points_scored', alias: 'points_2016' }, { ref: 'metric:points_scored', alias: 'points_2017' }],
+    groupBy: [], display: [], filters: [], expectedShape: 'comparison', unresolved: [], provenance: {}, ...extra,
+  });
+
+  it('is owed when the reading returns the parts and never subtracts them', () => {
+    expect(droppedChange("How did LeBron's total points change from calendar 2016 to calendar 2017? Show the percentage change.", two(), vocabulary)).toBeTruthy();
+  });
+
+  it('is discharged by the change measure, by a time breakdown, or by a metric that already means growth', () => {
+    const computed = two({ measures: [...two().measures, { ref: 'change:points_2017-points_2016', alias: 'pct', change: { base: 'points_2016', comparison: 'points_2017', as: 'percent' } }] });
+    expect(droppedChange('How did points change from 2016 to 2017? Show the percentage change.', computed, vocabulary)).toBeUndefined();
+    const trend = two({ groupBy: [{ ref: 'dimension:game_facts.game_date', role: 'time', grain: 'month' }] });
+    expect(droppedChange('How did points change month by month?', trend, vocabulary)).toBeUndefined();
+    const growthMetric = two({ measures: [{ ref: 'metric:revenue_growth_mom', alias: 'growth' }] });
+    expect(droppedChange('What was revenue growth?', growthMetric, vocabulary)).toBeUndefined();
+    // One measure is nothing to compare.
+    expect(droppedChange('How did points change?', two({ measures: [{ ref: 'metric:points_scored', alias: 'points' }] }), vocabulary)).toBeUndefined();
+  });
+});
+
+describe('each facet the question listed', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'total_points', label: 'Total points', aggregation: 'sum' }, { name: 'double_double_games', label: 'Double-double games', aggregation: 'sum', description: 'A season achievement.' }],
+    dimensions: [{ name: 'season', model: 'season_facts', label: 'Source season', dataType: 'number' }, { name: 'teams_played', model: 'season_facts', label: 'Teams played', dataType: 'number' }],
+  });
+  const profile: AnalyticalIntentV1 = {
+    version: 1, kind: 'analytics', reading: 'Grant Jerrett by season',
+    measures: [{ ref: 'metric:total_points' }, { ref: 'metric:double_double_games' }, { ref: 'dimension:season_facts.teams_played', aggregation: 'max' }],
+    groupBy: [{ ref: 'dimension:season_facts.season', role: 'categorical' }], display: [], filters: [],
+    expectedShape: 'grouped', unresolved: [], provenance: {},
+  };
+
+  it('names the parts no ref is named for, and passes over the parts that are answered', () => {
+    expect(unmetFacets('Give me a complete profile of Grant Jerrett, including his career, teams and achievements.', profile, vocabulary))
+      .toEqual(['his career', 'achievements']);
+  });
+
+  it('says nothing when the question listed no parts, or every part is carried', () => {
+    expect(unmetFacets('Give me a profile of Grant Jerrett.', profile, vocabulary)).toEqual([]);
+    expect(unmetFacets('Show his seasons, including total points and teams played.', profile, vocabulary)).toEqual([]);
   });
 });

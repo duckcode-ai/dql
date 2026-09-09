@@ -438,3 +438,50 @@ describe('the identity lives where the facts live', () => {
     expect(prepared.refusal?.code).toBe('join_path_required');
   });
 });
+
+describe('what changed between two periods', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'points_scored', label: 'Points scored', aggregation: 'sum', physical: { relation: 'dev.game_facts', expr: '"dev"."game_facts"."points"', aggregate: 'sum' } }],
+    dimensions: [{ name: 'game_date', model: 'game_facts', dataType: 'date', isTime: true, physical: { relation: 'dev.game_facts', column: 'game_date' } }],
+    relations: [{ schema: 'dev', name: 'game_facts', columns: [{ name: 'points' }, { name: 'game_date', dataType: 'DATE' }] }],
+  });
+  const scoped = (alias: string, start: string, end: string): AnalyticalIntentV1['measures'][number] => ({
+    ref: 'metric:points_scored', alias,
+    scope: [
+      { ref: 'dimension:game_facts.game_date', op: 'gte', values: [start], source: 'question' },
+      { ref: 'dimension:game_facts.game_date', op: 'lt', values: [end], source: 'question' },
+    ],
+  });
+  const reading = (measures: AnalyticalIntentV1['measures']): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'points 2016 versus 2017', measures, groupBy: [], display: [], filters: [],
+    expectedShape: 'comparison', unresolved: [], provenance: {},
+  });
+
+  it('computes the difference between the two measures it names, as a fraction of the earlier one', () => {
+    const prepared = composeRelational(reading([
+      scoped('points_2016', '2016-01-01', '2017-01-01'),
+      scoped('points_2017', '2017-01-01', '2018-01-01'),
+      { ref: 'change:points_2017-points_2016', alias: 'points_change_pct', change: { base: 'points_2016', comparison: 'points_2017', as: 'percent' } },
+    ]), vocabulary, { blockSql: () => undefined });
+    expect(prepared.refusal).toBeUndefined();
+    expect(prepared.candidate!.sql).toContain('NULLIF(CAST(island_1."points_2016" AS DOUBLE), 0)');
+    expect(prepared.candidate!.sql).toContain('AS "points_change_pct"');
+    expect(prepared.candidate!.proof.join(' ')).toContain('points_change_pct = points_2017 - points_2016');
+  });
+
+  it('refuses a change whose parts this reading does not project', () => {
+    const prepared = composeRelational(reading([
+      scoped('points_2016', '2016-01-01', '2017-01-01'),
+      { ref: 'change:points_2017-points_2016', alias: 'points_change', change: { base: 'points_2016', comparison: 'points_2017', as: 'absolute' } },
+    ]), vocabulary, { blockSql: () => undefined });
+    expect(prepared.candidate).toBeUndefined();
+    expect(prepared.refusal?.message).toContain('no measure aliased points_2017');
+  });
+
+  it('refuses to take the first N rows of an unordered reading', () => {
+    const unordered: AnalyticalIntentV1 = { ...reading([scoped('points_2017', '2017-01-01', '2018-01-01')]), expectedShape: 'ranking', limit: 5 };
+    expect(composeRelational(unordered, vocabulary, { blockSql: () => undefined }).refusal?.message).toContain('arbitrary');
+    // A lookup asks for a few rows, not for the best ones.
+    expect(composeRelational({ ...unordered, expectedShape: 'lookup' }, vocabulary, { blockSql: () => undefined }).refusal).toBeUndefined();
+  });
+});

@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import type { QueryResult, CellChartConfig } from '../../store/types';
 import type { Theme, ThemeMode } from '../../themes/notebook-theme';
-import { ChartOutput, CHART_TYPE_OPTIONS } from './ChartOutput';
+import { ChartOutput, CHART_TYPE_OPTIONS, isMeasureColumn } from './ChartOutput';
 import { TableOutput } from './TableOutput';
 
 const CHART_X_DATE_RE = /date|time|day|month|year|week|quarter|period|_at$|^at$/i;
@@ -18,12 +18,18 @@ function isChartNumericCell(value: unknown): boolean {
   return false;
 }
 
-/** Columns whose sampled non-blank values are all numeric — candidate measures. */
+/**
+ * Columns this result may plot as VALUES. The recommender and the renderer must
+ * agree, or the chart draws points while its own Y selector says player_id: the
+ * result's contract (`columnsMeta`) decides first, and sampled values only
+ * where a result carries no contract.
+ */
 function numericResultColumns(result: QueryResult): string[] {
   const sample = result.rows.slice(0, 20);
   if (sample.length === 0) return [];
   return result.columns.filter((column) =>
-    sample.some((row) => isChartNumericCell(row[column]))
+    isMeasureColumn(result, column)
+    && sample.some((row) => isChartNumericCell(row[column]))
     && sample.every((row) => {
       const value = row[column];
       return value === null || value === undefined || value === '' || isChartNumericCell(value);
