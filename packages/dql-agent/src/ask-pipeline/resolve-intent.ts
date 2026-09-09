@@ -10,7 +10,7 @@ import {
   type IntentPredicate,
   type IntentUnresolved,
 } from './intent.js';
-import { normalizeVocabularyText, suggestSameGrainColumns, trigramSimilarity, type VocabularyEntry, type VocabularyIndex, type VocabularyKind } from './vocabulary.js';
+import { normalizeVocabularyText, suggestSameGrainColumns, suggestSameRelationFields, trigramSimilarity, type VocabularyEntry, type VocabularyIndex, type VocabularyKind } from './vocabulary.js';
 
 /**
  * THE MODEL'S ONE JOB: say what the question means, in the vocabulary.
@@ -113,6 +113,7 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
     '4b. A FACT TABLE MAY KEEP ROWS A DEFINITION DOES NOT COUNT: a participation flag, a soft delete, a test order, a cancelled row. When a relation or a column card says which rows count, either use the metric that already applies that rule, or put the restriction in that measure\'s `scope`. Counting the raw column instead answers a different question at the same confidence.',
     '5. SHAPE. "top/best/highest N" is a ranking: ordering desc on the measure and a limit (default 10 when "top" has no number). "by <thing>" is a breakdown. "how many/what is the total" with no breakdown is a scalar. "X and Y" for one subject is a comparison.',
     '5c. A RATIO OVER RAW COLUMNS. When the project has no metric for a part (a dbt project with no semantic layer), a ratio part may be a `column:` ref with its aggregation: `derived: {"kind":"ratio","numerator":"column:<relation>.<col>","numeratorAggregation":"sum","denominator":"column:<relation>.<col2>","denominatorAggregation":"count_distinct"}` (points per game = sum of points / count_distinct of game ids over the rows that count as games). Never invent a measure name.',
+    '5e. A STORED RATE IS NOT AN AVERAGE OF RATES. A column that already holds a percentage or a per-unit rate (field_goal_pct, win_rate, margin_pct) is one row\'s rate: averaging it over many rows weights a player with three attempts like one with three hundred. When the parts exist (made and attempted, wins and games), write the ratio of their sums; use the stored column only when the answer is about one row, or when the project has no parts to divide.',
     '5d. A THRESHOLD ON AN AGGREGATE. "with at least 20 games", "minimum 100 attempts" is a filter on the aggregated measure, not on rows: add that measure (with an alias) and a filter `{"ref":"measure:<index of that measure>","op":"gte","values":[20]}`; it applies after aggregation.',
     '5b. A RATIO OF TWO GOVERNED MEASURES. "average order value", "revenue per order", "X per Y", "share of", "margin %" is a measure with `derived: {"kind":"ratio","numerator":<metric ref>,"denominator":<metric ref>}` and an `alias`, and no `ref` (average order value = the revenue metric / the order-count metric). A governed derived or ratio metric (its card shows `= formula` and `time <dim>`) may be used instead ONLY when it measures the same thing over the same time role as the question: a metric built from lifetime per-customer measures (lifetime spend / lifetime orders, time = the customer\'s first order date) is a cohort average, so "average order value in 2025", "by month", "last quarter" is NEVER that metric; it is the derived ratio of the period\'s revenue and orders. Use the cohort metric only when the question names the cohort itself ("customers first acquired in 2025", "customers who joined in"). "share of ALL", "% of total", "concentration": the denominator is the SAME measure over every row of the period, written `"denominatorScope":"overall"` on the derived ratio (a measure divided by itself without it is 1 for every row).',
     '6. TIME. A time axis ("by month") is a groupBy with role time and a grain, using the time dimension of the SAME model as the measure (an order total is by the orders model\'s time, an order-line revenue by the order line model\'s time). A time window ("last quarter", "in 2025") is `time.window` with an ISO half-open range plus the expression. Measures under one window must share their `time` role (see the cards); when they do not, add an `unresolved` entry with material=true and the two time dimension refs as options instead of choosing.',
@@ -226,11 +227,15 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
   };
   // Ordering by a measure's alias ("total_points") names that measure.
   const orderingRef = (ref: string): string => {
-    if (/^measure:\d+$/.test(ref) || vocabulary.resolve(ref)) return ref;
-    // The alias may arrive dressed as a ref ("metric:total_points").
+    if (/^measure:\d+$/.test(ref)) return ref;
+    // An alias of THIS reading outranks a vocabulary entry that happens to
+    // share its name: "points_per_game" here is the ratio just composed over
+    // the game facts, not the season metric of the same name — and resolving it
+    // to the metric left the ranking with nothing to order by.
     const bare = ref.replace(/^(?:metric|measure|column|dimension):/, '').toLowerCase();
     const at = intent.measures.findIndex((measure) => measure.alias && measure.alias.toLowerCase() === bare);
-    return at >= 0 ? `measure:${at}` : ref;
+    if (at >= 0) return `measure:${at}`;
+    return ref;
   };
   const provenanceNotes: Record<string, string> = {};
   const measures = intent.measures.map((measure, index) => {
@@ -996,7 +1001,7 @@ const CALENDAR_WORDS = /\b(calendar\d*|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr
  * question asks for a calendar period and the reading restricts a field with
  * no date role instead, this names the date dimensions that would honour it.
  */
-export function calendarBasisProblem(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): { field: string; dates: string[]; measuresAt: string[] } | undefined {
+export function calendarBasisProblem(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): { field: string; dates: string[]; measuresAt: string[]; fieldsAt: string[] } | undefined {
   if (intent.kind !== 'analytics' || !CALENDAR_WORDS.test(question)) return undefined;
   const yearish = (values: unknown[]) => values.some((value) => /^(?:19|20)\d{2}$/.test(String(value)));
   const restrictions = [
@@ -1024,7 +1029,11 @@ export function calendarBasisProblem(question: string, intent: AnalyticalIntentV
     .filter((entry) => entry.kind === 'column' && relations.has(entry.physical?.relation ?? entry.model ?? '') && !entry.roles.includes('time') && !entry.roles.includes('label'))
     .map((entry) => entry.ref);
   const measuresAt = [...matched, ...rest.filter((ref) => !matched.some((item) => item.startsWith(ref)))].slice(0, 14);
-  return { field, dates, measuresAt };
+  // The identity and the restrictions must move with the measures: a player
+  // dimension defined on the season table cannot group a game-dated metric.
+  const fields = [...intent.groupBy.map((group) => group.ref), ...intent.display, ...intent.filters.filter((filter) => filter.on !== 'aggregate').map((filter) => filter.ref)];
+  const fieldsAt = [...relations].flatMap((relation) => suggestSameRelationFields(vocabulary, fields, relation)).map((item) => `${item.to} (for ${item.from})`).slice(0, 8);
+  return { field, dates, measuresAt, fieldsAt };
 }
 
 const RELATIVE_PERIOD = /\b(?:this|current|present|ongoing|latest|most recent)\s+(season|year|month|quarter|week|period)\b|\b(?:year to date|ytd)\b|\bso far this\s+(season|year|month|quarter)\b/i;
@@ -1052,7 +1061,13 @@ export function relativePeriodProblem(question: string, intent: AnalyticalIntent
   };
   const restricts = [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])]
     .filter((predicate) => predicate.on !== 'aggregate' && !/^measure:\d+$/.test(predicate.ref));
-  if (restricts.some((predicate) => periodish(predicate.ref))) return undefined;
+  // A period the question did not name is an anchor the reading invented: the
+  // project holds no mapping from today to a stored season, so "2025" here
+  // came from nowhere and returns no rows (or the wrong ones) with full
+  // confidence. Only a value the question itself carries discharges this.
+  const asked = normalizeVocabularyText(question).split(' ');
+  const named = (predicate: { values: unknown[] }) => predicate.values.some((value) => asked.includes(normalizeVocabularyText(String(value))));
+  if (restricts.some((predicate) => periodish(predicate.ref) && named(predicate))) return undefined;
   const fields = vocabulary.entries
     .filter((entry) => (entry.kind === 'dimension' || entry.kind === 'column') && (entry.roles.includes('time') || names(entry).includes(unit)))
     .map((entry) => entry.ref).slice(0, 6);
@@ -1328,7 +1343,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
         const described = fieldEntry?.description ? ` (${fieldEntry.description.replace(/[.\s]+$/, '')})` : '';
         if (attempts < maxAttempts && basis.dates.length > 0) {
           lastDetail = `the question asks for a calendar period; the reading restricts ${basis.field}, which is not a date`;
-          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question asks for a CALENDAR period, but your reading restricts ${basis.field}${described}, which is not a date and may hold a different population for the same number. Resend the COMPLETE intent with the period as a time window (or a date filter) on a date dimension: ${basis.dates.join(', ')}. The measures must come from that date's own relation (a metric defined on another table cannot be restricted by this date): aggregate its columns instead${basis.measuresAt.length ? `, for example ${basis.measuresAt.join(', ')} with an aggregation` : ''}. If none of them can express the question, list the period as a material unresolved clause instead.` });
+          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question asks for a CALENDAR period, but your reading restricts ${basis.field}${described}, which is not a date and may hold a different population for the same number. Resend the COMPLETE intent with the period as a time window (or a date filter) on a date dimension: ${basis.dates.join(', ')}. The measures must come from that date's own relation (a metric defined on another table cannot be restricted by this date): aggregate its columns instead${basis.measuresAt.length ? `, for example ${basis.measuresAt.join(', ')} with an aggregation` : ''}. The grouping, the display and every filter must come from that relation too${basis.fieldsAt.length ? `: ${basis.fieldsAt.join(', ')}` : ''}. If none of them can express the question, list the period as a material unresolved clause instead.` });
           continue;
         }
         return {
@@ -1346,7 +1361,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       if (relative) {
         if (attempts < maxAttempts) {
           lastDetail = `the question asks for "${relative.phrase}"; the reading restricts no period`;
-          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question asks for "${relative.phrase}". That names a POPULATION: every row of the answer must fall in one and the same period. Your reading restricts none — selecting the period beside each row (its maximum, its latest value) leaves every row with its own, so the answer would cover all of history. Resend the COMPLETE intent with a time window, or a filter that pins one period${relative.fields.length ? ` on one of ${relative.fields.join(', ')}` : ''}. If this project holds no mapping from today to that period, list "${relative.phrase}" as a material unresolved clause with options [] instead of choosing one.` });
+          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question asks for "${relative.phrase}". That names a POPULATION: every row of the answer must fall in one and the same period. Your reading restricts none — selecting the period beside each row (its maximum, its latest value) leaves every row with its own, so the answer would cover all of history. Resend the COMPLETE intent with a time window, or a filter that pins one period${relative.fields.length ? ` on one of ${relative.fields.join(', ')}` : ''}. If this project holds no mapping from today to that period, resend the intent with NO period restriction at all and no unresolved clause: the host will then ask which period was meant, rather than answering over all of history.` });
           continue;
         }
         validation.intent.unresolved.push({
@@ -1396,7 +1411,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       if (dates.length === 1) {
         const basis = calendarBasisProblem(input.question, { ...validation.intent, unresolved: [] }, input.vocabulary);
         lastDetail = `the question names a calendar period; ${dates[0]} is the date dimension among the options`;
-        messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question says CALENDAR, so "${material.clause}" is not open: use ${dates[0]} as the period (a time window with its bounds) and remove that unresolved clause. The measures must come from ${dates[0]}'s own relation: aggregate its columns${basis?.measuresAt.length ? `, for example ${basis.measuresAt.join(', ')} with an aggregation` : ''}; a metric defined on another table cannot be restricted by this date. Resend the COMPLETE intent.` });
+        messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question says CALENDAR, so "${material.clause}" is not open: use ${dates[0]} as the period (a time window with its bounds) and remove that unresolved clause. The measures must come from ${dates[0]}'s own relation: aggregate its columns${basis?.measuresAt.length ? `, for example ${basis.measuresAt.join(', ')} with an aggregation` : ''}; a metric defined on another table cannot be restricted by this date. Group, display and filter on that relation too${basis?.fieldsAt.length ? `: ${basis.fieldsAt.join(', ')}` : ''}. Resend the COMPLETE intent.` });
         continue;
       }
     }

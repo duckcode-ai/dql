@@ -69,7 +69,7 @@
     {
       "id": "nb19-monthly-2017",
       "question": "Show monthly scoring totals during calendar 2017.",
-      "sql": "SELECT date(game_date, 'start of month') AS month, SUM(pts) AS total_points FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY 1 ORDER BY 1",
+      "sql": "WITH months(month) AS (VALUES ('2017-01-01'),('2017-02-01'),('2017-03-01'),('2017-04-01'),('2017-05-01'),('2017-06-01'),('2017-07-01'),('2017-08-01'),('2017-09-01'),('2017-10-01'),('2017-11-01'),('2017-12-01')) SELECT m.month AS month, COALESCE(SUM(p.pts), 0) AS total_points FROM months m LEFT JOIN dev.player_game_stats p ON date(p.game_date, 'start of month') = m.month GROUP BY m.month ORDER BY m.month",
       "columns": {
         "month": [
           "month",
@@ -91,7 +91,7 @@
         "month"
       ],
       "tier": "governed",
-      "note": "A monthly grain over calendar 2017 from the seeded cohort; the block that ranks scorers over two years is never a substitute for a monthly trend."
+      "note": "A monthly grain over calendar 2017: every month of the window is a row, and a month with no games is zero, not absent."
     },
     {
       "id": "nb15-double-doubles",
@@ -297,17 +297,21 @@
           "total_three_pointers"
         ],
         "three_point_attempts": [
-          "three_point_attempts",
+          "attempts",
           "fg3a",
-          "threes_attempted",
-          "three_pointers_attempted"
+          "three_point_attempts",
+          "three_point_attempts_total",
+          "three_pointers_attempted",
+          "threes_attempted"
         ],
         "three_point_pct": [
-          "three_point_pct",
           "fg3_pct",
-          "three_point_percentage",
           "shooting_pct",
-          "three_point_shooting_pct"
+          "shooting_percentage",
+          "three_point_pct",
+          "three_point_percentage",
+          "three_point_shooting_pct",
+          "three_point_shooting_percentage"
         ]
       },
       "identity": [
@@ -340,17 +344,21 @@
               "total_three_pointers"
             ],
             "three_point_attempts": [
-              "three_point_attempts",
+              "attempts",
               "fg3a",
-              "threes_attempted",
-              "three_pointers_attempted"
+              "three_point_attempts",
+              "three_point_attempts_total",
+              "three_pointers_attempted",
+              "threes_attempted"
             ],
             "three_point_pct": [
-              "three_point_pct",
               "fg3_pct",
-              "three_point_percentage",
               "shooting_pct",
-              "three_point_shooting_pct"
+              "shooting_percentage",
+              "three_point_pct",
+              "three_point_percentage",
+              "three_point_shooting_pct",
+              "three_point_shooting_percentage"
             ]
           },
           "note": "the superlative answered as a ranking whose first row is the leader"

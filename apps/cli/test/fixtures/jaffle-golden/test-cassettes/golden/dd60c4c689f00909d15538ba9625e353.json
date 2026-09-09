@@ -1,0 +1,26 @@
+{
+  "key": "dd60c4c689f00909d15538ba9625e353",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"For customer Ryan Byrd, show total product revenue and beverage (drink) product revenue.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"alias\":\"total_revenue\"},{\"ref\":\"metric:order_item.revenue\",\"alias\":\"beverage_revenue\",\"scope\":[{\"ref\":\"dimension:order_item.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"inherited\"}]}],\"groupBy\":[],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"dimension:order_item.is_drink_item\":\"inherited\",\"dimension:customers.customer_name\":\"q:Ryan byrd\",\"entity:customers.customer\":\"removed:filtered to a single named customer, no ranking or grouping needed\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T01:03:56.471Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 5,
+    "messageRoles": [
+      "system",
+      "user",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "dd60c4c689f00909d15538ba9625e35353c10aa67942ae52b435895c6fa2f4c6",
+    "postCanonicalHash": "dd60c4c689f00909d15538ba9625e35353c10aa67942ae52b435895c6fa2f4c6",
+    "appliedRuleClasses": []
+  }
+}

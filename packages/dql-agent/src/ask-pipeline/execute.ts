@@ -254,6 +254,11 @@ export function fillPeriodGaps(intent: AnalyticalIntentV1, result: ExecutedRows)
   if (!timeColumn) return { result, added: 0 };
   const key = (value: unknown): string => String(value ?? '').slice(0, 10);
   const present = new Set(result.rows.map((row) => key(row[timeColumn])));
+  // A filled period must look like the periods the warehouse returned: a bare
+  // date beside timestamps (or the other way round) reads as a different value
+  // to everything downstream.
+  const sample = String(result.rows[0]?.[timeColumn] ?? '');
+  const asPeriod = (iso: string): string => (/^\d{4}-\d{2}-\d{2}$/.test(sample) ? iso : sample.includes('T') || sample === '' ? `${iso}T00:00:00.000Z` : iso);
   // Which columns read 0 for an empty period: only the measures that ADD up.
   // An average or a ratio of nothing is not zero, it is unknown.
   const additiveRefs = new Set(intent.measures
@@ -275,7 +280,7 @@ export function fillPeriodGaps(intent: AnalyticalIntentV1, result: ExecutedRows)
     if (present.has(iso)) continue;
     const row: Record<string, unknown> = {};
     for (const column of result.columns) {
-      row[column] = column === timeColumn ? `${iso}T00:00:00.000Z` : additive.has(column) ? 0 : null;
+      row[column] = column === timeColumn ? asPeriod(iso) : additive.has(column) ? 0 : null;
     }
     rows.push(row);
     added += 1;

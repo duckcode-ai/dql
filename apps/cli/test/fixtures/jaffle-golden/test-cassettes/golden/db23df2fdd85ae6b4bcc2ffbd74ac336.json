@@ -1,0 +1,23 @@
+{
+  "key": "db23df2fdd85ae6b4bcc2ffbd74ac336",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross order revenue (including tax) broken down by location.\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[{\"ref\":\"entity:orders.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"metric:orders.order_total\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:total revenue\",\"entity:orders.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T00:50:46.151Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "db23df2fdd85ae6b4bcc2ffbd74ac336c2724f830e928b90505bd78ed4faf4bf",
+    "postCanonicalHash": "db23df2fdd85ae6b4bcc2ffbd74ac336c2724f830e928b90505bd78ed4faf4bf",
+    "appliedRuleClasses": []
+  }
+}

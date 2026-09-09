@@ -296,6 +296,8 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   const params: unknown[] = [];
   const joinedAll = new Set<string>();
   const islandSql: string[] = [];
+  /** Fields read from the measures' own relation because the same column lives there. */
+  const rebound = new Set<string>();
   for (const islandKey of islandOrder) {
     const base = islandKey.replace(/#overall$/, '');
     const overallIsland = islandKey.endsWith('#overall');
@@ -309,7 +311,29 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
         ? { ...window, relation: base }
         : window)
       : undefined;
-    const needed = new Set<string>([...islandColumns.map((c) => c.relation), ...filters.map((f) => f.relation), ...(islandWindow ? [islandWindow.relation] : []), ...islandMeasures.flatMap((m) => (scopes.get(m) ?? []).map((s) => s.relation))]);
+    // THE IDENTITY LIVES WHERE THE FACTS LIVE. A grouping, a label or a
+    // filter on another relation with no governed join path is read from the
+    // column of the SAME NAME on the relation this island measures, when it
+    // has one: a player dimension defined on the season table and the
+    // player_name column of the game table are the same column, spelled twice.
+    // A name that is merely similar is never substituted — that stays a
+    // refusal the interpreter can repair.
+    const sameNameOnBase = (relation: string, column: string): boolean =>
+      relation !== base
+      && (deps.joinPath?.(base, relation)?.length ?? 0) === 0
+      && vocabulary.entries.some((candidate) => candidate.kind === 'column' && (candidate.physical?.relation ?? candidate.model) === base && candidate.name.toLowerCase() === column.toLowerCase());
+    const islandColumnsBound = islandColumns.map((column) => {
+      if (!sameNameOnBase(column.relation, column.column)) return column;
+      const bound = qualify(dialect, base, column.column);
+      rebound.add(`${column.relation}.${column.column} read from ${base}.${column.column}, the same column on the relation the measures come from`);
+      return { ...column, relation: base, expr: column.grain ? dialect.dateTrunc(column.grain, bound) : bound };
+    });
+    const islandFilters = filters.map((filter) => {
+      if (!sameNameOnBase(filter.relation, filter.column)) return filter;
+      rebound.add(`${filter.relation}.${filter.column} read from ${base}.${filter.column}, the same column on the relation the measures come from`);
+      return { ...filter, relation: base };
+    });
+    const needed = new Set<string>([...islandColumnsBound.map((c) => c.relation), ...islandFilters.map((f) => f.relation), ...(islandWindow ? [islandWindow.relation] : []), ...islandMeasures.flatMap((m) => (scopes.get(m) ?? []).map((s) => s.relation))]);
     const joins: string[] = [];
     const joined = new Set([base]);
     for (const relation of needed) {
@@ -346,19 +370,19 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
       return `${AGG_SQL[measure.aggregate]!(expr)} AS ${dialect.quoteIdentifier(measure.alias)}`;
     });
     const where: string[] = [];
-    for (const filter of filters) where.push(predicateSql(dialect, filter, params));
+    for (const filter of islandFilters) where.push(predicateSql(dialect, filter, params));
     if (islandWindow) {
       const target = qualify(dialect, islandWindow.relation, islandWindow.column);
       params.push(islandWindow.start, islandWindow.end);
       where.push(`${target} >= ?`, `${target} < ?`);
     }
-    const select = [...islandColumns.map((column) => `${column.expr} AS ${dialect.quoteIdentifier(column.alias)}`), ...measureSql];
+    const select = [...islandColumnsBound.map((column) => `${column.expr} AS ${dialect.quoteIdentifier(column.alias)}`), ...measureSql];
     islandSql.push([
       `SELECT ${select.join(', ')}`,
       `FROM ${qualifyRelation(dialect, base)}`,
       ...joins,
       ...(where.length ? [`WHERE ${where.join(' AND ')}`] : []),
-      ...(islandColumns.length ? [`GROUP BY ${islandColumns.map((column) => column.expr).join(', ')}`] : []),
+      ...(islandColumnsBound.length ? [`GROUP BY ${islandColumnsBound.map((column) => column.expr).join(', ')}`] : []),
     ].join('\n'));
   }
 
@@ -415,15 +439,22 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   let orderBy = '';
   if (intent.ordering) {
     const measureIndex = intent.ordering.ref.startsWith('measure:') ? Number(intent.ordering.ref.slice('measure:'.length)) || 0 : intent.measures.findIndex((measure) => measure.ref === intent.ordering!.ref);
-    const target = measureIndex >= 0 ? visible[measureIndex]?.alias : columns.find((column) => vocabulary.get(intent.ordering!.ref)?.physical?.column === column.column || vocabulary.get(intent.ordering!.ref)?.name === column.column)?.alias;
-    if (target) orderBy = `\nORDER BY ${dialect.quoteIdentifier(target)} ${intent.ordering.direction.toUpperCase()}`;
+    const target = measureIndex >= 0
+      ? visible[measureIndex]?.alias
+      : visible.find((measure) => measure.alias === intent.ordering!.ref.replace(/^(?:metric|measure|column|dimension):/, ''))?.alias
+        ?? columns.find((column) => vocabulary.get(intent.ordering!.ref)?.physical?.column === column.column || vocabulary.get(intent.ordering!.ref)?.name === column.column)?.alias;
+    // An ordering that names nothing in this reading must not simply vanish: a
+    // limit over an unordered query returns an arbitrary ten rows and calls
+    // them the top ten.
+    if (!target) return refuse('relational_compose_failed', `the ordering ${intent.ordering.ref} names nothing this reading projects; order by one of ${[...visible.map((measure) => measure.alias), ...columns.map((column) => column.alias)].join(', ')}`, true);
+    orderBy = `\nORDER BY ${dialect.quoteIdentifier(target)} ${intent.ordering.direction.toUpperCase()}`;
   } else if (columns.some((column) => column.grain)) {
     orderBy = `\nORDER BY ${columns.filter((column) => column.grain).map((column) => dialect.quoteIdentifier(column.alias)).join(', ')}`;
   }
   const limit = intent.limit ? `\n${dialect.limitClause(intent.limit)}` : '';
 
   let sql: string;
-  const proof: string[] = [];
+  const proof: string[] = [...rebound];
   const keys = columns.map((column) => column.alias);
   const thresholdParams: unknown[] = [];
   const thresholdWhere = thresholdSql(thresholdParams);

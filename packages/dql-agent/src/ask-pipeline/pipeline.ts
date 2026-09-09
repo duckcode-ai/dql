@@ -94,15 +94,23 @@ export function unmetDisplayObligation(
   intent: AnalyticalIntentV1,
   refusals: PreparedRefusal[],
   label: (ref: string) => string,
+  question?: string,
 ): { message: string; refs: string[] } | undefined {
   const keys = intent.groupBy.filter((group) => group.role === 'key');
   if (keys.length === 0 || intent.display.length > 0) return undefined;
   const lost = requested.filter((ref) => !intent.display.includes(ref) && !intent.groupBy.some((group) => group.ref === ref) && !(intent.provenance[ref] ?? '').startsWith('removed'));
-  if (lost.length === 0) return undefined;
+  // A question that asks WHICH ones is answered by names. Even when no reading
+  // ever asked for the label, rows identified only by a key have not answered
+  // it — unless the question asked for the ids themselves.
+  const asksWhich = Boolean(question && /\b(which|who|whom|whose|name|names|list)\b/i.test(question) && !/\b(id|ids|identifier|identifiers|key|keys)\b/i.test(question));
+  if (lost.length === 0 && !asksWhich) return undefined;
   const join = refusals.find((refusal) => refusal.code === 'join_path_required');
   const because = join ? `, because ${summarizeRefusal(join).replace(/^no governed join path/, 'no governed relationship reaches it')}` : ' from this reading';
+  const identified = keys.map((group) => label(group.ref)).join(', ');
   return {
-    message: `the rows are identified by ${keys.map((group) => label(group.ref)).join(', ')} only: ${lost.map((ref) => label(ref)).join(', ')} could not be shown beside them${because}`,
+    message: lost.length
+      ? `the rows are identified by ${identified} only: ${lost.map((ref) => label(ref)).join(', ')} could not be shown beside them${because}`
+      : `the rows are identified by ${identified} only: this project's governed vocabulary reaches no human-readable label for them${because}`,
     refs: lost,
   };
 }
@@ -331,7 +339,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // the answer is served, but the omission is named and the check does not
   // pass: opaque identifiers are not the answer to "which".
   if (filled.added > 0) receipt.executed = { ...receipt.executed!, proofs: [...(receipt.executed?.proofs ?? []), `${filled.added} ${intent.groupBy.find((group) => group.role === 'time')?.grain ?? 'period'}s of the window held no rows and are shown as zero`] };
-  const unmetLabel = unmetDisplayObligation(requestedDisplay, intent, receipt.refusals, label);
+  const unmetLabel = unmetDisplayObligation(requestedDisplay, intent, receipt.refusals, label, input.question);
   if (unmetLabel) {
     receipt.unmet = [...(receipt.unmet ?? []), { obligation: 'display_label', message: unmetLabel.message, refs: unmetLabel.refs }];
     caveats.push(`${unmetLabel.message}; declare a governed relationship to that label (with its uniqueness and coverage proof), or add the label to the fact relation`);

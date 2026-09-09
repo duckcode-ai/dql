@@ -1,0 +1,25 @@
+{
+  "key": "8a722deca7f005961c1211b8670f4b0d",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by total points scored, showing the top 10 (no season restriction available to map \\\"this season\\\" to a period held by this project).\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:top scorers\",\"dimension:player_game_stats.player_id\":\"q:top scorers\",\"dimension:player_game_stats.player_name\":\"q:top scorers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T01:30:50.101Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "8a722deca7f005961c1211b8670f4b0decc3862c94ed87101c64a80dc59c54b2",
+    "postCanonicalHash": "8a722deca7f005961c1211b8670f4b0decc3862c94ed87101c64a80dc59c54b2",
+    "appliedRuleClasses": []
+  }
+}

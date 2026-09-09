@@ -602,6 +602,53 @@ the question string again.
    another relation, the column of the date's relation that carries the same
    fact, and the join-path refusal is repairable with it (`AGT-075`).
 
+30. **A definition owns the rows it counts.** A metric may declare which rows
+   it counts (a participation flag, a soft delete, a test order). That scope
+   binds inside the aggregate at the relational tier — a sum reads zero for an
+   excluded row, a count and a distinct count read nothing — and a scope this
+   cannot read refuses the physical binding instead of dropping it. A measure
+   written as a raw column aggregation is replaced by the metric that defines
+   exactly that aggregate of that column on that relation, with the
+   substitution in the provenance and, when the definition excludes rows, in
+   the reading. A relation's documented boolean columns reach its card, so a
+   reader can see which rows a definition counts (`AGT-076`).
+
+31. **Three obligations are typed, not lexical.** A relative period ("this
+   season", "the current quarter") names one anchor every row must share: a
+   reading that selects the period beside each row restricts nothing, so the
+   interpreter is corrected once and the turn then says why the period cannot
+   be resolved here, with zero SQL. A clause that asks WHICH ones is
+   discharged only by an identity — a grouping, a displayed label, a filtered
+   member — never by a measure that counts them. A requested label a repair
+   dropped because no governed relationship reaches it is recorded as an
+   unmet obligation: the answer is served with the omission named, the check
+   does not pass, and the next action is to declare the relationship with its
+   uniqueness and coverage proof (`AGT-077`, `UI-028`).
+
+32. **A semantic filter is bound or the composition refuses.** A filter
+   dimension the selected metrics cannot resolve refuses the whole native
+   composition, as a group-by already did; the registry name is never emitted
+   where a column belongs. A native dimension resolves by the table-qualified
+   spelling its own vocabulary uses. The pipeline then prepares the relational
+   candidate, which owns the physical column (`AGT-078`).
+
+33. **The choice the user made is carried.** A clarification option is a
+   governed ref: the analytical question stays the user's own, the interpreter
+   is told the meaning is already chosen, and the reading is bound to it
+   deterministically, so a picked option cannot be ignored and asked again. A
+   selection that comes back a second time is reported as a continuation
+   failure, never as a modeling gap nobody proved (`AGT-079`, `UI-029`).
+
+34. **A result says what it covers.** A series over an absolute window covers
+   every period of that window: the periods the warehouse returned no rows for
+   are added in order, additive measures reading zero and anything else
+   staying empty, and the proof says how many were added. A ranked share over
+   a whole-period denominator says what the shown rows are together. A chart
+   may plot only what the result's contract calls a measurement, so an
+   identifier never becomes a series; and the SQL inspector says whether the
+   warehouse executed the statement, rejected it, or never saw it, with the
+   values its placeholders stand for (`AGT-080`, `UI-030`).
+
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn
 conversation, hand-reviewed reference SQL executed against a seeded SQLite

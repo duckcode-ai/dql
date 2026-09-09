@@ -1,0 +1,23 @@
+{
+  "key": "a7da858373da70b327d62d84e601c203",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by total three-pointers made in calendar year 2017, showing attempts and shooting percentage.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.fg3m\",\"aggregation\":\"sum\",\"alias\":\"three_pointers_made\"},{\"ref\":\"column:dev.player_game_stats.fg3a\",\"aggregation\":\"sum\",\"alias\":\"attempts\"},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.fg3m\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:dev.player_game_stats.fg3a\",\"denominatorAggregation\":\"sum\"},\"alias\":\"shooting_percentage\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.fg3m\":\"q:made the most three-pointers\",\"column:dev.player_game_stats.fg3a\":\"q:Show attempts\",\"dimension:player_game_stats.player_id\":\"q:Who made\",\"dimension:player_game_stats.player_name\":\"q:Who made\",\"dimension:player_game_stats.game_date\":\"q:in 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T01:10:59.493Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "a7da858373da70b327d62d84e601c203d2eea52ef749b8614b9fec24aaaf7bb4",
+    "postCanonicalHash": "a7da858373da70b327d62d84e601c203d2eea52ef749b8614b9fec24aaaf7bb4",
+    "appliedRuleClasses": []
+  }
+}

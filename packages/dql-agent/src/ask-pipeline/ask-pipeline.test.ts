@@ -1344,7 +1344,9 @@ describe('a relative period is a population, not a column', () => {
   it('is a problem when the reading restricts no period, however it selects one', () => {
     const selected: AnalyticalIntentV1 = { ...base, measures: [{ ref: 'metric:total_points' }, { ref: 'dimension:season_facts.season', aggregation: 'max', alias: 'current_season' }] };
     expect(relativePeriodProblem('Who are the top scorers this season?', selected, vocabulary)).toMatchObject({ unit: 'season' });
-    expect(relativePeriodProblem('Who are the top scorers this season?', { ...base, filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: [2022], source: 'question' }] }, vocabulary)).toBeUndefined();
+    // A period the question never named is an anchor the reading invented.
+    expect(relativePeriodProblem('Who are the top scorers this season?', { ...base, filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: [2022], source: 'question' }] }, vocabulary)).toMatchObject({ unit: 'season' });
+    expect(relativePeriodProblem('Who are the top scorers this season, meaning 2022?', { ...base, filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: [2022], source: 'question' }] }, vocabulary)).toBeUndefined();
     expect(relativePeriodProblem('Who are the top scorers this season?', { ...base, time: { ref: 'dimension:game_facts.game_date', window: { start: '2022-01-01', end: '2023-01-01', expression: 'in 2022' } } }, vocabulary)).toBeUndefined();
     expect(relativePeriodProblem('Who are the top scorers in 2017?', base, vocabulary)).toBeUndefined();
   });
@@ -1385,6 +1387,14 @@ describe('an answer that could not carry the label the question asked for', () =
     const unmet = unmetDisplayObligation(['column:dev.teams.team_nickname'], intent([]), refusals as never, label);
     expect(unmet?.message).toContain('identified by team_id only');
     expect(unmet?.message).toContain('no governed relationship reaches it');
+  });
+
+  it('names the omission for a question that asks WHICH ones, even when no reading asked for the label', () => {
+    const unmet = unmetDisplayObligation([], intent([]), [] as never, label, 'Which teams won the most games in the 2017 season?');
+    expect(unmet?.message).toContain('no human-readable label');
+    // A question that asks for the ids themselves is answered by ids.
+    expect(unmetDisplayObligation([], intent([]), [] as never, label, 'Show the team ids and their wins')).toBeUndefined();
+    expect(unmetDisplayObligation([], intent([]), [] as never, label, 'How many games were won in 2017?')).toBeUndefined();
   });
 
   it('says nothing when the label is shown, or when the reading deliberately removed it', () => {

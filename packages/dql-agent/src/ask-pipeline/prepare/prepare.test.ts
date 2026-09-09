@@ -404,3 +404,37 @@ describe('a share of the whole period divides by an ungrouped denominator', () =
     expect(composed.candidate!.params).toEqual([2017]);
   });
 });
+
+describe('the identity lives where the facts live', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'points_scored', label: 'Points scored', aggregation: 'sum', physical: { relation: 'dev.game_facts', expr: '"dev"."game_facts"."points"', aggregate: 'sum' } }],
+    dimensions: [
+      { name: 'player', model: 'season_facts', label: 'Player', dataType: 'string', physical: { relation: 'dev.season_facts', column: 'player_name' } },
+      { name: 'nickname', model: 'teams', label: 'Team nickname', dataType: 'string', physical: { relation: 'dev.teams', column: 'team_nickname' } },
+    ],
+    relations: [
+      { schema: 'dev', name: 'game_facts', columns: [{ name: 'player_name', dataType: 'VARCHAR' }, { name: 'points', dataType: 'INTEGER' }] },
+      { schema: 'dev', name: 'season_facts', columns: [{ name: 'player_name', dataType: 'VARCHAR' }] },
+      { schema: 'dev', name: 'teams', columns: [{ name: 'team_nickname', dataType: 'VARCHAR' }] },
+    ],
+  });
+  const reading = (ref: string): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'points by player', measures: [{ ref: 'metric:points_scored' }],
+    groupBy: [{ ref, role: 'key' }], display: [], filters: [], expectedShape: 'grouped', unresolved: [], provenance: {},
+  });
+  const noJoins: PrepareDeps = { blockSql: () => undefined };
+
+  it('reads a field of another relation from the same column on the relation it measures, and says so', () => {
+    const prepared = composeRelational(reading('dimension:season_facts.player'), vocabulary, noJoins);
+    expect(prepared.refusal).toBeUndefined();
+    expect(prepared.candidate!.sql).toContain('"dev"."game_facts"."player_name"');
+    expect(prepared.candidate!.sql).not.toContain('season_facts');
+    expect(prepared.candidate!.proof.join(' ')).toContain('read from dev.game_facts.player_name');
+  });
+
+  it('refuses when the column simply does not exist there, instead of substituting a similar name', () => {
+    const prepared = composeRelational(reading('dimension:teams.nickname'), vocabulary, noJoins);
+    expect(prepared.candidate).toBeUndefined();
+    expect(prepared.refusal?.code).toBe('join_path_required');
+  });
+});
