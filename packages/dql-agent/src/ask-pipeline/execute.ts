@@ -209,3 +209,79 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
     return { ok: false, code: 'execution_failed', message, proofs, warehouse: classifyWarehouseError(message) };
   }
 }
+
+const GRAIN_STEP: Record<string, (date: Date) => void> = {
+  day: (date) => date.setUTCDate(date.getUTCDate() + 1),
+  week: (date) => date.setUTCDate(date.getUTCDate() + 7),
+  month: (date) => date.setUTCMonth(date.getUTCMonth() + 1),
+  quarter: (date) => date.setUTCMonth(date.getUTCMonth() + 3),
+  year: (date) => date.setUTCFullYear(date.getUTCFullYear() + 1),
+};
+
+const startOfGrain = (date: Date, grain: string): Date => {
+  const start = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  if (grain === 'week') { start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 6) % 7)); return start; }
+  if (grain === 'month') return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  if (grain === 'quarter') return new Date(Date.UTC(start.getUTCFullYear(), Math.floor(start.getUTCMonth() / 3) * 3, 1));
+  if (grain === 'year') return new Date(Date.UTC(start.getUTCFullYear(), 0, 1));
+  return start;
+};
+
+/**
+ * A SERIES MUST COVER THE PERIOD IT CLAIMS.
+ *
+ * "Monthly totals during calendar 2017" is twelve months. A warehouse returns
+ * only the months that have rows, so a summer with no games silently became a
+ * ten-row year: the reader cannot tell a month with nothing in it from a month
+ * nobody asked about. The window the intent bound is the authority, so the
+ * missing periods are added here, in the order the series runs — additive
+ * measures read 0 (nothing happened), anything else stays null (nothing to
+ * average). Only a single time grouping over an absolute window with no limit
+ * is filled: with another grouping beside it, which member the empty period
+ * belongs to is not ours to invent.
+ */
+export function fillPeriodGaps(intent: AnalyticalIntentV1, result: ExecutedRows): { result: ExecutedRows; added: number } {
+  const window = intent.time?.window;
+  const groups = intent.groupBy;
+  const time = groups.find((group) => group.role === 'time' && group.grain);
+  if (!window || !time?.grain || groups.length !== 1 || intent.limit !== undefined || !GRAIN_STEP[time.grain]) return { result, added: 0 };
+  if (result.truncated || result.rows.length === 0) return { result, added: 0 };
+  const start = new Date(`${window.start.slice(0, 10)}T00:00:00Z`);
+  const end = new Date(`${window.end.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return { result, added: 0 };
+  const timeColumn = result.columns.find((column) => result.columnsMeta?.some((meta) => meta.name === column && meta.kind === 'date'))
+    ?? result.columns.find((column) => result.rows.every((row) => typeof row[column] === 'string' && /^\d{4}-\d{2}-\d{2}/.test(String(row[column]))));
+  if (!timeColumn) return { result, added: 0 };
+  const key = (value: unknown): string => String(value ?? '').slice(0, 10);
+  const present = new Set(result.rows.map((row) => key(row[timeColumn])));
+  // Which columns read 0 for an empty period: only the measures that ADD up.
+  // An average or a ratio of nothing is not zero, it is unknown.
+  const additiveRefs = new Set(intent.measures
+    .filter((measure) => !measure.derived && (measure.aggregation === undefined || ['sum', 'count', 'count_distinct'].includes(measure.aggregation)))
+    .map((measure) => measure.ref));
+  const additiveAliases = new Set(intent.measures
+    .filter((measure) => !measure.derived && (measure.aggregation === undefined || ['sum', 'count', 'count_distinct'].includes(measure.aggregation)))
+    .map((measure) => measure.alias)
+    .filter((alias): alias is string => Boolean(alias)));
+  const additive = new Set(result.columns.filter((column) => {
+    if (additiveAliases.has(column)) return true;
+    const meta = result.columnsMeta?.find((item) => item.name === column);
+    return Boolean(meta?.ref && additiveRefs.has(meta.ref));
+  }));
+  const rows = [...result.rows];
+  let added = 0;
+  for (let at = startOfGrain(start, time.grain); at < end; GRAIN_STEP[time.grain]!(at)) {
+    const iso = at.toISOString().slice(0, 10);
+    if (present.has(iso)) continue;
+    const row: Record<string, unknown> = {};
+    for (const column of result.columns) {
+      row[column] = column === timeColumn ? `${iso}T00:00:00.000Z` : additive.has(column) ? 0 : null;
+    }
+    rows.push(row);
+    added += 1;
+    if (added > 400) return { result, added: 0 };
+  }
+  if (added === 0) return { result, added: 0 };
+  rows.sort((left, right) => key(left[timeColumn]).localeCompare(key(right[timeColumn])));
+  return { result: { ...result, rows, rowCount: rows.length }, added };
+}

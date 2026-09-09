@@ -6,7 +6,8 @@ import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactName
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { runAskPipeline, unmetDisplayObligation } from './pipeline.js';
-import { suggestSameGrainColumns, buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
+import { fillPeriodGaps } from './execute.js';
+import { suggestSameGrainColumns, suggestSameRelationFields, buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
 import { extractFirstJsonObject } from '../providers/structured-output.js';
 
@@ -1427,5 +1428,57 @@ describe('a meaning the user already picked', () => {
   it('tells the interpreter the choice is made, only when there is one', () => {
     expect(buildIntentSystemPrompt({ cards: '', hasPrior: false, selection: { ref: 'metric:total_points', label: 'Total points' } })).toContain('THE MEANING IS ALREADY CHOSEN');
     expect(buildIntentSystemPrompt({ cards: '', hasPrior: false })).not.toContain('THE MEANING IS ALREADY CHOSEN');
+  });
+});
+
+describe('a series covers the period it claims', () => {
+  const intent = (overrides: Partial<AnalyticalIntentV1> = {}): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'monthly points in 2017',
+    measures: [{ ref: 'column:dev.game_facts.points', aggregation: 'sum', alias: 'monthly_points' }],
+    groupBy: [{ ref: 'dimension:game_facts.game_date', role: 'time', grain: 'month' }],
+    display: [], filters: [], expectedShape: 'trend', unresolved: [], provenance: {},
+    time: { ref: 'dimension:game_facts.game_date', window: { start: '2017-01-01', end: '2018-01-01', expression: 'calendar 2017' } },
+    ...overrides,
+  });
+  const executed = (months: string[]) => ({
+    columns: ['game_date_month', 'monthly_points'],
+    rows: months.map((month, index) => ({ game_date_month: `${month}T00:00:00.000Z`, monthly_points: 100 + index })),
+    rowCount: months.length, executionTimeMs: 1,
+    columnsMeta: [{ name: 'game_date_month', kind: 'date' as const, grain: 'month' }, { name: 'monthly_points', kind: 'number' as const }],
+  });
+
+  it('adds the months the warehouse returned nothing for, as zero, in order', () => {
+    const filled = fillPeriodGaps(intent(), executed(['2017-01-01', '2017-02-01', '2017-12-01']));
+    expect(filled.added).toBe(9);
+    expect(filled.result.rowCount).toBe(12);
+    expect(filled.result.rows.map((row) => String(row.game_date_month).slice(0, 7))).toEqual([
+      '2017-01', '2017-02', '2017-03', '2017-04', '2017-05', '2017-06', '2017-07', '2017-08', '2017-09', '2017-10', '2017-11', '2017-12',
+    ]);
+    expect(filled.result.rows[6]!.monthly_points).toBe(0);
+  });
+
+  it('leaves an average empty rather than calling it zero, and never invents a member', () => {
+    const averaged = fillPeriodGaps(intent({ measures: [{ ref: 'column:dev.game_facts.points', aggregation: 'avg', alias: 'avg_points' }] }), {
+      ...executed(['2017-01-01']), columns: ['game_date_month', 'avg_points'],
+      rows: [{ game_date_month: '2017-01-01T00:00:00.000Z', avg_points: 12 }],
+      columnsMeta: [{ name: 'game_date_month', kind: 'date' as const }, { name: 'avg_points', kind: 'number' as const }],
+    });
+    expect(averaged.result.rows.find((row) => String(row.game_date_month).startsWith('2017-06'))!.avg_points).toBeNull();
+    // Another grouping beside the period: which member owns an empty month is not ours to say.
+    const grouped = intent({ groupBy: [{ ref: 'dimension:game_facts.game_date', role: 'time', grain: 'month' }, { ref: 'dimension:game_facts.player', role: 'key' }] });
+    expect(fillPeriodGaps(grouped, executed(['2017-01-01'])).added).toBe(0);
+    // A ranking of periods asks for the top ones, not for all of them.
+    expect(fillPeriodGaps(intent({ limit: 3 }), executed(['2017-01-01'])).added).toBe(0);
+  });
+});
+
+describe('the same field on the relation that carries the period', () => {
+  const vocabulary = buildVocabularyIndex({
+    dimensions: [{ name: 'player', model: 'season_facts', label: 'Player', dataType: 'string', physical: { relation: 'dev.season_facts', column: 'player_name' } }],
+    relations: [{ schema: 'dev', name: 'game_facts', columns: [{ name: 'player_id', dataType: 'INTEGER' }, { name: 'player_name', dataType: 'VARCHAR' }, { name: 'points', dataType: 'INTEGER' }] }],
+  });
+  it('moves a name filter to the name column, not to the id that shares its stem', () => {
+    expect(suggestSameRelationFields(vocabulary, ['dimension:season_facts.player'], 'dev.game_facts'))
+      .toEqual([{ from: 'dimension:season_facts.player', to: 'column:dev.game_facts.player_name' }]);
   });
 });

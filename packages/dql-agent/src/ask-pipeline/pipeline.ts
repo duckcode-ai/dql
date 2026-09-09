@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AgentProvider, ProviderRunOptions } from '../providers/types.js';
-import { executeCandidate, type ExecuteDeps, type ExecutedRows } from './execute.js';
+import { executeCandidate, fillPeriodGaps, type ExecuteDeps, type ExecutedRows } from './execute.js';
 import { describeIntent, intentExecutionFingerprint, type AnalyticalIntentV1 } from './intent.js';
 import { composeAnsweredText, composeFailedText, composeGapText, describeResultColumns, labelFor, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
 import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal, type PrepareResult } from './prepare/index.js';
@@ -318,7 +318,11 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   input.preparationCache?.set(cacheKey, candidate);
   receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: executed.result.rowCount, ms: Math.round(executed.result.executionTimeMs), proofs: executed.proofs };
   timings.total = Math.round(now() - started);
-  const result: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(intent, executed.result, input.vocabulary) };
+  const described: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(intent, executed.result, input.vocabulary) };
+  // A series must cover the period it claims: a month the warehouse returned
+  // no rows for is a month with nothing in it, not a month left out.
+  const filled = fillPeriodGaps(intent, described);
+  const result = filled.result;
   // A certified block served as published with an identity caveat says so in the answer.
   const caveats = candidate.tier === 'certified' ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line) => `${line.replace(/; the certified block is served as published$/, '')}; recertify it with the entity key to keep them apart`) : [];
   // THE LABEL THE QUESTION ASKED FOR. "Which teams" is answered by names; when
@@ -326,6 +330,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // the rows carry a key and nothing else. The numbers can still be right, so
   // the answer is served, but the omission is named and the check does not
   // pass: opaque identifiers are not the answer to "which".
+  if (filled.added > 0) receipt.executed = { ...receipt.executed!, proofs: [...(receipt.executed?.proofs ?? []), `${filled.added} ${intent.groupBy.find((group) => group.role === 'time')?.grain ?? 'period'}s of the window held no rows and are shown as zero`] };
   const unmetLabel = unmetDisplayObligation(requestedDisplay, intent, receipt.refusals, label);
   if (unmetLabel) {
     receipt.unmet = [...(receipt.unmet ?? []), { obligation: 'display_label', message: unmetLabel.message, refs: unmetLabel.refs }];

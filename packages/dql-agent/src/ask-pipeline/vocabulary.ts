@@ -360,6 +360,35 @@ function eligibilityNotes(columns: Array<{ name: string; dataType?: string; desc
     .map((column) => `${column.name} ${column.description!.replace(/\s+/g, ' ').slice(0, 120)}`);
 }
 
+/**
+ * The same FIELD on another relation. A name filter bound to the season table
+ * cannot restrict a metric read from the game table, but that table names its
+ * players too: the repair needs to be told which column carries the same value,
+ * or it will keep proposing a join nobody declared.
+ */
+export function suggestSameRelationFields(vocabulary: VocabularyIndex, refs: string[], relation: string): Array<{ from: string; to: string }> {
+  const columns = vocabulary.entries.filter((entry) => (entry.kind === 'column' || entry.kind === 'dimension') && (entry.physical?.relation ?? entry.model) === relation);
+  const out: Array<{ from: string; to: string }> = [];
+  for (const ref of refs) {
+    const entry = vocabulary.get(ref);
+    if (!entry || entry.roles.includes('measure')) continue;
+    const words = stems(entry.physical?.column ?? entry.name);
+    if (words.length === 0) continue;
+    const scored = columns
+      .filter((column) => column.ref !== ref)
+      .map((column) => ({ column, score: stems(column.physical?.column ?? column.name).filter((stem) => words.some((word) => stem === word || stem.startsWith(word) || word.startsWith(stem))).length }))
+      .filter((item) => item.score > 0)
+      // A label matches a label: a player NAME filter belongs on the name
+      // column, never on the id that shares its stem.
+      .sort((left, right) => right.score - left.score
+        || Number(right.column.roles.includes('label') === entry.roles.includes('label')) - Number(left.column.roles.includes('label') === entry.roles.includes('label'))
+        || left.column.name.length - right.column.name.length);
+    const best = scored[0]?.column;
+    if (best) out.push({ from: ref, to: best.ref });
+  }
+  return out;
+}
+
 export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex {
   const entries: VocabularyEntry[] = [];
   for (const metric of source.metrics ?? []) {

@@ -112,7 +112,13 @@ function throwIfAlreadyCancelled(signal?: AbortSignal): void {
   }
 }
 
-const DEFAULT_SUBSCRIPTION_CLI_TIMEOUT_MS = 60_000;
+/**
+ * A subscription CLI reads a hard question in well over a minute (a two-year
+ * comparable cohort with a threshold in each year took longer than 60 s twice
+ * in a row, and the turn ended with nothing). The pipeline's own deadline still
+ * bounds the turn; this only stops cutting a dispatch off just before it lands.
+ */
+const DEFAULT_SUBSCRIPTION_CLI_TIMEOUT_MS = 90_000;
 
 /**
  * The CLI did not answer inside its deadline. `code` lets the pipeline retry

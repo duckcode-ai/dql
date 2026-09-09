@@ -987,7 +987,7 @@ const CLAUSE_WORDS = (text: string) => (normalizeVocabularyText(text).split(' ')
  * that ask for the wider population ("all", "every", "overall") make it the
  * user's choice instead.
  */
-const CALENDAR_WORDS = /\b(calendar|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|q[1-4]|quarter|month(?:ly)?|week(?:ly)?|day|daily)\b/i;
+const CALENDAR_WORDS = /\b(calendar\d*|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|q[1-4]|quarter|month(?:ly)?|week(?:ly)?|day|daily)\b/i;
 /**
  * The basis a period is measured on is part of its meaning. "Calendar 2017"
  * is the dates 2017-01-01 to 2017-12-31; a season, fiscal or cohort field

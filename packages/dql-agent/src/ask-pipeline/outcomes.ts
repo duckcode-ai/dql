@@ -206,6 +206,18 @@ export function composeAnsweredText(intent: AnalyticalIntentV1, result: Executed
     const first = result.rows.slice(0, 3).map((row) => columns.map((column) => formatValue(row[column], metaOf(column))).join(' · '));
     if (first.length) lines.push(`Leading rows: ${first.join(' | ')}.`);
   }
+  // CONCENTRATION IS A TOTAL, NOT A LIST. "How concentrated is scoring among
+  // the top five" asks what the five together are, and five rows of "1.0%"
+  // never say 4.4%. The shares are over one whole-period denominator, so they
+  // add up: the sum is the answer to the question that was asked.
+  const shareColumn = intent.measures.find((measure) => measure.derived?.denominatorScope === 'overall')?.alias;
+  if (shareColumn && intent.limit !== undefined && result.rowCount > 1 && columns.includes(shareColumn)) {
+    const total = result.rows.reduce((sum, row) => {
+      const value = typeof row[shareColumn] === 'number' ? row[shareColumn] as number : Number(row[shareColumn]);
+      return Number.isFinite(value) ? sum + value : sum;
+    }, 0);
+    lines.push(`Together the ${result.rowCount} rows are ${formatValue(total, metaOf(shareColumn))} of the whole period.`);
+  }
   // Identity: several members share the asked-for name; the rows keep them apart.
   for (const note of extras.notes ?? []) if (note.startsWith('identity:')) lines.push(`${note.slice('identity:'.length).trim().replace(/[.\s]+$/, '')}.`);
   // Definitions: a grouping or filter dimension with a governed description

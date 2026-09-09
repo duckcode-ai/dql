@@ -1,5 +1,5 @@
 import type { AnalyticalIntentV1, IntentPredicate } from '../intent.js';
-import { suggestSameGrainColumns, type VocabularyEntry, type VocabularyIndex } from '../vocabulary.js';
+import { suggestSameGrainColumns, suggestSameRelationFields, type VocabularyEntry, type VocabularyIndex } from '../vocabulary.js';
 import type { PrepareDeps, PreparedCandidate, PreparedRefusal, SqlDialectLike } from './types.js';
 
 /**
@@ -319,8 +319,12 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
       // fix (measures from one relation, a period or grouping from another).
       if (!path || path.length === 0) {
         const moved = suggestSameGrainColumns(vocabulary, intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]), relation);
+        // The base relation is where the measures and the period already live,
+        // so the fields must move THERE, not the other way round.
+        const fields = suggestSameRelationFields(vocabulary, [...intent.filters.map((filter) => filter.ref), ...intent.groupBy.map((group) => group.ref), ...intent.display], base);
         const hint = moved.length ? ` The same facts exist on ${relation}: ${moved.map((item) => `${item.from} -> ${item.to} (${item.aggregation})`).join('; ')}; read every measure from there and keep the period.` : '';
-        return refuse('join_path_required', `no governed join path from ${base} to ${relation}; read the question over one relation, taking the measures from the relation that carries the period or grouping.${hint}`, true);
+        const fieldHint = fields.length ? ` The same fields exist on ${base}: ${fields.map((item) => `${item.from} -> ${item.to}`).join('; ')}; restrict and group there instead.` : '';
+        return refuse('join_path_required', `no governed join path from ${base} to ${relation}; read the question over one relation, taking the measures from the relation that carries the period or grouping.${hint}${fieldHint}`, true);
       }
       for (const step of path) {
         if (joined.has(step.relation)) continue;
