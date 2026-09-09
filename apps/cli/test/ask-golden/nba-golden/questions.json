@@ -159,19 +159,25 @@
           "name"
         ],
         "points_per_game": [
-          "points_per_game",
-          "ppg",
           "avg_points_per_game",
-          "points_per_game_played"
+          "points_per_game",
+          "points_per_game_played",
+          "points_pg",
+          "ppg",
+          "pts_per_game"
         ],
         "rebounds_per_game": [
+          "avg_rebounds_per_game",
+          "reb_per_game",
           "rebounds_per_game",
-          "rpg",
-          "avg_rebounds_per_game"
+          "rebounds_pg",
+          "rpg"
         ],
         "assists_per_game": [
-          "assists_per_game",
           "apg",
+          "assists_per_game",
+          "assists_pg",
+          "ast_per_game",
           "avg_assists_per_game"
         ]
       },
@@ -197,19 +203,25 @@
               "name"
             ],
             "points_per_game": [
-              "points_per_game",
-              "ppg",
               "avg_points_per_game",
-              "points_per_game_played"
+              "points_per_game",
+              "points_per_game_played",
+              "points_pg",
+              "ppg",
+              "pts_per_game"
             ],
             "rebounds_per_game": [
+              "avg_rebounds_per_game",
+              "reb_per_game",
               "rebounds_per_game",
-              "rpg",
-              "avg_rebounds_per_game"
+              "rebounds_pg",
+              "rpg"
             ],
             "assists_per_game": [
-              "assists_per_game",
               "apg",
+              "assists_per_game",
+              "assists_pg",
+              "ast_per_game",
               "avg_assists_per_game"
             ]
           }

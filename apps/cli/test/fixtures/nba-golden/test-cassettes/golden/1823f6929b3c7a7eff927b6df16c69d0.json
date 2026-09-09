@@ -1,0 +1,23 @@
+{
+  "key": "1823f6929b3c7a7eff927b6df16c69d0",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by total points scored this season, but the project only contains game data for the 2016 and 2017 NBA seasons so 'this season' cannot be resolved to a concrete season.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"this season\",\"options\":[\"2016\",\"2017\"],\"material\":true,\"question\":\"The data covers only the 2016-17 and 2017-18 NBA seasons (no current-season data). Which season should 'this season' refer to?\"}],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:top scorers\",\"dimension:player_game_stats.player_id\":\"q:top scorers\",\"dimension:player_game_stats.player_name\":\"q:top scorers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T13:48:18.011Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "1823f6929b3c7a7eff927b6df16c69d012f174b97f2347b64ae15902ca0db104",
+    "postCanonicalHash": "1823f6929b3c7a7eff927b6df16c69d012f174b97f2347b64ae15902ca0db104",
+    "appliedRuleClasses": []
+  }
+}

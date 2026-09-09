@@ -1,0 +1,23 @@
+{
+  "key": "04562fac597aab654e7b588367d8e957",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Find the player with the most three-pointers made in 2017, along with their three-point attempts and shooting percentage.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.fg3m\",\"aggregation\":\"sum\",\"alias\":\"three_pointers_made\"},{\"ref\":\"column:dev.player_game_stats.fg3a\",\"aggregation\":\"sum\",\"alias\":\"attempts\"},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.fg3m\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:dev.player_game_stats.fg3a\",\"denominatorAggregation\":\"sum\"},\"alias\":\"three_point_pct\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"three_pointers_made\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.fg3m\":\"q:made the most three-pointers\",\"column:dev.player_game_stats.fg3a\":\"q:attempts\",\"dimension:player_game_stats.player_id\":\"q:who\",\"dimension:player_game_stats.player_name\":\"q:who\",\"dimension:player_game_stats.game_date\":\"q:in 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T13:54:31.430Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "04562fac597aab654e7b588367d8e957bf3bbdc9679265e5135a998b3c79cfe9",
+    "postCanonicalHash": "04562fac597aab654e7b588367d8e957bf3bbdc9679265e5135a998b3c79cfe9",
+    "appliedRuleClasses": []
+  }
+}

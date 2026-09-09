@@ -1,0 +1,23 @@
+{
+  "key": "87f175ed5fffab678debe8aa3babe73f",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Find the player with the highest ratio of total assists to total turnovers in games played during 2017, restricted to players with at least 20 games played.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.played\",\"aggregation\":\"sum\",\"alias\":\"games_played\"},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.ast\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:dev.player_game_stats.turnover\",\"denominatorAggregation\":\"sum\"},\"alias\":\"ast_to_turnover_ratio\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"measure:0\",\"op\":\"gte\",\"values\":[20],\"source\":\"question\"}],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"measure:1\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"population\":\"matching\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.played\":\"q:at least 20 games\",\"column:dev.player_game_stats.ast\":\"q:assist-to-turnover ratio\",\"column:dev.player_game_stats.turnover\":\"q:assist-to-turnover ratio\",\"dimension:player_game_stats.player_id\":\"q:who had\",\"dimension:player_game_stats.player_name\":\"q:who had\",\"dimension:player_game_stats.game_date\":\"q:in 2017\",\"measure:0\":\"q:at least 20 games\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T13:54:53.947Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "87f175ed5fffab678debe8aa3babe73f25b9eddedaf956d80745466766940877",
+    "postCanonicalHash": "87f175ed5fffab678debe8aa3babe73f25b9eddedaf956d80745466766940877",
+    "appliedRuleClasses": []
+  }
+}

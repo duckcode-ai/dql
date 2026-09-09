@@ -649,6 +649,32 @@ the question string again.
    warehouse executed the statement, rejected it, or never saw it, with the
    values its placeholders stand for (`AGT-080`, `UI-030`).
 
+35. **A comparison computes its comparison.** A period comparison is the same
+   measure written twice, each scoped to its own period, plus a `change`
+   measure that names those two by their aliases and reports their difference
+   absolutely or as a fraction of the earlier one. A question that asks for a
+   change, a difference, a growth or an improvement and a reading that returns
+   only the parts is corrected once, and then the turn says it did not answer
+   it rather than letting the prose claim it. A limit with no ordering is
+   refused: the first ten rows of an unordered query are not the top ten
+   (`AGT-081`).
+
+36. **A selection is a typed clause decision.** Choosing which period a year
+   means applies that date as the period — with the year the clause named —
+   removes the basis the user rejected, and adds no breakdown; the repair that
+   follows is not held to the refs the selection replaced. A match that can
+   cover several members (a partial name, a multi-valued filter) groups by that
+   member's key and shows its label, so two people who share a surname are two
+   rows and never one sum. A member that matched nothing exactly is asked, once
+   and bounded, which values of that same column contain it (`AGT-082`).
+
+37. **A request that listed its parts is answered part by part.** Each facet
+   after "including" that no ref of the reading is named for is recorded as an
+   unmet coverage obligation, named in the answer and failing its check, so a
+   season table is never delivered as a complete profile. A refusal that
+   carries no reading names the measures this project does hold for the words
+   the question used (`AGT-083`, `UI-031`).
+
 The gate is `apps/cli/src/ask-golden.test.ts` with
 `apps/cli/test/ask-golden/`: ~30 jaffle questions plus the five-turn
 conversation, hand-reviewed reference SQL executed against a seeded SQLite

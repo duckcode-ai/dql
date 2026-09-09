@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, droppedChange, identityClauseWords, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { runAskPipeline, unmetDisplayObligation } from './pipeline.js';
@@ -1566,5 +1566,37 @@ describe('each facet the question listed', () => {
   it('says nothing when the question listed no parts, or every part is carried', () => {
     expect(unmetFacets('Give me a profile of Grant Jerrett.', profile, vocabulary)).toEqual([]);
     expect(unmetFacets('Show his seasons, including total points and teams played.', profile, vocabulary)).toEqual([]);
+  });
+});
+
+describe('a match that covers several members', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'points_scored', label: 'Points scored', aggregation: 'sum' }],
+    dimensions: [
+      { name: 'player', model: 'season_facts', label: 'Player', dataType: 'string', physical: { relation: 'dev.season_facts', column: 'player_name' } },
+      { name: 'player_id', model: 'season_facts', label: 'Player ID', dataType: 'number', physical: { relation: 'dev.season_facts', column: 'player_id' } },
+    ],
+  });
+  const asked = (op: 'contains' | 'eq' | 'in', values: string[]): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: "Curry's points", measures: [{ ref: 'metric:points_scored' }], groupBy: [], display: [],
+    filters: [{ ref: 'dimension:season_facts.player', op, values, source: 'question' }],
+    expectedShape: 'scalar', unresolved: [], provenance: {},
+  });
+
+  it('groups by the member key and shows the label, so two Currys are two rows', () => {
+    const intent = asked('contains', ['Curry']);
+    keepMembersApart(intent, vocabulary);
+    expect(intent.groupBy).toEqual([{ ref: 'dimension:season_facts.player_id', role: 'key' }]);
+    expect(intent.display).toEqual(['dimension:season_facts.player']);
+    expect(intent.reading).toContain('several members');
+  });
+
+  it('leaves an exact single member, and a reading that already keeps its members apart, alone', () => {
+    const exact = asked('eq', ['Stephen Curry']);
+    keepMembersApart(exact, vocabulary);
+    expect(exact.groupBy).toEqual([]);
+    const grouped: AnalyticalIntentV1 = { ...asked('contains', ['Curry']), groupBy: [{ ref: 'dimension:season_facts.player_id', role: 'key' }] };
+    keepMembersApart(grouped, vocabulary);
+    expect(grouped.groupBy).toHaveLength(1);
   });
 });

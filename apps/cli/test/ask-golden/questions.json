@@ -939,9 +939,38 @@
     {
       "id": "growth-jul-aug",
       "question": "Compare August with July 2025 sales before tax and show the percentage growth.",
-      "outcome": "gap",
-      "tier": "none",
-      "note": "revenue_growth_mom uses a prior-period offset (offset_window 1 month). The native composer and the relational tier cannot express it, so on this fixture the turn is a gap that names the semantic-engine capability and executes nothing; a silently zero growth is the failure this case guards against. On the real workspace (MetricFlow) the built-product driver expects 10.78%."
+      "tier": "governed",
+      "note": "A month-over-month comparison the semantic engine cannot express as an offset metric is still answerable as two scoped measures and the change between them: the two totals plus the growth as a fraction of July. A silently zero growth, or two totals with the growth only in the prose, is the failure this case guards against.",
+      "sql": "SELECT SUM(CASE WHEN oi.ordered_at >= '2025-07-01' AND oi.ordered_at < '2025-08-01' THEN oi.product_price ELSE 0 END) AS revenue_july, SUM(CASE WHEN oi.ordered_at >= '2025-08-01' AND oi.ordered_at < '2025-09-01' THEN oi.product_price ELSE 0 END) AS revenue_august, (SUM(CASE WHEN oi.ordered_at >= '2025-08-01' AND oi.ordered_at < '2025-09-01' THEN oi.product_price ELSE 0 END) * 1.0  - SUM(CASE WHEN oi.ordered_at >= '2025-07-01' AND oi.ordered_at < '2025-08-01' THEN oi.product_price ELSE 0 END)) / NULLIF(SUM(CASE WHEN oi.ordered_at >= '2025-07-01' AND oi.ordered_at < '2025-08-01' THEN oi.product_price ELSE 0 END) * 1.0, 0) AS growth FROM dev.order_items oi",
+      "columns": {
+        "revenue_july": [
+          "revenue_july",
+          "revenue_jul",
+          "revenue_jul_2025",
+          "july_revenue",
+          "revenue_july_2025",
+          "jul_revenue"
+        ],
+        "revenue_august": [
+          "revenue_august",
+          "revenue_aug",
+          "revenue_aug_2025",
+          "august_revenue",
+          "revenue_august_2025",
+          "aug_revenue"
+        ],
+        "growth": [
+          "growth",
+          "growth_pct",
+          "revenue_growth_pct",
+          "percentage_growth",
+          "percent_growth",
+          "growth_percentage",
+          "revenue_growth",
+          "pct_change",
+          "percentage_change"
+        ]
+      }
     },
     {
       "id": "unqualified-revenue",

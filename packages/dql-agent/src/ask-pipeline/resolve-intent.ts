@@ -264,6 +264,16 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
       }
       return { ...measure, ref, derived: { ...measure.derived, kind: 'ratio' as const, numerator, denominator, ...(denominatorScope ? { denominatorScope } : {}) }, ...(scope?.length ? { scope } : {}) };
     }
+    // A change names two measures of THIS reading, so its ref is a name the
+    // host minted, not a vocabulary id: there is nothing here to canonicalise.
+    // The composer proves both aliases exist and refuses when they do not.
+    if (measure.change) {
+      const aliases = new Set(intent.measures.map((item) => item.alias).filter(Boolean));
+      for (const part of [measure.change.base, measure.change.comparison]) {
+        if (!aliases.has(part)) problems.push({ path: `measures[${index}].change`, message: `${part} is not the alias of any measure in this reading; give each period its own measure and alias it` });
+      }
+      return measure;
+    }
     const ref = canonical(asMeasureRef(measure.ref, measure.aggregation), MEASURE_KINDS, `measures[${index}].ref`, (entry) =>
       entry.kind === 'column' && !measure.aggregation ? `${entry.ref} is a raw column; a column measure needs an aggregation` : undefined);
     const scope = measure.scope?.map((p, at) => predicate(p, `measures[${index}].scope[${at}]`));
@@ -282,7 +292,7 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
   // A time axis belongs to the measure's own model: an order total by the
   // order lines' time multiplies orders across lines. When the same-named
   // time dimension exists on the measure's model, rebind to it.
-  const measureModels = new Set(measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]).map((ref) => vocabulary.get(ref)?.model).filter((model): model is string => Boolean(model)));
+  const measureModels = new Set(measures.flatMap((measure) => measure.change ? [] : measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]).map((ref) => vocabulary.get(ref)?.model).filter((model): model is string => Boolean(model)));
   const rebindTime = (ref: string): string => {
     const entry = vocabulary.get(ref);
     if (!entry || !entry.roles.includes('time') || !entry.model || measureModels.size === 0 || measureModels.has(entry.model)) return ref;
@@ -554,6 +564,7 @@ export function applyGovernedDefaults(intent: AnalyticalIntentV1, question: stri
       } else intent.measures.push({ ref: chosen });
     }
   }
+  keepMembersApart(intent, vocabulary);
   bindExactNames(intent, normalizedQuestion, grainWords, vocabulary);
   preferGovernedDefinition(intent, vocabulary);
   promoteSoleMeasureScope(intent);
@@ -679,6 +690,42 @@ export function preferGovernedDefinition(intent: AnalyticalIntentV1, vocabulary:
   }
 }
 
+/**
+ * A MATCH THAT COVERS SEVERAL MEMBERS KEEPS THEM APART.
+ *
+ * "Curry's performance" is two players in this data, and a text match with no
+ * grouping adds them together: one row, 3,002 points, belonging to nobody. A
+ * partial or multi-valued match on a label therefore groups by that member's
+ * key (and displays the label), so each member the filter caught is its own
+ * row and the reader can see which ones were caught.
+ */
+export function keepMembersApart(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): void {
+  if (intent.kind !== 'analytics' || intent.groupBy.some((group) => group.role === 'key')) return;
+  const broad = intent.filters.find((filter) => {
+    if (filter.on === 'aggregate') return false;
+    const multiple = filter.op === 'contains' || (filter.op === 'in' && filter.values.length > 1);
+    if (!multiple || !filter.values.some((value) => typeof value === 'string')) return false;
+    const entry = vocabulary.get(filter.ref);
+    return Boolean(entry && (entry.kind === 'dimension' || entry.kind === 'column') && !entry.roles.includes('time') && !entry.roles.includes('numeric') && !entry.roles.includes('boolean'));
+  });
+  if (!broad) return;
+  const entry = vocabulary.get(broad.ref)!;
+  if (intent.groupBy.some((group) => group.ref === broad.ref)) return;
+  const relation = entry.physical?.relation ?? entry.model;
+  const stem = (entry.physical?.column ?? entry.name).replace(/_(name|label|title|description)$/i, '');
+  // The key of the same thing on the same relation, when the project has one.
+  const key = vocabulary.entries.find((candidate) =>
+    (candidate.kind === 'dimension' || candidate.kind === 'column' || candidate.kind === 'entity')
+    && (candidate.physical?.relation ?? candidate.model) === relation
+    && [`${stem}_id`, `${stem}_key`, `${stem}id`].includes((candidate.physical?.column ?? candidate.name).toLowerCase()));
+  const grouped = key ?? entry;
+  intent.groupBy.push({ ref: grouped.ref, role: key ? 'key' : 'categorical' });
+  if (key && !intent.display.includes(entry.ref)) intent.display.push(entry.ref);
+  intent.provenance[grouped.ref] = `host: ${JSON.stringify(String(broad.values[0]))} can match several members, so each one is its own row`;
+  const note = `${entry.label ?? entry.name} matched by text can cover several members; each one is a row of its own`;
+  if (!intent.reading.includes('several members')) intent.reading = `${intent.reading.replace(/[.\s]+$/, '')}; ${note}.`;
+}
+
 /** Words that qualify a money measure away from its plain named reading. */
 const MEASURE_QUALIFIERS = ['gross', 'including', 'incl', 'tax', 'after tax', 'net', 'order total', 'lifetime', 'ltv'];
 
@@ -737,7 +784,12 @@ export function bindExactNames(intent: AnalyticalIntentV1, normalizedQuestion: s
   const rebind = (ref: string): string => {
     const entry = vocabulary.get(ref);
     if (!entry || (entry.kind !== 'metric' && entry.kind !== 'measure') || namedByQuestion(entry) || absorbs(entry)) return ref;
-    if (timeRelation && entry.physical?.relation === timeRelation && target.physical?.relation !== timeRelation) return ref;
+    // ... unless the named metric carries a date of its own: then the period
+    // follows it there (an order line's revenue has the order line's date), and
+    // only a metric with no time axis at all would strand the window.
+    const targetHasOwnTime = Boolean(target.physical?.relation) && vocabulary.entries.some((candidate) =>
+      candidate.kind === 'dimension' && candidate.roles.includes('time') && (candidate.physical?.relation ?? candidate.model) === target.physical!.relation);
+    if (timeRelation && entry.physical?.relation === timeRelation && target.physical?.relation !== timeRelation && !targetHasOwnTime) return ref;
     intent.provenance[target.ref] = `${intent.provenance[ref] ?? `q:${target.name}`} (governed default: the question names the metric "${target.name}")`;
     // The reading line stays honest about what was measured.
     const measuredAs = `measured as ${target.label ?? target.name} because the question names the metric "${target.name}"`;
@@ -1198,7 +1250,13 @@ export function widenedPopulation(question: string, intent: AnalyticalIntentV1, 
     if (filter.on === 'aggregate') { if (!intent.filters.some((next) => next.on === 'aggregate')) lost.push(`the threshold "${filter.ref} ${filter.op} ${filter.values.join(', ')}"`); continue; }
     if (!restricted.has(filter.ref) && !removed(filter.ref)) lost.push(`the restriction on ${filter.ref}`);
   }
-  if (prior.time?.window && !intent.time?.window) lost.push('the period');
+  // A period may be written as a window, or as date restrictions on the
+  // measures themselves — "July revenue and August revenue" restricts the same
+  // axis twice. Only a reading that restricts that axis NOWHERE has widened.
+  const restrictsPriorAxis = prior.time?.ref
+    ? [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])].some((predicate) => predicate.ref === prior.time!.ref)
+    : false;
+  if (prior.time?.window && !intent.time?.window && !restrictsPriorAxis) lost.push('the period');
   if (prior.limit !== undefined && intent.limit === undefined) lost.push(`the limit of ${prior.limit}`);
   if (prior.ordering && !intent.ordering) lost.push('the ranking');
   return lost;

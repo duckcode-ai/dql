@@ -1,0 +1,23 @@
+{
+  "key": "e2ff43ab926062d51632e8d248a0fcac",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total product revenue (excluding tax) broken down by calendar month.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\"}],\"groupBy\":[{\"ref\":\"dimension:order_item.ordered_at\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"dimension:order_item.ordered_at\":\"q:by month\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T13:26:25.405Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "e2ff43ab926062d51632e8d248a0fcacca0cacc6792e1364cb15e80b764c2e12",
+    "postCanonicalHash": "e2ff43ab926062d51632e8d248a0fcacca0cacc6792e1364cb15e80b764c2e12",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "d03bce2826a7eceff831044d74054834",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Break down beverage (drink) revenue and its share of order revenue by product and by customer type to see what drives the high beverage revenue.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\"},{\"ref\":\"metric:order_item.drink_revenue_pct\"}],\"groupBy\":[{\"ref\":\"entity:order_item.product\",\"role\":\"key\"},{\"ref\":\"dimension:customers.customer_type\",\"role\":\"categorical\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:order_item.drink_revenue_pct\",\"direction\":\"desc\"},\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:order_item.drink_revenue\":\"q:beverage revenue\",\"metric:order_item.drink_revenue_pct\":\"q:drink revenue pct\",\"entity:order_item.product\":\"q:by product\",\"dimension:products.product_name\":\"q:by product\",\"dimension:customers.customer_type\":\"q:by customer type\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T13:38:57.105Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d03bce2826a7eceff831044d74054834b9fe92ccdb9f13062d1776cc8d7d624f",
+    "postCanonicalHash": "d03bce2826a7eceff831044d74054834b9fe92ccdb9f13062d1776cc8d7d624f",
+    "appliedRuleClasses": []
+  }
+}

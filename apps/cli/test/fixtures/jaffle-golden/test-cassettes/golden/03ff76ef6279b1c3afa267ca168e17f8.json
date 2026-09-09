@@ -1,0 +1,23 @@
+{
+  "key": "03ff76ef6279b1c3afa267ca168e17f8",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show gross order revenue trended by month, broken down by whether the order included a drink item.\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[{\"ref\":\"dimension:orders.ordered_at\",\"role\":\"time\",\"grain\":\"month\"},{\"ref\":\"dimension:orders.is_drink_order\",\"role\":\"categorical\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"dimension:orders.ordered_at\":\"q:over time\",\"dimension:orders.is_drink_order\":\"q:by drink orders\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T13:38:02.601Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "03ff76ef6279b1c3afa267ca168e17f8ed59423cf2efe5df00469277fe949236",
+    "postCanonicalHash": "03ff76ef6279b1c3afa267ca168e17f8ed59423cf2efe5df00469277fe949236",
+    "appliedRuleClasses": []
+  }
+}

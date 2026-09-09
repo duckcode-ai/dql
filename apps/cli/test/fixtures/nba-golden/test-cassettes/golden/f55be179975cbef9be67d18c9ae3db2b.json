@@ -1,0 +1,23 @@
+{
+  "key": "f55be179975cbef9be67d18c9ae3db2b",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Find the player (by identity) with the highest total points summed across games played in calendar year 2017.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"calendar year 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:scored the most points\",\"dimension:player_game_stats.player_id\":\"q:Who scored\",\"dimension:player_game_stats.player_name\":\"q:Who scored\",\"dimension:player_game_stats.game_date\":\"q:in calendar year 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-09T13:44:27.472Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "f55be179975cbef9be67d18c9ae3db2b340ed720ecd574e5ecbd490a79144f07",
+    "postCanonicalHash": "f55be179975cbef9be67d18c9ae3db2b340ed720ecd574e5ecbd490a79144f07",
+    "appliedRuleClasses": []
+  }
+}
