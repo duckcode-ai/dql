@@ -19,6 +19,7 @@ let inlineAskChartConfig: typeof UnifiedAgentRunPanelModule.inlineAskChartConfig
 let resolvedParameterValues: typeof UnifiedAgentRunPanelModule.resolvedParameterValues;
 let agentRunHistoryFromItems: typeof UnifiedAgentRunPanelModule.agentRunHistoryFromItems;
 let liveAgentActivityFor: typeof UnifiedAgentRunPanelModule.liveAgentActivityFor;
+let answerSqlEvidenceFromRun: typeof UnifiedAgentRunPanelModule.answerSqlEvidenceFromRun;
 let clarificationSelectionInput: typeof UnifiedAgentRunPanelModule.clarificationSelectionInput;
 let researchSourceFromRun: typeof UnifiedAgentRunPanelModule.researchSourceFromRun;
 let isAgentRunPinnable: typeof UnifiedAgentRunPanelModule.isAgentRunPinnable;
@@ -75,6 +76,7 @@ beforeAll(async () => {
     resolvedParameterValues = module.resolvedParameterValues;
     agentRunHistoryFromItems = module.agentRunHistoryFromItems;
     liveAgentActivityFor = module.liveAgentActivityFor;
+    answerSqlEvidenceFromRun = module.answerSqlEvidenceFromRun;
     clarificationSelectionInput = module.clarificationSelectionInput;
     researchSourceFromRun = module.researchSourceFromRun;
     isAgentRunPinnable = module.isAgentRunPinnable;
@@ -1137,6 +1139,35 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     })).toEqual({
       question: 'Who are the top customers and what is their BCM this month?',
       selectedEvidenceId: 'semantic-path:report_date:bcm_ccu_pc',
+    });
+  });
+
+  it('says whether the warehouse ran the SQL, and carries the values its placeholders stand for', () => {
+    const run = (payload: Record<string, unknown>) => ({
+      id: 'run-1', question: 'q', artifacts: [{ id: 'a1', kind: 'answer', payload }],
+    } as unknown as Parameters<typeof answerSqlEvidenceFromRun>[0]);
+    expect(answerSqlEvidenceFromRun(run({
+      sql: 'SELECT 1 WHERE d >= ? AND d < ?',
+      sqlParams: ['2016-01-01', '2018-01-01'],
+      result: { sql: 'SELECT 1 WHERE d >= ? AND d < ?', rows: [], columns: [] },
+    }))).toEqual({ sql: 'SELECT 1 WHERE d >= ? AND d < ?', origin: 'executed', params: ['2016-01-01', '2018-01-01'] });
+    expect(answerSqlEvidenceFromRun(run({ sql: 'SELECT bad', executionError: 'Binder Error' }))?.origin).toBe('failed');
+    expect(answerSqlEvidenceFromRun(run({ proposedSql: 'SELECT 1' }))?.origin).toBe('proposed');
+    expect(answerSqlEvidenceFromRun(run({ sql: 'SELECT 1' }))?.origin).toBe('compiled');
+  });
+
+  it("prefers the user's own question over an option's generated prose", () => {
+    // The option's `question` is a reading plus a label ("The user wants a
+    // ranking of the best players ... — Total points"). Submitting that as the
+    // analytical question makes the next turn answer a sentence nobody asked.
+    expect(clarificationSelectionInput({
+      id: 'metric:total_points',
+      label: 'Total points',
+      question: 'The user wants a ranking of the best players, but "best" could mean several measures. — Total points',
+      kind: 'vocabulary',
+    }, 'Who are our best players?')).toEqual({
+      question: 'Who are our best players?',
+      selectedEvidenceId: 'metric:total_points',
     });
   });
 

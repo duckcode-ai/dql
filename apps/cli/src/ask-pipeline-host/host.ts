@@ -451,6 +451,10 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       ...(prior ? { prior: prior.intent, ...(prior.executed === false ? { priorExecuted: false } : {}), ...(prior.summary ? { priorAnswerSummary: prior.summary } : {}) } : {}),
       ...(deps.guidance?.(request) ? { guidance: deps.guidance(request) } : {}),
       ...(connection && deps.probeLiteral && deps.literalProbeAllowed ? { groundLiterals: (intent: AnalyticalIntentV1) => groundIntentLiterals(intent, vocabulary, connection, tracedProbes(deps, request)) } : {}),
+      // The option the user clicked is a governed ref, and the turn that
+      // follows must carry it: a selection that only reaches the prompt can be
+      // ignored, and the question then comes back a second time.
+      ...(selectedMeaning(request, vocabulary) ? { selection: selectedMeaning(request, vocabulary)! } : {}),
       explorationOptIn: explorationOptIn(request),
       // Research branches phrase hypotheses ("because", "drivers"); the
       // full-question clause check is for questions a person asked.
@@ -506,6 +510,18 @@ function failure(runId: string, message: string, code: 'provider_error' | 'execu
 }
 
 /** How a gap is headed: no matching data is not a modeling gap. */
+/**
+ * The clarification option the user picked, when it names something this
+ * vocabulary holds. A selection the vocabulary cannot resolve is ignored here
+ * (the router validates the id separately); it is never turned into SQL.
+ */
+export function selectedMeaning(request: AgentRunRequest, vocabulary: VocabularyIndex): { ref: string; label?: string } | undefined {
+  const id = request.selectedEvidenceId?.trim();
+  if (!id) return undefined;
+  const entry = vocabulary.get(id) ?? vocabulary.resolve(id);
+  return entry ? { ref: entry.ref, ...(entry.label ? { label: entry.label } : {}) } : undefined;
+}
+
 export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['gap']): { title: string; code: 'policy_blocked' | 'ambiguous' | 'no_data' | 'modeling_gap' } {
   if (gap === 'denied') return { title: 'Blocked by policy', code: 'policy_blocked' };
   if (gap === 'ambiguous') return { title: 'One detail is missing', code: 'ambiguous' };
@@ -646,7 +662,7 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     return withReceipt({ summary: outcome.kind === 'definition' ? 'Explained a governed definition.' : 'Replied conversationally.', answer: outcome.reply, answerKind: 'conversational', status: 'completed', trustState: 'not_applicable', stopReason: 'conversational_reply', resolvedRoute: 'conversation', artifacts: [], evaluations: [], nextActions: [], telemetry });
   }
   if (outcome.kind === 'clarify') {
-    const clarificationOptions: NonNullable<AgentRouteExecutorResult['clarificationOptions']> = outcome.options.map((option) => ({ id: option.ref, label: option.label, ...(option.description ? { description: option.description } : {}), kind: 'vocabulary', question: `${outcome.intent.reading || 'the question'} — ${option.label}` }));
+    const clarificationOptions: NonNullable<AgentRouteExecutorResult['clarificationOptions']> = outcome.options.map((option) => ({ id: option.ref, label: option.label, ...(option.description ? { description: option.description } : {}), kind: 'vocabulary' }));
     return withReceipt({ summary: outcome.question, answer: outcome.question, status: 'needs_clarification', trustState: 'not_applicable', stopReason: 'needs_clarification', resolvedRoute: 'clarify', answerRefusalCode: 'ambiguous', clarificationOptions, artifacts: [{ id: `${runId}:clarify`, kind: 'answer', title: 'One question before running this', trustState: 'not_applicable', payload: { kind: 'no_answer', text: outcome.question, answer: outcome.question, ...common } }], evaluations: [], nextActions: [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }], telemetry });
   }
   if (outcome.kind === 'gap') {

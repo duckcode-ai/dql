@@ -5908,13 +5908,19 @@ function consumeRepeatedClarificationSelection(
   const options = result.clarificationOptions ?? routeDecision.clarificationOptions ?? [];
   if (!options.some((option) => option.id === selectedEvidenceId)) return result;
   const { clarificationOptions: _repeatedOptions, ...withoutRepeatedOptions } = result;
-  const message = 'I used the selected governed meaning, but it does not cover every requested metric, dimension, filter, and grain. DQL did not drop any part of the question or ask you to choose the same option again. Review the missing modeling capability or continue with a review-required generated query.';
+  // The same option came back a second time. That is a continuation failure,
+  // not a proven modeling gap: nothing here compared what the project can do
+  // with what the question needs, so the answer must not claim a missing
+  // capability. It says what happened, keeps whatever the run did say, and
+  // does not re-render the option the user already picked.
+  const asked = (result.answer ?? result.summary ?? '').trim();
+  const message = `You chose ${selectedEvidenceId}, and the run came back asking the same thing instead of using it${asked ? `: "${asked.replace(/\s+/g, ' ').slice(0, 200)}"` : ''}. That is a continuation failure in DQL, not a gap in this project's modeling. Ask the question again naming that meaning, or open the trace to see where the selection was lost.`;
   return {
     ...withoutRepeatedOptions,
     status: 'needs_review',
     trustState: 'review_required',
     stopReason: 'human_review_required',
-    answerRefusalCode: 'modeling_gap',
+    answerRefusalCode: 'ambiguous',
     summary: message,
     answer: message,
   };

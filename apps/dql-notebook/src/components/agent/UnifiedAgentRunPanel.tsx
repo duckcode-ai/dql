@@ -4490,8 +4490,11 @@ export function clarificationSelectionInput(
   selectedEvidenceId: string;
 } {
   const original = sourceQuestion?.trim();
+  // The analytical question is the user's own, always: an option's `question`
+  // is UI prose (a reading plus a label) and submitting it as the question
+  // makes the next turn answer a sentence nobody asked.
   return {
-    question: option.question?.trim() || original || option.label,
+    question: original || option.question?.trim() || option.label,
     selectedEvidenceId: option.id,
   };
 }
@@ -4570,7 +4573,8 @@ function AskInspector({
 }) {
   const payload = payloadOf(artifact);
   const dqlArtifact = answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload);
-  const sql = answerSqlFromRun(run) ?? (typeof payload.sql === 'string' ? payload.sql : undefined);
+  const sqlEvidence = answerSqlEvidenceFromRun(run) ?? (typeof payload.sql === 'string' && payload.sql.trim() ? { sql: payload.sql, origin: 'compiled' as const } : undefined);
+  const sql = sqlEvidence?.sql;
   const resultData = extractResult(payload);
   const insertTitle = resultCardTitle(run, artifact);
   const evidence = evidenceFromRun(run);
@@ -4687,7 +4691,7 @@ function AskInspector({
           sql ? (
             <>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                <span style={{ fontSize: 11, color: t.textMuted }}>Attempted compiled SQL — open it in Notebook to inspect or repair.</span>
+                <span style={{ fontSize: 11, color: t.textMuted }}>{ANSWER_SQL_LABELS[sqlEvidence?.origin ?? 'compiled']} Open it in Notebook to inspect or repair.</span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   {onInsertSql ? (
                     <button
@@ -4701,10 +4705,23 @@ function AskInspector({
                       Open SQL in notebook
                     </button>
                   ) : null}
-                  <CopyButton text={sql} t={t} title="Copy SQL" />
+                  <CopyButton text={sqlEvidence?.params?.length ? `${sql}\n\n-- parameters\n${sqlEvidence.params.map((value, index) => `-- $${index + 1} = ${JSON.stringify(value)}`).join('\n')}` : sql} t={t} title="Copy SQL" />
                 </div>
               </div>
               <pre style={codeStyle(t)}>{sql}</pre>
+              {sqlEvidence?.params?.length ? (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 4 }}>Bound parameters, in order — the placeholders above stand for these values.</div>
+                  <div style={{ display: 'grid', gap: 3 }}>
+                    {sqlEvidence.params.map((value, index) => (
+                      <div key={`sql-param-${index + 1}`} style={{ display: 'flex', gap: 8, fontSize: 11.5, fontFamily: 'var(--font-mono, monospace)', color: t.textPrimary }}>
+                        <span style={{ color: t.textMuted, minWidth: 26 }}>${index + 1}</span>
+                        <span>{typeof value === 'string' ? value : JSON.stringify(value)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </>
           ) : (
             <InspectorEmpty t={t}>Compilation stopped before SQL was produced. The DQL, plan, trust evidence, and failure steps are still retained.</InspectorEmpty>
@@ -6452,7 +6469,27 @@ function evidenceFromRun(run: AgentRun): Array<{ label: string; certified: boole
 }
 
 /** Best-effort SQL behind a run, for the certification handoff. */
-function answerSqlFromRun(run: AgentRun): string | undefined {
+/**
+ * The SQL of a run, WITH ITS LIFECYCLE. One string cannot say whether the
+ * warehouse ran this statement, rejected it, or never saw it, and calling every
+ * one of them "attempted" told a reader that a successful governed answer had
+ * only been tried. The bound parameters travel with it: placeholder SQL without
+ * its values is not a reproducible handoff.
+ */
+export interface AnswerSqlEvidence {
+  sql: string;
+  origin: 'executed' | 'failed' | 'compiled' | 'proposed';
+  params?: unknown[];
+}
+
+export const ANSWER_SQL_LABELS: Record<AnswerSqlEvidence['origin'], string> = {
+  executed: 'Executed SQL — this statement produced the result.',
+  failed: 'Attempted SQL — the warehouse rejected this statement.',
+  compiled: 'Compiled SQL — prepared for this reading, not executed.',
+  proposed: 'Proposed SQL — review required before it runs.',
+};
+
+export function answerSqlEvidenceFromRun(run: AgentRun): AnswerSqlEvidence | undefined {
   for (const artifact of run.artifacts) {
     const payload = payloadOf(artifact);
     const researchRun = payload.researchRun && typeof payload.researchRun === 'object' ? payload.researchRun as Record<string, unknown> : undefined;
@@ -6460,16 +6497,25 @@ function answerSqlFromRun(run: AgentRun): string | undefined {
       ? payload.result as Record<string, unknown>
       : undefined;
     const dqlArtifact = normalizeDqlArtifactReference(payload.dqlArtifact);
-    const sql = payload.proposedSql
-      ?? payload.sql
-      ?? payload.sqlPreview
-      ?? result?.sql
-      ?? researchRun?.generatedSql
-      ?? researchRun?.reviewedSql
-      ?? dqlArtifact?.compiledSql;
-    if (typeof sql === 'string' && sql.trim()) return sql;
+    const text = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value : undefined;
+    const params = Array.isArray(payload.sqlParams) ? payload.sqlParams as unknown[]
+      : Array.isArray(result?.sqlParams) ? result!.sqlParams as unknown[]
+      : undefined;
+    const withParams = (sql: string, origin: AnswerSqlEvidence['origin']): AnswerSqlEvidence => ({ sql, origin, ...(params?.length ? { params } : {}) });
+    const executed = text(result?.sql);
+    if (executed) return withParams(executed, 'executed');
+    const failed = text(payload.executionError) ? text(payload.sql) : undefined;
+    if (failed) return withParams(failed, 'failed');
+    const proposed = text(payload.proposedSql) ?? text(researchRun?.generatedSql) ?? text(researchRun?.reviewedSql);
+    if (proposed) return withParams(proposed, 'proposed');
+    const compiled = text(payload.sql) ?? text(payload.sqlPreview) ?? text(dqlArtifact?.compiledSql);
+    if (compiled) return withParams(compiled, 'compiled');
   }
   return undefined;
+}
+
+function answerSqlFromRun(run: AgentRun): string | undefined {
+  return answerSqlEvidenceFromRun(run)?.sql;
 }
 
 /**

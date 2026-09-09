@@ -3,7 +3,7 @@ import type { AgentAnswerCascade, AgentTurn } from '../../llm/types';
 import type { AiRoute, CellChartConfig, QueryResult } from '../../store/types';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import { ChartOutput, CHART_TYPE_OPTIONS, resolveChartType } from '../output/ChartOutput';
+import { ChartOutput, CHART_TYPE_OPTIONS, categoryColumns, measureColumns, resolveChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { deriveResultChartConfig } from '../output/ResultView';
 import { TrustBadge, DerivationWalkPanel, type TrustState } from '@duckcodeailabs/dql-ui';
@@ -1876,8 +1876,12 @@ function ChartCustomizationPanel({
   const columns = result.columns;
   if (columns.length === 0) return null;
   const chartTypeOptions = CHART_TYPE_OPTIONS.filter((option) => option.value !== 'table');
-  const x = chartConfig?.x && columns.includes(chartConfig.x) ? chartConfig.x : columns[0] ?? '';
-  const y = chartConfig?.y && columns.includes(chartConfig.y) ? chartConfig.y : columns.find((column) => column !== x) ?? columns[0] ?? '';
+  // The offered defaults follow the result's own contract: a key or a label is
+  // never the value axis, however numeric its values look.
+  const measures = measureColumns(result);
+  const categories = categoryColumns(result);
+  const x = chartConfig?.x && columns.includes(chartConfig.x) ? chartConfig.x : categories[0] ?? columns[0] ?? '';
+  const y = chartConfig?.y && columns.includes(chartConfig.y) ? chartConfig.y : measures.find((column) => column !== x) ?? columns.find((column) => column !== x) ?? columns[0] ?? '';
   const color = chartConfig?.color && columns.includes(chartConfig.color) ? chartConfig.color : '';
   return (
     <div

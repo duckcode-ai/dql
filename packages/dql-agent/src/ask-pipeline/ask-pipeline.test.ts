@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, auditLedger, bindExactNames, identityClauseWords, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, identityClauseWords, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { runAskPipeline, unmetDisplayObligation } from './pipeline.js';
@@ -1391,5 +1391,41 @@ describe('an answer that could not carry the label the question asked for', () =
     const removed = intent([]);
     removed.provenance['column:dev.teams.team_nickname'] = 'removed:the question asked for ids';
     expect(unmetDisplayObligation(['column:dev.teams.team_nickname'], removed, refusals as never, label)).toBeUndefined();
+  });
+});
+
+describe('a meaning the user already picked', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'total_points', label: 'Total points', aggregation: 'sum' }, { name: 'points_per_game', label: 'Points per game', aggregation: 'avg' }],
+    dimensions: [{ name: 'player', model: 'season_facts', label: 'Player', dataType: 'string' }],
+  });
+  const unresolvedIntent = (): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'the best players', measures: [], groupBy: [], display: [], filters: [], expectedShape: 'ranking',
+    unresolved: [{ clause: 'best players', material: true, options: ['metric:total_points', 'metric:points_per_game'], question: 'Which measure defines best?' }],
+    provenance: {},
+  });
+
+  it('carries the chosen ref into the reading, whatever the interpreter wrote', () => {
+    const intent = unresolvedIntent();
+    applySelectedMeaning(intent, { ref: 'metric:total_points', label: 'Total points' }, vocabulary);
+    expect(intent.measures.map((measure) => measure.ref)).toEqual(['metric:total_points']);
+    expect(intent.ordering).toEqual({ ref: 'metric:total_points', direction: 'desc' });
+    expect(intent.limit).toBe(10);
+    expect(intent.unresolved.every((clause) => !clause.material)).toBe(true);
+    expect(intent.provenance['metric:total_points']).toContain('clarification');
+  });
+
+  it('groups by a chosen dimension, and never doubles a ref the reading already carries', () => {
+    const grouped = unresolvedIntent();
+    applySelectedMeaning(grouped, { ref: 'dimension:season_facts.player' }, vocabulary);
+    expect(grouped.groupBy).toEqual([{ ref: 'dimension:season_facts.player', role: 'categorical' }]);
+    const already: AnalyticalIntentV1 = { ...unresolvedIntent(), measures: [{ ref: 'metric:total_points' }] };
+    applySelectedMeaning(already, { ref: 'metric:total_points' }, vocabulary);
+    expect(already.measures).toHaveLength(1);
+  });
+
+  it('tells the interpreter the choice is made, only when there is one', () => {
+    expect(buildIntentSystemPrompt({ cards: '', hasPrior: false, selection: { ref: 'metric:total_points', label: 'Total points' } })).toContain('THE MEANING IS ALREADY CHOSEN');
+    expect(buildIntentSystemPrompt({ cards: '', hasPrior: false })).not.toContain('THE MEANING IS ALREADY CHOSEN');
   });
 });

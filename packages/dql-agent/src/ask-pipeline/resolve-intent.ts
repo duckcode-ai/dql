@@ -42,6 +42,8 @@ export interface ResolveIntentInput {
   ledger?: IntentLedger;
   /** Round number for ledger entries (0 = the first resolution, 1 = the pipeline's repair). */
   ledgerRound?: number;
+  /** The governed meaning the user picked from a clarification's options, when this turn continues one. */
+  selection?: { ref: string; label?: string };
   /** Optional domain briefing / project guidance rendered above the cards. */
   guidance?: string;
   /** Character budget for the vocabulary cards. */
@@ -99,7 +101,7 @@ const GROUP_KINDS: VocabularyKind[] = ['dimension', 'entity', 'column'];
 const DISPLAY_KINDS: VocabularyKind[] = ['dimension', 'entity', 'column'];
 const FILTER_KINDS: VocabularyKind[] = ['dimension', 'entity', 'column'];
 
-export function buildIntentSystemPrompt(input: { cards: string; guidance?: string; hasPrior: boolean; hints?: string[] }): string {
+export function buildIntentSystemPrompt(input: { cards: string; guidance?: string; hasPrior: boolean; hints?: string[]; selection?: { ref: string; label?: string } }): string {
   return [
     'You are the interpreter for a governed analytics system over a dbt project. You read one question and write down exactly what it means as a JSON AnalyticalIntent. You never write SQL and never invent identifiers: every ref you use must be copied verbatim from the vocabulary below. The host proves and executes what you write.',
     '',
@@ -128,6 +130,7 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
     'OUTPUT: one JSON object matching this shape, nothing else. `reading` restates the question in one sentence as you understood it.',
     '{"version":1,"kind":"analytics","reading":"...","measures":[{"ref":"metric:...","scope":[{"ref":"dimension:...","op":"eq","values":["..."],"source":"question"}],"aggregation":"sum"},{"derived":{"kind":"ratio","numerator":"metric:...","denominator":"metric:..."},"alias":"..."}],"groupBy":[{"ref":"entity:...","role":"key"},{"ref":"dimension:...","role":"time","grain":"month"}],"display":["dimension:..."],"filters":[{"ref":"dimension:...","op":"eq","values":["literal"],"source":"question"}],"ordering":{"ref":"metric:...","direction":"desc"},"limit":10,"time":{"ref":"dimension:...","window":{"start":"2025-01-01","end":"2026-01-01","expression":"in 2025"}},"expectedShape":"ranking","population":"matching","unresolved":[],"provenance":{"metric:...":"q:phrase"},"reply":"only for conversation/definition"}',
     'Predicates always carry `values` as an array (one element for eq; the literal exactly as written). `scope`, `aggregation`, `derived` and `population` are optional. Omit `ordering`, `limit` and `time` when the question has none.',
+    ...(input.selection ? ['', `THE MEANING IS ALREADY CHOSEN. The user picked ${input.selection.ref}${input.selection.label ? ` (${input.selection.label})` : ''} for the ambiguous part of this question. Use that ref: as the measure when it measures something, as the grouping when it names a thing. Do not list that part as unresolved and never ask about it again; read the rest of the question as usual.`] : []),
     ...(input.guidance ? ['', 'PROJECT GUIDANCE', input.guidance] : []),
     ...(input.hints?.length ? ['', 'SPELLING HINTS (question words that match nothing exactly, with the nearest vocabulary; a misspelling resolves to the obvious entry)', ...input.hints.map((hint) => `- ${hint}`)] : []),
     '',
@@ -563,6 +566,32 @@ export function scopedColumnOf(expr: string): { column: string; scoped: boolean 
   const core = (wrapped?.[2] ?? expr).trim().replace(/"/g, '');
   if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(core)) return undefined;
   return { column: core.split('.').pop()!, scoped: Boolean(wrapped) };
+}
+
+/**
+ * A MEANING THE USER ALREADY PICKED. The clarification's options are refs, and
+ * the pick is one of them: the reading that follows must carry it, whatever the
+ * interpreter wrote. A selection that only reaches the prompt can be ignored by
+ * the model, and the turn then asks the same question again.
+ */
+export function applySelectedMeaning(intent: AnalyticalIntentV1, selection: { ref: string; label?: string }, vocabulary: VocabularyIndex): void {
+  const entry = vocabulary.get(selection.ref);
+  if (!entry || intent.kind !== 'analytics') return;
+  for (const clause of intent.unresolved) {
+    if (clause.options.includes(selection.ref)) { clause.material = false; clause.question = `Read "${clause.clause}" as ${entry.label ?? entry.name}: you chose it.`; }
+  }
+  const used = intentRefs(intent);
+  if (used.includes(selection.ref)) return;
+  intent.provenance[selection.ref] = intent.provenance[selection.ref] ?? 'clarification:the meaning you chose';
+  if (entry.roles.includes('measure') || entry.kind === 'metric' || entry.kind === 'measure') {
+    intent.measures.push({ ref: selection.ref });
+    if (!intent.ordering && intent.expectedShape === 'ranking') intent.ordering = { ref: selection.ref, direction: 'desc' };
+    if (intent.expectedShape === 'ranking' && intent.limit === undefined) intent.limit = 10;
+    return;
+  }
+  if (entry.kind === 'dimension' || entry.kind === 'entity' || entry.kind === 'column') {
+    intent.groupBy.push({ ref: selection.ref, role: entry.roles.includes('key') ? 'key' : entry.roles.includes('time') ? 'time' : 'categorical' });
+  }
 }
 
 /**
@@ -1167,7 +1196,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   const now = input.now ?? (() => Date.now());
   const seeds = input.question.split(/[^A-Za-z0-9_']+/).filter((word) => word.length > 2);
   const cards = input.vocabulary.renderCards({ maxChars: input.cardBudget ?? 24_000, seeds });
-  const system = buildIntentSystemPrompt({ cards, guidance: input.guidance, hasPrior: Boolean(input.prior), hints: spellingHints(input.question, input.vocabulary) });
+  const system = buildIntentSystemPrompt({ cards, guidance: input.guidance, hasPrior: Boolean(input.prior), hints: spellingHints(input.question, input.vocabulary), ...(input.selection ? { selection: input.selection } : {}) });
   const messages: AgentMessage[] = [
     { role: 'system', content: system },
     ...(input.prior ? [{ role: 'user' as const, content: renderPrior(input.prior, input.priorExecuted === false ? undefined : input.priorAnswerSummary, input.priorExecuted !== false) }] : []),
@@ -1258,6 +1287,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     if (validation.followUpReplacement && attempts > 1) validation.problems = validation.problems.filter((problem) => problem.message !== validation.followUpReplacement);
     const bare = isBareIntent(parsed.intent);
     const askedQuestions = new Map(validation.intent.unresolved.map((clause) => [clause, clause.question]));
+    if (input.selection) applySelectedMeaning(validation.intent, input.selection, input.vocabulary);
     applyGovernedDefaults(validation.intent, input.question, input.vocabulary);
     proveTimeRoles(validation.intent, input.vocabulary);
     if (input.clauseCoverage !== false) proveClauseCoverage(input.question, validation.intent, input.vocabulary);

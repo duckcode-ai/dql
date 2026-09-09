@@ -53,6 +53,38 @@ function isStringLike(v: unknown): boolean {
   return typeof v === 'string' || typeof v === 'number';
 }
 
+const IDENTIFIER_NAME_RE = /(^|_)(id|key|uuid|code)$/i;
+
+/**
+ * WHAT A CHART MAY PLOT AS A VALUE.
+ *
+ * A six-digit player id is a number at runtime and an identity in meaning: put
+ * it on a value axis and it dwarfs the measure beside it, which is exactly how
+ * a correct table became a misleading chart. The executed result carries its
+ * own contract (`columnsMeta`: the kind, and the ref that owns the column), so
+ * a key or a label is a dimension whatever its runtime type. Without a
+ * contract, an identifier name and then the values decide, as before.
+ */
+export function isMeasureColumn(result: QueryResult, column: string): boolean {
+  const meta = result.columnsMeta?.find((item) => item.name === column);
+  if (meta) {
+    if (meta.kind === 'text' || meta.kind === 'date' || meta.kind === 'boolean') return false;
+    if (meta.ref?.startsWith('dimension:') || meta.ref?.startsWith('entity:')) return false;
+    if (meta.ref?.startsWith('metric:') || meta.ref?.startsWith('measure:')) return true;
+    return !IDENTIFIER_NAME_RE.test(column);
+  }
+  if (IDENTIFIER_NAME_RE.test(column)) return false;
+  return result.rows.slice(0, 5).some((row) => isNumericValue(row[column]));
+}
+
+export function measureColumns(result: QueryResult): string[] {
+  return result.columns.filter((column) => isMeasureColumn(result, column));
+}
+
+export function categoryColumns(result: QueryResult): string[] {
+  return result.columns.filter((column) => !isMeasureColumn(result, column));
+}
+
 const VALID_CHART_TYPES = new Set<string>([
   'bar', 'line', 'area', 'pie', 'donut', 'scatter', 'heatmap',
   'funnel', 'waterfall', 'histogram', 'gauge', 'stacked-bar',
@@ -79,7 +111,9 @@ export function detectChartType(result: QueryResult): ChartType {
   const col1 = columns[1];
   const sample = rows.slice(0, 5);
 
-  const col1AllNumeric = sample.every((r) => isNumericValue(r[col1]));
+  // A chart needs something to measure; a table of identities is a table.
+  if (measureColumns(result).length === 0) return 'table';
+  const col1AllNumeric = isMeasureColumn(result, col1) && sample.every((r) => isNumericValue(r[col1]));
   const col0AllString = sample.every((r) => isStringLike(r[col0]));
 
   // Line chart: col[0] is date-like name and col[1] is numeric
@@ -89,14 +123,14 @@ export function detectChartType(result: QueryResult): ChartType {
 
   // Bar chart: label/name/category col + value/count/total/revenue/amount col
   const labelCol = columns.find((c) => LABEL_NAME_RE.test(c));
-  const valueCol = columns.find((c) => VALUE_NAME_RE.test(c));
+  const valueCol = columns.find((c) => VALUE_NAME_RE.test(c) && isMeasureColumn(result, c));
   if (labelCol && valueCol) {
     const valueAllNumeric = sample.every((r) => isNumericValue(r[valueCol]));
     if (valueAllNumeric) return 'bar';
   }
 
   // Scatter: two numeric columns
-  const col0AllNumeric = sample.every((r) => isNumericValue(r[col0]));
+  const col0AllNumeric = isMeasureColumn(result, col0) && sample.every((r) => isNumericValue(r[col0]));
   if (col0AllNumeric && col1AllNumeric && columns.length >= 2) {
     return 'scatter';
   }
@@ -181,12 +215,17 @@ function formatCategoryLabel(value: string, column: string, maxLen = 16): string
 }
 
 function pickColumns(result: QueryResult, chartConfig?: CellChartConfig) {
+  const categories = categoryColumns(result);
+  const measures = measureColumns(result);
   const labelCol =
     (chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : undefined) ??
-    result.columns.find((c) => LABEL_NAME_RE.test(c)) ?? result.columns[0];
+    result.columns.find((c) => LABEL_NAME_RE.test(c)) ??
+    // A label beats the key it belongs to: names read, ids do not.
+    categories.find((c) => /name|label|title/i.test(c)) ?? categories[0] ?? result.columns[0];
   const valueCol =
     (chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : undefined) ??
-    result.columns.find((c) => VALUE_NAME_RE.test(c)) ?? result.columns[1];
+    result.columns.find((c) => VALUE_NAME_RE.test(c) && isMeasureColumn(result, c)) ??
+    measures.find((c) => c !== labelCol) ?? result.columns[1];
   return { labelCol, valueCol };
 }
 
@@ -265,7 +304,7 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
   const labelCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : result.columns[0];
   // All numeric columns except the label column become groups
   const sample = result.rows.slice(0, 5);
-  const valueCols = result.columns.filter((c) => c !== labelCol && sample.some((r) => isNumericValue(r[c])));
+  const valueCols = result.columns.filter((c) => c !== labelCol && isMeasureColumn(result, c) && sample.some((r) => isNumericValue(r[c])));
   if (valueCols.length === 0) return <BarChart result={result} themeMode={themeMode} chartConfig={chartConfig} />;
 
   const labels = result.rows.slice(0, DEFAULT_MAX_ITEMS).map((r) => String(r[labelCol] ?? ''));
@@ -331,7 +370,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
 
   const labelCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : result.columns[0];
   const sample = result.rows.slice(0, 5);
-  const valueCols = result.columns.filter((c) => c !== labelCol && sample.some((r) => isNumericValue(r[c])));
+  const valueCols = result.columns.filter((c) => c !== labelCol && isMeasureColumn(result, c) && sample.some((r) => isNumericValue(r[c])));
   if (valueCols.length === 0) return <BarChart result={result} themeMode={themeMode} chartConfig={chartConfig} />;
 
   const rows = result.rows.slice(0, DEFAULT_MAX_ITEMS);
@@ -739,7 +778,7 @@ function HistogramChart({ result, themeMode, chartConfig }: { result: QueryResul
 
   // Use first numeric column
   const numCol = (chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : undefined) ??
-    result.columns.find((c) => result.rows.slice(0, 5).some((r) => isNumericValue(r[c]))) ?? result.columns[0];
+    measureColumns(result)[0] ?? result.columns[0];
 
   const values = result.rows.map((r) => Number(r[numCol] ?? 0)).filter((v) => !isNaN(v));
   if (values.length === 0) return null;
@@ -875,7 +914,7 @@ function SankeyChart({ result, themeMode, chartConfig }: { result: QueryResult; 
   const palette = getPalette(chartConfig?.colorPalette);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
   const sample = result.rows.slice(0, 20);
-  const numericColumns = result.columns.filter((column) => sample.some((row) => isNumericValue(row[column])));
+  const numericColumns = result.columns.filter((column) => isMeasureColumn(result, column) && sample.some((row) => isNumericValue(row[column])));
   const dimensionColumns = result.columns.filter((column) => !numericColumns.includes(column));
   const sourceCol = chartConfig?.x && dimensionColumns.includes(chartConfig.x)
     ? chartConfig.x
@@ -1078,7 +1117,7 @@ function GaugeChart({ result, themeMode, chartConfig }: { result: QueryResult; t
   if (!row) return null;
 
   const yCol = (chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : undefined) ??
-    result.columns.find((c) => isNumericValue(row[c])) ?? result.columns[0];
+    measureColumns(result).find((c) => isNumericValue(row[c])) ?? result.columns[0];
   const rawVal = Number(row[yCol] ?? 0);
   const label = chartConfig?.title ?? yCol;
 
@@ -1148,7 +1187,7 @@ function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; them
   if (!row) return null;
 
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y
-    : result.columns.find((c) => isNumericValue(row[c])) ?? result.columns[0];
+    : measureColumns(result).find((c) => isNumericValue(row[c])) ?? result.columns[0];
 
   const displayVal = formatKpiValue(yCol, row[yCol], result.rows.map((item) => item[yCol]), chartConfig?.format, metaFor(result, yCol));
 

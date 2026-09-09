@@ -34,6 +34,8 @@ export interface RunAskPipelineInput {
   priorExecuted?: boolean;
   priorAnswerSummary?: string;
   guidance?: string;
+  /** The governed meaning the user picked from a clarification's options. */
+  selection?: { ref: string; label?: string };
   /** False for research branches: their questions are hypotheses, not asks for causes or decisions. */
   clauseCoverage?: boolean;
   explorationOptIn?: boolean;
@@ -129,7 +131,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // 1. Resolve.
   const resolveStarted = now();
   let resolution: IntentResolution = await resolveIntent({
-    question: input.question, vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, priorAnswerSummary: input.priorAnswerSummary, clauseCoverage: input.clauseCoverage, budgetMs: remaining(),
+    question: input.question, vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, priorAnswerSummary: input.priorAnswerSummary, clauseCoverage: input.clauseCoverage, budgetMs: remaining(), ...(input.selection ? { selection: input.selection } : {}),
     guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now,
     maxAttempts: remaining() > 15_000 ? 2 : 1,
     onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500) }),
@@ -234,7 +236,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     const repairStarted = now();
     resolution = await resolveIntent({
       question: `${input.question}\n\nThe previous interpretation could not be prepared. ${repairable.tier === 'certified' ? 'The certified block is not applicable: ' : 'The engine said: '}${repairable.message}. ${repairable.tier === 'certified' ? 'Express the analysis with metric, entity and dimension refs instead of the block.' : 'Choose refs the engine can bind.'}`,
-      vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage,
+      vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage, ...(input.selection ? { selection: input.selection } : {}),
       // The repair is held to the original question's obligations.
       ...(resolution.status === 'resolved' && resolution.ledger ? { ledger: resolution.ledger, ledgerRound: round + 1 } : {}),
       onDispatch: (event) => receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500) }),
