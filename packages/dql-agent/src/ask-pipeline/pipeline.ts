@@ -267,6 +267,17 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     recordLedger(resolution);
     if (resolution.status !== 'resolved') {
       receipt.failure = { stage: 'prepare', reason: `repair_${resolution.status}`, message: resolution.status === 'failed' ? resolution.detail : resolution.status === 'clarify' ? resolution.question : resolution.status, ...(resolution.status === 'failed' ? { problems: resolution.problems } : {}) };
+      // A repair that came back with a QUESTION is a question for the user, not
+      // an engine failure: asking it is the honest end of the turn, and the
+      // compiler's message stays in the receipt.
+      // ... unless a certified block is still standing as the answer of last
+      // resort: serving what the team certified beats asking again.
+      const fallbackWaiting = Boolean(prepared?.fallbacks?.[0] ?? firstPrepared?.fallbacks?.[0]);
+      if (resolution.status === 'clarify' && resolution.question && !fallbackWaiting) {
+        receipt.intent = resolution.intent;
+        const options = resolution.options.map((ref) => ({ ref, label: label(ref), ...(input.vocabulary.get(ref)?.description ? { description: input.vocabulary.get(ref)!.description } : {}) }));
+        return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
+      }
       break;
     }
     intent = resolution.intent;
