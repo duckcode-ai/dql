@@ -80,6 +80,31 @@ function gapFromRefusals(refusals: PreparedRefusal[], intent: AnalyticalIntentV1
   return { gap: 'not_modeled', message: deepest?.message ?? 'no governed tier could prepare the intent', nearest };
 }
 
+/**
+ * THE LABEL THE QUESTION ASKED FOR. "Which teams" is answered by names. When a
+ * repair dropped the requested label because no governed relationship reaches
+ * it, the rows carry a key and nothing else. The numbers may still be right,
+ * so the answer is served, but the omission is named and the check does not
+ * pass: opaque identifiers do not answer "which".
+ */
+export function unmetDisplayObligation(
+  requested: string[],
+  intent: AnalyticalIntentV1,
+  refusals: PreparedRefusal[],
+  label: (ref: string) => string,
+): { message: string; refs: string[] } | undefined {
+  const keys = intent.groupBy.filter((group) => group.role === 'key');
+  if (keys.length === 0 || intent.display.length > 0) return undefined;
+  const lost = requested.filter((ref) => !intent.display.includes(ref) && !intent.groupBy.some((group) => group.ref === ref) && !(intent.provenance[ref] ?? '').startsWith('removed'));
+  if (lost.length === 0) return undefined;
+  const join = refusals.find((refusal) => refusal.code === 'join_path_required');
+  const because = join ? `, because ${summarizeRefusal(join).replace(/^no governed join path/, 'no governed relationship reaches it')}` : ' from this reading';
+  return {
+    message: `the rows are identified by ${keys.map((group) => label(group.ref)).join(', ')} only: ${lost.map((ref) => label(ref)).join(', ')} could not be shown beside them${because}`,
+    refs: lost,
+  };
+}
+
 export async function runAskPipeline(input: RunAskPipelineInput): Promise<PipelineOutcome> {
   const now = input.now ?? (() => Date.now());
   const started = now();
@@ -151,11 +176,18 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: `${composeGapText('unsupported', message.replace(/[.\s]+$/, ''), [], false)}${answerable}`, receipt, intent: resolution.intent, offerExploration: false };
       }
       const nearest = input.vocabulary.lookup(clause, { limit: 4, minScore: 0.5 }).map((hit) => label(hit.entry.ref));
-      return { kind: 'gap', gap: 'not_modeled', message: `"${clause}" is not something this project's governed data describes`, nearest, text: `${composeGapText('not_modeled', `"${clause}" is not something this project's governed data describes`, nearest, false)}${answerable}`, receipt, intent: resolution.intent, offerExploration: false };
+      // A clause that came with its own explanation says more than the
+      // generic sentence: read it out instead of restating the clause.
+      const message = material?.question ?? `"${clause}" is not something this project's governed data describes`;
+      return { kind: 'gap', gap: 'not_modeled', message, nearest, text: `${composeGapText('not_modeled', message.replace(/[.\s]+$/, ''), nearest, false)}${answerable}`, receipt, intent: resolution.intent, offerExploration: false };
     }
     return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
   }
   let intent = resolution.intent;
+  // What the first reading promised to SHOW. A repair may drop a label the
+  // engine could not reach; the answer must say so rather than quietly
+  // identifying its rows by an opaque key.
+  const requestedDisplay = [...resolution.intent.display];
   if (input.groundLiterals) {
     const groundStarted = now();
     try {
@@ -287,6 +319,16 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   const result: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(intent, executed.result, input.vocabulary) };
   // A certified block served as published with an identity caveat says so in the answer.
   const caveats = candidate.tier === 'certified' ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line) => `${line.replace(/; the certified block is served as published$/, '')}; recertify it with the entity key to keep them apart`) : [];
+  // THE LABEL THE QUESTION ASKED FOR. "Which teams" is answered by names; when
+  // the repair dropped the label because no governed relationship reaches it,
+  // the rows carry a key and nothing else. The numbers can still be right, so
+  // the answer is served, but the omission is named and the check does not
+  // pass: opaque identifiers are not the answer to "which".
+  const unmetLabel = unmetDisplayObligation(requestedDisplay, intent, receipt.refusals, label);
+  if (unmetLabel) {
+    receipt.unmet = [...(receipt.unmet ?? []), { obligation: 'display_label', message: unmetLabel.message, refs: unmetLabel.refs }];
+    caveats.push(`${unmetLabel.message}; declare a governed relationship to that label (with its uniqueness and coverage proof), or add the label to the fact relation`);
+  }
   // A member the host did not resolve to a key is matched by text, and the
   // answer says so: the reading may name a person, the predicate names a
   // string. A `contains` match can cover several members.

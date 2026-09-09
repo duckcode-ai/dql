@@ -708,11 +708,16 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
       // A certified block served as published with a label-only grouping
       // says so: the answer cannot keep two same-named entities apart.
       ...(candidate.tier === 'certified' ? candidate.proof.filter((line) => /no identity key/.test(line)).map((line, index) => ({ id: `pipeline-certified-caveat-${index + 1}`, label: 'Certified block identity', passed: false, severity: 'warning' as const, message: `${line.replace(/^the block/, 'The block')}. Recertify it with the entity key to keep same-named members apart.` })) : []),
+      // An answer that could not carry a requested output says so, and the
+      // check does not pass: a ranking whose only identity is a numeric key
+      // has not answered "which teams".
+      ...(receipt.unmet ?? []).map((unmet, index) => ({ id: `pipeline-unmet-${index + 1}`, label: unmet.obligation === 'display_label' ? 'Requested identity' : 'Requested coverage', passed: false, severity: 'warning' as const, message: `${unmet.message.charAt(0).toUpperCase()}${unmet.message.slice(1)}.` })),
       // A certified block refused for identity is shown as source evidence
       // beside the keyed governed answer that replaced it.
       ...receipt.refusals.filter((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message)).map((refusal, index) => ({ id: `pipeline-certified-identity-${index + 1}`, label: 'Certified source, not applicable', passed: false, severity: 'warning' as const, message: `${refusal.message.replace(/^block:/, 'Block ')}. The answer is composed by entity key; recertify the block with the key column to serve it as certified.` })),
     ],
     nextActions: [
+      ...((receipt.unmet ?? []).some((unmet) => unmet.obligation === 'display_label') ? [{ id: 'declare-relationship', label: 'Declare the relationship that carries the label', route: 'modeling_draft' as const }] : []),
       ...(receipt.refusals.some((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message)) || (candidate.tier === 'certified' && candidate.proof.some((line) => /no identity key/.test(line))) ? [{ id: 'recertify-with-key', label: 'Recertify this block with the entity key', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const }] : []),
       { id: 'create-block', label: 'Save as block', route: 'dql_block_draft', artifactKind: 'dql_block_draft' }, { id: 'research-gap', label: 'Research deeper', route: 'research' },
     ],

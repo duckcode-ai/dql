@@ -1028,3 +1028,39 @@ describe('explainCompatibleDimensions memoization', () => {
       .toEqual(['channel', 'region']);
   });
 });
+
+describe('a semantic filter is bound or the composition refuses', () => {
+  const layer = new SemanticLayer();
+  layer.addMetric({
+    name: 'total_points', label: 'Total points', description: '', domain: 'nba', sql: 'total_points', type: 'sum',
+    table: 'TRANSFORMED.local_player_season_facts',
+  });
+  layer.addDimension({
+    name: 'player', label: 'Player', description: '', domain: 'nba', sql: 'player_name', type: 'string',
+    table: 'TRANSFORMED.local_player_season_facts',
+  });
+
+  it('resolves a native dimension by the table-qualified spelling its own vocabulary uses', () => {
+    const compiled = layer.composeQuery({
+      metrics: ['total_points'], dimensions: [],
+      filters: [{ dimension: 'local_player_season_facts.player', operator: 'equals', values: ['LeBron James'] }],
+    });
+    expect(compiled?.sql).toContain('player_name');
+    expect(compiled?.sql).not.toMatch(/\.player\s*=/);
+  });
+
+  it('refuses rather than emitting a registry name as a column, or dropping the restriction', () => {
+    expect(layer.composeQuery({
+      metrics: ['total_points'], dimensions: [],
+      filters: [{ dimension: 'no_such_dimension', operator: 'equals', values: ['x'] }],
+    })).toBeNull();
+    // One resolved filter must not hide an unresolved one.
+    expect(layer.composeQuery({
+      metrics: ['total_points'], dimensions: [],
+      filters: [
+        { dimension: 'player', operator: 'equals', values: ['LeBron James'] },
+        { dimension: 'no_such_dimension', operator: 'equals', values: ['x'] },
+      ],
+    })).toBeNull();
+  });
+});

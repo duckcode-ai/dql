@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, auditLedger, bindExactNames, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyGovernedDefaults, auditLedger, bindExactNames, identityClauseWords, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
-import { runAskPipeline } from './pipeline.js';
+import { runAskPipeline, unmetDisplayObligation } from './pipeline.js';
 import { suggestSameGrainColumns, buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
 import { extractFirstJsonObject } from '../providers/structured-output.js';
@@ -997,7 +997,7 @@ describe('the original question is preserved through every repair (the obligatio
     expect(executed).toBe(0);
     expect(outcome.kind).toBe('gap');
     if (outcome.kind !== 'gap') return;
-    expect(outcome.text).toMatch(/double-doubles/);
+    expect(outcome.text).toMatch(/double-doubles/i);
     expect(outcome.receipt.ledger?.entries.map((entry) => entry.disposition)).toContain('restored');
     expect(outcome.receipt.ledger?.clauses).toEqual([{ clause: 'double-doubles' }]);
   });
@@ -1272,5 +1272,124 @@ describe('the same fact at another grain', () => {
       { from: 'column:dev.season_facts.games_played', to: 'column:dev.game_facts.game_id', aggregation: 'count_distinct' },
     ]);
     expect(suggestSameGrainColumns(vocabulary, ['column:dev.season_facts.player_id'], 'dev.game_facts')).toEqual([]);
+  });
+});
+
+describe('the project\'s definition wins over the raw column', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [
+      { name: 'points_scored', label: 'Points scored', aggregation: 'sum', physical: { relation: 'dev.game_facts', expr: 'CASE WHEN "dev"."game_facts"."participated" = true THEN "dev"."game_facts"."points" ELSE 0 END', aggregate: 'sum' } },
+      { name: 'games_played', label: 'Games played', aggregation: 'count_distinct', physical: { relation: 'dev.game_facts', expr: 'CASE WHEN "dev"."game_facts"."participated" = true THEN "dev"."game_facts"."game_id" END', aggregate: 'count_distinct' } },
+      { name: 'assists_made', label: 'Assists', aggregation: 'sum', physical: { relation: 'dev.game_facts', expr: '"dev"."game_facts"."assists"', aggregate: 'sum' } },
+      { name: 'assist_total', label: 'Assist total', aggregation: 'sum', physical: { relation: 'dev.game_facts', expr: '"dev"."game_facts"."assists"', aggregate: 'sum' } },
+    ],
+    relations: [{ schema: 'dev', name: 'game_facts', columns: [{ name: 'game_id' }, { name: 'points' }, { name: 'assists' }, { name: 'participated', dataType: 'BOOLEAN' }] }],
+  });
+  const make = (measures: AnalyticalIntentV1['measures']): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'Points and games in calendar 2017', measures, groupBy: [], display: [], filters: [],
+    ordering: { ref: 'column:dev.game_facts.points', direction: 'desc' }, expectedShape: 'ranking', unresolved: [],
+    provenance: { 'column:dev.game_facts.points': 'q:total points' },
+  });
+
+  it('reads a scoped aggregate through to the column it aggregates', () => {
+    expect(scopedColumnOf('CASE WHEN "dev"."game_facts"."participated" = true THEN "dev"."game_facts"."points" ELSE 0 END')).toEqual({ column: 'points', scoped: true });
+    expect(scopedColumnOf('"dev"."game_facts"."points"')).toEqual({ column: 'points', scoped: false });
+    expect(scopedColumnOf('SUM(a) / SUM(b)')).toBeUndefined();
+  });
+
+  it('replaces a raw column aggregation by the metric that defines it, and says so when the definition excludes rows', () => {
+    const intent = make([
+      { ref: 'column:dev.game_facts.points', aggregation: 'sum', alias: 'total_points' },
+      { ref: 'column:dev.game_facts.game_id', aggregation: 'count_distinct', alias: 'games_played' },
+    ]);
+    preferGovernedDefinition(intent, vocabulary);
+    expect(intent.measures.map((measure) => measure.ref)).toEqual(['metric:points_scored', 'metric:games_played']);
+    expect(intent.measures.every((measure) => measure.aggregation === undefined)).toBe(true);
+    expect(intent.ordering!.ref).toBe('metric:points_scored');
+    expect(intent.provenance['metric:points_scored']).toContain('governed default: Points scored defines this column');
+    expect(intent.reading).toContain('counts only the rows its definition includes');
+  });
+
+  it('leaves the raw column alone when the project declares two definitions of it, or none at that aggregation', () => {
+    const ambiguous = make([{ ref: 'column:dev.game_facts.assists', aggregation: 'sum', alias: 'assists' }]);
+    preferGovernedDefinition(ambiguous, vocabulary);
+    expect(ambiguous.measures[0]!.ref).toBe('column:dev.game_facts.assists');
+    const otherAggregate = make([{ ref: 'column:dev.game_facts.points', aggregation: 'avg', alias: 'avg_points' }]);
+    preferGovernedDefinition(otherAggregate, vocabulary);
+    expect(otherAggregate.measures[0]!.ref).toBe('column:dev.game_facts.points');
+  });
+
+  it('carries a ratio\'s parts to their governed definitions', () => {
+    const intent = make([{ ref: 'ratio:column:dev.game_facts.points/column:dev.game_facts.game_id', alias: 'points_per_game', derived: { kind: 'ratio', numerator: 'column:dev.game_facts.points', numeratorAggregation: 'sum', denominator: 'column:dev.game_facts.game_id', denominatorAggregation: 'count_distinct' } }]);
+    preferGovernedDefinition(intent, vocabulary);
+    expect(intent.measures[0]!.derived).toEqual({ kind: 'ratio', numerator: 'metric:points_scored', denominator: 'metric:games_played' });
+    expect(intent.measures[0]!.ref).toBe('ratio:metric:points_scored/metric:games_played');
+  });
+});
+
+describe('a relative period is a population, not a column', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'total_points', aggregation: 'sum', physical: { relation: 'dev.season_facts', expr: '"dev"."season_facts"."points"', aggregate: 'sum' } }],
+    dimensions: [
+      { name: 'season', model: 'season_facts', label: 'Source season', dataType: 'number', physical: { relation: 'dev.season_facts', column: 'season' } },
+      { name: 'game_date', model: 'game_facts', dataType: 'date', isTime: true, physical: { relation: 'dev.game_facts', column: 'game_date' } },
+    ],
+  });
+  const base: AnalyticalIntentV1 = {
+    version: 1, kind: 'analytics', reading: 'Top scorers', measures: [{ ref: 'metric:total_points' }], groupBy: [], display: [], filters: [],
+    expectedShape: 'ranking', unresolved: [], provenance: {},
+  };
+
+  it('is a problem when the reading restricts no period, however it selects one', () => {
+    const selected: AnalyticalIntentV1 = { ...base, measures: [{ ref: 'metric:total_points' }, { ref: 'dimension:season_facts.season', aggregation: 'max', alias: 'current_season' }] };
+    expect(relativePeriodProblem('Who are the top scorers this season?', selected, vocabulary)).toMatchObject({ unit: 'season' });
+    expect(relativePeriodProblem('Who are the top scorers this season?', { ...base, filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: [2022], source: 'question' }] }, vocabulary)).toBeUndefined();
+    expect(relativePeriodProblem('Who are the top scorers this season?', { ...base, time: { ref: 'dimension:game_facts.game_date', window: { start: '2022-01-01', end: '2023-01-01', expression: 'in 2022' } } }, vocabulary)).toBeUndefined();
+    expect(relativePeriodProblem('Who are the top scorers in 2017?', base, vocabulary)).toBeUndefined();
+  });
+});
+
+describe('a clause that asks which ones is answered by identities', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'teams_played', label: 'Teams played', aggregation: 'sum' }],
+    dimensions: [{ name: 'team', model: 'team_facts', label: 'Team', dataType: 'number' }, { name: 'player', model: 'season_facts', label: 'Player', dataType: 'string' }],
+  });
+  const intent = (overrides: Partial<AnalyticalIntentV1>): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'profile', measures: [], groupBy: [], display: [], filters: [], expectedShape: 'grouped', unresolved: [], provenance: {}, ...overrides,
+  });
+  const ledger = { clauses: [{ clause: 'teams (which teams he played for)', words: ['teams', 'which', 'played'], role: 'identity' as const, roleWords: ['teams'] }], measures: [], unaccounted: [] };
+
+  it('reads the identity words out of the clause', () => {
+    expect(identityClauseWords('teams (which teams he played for)', vocabulary)).toEqual(['teams']);
+    expect(identityClauseWords('how many teams he played for', vocabulary)).toEqual([]);
+  });
+
+  it('is not discharged by a measure that counts them, and is discharged by a grouping that names them', () => {
+    const counted = intent({ measures: [{ ref: 'metric:teams_played', aggregation: 'sum' }] });
+    expect(auditLedger('profile', counted, ledger, vocabulary).entries[0]!.disposition).toBe('dropped');
+    const grouped = intent({ groupBy: [{ ref: 'dimension:team_facts.team', role: 'key' }] });
+    expect(auditLedger('profile', grouped, ledger, vocabulary).entries[0]!.disposition).toBe('discharged');
+  });
+});
+
+describe('an answer that could not carry the label the question asked for', () => {
+  const label = (ref: string) => ref.split('.').pop()!;
+  const intent = (display: string[]): AnalyticalIntentV1 => ({
+    version: 1, kind: 'analytics', reading: 'teams by wins', measures: [{ ref: 'column:dev.team_season.wins', aggregation: 'sum' }],
+    groupBy: [{ ref: 'column:dev.team_season.team_id', role: 'key' }], display, filters: [], expectedShape: 'ranking', unresolved: [], provenance: {},
+  });
+  const refusals = [{ tier: 'relational' as const, code: 'join_path_required' as const, message: 'no governed join path from dev.team_season to dev.teams', repairable: true }];
+
+  it('names the omission, with the reason the label could not be reached', () => {
+    const unmet = unmetDisplayObligation(['column:dev.teams.team_nickname'], intent([]), refusals as never, label);
+    expect(unmet?.message).toContain('identified by team_id only');
+    expect(unmet?.message).toContain('no governed relationship reaches it');
+  });
+
+  it('says nothing when the label is shown, or when the reading deliberately removed it', () => {
+    expect(unmetDisplayObligation(['column:dev.teams.team_nickname'], intent(['column:dev.teams.team_nickname']), refusals as never, label)).toBeUndefined();
+    const removed = intent([]);
+    removed.provenance['column:dev.teams.team_nickname'] = 'removed:the question asked for ids';
+    expect(unmetDisplayObligation(['column:dev.teams.team_nickname'], removed, refusals as never, label)).toBeUndefined();
   });
 });

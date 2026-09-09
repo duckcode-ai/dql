@@ -38,6 +38,13 @@ export interface PipelineReceipt {
   /** Warehouse statements this run dispatched and how many failed; `executed` is the one that succeeded. A failed attempt is never "no query ran". */
   /** What the host sent to the warehouse for this run: queries attempted, of which failed and succeeded. */
   warehouse?: { attempts: number; failures: number; executions?: number };
+  /**
+   * What the answer does NOT carry although the question asked for it: a
+   * requested human label the governed vocabulary could not reach, a facet the
+   * project does not model. An answer with an unmet obligation is served with
+   * the omission named; it never counts as a complete one.
+   */
+  unmet?: Array<{ obligation: 'display_label' | 'coverage'; message: string; refs?: string[] }>;
   /** The original question's obligations and what each later reading did with them. */
   ledger?: { clauses: Array<{ clause: string; kind?: string }>; timeGrain?: { ref: string; grain: string }; measures: string[]; entries: Array<{ clause: string; kind?: string; disposition: string; by?: string; round: number }> };
 }

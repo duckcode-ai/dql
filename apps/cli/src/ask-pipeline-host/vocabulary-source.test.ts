@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
+import { buildVocabularyIndex, renderCard } from '@duckcodeailabs/dql-agent';
 import { modelingJoinPaths } from './host.js';
 import { leafName, nativeAggregateBinding, nativeFormulaBinding, normalizeRelationName, parseMetricFilter, qualifyExpression, buildVocabularySource } from './vocabulary-source.js';
 
@@ -12,11 +13,16 @@ describe('vocabulary source helpers', () => {
     expect(qualifyExpression('1', 'dev.orders', [])).toBe('1');
     expect(qualifyExpression('"dev"."orders"."order_total" * 2', 'dev.orders', ['order_total'])).toBe('"dev"."orders"."order_total" * 2');
   });
-  it('reads a MetricFlow where filter into a column and a condition', () => {
+  it('reads a metric scope from a MetricFlow template, a plain predicate or a bare boolean, and reports what it cannot read', () => {
     expect(parseMetricFilter({ where_filters: [{ where_sql_template: "{{ Dimension('order_id__is_drink_order') }} = true\n" }] }))
-      .toEqual([{ column: 'is_drink_order', entityPath: ['order_id'], condition: '= true' }]);
-    expect(parseMetricFilter("{{ Dimension('order_id__order_total_dim') }} >= 20")).toEqual([{ column: 'order_total_dim', entityPath: ['order_id'], condition: '>= 20' }]);
-    expect(parseMetricFilter(null)).toEqual([]);
+      .toEqual({ predicates: [{ column: 'is_drink_order', entityPath: ['order_id'], condition: '= true' }], unparsed: [] });
+    expect(parseMetricFilter("{{ Dimension('order_id__order_total_dim') }} >= 20")).toEqual({ predicates: [{ column: 'order_total_dim', entityPath: ['order_id'], condition: '>= 20' }], unparsed: [] });
+    expect(parseMetricFilter('participated = true')).toEqual({ predicates: [{ column: 'participated', entityPath: [], condition: '= true' }], unparsed: [] });
+    expect(parseMetricFilter('participated')).toEqual({ predicates: [{ column: 'participated', entityPath: [], condition: '= true' }], unparsed: [] });
+    // A scope this cannot take apart is reported, never dropped.
+    expect(parseMetricFilter('participated = true and minutes > 0').unparsed).toHaveLength(1);
+    expect(parseMetricFilter('exists (select 1 from other)').unparsed).toHaveLength(1);
+    expect(parseMetricFilter(null)).toEqual({ predicates: [], unparsed: [] });
   });
   it('normalizes three-part relation names to schema.table', () => {
     expect(normalizeRelationName('"jaffle_shop"."dev"."customers"')).toBe('dev.customers');
@@ -236,5 +242,49 @@ describe('a native metric written as a formula of aggregates', () => {
       expr: 'SUM("TRANSFORMED"."local_player_season_facts"."total_points") / NULLIF(SUM("TRANSFORMED"."local_player_season_facts"."games_played"), 0)',
       aggregate: 'derived',
     });
+  });
+});
+
+describe('a native metric that declares which rows its definition counts', () => {
+  const layerWith = (metrics: unknown[]) => ({
+    listCubes: () => [],
+    listMetrics: () => metrics,
+    listMeasures: () => [], listTimeDimensions: () => [], listDimensions: () => [], listEntities: () => [], listSemanticModels: () => [], findJoinPath: () => [], displayFormatFor: () => undefined,
+  } as unknown as SemanticLayer);
+  const relations = [{ schema: 'TRANSFORMED', name: 'local_player_game_facts', columns: [{ name: 'game_id' }, { name: 'points' }, { name: 'participated', dataType: 'BOOLEAN', description: 'True when the player appeared; DNP rows are kept with false.' }] }];
+
+  it('binds the scope inside the aggregate, and a sum is the only aggregate that reads zero for an excluded row', () => {
+    const source = buildVocabularySource({ manifest: undefined, semanticLayer: layerWith([
+      { name: 'points_scored', label: 'Points scored', description: 'Points in games played.', sql: 'points', type: 'sum', table: 'TRANSFORMED.local_player_game_facts', filter: 'participated = true' },
+      { name: 'games_played', label: 'Games played', description: 'Games a player appeared in.', sql: 'COUNT(DISTINCT game_id)', type: 'count_distinct', table: 'TRANSFORMED.local_player_game_facts', filter: 'participated = true' },
+    ]), relations } as never);
+    expect(source.metrics!.find((metric) => metric.name === 'points_scored')?.physical).toEqual({
+      relation: 'TRANSFORMED.local_player_game_facts',
+      expr: 'CASE WHEN "TRANSFORMED"."local_player_game_facts"."participated" = true THEN "TRANSFORMED"."local_player_game_facts"."points" ELSE 0 END',
+      aggregate: 'sum',
+    });
+    // COUNT(DISTINCT CASE WHEN ... THEN game_id END): an excluded row must be
+    // NULL, never 0, or it would be counted after all.
+    expect(source.metrics!.find((metric) => metric.name === 'games_played')?.physical?.expr)
+      .toBe('CASE WHEN "TRANSFORMED"."local_player_game_facts"."participated" = true THEN "TRANSFORMED"."local_player_game_facts"."game_id" END');
+    expect(source.metrics!.find((metric) => metric.name === 'games_played')?.description).toContain('Only where participated = true');
+  });
+
+  it('refuses a physical binding for a scope it cannot read, instead of dropping it', () => {
+    const source = buildVocabularySource({ manifest: undefined, semanticLayer: layerWith([
+      { name: 'points_scored', label: 'Points scored', description: '', sql: 'points', type: 'sum', table: 'TRANSFORMED.local_player_game_facts', filter: 'participated = true and minutes > 0' },
+      { name: 'scored_per_game', label: 'Scored per game', description: '', sql: 'SUM(points) / NULLIF(COUNT(DISTINCT game_id), 0)', type: 'custom', table: 'TRANSFORMED.local_player_game_facts', filter: 'participated = true' },
+    ]), relations } as never);
+    const scoped = source.metrics!.find((metric) => metric.name === 'points_scored');
+    expect(scoped?.physical).toBeUndefined();
+    expect(scoped?.engineOnly).toBeTruthy();
+    // A formula of aggregates is written as a whole and cannot carry a per-row scope.
+    expect(source.metrics!.find((metric) => metric.name === 'scored_per_game')?.physical).toBeUndefined();
+  });
+
+  it('a documented eligibility flag reaches the relation card', () => {
+    const source = buildVocabularySource({ manifest: undefined, semanticLayer: undefined, relations } as never);
+    const index = buildVocabularyIndex(source);
+    expect(renderCard(index.get('relation:TRANSFORMED.local_player_game_facts')!)).toContain('which rows count: participated True when the player appeared');
   });
 });

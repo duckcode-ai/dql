@@ -720,6 +720,12 @@ export class SemanticLayer {
     const resolvedFilterDimensions = (filters ?? [])
       .map((filter) => this.resolveDimensionForMetrics(filter.dimension, resolvedMetrics))
       .filter(Boolean) as DimensionDefinition[];
+    // A filter dimension the selected metrics cannot resolve is not a filter,
+    // it is a name. Composing anyway would either drop the restriction or emit
+    // the registry name where a column belongs, so the composition refuses and
+    // the caller falls through to a tier that can bind it. Group-bys already
+    // fail closed this way (above); filters must not be the exception.
+    if (resolvedFilterDimensions.length !== (filters ?? []).filter((filter) => filter.dimension).length) return null;
 
     // Multiple metrics from different fact tables must never be aggregated after
     // one raw fact-to-fact join: that multiplies rows and silently inflates sums.
@@ -905,11 +911,12 @@ export class SemanticLayer {
     for (const f of filters ?? []) {
       if (!f.dimension) continue;
       const dimDef = this.resolveDimensionForMetrics(f.dimension, resolvedMetrics);
-      const dimSql = dimDef
-        ? useStableAliases
-          ? qualifyForTable(dimDef.sql, dimDef.table)
-          : (dimDef.sql.includes('.') || dimDef.table === primaryTable ? dimDef.sql : `${dimDef.table}.${dimDef.sql}`)
-        : f.dimension;
+      // Never emit a semantic registry name as SQL: `player` is a dimension
+      // whose column is `player_name`, and the warehouse would rightly reject it.
+      if (!dimDef) return null;
+      const dimSql = useStableAliases
+        ? qualifyForTable(dimDef.sql, dimDef.table)
+        : (dimDef.sql.includes('.') || dimDef.table === primaryTable ? dimDef.sql : `${dimDef.table}.${dimDef.sql}`);
       const v0 = f.values?.[0] ?? '';
       const v1 = f.values?.[1] ?? '';
       // Detect if value looks numeric (no quoting needed)
@@ -2219,6 +2226,12 @@ export function semanticDimensionReference(dimension: Pick<DimensionDefinition, 
 
 function semanticDimensionReferences(dimension: DimensionDefinition): string[] {
   const references = new Set<string>([dimension.name, semanticDimensionReference(dimension)]);
+  // A native dimension has no cube: it names its own table, and callers spell
+  // it `<table leaf>.<name>` (the vocabulary's own model qualification).
+  if (!dimension.cube && dimension.table) {
+    const leaf = dimension.table.split('.').pop();
+    if (leaf) { references.add(`${leaf}.${dimension.name}`); references.add(`${dimension.table}.${dimension.name}`); }
+  }
   if (dimension.cube) {
     references.add(`${dimension.cube}.${dimension.name}`);
     references.add(`${dimension.cube}__${dimension.name}`);

@@ -44,6 +44,12 @@ export interface VocabularyEntry {
   contract?: BlockContractV1;
   /** Relations list their columns; blocks list their outputs. */
   columns?: string[];
+  /**
+   * Documented columns that decide which rows a definition counts (a
+   * participation flag, a soft delete). A reader who cannot see them counts
+   * rows the project excludes.
+   */
+  columnNotes?: string[];
   examples?: string[];
   /** The id the host's existing compilers know this object by (semantic runtime name, catalog key). */
   sourceId?: string;
@@ -270,8 +276,9 @@ export function renderCard(entry: VocabularyEntry): string {
   // A derived or ratio metric shows its formula: what it divides decides
   // whether it is a period ratio or a lifetime one.
   const formula = (entry.metricType === 'derived' || entry.metricType === 'ratio') && entry.expr ? ` = ${entry.expr.replace(/\s+/g, ' ').slice(0, 120)}` : '';
-  const description = entry.description ? ` ${entry.description.replace(/\s+/g, ' ').slice(0, entry.kind === 'term' || entry.kind === 'block' ? 400 : 160)}` : '';
+  const description = entry.description ? ` ${entry.description.replace(/\s+/g, ' ').slice(0, entry.kind === 'term' || entry.kind === 'block' ? 400 : entry.kind === 'relation' ? 300 : 160)}` : '';
   const columns = entry.columns?.length ? ` columns: ${entry.columns.slice(0, 40).join(', ')}${entry.columns.length > 40 ? ', ...' : ''}` : '';
+  const notes = entry.columnNotes?.length ? ` which rows count: ${entry.columnNotes.join('; ')}` : '';
   const scope = entry.contract?.staticScope.length
     ? ` scope: ${entry.contract.staticScope.map((p) => `${p.column} ${p.op}${p.values.length ? ` ${p.values.join('/')}` : ''}`).join(' and ')}`
     : '';
@@ -280,7 +287,7 @@ export function renderCard(entry: VocabularyEntry): string {
   const examples = entry.examples?.length ? ` e.g. "${entry.examples[0]}"` : '';
   const aliases = entry.aliases.filter((alias) => normalizeVocabularyText(alias) !== normalizeVocabularyText(entry.name)).slice(0, 4);
   const aka = aliases.length ? ` aka ${aliases.join(', ')}` : '';
-  return `- ${entry.ref} [${bits.join('; ')}]${formula}${description}${aka}${columns}${groupBy}${scope}${limit}${examples}`;
+  return `- ${entry.ref} [${bits.join('; ')}]${formula}${description}${aka}${columns}${notes}${groupBy}${scope}${limit}${examples}`;
 }
 
 // Building from host-neutral sources.
@@ -339,6 +346,18 @@ export function suggestSameGrainColumns(vocabulary: VocabularyIndex, measureRefs
     out.push({ from: ref, to: best.ref, aggregation: counted ? 'count_distinct' : (entry.aggregation === 'count_distinct' || entry.aggregation === 'count' ? 'count_distinct' : 'sum') });
   }
   return out;
+}
+
+/**
+ * The documented boolean columns of a relation: the ones that say which rows a
+ * definition counts. Named without a description they teach nothing, so only
+ * documented ones are carried.
+ */
+function eligibilityNotes(columns: Array<{ name: string; dataType?: string; description?: string }>): string[] {
+  return columns
+    .filter((column) => column.description && columnRoles(column.name, column.dataType).includes('boolean'))
+    .slice(0, 4)
+    .map((column) => `${column.name} ${column.description!.replace(/\s+/g, ' ').slice(0, 120)}`);
 }
 
 export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex {
@@ -459,6 +478,7 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       model: qualified,
       roles: [],
       columns: relation.columns.map((column) => column.name),
+      ...(eligibilityNotes(relation.columns).length ? { columnNotes: eligibilityNotes(relation.columns) } : {}),
       ...(relation.sourceId ? { sourceId: relation.sourceId } : {}),
     });
     for (const column of relation.columns) {

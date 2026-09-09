@@ -64,7 +64,18 @@ export interface IntentProblem { path: string; message: string; suggestions?: st
  */
 export interface IntentLedger {
   /** Material clauses the first reading declared it could not resolve. */
-  clauses: Array<{ clause: string; kind?: IntentUnresolved['kind']; question?: string; words: string[] }>;
+  clauses: Array<{
+    clause: string; kind?: IntentUnresolved['kind']; question?: string; words: string[];
+    /**
+     * What KIND of output would answer the clause. "which teams he played for"
+     * asks for identities: a count of teams uses the same words and answers a
+     * different question, so an identity clause is discharged only by a
+     * grouping or a displayed label, never by a measure.
+     */
+    role?: 'identity';
+    /** The words that must be accounted for in that role. */
+    roleWords?: string[];
+  }>;
   /** The first reading's time grouping (a monthly trend is never a ranking). */
   timeGrain?: { ref: string; grain: string };
   /** The first reading's measures by ref (a block may replace one only through its outputs). */
@@ -97,6 +108,7 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
     '2. A QUALIFIER RESTRICTS ONLY THE MEASURE IT MODIFIES. "beverage revenue" is the drink-scoped revenue measure (or revenue with a scope predicate on THAT measure), not a global filter. "total revenue and beverage revenue" is two measures.',
     '3. A QUOTED OR PROPER-NAME LITERAL IS A FILTER VALUE on the dimension that holds such values (customer names on customer_name, product names on product_name). Keep the literal exactly as written; the host matches it case-insensitively.',
     '4. PREFER THE GOVERNED DEFINITION. If a metric already expresses the measure the question asks for, use it; only fall back to column refs with an aggregation when no metric fits. A certified block may be named as the ONLY measure ref when the question asks for exactly what the block declares (same measure, same scope, same grain, same ranking); a block-named intent carries NO groupBy, display or filters of its own because the block already fixes them. If you are not sure the block matches exactly, express the analysis with metric and dimension refs instead.',
+    '4b. A FACT TABLE MAY KEEP ROWS A DEFINITION DOES NOT COUNT: a participation flag, a soft delete, a test order, a cancelled row. When a relation or a column card says which rows count, either use the metric that already applies that rule, or put the restriction in that measure\'s `scope`. Counting the raw column instead answers a different question at the same confidence.',
     '5. SHAPE. "top/best/highest N" is a ranking: ordering desc on the measure and a limit (default 10 when "top" has no number). "by <thing>" is a breakdown. "how many/what is the total" with no breakdown is a scalar. "X and Y" for one subject is a comparison.',
     '5c. A RATIO OVER RAW COLUMNS. When the project has no metric for a part (a dbt project with no semantic layer), a ratio part may be a `column:` ref with its aggregation: `derived: {"kind":"ratio","numerator":"column:<relation>.<col>","numeratorAggregation":"sum","denominator":"column:<relation>.<col2>","denominatorAggregation":"count_distinct"}` (points per game = sum of points / count_distinct of game ids over the rows that count as games). Never invent a measure name.',
     '5d. A THRESHOLD ON AN AGGREGATE. "with at least 20 games", "minimum 100 attempts" is a filter on the aggregated measure, not on rows: add that measure (with an alias) and a filter `{"ref":"measure:<index of that measure>","op":"gte","values":[20]}`; it applies after aggregation.',
@@ -534,7 +546,78 @@ export function applyGovernedDefaults(intent: AnalyticalIntentV1, question: stri
     }
   }
   bindExactNames(intent, normalizedQuestion, grainWords, vocabulary);
+  preferGovernedDefinition(intent, vocabulary);
   promoteSoleMeasureScope(intent);
+}
+
+const COLUMN_REF = /^column:(.+)\.([^.]+)$/;
+
+/**
+ * The single column an aggregate expression reads, seen through the scope a
+ * governed definition may wrap it in: `CASE WHEN participated THEN "r"."points"
+ * ELSE 0 END` reads `points`. An expression over more than one column has no
+ * single column and is never matched.
+ */
+export function scopedColumnOf(expr: string): { column: string; scoped: boolean } | undefined {
+  const wrapped = /^\s*case\s+when\s+(.+?)\s+then\s+(.+?)(?:\s+else\s+0)?\s+end\s*$/is.exec(expr);
+  const core = (wrapped?.[2] ?? expr).trim().replace(/"/g, '');
+  if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(core)) return undefined;
+  return { column: core.split('.').pop()!, scoped: Boolean(wrapped) };
+}
+
+/**
+ * THE PROJECT'S DEFINITION WINS OVER THE RAW COLUMN. A measure written as an
+ * aggregation of a physical column is replaced by the governed metric that
+ * defines exactly that aggregate of that column on that relation. This matters
+ * beyond tidiness: a fact table keeps rows its definitions exclude (a player
+ * who did not play, a cancelled order), so counting the column itself answers a
+ * different question with the same confidence. A scoped definition says so in
+ * the reading. Nothing happens when the project declares no such metric, or
+ * declares several.
+ */
+export function preferGovernedDefinition(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): void {
+  const governedFor = (ref: string, aggregation: string | undefined): VocabularyEntry | undefined => {
+    const match = COLUMN_REF.exec(ref);
+    if (!match || !aggregation) return undefined;
+    const [, relation, column] = match;
+    const found = vocabulary.entries.filter((entry) => {
+      if (entry.kind !== 'metric' && entry.kind !== 'measure') return false;
+      if (entry.derived || entry.engineOnly || !entry.physical || entry.physical.relation !== relation) return false;
+      if ((entry.physical.aggregate ?? '') !== aggregation) return false;
+      const read = scopedColumnOf(entry.physical.expr ?? entry.physical.column ?? '');
+      return read?.column.toLowerCase() === column!.toLowerCase();
+    });
+    return found.length === 1 ? found[0] : undefined;
+  };
+  const rewrite = (ref: string, aggregation: string | undefined, alias: string | undefined): { ref: string; drops: boolean } => {
+    const target = governedFor(ref, aggregation);
+    if (!target || intentRefs(intent).includes(target.ref)) return { ref, drops: false };
+    intent.provenance[target.ref] = `${intent.provenance[ref] ?? `q:${target.name}`} (governed default: ${target.label ?? target.name} defines this column)`;
+    delete intent.provenance[ref];
+    if (intent.ordering?.ref === ref) intent.ordering.ref = target.ref;
+    const read = scopedColumnOf(target.physical!.expr ?? '');
+    if (read?.scoped) {
+      const note = `${alias ?? target.label ?? target.name} is the governed ${target.label ?? target.name}, which counts only the rows its definition includes`;
+      if (!intent.reading.includes(note)) intent.reading = `${intent.reading.replace(/[.\s]+$/, '')}; ${note}.`;
+    }
+    return { ref: target.ref, drops: true };
+  };
+  for (const measure of intent.measures) {
+    if (measure.derived) {
+      const numerator = rewrite(measure.derived.numerator, measure.derived.numeratorAggregation, measure.alias);
+      const denominator = rewrite(measure.derived.denominator, measure.derived.denominatorAggregation, measure.alias);
+      measure.derived.numerator = numerator.ref;
+      measure.derived.denominator = denominator.ref;
+      if (numerator.drops) delete measure.derived.numeratorAggregation;
+      if (denominator.drops) delete measure.derived.denominatorAggregation;
+      if (measure.ref.startsWith('ratio:')) measure.ref = `ratio:${measure.derived.numerator}/${measure.derived.denominator}`;
+      continue;
+    }
+    const bound = rewrite(measure.ref, measure.aggregation, measure.alias);
+    if (!bound.drops) continue;
+    measure.ref = bound.ref;
+    delete measure.aggregation;
+  }
 }
 
 /** Words that qualify a money measure away from its plain named reading. */
@@ -915,6 +998,38 @@ export function calendarBasisProblem(question: string, intent: AnalyticalIntentV
   return { field, dates, measuresAt };
 }
 
+const RELATIVE_PERIOD = /\b(?:this|current|present|ongoing|latest|most recent)\s+(season|year|month|quarter|week|period)\b|\b(?:year to date|ytd)\b|\bso far this\s+(season|year|month|quarter)\b/i;
+
+/**
+ * A RELATIVE PERIOD IS A POPULATION, NOT A COLUMN. "this season", "the current
+ * quarter" names one anchor every row must share. A project whose period is a
+ * stored value (a source season, a fiscal label) has no mapping from today's
+ * date to that value, and the latest value present in a snapshot is a
+ * different claim from the current one. A reading that answers by SELECTING
+ * the period beside each row (the maximum season per player) restricts
+ * nothing: every row keeps its own anchor and the answer covers all history at
+ * full confidence.
+ */
+export function relativePeriodProblem(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): { phrase: string; unit: string; fields: string[] } | undefined {
+  if (intent.kind !== 'analytics') return undefined;
+  const match = RELATIVE_PERIOD.exec(question);
+  if (!match) return undefined;
+  const unit = (match[1] ?? match[2] ?? 'period').toLowerCase();
+  if (intent.time?.window) return undefined;
+  const names = (entry: VocabularyEntry | undefined) => normalizeVocabularyText(`${entry?.name ?? ''} ${entry?.label ?? ''}`).split(' ');
+  const periodish = (ref: string) => {
+    const entry = vocabulary.resolve(ref);
+    return Boolean(entry && (entry.roles.includes('time') || names(entry).includes(unit)));
+  };
+  const restricts = [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])]
+    .filter((predicate) => predicate.on !== 'aggregate' && !/^measure:\d+$/.test(predicate.ref));
+  if (restricts.some((predicate) => periodish(predicate.ref))) return undefined;
+  const fields = vocabulary.entries
+    .filter((entry) => (entry.kind === 'dimension' || entry.kind === 'column') && (entry.roles.includes('time') || names(entry).includes(unit)))
+    .map((entry) => entry.ref).slice(0, 6);
+  return { phrase: match[0], unit, fields };
+}
+
 export function widenedPopulation(question: string, intent: AnalyticalIntentV1, prior: AnalyticalIntentV1 | undefined): string[] {
   if (!prior || intent.kind !== 'analytics' || prior.kind !== 'analytics') return [];
   if (/\b(all|every|overall|entire|whole|any)\b/i.test(question)) return [];
@@ -948,10 +1063,33 @@ export function widenedPopulation(question: string, intent: AnalyticalIntentV1, 
   return lost;
 }
 
+/**
+ * The words of a clause that name a thing rather than a measurement, when the
+ * clause asks WHICH ones ("which teams he played for", "list the products").
+ * Those words are answered by identities, and a measure of the same name
+ * ("teams played" as a count) does not answer them.
+ */
+const IDENTITY_ASK = /\b(which|who|whom|whose|list|name)\b/i;
+export function identityClauseWords(clause: string, vocabulary: VocabularyIndex): string[] {
+  if (!IDENTITY_ASK.test(clause) || /\bhow many\b/i.test(clause)) return [];
+  const identities = new Set<string>();
+  for (const entry of vocabulary.entries) {
+    if (entry.kind !== 'entity' && entry.kind !== 'dimension' && entry.kind !== 'model' && entry.kind !== 'relation') continue;
+    for (const name of [entry.name, entry.label ?? '', ...entry.aliases]) {
+      const word = normalizeVocabularyText(name);
+      if (word && !word.includes(' ')) { identities.add(word); identities.add(singularWord(word)); }
+    }
+  }
+  return [...new Set(CLAUSE_WORDS(clause).filter((word) => identities.has(word) || identities.has(singularWord(word))))];
+}
+
 export function buildLedger(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): IntentLedger {
   const time = intent.groupBy.find((group) => group.role === 'time' && group.grain);
   return {
-    clauses: intent.unresolved.filter((clause) => clause.material).map((clause) => ({ clause: clause.clause, ...(clause.kind ? { kind: clause.kind } : {}), ...(clause.question ? { question: clause.question } : {}), words: CLAUSE_WORDS(clause.clause) })),
+    clauses: intent.unresolved.filter((clause) => clause.material).map((clause) => {
+      const roleWords = identityClauseWords(clause.clause, vocabulary);
+      return { clause: clause.clause, ...(clause.kind ? { kind: clause.kind } : {}), ...(clause.question ? { question: clause.question } : {}), words: CLAUSE_WORDS(clause.clause), ...(roleWords.length ? { role: 'identity' as const, roleWords } : {}) };
+    }),
     ...(time?.grain ? { timeGrain: { ref: time.ref, grain: time.grain } } : {}),
     measures: intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]),
     unaccounted: unaccountedQuestionWords(question, intent, vocabulary),
@@ -974,10 +1112,23 @@ export function auditLedger(question: string, intent: AnalyticalIntentV1, ledger
   const entries: Omit<LedgerEntry, 'round'>[] = [];
   const dropped: IntentLedger['clauses'] = [];
   const covered = accountedWords(intent, vocabulary);
+  // An identity clause is answered by what the rows ARE, so only the refs that
+  // identify a row count: a grouping, a displayed label, a filtered member.
+  const identityCovered = new Set<string>();
+  for (const ref of [...intent.groupBy.map((group) => group.ref), ...intent.display, ...intent.filters.map((filter) => filter.ref)]) {
+    const entry = vocabulary.get(ref);
+    if (!entry || entry.roles.includes('measure')) continue;
+    for (const text of [entry.name, entry.label ?? '', entry.model ?? '', ...entry.aliases]) {
+      for (const word of normalizeVocabularyText(text).split(' ')) if (word) { identityCovered.add(word); identityCovered.add(singularWord(word)); }
+    }
+  }
   const listed = new Set(intent.unresolved.filter((clause) => clause.material).map((clause) => normalizeVocabularyText(clause.clause)));
   for (const item of ledger.clauses) {
     const words = item.words.filter((word) => !/^\d+$/.test(word));
-    const discharged = words.length > 0 && words.every((word) => covered.has(word) || covered.has(singularWord(word)));
+    const identity = item.role === 'identity' && (item.roleWords ?? []).length > 0;
+    const discharged = identity
+      ? (item.roleWords ?? []).every((word) => identityCovered.has(word) || identityCovered.has(singularWord(word)))
+      : words.length > 0 && words.every((word) => covered.has(word) || covered.has(singularWord(word)));
     if (discharged) { entries.push({ clause: item.clause, kind: item.kind, disposition: 'discharged', by: 'refs' }); continue; }
     const stillListed = listed.has(normalizeVocabularyText(item.clause)) || intent.unresolved.some((clause) => clause.material && words.some((word) => normalizeVocabularyText(clause.clause).includes(word)));
     if (stillListed) { entries.push({ clause: item.clause, kind: item.kind, disposition: 'unresolved' }); continue; }
@@ -1157,6 +1308,21 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
             : `The question asks for a calendar period, but this project only models ${fieldName}${described}, which is not a date. Should the answer use the ${fieldName} value instead?`,
           ...(ledger ? { ledger, ledgerEntries } : {}),
         };
+      }
+      // A relative period ("this season") must restrict the rows. One
+      // correction, then the turn says why it cannot be resolved here instead
+      // of answering over all history.
+      const relative = relativePeriodProblem(input.question, validation.intent, input.vocabulary);
+      if (relative) {
+        if (attempts < maxAttempts) {
+          lastDetail = `the question asks for "${relative.phrase}"; the reading restricts no period`;
+          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question asks for "${relative.phrase}". That names a POPULATION: every row of the answer must fall in one and the same period. Your reading restricts none — selecting the period beside each row (its maximum, its latest value) leaves every row with its own, so the answer would cover all of history. Resend the COMPLETE intent with a time window, or a filter that pins one period${relative.fields.length ? ` on one of ${relative.fields.join(', ')}` : ''}. If this project holds no mapping from today to that period, list "${relative.phrase}" as a material unresolved clause with options [] instead of choosing one.` });
+          continue;
+        }
+        validation.intent.unresolved.push({
+          clause: relative.phrase, options: [], material: true, kind: 'not_modeled', origin: 'ledger',
+          question: `"${relative.phrase}" cannot be resolved from this project: its ${relative.unit} is a stored value with no mapping to today's date, and the latest ${relative.unit} the data holds is a different claim from the current one. Name the ${relative.unit} you mean, or ask for the latest ${relative.unit} in the data.`,
+        });
       }
       // A follow-up may not quietly answer a wider population than the one it
       // is editing: one correction, then the turn ends in a clarification.

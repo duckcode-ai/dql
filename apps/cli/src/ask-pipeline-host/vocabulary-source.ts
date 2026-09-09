@@ -106,8 +106,25 @@ export function qualifyExpression(expr: string, relation: string, columns: Itera
   return out.replace(/__lit(\d+)__/g, (_m, index: string) => literals[Number(index)]!);
 }
 
-/** `{{ Dimension('order_id__is_drink_order') }} = true` becomes `{ column: 'is_drink_order', condition: '= true' }`. */
-export function parseMetricFilter(filter: unknown): Array<{ column: string; condition: string; entityPath: string[] }> {
+/**
+ * A metric's declared scope, read from every shape a project may write it in:
+ * a MetricFlow `{{ Dimension('order_id__is_drink_order') }} = true` template, a
+ * plain predicate a native DQL metric declares (`participated = true`), or a
+ * bare boolean column. A filter this cannot read is reported as `unparsed`, so
+ * the caller can refuse a physical binding instead of dropping the scope and
+ * answering a different question at the highest trust it has.
+ */
+export interface MetricFilterSpec {
+  predicates: Array<{ column: string; condition: string; entityPath: string[] }>;
+  unparsed: string[];
+}
+
+const DIMENSION_TEMPLATE = /^\{\{\s*Dimension\(\s*'([^']+)'\s*\)\s*\}\}\s*(=|!=|<>|>=|<=|>|<|in|not in)\s*(.+?)\s*$/i;
+const PLAIN_PREDICATE = /^([A-Za-z_][A-Za-z0-9_]*)\s+(=|!=|<>|>=|<=|>|<|is not|is|in|not in)\s+(.+?)$/i;
+const TIGHT_PREDICATE = /^([A-Za-z_][A-Za-z0-9_]*)\s*(=|!=|<>|>=|<=|>|<)\s*(.+?)$/i;
+const BARE_BOOLEAN = /^([A-Za-z_][A-Za-z0-9_]*)$/;
+
+export function parseMetricFilter(filter: unknown): MetricFilterSpec {
   const templates: string[] = [];
   const collect = (value: unknown) => {
     if (typeof value === 'string') templates.push(value);
@@ -115,12 +132,37 @@ export function parseMetricFilter(filter: unknown): Array<{ column: string; cond
     else if (value && typeof value === 'object') Object.values(value as Record<string, unknown>).forEach(collect);
   };
   collect(filter);
-  return templates.flatMap((template) => {
-    const match = template.trim().match(/^\{\{\s*Dimension\(\s*'([^']+)'\s*\)\s*\}\}\s*(=|!=|<>|>=|<=|>|<|in|not in)\s*(.+?)\s*$/i);
-    if (!match) return [];
-    const parts = match[1]!.split('__');
-    return [{ column: parts[parts.length - 1]!, entityPath: parts.slice(0, -1), condition: `${match[2]} ${match[3]}` }];
-  });
+  const spec: MetricFilterSpec = { predicates: [], unparsed: [] };
+  for (const template of templates) {
+    const text = template.trim();
+    if (!text) continue;
+    const dimension = DIMENSION_TEMPLATE.exec(text);
+    if (dimension) {
+      const parts = dimension[1]!.split('__');
+      spec.predicates.push({ column: parts[parts.length - 1]!, entityPath: parts.slice(0, -1), condition: `${dimension[2]} ${dimension[3]}` });
+      continue;
+    }
+    // A composite predicate names columns this cannot qualify one by one; the
+    // semantic engine owns it.
+    if (/\bor\b/i.test(text) || /\band\b/i.test(text) || text.includes('{{')) { spec.unparsed.push(text); continue; }
+    const plain = PLAIN_PREDICATE.exec(text) ?? TIGHT_PREDICATE.exec(text);
+    if (plain) { spec.predicates.push({ column: plain[1]!, entityPath: [], condition: `${plain[2]} ${plain[3]}` }); continue; }
+    const bare = BARE_BOOLEAN.exec(text);
+    if (bare) { spec.predicates.push({ column: bare[1]!, entityPath: [], condition: '= true' }); continue; }
+    spec.unparsed.push(text);
+  }
+  return spec;
+}
+
+/**
+ * A scoped aggregate. The scope goes INSIDE the aggregate so several measures
+ * of one relation keep their own populations. Only a sum reads 0 for an
+ * excluded row; a count, a distinct count or an extremum must see NULL, or the
+ * excluded rows would be counted after all.
+ */
+export function scopedAggregateExpression(base: string, aggregate: string, predicates: string[]): string {
+  if (predicates.length === 0) return base;
+  return `CASE WHEN ${predicates.join(' AND ')} THEN ${base}${aggregate === 'sum' ? ' ELSE 0' : ''} END`;
 }
 
 export function buildVocabularySource(input: VocabularySourceInput): VocabularySource {
@@ -206,16 +248,17 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       const relation = model ? relationOfCube.get(model) : undefined;
       const aggregate = (measure?.agg ?? metric.aggregation ?? metric.type)?.toLowerCase();
       const simple = !metric.metricType || metric.metricType === 'simple';
-      const filters = parseMetricFilter(metric.filter);
-      // A filtered simple metric binds physically only when every filter column lives on the metric's own model.
+      const filterSpec = parseMetricFilter(metric.filter);
+      const filters = filterSpec.predicates;
+      // A filtered simple metric binds physically only when every filter column
+      // lives on the metric's own model AND every declared filter was read: a
+      // scope this cannot express must not be silently dropped.
       const knownColumns = model ? cubeColumns(model) : new Set<string>();
-      const localFilters = filters.every((filter) => knownColumns.has(filter.column));
+      const localFilters = filterSpec.unparsed.length === 0 && filters.every((filter) => knownColumns.has(filter.column));
       let physical: { relation: string; expr: string; aggregate: string } | undefined;
       if (relation && measure && aggregate && AGGREGATES.has(aggregate) && simple && localFilters) {
         const base = qualifyExpression(measure.expr ?? measure.name, relation, knownColumns);
-        const expr = filters.length
-          ? `CASE WHEN ${filters.map((filter) => `${qualifyExpression(filter.column, relation, knownColumns)} ${filter.condition}`).join(' AND ')} THEN ${base}${aggregate === 'sum' || aggregate === 'count' ? ' ELSE 0' : ''} END`
-          : base;
+        const expr = scopedAggregateExpression(base, aggregate, filters.map((filter) => `${qualifyExpression(filter.column, relation, knownColumns)} ${filter.condition}`));
         physical = { relation, expr, aggregate };
       }
       // A derived or ratio metric binds physically ONLY when plain SQL can
@@ -272,21 +315,33 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       // A native DQL metric has no cube and no measure, only its own table,
       // expression and type. Without this binding the interpreter can name a
       // metric that discovery admitted and no governed tier can execute.
-      if (!physical && !derived && !engineOnly && simple && filters.length === 0) {
+      if (!physical && !derived && !engineOnly && simple) {
         const nativeRelation = normalizeRelationName(metric.table);
-        const native = nativeRelation && relationColumns.has(nativeRelation) ? nativeAggregateBinding(metric.sql, metric.type ?? metric.aggregation) : undefined;
-        if (nativeRelation && native) {
-          physical = { relation: nativeRelation, expr: qualifyExpression(native.expr, nativeRelation, relationColumns.get(nativeRelation) ?? []), aggregate: native.aggregate };
+        const nativeColumns = nativeRelation ? relationColumns.get(nativeRelation) : undefined;
+        const native = nativeRelation && nativeColumns ? nativeAggregateBinding(metric.sql, metric.type ?? metric.aggregation) : undefined;
+        // A native metric may declare the rows its definition counts
+        // ("participated = true"): the scope binds with the aggregate, or the
+        // metric stays with the semantic engine.
+        const scopable = filterSpec.unparsed.length === 0 && filters.every((filter) => filter.entityPath.length === 0 && nativeColumns?.has(filter.column));
+        if (nativeRelation && nativeColumns && native && scopable) {
+          const base = qualifyExpression(native.expr, nativeRelation, nativeColumns);
+          const expr = scopedAggregateExpression(base, native.aggregate, filters.map((filter) => `${qualifyExpression(filter.column, nativeRelation, nativeColumns)} ${filter.condition}`));
+          physical = { relation: nativeRelation, expr, aggregate: native.aggregate };
+        } else if (nativeRelation && nativeColumns && native && !scopable) {
+          engineOnly = 'a declared scope the relational tier cannot bind to this relation';
         }
       }
       // A native metric whose expression is a formula OF aggregates over its
       // own table (points per game = SUM(points) / NULLIF(SUM(games), 0))
       // binds as a derived aggregate: the formula is emitted as written inside
       // the grouped query, never wrapped in another SUM or AVG.
-      if (!physical && !derived && !engineOnly && filters.length === 0) {
+      if (!physical && !derived && !engineOnly) {
         const nativeRelation = normalizeRelationName(metric.table);
         const formula = nativeRelation && relationColumns.has(nativeRelation) ? nativeFormulaBinding(metric.sql) : undefined;
-        if (nativeRelation && formula) physical = { relation: nativeRelation, expr: qualifyExpression(formula, nativeRelation, relationColumns.get(nativeRelation) ?? []), aggregate: 'derived' };
+        // A formula of aggregates cannot carry a per-row scope: the scope
+        // belongs inside each aggregate, and this one is written as a whole.
+        if (nativeRelation && formula && filters.length === 0 && filterSpec.unparsed.length === 0) physical = { relation: nativeRelation, expr: qualifyExpression(formula, nativeRelation, relationColumns.get(nativeRelation) ?? []), aggregate: 'derived' };
+        else if (nativeRelation && formula) engineOnly = 'a scoped formula of aggregates';
       }
       if (!physical && !derived && !engineOnly && metric.metricType && metric.metricType !== 'simple') engineOnly = `a ${metric.metricType} metric the relational tier cannot compose`;
       const scopeNote = filters.length ? ` Only where ${filters.map((filter) => `${filter.column} ${filter.condition}`).join(' and ')}.` : '';
