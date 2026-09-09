@@ -459,9 +459,9 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       // Research branches phrase hypotheses ("because", "drivers"); the
       // full-question clause check is for questions a person asked.
       clauseCoverage: request.requestedMode !== 'research',
-      // Room for one interpreter retry after a 60 s provider timeout plus
-      // the rest of the turn; the engine's own hard deadline still wins.
-      deadlineMs: 150_000,
+      // Room for one interpreter retry after a 90 s provider timeout plus the
+      // rest of the turn; the engine's own hard deadline still wins.
+      deadlineMs: 240_000,
       preparationCache,
       cacheScope: `${deps.getManifest().snapshotId}|${connection?.driver ?? 'none'}|${vocabulary.fingerprint}`,
       ...(deps.buildIdentity ? { build: deps.buildIdentity() } : {}),

@@ -699,9 +699,20 @@ export function bindExactNames(intent: AnalyticalIntentV1, normalizedQuestion: s
     const words = new Set(namesOf(entry).flatMap((name) => name.split(' ')));
     return targetWords.every((word) => words.has(word));
   };
+  // The period's own relation outranks the name. "Total points" in a CALENDAR
+  // question is the fact dated by that calendar, not the season rollup of the
+  // same name: rebinding the measure off the relation that carries the window
+  // leaves a reading no engine can compose, or a different population.
+  // The period may be a window, or a date restriction written on the measures
+  // themselves ("points in 2016" and "points in 2017" as two scoped measures).
+  const datePredicate = [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])]
+    .find((predicate) => vocabulary.get(predicate.ref)?.roles.includes('time'));
+  const timeRelation = (intent.time?.window && intent.time.ref ? vocabulary.get(intent.time.ref)?.physical?.relation : undefined)
+    ?? (datePredicate ? vocabulary.get(datePredicate.ref)?.physical?.relation : undefined);
   const rebind = (ref: string): string => {
     const entry = vocabulary.get(ref);
     if (!entry || (entry.kind !== 'metric' && entry.kind !== 'measure') || namedByQuestion(entry) || absorbs(entry)) return ref;
+    if (timeRelation && entry.physical?.relation === timeRelation && target.physical?.relation !== timeRelation) return ref;
     intent.provenance[target.ref] = `${intent.provenance[ref] ?? `q:${target.name}`} (governed default: the question names the metric "${target.name}")`;
     // The reading line stays honest about what was measured.
     const measuredAs = `measured as ${target.label ?? target.name} because the question names the metric "${target.name}"`;
@@ -1053,7 +1064,12 @@ export function relativePeriodProblem(question: string, intent: AnalyticalIntent
   const match = RELATIVE_PERIOD.exec(question);
   if (!match) return undefined;
   const unit = (match[1] ?? match[2] ?? 'period').toLowerCase();
-  if (intent.time?.window) return undefined;
+  // The calendar defines a day, a week, a month, a quarter and a year, so a
+  // window resolves those. It defines no season, no fiscal period and no
+  // campaign: a window invented for one of those is world knowledge, not this
+  // project's — and it silently answers for dates the project never described.
+  const CALENDAR_UNITS = new Set(['day', 'week', 'month', 'quarter', 'year']);
+  if (intent.time?.window && CALENDAR_UNITS.has(unit)) return undefined;
   const names = (entry: VocabularyEntry | undefined) => normalizeVocabularyText(`${entry?.name ?? ''} ${entry?.label ?? ''}`).split(' ');
   const periodish = (ref: string) => {
     const entry = vocabulary.resolve(ref);

@@ -1347,7 +1347,11 @@ describe('a relative period is a population, not a column', () => {
     // A period the question never named is an anchor the reading invented.
     expect(relativePeriodProblem('Who are the top scorers this season?', { ...base, filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: [2022], source: 'question' }] }, vocabulary)).toMatchObject({ unit: 'season' });
     expect(relativePeriodProblem('Who are the top scorers this season, meaning 2022?', { ...base, filters: [{ ref: 'dimension:season_facts.season', op: 'eq', values: [2022], source: 'question' }] }, vocabulary)).toBeUndefined();
-    expect(relativePeriodProblem('Who are the top scorers this season?', { ...base, time: { ref: 'dimension:game_facts.game_date', window: { start: '2022-01-01', end: '2023-01-01', expression: 'in 2022' } } }, vocabulary)).toBeUndefined();
+    // A season is not a calendar unit: a window invented for one is world
+    // knowledge, not this project's definition.
+    expect(relativePeriodProblem('Who are the top scorers this season?', { ...base, time: { ref: 'dimension:game_facts.game_date', window: { start: '2022-10-01', end: '2023-07-01', expression: 'this season' } } }, vocabulary)).toMatchObject({ unit: 'season' });
+    // The calendar defines a month, so a window answers "this month".
+    expect(relativePeriodProblem('What did we score this month?', { ...base, time: { ref: 'dimension:game_facts.game_date', window: { start: '2022-09-01', end: '2022-10-01', expression: 'this month' } } }, vocabulary)).toBeUndefined();
     expect(relativePeriodProblem('Who are the top scorers in 2017?', base, vocabulary)).toBeUndefined();
   });
 });
