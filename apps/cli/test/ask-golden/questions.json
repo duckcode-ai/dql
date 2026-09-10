@@ -986,7 +986,11 @@
           "growth_percentage",
           "revenue_growth",
           "pct_change",
-          "percentage_change"
+          "percentage_change",
+          "revenue_change_pct",
+          "change_pct",
+          "change_percent",
+          "revenue_change"
         ]
       }
     },
@@ -1066,6 +1070,27 @@
       "outcome": "gap",
       "tier": "none",
       "note": "Region is not modeled and 'why'/'invest' ask for an explanation and a decision Ask does not compute: a named gap with zero SQL and the answerable reading (revenue) stated. Never the adjacent certified monthly trend."
+    },
+    {
+      "id": "revenue-by-shopper",
+      "question": "revenue by shopper",
+      "sql": "SELECT o.customer_id, SUM(oi.product_price) AS revenue FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id GROUP BY o.customer_id ORDER BY revenue DESC",
+      "columns": {
+        "customer_id": [
+          "customer_id",
+          "customer"
+        ],
+        "revenue": [
+          "revenue",
+          "product_revenue"
+        ]
+      },
+      "identity": [
+        "customer_id"
+      ],
+      "tier": "any",
+      "outcome": "clarify_or_rows",
+      "note": "\"Shopper\" is a business concept known under two keys (the customer record, and the customer on each order). A concept is discovery and clarification, never an executable identity (A-005): the expected turn asks which binding to use; a reading that resolves to the customer record on its own is also accepted."
     }
   ]
 }

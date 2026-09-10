@@ -165,3 +165,26 @@ describe('the vocabulary is a view over the pack', () => {
     ])).toEqual(['metric:order_item.revenue', 'relation:dev.customers', 'block:commerce.top_customers']);
   });
 });
+
+describe('a business concept is projected with its bindings as resolvable refs', () => {
+  it('offers each binding as the entity\'s relation, once, from the ranked objects and the eligible set', () => {
+    const entity = (qualifiedId: string, relation: string) => ({ objectKey: `dql:entity:${qualifiedId}`, objectType: 'dql_entity', name: qualifiedId.split('::').pop()!, payload: { qualifiedId, relation } });
+    const concept = { objectKey: 'dql:concept:commerce::concept::customer', objectType: 'concept', name: 'customer', domain: 'commerce', status: 'reviewed', payload: { localId: 'customer', name: 'Customer', synonyms: ['buyer'], bindings: [{ entity: 'commerce::entity::customer', domain: 'commerce', role: 'canonical', grain: 'customer_id' }, { entity: 'growth::entity::acquisition', domain: 'growth', role: 'conformed' }] } };
+    const pack = {
+      objects: [concept] as never[], skills: [], appliedHints: [],
+      eligible: eligible([], [concept, entity('commerce::entity::customer', '"warehouse"."dev"."customers"'), entity('growth::entity::acquisition', 'dev.customer_acquisition')]),
+    };
+    const projected = projectVocabularySource(base, pack);
+    expect(projected.source.concepts).toEqual([{
+      id: 'customer', domain: 'commerce', name: 'Customer', synonyms: ['buyer'], status: 'reviewed',
+      bindings: [
+        { entityRef: 'relation:dev.customers', domain: 'commerce', role: 'canonical', grain: 'customer_id' },
+        { entityRef: 'relation:dev.customer_acquisition', domain: 'growth', role: 'conformed' },
+      ],
+    }]);
+    expect(projected.admitted.concept).toBe(1);
+    const vocabulary = buildVocabularyIndex(projected.source);
+    expect(vocabulary.get('concept:commerce.customer')?.kind).toBe('concept');
+    expect(vocabulary.resolve('buyer', ['concept'])?.ref).toBe('concept:commerce.customer');
+  });
+});

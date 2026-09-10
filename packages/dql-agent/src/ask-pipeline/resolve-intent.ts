@@ -319,6 +319,37 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
     }
     return ref;
   };
+  // A CONCEPT IS DISCOVERY, NOT AN IDENTITY (A-005). "Customer" bound to a
+  // person in Sales and a billing account in Finance must not be grouped by
+  // whichever binding is locally convenient: a concept ref in a grouping,
+  // display or filter becomes one material clarification listing the
+  // bindings with their grain and domain, never a binding chosen here.
+  const conceptClauses: IntentUnresolved[] = [];
+  const conceptRef = (ref: string): VocabularyEntry | undefined => {
+    const entry = vocabulary.get(ref) ?? vocabulary.resolve(ref, ['concept']);
+    return entry?.kind === 'concept' ? entry : undefined;
+  };
+  const dropConcept = (ref: string, where: string): boolean => {
+    const entry = conceptRef(ref);
+    if (!entry) return false;
+    const bindings = (entry.bindings ?? []).filter((binding) => vocabulary.get(binding.entityRef));
+    if (!conceptClauses.some((clause) => clause.clause === entry.name)) {
+      const described = (entry.bindings ?? []).map((binding) => `${binding.entityRef}${binding.grain ? ` (${binding.grain}${binding.domain ? `, ${binding.domain}` : ''})` : binding.domain ? ` (${binding.domain})` : ''}`).join(', ');
+      conceptClauses.push({
+        clause: entry.name, material: true, options: bindings.map((binding) => binding.entityRef),
+        question: `"${entry.name}" is a business concept known under several keys — ${described}. Which of them should this ${where} use?`,
+      });
+    }
+    return true;
+  };
+  intent = {
+    ...intent,
+    groupBy: intent.groupBy.filter((group) => !dropConcept(group.ref, 'grouping')),
+    display: intent.display.filter((ref) => !dropConcept(ref, 'display')),
+    filters: intent.filters.filter((p) => !dropConcept(p.ref, 'filter')),
+    unresolved: [...intent.unresolved, ...conceptClauses],
+  };
+  for (const clause of conceptClauses) intent.provenance[`concept:${clause.clause}`] = 'host:a concept names several keys; the binding is a choice, not a default';
   const groupBy = intent.groupBy.map((group, index) => ({
     ...group,
     ref: canonical(group.role === 'time' ? rebindTime(canonical(group.ref, GROUP_KINDS, `groupBy[${index}].ref`)) : group.ref, GROUP_KINDS, `groupBy[${index}].ref`, (entry) => {

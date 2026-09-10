@@ -1,0 +1,23 @@
+{
+  "key": "d1fe0990064794f7a7d499445b3f7908",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants information about the beverage (drink) category but has not specified which aspect — product revenue, top customers, or something else.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"get the beverage category\",\"options\":[\"block:commerce.beverage_revenue_by_product\",\"block:commerce.top_beverage_customers\",\"dimension:products.product_name (list of beverage products)\"],\"material\":true,\"question\":\"What would you like to see about the beverage category — revenue by beverage product, top customers by beverage spend, or simply the list of beverage products?\"}],\"provenance\":{\"term:Beverage\":\"q:bevereage catogery\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T07:18:38.429Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d1fe0990064794f7a7d499445b3f7908cf6f3f6f062e5418d16ff18d9831d26a",
+    "postCanonicalHash": "d1fe0990064794f7a7d499445b3f7908cf6f3f6f062e5418d16ff18d9831d26a",
+    "appliedRuleClasses": []
+  }
+}

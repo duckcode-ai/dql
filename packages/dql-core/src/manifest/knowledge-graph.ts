@@ -291,6 +291,15 @@ export function buildManifestKnowledgeGraph(input: BuildManifestKnowledgeGraphIn
     addEdge('contains', `domain::${declaration.domain}`, declaration.qualifiedId);
     for (const entity of declaration.entities) addEdge('conforms_to', resolveModelEntity(manifest, entity), declaration.qualifiedId);
   }
+  for (const concept of Object.values(manifest.modeling?.concepts ?? {})) {
+    addObject(object('concept', concept.qualifiedId, concept.localId, concept.sourcePath, {
+      domainId: concept.domain, status: concept.status, owner: concept.owner,
+      aliases: unique([concept.localId, concept.name, ...concept.synonyms]),
+      payload: { ...concept },
+    }));
+    addEdge('contains', `domain::${concept.domain}`, concept.qualifiedId);
+    for (const binding of concept.bindings) addEdge('binds', concept.qualifiedId, resolveModelEntity(manifest, binding.entity));
+  }
   for (const rule of Object.values(manifest.modeling?.rules ?? {})) {
     addObject(object('policy', rule.qualifiedId, rule.localId, rule.sourcePath, { domainId: rule.domain, payload: { ...rule } }));
     addEdge('contains', `domain::${rule.domain}`, rule.qualifiedId);

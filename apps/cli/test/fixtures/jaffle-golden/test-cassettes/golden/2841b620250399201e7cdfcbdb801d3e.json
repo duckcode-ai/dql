@@ -1,0 +1,24 @@
+{
+  "key": "2841b620250399201e7cdfcbdb801d3e",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show Ryan Byrd's total product revenue and beverage (drink) product revenue side by side.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"alias\":\"total_revenue\"},{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:products.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"}],\"alias\":\"beverage_revenue\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"inherited\",\"entity:orders.customer\":\"inherited\",\"dimension:customers.customer_name\":\"q:Ryan byrd\",\"dimension:products.is_drink_item\":\"inherited\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T07:27:48.567Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "2841b620250399201e7cdfcbdb801d3eeb0d4b24ca913b0ef889e502e2312ffe",
+    "postCanonicalHash": "2841b620250399201e7cdfcbdb801d3eeb0d4b24ca913b0ef889e502e2312ffe",
+    "appliedRuleClasses": []
+  }
+}

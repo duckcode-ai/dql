@@ -436,6 +436,32 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
     edges.push({ src: `domain:${area.domain}`, dst: nodeId, kind: 'contains' });
   }
 
+  for (const concept of Object.values(modeling.concepts ?? {})) {
+    const nodeId = `concept:${concept.qualifiedId}`;
+    nodes.push({
+      nodeId,
+      kind: 'concept',
+      name: concept.name,
+      domain: concept.domain,
+      status: concept.status,
+      description: concept.description,
+      entities: concept.bindings.map((binding) => binding.entity),
+      sourcePath: concept.sourcePath,
+      sourceTier: 'business_context',
+      certification: certificationFromStatus(concept.status),
+      provenance: concept.origin === 'ai_draft' ? 'DQL business concept (AI draft)' : 'DQL business concept',
+      llmContext: [
+        concept.description ?? '',
+        concept.synonyms.length ? `also called: ${concept.synonyms.join(', ')}` : '',
+        `bindings: ${concept.bindings.map((binding) => `${binding.entity} (${binding.role}${binding.grain ? `, ${binding.grain}` : ''})`).join('; ')}`,
+        concept.rule ? `rule: ${concept.rule}` : '',
+      ].filter(Boolean).join('\n'),
+      payload: { ...concept },
+    });
+    edges.push({ src: `domain:${concept.domain}`, dst: nodeId, kind: 'contains' });
+    for (const binding of concept.bindings) edges.push({ src: nodeId, dst: entityNodeId(binding.entity), kind: 'binds' });
+  }
+
   for (const entity of Object.values(modeling.entities)) {
     const nodeId = `entity:${entity.qualifiedId ?? entity.id}`;
     const dbtNode = manifest.dbtProvenance?.nodes[entity.dbtUniqueId];

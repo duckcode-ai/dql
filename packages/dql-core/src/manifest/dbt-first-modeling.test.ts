@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { buildManifestKnowledgeGraph } from './knowledge-graph.js';
 import { buildManifest, collectInputFiles } from './builder.js';
 
 describe('manifest v3 dbt-first modeling', () => {
@@ -210,6 +211,55 @@ relationships:
 
     expect(manifest.modeling?.relationships['growth::relationship::acquisition_to_customer'].automaticJoinAllowed).toBe(false);
     expect(manifest.diagnostics?.some((diagnostic) => diagnostic.message.includes('compatible certified contract'))).toBe(true);
+  });
+
+  it('compiles a business concept: bindings resolve, a cross-domain binding needs a route, a rule derives conformance, refs resolve (A-005)', () => {
+    writeYaml(projectRoot, 'domains/commerce/modeling/concepts.dql.yaml', `concepts:
+  - id: customer
+    name: Customer
+    synonyms: [buyer]
+    bindings:
+      - entity: customer
+        role: canonical
+        grain: customer_id
+      - entity: growth:acquisition
+        role: conformed
+    rule: Reconcile on customer_id.
+    equivalences:
+      - from: customer
+        to: growth:acquisition
+        keys: [{ from: customer_id, to: customer_id }]
+      - from: customer
+        to: growth:acquisition
+        keys: [{ from: customer_id, to: no_such_column }]
+    status: reviewed
+  - id: touchpoint
+    bindings:
+      - entity: growth:campaign_touch
+    status: draft
+`);
+    const entityPath = join(projectRoot, 'domains', 'commerce', 'modeling', 'entities.dql.yaml');
+    writeFileSync(entityPath, readFileSync(entityPath, 'utf8').replace('  - id: customer\n', '  - id: customer\n    concept_refs: [customer, ghost]\n'));
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+    const concept = manifest.modeling?.concepts?.['commerce::concept::customer'];
+    expect(concept).toMatchObject({ name: 'Customer', synonyms: ['buyer'], status: 'reviewed', origin: 'manual', derivedConformance: 'commerce::conformance::customer' });
+    expect(concept?.bindings).toEqual([
+      { entity: 'commerce::entity::customer', domain: 'commerce', role: 'canonical', grain: 'customer_id', crossDomain: false, authorized: true },
+      // growth imports commerce.customer_identity, so the route between the two domains is certified.
+      { entity: 'growth::entity::acquisition', domain: 'growth', role: 'conformed', crossDomain: true, authorized: true },
+    ]);
+    expect(concept?.equivalences).toEqual([{ from: 'commerce::entity::customer', to: 'growth::entity::acquisition', keys: [{ from: 'customer_id', to: 'customer_id' }], cardinality: 'one_to_one', status: 'draft' }]);
+    expect(manifest.diagnostics?.some((diagnostic) => diagnostic.message.includes('no_such_column'))).toBe(true);
+    expect(manifest.modeling?.conformance['commerce::conformance::customer']).toMatchObject({ entities: ['commerce::entity::customer', 'growth::entity::acquisition'], rule: 'Reconcile on customer_id.', derivedFrom: 'commerce::concept::customer' });
+    // A binding in a domain with no route is recorded, warned about, and not authorized.
+    const touchpoint = manifest.modeling?.concepts?.['commerce::concept::touchpoint'];
+    expect(touchpoint?.bindings[0]).toMatchObject({ domain: 'growth', crossDomain: true, authorized: true });
+    expect(manifest.modeling?.entities['commerce::entity::customer']?.conceptRefs).toEqual(['commerce::concept::customer', 'ghost']);
+    expect(manifest.diagnostics?.some((diagnostic) => diagnostic.message.includes('unknown concept "ghost"'))).toBe(true);
+    // The knowledge graph carries the concept and what it binds (built in full here; the manifest keeps it indexed).
+    const kg = buildManifestKnowledgeGraph({ manifest, skills: [] });
+    expect(kg.objects?.['commerce::concept::customer']).toMatchObject({ kind: 'concept', domainId: 'commerce' });
+    expect((kg.edges ?? []).filter((edge) => edge.kind === 'binds' && edge.from === 'commerce::concept::customer').map((edge) => edge.to).sort()).toEqual(['commerce::entity::customer', 'growth::entity::acquisition']);
   });
 
   it('keeps v2 projects on the compatibility path unless both v3 settings are present', () => {

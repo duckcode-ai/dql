@@ -1,0 +1,23 @@
+{
+  "key": "5d16c8e74313c1451cc7f9b21f4e6f0a",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for total revenue, but this project distinguishes gross order revenue (including tax, from the orders mart) from product/beverage revenue (excluding tax, from order items), so the intended definition is unclear.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[{\"clause\":\"How much revenue do we have?\",\"options\":[\"metric:orders.order_total\",\"metric:order_item.revenue\"],\"material\":true,\"question\":\"Do you mean gross order revenue including tax (order total), or product revenue excluding tax (order item revenue)?\"}],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"metric:order_item.revenue\":\"q:revenue\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T07:22:39.788Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "5d16c8e74313c1451cc7f9b21f4e6f0a1e6f77518e4dee86101979a7cc277fe7",
+    "postCanonicalHash": "5d16c8e74313c1451cc7f9b21f4e6f0a1e6f77518e4dee86101979a7cc277fe7",
+    "appliedRuleClasses": []
+  }
+}

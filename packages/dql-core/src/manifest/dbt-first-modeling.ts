@@ -11,6 +11,9 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, sep } from 'node:path';
 import * as yaml from 'js-yaml';
 import type {
+  ManifestBusinessConcept,
+  ManifestConceptBinding,
+  ManifestConceptEquivalence,
   ManifestConformanceDeclaration,
   ManifestDbtFirstModeling,
   ManifestDbtNodeProvenance,
@@ -231,6 +234,7 @@ export function loadDbtFirstModeling(
   const rawRelationships: Array<{ value: RawRelationship; sourcePath: string; domain: string; areaId?: string }> = [];
   const contracts: Record<string, ManifestModelContract> = {};
   const conformance: Record<string, ManifestConformanceDeclaration> = {};
+  const rawConcepts: Array<{ value: UnknownRecord; sourcePath: string; domain: string }> = [];
   const rules: Record<string, ManifestModelRule> = {};
   const domainExports: Record<string, ManifestDomainExport> = {};
   const domainImports: Record<string, ManifestDomainImport> = {};
@@ -378,6 +382,8 @@ export function loadDbtFirstModeling(
       if (!insertScopedRecord(conformance, declaration)) diagnostics.push(modelingError(relPath, `duplicate conformance declaration "${declaration.qualifiedId}" in the same Domain Package`));
     }
 
+    for (const rawConcept of arrayOfRecords(source.concepts)) rawConcepts.push({ value: rawConcept, sourcePath: relPath, domain });
+
     for (const rawRule of arrayOfRecords(source.rules)) {
       const id = stringValue(rawRule.id);
       const expression = stringValue(rawRule.expression);
@@ -483,6 +489,7 @@ export function loadDbtFirstModeling(
     area.relationshipIds.sort();
     area.referencedEntityIds = [...new Set(references)].sort();
   }
+  const concepts = compileConcepts(rawConcepts, entities, conformance, domainExports, domainImports, domainSources, nodeFacts, diagnostics);
   validateConformance(conformance, entities, diagnostics);
   const packages = Object.fromEntries([...domainSources.values()]
     .map((source): [string, ManifestDomainPackage] => [source.id, {
@@ -514,6 +521,7 @@ export function loadDbtFirstModeling(
       relationships: sortRecord(relationships),
       contracts: sortRecord(contracts),
       conformance: sortRecord(conformance),
+      ...(Object.keys(concepts).length ? { concepts: sortRecord(concepts) } : {}),
       rules: sortRecord(rules),
       interfaces: {
         exports: sortRecord(domainExports),
@@ -971,6 +979,112 @@ function validateContracts(
       return [];
     });
   }
+}
+
+/**
+ * BUSINESS CONCEPTS (amendment A-005). A concept binds N entities; a binding
+ * in another domain is authorized only through a certified export/import
+ * route (the bound entity's domain exports it, or imports an export of the
+ * concept's own domain) — missing route information never widens it. An
+ * equivalence compiles only when both bindings resolve and its keys exist on
+ * both entities. A concept with two or more bindings and a rule DERIVES a
+ * conformance declaration, so `conforms_to` edges keep working. Entity
+ * `concept_refs` resolve to concept ids, with a warning when unknown.
+ */
+function compileConcepts(
+  rawConcepts: Array<{ value: UnknownRecord; sourcePath: string; domain: string }>,
+  entities: Record<string, ManifestModelEntity>,
+  conformance: Record<string, ManifestConformanceDeclaration>,
+  domainExports: Record<string, ManifestDomainExport>,
+  domainImports: Record<string, ManifestDomainImport>,
+  packages: Map<string, { id: string; exports: string[] }>,
+  nodeFacts: Map<string, DbtNodeFacts>,
+  diagnostics: ManifestDiagnostic[],
+): Record<string, ManifestBusinessConcept> {
+  const concepts: Record<string, ManifestBusinessConcept> = {};
+  const exportsEntity = (domain: string, entity: ManifestModelEntity): boolean =>
+    packages.get(domain)?.exports.includes(entity.localId) === true
+    || Object.values(domainExports).some((exported) => exported.domain === domain && (exported.entity === entity.localId || exported.entity === entity.qualifiedId || exported.entity === entity.id));
+  const importsFrom = (consumer: string, producer: string): boolean =>
+    Object.values(domainImports).some((imported) => imported.domain === consumer && imported.exportRef.split('.')[0] === producer);
+  for (const { value, sourcePath, domain } of rawConcepts) {
+    const localId = stringValue(value.id);
+    if (!localId) { diagnostics.push(modelingError(sourcePath, 'each concept requires `id`')); continue; }
+    const qualifiedId = qualifiedObjectId(domain, 'concept', localId);
+    const bindings: ManifestConceptBinding[] = [];
+    for (const rawBinding of arrayOfRecords(value.bindings)) {
+      const ref = stringValue(rawBinding.entity);
+      if (!ref) { diagnostics.push(modelingError(sourcePath, `concept "${localId}" has a binding with no entity`)); continue; }
+      const key = resolveScopedKey(entities, ref, domain);
+      const entity = key ? entities[key] : undefined;
+      if (!key || !entity) { diagnostics.push(modelingError(sourcePath, `concept "${localId}" binds unknown or ambiguous entity "${ref}"`)); continue; }
+      const crossDomain = entity.domain !== domain;
+      const authorized = !crossDomain || exportsEntity(entity.domain, entity) || importsFrom(entity.domain, domain);
+      if (crossDomain && !authorized) {
+        diagnostics.push({ kind: 'modeling', filePath: sourcePath, severity: 'warning', message: `concept "${localId}" binds ${entity.domain} entity "${entity.localId}" without a certified export/import route between ${domain} and ${entity.domain}; the binding is recorded but not authorized` });
+      }
+      const role = rawBinding.role === 'canonical' ? 'canonical' : 'conformed';
+      bindings.push({ entity: key, domain: entity.domain, role, ...(stringValue(rawBinding.grain) ? { grain: stringValue(rawBinding.grain) } : {}), crossDomain, authorized });
+    }
+    if (bindings.length === 0) diagnostics.push(modelingError(sourcePath, `concept "${localId}" binds no entity`));
+    const boundKeys = new Set(bindings.map((binding) => binding.entity));
+    const equivalences: ManifestConceptEquivalence[] = [];
+    for (const rawEquivalence of arrayOfRecords(value.equivalences)) {
+      const fromKey = resolveScopedKey(entities, stringValue(rawEquivalence.from) ?? '', domain);
+      const toKey = resolveScopedKey(entities, stringValue(rawEquivalence.to) ?? '', domain);
+      if (!fromKey || !toKey || !boundKeys.has(fromKey) || !boundKeys.has(toKey)) { diagnostics.push(modelingError(sourcePath, `concept "${localId}" equivalence must join two of its own bindings`)); continue; }
+      const keys = arrayOfRecords(rawEquivalence.keys).map((pair) => ({ from: stringValue(pair.from) ?? '', to: stringValue(pair.to) ?? '' })).filter((pair) => pair.from && pair.to);
+      if (keys.length === 0) { diagnostics.push(modelingError(sourcePath, `concept "${localId}" equivalence ${fromKey} → ${toKey} declares no keys`)); continue; }
+      const fromColumns = nodeFacts.get(entities[fromKey]!.dbtUniqueId)?.columns;
+      const toColumns = nodeFacts.get(entities[toKey]!.dbtUniqueId)?.columns;
+      const missing = keys.filter((pair) => (fromColumns && !fromColumns.has(pair.from.toLowerCase())) || (toColumns && !toColumns.has(pair.to.toLowerCase())));
+      if (missing.length) { diagnostics.push(modelingError(sourcePath, `concept "${localId}" equivalence key ${missing.map((pair) => `${pair.from} = ${pair.to}`).join(', ')} is not a column of both entities`)); continue; }
+      const cardinality = stringValue(rawEquivalence.cardinality) ?? 'one_to_one';
+      if (cardinality !== 'one_to_one') { diagnostics.push(modelingError(sourcePath, `concept "${localId}" equivalence must be one_to_one (got ${cardinality})`)); continue; }
+      equivalences.push({
+        from: fromKey, to: toKey, keys, cardinality: 'one_to_one',
+        ...(stringValue(rawEquivalence.valid_from ?? rawEquivalence.validFrom) ? { validFrom: stringValue(rawEquivalence.valid_from ?? rawEquivalence.validFrom) } : {}),
+        ...(stringValue(rawEquivalence.valid_to ?? rawEquivalence.validTo) ? { validTo: stringValue(rawEquivalence.valid_to ?? rawEquivalence.validTo) } : {}),
+        status: rawEquivalence.status === 'certified' ? 'certified' : 'draft',
+      });
+    }
+    const rule = stringValue(value.rule);
+    const status = lifecycle(value.status);
+    const concept: ManifestBusinessConcept = {
+      id: qualifiedId, localId, qualifiedId, domain,
+      name: stringValue(value.name) ?? localId,
+      description: stringValue(value.description),
+      synonyms: stringArray(value.synonyms),
+      bindings,
+      ...(rule ? { rule } : {}),
+      equivalences,
+      status,
+      owner: stringValue(value.owner),
+      origin: value.origin === 'ai_draft' ? 'ai_draft' : 'manual',
+      sourcePath,
+    };
+    if (bindings.length >= 2 && rule) {
+      const derivedId = qualifiedObjectId(domain, 'conformance', localId);
+      if (!conformance[derivedId]) {
+        conformance[derivedId] = { id: derivedId, localId, qualifiedId: derivedId, domain, entities: bindings.map((binding) => binding.entity), rule, sourcePath, derivedFrom: qualifiedId };
+        concept.derivedConformance = derivedId;
+      } else {
+        concept.derivedConformance = derivedId;
+      }
+    }
+    if (!insertScopedRecord(concepts, concept)) diagnostics.push(modelingError(sourcePath, `duplicate concept "${qualifiedId}" in the same Domain Package`));
+  }
+  // Entity concept references resolve to concept ids; unknown ones are kept as written and flagged.
+  for (const entity of Object.values(entities)) {
+    if (!entity.conceptRefs?.length) continue;
+    entity.conceptRefs = entity.conceptRefs.map((ref) => {
+      const key = resolveScopedKey(concepts, ref, entity.domain);
+      if (key) return key;
+      if (Object.keys(concepts).length > 0) diagnostics.push({ kind: 'modeling', filePath: entity.sourcePath, severity: 'warning', message: `entity "${entity.localId}" references unknown concept "${ref}"` });
+      return ref;
+    });
+  }
+  return concepts;
 }
 
 function validateConformance(

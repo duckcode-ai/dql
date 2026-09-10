@@ -1080,7 +1080,11 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
       ...receipt.refusals.filter((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message)).map((refusal, index) => ({ id: `pipeline-certified-identity-${index + 1}`, label: 'Certified source, not applicable', passed: false, severity: 'warning' as const, message: `${refusal.message.replace(/^block:/, 'Block ')}. The answer is composed by entity key; recertify the block with the key column to serve it as certified.` })),
     ],
     nextActions: [
-      ...((receipt.unmet ?? []).some((unmet) => unmet.obligation === 'display_label') ? [{ id: 'declare-relationship', label: 'Declare the relationship that carries the label', route: 'modeling_draft' as const }] : []),
+      ...((receipt.unmet ?? []).some((unmet) => unmet.obligation === 'display_label') ? [
+        { id: 'declare-relationship', label: 'Declare the relationship that carries the label', route: 'modeling_draft' as const },
+        // The label lives on another entity of the same thing: a concept draft can name that (A-005), for review, never certified by asking.
+        { id: 'draft-concept', label: 'Draft a business concept for this identity', route: 'modeling_draft' as const },
+      ] : []),
       ...(receipt.refusals.some((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message)) || (candidate.tier === 'certified' && candidate.proof.some((line) => /no identity key/.test(line))) ? [{ id: 'recertify-with-key', label: 'Recertify this block with the entity key', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const }] : []),
       { id: 'create-block', label: 'Save as block', route: 'dql_block_draft', artifactKind: 'dql_block_draft' }, { id: 'research-gap', label: 'Research deeper', route: 'research' },
     ],

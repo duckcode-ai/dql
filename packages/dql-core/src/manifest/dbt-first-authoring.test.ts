@@ -248,3 +248,22 @@ it('removes an authored entity, leaving the domain source intact', () => {
     }
   });
 });
+
+describe('concept authoring (A-005)', () => {
+  it('previews an upsert_concept as a concepts.dql.yaml list entry and refuses a concept with no binding', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const root = mkdtempSync(join(tmpdir(), 'dql-concept-'));
+    mkdirSync(join(root, 'domains', 'commerce', 'modeling'), { recursive: true });
+    writeFileSync(join(root, 'domains', 'commerce', 'domain.dql'), 'domain "Commerce" {\n  id = "commerce"\n}\n');
+    const { previewModelingChange } = await import('./dbt-first-authoring.js');
+    const preview = previewModelingChange(root, { operation: 'upsert_concept', value: { id: 'customer', domain: 'commerce', name: 'Customer', bindings: [{ entity: 'customer', role: 'canonical', grain: 'customer_id' }, { entity: 'growth:acquisition' }], rule: 'Reconcile on customer_id.', origin: 'ai_draft', status: 'draft' } });
+    expect(preview.patches).toHaveLength(1);
+    expect(preview.patches[0]!.path).toMatch(/domains\/commerce\/modeling\/(concepts|model)\.dql\.yaml$/);
+    expect(preview.patches[0]!.after).toContain('id: customer');
+    expect(preview.patches[0]!.after).toContain('role: canonical');
+    expect(preview.patches[0]!.after).toContain('origin: ai_draft');
+    expect(() => previewModelingChange(root, { operation: 'upsert_concept', value: { id: 'empty', domain: 'commerce', bindings: [] } })).toThrow(/at least one entity binding/);
+  });
+});

@@ -128,6 +128,35 @@ export function projectVocabularySource(base: VocabularySource, pack: Pick<Local
   });
   admitted.relationship = source.relationships.length;
 
+  // Business concepts: one thing under several keys. A binding names a
+  // modeled entity; the card offers the entity's relation so a clarification
+  // can be answered with a ref the vocabulary resolves.
+  const relationOfEntity = new Map<string, string>();
+  for (const object of [...pack.objects, ...(eligible?.objects ?? [])]) {
+    if (object.objectType !== 'dql_entity') continue;
+    const payload = (object.payload ?? {}) as { qualifiedId?: string; relation?: string };
+    const relation = normalizeRelation(payload.relation);
+    const qualifiedId = payload.qualifiedId ?? object.objectKey.replace(/^[^:]+:[^:]+:/, '');
+    if (relation && qualifiedId && !relationOfEntity.has(qualifiedId)) relationOfEntity.set(qualifiedId, relation);
+  }
+  source.concepts = [...pack.objects, ...(eligible?.objects ?? [])].filter((object) => object.objectType === 'concept').flatMap((object) => {
+    const payload = (object.payload ?? {}) as { localId?: string; name?: string; description?: string; synonyms?: string[]; status?: string; bindings?: Array<{ entity: string; domain: string; role?: string; grain?: string }> };
+    const id = payload.localId ?? leaf(object.name);
+    return [{
+      id, ...(object.domain ? { domain: object.domain } : {}), name: payload.name ?? object.name,
+      ...(payload.description ?? object.description ? { description: payload.description ?? object.description } : {}),
+      ...(payload.synonyms?.length ? { synonyms: payload.synonyms } : {}),
+      ...(object.status ? { status: object.status } : {}),
+      bindings: (payload.bindings ?? []).map((binding) => {
+        const relation = relationOfEntity.get(binding.entity);
+        return { entityRef: relation ? `relation:${relation}` : `entity:${binding.entity}`, domain: binding.domain, ...(binding.role ? { role: binding.role } : {}), ...(binding.grain ? { grain: binding.grain } : {}) };
+      }),
+    }];
+  });
+  // The same concept can be in the ranked objects and the eligible set: once.
+  source.concepts = source.concepts.filter((concept, index, all) => all.findIndex((other) => other.id === concept.id && other.domain === concept.domain) === index);
+  admitted.concept = source.concepts.length;
+
   // The selected skills only. Their preferred names resolve against the
   // projected source, so a preference for something outside the envelope
   // names nothing.
@@ -198,4 +227,12 @@ export function rankedRefsFromPack(objects: MetadataObject[]): string[] {
     }
   }
   return refs;
+}
+
+/** `"db"."schema"."table"` or `db.schema.table` → `schema.table`; a bare name stays. */
+function normalizeRelation(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const parts = value.split('.').map((part) => part.replace(/^"|"$/g, '').trim()).filter(Boolean);
+  if (parts.length === 0) return undefined;
+  return parts.slice(-2).join('.');
 }

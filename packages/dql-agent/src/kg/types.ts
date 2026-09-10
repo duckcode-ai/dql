@@ -34,6 +34,7 @@ export type KGNodeKind =
   | 'domain_export'
   | 'domain_import'
   | 'conformance'
+  | 'concept'
   | 'policy'
   | 'evaluation';
 
@@ -183,7 +184,7 @@ export interface KGEdge {
   src: string;
   dst: string;
   kind: 'feeds_into' | 'reads_from' | 'aggregates' | 'visualizes' | 'depends_on' | 'contains' | 'related_to' | 'defines' | 'composes'
-    | 'parent_domain' | 'binds_to' | 'proves_join' | 'governed_by' | 'exports' | 'imports' | 'conforms_with' | 'validated_by';
+    | 'parent_domain' | 'binds_to' | 'binds' | 'proves_join' | 'governed_by' | 'exports' | 'imports' | 'conforms_with' | 'validated_by';
   weight?: number;
 }
 

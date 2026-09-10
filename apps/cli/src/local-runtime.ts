@@ -74,6 +74,9 @@ import {
   type SemanticRefResolutionOptions,
 } from '@duckcodeailabs/dql-notebook';
 import {
+  type TermTemplateInput,
+  termFilePath,
+  buildTermTemplate,
   loadSemanticLayerFromDir,
   normalizeDqlArtifactReference,
   serializeMetricDefinitionToYaml,
@@ -159,7 +162,6 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
-import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
@@ -336,8 +338,6 @@ import {
   type BuildFromPromptResult,
   reindexProject,
   deterministicResultFactsForAnswer,
-  verifyAskNarration,
-  renderAskNarrationBrief,
   ASK_NARRATION_SYSTEM_PROMPT,
   type AskNarrationFactSetV1,
   invalidateAgentProjectState,
@@ -6533,6 +6533,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             operationId: operation.id,
           });
         }
+      } else if (operation.kind === 'term_change') {
+        // A term is a governed definition file; the proposal shows the whole
+        // file as it will be written, over what is there today.
+        const termPath = termFilePath(operation.value.domain, operation.value.title);
+        const absolute = join(projectRoot, termPath);
+        const before = existsSync(absolute) ? readFileSync(absolute, 'utf8') : '';
+        const after = buildTermTemplate(operation.value);
+        patches.push({ path: termPath, before, after, changed: before !== after, owner: 'dql', operationId: operation.id });
       } else if (operation.kind === 'dbt_source_change') {
         const { dbtProjectDir, manifestPath } = onboardingDbtPaths({});
         const preview = previewDbtSourcePatch(dbtProjectDir, manifestPath, operation.change);
@@ -24756,7 +24764,7 @@ function parseContextAuthoringOperations(value: unknown): ContextAuthoringOperat
     const evidence = Array.isArray(operation.evidence) ? operation.evidence.filter((item): item is string => typeof item === 'string').slice(0, 32) : undefined;
     if (operation.kind === 'modeling_change') {
       const change = operation.change as ModelingAuthoringChange | undefined;
-      const allowed = new Set(['upsert_domain', 'upsert_area', 'upsert_entity', 'upsert_relationship', 'upsert_contract', 'upsert_export', 'upsert_import', 'remove_entity', 'remove_relationship', 'remove_area', 'remove_contract', 'remove_export', 'remove_import']);
+      const allowed = new Set(['upsert_domain', 'upsert_area', 'upsert_entity', 'upsert_relationship', 'upsert_contract', 'upsert_export', 'upsert_import', 'upsert_concept', 'remove_entity', 'remove_relationship', 'remove_area', 'remove_contract', 'remove_export', 'remove_import', 'remove_concept']);
       if (!change || typeof change !== 'object' || !allowed.has(change.operation) || !('value' in change) || !change.value || typeof change.value !== 'object') throw Object.assign(new Error(`Modeling operation ${id} is invalid.`), { code: 'INVALID_REQUEST' });
       return { id, kind: 'modeling_change', change, dependsOn, evidence };
     }
@@ -24779,6 +24787,11 @@ function parseContextAuthoringOperations(value: unknown): ContextAuthoringOperat
       const change = operation.change as DbtSourceAuthoringInput | undefined;
       if (!change || typeof change.uniqueId !== 'string' || !change.uniqueId.trim()) throw Object.assign(new Error(`dbt source operation ${id} is invalid.`), { code: 'INVALID_REQUEST' });
       return { id, kind: 'dbt_source_change', change, dependsOn, evidence };
+    }
+    if (operation.kind === 'term_change') {
+      const value = operation.value as TermTemplateInput | undefined;
+      if (!value || typeof value.title !== 'string' || !value.title.trim() || typeof value.domain !== 'string' || !value.domain.trim()) throw Object.assign(new Error(`Term operation ${id} needs a title and a domain.`), { code: 'INVALID_REQUEST' });
+      return { id, kind: 'term_change', value: { ...value, title: value.title.trim(), domain: value.domain.trim(), owner: typeof value.owner === 'string' && value.owner.trim() ? value.owner.trim() : 'unassigned', status: 'draft' }, dependsOn, evidence };
     }
     throw Object.assign(new Error(`Unsupported context operation kind for ${id}.`), { code: 'INVALID_REQUEST' });
   });

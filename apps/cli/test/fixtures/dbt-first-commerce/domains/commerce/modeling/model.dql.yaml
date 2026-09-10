@@ -75,3 +75,25 @@ contracts:
     status: certified
     owner: commerce@company.test
     required_evaluation: false
+concepts:
+  - id: customer
+    name: Customer
+    description: A person who bought from us; Growth knows the same person as an acquired customer.
+    synonyms: [buyer, account]
+    bindings:
+      - entity: customer
+        role: canonical
+        grain: customer_id
+      - entity: growth:acquisition
+        role: conformed
+        grain: customer_id
+    rule: Reconcile on customer_id; the Commerce customer is the canonical identity.
+    equivalences:
+      - from: customer
+        to: growth:acquisition
+        keys: [{ from: customer_id, to: customer_id }]
+        cardinality: one_to_one
+        status: draft
+    status: reviewed
+    owner: commerce@company.test
+    origin: manual

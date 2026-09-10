@@ -164,3 +164,4 @@ export type {
   DbtDataState,
   DbtRunState,
 } from './types.js';
+export { buildTermTemplate, termFilePath, termSlug, type TermTemplateInput } from './term-authoring.js';

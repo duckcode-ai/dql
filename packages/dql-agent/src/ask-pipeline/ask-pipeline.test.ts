@@ -482,6 +482,35 @@ describe('the discovery path: what the cards cut is still modeled (CTX-010)', ()
   });
 });
 
+describe('a concept is discovery, not an identity (A-005)', () => {
+  const source: VocabularySource = {
+    ...jaffle,
+    relations: [
+      ...(jaffle.relations ?? []),
+      { schema: 'dev', name: 'customers', columns: [{ name: 'customer_id', dataType: 'VARCHAR' }, { name: 'customer_name', dataType: 'VARCHAR' }] },
+    ],
+    concepts: [{ id: 'shopper', domain: 'commerce', name: 'Shopper', synonyms: ['buyer'], bindings: [{ entityRef: 'relation:dev.customers', domain: 'commerce', role: 'canonical', grain: 'customer_id' }, { entityRef: 'relation:dev.orders', domain: 'commerce', role: 'conformed', grain: 'order_id' }] }],
+  };
+  const vocabulary = buildVocabularyIndex(source);
+  it('renders the concept card and resolves its synonym, but never admits it as a measure, grouping, display or filter', () => {
+    expect(vocabulary.renderCards({ seeds: ['shopper'] })).toContain('concept:commerce.shopper');
+    expect(vocabulary.resolve('buyer', ['concept'])?.ref).toBe('concept:commerce.shopper');
+    expect(vocabulary.resolve('shopper', ['dimension', 'entity', 'column'])).toBeUndefined();
+  });
+  it('a concept ref in a grouping becomes one material clarification listing the bindings, and the grouping is not executed on a binding chosen by the host', () => {
+    const validation = validateIntentRefs(parseIntent({
+      version: 1, kind: 'analytics', reading: 'revenue by shopper', measures: [{ ref: 'metric:order_item.revenue' }],
+      groupBy: [{ ref: 'concept:commerce.shopper', role: 'key' }], display: ['concept:commerce.shopper'], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped',
+    }).intent!, vocabulary);
+    expect(validation.problems).toEqual([]);
+    expect(validation.intent.groupBy).toEqual([]);
+    expect(validation.intent.display).toEqual([]);
+    expect(validation.intent.unresolved).toEqual([expect.objectContaining({ clause: 'Shopper', material: true, options: ['relation:dev.customers', 'relation:dev.orders'] })]);
+    expect(validation.intent.unresolved[0]!.question).toContain('known under several keys');
+    expect(validation.intent.unresolved[0]!.question).toContain('customer_id, commerce');
+  });
+});
+
 describe('no partial answers: a clause nothing models stays material', () => {
   const vocabulary = buildVocabularyIndex(jaffle);
   const intent = (raw: Record<string, unknown>): AnalyticalIntentV1 => {

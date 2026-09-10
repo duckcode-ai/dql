@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type {
   DbtSourceAuthoringInput,
   ModelingAuthoringChange,
+  TermTemplateInput,
 } from '@duckcodeailabs/dql-core';
 import type { WriteSkillInput } from './skills/loader.js';
 
@@ -37,6 +38,14 @@ export type ContextAuthoringOperation =
       id: string;
       kind: 'dbt_source_change';
       change: DbtSourceAuthoringInput;
+      dependsOn?: string[];
+      evidence?: string[];
+    }
+  | {
+      id: string;
+      /** A business term written to `domains/<domain>/terms/<slug>.dql` from the shared template; the one in-product way to author a term. */
+      kind: 'term_change';
+      value: TermTemplateInput;
       dependsOn?: string[];
       evidence?: string[];
     };

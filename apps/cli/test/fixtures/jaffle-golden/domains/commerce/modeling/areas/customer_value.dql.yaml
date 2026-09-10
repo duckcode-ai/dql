@@ -23,3 +23,19 @@ relationships:
     fanout: safe
     status: draft
     owner: analytics@jaffle.shop
+concepts:
+  - id: shopper
+    name: Shopper
+    description: The person who buys; known as the customer record and as the customer named on each order.
+    synonyms: [shopper, buyer]
+    bindings:
+      - entity: customer
+        role: canonical
+        grain: customer_id
+      - entity: order
+        role: conformed
+        grain: order_id
+    rule: Reconcile on customer_id; the customer record is the canonical identity.
+    status: reviewed
+    owner: analytics@jaffle.shop
+    origin: manual

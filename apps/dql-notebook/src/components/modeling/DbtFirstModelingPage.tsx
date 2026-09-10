@@ -1218,7 +1218,24 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
               <Field label="Business name"><Input value={businessName} onChange={setBusinessName} t={t} placeholder="Customer order" /></Field>
               <Field label="Business context"><Input value={businessContext} onChange={setBusinessContext} t={t} placeholder="One order used to understand repeat purchasing and revenue." /></Field>
               <div style={twoColumns}>
-                <Field label="Business concepts"><Input value={conceptRefs} onChange={setConceptRefs} t={t} placeholder="customer_lifecycle, revenue" /></Field>
+                <Field label="Business concepts">
+                  <div style={{ display: 'grid', gap: 4 }}>
+                    <Input value={conceptRefs} onChange={setConceptRefs} t={t} placeholder="customer, shopper" />
+                    {Object.keys(data?.modeling.concepts ?? {}).length > 0 && (
+                      <Select
+                        value=""
+                        onChange={(value) => {
+                          if (!value) return;
+                          const current = csv(conceptRefs);
+                          if (!current.includes(value)) setConceptRefs([...current, value].join(', '));
+                        }}
+                        values={['', ...Object.values(data?.modeling.concepts ?? {}).map((concept) => concept.localId)]}
+                        labels={{ '': 'Add a concept…', ...Object.fromEntries(Object.values(data?.modeling.concepts ?? {}).map((concept) => [concept.localId, `${concept.name} (${concept.domain}, ${concept.bindings.length} binding${concept.bindings.length === 1 ? '' : 's'})`])) }}
+                        t={t}
+                      />
+                    )}
+                  </div>
+                </Field>
                 <Field label="Analytical role"><Select value={analyticalRole} onChange={(value) => setAnalyticalRole(value as NonNullable<ManifestModelEntity['analyticalRole']>)} values={['event', 'dimension', 'snapshot', 'bridge', 'unknown']} t={t} /></Field>
               </div>
               <div style={twoColumns}>

@@ -1,0 +1,23 @@
+{
+  "key": "843f15cbe4d6b4dde0261f2f39c70a41",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross order revenue broken down by customer type (new vs returning).\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[{\"ref\":\"dimension:customers.customer_type\",\"role\":\"categorical\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"dimension:customers.customer_type\":\"q:by customer type\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T07:20:01.786Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "843f15cbe4d6b4dde0261f2f39c70a4107e16893c0f7f2e249e84a867799b3fe",
+    "postCanonicalHash": "843f15cbe4d6b4dde0261f2f39c70a4107e16893c0f7f2e249e84a867799b3fe",
+    "appliedRuleClasses": []
+  }
+}

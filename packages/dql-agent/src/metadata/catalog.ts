@@ -270,6 +270,8 @@ export interface EnsureMetadataCatalogOptions {
   semanticLayer?: SemanticLayer | null;
   /** Parsed skills from the same project read used to prepare the KG. */
   skills?: Skill[];
+  /** The knowledge graphs the caller already built from the same manifest and layer; the snapshot reuses them instead of building the KG a second time per reindex. */
+  graphs?: MetadataSnapshotGraphs;
   force?: boolean;
   /** Optional explicit real embedding provider for the snapshot vector lane. */
   embeddingProvider?: EmbeddingProvider;
@@ -364,10 +366,10 @@ export interface EligibleContextSet {
 export const ELIGIBLE_CONTEXT_OBJECT_TYPES = [
   'semantic_metric', 'semantic_measure', 'semantic_dimension', 'semantic_entity', 'semantic_model',
   'dql_block', 'dql_term', 'dbt_model', 'dbt_source', 'warehouse_table',
-  'relationship', 'dql_entity', 'domain_capsule', 'business_view',
+  'relationship', 'dql_entity', 'domain_capsule', 'business_view', 'concept',
 ] as const;
 /** The authored kinds whose payload the eligible set carries (few, and needed to render them). */
-const ELIGIBLE_PAYLOAD_TYPES = new Set(['relationship', 'dql_entity', 'domain_capsule']);
+const ELIGIBLE_PAYLOAD_TYPES = new Set(['relationship', 'dql_entity', 'domain_capsule', 'concept']);
 
 export interface CertifiedFitConfirmationRequest {
   question: string;
@@ -1253,7 +1255,7 @@ export async function ensureMetadataCatalogFresh(
     : loadAgentSemanticLayer(projectRoot);
   const manifest = options.manifest ?? loadAgentManifest(projectRoot);
   const skills = options.skills ?? loadSkills(projectRoot).skills;
-  const snapshot = buildMetadataSnapshot(projectRoot, manifest, semanticLayer, skills);
+  const snapshot = buildMetadataSnapshot(projectRoot, manifest, semanticLayer, skills, options.graphs);
   const catalog = openMetadataCatalog(projectRoot);
   try {
     const existing = catalog.state('fingerprint');
@@ -2219,14 +2221,21 @@ export function latestRuntimeSchemaSnapshotForProject(
   }
 }
 
+/** The two graphs a snapshot is built from; a reindex that already built them passes them in (built once, not twice). */
+export interface MetadataSnapshotGraphs {
+  manifestGraph: ReturnType<typeof buildKGFromManifest>;
+  semanticGraph: ReturnType<typeof buildKGFromSemanticLayer>;
+}
+
 export function buildMetadataSnapshot(
   projectRoot: string,
   manifest: DQLManifest,
   semanticLayer?: SemanticLayer,
   skills: Skill[] = loadSkills(projectRoot).skills,
+  graphs?: MetadataSnapshotGraphs,
 ): MetadataSnapshot {
-  const manifestGraph = buildKGFromManifest(manifest);
-  const semanticGraph = buildKGFromSemanticLayer(semanticLayer, declaredDomainIds(manifest));
+  const manifestGraph = graphs?.manifestGraph ?? buildKGFromManifest(manifest);
+  const semanticGraph = graphs?.semanticGraph ?? buildKGFromSemanticLayer(semanticLayer, declaredDomainIds(manifest));
   const objects = new Map<string, MetadataObject>();
   const edges = new Map<string, MetadataEdge>();
   const diagnostics: MetadataDiagnostic[] = [

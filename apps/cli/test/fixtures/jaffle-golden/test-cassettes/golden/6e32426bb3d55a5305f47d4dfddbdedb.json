@@ -1,0 +1,23 @@
+{
+  "key": "6e32426bb3d55a5305f47d4dfddbdedb",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What was total gross profit (revenue minus cost) in 2025, and what percentage of revenue did that gross profit represent?\",\"measures\":[{\"ref\":\"metric:order_item.order_gross_profit\",\"alias\":\"gross_profit\"},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"metric:order_item.order_gross_profit\",\"denominator\":\"metric:order_item.revenue\"},\"alias\":\"gross_margin_pct\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"comparison\",\"time\":{\"ref\":\"dimension:order_item.ordered_at\",\"window\":{\"start\":\"2025-01-01\",\"end\":\"2026-01-01\",\"expression\":\"in 2025\"}},\"unresolved\":[],\"provenance\":{\"metric:order_item.order_gross_profit\":\"q:gross profit\",\"metric:order_item.revenue\":\"q:gross margin percentage\",\"dimension:order_item.ordered_at\":\"q:in 2025\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T07:21:53.055Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "6e32426bb3d55a5305f47d4dfddbdedba2539cd790885e5d7a23d6c5027daeb6",
+    "postCanonicalHash": "6e32426bb3d55a5305f47d4dfddbdedba2539cd790885e5d7a23d6c5027daeb6",
+    "appliedRuleClasses": []
+  }
+}

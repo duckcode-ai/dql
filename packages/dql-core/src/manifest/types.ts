@@ -148,6 +148,7 @@ export type ManifestKnowledgeObjectKind =
   | 'domain_export'
   | 'domain_import'
   | 'conformance'
+  | 'concept'
   | 'policy'
   | 'evaluation'
   | 'block'
@@ -179,6 +180,7 @@ export type ManifestKnowledgeEdgeKind =
   | 'exports'
   | 'imports'
   | 'conforms_to'
+  | 'binds'
   | 'guided_by'
   | 'evaluated_by'
   | 'consumed_by';
@@ -995,6 +997,8 @@ export interface ManifestDbtFirstModeling {
   relationships: Record<string, ManifestModelRelationship>;
   contracts: Record<string, ManifestModelContract>;
   conformance: Record<string, ManifestConformanceDeclaration>;
+  /** Business concepts (AI-drafted, human-certified); absent on projects that declare none. */
+  concepts?: Record<string, ManifestBusinessConcept>;
   rules: Record<string, ManifestModelRule>;
   interfaces?: {
     exports: Record<string, ManifestDomainExport>;
@@ -1197,6 +1201,57 @@ export interface ManifestConformanceDeclaration {
   entities: string[];
   rule: string;
   sourcePath: string;
+  /** Set when a business concept with several bindings and a rule derived this declaration. */
+  derivedFrom?: string;
+}
+
+/** Where a business concept lives: one entity, canonical or conformed, at a grain. */
+export interface ManifestConceptBinding {
+  /** Qualified entity id (`<domain>::entity::<localId>`). */
+  entity: string;
+  domain: string;
+  role: 'canonical' | 'conformed';
+  grain?: string;
+  crossDomain: boolean;
+  /** A cross-domain binding is authorized only through a certified export/import route; a same-domain binding always is. */
+  authorized: boolean;
+}
+
+/** A typed, certifiable mapping between two bindings that execution may later rely on; never executed in the first release. */
+export interface ManifestConceptEquivalence {
+  from: string;
+  to: string;
+  keys: Array<{ from: string; to: string }>;
+  cardinality: 'one_to_one';
+  validFrom?: string;
+  validTo?: string;
+  status: 'draft' | 'certified';
+}
+
+/**
+ * A BUSINESS CONCEPT: one thing known under several keys. A concept has
+ * identity, N entity bindings across domains, and a reconciliation rule; it
+ * is AI-draftable and human-certified. Concepts are discovery and
+ * clarification for the agent — never an executable identity until a
+ * certified equivalence says how two bindings map.
+ */
+export interface ManifestBusinessConcept {
+  id: string;
+  localId: string;
+  qualifiedId: string;
+  domain: string;
+  name: string;
+  description?: string;
+  synonyms: string[];
+  bindings: ManifestConceptBinding[];
+  rule?: string;
+  equivalences: ManifestConceptEquivalence[];
+  status: ManifestModelLifecycle;
+  owner?: string;
+  origin: 'manual' | 'ai_draft';
+  sourcePath: string;
+  /** The conformance declaration this concept derived (bindings ≥ 2 and a rule). */
+  derivedConformance?: string;
 }
 
 export interface ManifestModelRule {

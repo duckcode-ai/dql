@@ -1,3 +1,4 @@
+/** @deprecated Superseded by the Ask pipeline (`ask-pipeline/pipeline.ts`); kept one release as a public export with no runtime consumer, removed in the next. */
 import type { AdmittedIdentifier } from './identifier-ledger.js';
 import { createAgenticSqlExecutionCapability } from './sql-authorization.js';
 /**

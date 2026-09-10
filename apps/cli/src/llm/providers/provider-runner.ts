@@ -355,7 +355,6 @@ function compactInline(value: string, max: number): string {
 }
 
 /** Drafts shown to the model per app; enough to be useful, bounded for prompt size. */
-const APP_DRAFT_PROMPT_LIMIT = 6;
 
 /**
  * The App copilot's own app: its pages, tiles, and review-required drafts.
@@ -395,44 +394,6 @@ export function renderAppContextGuidance(value: unknown, maxChars = 600): string
   if (drafts.length) parts.push(`Review-required drafts saved here (never certified): ${drafts.map((draft) => draft.name).join(', ')}.`);
   const text = parts.join(' ');
   return text.length > maxChars ? `${text.slice(0, maxChars - 1).trimEnd()}…` : text;
-}
-
-export function renderAppContextForPrompt(value: unknown): string | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const envelope = value as {
-    app?: { name?: string; domain?: string; audience?: string; businessOutcome?: string };
-    dashboards?: Array<{ title?: string; tiles?: unknown[] }>;
-    drafts?: Array<{ name?: string; status?: string; description?: string; question?: string; sql?: string }>;
-    focus?: { tileId?: string; blockId?: string };
-  };
-  const app = envelope.app;
-  if (!app?.name) return undefined;
-  const lines = [`This question was asked inside the App "${app.name}"${app.domain ? ` (domain: ${app.domain})` : ''}.`];
-  if (app.audience) lines.push(`Audience: ${app.audience}`);
-  if (app.businessOutcome) lines.push(`Business outcome: ${app.businessOutcome}`);
-
-  const pages = (envelope.dashboards ?? []).filter((page) => page?.title);
-  if (pages.length > 0) {
-    lines.push(`Pages: ${pages.map((page) => `${page.title} (${page.tiles?.length ?? 0} tiles)`).join('; ')}`);
-  }
-  if (envelope.focus?.blockId) lines.push(`Focused block: ${envelope.focus.blockId}`);
-
-  const drafts = (envelope.drafts ?? []).filter((draft) => draft?.name).slice(0, APP_DRAFT_PROMPT_LIMIT);
-  if (drafts.length > 0) {
-    lines.push(
-      '',
-      'Draft analyses saved in this app. They are REVIEW-REQUIRED and not certified:',
-      'reuse or adapt their SQL when it answers the question, say plainly that the source is an unreviewed app draft,',
-      'and never present one as a certified result.',
-      ...drafts.map((draft) => [
-        `- ${draft.name} (status: ${draft.status ?? 'review'})`,
-        draft.question ? `  question: ${draft.question}` : '',
-        draft.description ? `  description: ${draft.description}` : '',
-        draft.sql ? `  sql:\n${draft.sql.split('\n').map((line) => `    ${line}`).join('\n')}` : '',
-      ].filter(Boolean).join('\n')),
-    );
-  }
-  return lines.join('\n');
 }
 
 export function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContext): string | undefined {

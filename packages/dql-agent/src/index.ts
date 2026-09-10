@@ -1780,6 +1780,8 @@ export async function reindexProject(
   const metadataRefresh = await ensureMetadataCatalogFresh(projectRoot, {
     manifest,
     semanticLayer,
+    // Built once above for the KG store; the snapshot reads the same graphs.
+    graphs: { manifestGraph, semanticGraph },
     // `loadSkills: false` preserves the historical KG opt-out, while the
     // metadata catalog still owns a complete immutable snapshot for context
     // retrieval and will load its source-owned skill records itself.
@@ -2025,3 +2027,4 @@ export { generateStructured, extractFirstJsonObject, type StructuredReply } from
 
 export * from './relationship-validation.js';
 export * from './agentic/research-assets.js';
+export * from './concept-draft.js';

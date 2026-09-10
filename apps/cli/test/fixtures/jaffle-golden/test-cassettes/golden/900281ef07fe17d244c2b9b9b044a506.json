@@ -1,0 +1,23 @@
+{
+  "key": "900281ef07fe17d244c2b9b9b044a506",
+  "operation": "generate",
+  "text": "{\"hypotheses\":[{\"statement\":\"Beverage revenue is high primarily because it is concentrated in a small number of top-selling products, not spread evenly across the menu\",\"priorConfidence\":0.55,\"target\":\"beverage_revenue_by_product\",\"action\":\"breakdown\",\"expectation\":\"A small subset (e.g. top 2-3) of products account for a disproportionately large share (>50%) of drink_revenue, showing a long-tail/concentrated distribution\"},{\"statement\":\"Beverage revenue is driven by a concentrated group of high-spending repeat customers rather than broad-based demand\",\"priorConfidence\":0.45,\"target\":\"top_beverage_customers\",\"action\":\"lookup_block\",\"expectation\":\"A small number of customers in top_beverage_customers contribute a disproportionate share of total drink revenue, indicating customer concentration rather than broad purchasing\"},{\"statement\":\"One customer_type segment (e.g. returning customers) disproportionately drives beverage revenue compared to others\",\"priorConfidence\":0.5,\"target\":\"customers.customer_type\",\"action\":\"breakdown\",\"expectation\":\"order_item.drink_revenue broken down by customers.customer_type shows one segment contributing a clearly outsized share (not roughly proportional to its order count)\"},{\"statement\":\"High beverage revenue reflects sustained month-over-month growth trend rather than a one-time spike\",\"priorConfidence\":0.4,\"target\":\"order_item.revenue_growth_mom\",\"action\":\"compare_time\",\"expectation\":\"order_item.revenue_growth_mom for drink items shows consistent positive growth across multiple recent periods rather than a single anomalous jump\"},{\"statement\":\"Beverage revenue is high mainly due to high order volume (many drink orders) rather than high per-order value\",\"priorConfidence\":0.4,\"target\":\"orders.drink_orders\",\"action\":\"lookup_metric\",\"expectation\":\"orders.drink_orders count is high and tracks closely with drink_revenue growth, while average revenue per drink order stays flat, indicating volume rather than price is the driver\"}]}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T07:24:20.034Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "900281ef07fe17d244c2b9b9b044a506f0bde42f7f039989487f02d555cbbd6b",
+    "postCanonicalHash": "900281ef07fe17d244c2b9b9b044a506f0bde42f7f039989487f02d555cbbd6b",
+    "appliedRuleClasses": []
+  }
+}

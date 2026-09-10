@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { renderSemanticBlockSource } from '@duckcodeailabs/dql-core';
+import { renderSemanticBlockSource, buildTermTemplate } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot, loadProjectConfig } from '../local-runtime.js';
 
@@ -159,27 +159,6 @@ function buildDomainTemplate(opts: {
     primaryTerms = []
     reviewCadence = "monthly"
     tags = ["${domainSlug}"]
-}
-`;
-}
-
-function buildTermTemplate(opts: {
-  title: string;
-  domain: string;
-  owner: string;
-}): string {
-  return `term "${opts.title}" {
-    domain = "${opts.domain}"
-    type = "entity"
-    status = "draft"
-    description = "Business definition for ${opts.title.toLowerCase()}."
-    owner = "${opts.owner}"
-    tags = ["term", "${opts.domain}"]
-    identifiers = ["${toSlug(opts.title)}_id"]
-    synonyms = []
-    businessOwner = "${opts.owner}"
-    businessRules = []
-    caveats = []
 }
 `;
 }

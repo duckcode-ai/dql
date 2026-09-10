@@ -94,6 +94,22 @@ export interface RelationshipAuthoringInput {
   evidenceExpiresAt?: string;
 }
 
+/** A business concept as authored: bindings describe where it lives; equivalences are typed mappings for a later, separately gated release. */
+export interface ConceptAuthoringInput {
+  id: string;
+  domain: string;
+  areaId?: string;
+  name?: string;
+  description?: string;
+  synonyms?: string[];
+  bindings: Array<{ entity: string; role?: 'canonical' | 'conformed'; grain?: string }>;
+  rule?: string;
+  equivalences?: Array<{ from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: 'one_to_one'; validFrom?: string; validTo?: string; status?: 'draft' | 'certified' }>;
+  status?: ManifestModelLifecycle;
+  owner?: string;
+  origin?: 'manual' | 'ai_draft';
+}
+
 export interface ContractAuthoringInput {
   id: string;
   domain: string;
@@ -147,6 +163,7 @@ export type ModelingAuthoringChange =
   | { operation: 'upsert_contract'; value: ContractAuthoringInput }
   | { operation: 'upsert_export'; value: DomainExportAuthoringInput }
   | { operation: 'upsert_import'; value: DomainImportAuthoringInput }
+  | { operation: 'upsert_concept'; value: ConceptAuthoringInput }
   // Removals. Modeling was upsert-only, so an entity, relationship or model
   // area authored by mistake could only be removed by hand-editing YAML.
   // Contract/export/import removal completes the set: every object the UI can
@@ -156,7 +173,8 @@ export type ModelingAuthoringChange =
   | { operation: 'remove_area'; value: ModelingObjectRef }
   | { operation: 'remove_contract'; value: ModelingObjectRef }
   | { operation: 'remove_export'; value: ModelingObjectRef }
-  | { operation: 'remove_import'; value: ModelingObjectRef };
+  | { operation: 'remove_import'; value: ModelingObjectRef }
+  | { operation: 'remove_concept'; value: ModelingObjectRef };
 
 /** Identifies an authored modeling object for removal. */
 export interface ModelingObjectRef {
@@ -310,6 +328,8 @@ export function previewModelingChange(projectRoot: string, change: ModelingAutho
       case 'remove_contract': return [previewRemoveListEntry(root, change.value, 'contracts.dql.yaml', 'contracts')];
       case 'remove_export': return [previewRemoveListEntry(root, change.value, 'interfaces.dql.yaml', 'exports')];
       case 'remove_import': return [previewRemoveListEntry(root, change.value, 'interfaces.dql.yaml', 'imports')];
+      case 'upsert_concept': return [previewConcept(root, change.value)];
+      case 'remove_concept': return [previewRemoveListEntry(root, change.value, 'concepts.dql.yaml', 'concepts')];
       default: {
         const unsupported: never = change;
         throw new Error(`Unsupported modeling operation: ${(unsupported as { operation?: string }).operation ?? 'unknown'}`);
@@ -583,6 +603,38 @@ function previewRelationship(projectRoot: string, value: RelationshipAuthoringIn
     ...(value.validation ? { validation: validationSource(value.validation) } : {}),
   };
   return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'relationships.dql.yaml', 'relationships', 'id', id, value.areaId), 'relationships', 'id', relationship);
+}
+
+function previewConcept(projectRoot: string, value: ConceptAuthoringInput): ModelingSourcePatch {
+  const id = requiredId(value.id, 'concept');
+  const domain = requiredId(value.domain, 'domain');
+  const bindings = (value.bindings ?? []).filter((binding) => binding.entity?.trim()).map((binding) => ({
+    entity: binding.entity.trim(),
+    ...(binding.role ? { role: binding.role } : {}),
+    ...(binding.grain?.trim() ? { grain: binding.grain.trim() } : {}),
+  }));
+  if (bindings.length === 0) throw new Error(`Concept "${id}" needs at least one entity binding.`);
+  const equivalences = (value.equivalences ?? []).map((equivalence) => ({
+    from: equivalence.from, to: equivalence.to,
+    keys: equivalence.keys.map((pair) => ({ from: pair.from, to: pair.to })),
+    cardinality: equivalence.cardinality ?? 'one_to_one',
+    ...(equivalence.validFrom ? { valid_from: equivalence.validFrom } : {}),
+    ...(equivalence.validTo ? { valid_to: equivalence.validTo } : {}),
+    status: equivalence.status ?? 'draft',
+  }));
+  const concept: UnknownRecord = {
+    id,
+    ...(value.name?.trim() ? { name: value.name.trim() } : {}),
+    ...(value.description?.trim() ? { description: value.description.trim() } : {}),
+    ...(cleanStrings(value.synonyms).length ? { synonyms: cleanStrings(value.synonyms) } : {}),
+    bindings,
+    ...(value.rule?.trim() ? { rule: value.rule.trim() } : {}),
+    ...(equivalences.length ? { equivalences } : {}),
+    status: canonicalLifecycle(value.status),
+    ...(value.owner?.trim() ? { owner: value.owner.trim() } : {}),
+    origin: value.origin ?? 'manual',
+  };
+  return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'concepts.dql.yaml', 'concepts', 'id', id, value.areaId), 'concepts', 'id', concept);
 }
 
 function previewContract(projectRoot: string, value: ContractAuthoringInput): ModelingSourcePatch {

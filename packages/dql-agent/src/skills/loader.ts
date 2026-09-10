@@ -785,6 +785,7 @@ export function activeSkills(skills: Skill[], userId: string | null): Skill[] {
   return skills.filter((s) => (s.scope ?? 'project') === 'project' && (s.status ?? 'active') === 'active');
 }
 
+/** @deprecated The Ask vocabulary reads a skill's preferred refs from the pack projection (`projectVocabularySource`); this hint builder has no runtime consumer and is removed in the next release. */
 export function buildSkillBlockHints(skills: Skill[], userId: string | null): string[] {
   const hints = new Set<string>();
   for (const skill of activeSkills(skills, userId)) {
@@ -802,6 +803,7 @@ export function buildSkillBlockHints(skills: Skill[], userId: string | null): st
 }
 
 /** Metric ids a selected skill may prefer, including vocabulary aliases. */
+/** @deprecated The Ask vocabulary reads a skill's preferred refs from the pack projection (`projectVocabularySource`); this hint builder has no runtime consumer and is removed in the next release. */
 export function buildSkillMetricHints(skills: Skill[], userId: string | null): string[] {
   const hints = new Set<string>();
   for (const skill of activeSkills(skills, userId)) {
