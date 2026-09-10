@@ -164,6 +164,8 @@ import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
 import {
+  catalogKeyTypes,
+  validateRelationshipOnWarehouse,
   applyFinding,
   createResearchState,
   narrationMaxTokensForFacts,
@@ -6035,6 +6037,49 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return undefined;
     },
     buildIdentity: () => ({ runtime: 'pipeline_v3', snapshotId: projectSnapshot().snapshotId }),
+    // THE PACK IS THE PROJECTION (CTX-010). Complete eligible admission for
+    // the resolved envelope, the selected skills and approved hints, the domain
+    // briefing; no reranker and no fit-confirm call, so an Ask turn gains no
+    // dispatch. The vocabulary the interpreter reads is built from it.
+    buildContextPack: async (request, envelope) => {
+      const snapshot = projectSnapshot();
+      const followUp = resolveAgentFollowUpContext(request.conversationContext, request.question);
+      const serverSnapshot = agentRunRecord(request.conversationContext?.conversationEnvelope ?? request.conversationContext?.serverSnapshot);
+      const topicRelation = agentRunString(serverSnapshot?.topicRelation);
+      const preparedMetadataFingerprint = isAgentProjectIndexReady(projectRoot) ? currentMetadataFingerprint(projectRoot) : undefined;
+      const targetDescriptor = executionTargetDescriptor(request as unknown as Record<string, unknown>);
+      const targetConnectionName = targetDescriptor.target === 'connection' ? targetDescriptor.connectionName : undefined;
+      let runtimeSchemaSnapshot: RuntimeSchemaSnapshot | undefined;
+      if (targetConnectionName) {
+        const targetConnection = resolveNamedConnection(targetConnectionName);
+        const activeScope = targetConnection ? optionalActiveConnectionMetadataScope(projectRoot, projectConfig, targetConnection, targetConnectionName) : null;
+        runtimeSchemaSnapshot = runtimeSchemaSnapshotForAgentConnection(projectRoot, targetConnectionName, activeScope?.scopeFingerprint);
+      }
+      return buildLocalContextPack(projectRoot, {
+        question: request.question,
+        focusObjectKey: request.selectedEvidenceId,
+        mode: 'question',
+        admission: 'complete_eligible',
+        followUp,
+        priorContextPackId: agentRunString(request.conversationContext?.contextPackId),
+        conversationTopicRelation: topicRelation === 'continuation' || topicRelation === 'refinement' || topicRelation === 'return' || topicRelation === 'shift' ? topicRelation : undefined,
+        reusePolicy: 'seed',
+        preparedMetadataFingerprint,
+        ...(runtimeSchemaSnapshot ? { runtimeSchemaSnapshot } : {}),
+        surface: agentRunWorkspaceValue(request, 'surface') ?? 'notebook',
+        selectedContext: { selectedObject: request.selectedObject, workspaceContext: request.workspaceContext },
+        strictness: 'balanced',
+        limit: 80,
+        ...(envelope.activeDomain ? { domainContext: envelope } : {}),
+      }).then((pack) => (projectSnapshot().snapshotId === snapshot.snapshotId ? pack : undefined));
+    },
+    // The thread's compacted memory: what earlier turns settled.
+    conversation: (request) => {
+      const store = getConversationStore();
+      if (!store || !request.threadId) return undefined;
+      const thread = store.getThread(request.threadId);
+      return thread?.rollingSummary ? { summary: thread.rollingSummary } : undefined;
+    },
     // Exact literal probes stay behind the operator allowlist
     // (`agent.runtimeValueGrounding.searchSafeColumns`): a column the project
     // did not name is never queried for a value, and the probe is one
@@ -23317,64 +23362,10 @@ async function validateModelingRelationship(
   const toNode = manifest.dbtProvenance?.nodes[toEntity.dbtUniqueId];
   if (!fromNode?.relation || !toNode?.relation) throw new Error('Both dbt models must expose warehouse relation names.');
   if (!relationship.keys.length) throw new Error('At least one join key pair is required.');
-
-  const safeQuote = (identifier: string) => quoteIdentifier(assertSafeSqlIdentifier(identifier));
-  const fromRelation = quoteQualifiedIdentifier(fromNode.relation, safeQuote);
-  const toRelation = quoteQualifiedIdentifier(toNode.relation, safeQuote);
-  const fromNull = relationship.keys.map((key) => `f.${safeQuote(key.from)} IS NULL`).join(' OR ');
-  const toNull = relationship.keys.map((key) => `t.${safeQuote(key.to)} IS NULL`).join(' OR ');
-  const join = relationship.keys.map((key) => `f.${safeQuote(key.from)} = t.${safeQuote(key.to)}`).join(' AND ');
-  const fromKeys = relationship.keys.map((key) => safeQuote(key.from)).join(', ');
-  const toKeys = relationship.keys.map((key) => safeQuote(key.to)).join(', ');
-  const firstToKey = safeQuote(relationship.keys[0]!.to);
-  const sql = `WITH
-from_counts AS (SELECT COUNT(*) AS rows, SUM(CASE WHEN ${fromNull} THEN 1 ELSE 0 END) AS null_keys FROM ${fromRelation} f),
-to_counts AS (SELECT COUNT(*) AS rows, SUM(CASE WHEN ${toNull} THEN 1 ELSE 0 END) AS null_keys FROM ${toRelation} t),
-from_max AS (SELECT COALESCE(MAX(key_count), 0) AS max_per_key FROM (SELECT COUNT(*) AS key_count FROM ${fromRelation} GROUP BY ${fromKeys}) x),
-to_max AS (SELECT COALESCE(MAX(key_count), 0) AS max_per_key FROM (SELECT COUNT(*) AS key_count FROM ${toRelation} GROUP BY ${toKeys}) x),
-joined AS (SELECT COUNT(*) AS rows FROM ${fromRelation} f JOIN ${toRelation} t ON ${join}),
-unmatched AS (SELECT COUNT(*) AS rows FROM ${fromRelation} f LEFT JOIN ${toRelation} t ON ${join} WHERE t.${firstToKey} IS NULL)
-SELECT from_counts.rows AS from_rows, to_counts.rows AS to_rows, joined.rows AS joined_rows,
-  from_counts.null_keys AS from_null_keys, to_counts.null_keys AS to_null_keys,
-  unmatched.rows AS unmatched_from, from_max.max_per_key AS max_from_per_key, to_max.max_per_key AS max_to_per_key
-FROM from_counts, to_counts, joined, unmatched, from_max, to_max`;
-  const result = await execute(sql);
-  const row = result.rows[0] ?? {};
-  const maxFromPerKey = numericValue(row.max_from_per_key);
-  const maxToPerKey = numericValue(row.max_to_per_key);
-  const cardinalityPassed = relationship.cardinality === 'one_to_one'
-    ? maxFromPerKey <= 1 && maxToPerKey <= 1
-    : relationship.cardinality === 'one_to_many'
-      ? maxFromPerKey <= 1
-      : relationship.cardinality === 'many_to_one'
-        ? maxToPerKey <= 1
-        : false;
-  const policyPassed = relationship.fanout === 'safe' && cardinalityPassed;
-  const queryFingerprint = createHash('sha256').update(sql).digest('hex');
-  return {
-    status: policyPassed ? 'passed' : 'failed',
-    checkedAt: new Date().toISOString(),
-    queryFingerprint,
-    proofFingerprint: relationshipValidationProofFingerprint({
-      fromRelation: fromNode.relation,
-      toRelation: toNode.relation,
-      keys: relationship.keys,
-      cardinality: relationship.cardinality,
-      fanout: relationship.fanout,
-      queryFingerprint,
-    }),
-    fromRows: numericValue(row.from_rows),
-    toRows: numericValue(row.to_rows),
-    joinedRows: numericValue(row.joined_rows),
-    fromNullKeys: numericValue(row.from_null_keys),
-    toNullKeys: numericValue(row.to_null_keys),
-    unmatchedFrom: numericValue(row.unmatched_from),
-    maxFromPerKey,
-    maxToPerKey,
-    message: policyPassed
-      ? 'Warehouse evidence matches the declared cardinality and safe fanout policy.'
-      : 'Warehouse evidence does not prove the declared cardinality and safe fanout policy.',
-  };
+  // ONE PROOF (REL-005): the same statement and evidence Ask's warehouse proof
+  // gathers, so certification can reuse either.
+  const spec = { fromRelation: fromNode.relation, toRelation: toNode.relation, keys: relationship.keys, cardinality: relationship.cardinality, fanout: relationship.fanout };
+  return validateRelationshipOnWarehouse({ ...spec, keyTypes: catalogKeyTypes(manifest, spec) }, execute, quoteIdentifier);
 }
 
 function relatedProductsForDomain(

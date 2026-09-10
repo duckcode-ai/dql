@@ -287,7 +287,7 @@ function writeProject(projectRoot: string): string {
       status: passed
       checked_at: '2026-07-11T00:00:00.000Z'
       query_fingerprint: order-customer-proof
-      proof_fingerprint: abd9109395c4eea1588b28cfad8465923886163ab5d393216954613c861ae25a
+      proof_fingerprint: dceae5294415da923f9107a4aae0ed0420bc3db5f425b01043072b6dd09627b4
       from_rows: 10
       to_rows: 5
       joined_rows: 10
@@ -344,7 +344,7 @@ contracts:
       status: passed
       checked_at: '2026-07-11T00:00:00.000Z'
       query_fingerprint: acquisition-customer-proof
-      proof_fingerprint: b4437e3b0773955d15e7c77d368031099650f16d17c297f65f86a1c549dc1720
+      proof_fingerprint: 02328de5aa0d00075fd0ed0c6230966e656ab071c61e5e1db934625b36de0fee
       from_rows: 5
       to_rows: 5
       joined_rows: 5

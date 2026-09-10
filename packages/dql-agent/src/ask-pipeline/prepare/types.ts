@@ -1,3 +1,4 @@
+import type { ManifestRelationshipValidationEvidence } from '@duckcodeailabs/dql-core';
 import type { AnalyticalIntentV1 } from '../intent.js';
 import type { VocabularyIndex } from '../vocabulary.js';
 
@@ -42,6 +43,8 @@ export interface PreparedCandidate {
    * helper columns are dropped unless the intent asked for them.
    */
   derived?: Array<{ alias: string; numerator: string; denominator: string; keepInputs?: boolean }>;
+  /** The join steps this candidate's SQL takes, with their authority (relational tier). */
+  joins?: RelationalJoinStep[];
   /**
    * A superlative fetched ONE MORE ROW than it will show, so that a tie at the
    * boundary can be seen rather than silently resolved by whatever order the
@@ -52,6 +55,9 @@ export interface PreparedCandidate {
 }
 
 export type PrepareRefusalCode =
+  | 'join_requires_domain_contract'
+  | 'relationship_domain_unknown'
+  | 'policy_filter_unbindable'
   | 'no_certified_block'
   | 'block_not_applicable'
   | 'not_semantic'
@@ -67,6 +73,8 @@ export type PrepareRefusalCode =
 export interface PreparedRefusal {
   /** The two relations a `join_path_required` refusal could not connect. */
   relations?: [string, string];
+  /** Declared but unauthorized relationships between them: what a reader could validate to make the join possible. */
+  unproven?: UnprovenJoin[];
   tier: PrepareTier;
   code: PrepareRefusalCode;
   /** Verbatim: what the compiler, composer or entailment check actually said. */
@@ -99,6 +107,43 @@ export interface RelationalJoinStep {
   relation: string;
   /** ON clause using fully qualified relation names. */
   on: string;
+  /** Why this join may run (REL-002 amendment A-003). Absent only for a semantic-layer path the compiler owns. */
+  authority?: JoinAuthorityV1;
+}
+
+/**
+ * ONE PROOF RECORD FOR A JOIN. Every generated join carries exactly one
+ * authority: the semantic layer (compiler-owned), a certified DQL relationship
+ * (`certified`), or a within-domain warehouse proof (`proven_default`) whose
+ * promise is structural safety only — never business identity, never
+ * cross-domain permission.
+ */
+export interface JoinAuthorityV1 {
+  version: 1;
+  from: string;
+  to: string;
+  keys: Array<{ from: string; to: string }>;
+  source: 'semantic_layer' | 'dql_relationship' | 'warehouse_proof';
+  relationshipId?: string;
+  authority: 'certified' | 'proven_default';
+  scope: 'no_domains' | 'within_domain' | 'cross_domain_certified';
+  domains: { from: string[]; to: string[] };
+  evidence?: ManifestRelationshipValidationEvidence;
+  /** When the evidence was gathered and how long it authorizes execution. */
+  freshness?: { checkedAt: string; expiresAt: string; target: string; generationToken?: string };
+  snapshotId?: string;
+}
+
+/** A declared relationship the host will not join on declaration alone: an offer to validate it. */
+export interface UnprovenJoin {
+  relationshipId: string;
+  from: string;
+  to: string;
+  keys: Array<{ from: string; to: string }>;
+  status: string;
+  cardinality?: string;
+  fanout?: string;
+  reason: string;
 }
 
 export interface SqlDialectLike {
@@ -118,7 +163,9 @@ export interface PrepareDeps {
    * there. A proof admits the join as a governed default and is remembered for
    * the snapshot; anything short of both proofs admits nothing.
    */
-  proveJoinPath?: (fromRelation: string, toRelation: string) => Promise<RelationalJoinStep[] | undefined>;
+  proveJoinPath?: (fromRelation: string, toRelation: string) => Promise<RelationalJoinStep[] | { refusal: PreparedRefusal } | undefined>;
+  /** Declared relationships between two relations that are NOT authorized to join: the offers a refusal names. */
+  unprovenJoinPath?: (fromRelation: string, toRelation: string) => UnprovenJoin[];
   /** Dialect for relational composition. */
   dialect?: SqlDialectLike;
   /** Certified block source text by block ref. */

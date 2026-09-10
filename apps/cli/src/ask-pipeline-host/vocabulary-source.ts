@@ -447,9 +447,29 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
   }
   for (const term of Object.values(input.manifest?.terms ?? {})) {
     if ((term.status ?? '').toLowerCase() === 'deprecated') continue;
+    // A term's rules and caveats are kept apart from its description: the
+    // card renders them as `rules:` so the reader knows they govern the word.
     const rules = [...((term as { businessRules?: string[] }).businessRules ?? []), ...((term as { caveats?: string[] }).caveats ?? [])];
-    const description = [term.description, rules.length ? `Rules: ${rules.join(' ')}` : ''].filter(Boolean).join(' ');
-    source.terms!.push({ name: term.name, ...(term.synonyms?.length ? { synonyms: term.synonyms } : {}), ...(description ? { description } : {}), ...(term.metricRefs?.length ? { metricRefs: term.metricRefs } : {}) });
+    const identifiers = (term as { identifiers?: string[] }).identifiers ?? [];
+    source.terms!.push({
+      name: term.name, ...(term.synonyms?.length || identifiers.length ? { synonyms: [...new Set([...(term.synonyms ?? []), ...identifiers])] } : {}),
+      ...(term.description ? { description: term.description } : {}), ...(rules.length ? { rules } : {}),
+      ...(term.metricRefs?.length ? { metricRefs: term.metricRefs } : {}), ...(term.domain ? { domain: term.domain } : {}),
+    });
+  }
+  // What a modeled thing IS: the business context and grain a Domain Studio
+  // entity binding carries, attached to the physical relation it binds.
+  const nodes = input.manifest?.dbtProvenance?.nodes ?? {};
+  for (const entity of Object.values(input.manifest?.modeling?.entities ?? {})) {
+    const relation = normalizeRelationName((nodes as Record<string, { relation?: string } | undefined>)[entity.dbtUniqueId]?.relation);
+    if (!relation) continue;
+    source.relationMeaning = source.relationMeaning ?? {};
+    source.relationMeaning[relation] = {
+      ...(entity.businessName ? { businessName: entity.businessName } : {}),
+      ...(entity.businessContext ? { businessContext: entity.businessContext } : {}),
+      ...(entity.grain ? { grain: entity.grain } : {}),
+      ...(entity.domain ? { domain: entity.domain } : {}),
+    };
   }
   return source;
 }

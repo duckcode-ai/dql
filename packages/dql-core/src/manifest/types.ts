@@ -1110,6 +1110,8 @@ export interface ManifestModelRelationship {
   certificationFingerprint?: string;
   /** Warehouse-backed evidence captured before certification. */
   validation?: ManifestRelationshipValidationEvidence;
+  /** Lowercased catalog data types of the join keys, when dbt's catalog knows them; part of the validation proof. */
+  keyTypes?: Array<{ from?: string; to?: string }>;
   staleCertification: boolean;
   /** Only certified, fresh, exported, fanout-safe edges can prove a generated join. */
   automaticJoinAllowed: boolean;

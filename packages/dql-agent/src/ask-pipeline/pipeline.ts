@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import type { AgentProvider, ProviderRunOptions } from '../providers/types.js';
 import { executeCandidate, fillPeriodGaps, type ExecuteDeps, type ExecutedRows } from './execute.js';
-import { describeIntent, intentExecutionFingerprint, type AnalyticalIntentV1, type IntentPredicate } from './intent.js';
-import { composeAnsweredText, composeFailedText, composeGapText, describeResultColumns, labelFor, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
+import { describeIntent, intentExecutionFingerprint, intentRefs, type AnalyticalIntentV1, type IntentPredicate } from './intent.js';
+import { composeAnsweredText, composeFailedText, composeGapText, describeResultColumns, labelFor, type ContextLedgerV1, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
 import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal, type PrepareResult } from './prepare/index.js';
-import { keepMembersApart, resolveIntent, uncoveredQuestionTerms, unmetFacets, type IntentResolution } from './resolve-intent.js';
-import type { VocabularyEntry, VocabularyIndex } from './vocabulary.js';
+import { applySkillPolicies } from './policies.js';
+import { keepMembersApart, resolveIntent, uncoveredQuestionTerms, unmetFacets, type IntentResolution, causalOperatorsIn } from './resolve-intent.js';
+import type { RenderedCards, VocabularyDomainHeader, VocabularyEntry, VocabularyIndex } from './vocabulary.js';
 
 /**
  * INTENT → PREPARE → EXECUTE, as one host-neutral function.
@@ -67,6 +68,23 @@ export interface RunAskPipelineInput {
    * person asking, never by the interpreter's prose or by adding them up.
    */
   memberSelection?: { ref: string; values: string[] };
+  /**
+   * How the host built the vocabulary this turn reads (CTX-010): the resolved
+   * envelope, what the pack retrieved and admitted, the refs retrieval ranked
+   * first, and the domain header. Recorded in the receipt's context ledger.
+   */
+  context?: {
+    packId?: string;
+    snapshotId?: string;
+    envelope?: ContextLedgerV1['envelope'];
+    retrieved?: ContextLedgerV1['retrieved'];
+    admitted?: ContextLedgerV1['admitted'];
+    rankedRefs?: string[];
+    header?: VocabularyDomainHeader;
+    columnsFor?: { shown: number; total: number };
+  };
+  /** The thread's compacted memory: what was settled earlier, and a clarification still pending. */
+  conversation?: { summary?: string; pendingClarification?: string };
 }
 
 const fingerprintSql = (sql: string) => `sha256:${createHash('sha256').update(sql).digest('hex').slice(0, 24)}`;
@@ -78,8 +96,17 @@ function summarizeRefusal(refusal: PreparedRefusal): string {
 }
 
 function gapFromRefusals(refusals: PreparedRefusal[], intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): { gap: GapKind; message: string; nearest: string[] } {
-  const denied = refusals.find((refusal) => refusal.code === 'policy_denied');
+  const denied = refusals.find((refusal) => refusal.code === 'policy_denied' || refusal.code === 'join_requires_domain_contract' || refusal.code === 'policy_filter_unbindable');
   if (denied) return { gap: 'denied', message: denied.message, nearest: [] };
+  // A declared relationship nobody validated is an offer, not a path: the
+  // reader is told exactly which one and what would make the join possible.
+  const offered = refusals.find((refusal) => refusal.code === 'join_path_required' && refusal.unproven?.length);
+  if (offered?.unproven?.length) {
+    const offer = offered.unproven[0]!;
+    return { gap: 'not_modeled', message: `no certified relationship reaches ${offered.relations?.[1] ?? offer.to} from ${offered.relations?.[0] ?? offer.from}. The declared relationship ${offer.relationshipId} (${offer.keys.map((key) => `${key.from} = ${key.to}`).join(', ')}) is ${offer.status === 'draft' ? 'a draft that has not been validated' : offer.reason}; validate it in Domain Studio and Ask will use it`, nearest: [] };
+  }
+  const unknownDomain = refusals.find((refusal) => refusal.code === 'relationship_domain_unknown');
+  if (unknownDomain) return { gap: 'not_modeled', message: unknownDomain.message, nearest: [] };
   const unresolved = intent.unresolved.filter((clause) => clause.material);
   if (unresolved.length) return { gap: 'ambiguous', message: unresolved.map((clause) => clause.clause).join('; '), nearest: unresolved.flatMap((clause) => clause.options) };
   const compile = refusals.find((refusal) => refusal.code === 'semantic_compile_failed' || refusal.code === 'relational_compose_failed' || refusal.code === 'join_path_required' || refusal.code === 'measure_scope_not_expressible');
@@ -295,6 +322,28 @@ export function proveSubjectMatchesPopulation(intent: AnalyticalIntentV1, vocabu
   return undefined;
 }
 
+/**
+ * The refs the question names OUTRIGHT: exact ref, name or alias hits for its
+ * words and word pairs. Bounded (the first forty words), spelling-exact, and
+ * proposals only — pinning changes what renders first, never what resolves.
+ */
+export function pinnedRefsFor(question: string, vocabulary: VocabularyIndex): string[] {
+  const words = question.split(/[^A-Za-z0-9_']+/).filter((word) => word.length > 2).slice(0, 40);
+  const terms = new Set<string>();
+  for (let index = 0; index < words.length; index += 1) {
+    terms.add(words[index]!);
+    if (index + 1 < words.length) terms.add(`${words[index]} ${words[index + 1]}`);
+    if (index + 2 < words.length) terms.add(`${words[index]} ${words[index + 1]} ${words[index + 2]}`);
+  }
+  const pinned: string[] = [];
+  for (const term of terms) {
+    for (const hit of vocabulary.lookup(term, { limit: 3, minScore: 0.95 })) {
+      if ((hit.matchedOn === 'ref' || hit.matchedOn === 'name' || hit.matchedOn === 'alias') && !pinned.includes(hit.entry.ref)) pinned.push(hit.entry.ref);
+    }
+  }
+  return pinned;
+}
+
 /** Guidance that carries a settled identity into the reading the interpreter writes. */
 function memberGuidance(input: RunAskPipelineInput): string | undefined {
   if (!input.memberSelection) return input.guidance;
@@ -324,11 +373,46 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   const remaining = () => (deadline ? deadline - now() : Number.POSITIVE_INFINITY);
   const mark = (stage: string, from: number) => { timings[stage] = Math.round(now() - from); input.trace?.({ stage, detail: timings[stage] }); };
 
+  // THE DISCOVERY PATH, step one: hydration before the first call. Every
+  // exact or alias match for the question's own words is pinned ahead of
+  // ranking, so what the question names is never cut by what it resembles.
+  const pinnedRefs = pinnedRefsFor(input.question, input.vocabulary);
+  const skillRefs = input.vocabulary.entries.filter((entry) => entry.kind === 'skill').map((entry) => entry.ref);
+  const renderedCards = input.vocabulary.renderCardsDetailed({
+    maxChars: input.cardBudget ?? 24_000,
+    seeds: input.question.split(/[^A-Za-z0-9_']+/).filter((word) => word.length > 2),
+    ...(input.context?.rankedRefs?.length ? { rankedRefs: input.context.rankedRefs } : {}),
+    ...(pinnedRefs.length ? { pinnedRefs } : {}),
+    include: { skill: skillRefs },
+    ...(input.context?.header ? { header: input.context.header } : {}),
+    ...(input.context?.columnsFor ? { columnsFor: input.context.columnsFor } : {}),
+  });
+  receipt.context = {
+    version: 1,
+    ...(input.context?.packId ? { packId: input.context.packId } : {}),
+    ...(input.context?.snapshotId ? { snapshotId: input.context.snapshotId } : {}),
+    ...(input.context?.envelope ? { envelope: input.context.envelope } : {}),
+    ...(input.context?.retrieved ? { retrieved: input.context.retrieved } : {}),
+    ...(input.context?.admitted ? { admitted: input.context.admitted } : {}),
+    rendered: {
+      byKind: renderedCards.rendered, charsByKind: renderedCards.chars, totalChars: renderedCards.totalChars, truncated: renderedCards.truncated,
+      skills: skillRefs, hints: input.vocabulary.entries.filter((entry) => entry.kind === 'hint').map((entry) => entry.ref),
+    },
+  };
+  const renderedRefs = new Set(renderedCards.refs.map((ref) => ref.toLowerCase()));
+  const recordSelection = (selected: AnalyticalIntentV1) => {
+    const refs = intentRefs(selected);
+    const byKind: Record<string, number> = {};
+    for (const ref of refs) { const kind = input.vocabulary.get(ref)?.kind ?? 'unknown'; byKind[kind] = (byKind[kind] ?? 0) + 1; }
+    receipt.context = { ...receipt.context!, selected: { refs, byKind, unrendered: refs.filter((ref) => !renderedRefs.has(ref.toLowerCase())) } };
+  };
+
   // 1. Resolve.
   const resolveStarted = now();
   let resolution: IntentResolution = await resolveIntent({
     question: input.question, vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, priorAnswerSummary: input.priorAnswerSummary, clauseCoverage: input.clauseCoverage, budgetMs: remaining(), ...(input.selection ? { selection: input.selection } : {}),
     guidance: memberGuidance(input), cardBudget: input.cardBudget, providerOptions: input.providerOptions, now,
+    renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
     maxAttempts: remaining() > 15_000 ? 2 : 1,
     onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500) }),
   });
@@ -391,16 +475,31 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         ? [...new Set(input.vocabulary.lookup(input.question, { limit: 6, minScore: 0.5 }).map((hit) => hit.entry).filter((entry) => entry.kind === 'metric' || entry.kind === 'measure').map((entry) => entry.label ?? entry.name))].slice(0, 3)
         : [];
       const offered = nearestMeasures.length ? ` This project does measure ${nearestMeasures.join(', ')}: ask for ${nearestMeasures.length === 1 ? 'it' : 'one of them'} over a period and I can show it.` : '';
-      if (material?.kind === 'unsupported') {
+      if (material?.kind === 'unsupported' || (material && causalOperatorsIn(material.clause).length > 0)) {
         // Every clause the project cannot serve is named, not only the first.
         const message = materials.map((item) => item.question ?? `"${item.clause}" asks for an operation Ask does not perform`).map((text) => text.replace(/[.\s]+$/, '')).join('. ');
         return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: `${composeGapText('unsupported', message.replace(/[.\s]+$/, ''), [], false)}${answerable}${offered}`, receipt, intent: resolution.intent, offerExploration: false };
       }
+      // THE DISCOVERY PATH, step three: "not shown" is never "not modeled".
+      // Before the project is said not to hold something, the whole inventory
+      // is asked; an exact object the cards did not have room for is named,
+      // and the gap says it was not shown in this reading.
+      const unrendered = input.vocabulary.lookup(clause, { limit: 3, minScore: 0.9 })
+        .filter((hit) => (hit.matchedOn === 'ref' || hit.matchedOn === 'name' || hit.matchedOn === 'alias') && !renderedRefs.has(hit.entry.ref.toLowerCase()));
+      if (unrendered.length > 0) {
+        const named = unrendered.map((hit) => `${label(hit.entry.ref)} (${hit.entry.ref})`).join(', ');
+        const message = `"${clause}" was not shown in this reading, but this project does hold ${named}; ask for it by that name`;
+        return { kind: 'gap', gap: 'not_retrieved', message, nearest: unrendered.map((hit) => label(hit.entry.ref)), text: `${composeGapText('not_retrieved', message, [], false)}${answerable}`, receipt, intent: resolution.intent, offerExploration: false };
+      }
       const nearest = input.vocabulary.lookup(clause, { limit: 4, minScore: 0.5 }).map((hit) => label(hit.entry.ref));
       // A clause that came with its own explanation says more than the
-      // generic sentence: read it out instead of restating the clause.
+      // generic sentence: read it out instead of restating the clause. And a
+      // clause whose explanation is itself a question ("spend or orders?")
+      // is an ambiguity the project could not settle, not something it fails
+      // to model: the gap says so.
       const message = material?.question ?? `"${clause}" is not something this project's governed data describes`;
-      return { kind: 'gap', gap: 'not_modeled', message, nearest, text: `${composeGapText('not_modeled', message.replace(/[.\s]+$/, ''), nearest, false)}${answerable}${offered}`, receipt, intent: resolution.intent, offerExploration: false };
+      const gap = material?.question && /\?\s*$/.test(material.question.trim()) ? 'ambiguous' : 'not_modeled';
+      return { kind: 'gap', gap, message, nearest, text: `${composeGapText(gap, message.replace(/[.\s]+$/, ''), nearest, false)}${answerable}${offered}`, receipt, intent: resolution.intent, offerExploration: false };
     }
     return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
   }
@@ -429,6 +528,20 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       if (bound.length) receipt.grounding = [...(receipt.grounding ?? []), ...bound];
     } catch { /* a probe that fails leaves the reading as the interpreter wrote it */ }
   }
+  // TYPED POLICIES ARE ENFORCED HERE (SKILL-004): the selected skills' and
+  // the domain's required filters, time role, completeness and ranking
+  // defaults, on the typed intent, before any proof or preparation. What
+  // could not be bound is a refusal, never a silent predicate.
+  const policies = applySkillPolicies(intent, input.vocabulary, { now, extraRequiredFilters: input.context?.header?.requiredFilters });
+  if (policies.applied.length || policies.gaps.length) {
+    receipt.policies = policies.applied.map((effect) => ({ policyId: effect.policyId, field: effect.field, effect: effect.effect }));
+    receipt.context = { ...receipt.context!, enforced: { policies: policies.applied, requiredFilters: policies.requiredFilters, gaps: policies.gaps } };
+  }
+  if (policies.refusal) {
+    receipt.refusals.push(policies.refusal);
+    receipt.failure = { stage: 'prepare', reason: policies.refusal.code, message: policies.refusal.message };
+    return { kind: 'gap', gap: 'denied', message: policies.refusal.message, nearest: [], text: composeGapText('denied', policies.refusal.message, [], false), receipt, intent, offerExploration: false };
+  }
   // Whatever produced this reading — the interpreter, a follow-up edit, the
   // host's own grounding — a single row may not carry several members' facts.
   if (proveSubjectMatchesPopulation(intent, input.vocabulary)) keepMembersApart(intent, input.vocabulary);
@@ -442,6 +555,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // run is exactly the mismatch this pipeline exists to prevent.
   receipt.intent = intent;
   receipt.reading = intent.reading;
+  recordSelection(intent);
   const uncovered = uncoveredQuestionTerms(input.question, intent, input.vocabulary);
   if (uncovered.length) receipt.uncovered = uncovered;
 
@@ -481,11 +595,20 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     if (needsJoin?.relations && input.prepareDeps.proveJoinPath && !provedJoin && remaining() > 8_000) {
       provedJoin = true;
       const proveStarted = now();
-      let proven: unknown;
+      let proven: Awaited<ReturnType<NonNullable<PrepareDeps['proveJoinPath']>>>;
       try { proven = await input.prepareDeps.proveJoinPath(needsJoin.relations[0], needsJoin.relations[1]); } catch { proven = undefined; }
       mark('prove_join', proveStarted);
-      if (proven) {
-        receipt.grounding = [...(receipt.grounding ?? []), `relationship: no declared relationship reaches ${needsJoin.relations[1]} from ${needsJoin.relations[0]}, and the warehouse proved one (the key is unique there and covers every row of the facts)`];
+      if (proven && !Array.isArray(proven)) {
+        // The host refused to probe: a domain boundary, or membership nobody
+        // can name. That is a decision, not a missing path — it ends the turn.
+        receipt.refusals.push(proven.refusal);
+        receipt.tiers.push({ round, tier: 'relational', outcome: 'refused', detail: `${proven.refusal.code}: ${proven.refusal.message.slice(0, 160)}` });
+        break;
+      }
+      if (Array.isArray(proven) && proven.length) {
+        const authority = proven[0]?.authority;
+        const keys = authority?.keys.map((key) => key.from === key.to ? key.from : `${key.from} = ${key.to}`).join(', ') ?? 'a shared key';
+        receipt.grounding = [...(receipt.grounding ?? []), `relationship: ${label(`relation:${needsJoin.relations[0]}`)} and ${label(`relation:${needsJoin.relations[1]}`)} are joined on ${keys} because the warehouse showed the key is unique in ${label(`relation:${needsJoin.relations[1]}`)} and every ${label(`relation:${needsJoin.relations[0]}`)} row has one; this join is not yet certified, and Domain Studio can certify it from this evidence`];
         attempted.delete(cacheKey);
         round -= 1;
         continue;
@@ -498,6 +621,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     resolution = await resolveIntent({
       question: `${input.question}\n\nThe previous interpretation could not be prepared. ${repairable.tier === 'certified' ? 'The certified block is not applicable: ' : 'The engine said: '}${repairable.message}. ${repairable.tier === 'certified' ? 'Express the analysis with metric, entity and dimension refs instead of the block.' : 'Choose refs the engine can bind.'}`,
       vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage, ...(input.selection ? { selection: input.selection } : {}),
+      renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
       // The repair is held to the original question's obligations.
       ...(resolution.status === 'resolved' && resolution.ledger ? { ledger: resolution.ledger, ledgerRound: round + 1 } : {}),
       onDispatch: (event) => receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500) }),
@@ -698,5 +822,9 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         ? `identity: ${label} matched by text containing ${literal}; that can cover several members, none was resolved to a key`
         : `identity: ${label} matched by exact text ${literal}, not resolved to a key`;
     });
+  const usedJoins = (candidate.joins ?? []).map((step) => step.authority
+    ? { source: step.authority.source, ...(step.authority.relationshipId ? { relationshipId: step.authority.relationshipId } : {}), authority: step.authority.authority, scope: step.authority.scope }
+    : { source: 'declared', authority: 'unknown' });
+  receipt.context = { ...receipt.context!, used: { joins: usedJoins, relations: [...new Set((candidate.joins ?? []).map((step) => step.relation))], tier: candidate.tier, ...(candidate.engine ? { engine: candidate.engine } : {}) } };
   return { kind: 'answered', intent, candidate, result, text: composeAnsweredText(intent, result, input.vocabulary, candidate.trust, { notes: [...(receipt.grounding ?? []), ...textMatches], caveats }), receipt };
 }

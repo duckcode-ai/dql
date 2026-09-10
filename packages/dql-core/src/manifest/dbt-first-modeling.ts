@@ -44,6 +44,8 @@ interface DbtNodeFacts {
   grain?: string;
   keys: string[];
   columns: Set<string>;
+  /** Column data types from catalog.json, lower-cased, when the catalog is present. */
+  columnTypes: Map<string, string>;
   identityFingerprint: string;
 }
 
@@ -164,6 +166,11 @@ export function loadDbtFirstModeling(
     const grain = stringValue(dqlMeta.grain);
     const columns = new Set(Object.keys(asRecord(raw.columns)).map((column) => column.toLowerCase()));
     const catalogEntry = catalogNode(rawCatalog, uniqueId);
+    const columnTypes = new Map<string, string>();
+    for (const [columnName, column] of Object.entries(asRecord(catalogNode(rawCatalog, uniqueId).columns))) {
+      const type = stringValue(asRecord(column).type);
+      if (type) columnTypes.set(columnName, type.toLowerCase());
+    }
     const identityFingerprint = fingerprint({
       uniqueId,
       relation,
@@ -184,6 +191,7 @@ export function loadDbtFirstModeling(
       keys,
       columns,
       identityFingerprint,
+      columnTypes,
     });
     nodeProvenance[uniqueId] = {
       uniqueId,
@@ -576,6 +584,8 @@ function buildRelationships(
       && crossDomainContractsGranted(ownerDomain, importRefs, domainExports, domainImports, contracts, sourcePath, id, diagnostics));
     const certificationFingerprint = certificationProof(value.certifiedAgainst, keys, cardinality, fanout);
     const validation = validationEvidence(value.validation);
+    const keyTypes = relationshipKeyTypes(keys, fromFacts?.columnTypes, toFacts?.columnTypes);
+    const keyTypesKnown = keyTypes.some((pair) => pair.from || pair.to);
     const validationProof = relationshipValidationProofFingerprint({
       fromRelation: fromFacts?.relation,
       toRelation: toFacts?.relation,
@@ -583,6 +593,7 @@ function buildRelationships(
       cardinality,
       fanout,
       queryFingerprint: validation?.queryFingerprint ?? '',
+      keyTypes,
     });
     const validationMatches = Boolean(validation?.proofFingerprint && validation.proofFingerprint === validationProof);
     const evidenceExpiresAt = stringValue(value.evidence_expires_at ?? value.evidenceExpiresAt);
@@ -671,6 +682,7 @@ function buildRelationships(
       fingerprint: currentProof,
       certificationFingerprint,
       validation,
+      ...(keyTypesKnown ? { keyTypes } : {}),
       staleCertification,
       automaticJoinAllowed,
     };
@@ -722,7 +734,17 @@ export function relationshipValidationProofFingerprint(input: {
   cardinality: ManifestRelationshipCardinality;
   fanout: ManifestFanoutPolicy;
   queryFingerprint: string;
+  /**
+   * The key columns' data types, when the catalog knows them. A key that
+   * changes type (an integer id that becomes text) is a structural change the
+   * proof must notice; without types in the proof, yesterday's evidence stayed
+   * admissible after it. Omitted when no type is known, so a project without a
+   * catalog keeps its proofs.
+   */
+  keyTypes?: Array<{ from?: string; to?: string }>;
 }): string {
+  const keyTypes = (input.keyTypes ?? []).map((pair) => ({ from: pair.from?.toLowerCase(), to: pair.to?.toLowerCase() }));
+  const typed = keyTypes.some((pair) => pair.from || pair.to);
   return fingerprint({
     fromRelation: input.fromRelation,
     toRelation: input.toRelation,
@@ -730,7 +752,21 @@ export function relationshipValidationProofFingerprint(input: {
     cardinality: input.cardinality,
     fanout: input.fanout,
     queryFingerprint: input.queryFingerprint,
+    ...(typed ? { keyTypes } : {}),
   });
+}
+
+/** The declared key columns' types on both sides, from the node facts, for a proof fingerprint. */
+export function relationshipKeyTypes(
+  keys: Array<{ from: string; to: string }>,
+  fromTypes: Map<string, string> | undefined,
+  toTypes: Map<string, string> | undefined,
+): Array<{ from?: string; to?: string }> {
+  const lookup = (types: Map<string, string> | undefined, column: string): string | undefined => {
+    if (!types) return undefined;
+    return types.get(column) ?? types.get(column.toLowerCase()) ?? [...types.entries()].find(([name]) => name.toLowerCase() === column.toLowerCase())?.[1];
+  };
+  return keys.map((key) => ({ from: lookup(fromTypes, key.from), to: lookup(toTypes, key.to) }));
 }
 
 type ScopedManifestObject = {

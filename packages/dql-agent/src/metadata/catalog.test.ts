@@ -758,6 +758,82 @@ describe('local metadata catalog', () => {
     expect(pack.domainBriefing).toBeUndefined();
   });
 
+it('complete-eligible admission enumerates every object of the pinned domain and every undomained one, and never persists the set', async () => {
+    // Discovery is not resolution (CTX-010): a pinned domain admits its own
+    // objects and the project's undomained ones in full; a sibling domain's
+    // objects are not eligible; with no pin, the whole catalog is.
+    const manifest = {
+      manifestVersion: 3,
+      dqlVersion: 'test', generatedAt: '1970-01-01T00:00:00.000Z', project: 'test', projectRoot,
+      domains: {
+        growth: { id: 'growth', name: 'Growth', filePath: 'domains/growth/domain.dql' },
+        commerce: { id: 'commerce', name: 'Commerce', filePath: 'domains/commerce/domain.dql' },
+      },
+      blocks: {}, businessViews: {}, notebooks: {}, dashboards: {}, apps: {}, metrics: {}, dimensions: {}, sources: {},
+      terms: {
+        qualified_lead: { name: 'qualified_lead', filePath: 'domains/growth/terms/qualified_lead.dql', domain: 'growth', description: 'A lead that passed scoring.', synonyms: ['MQL'] },
+        qualified_order: { name: 'qualified_order', filePath: 'domains/commerce/terms/qualified_order.dql', domain: 'commerce', description: 'An order that passed scoring.', synonyms: ['MQO'] },
+        fiscal_year: { name: 'fiscal_year', filePath: 'terms/fiscal_year.dql', description: 'February through January.' },
+      },
+      lineage: { nodes: [], edges: [] }, diagnostics: [],
+      dbtProvenance: { manifestPath: join(projectRoot, 'target/manifest.json'), manifestFingerprint: 'eligible-snapshot', nodes: {}, metricFlow: {} },
+      modeling: {
+        mode: 'dbt-first',
+        packages: {
+          growth: { id: 'growth', filePath: 'domains/growth/domain.dql', exports: [] },
+          commerce: { id: 'commerce', filePath: 'domains/commerce/domain.dql', exports: [] },
+        },
+        areas: {}, entities: {}, relationships: {}, contracts: {}, conformance: {}, rules: {},
+        interfaces: { exports: {}, imports: {} }, domainLineage: [],
+      },
+    } as unknown as DQLManifest;
+    const snapshot = buildMetadataSnapshot(projectRoot, manifest);
+    upsertMetadataSnapshot(projectRoot, snapshot);
+
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      const all = catalog.listEligibleObjects({ objectTypes: ['dql_term'], domains: [] });
+      expect(all.map((object) => object.name).sort()).toEqual(['fiscal_year', 'qualified_lead', 'qualified_order']);
+      const growth = catalog.listEligibleObjects({ objectTypes: ['dql_term'], domains: ['growth'] });
+      expect(growth.map((object) => object.name).sort()).toEqual(['fiscal_year', 'qualified_lead']);
+      expect(growth.find((object) => object.name === 'qualified_lead')).toMatchObject({ objectType: 'dql_term', domain: 'growth' });
+      // Payloads travel only for the kinds that asked for them.
+      expect(growth.every((object) => object.payload === undefined)).toBe(true);
+      expect(catalog.listEligibleObjects({ objectTypes: [], domains: [] })).toEqual([]);
+    } finally {
+      catalog.close();
+    }
+
+    const pinned = await buildLocalContextPack(projectRoot, {
+      question: 'how many qualified leads',
+      preparedMetadataFingerprint: snapshot.fingerprint,
+      admission: 'complete_eligible',
+      domainContext: { activeDomain: 'growth', ancestors: [], descendants: [], allowedImports: [], source: 'explicit_ui', confidence: 'high', snapshotId: 'eligible-snapshot' },
+    });
+    expect(pinned.eligible).toBeDefined();
+    expect(pinned.eligible?.domains).toEqual(['growth']);
+    expect(pinned.eligible?.counts.dql_term).toBe(2);
+    expect(pinned.eligible?.objects.map((object) => object.name)).not.toContain('qualified_order');
+    expect(pinned.eligible?.fingerprint).toMatch(/^sha256:/);
+
+    const unpinned = await buildLocalContextPack(projectRoot, { question: 'how many qualified leads', preparedMetadataFingerprint: snapshot.fingerprint, admission: 'complete_eligible' });
+    expect(unpinned.eligible?.counts.dql_term).toBe(3);
+    expect(unpinned.eligible?.fingerprint).not.toBe(pinned.eligible?.fingerprint);
+
+    const ranked = await buildLocalContextPack(projectRoot, { question: 'how many qualified leads', preparedMetadataFingerprint: snapshot.fingerprint });
+    expect(ranked.eligible).toBeUndefined();
+
+    // The eligible set is a transient projection: the stored pack never carries it.
+    const stored = openMetadataCatalog(projectRoot);
+    try {
+      const persisted = stored.getContextPack(pinned.id);
+      expect(persisted).not.toBeNull();
+      expect(persisted?.eligible).toBeUndefined();
+    } finally {
+      stored.close();
+    }
+  });
+
 it('upgrades the vector index to a real embedder after the sync write, and is idempotent', async () => {
     // The snapshot write is synchronous, so it can only use the hashed
     // provider's sync embedOne — remote embedders are async-only and could

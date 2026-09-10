@@ -1,0 +1,23 @@
+{
+  "key": "b883a8ed91a151b22e29569d890ed084",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top 5 players by total points scored in games dated across calendar years 2016 and 2017 combined, identified by player id with their name shown, along with their number of games played.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"},{\"ref\":\"dimension:player_game_stats.played\",\"aggregation\":\"count\",\"alias\":\"games_played\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}]}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":5,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2016-01-01\",\"end\":\"2018-01-01\",\"expression\":\"calendar years 2016 and 2017 combined\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:total points\",\"dimension:player_game_stats.played\":\"q:games played\",\"dimension:player_game_stats.player_id\":\"q:top five players\",\"dimension:player_game_stats.player_name\":\"q:top five players\",\"dimension:player_game_stats.game_date\":\"q:calendar years 2016 and 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T03:27:50.483Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b883a8ed91a151b22e29569d890ed08434ce65371acb6313ef785ef82e4b50e5",
+    "postCanonicalHash": "b883a8ed91a151b22e29569d890ed08434ce65371acb6313ef785ef82e4b50e5",
+    "appliedRuleClasses": []
+  }
+}

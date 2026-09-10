@@ -1,0 +1,23 @@
+{
+  "key": "b48046217e3ea6d9feee0317850a9174",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by their total beverage (drink) product revenue, showing the top 10 by customer identity.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"alias\":\"beverage_revenue\",\"scope\":[{\"ref\":\"dimension:products.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"}]}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:beverage product category\",\"dimension:products.is_drink_item\":\"q:beverage\",\"entity:customers.customer\":\"q:top customers\",\"dimension:customers.customer_name\":\"q:top customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T06:26:45.851Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b48046217e3ea6d9feee0317850a9174b9e6804f68c724bda4751644097ef162",
+    "postCanonicalHash": "b48046217e3ea6d9feee0317850a9174b9e6804f68c724bda4751644097ef162",
+    "appliedRuleClasses": []
+  }
+}

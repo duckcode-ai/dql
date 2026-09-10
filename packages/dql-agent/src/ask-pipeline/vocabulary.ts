@@ -17,7 +17,7 @@ import type { BlockContractV1 } from './block-contract.js';
  * only an exact ref that `resolve` returns can enter an intent.
  */
 
-export type VocabularyKind = 'metric' | 'measure' | 'dimension' | 'entity' | 'block' | 'relation' | 'column' | 'model' | 'term';
+export type VocabularyKind = 'metric' | 'measure' | 'dimension' | 'entity' | 'block' | 'relation' | 'column' | 'model' | 'term' | 'relationship' | 'skill' | 'hint' | 'concept';
 export type VocabularyRole = 'measure' | 'key' | 'label' | 'categorical' | 'time' | 'boolean' | 'numeric' | 'text' | 'certified';
 
 export interface VocabularyEntry {
@@ -77,6 +77,50 @@ export interface VocabularyEntry {
   physical?: { relation: string; column?: string; expr?: string; aggregate?: string };
   /** Certified block source, host-only. */
   sql?: string;
+  /** The domain that owns this object, when the project declares domains. */
+  domain?: string;
+  /** What this thing IS to the business (a modeled entity's context), and the grain its rows carry. */
+  businessContext?: string;
+  grain?: string;
+  /** A term's business rules and caveats, kept apart from its description. */
+  rules?: string[];
+  /**
+   * A relationship's authority to join: `certified` joins silently,
+   * `draft` and `unproven` are declared but never joined on declaration alone.
+   */
+  joinAuthority?: 'certified' | 'draft' | 'unproven';
+  /** For a relationship: its endpoints and the key pairs it joins on. */
+  relationship?: { from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: string; fanout?: string; verb?: string; crossDomain?: boolean };
+  /** For a skill: its typed analytical policy, host-enforced, never rendered raw. */
+  policy?: Record<string, unknown>;
+  /** For a skill: the refs it prefers, and the required filters and clarify-when rules it states. */
+  skill?: { preferredRefs: string[]; requiredFilters: string[]; clarifyWhen: string[]; vocabulary: Record<string, string>; kind?: string; guidance?: string };
+  /** Skills that prefer this object, by skill ref. */
+  preferredBy?: string[];
+  /** For a concept: the entities it is bound to, with their grain and domain. */
+  bindings?: Array<{ entityRef: string; domain?: string; role?: string; grain?: string }>;
+}
+
+/** A domain's authored context, rendered as the first block the model reads. */
+export interface VocabularyDomainHeader {
+  id: string;
+  name: string;
+  description?: string;
+  purpose?: string;
+  intentExamples: string[];
+  caveats: string[];
+  requiredFilters: string[];
+}
+
+/** What `renderCards` showed, for the receipt: counts and characters per kind, and every truncation. */
+export interface RenderedCards {
+  text: string;
+  /** The refs that were rendered, so a later selection can be told from an unrendered one. */
+  refs: string[];
+  rendered: Record<string, number>;
+  chars: Record<string, number>;
+  truncated: Array<{ kind: string; shown: number; total: number }>;
+  totalChars: number;
 }
 
 export interface VocabularyLookupHit {
@@ -107,7 +151,33 @@ export function trigramSimilarity(left: string, right: string): number {
   return (2 * shared) / (a.size + b.size);
 }
 
-const KIND_PRIORITY: Record<VocabularyKind, number> = { block: 0, metric: 1, measure: 2, dimension: 3, entity: 4, model: 5, relation: 6, column: 7, term: 8 };
+const KIND_PRIORITY: Record<VocabularyKind, number> = { block: 0, metric: 1, measure: 2, dimension: 3, entity: 4, concept: 5, model: 6, relation: 7, column: 8, term: 9, relationship: 10, skill: 11, hint: 12 };
+
+/**
+ * Per-section character ceilings inside the prompt budget. Ranking decides
+ * what renders INSIDE a section; it never removes an object from the index, so
+ * a truncated section still reports how many entries it holds.
+ */
+export const DEFAULT_SECTION_CAPS: Record<VocabularyKind, number> = {
+  block: 3_000, metric: 6_000, measure: 2_000, dimension: 5_000, entity: 1_500, concept: 1_200, model: 1_000,
+  relation: 3_000, column: 2_000, term: 1_500, relationship: 2_000, skill: 2_400, hint: 800,
+};
+
+const SECTION_TITLES: Array<[VocabularyKind, string]> = [
+  ['block', 'CERTIFIED BLOCKS (a block answers exactly the question it declares; name it as a measure ref)'],
+  ['metric', 'METRICS (governed semantic layer; use as measure refs)'],
+  ['measure', 'MEASURES (semantic measures; use as measure refs)'],
+  ['dimension', 'DIMENSIONS (group-by, display and filter refs; the role says key, label, categorical, time, boolean)'],
+  ['entity', 'ENTITY KEYS (the identity of a thing; group rankings by these and display the label beside them)'],
+  ['concept', 'BUSINESS CONCEPTS (one thing known under several keys; a concept ref is a question to the reader, never a grouping — name the binding you mean)'],
+  ['model', 'SEMANTIC MODELS'],
+  ['relation', 'PHYSICAL RELATIONS (for governed SQL when no metric fits; columns listed)'],
+  ['column', 'COLUMNS'],
+  ['term', 'BUSINESS TERMS (governed definitions; a rule here is the meaning of the word)'],
+  ['relationship', 'RELATIONSHIPS (declared joins between things; "joins automatically" means the host joins on it, "declared, not proven" means the host may prove or refuse it — never invent a join, never ask which join to take)'],
+  ['skill', 'SKILLS (this project\'s written reporting conventions, selected for this question; advisory — never override a certified block, a metric the question names, or the user\'s grain; typed policies are enforced by the host)'],
+  ['hint', 'APPROVED CORRECTIONS (reviewed lessons from earlier answers; apply the rule, never reproduce old SQL)'],
+];
 
 export class VocabularyIndex {
   readonly entries: VocabularyEntry[];
@@ -118,7 +188,13 @@ export class VocabularyIndex {
 
   constructor(entries: VocabularyEntry[]) {
     this.entries = [...entries].sort((a, b) => a.ref.localeCompare(b.ref));
-    this.fingerprint = `sha256:${createHash('sha256').update(this.entries.map((entry) => `${entry.ref}|${entry.kind}|${entry.roles.join(',')}`).join('\n')).digest('hex').slice(0, 24)}`;
+    // The fingerprint identifies what the model can READ, not only what exists:
+    // a description, an alias, a rule, a policy or a join authority that changes
+    // is a different vocabulary, and the receipt must say so.
+    this.fingerprint = `sha256:${createHash('sha256').update(this.entries.map((entry) => [
+      entry.ref, entry.kind, entry.roles.join(','), entry.description ?? '', entry.aliases.join(','), (entry.rules ?? []).join('|'),
+      entry.joinAuthority ?? '', entry.policy ? JSON.stringify(entry.policy) : '', (entry.preferredBy ?? []).join(','), entry.grain ?? '', entry.businessContext ?? '',
+    ].join('\u0001')).join('\n')).digest('hex').slice(0, 24)}`;
     for (const entry of this.entries) {
       this.byRef.set(entry.ref.toLowerCase(), entry);
       const tail = entry.ref.slice(entry.ref.indexOf(':') + 1);
@@ -215,54 +291,108 @@ export class VocabularyIndex {
   }
 
   /**
-   * Render the cards the model reads. Deterministic order (by kind, then ref)
-   * so cassettes stay stable; when the whole catalogue exceeds `maxChars`,
-   * the entries most related to `seeds` (the question) come first and the
-   * rest is summarised as a count the model can reach through lookup.
+   * Render the cards the model reads. Deterministic order so cassettes stay
+   * stable: refs the retrieval ranked come first (`rankedRefs`), then the
+   * entries most related to `seeds` (the question), then kind and ref. Every
+   * section has a character ceiling inside `maxChars`; ranking decides what
+   * renders INSIDE a section and never removes an entry from the index, so a
+   * truncated section reports its full count and the reader is told that a
+   * missing object is "not shown", never "not modeled".
    */
-  renderCards(options: { maxChars?: number; seeds?: string[] } = {}): string {
+  renderCards(options: RenderCardsOptions = {}): string {
+    return this.renderCardsDetailed(options).text;
+  }
+
+  renderCardsDetailed(options: RenderCardsOptions = {}): RenderedCards {
     const maxChars = options.maxChars ?? 24_000;
+    const caps = { ...DEFAULT_SECTION_CAPS, ...(options.sectionCaps ?? {}) };
     const seedScore = new Map<VocabularyEntry, number>();
     for (const seed of options.seeds ?? []) {
       for (const hit of this.lookup(seed, { limit: 40, minScore: 0.35 })) {
         seedScore.set(hit.entry, Math.max(seedScore.get(hit.entry) ?? 0, hit.score));
       }
     }
-    const ordered = [...this.entries].sort((a, b) =>
-      (seedScore.get(b) ?? 0) - (seedScore.get(a) ?? 0) || KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind] || a.ref.localeCompare(b.ref));
+    const rankedAt = new Map<string, number>();
+    (options.rankedRefs ?? []).forEach((ref, index) => { if (!rankedAt.has(ref.toLowerCase())) rankedAt.set(ref.toLowerCase(), index); });
+    const rank = (entry: VocabularyEntry): number => rankedAt.get(entry.ref.toLowerCase()) ?? Number.POSITIVE_INFINITY;
+    // A pinned entry (a name the question matched exactly, a selected skill)
+    // renders before anything ranking chose, so what the question names is
+    // never cut by what the question resembles.
+    const pinned = new Set((options.pinnedRefs ?? []).map((ref) => ref.toLowerCase()));
+    const includeSkills = options.include?.skill ? new Set(options.include.skill.map((ref) => ref.toLowerCase())) : undefined;
+    const eligible = this.entries.filter((entry) => !(entry.kind === 'skill' && includeSkills && !includeSkills.has(entry.ref.toLowerCase())));
+    const ordered = [...eligible].sort((a, b) =>
+      Number(pinned.has(b.ref.toLowerCase())) - Number(pinned.has(a.ref.toLowerCase()))
+      || rank(a) - rank(b)
+      || (seedScore.get(b) ?? 0) - (seedScore.get(a) ?? 0)
+      || KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind]
+      || a.ref.localeCompare(b.ref));
+    const header = options.header ? renderDomainHeader(options.header) : '';
     const included = new Set<VocabularyEntry>();
-    let chars = 0;
+    const charsByKind: Record<string, number> = {};
+    let chars = header ? header.length + 2 : 0;
     for (const entry of ordered) {
       const line = renderCard(entry);
-      if (chars + line.length > maxChars) continue;
+      const used = charsByKind[entry.kind] ?? 0;
+      if (used + line.length + 1 > caps[entry.kind]) continue;
+      if (chars + line.length + 1 > maxChars) continue;
       included.add(entry);
+      charsByKind[entry.kind] = used + line.length + 1;
       chars += line.length + 1;
     }
-    const sections: Array<[VocabularyKind, string]> = [
-      ['block', 'CERTIFIED BLOCKS (a block answers exactly the question it declares; name it as a measure ref)'],
-      ['metric', 'METRICS (governed semantic layer; use as measure refs)'],
-      ['measure', 'MEASURES (semantic measures; use as measure refs)'],
-      ['dimension', 'DIMENSIONS (group-by, display and filter refs; the role says key, label, categorical, time, boolean)'],
-      ['entity', 'ENTITY KEYS (the identity of a thing; group rankings by these and display the label beside them)'],
-      ['model', 'SEMANTIC MODELS'],
-      ['relation', 'PHYSICAL RELATIONS (for governed SQL when no metric fits; columns listed)'],
-      ['column', 'COLUMNS'],
-      ['term', 'BUSINESS TERMS'],
-    ];
-    const out: string[] = [];
-    for (const [kind, title] of sections) {
+    const out: string[] = header ? [header, ''] : [];
+    const rendered: Record<string, number> = {};
+    const truncated: RenderedCards['truncated'] = [];
+    for (const [kind, title] of SECTION_TITLES) {
       const rows = this.entries.filter((entry) => entry.kind === kind && included.has(entry));
-      const total = this.entries.filter((entry) => entry.kind === kind).length;
+      const total = eligible.filter((entry) => entry.kind === kind).length;
       if (total === 0) continue;
-      out.push(`${title}${rows.length < total ? ` (${rows.length} of ${total} shown; use lookup_vocabulary for the rest)` : ''}`);
+      rendered[kind] = rows.length;
+      if (rows.length < total) truncated.push({ kind, shown: rows.length, total });
+      const columnsNote = kind === 'column' && options.columnsFor
+        ? ` (listed for ${options.columnsFor.shown} of ${options.columnsFor.total} relations; name any other column as column:<schema.table>.<name>, exact spelling)`
+        : '';
+      out.push(`${title}${rows.length < total ? ` (${rows.length} of ${total} shown; an entry not shown here still exists — name it exactly, or say what you were looking for and it will be looked up)` : ''}${columnsNote}`);
       for (const entry of rows) out.push(renderCard(entry));
       out.push('');
     }
-    return out.join('\n').trim();
+    const text = out.join('\n').trim();
+    return { text, refs: [...included].map((entry) => entry.ref), rendered, chars: charsByKind, truncated, totalChars: text.length };
   }
 }
 
+export interface RenderCardsOptions {
+  maxChars?: number;
+  seeds?: string[];
+  /** Refs in retrieval rank order; they render first. */
+  rankedRefs?: string[];
+  /** Refs the question named outright; they render before ranking. */
+  pinnedRefs?: string[];
+  /** Skills to render (the selected ones); others stay in the index but off the page. */
+  include?: { skill?: string[] };
+  sectionCaps?: Partial<Record<VocabularyKind, number>>;
+  header?: VocabularyDomainHeader;
+  /** How many relations had their columns hydrated, of how many eligible. */
+  columnsFor?: { shown: number; total: number };
+}
+
+function renderDomainHeader(header: VocabularyDomainHeader): string {
+  const clip = (value: string, max: number) => value.replace(/\s+/g, ' ').slice(0, max);
+  const parts = [
+    `DOMAIN ${header.id}${header.name && header.name !== header.id ? ` (${header.name})` : ''} — the business context this question is read in; required filters and caveats here are enforced by the host, never by you.${header.description ? ` ${clip(header.description, 200)}` : ''}`,
+    header.purpose ? `Purpose: ${clip(header.purpose, 120)}` : '',
+    header.intentExamples.length ? `Typical questions: ${header.intentExamples.slice(0, 3).map((example) => `"${clip(example, 90)}"`).join('; ')}` : '',
+    header.caveats.length ? `Caveats: ${header.caveats.slice(0, 3).map((caveat) => clip(caveat, 120)).join('; ')}` : '',
+    header.requiredFilters.length ? `Required filters: ${header.requiredFilters.slice(0, 4).map((filter) => clip(filter, 80)).join('; ')}` : '',
+  ].filter(Boolean);
+  return parts.join('\n').slice(0, 900);
+}
+
 export function renderCard(entry: VocabularyEntry): string {
+  if (entry.kind === 'relationship') return renderRelationshipCard(entry);
+  if (entry.kind === 'skill') return renderSkillCard(entry);
+  if (entry.kind === 'hint') return renderHintCard(entry);
+  if (entry.kind === 'concept') return renderConceptCard(entry);
   const bits: string[] = [];
   if (entry.roles.length) bits.push(entry.roles.join('/'));
   if (entry.model && entry.kind !== 'relation') bits.push(`model ${entry.model}`);
@@ -287,7 +417,69 @@ export function renderCard(entry: VocabularyEntry): string {
   const examples = entry.examples?.length ? ` e.g. "${entry.examples[0]}"` : '';
   const aliases = entry.aliases.filter((alias) => normalizeVocabularyText(alias) !== normalizeVocabularyText(entry.name)).slice(0, 4);
   const aka = aliases.length ? ` aka ${aliases.join(', ')}` : '';
-  return `- ${entry.ref} [${bits.join('; ')}]${formula}${description}${aka}${columns}${notes}${groupBy}${scope}${limit}${examples}`;
+  // What a modeled thing IS, and the grain its rows carry: authored context
+  // the raw column list cannot say.
+  const meaning = entry.businessContext ? ` is: ${entry.businessContext.replace(/\s+/g, ' ').slice(0, 160)}` : '';
+  const grain = entry.grain ? ` one row per ${entry.grain}` : '';
+  const rules = entry.rules?.length ? ` rules: ${entry.rules.join(' ').replace(/\s+/g, ' ').slice(0, 220)}` : '';
+  const preferred = entry.preferredBy?.length ? ` preferred by ${entry.preferredBy.slice(0, 2).join(', ')}` : '';
+  return `- ${entry.ref} [${bits.join('; ')}]${formula}${description}${meaning}${grain}${rules}${aka}${preferred}${columns}${notes}${groupBy}${scope}${limit}${examples}`;
+}
+
+function renderRelationshipCard(entry: VocabularyEntry): string {
+  const rel = entry.relationship;
+  const authority = entry.joinAuthority === 'certified' ? 'certified; joins automatically' : entry.joinAuthority === 'draft' ? 'draft; declared, not proven' : 'declared, not proven';
+  const bits = [rel ? `${rel.from} -> ${rel.to}` : '', rel?.verb ?? '', rel?.cardinality ?? '', rel?.fanout ? `${rel.fanout} fanout` : '', rel?.crossDomain ? 'cross-domain' : '', authority].filter(Boolean);
+  const keys = rel?.keys.length ? ` on ${rel.keys.map((key) => `${key.from} = ${key.to}`).join(' and ')}` : '';
+  const description = entry.description ? ` ${entry.description.replace(/\s+/g, ' ').slice(0, 160)}` : '';
+  return `- ${entry.ref} [${bits.join('; ')}]${keys}${description}`;
+}
+
+function renderSkillCard(entry: VocabularyEntry): string {
+  const skill = entry.skill;
+  const bits = [skill?.kind ?? 'skill', entry.domain ?? ''].filter(Boolean);
+  const description = entry.description ? ` ${entry.description.replace(/\s+/g, ' ').slice(0, 200)}` : '';
+  const prefers = skill?.preferredRefs.length ? ` prefers: ${skill.preferredRefs.slice(0, 6).join(', ')}` : '';
+  const required = skill?.requiredFilters.length ? ` required filters (host-enforced): ${skill.requiredFilters.slice(0, 3).join('; ')}` : '';
+  const clarify = skill?.clarifyWhen.length ? ` clarify when: ${skill.clarifyWhen.slice(0, 2).join('; ')}` : '';
+  const words = skill ? Object.entries(skill.vocabulary).slice(0, 6).map(([word, ref]) => `"${word}" → ${ref}`).join(', ') : '';
+  const vocabulary = words ? ` words: ${words}` : '';
+  const policy = entry.policy ? ` policy: ${describePolicy(entry.policy)}` : '';
+  const guidance = skill?.guidance ? ` notes: ${skill.guidance.replace(/\s+/g, ' ').slice(0, 300)}` : '';
+  return `- ${entry.ref} [${bits.join('; ')}]${description}${prefers}${required}${clarify}${vocabulary}${policy}${guidance}`;
+}
+
+function describePolicy(policy: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const text = (value: unknown) => (typeof value === 'string' && value ? value : undefined);
+  const timeRole = text(policy.timeRole) ?? text(policy.time_role);
+  const calendar = text(policy.calendarId) ?? text(policy.calendar_id);
+  const timezone = text(policy.timezone);
+  const completeness = text(policy.completenessPolicy) ?? text(policy.completeness_policy);
+  const alignment = text(policy.comparisonAlignment) ?? text(policy.comparison_alignment);
+  const ranking = text(policy.defaultRankingPeriod) ?? text(policy.default_ranking_period);
+  if (timeRole) parts.push(`time role ${timeRole}`);
+  if (calendar) parts.push(`calendar ${calendar}`);
+  if (timezone) parts.push(`timezone ${timezone}`);
+  if (completeness) parts.push(`periods ${completeness.replace(/_/g, ' ')}`);
+  if (alignment) parts.push(`comparisons ${alignment.replace(/_/g, ' ')}`);
+  if (ranking) parts.push(`rank by the ${ranking} period`);
+  return parts.join(', ') || 'declared';
+}
+
+function renderHintCard(entry: VocabularyEntry): string {
+  const bits = ['approved', entry.domain ? `scope ${entry.domain}` : ''].filter(Boolean);
+  const description = entry.description ? ` ${entry.description.replace(/\s+/g, ' ').slice(0, 240)}` : '';
+  return `- ${entry.ref} [${bits.join('; ')}]${description}`;
+}
+
+function renderConceptCard(entry: VocabularyEntry): string {
+  const bits = ['concept', entry.status ?? '', entry.domain ?? ''].filter(Boolean);
+  const description = entry.description ? ` ${entry.description.replace(/\s+/g, ' ').slice(0, 160)}` : '';
+  const bindings = entry.bindings?.length ? ` bound to: ${entry.bindings.slice(0, 6).map((binding) => `${binding.entityRef}${binding.domain ? ` (${binding.domain}${binding.role ? `, ${binding.role}` : ''})` : ''}${binding.grain ? ` one row per ${binding.grain}` : ''}`).join('; ')}` : '';
+  const aliases = entry.aliases.filter((alias) => normalizeVocabularyText(alias) !== normalizeVocabularyText(entry.name)).slice(0, 4);
+  const aka = aliases.length ? ` aka ${aliases.join(', ')}` : '';
+  return `- ${entry.ref} [${bits.join('; ')}]${description}${bindings}${aka}`;
 }
 
 // Building from host-neutral sources.
@@ -300,7 +492,19 @@ export interface VocabularySource {
   models?: Array<{ name: string; label?: string; description?: string; relation?: string }>;
   blocks?: Array<{ name: string; domain?: string; description?: string; certified: boolean; status?: string; contract: BlockContractV1; examples?: string[]; tags?: string[]; sourceId?: string; sql?: string; sourcePath?: string }>;
   relations?: Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; sourceId?: string }>;
-  terms?: Array<{ name: string; synonyms?: string[]; description?: string; metricRefs?: string[] }>;
+  terms?: Array<{ name: string; synonyms?: string[]; description?: string; metricRefs?: string[]; rules?: string[]; domain?: string }>;
+  /** Declared relationships between modeled things, with their authority to join. */
+  relationships?: Array<{ id: string; domain?: string; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: string; fanout?: string; verb?: string; description?: string; status?: string; crossDomain?: boolean; joinAuthority: 'certified' | 'draft' | 'unproven' }>;
+  /** The skills selected for this request (already eligible), never every skill of the project. */
+  skills?: Array<{ ref: string; id: string; domain?: string; kind?: string; description?: string; triggers?: string[]; vocabulary?: Record<string, string>; preferredRefs?: string[]; requiredFilters?: string[]; clarifyWhen?: string[]; policy?: Record<string, unknown>; guidance?: string }>;
+  /** Approved, fresh corrections in scope; guidance only, never SQL. */
+  hints?: Array<{ id: string; title?: string; guidance: string; domain?: string; tags?: string[] }>;
+  /** Business concepts: one thing under several keys. */
+  concepts?: Array<{ id: string; domain?: string; name: string; description?: string; synonyms?: string[]; status?: string; bindings: Array<{ entityRef: string; domain?: string; role?: string; grain?: string }> }>;
+  /** The domain header rendered first, when the request resolved one. */
+  domain?: VocabularyDomainHeader;
+  /** Authored meaning for physical relations (a modeled entity's business context and grain), keyed by `schema.table`. */
+  relationMeaning?: Record<string, { businessName?: string; businessContext?: string; grain?: string; domain?: string }>;
 }
 
 const LABEL_WORD = /(^|_)(name|label|title|description|display)(_|$)/i;
@@ -532,6 +736,81 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       ...(term.description ? { description: term.description } : {}),
       roles: [],
       ...(term.metricRefs?.length ? { columns: term.metricRefs } : {}),
+      ...(term.rules?.length ? { rules: term.rules } : {}),
+      ...(term.domain ? { domain: term.domain } : {}),
+    });
+  }
+  // Authored meaning for a relation: what the modeled thing is, and its grain.
+  for (const [relation, meaning] of Object.entries(source.relationMeaning ?? {})) {
+    const entry = entries.find((candidate) => candidate.kind === 'relation' && candidate.model === relation);
+    if (!entry) continue;
+    if (meaning.businessName && !entry.aliases.includes(meaning.businessName)) entry.aliases.push(meaning.businessName);
+    if (meaning.businessContext) entry.businessContext = meaning.businessContext;
+    if (meaning.grain) entry.grain = meaning.grain;
+    if (meaning.domain) entry.domain = meaning.domain;
+  }
+  for (const relationship of source.relationships ?? []) {
+    entries.push({
+      ref: `relationship:${relationship.domain ? `${relationship.domain}.` : ''}${relationship.id}`,
+      kind: 'relationship',
+      name: relationship.id,
+      aliases: [relationship.id.replace(/_/g, ' '), relationship.from, relationship.to].filter(Boolean),
+      ...(relationship.description ? { description: relationship.description } : {}),
+      roles: [],
+      ...(relationship.status ? { status: relationship.status } : {}),
+      ...(relationship.domain ? { domain: relationship.domain } : {}),
+      joinAuthority: relationship.joinAuthority,
+      relationship: { from: relationship.from, to: relationship.to, keys: relationship.keys, ...(relationship.cardinality ? { cardinality: relationship.cardinality } : {}), ...(relationship.fanout ? { fanout: relationship.fanout } : {}), ...(relationship.verb ? { verb: relationship.verb } : {}), ...(relationship.crossDomain ? { crossDomain: true } : {}) },
+      columns: relationship.keys.flatMap((key) => [key.from, key.to]),
+    });
+  }
+  for (const skill of source.skills ?? []) {
+    const preferredRefs = skill.preferredRefs ?? [];
+    entries.push({
+      ref: skill.ref,
+      kind: 'skill',
+      name: skill.id,
+      aliases: [skill.id.replace(/[-_]/g, ' '), ...(skill.triggers ?? [])],
+      ...(skill.description ? { description: skill.description } : {}),
+      roles: [],
+      ...(skill.domain ? { domain: skill.domain } : {}),
+      ...(skill.policy ? { policy: skill.policy } : {}),
+      skill: { preferredRefs, requiredFilters: skill.requiredFilters ?? [], clarifyWhen: skill.clarifyWhen ?? [], vocabulary: skill.vocabulary ?? {}, ...(skill.kind ? { kind: skill.kind } : {}), ...(skill.guidance ? { guidance: skill.guidance } : {}) },
+    });
+    // The skill's own words become aliases of the entries they name, and the
+    // entries it prefers know it: both are request-scoped, because only the
+    // selected skills reach this source.
+    for (const [word, ref] of Object.entries(skill.vocabulary ?? {})) {
+      const target = entries.find((candidate) => candidate.ref.toLowerCase() === ref.toLowerCase());
+      if (target && !target.aliases.some((alias) => normalizeVocabularyText(alias) === normalizeVocabularyText(word))) target.aliases.push(word);
+    }
+    for (const ref of preferredRefs) {
+      const target = entries.find((candidate) => candidate.ref.toLowerCase() === ref.toLowerCase());
+      if (target) target.preferredBy = [...new Set([...(target.preferredBy ?? []), skill.ref])];
+    }
+  }
+  for (const hint of source.hints ?? []) {
+    entries.push({
+      ref: `hint:${hint.id}`,
+      kind: 'hint',
+      name: hint.title ?? hint.id,
+      aliases: hint.tags ?? [],
+      description: hint.guidance,
+      roles: [],
+      ...(hint.domain ? { domain: hint.domain } : {}),
+    });
+  }
+  for (const concept of source.concepts ?? []) {
+    entries.push({
+      ref: `concept:${concept.domain ? `${concept.domain}.` : ''}${concept.id}`,
+      kind: 'concept',
+      name: concept.name,
+      aliases: [concept.id.replace(/[-_]/g, ' '), ...(concept.synonyms ?? [])],
+      ...(concept.description ? { description: concept.description } : {}),
+      roles: [],
+      ...(concept.status ? { status: concept.status } : {}),
+      ...(concept.domain ? { domain: concept.domain } : {}),
+      bindings: concept.bindings,
     });
   }
   return new VocabularyIndex(entries);

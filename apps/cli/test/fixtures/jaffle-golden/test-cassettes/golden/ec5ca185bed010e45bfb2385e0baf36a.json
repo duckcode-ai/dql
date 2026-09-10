@@ -1,0 +1,23 @@
+{
+  "key": "ec5ca185bed010e45bfb2385e0baf36a",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Break down total supply cost by product.\",\"measures\":[{\"ref\":\"column:dev.supplies.supply_cost\",\"aggregation\":\"sum\",\"alias\":\"supply_cost\"}],\"groupBy\":[{\"ref\":\"dimension:supplies.product_id\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"column:dev.supplies.supply_cost\":\"q:supply cost\",\"dimension:supplies.product_id\":\"q:by product\",\"dimension:products.product_name\":\"q:by product\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T06:32:28.739Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "ec5ca185bed010e45bfb2385e0baf36af59b2dbb9979ec471ff0e6b6cc8b64db",
+    "postCanonicalHash": "ec5ca185bed010e45bfb2385e0baf36af59b2dbb9979ec471ff0e6b6cc8b64db",
+    "appliedRuleClasses": []
+  }
+}

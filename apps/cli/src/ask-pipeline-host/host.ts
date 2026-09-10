@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildExecutionPlan } from '@duckcodeailabs/dql-notebook';
 import { prepareBlockInvocation } from '../block-invocation.js';
@@ -9,8 +9,19 @@ import { getDialect, type DQLManifest, type SemanticLayer } from '@duckcodeailab
 import {
   buildVocabularyIndex,
   classifyWarehouseError,
+  assessAnalyticalRelationship,
   parseMemberOption,
+  projectVocabularySource,
+  rankedRefsFromPack,
+  resolveDomainContextEnvelope,
   runAskPipeline,
+  type DomainContextEnvelope,
+  type LocalContextPack,
+  type ContextLedgerV1,
+  type JoinAuthorityV1,
+  type UnprovenJoin,
+  catalogKeyTypes,
+  validateRelationshipOnWarehouse,
   type AgentProvider,
   type AgentRouteExecutor,
   type AgentRouteExecutorResult,
@@ -26,6 +37,7 @@ import {
   type SemanticCompileOutput,
   type SemanticCompileRequest,
   type VocabularyIndex,
+  type VocabularySource,
   type PreparedBlock,
   type VocabularyEntry,
 } from '@duckcodeailabs/dql-agent';
@@ -58,6 +70,14 @@ export interface AskPipelineHostDeps {
   /** The previous turn's typed reading. `executed: false` means it was blocked: its question stands, its result does not exist. */
   priorIntent(request: AgentRunRequest): { intent: AnalyticalIntentV1; summary?: string; executed?: boolean } | undefined;
   guidance?(request: AgentRunRequest): string | undefined;
+  /**
+   * The request-bound context pack for this envelope (CTX-010): complete
+   * eligible admission, the selected skills, the approved hints, the domain
+   * briefing. The vocabulary the interpreter reads is a view over it.
+   */
+  buildContextPack?(request: AgentRunRequest, envelope: DomainContextEnvelope): Promise<LocalContextPack | undefined>;
+  /** The thread's compacted memory for a follow-up. */
+  conversation?(request: AgentRunRequest): { summary?: string; pendingClarification?: string } | undefined;
   buildIdentity?(): Record<string, string>;
   maxRows?: number;
   /** Whether the project allowlists this physical column for an exact literal probe (`agent.runtimeValueGrounding`). */
@@ -79,7 +99,7 @@ export type AskHostTraceSpan =
 
 const fingerprintText = (value: string): string => createHash('sha256').update(value).digest('hex').slice(0, 24);
 
-interface VocabularyCacheEntry { key: string; vocabulary: VocabularyIndex }
+interface VocabularyCacheEntry { key: string; source: VocabularySource }
 
 type ProbedRelation = NonNullable<VocabularySourceInput['relations']>[number];
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
@@ -240,54 +260,112 @@ export function tracedProbes(deps: Pick<AskPipelineHostDeps, 'literalProbeAllowe
  * shortest declared path between two physical relations. Deprecated or
  * rejected relationships never join; a draft one does, and the proof says so.
  */
-export function modelingJoinPaths(manifest: DQLManifest | undefined, quoteRelation: (relation: string) => string): (fromRelation: string, toRelation: string) => RelationalJoinStep[] | undefined {
+/**
+ * JOIN AUTHORITY (REL-002, amendment A-003). Two graphs over the declared
+ * relationships: the AUTHORIZED one, whose edges pass the complete executable
+ * invariant (`assessAnalyticalRelationship`: certified, fresh proof, safe
+ * fanout, cross-domain chain), and the DECLARED-UNPROVEN one, whose edges are
+ * offers — a draft says a join exists, and the host may prove or refuse it,
+ * never take it on the author's word. Each authorized step carries its
+ * authority so the receipt can name it.
+ */
+export interface ModelingJoinGraph {
+  path(fromRelation: string, toRelation: string): RelationalJoinStep[] | undefined;
+  unproven(fromRelation: string, toRelation: string): UnprovenJoin[];
+  /** Every domain a relation is bound to through a modeled entity; empty when none. */
+  domainsOf(relation: string): string[];
+  /** The declared relationship between two relations, when exactly one exists, for a proof to honour its keys and direction. */
+  declared(fromRelation: string, toRelation: string): { id: string; keys: Array<{ from: string; to: string }>; cardinality: string; fanout: string; reversed: boolean } | undefined;
+  hasDomains: boolean;
+}
+
+export function modelingJoinGraph(manifest: DQLManifest | undefined, quoteRelation: (relation: string) => string): ModelingJoinGraph {
   const modeling = manifest?.modeling;
-  if (!modeling) return () => undefined;
+  const empty: ModelingJoinGraph = { path: () => undefined, unproven: () => [], domainsOf: () => [], declared: () => undefined, hasDomains: false };
+  if (!modeling) return empty;
   const relationOfEntity = new Map<string, string>();
+  const domainsOfRelation = new Map<string, Set<string>>();
   for (const entity of Object.values(modeling.entities ?? {})) {
     const relation = normalizeRelationName(manifest?.dbtProvenance?.nodes[entity.dbtUniqueId]?.relation);
     if (!relation) continue;
     for (const key of [entity.id, entity.localId, entity.qualifiedId]) if (key) relationOfEntity.set(key, relation);
+    if (entity.domain) { if (!domainsOfRelation.has(relation)) domainsOfRelation.set(relation, new Set()); domainsOfRelation.get(relation)!.add(entity.domain); }
   }
-  const edges = new Map<string, Array<{ relation: string; on: string }>>();
-  const addEdge = (from: string, to: string, on: string) => {
-    if (!edges.has(from)) edges.set(from, []);
-    edges.get(from)!.push({ relation: to, on });
+  const authorized = new Map<string, Array<{ relation: string; on: string; authority: JoinAuthorityV1 }>>();
+  const declared = new Map<string, Array<{ id: string; keys: Array<{ from: string; to: string }>; cardinality: string; fanout: string; status: string; reason: string; reversed: boolean }>>();
+  const addAuthorized = (from: string, to: string, on: string, authority: JoinAuthorityV1) => {
+    if (!authorized.has(from)) authorized.set(from, []);
+    authorized.get(from)!.push({ relation: to, on, authority });
   };
+  const addDeclared = (from: string, to: string, edge: { id: string; keys: Array<{ from: string; to: string }>; cardinality: string; fanout: string; status: string; reason: string; reversed: boolean }) => {
+    const key = `${from}->${to}`;
+    if (!declared.has(key)) declared.set(key, []);
+    declared.get(key)!.push(edge);
+  };
+  const hasDomains = Object.keys(modeling.packages ?? {}).length > 0;
   for (const relationship of Object.values(modeling.relationships ?? {})) {
     if (relationship.status === 'deprecated') continue;
     const from = relationOfEntity.get(relationship.from);
     const to = relationOfEntity.get(relationship.to);
     if (!from || !to || from === to || relationship.keys.length === 0) continue;
+    const decision = assessAnalyticalRelationship(relationship, manifest);
     const on = relationship.keys.map((key) => `${quoteRelation(from)}.${key.from} = ${quoteRelation(to)}.${key.to}`).join(' AND ');
-    addEdge(from, to, on);
-    addEdge(to, from, on);
-  }
-  return (fromRelation, toRelation) => {
-    if (fromRelation === toRelation) return [];
-    const previous = new Map<string, { relation: string; on: string }>();
-    const queue = [fromRelation];
-    const seen = new Set([fromRelation]);
-    while (queue.length) {
-      const current = queue.shift()!;
-      for (const edge of edges.get(current) ?? []) {
-        if (seen.has(edge.relation)) continue;
-        seen.add(edge.relation);
-        previous.set(edge.relation, { relation: current, on: edge.on });
-        if (edge.relation === toRelation) {
-          const steps: RelationalJoinStep[] = [];
-          for (let at = toRelation; at !== fromRelation;) {
-            const step = previous.get(at)!;
-            steps.unshift({ relation: at, on: step.on });
-            at = step.relation;
-          }
-          return steps;
-        }
-        queue.push(edge.relation);
-      }
+    if (decision.executable) {
+      const fromDomains = [...(domainsOfRelation.get(from) ?? [])];
+      const toDomains = [...(domainsOfRelation.get(to) ?? [])];
+      const crossDomain = Boolean(relationship.crossDomain) || (fromDomains.length > 0 && toDomains.length > 0 && !fromDomains.some((domain) => toDomains.includes(domain)));
+      const authority: JoinAuthorityV1 = {
+        version: 1, from, to, keys: relationship.keys, source: 'dql_relationship', relationshipId: relationship.qualifiedId ?? relationship.id, authority: 'certified',
+        scope: crossDomain ? 'cross_domain_certified' : hasDomains ? 'within_domain' : 'no_domains', domains: { from: fromDomains, to: toDomains },
+        ...(relationship.validation ? { evidence: relationship.validation } : {}),
+      };
+      addAuthorized(from, to, on, authority);
+      addAuthorized(to, from, on, { ...authority, from: to, to: from, keys: relationship.keys.map((key) => ({ from: key.to, to: key.from })), domains: { from: toDomains, to: fromDomains } });
+    } else {
+      const edge = { id: relationship.qualifiedId ?? relationship.id, keys: relationship.keys, cardinality: relationship.cardinality, fanout: relationship.fanout, status: relationship.status, reason: decision.message, reversed: false };
+      addDeclared(from, to, edge);
+      addDeclared(to, from, { ...edge, keys: relationship.keys.map((key) => ({ from: key.to, to: key.from })), reversed: true });
     }
-    return undefined;
+  }
+  return {
+    hasDomains,
+    domainsOf: (relation) => [...(domainsOfRelation.get(relation) ?? [])],
+    declared: (fromRelation, toRelation) => {
+      const edges = declared.get(`${fromRelation}->${toRelation}`) ?? [];
+      return edges.length === 1 ? edges[0] : undefined;
+    },
+    unproven: (fromRelation, toRelation) => (declared.get(`${fromRelation}->${toRelation}`) ?? []).map((edge) => ({ relationshipId: edge.id, from: fromRelation, to: toRelation, keys: edge.keys, status: edge.status, cardinality: edge.cardinality, fanout: edge.fanout, reason: edge.reason })),
+    path: (fromRelation, toRelation) => {
+      if (fromRelation === toRelation) return [];
+      const previous = new Map<string, { relation: string; on: string; authority: JoinAuthorityV1 }>();
+      const queue = [fromRelation];
+      const seen = new Set([fromRelation]);
+      while (queue.length) {
+        const current = queue.shift()!;
+        for (const edge of authorized.get(current) ?? []) {
+          if (seen.has(edge.relation)) continue;
+          seen.add(edge.relation);
+          previous.set(edge.relation, { relation: current, on: edge.on, authority: edge.authority });
+          if (edge.relation === toRelation) {
+            const steps: RelationalJoinStep[] = [];
+            for (let at = toRelation; at !== fromRelation;) {
+              const step = previous.get(at)!;
+              steps.unshift({ relation: at, on: step.on, authority: step.authority });
+              at = step.relation;
+            }
+            return steps;
+          }
+          queue.push(edge.relation);
+        }
+      }
+      return undefined;
+    },
   };
+}
+
+/** Compatibility: the authorized path function alone. */
+export function modelingJoinPaths(manifest: DQLManifest | undefined, quoteRelation: (relation: string) => string): (fromRelation: string, toRelation: string) => RelationalJoinStep[] | undefined {
+  return modelingJoinGraph(manifest, quoteRelation).path;
 }
 
 /** Date cells become ISO instants so every consumer reads one calendar value. */
@@ -330,26 +408,101 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     probedColumns.set(cacheKey, found);
     return found;
   };
-  const vocabularyFor = async (connection?: ConnectionConfig): Promise<VocabularyIndex> => {
+  type VocabularyView = { vocabulary: VocabularyIndex; context?: NonNullable<Parameters<typeof runAskPipeline>[0]['context']>; envelope: DomainContextEnvelope };
+  let viewCache: { key: string; view: VocabularyView } | undefined;
+
+  /** The request's scope, resolved server-side from what the surface sent; never from client-supplied ancestors or imports. */
+  const resolveAskEnvelope = (request: AgentRunRequest): DomainContextEnvelope => {
+    const { manifest, snapshotId } = deps.getManifest();
+    const workspace = (request.workspaceContext ?? {}) as Record<string, unknown>;
+    const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+    const list = (value: unknown): string[] | undefined => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : text(value) ? [text(value)!] : undefined;
+    const empty: DomainContextEnvelope = { activeDomain: null, ancestors: [], descendants: [], allowedImports: [], source: 'inferred', confidence: 'low', snapshotId };
+    if (!manifest) return empty;
+    try {
+      return resolveDomainContextEnvelope({
+        manifest, activeDomain: text(workspace.domain) ?? null, purpose: text(workspace.purpose), modelAreaId: text(workspace.modelAreaId), skillRefs: list(workspace.skillRefs),
+        source: text(workspace.domain) ? 'explicit_ui' : 'inferred', snapshotId,
+      });
+    } catch {
+      // An unknown domain or area is not a reason to answer unscoped: the
+      // request keeps no-domain scope and the envelope says so.
+      return empty;
+    }
+  };
+
+  /** The base source: everything the host can bind physically, per snapshot and connection. Cached; the pack projects it per request. */
+  const baseSourceFor = async (connection?: ConnectionConfig): Promise<{ key: string; source: VocabularySource }> => {
     const { manifest, snapshotId } = deps.getManifest();
     const layer = deps.getSemanticLayer();
     const input: VocabularySourceInput = { ...(layer ? { semanticLayer: layer } : {}), ...(manifest ? { manifest } : {}) };
     const key = `${snapshotId}|${layer ? layer.listCubes().map((cube) => cube.name).join(',') : 'no-semantic'}|${connection ? connectionKey(connection) : 'no-connection'}`;
-    if (vocabularyCache?.key === key) return vocabularyCache.vocabulary;
+    if (vocabularyCache?.key === key) return { key, source: vocabularyCache.source };
     const base = buildVocabularySource(input);
     const probed = await probeColumns(connection, base, snapshotId);
-    const vocabulary = probed.length ? buildProjectVocabulary({ ...input, relations: probed }) : buildVocabularyIndex(base);
-    vocabularyCache = { key, vocabulary };
-    // Debug aid: DQL_ASK_PIPELINE_DUMP_VOCABULARY=<file> writes the cards the interpreter reads.
+    const source = probed.length ? buildVocabularySource({ ...input, relations: probed }) : base;
+    vocabularyCache = { key, source };
+    return { key, source };
+  };
+
+  /**
+   * THE VOCABULARY IS A VIEW OVER THE PACK (CTX-010). The envelope decides
+   * eligibility, the pack admits the complete eligible set and selects the
+   * skills and hints for this question, and the host's base source supplies
+   * the physical bindings; the view is their projection. Without a pack (no
+   * host builder, or a snapshot that could not be opened) the base source is
+   * served whole and the ledger says no envelope was applied.
+   */
+  const vocabularyFor = async (request: AgentRunRequest, connection?: ConnectionConfig): Promise<VocabularyView> => {
+    const envelope = resolveAskEnvelope(request);
+    const { key, source: base } = await baseSourceFor(connection);
+    let pack: LocalContextPack | undefined;
+    try { pack = await deps.buildContextPack?.(request, envelope); } catch { pack = undefined; }
+    if (!pack) {
+      const vocabulary = buildVocabularyIndex(base);
+      return { vocabulary, envelope, context: { envelope: ledgerEnvelope(envelope), admitted: { byKind: countKinds(vocabulary) } } };
+    }
+    const skillRefs = pack.skills.map((skill) => skill.qualifiedId ?? skill.id).sort().join(',');
+    const hintIds = pack.appliedHints.map((hint) => hint.hintId).sort().join(',');
+    const viewKey = `${key}|${pack.eligible?.fingerprint ?? 'ranked'}|${skillRefs}|${hintIds}|${pack.domainBriefing?.domainId ?? ''}`;
+    const projected = projectVocabularySource(base, pack);
+    const vocabulary = viewCache?.key === viewKey ? viewCache.view.vocabulary : buildVocabularyIndex(projected.source);
+    const rankedRefs = rankedRefsFromPack(pack.objects);
+    const lanes: Record<string, number> = {};
+    for (const [lane, result] of Object.entries(pack.retrievalDiagnostics.fusion?.lanes ?? {})) lanes[lane] = result.returned;
+    const relationsTotal = pack.eligible ? Object.entries(pack.eligible.counts).filter(([type]) => type === 'dbt_model' || type === 'dbt_source' || type === 'warehouse_table').reduce((sum, [, count]) => sum + count, 0) : (projected.source.relations?.length ?? 0);
+    const relationsWithColumns = (projected.source.relations ?? []).filter((relation) => relation.columns.length > 0).length;
+    const view: VocabularyView = {
+      vocabulary, envelope,
+      context: {
+        packId: pack.id, snapshotId: envelope.snapshotId, envelope: ledgerEnvelope(envelope),
+        retrieved: { lanes, fused: pack.retrievalDiagnostics.fusion?.selectedKeys.length ?? pack.objects.length },
+        // Counted on the built index, so columns and the request overlay (skills, hints) are in the number the answer quotes.
+        admitted: { byKind: countKinds(vocabulary), ...(Object.keys(projected.dropped).length ? { dropped: projected.dropped } : {}), ...(Object.keys(projected.unindexed).length ? { unindexed: projected.unindexed } : {}), ...(pack.eligible ? { eligibleFingerprint: pack.eligible.fingerprint } : {}) },
+        rankedRefs, ...(projected.source.domain ? { header: projected.source.domain } : {}),
+        columnsFor: { shown: relationsWithColumns, total: Math.max(relationsTotal, relationsWithColumns) },
+      },
+    };
+    viewCache = { key: viewKey, view };
     if (process.env.DQL_ASK_PIPELINE_DUMP_VOCABULARY) {
       try { writeFileSync(process.env.DQL_ASK_PIPELINE_DUMP_VOCABULARY, `${vocabulary.renderCards({ maxChars: 1_000_000 })}\n`); } catch { /* debug only */ }
     }
-    return vocabulary;
+    return view;
+  };
+  const ledgerEnvelope = (envelope: DomainContextEnvelope): NonNullable<ContextLedgerV1['envelope']> => ({
+    activeDomain: envelope.activeDomain, ancestors: envelope.ancestors, descendants: envelope.descendants ?? [], allowedImports: envelope.allowedImports.length,
+    ...(envelope.purpose ? { purpose: envelope.purpose } : {}), ...(envelope.modelAreaId ? { modelAreaId: envelope.modelAreaId } : {}), ...(envelope.skillRefs ? { skillRefs: envelope.skillRefs } : {}),
+    source: envelope.source, confidence: envelope.confidence,
+  });
+  const countKinds = (vocabulary: VocabularyIndex): Record<string, number> => {
+    const counts: Record<string, number> = {};
+    for (const entry of vocabulary.entries) counts[entry.kind] = (counts[entry.kind] ?? 0) + 1;
+    return counts;
   };
 
   // A relationship the warehouse proved holds for as long as the snapshot and
   // the connection do; proving it twice would ask the same question twice.
-  const provenJoins = new Map<string, Map<string, RelationalJoinStep[]>>();
+  const provenJoins = new Map<string, Map<string, { steps: RelationalJoinStep[]; expiresAt: number; generationToken?: string }>>();
   const prepareDeps = (connection: ConnectionConfig, vocabulary: VocabularyIndex, engine?: PrepareDeps['engine']): PrepareDeps => {
     const layer = deps.getSemanticLayer();
     const provenScope = `${deps.getManifest().snapshotId}|${connectionKey(connection)}`;
@@ -377,34 +530,76 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         return { relation: right, on: join.sql.replace(/\$\{left\}/g, quoteRelation(left)).replace(/\$\{right\}/g, quoteRelation(right)) };
       });
     };
-    const declaredJoinPath = modelingJoinPaths(deps.getManifest().manifest, quoteRelation);
+    const joinGraph = modelingJoinGraph(deps.getManifest().manifest, quoteRelation);
+    const declaredJoinPath = joinGraph.path;
+    const sessionProvenPath = (fromRelation: string, toRelation: string): RelationalJoinStep[] | undefined => {
+      const prefix = `${fromRelation}->${toRelation}|`;
+      const now = Date.now();
+      for (const [key, entry] of provenJoinPath) if (key.startsWith(prefix) && entry.expiresAt > now) return entry.steps;
+      return undefined;
+    };
     return {
       ...(layer ? { compileSemantic: (request) => deps.compileSemantic(request, connection) } : {}),
       // Two governed join sources, in order: the semantic layer's entity
       // joins, then the relationships the team declared in Domain Studio.
-      joinPath: (fromRelation, toRelation) => semanticJoinPath(fromRelation, toRelation) ?? provenJoinPath.get(`${fromRelation}->${toRelation}`) ?? declaredJoinPath(fromRelation, toRelation),
+      // Order of authority: the semantic layer, a certified relationship, then
+      // a proof this session gathered and has not yet outlived.
+      joinPath: (fromRelation, toRelation) => semanticJoinPath(fromRelation, toRelation) ?? declaredJoinPath(fromRelation, toRelation) ?? sessionProvenPath(fromRelation, toRelation),
+      unprovenJoinPath: (fromRelation, toRelation) => joinGraph.unproven(fromRelation, toRelation),
       proveJoinPath: async (fromRelation, toRelation) => {
         const executor = deps.executor as QueryExecutor & { executePositional?: QueryExecutor['executePositional'] };
         if (!connection || typeof executor.executePositional !== 'function') return undefined;
-        const cached = provenJoinPath.get(`${fromRelation}->${toRelation}`);
-        if (cached) return cached;
+        // DOMAIN BOUNDARIES FIRST (A-003). Missing domain information never
+        // widens eligibility: an endpoint nobody modeled, or one bound to
+        // several domains, is a gap; endpoints in different domains need the
+        // governed interface chain and are never probed.
+        const fromDomains = joinGraph.domainsOf(fromRelation);
+        const toDomains = joinGraph.domainsOf(toRelation);
+        let scope: JoinAuthorityV1['scope'];
+        if (!joinGraph.hasDomains) scope = 'no_domains';
+        else if (fromDomains.length === 1 && toDomains.length === 1 && fromDomains[0] === toDomains[0]) scope = 'within_domain';
+        else if (fromDomains.length === 0 || toDomains.length === 0 || fromDomains.length > 1 || toDomains.length > 1) {
+          const which = [fromDomains.length !== 1 ? fromRelation : '', toDomains.length !== 1 ? toRelation : ''].filter(Boolean).join(' and ');
+          return { refusal: { tier: 'relational', code: 'relationship_domain_unknown', message: `no certified relationship reaches ${toRelation} from ${fromRelation}, and ${which} ${which.includes(' and ') ? 'are' : 'is'} not bound to exactly one domain, so the warehouse was not asked to prove one; bind the relation to an entity in one domain, or declare and validate the relationship in Domain Studio`, repairable: false, relations: [fromRelation, toRelation] } };
+        } else {
+          return { refusal: { tier: 'relational', code: 'join_requires_domain_contract', message: `${fromRelation} (${fromDomains[0]}) and ${toRelation} (${toDomains[0]}) belong to different domains: a join across them needs a certified export from ${toDomains[0]}, a matching import in ${fromDomains[0]} with an allowed purpose, and a certified relationship; the warehouse is not asked to prove a cross-domain join`, repairable: false, relations: [fromRelation, toRelation] } };
+        }
+        const declaredEdge = joinGraph.declared(fromRelation, toRelation);
+        // A declared draft supplies the keys, direction and cardinality; an
+        // attribution or many-to-many declaration is never probed as if it
+        // were many-to-one. Without a draft, the probe runs fact -> label on a
+        // key whose name matches on both sides.
+        if (declaredEdge && (declaredEdge.cardinality === 'many_to_many' || declaredEdge.fanout === 'attribution_required' || declaredEdge.fanout === 'forbidden')) return undefined;
         const columnsOf = (relation: string): string[] => vocabulary.entries.find((entry) => entry.kind === 'relation' && entry.ref.endsWith(relation))?.columns ?? [];
-        const column = sharedKeyColumn(columnsOf(fromRelation), columnsOf(toRelation));
-        if (!column) return undefined;
+        const keys = declaredEdge?.keys ?? (() => { const column = sharedKeyColumn(columnsOf(fromRelation), columnsOf(toRelation)); return column ? [{ from: column, to: column }] : []; })();
+        if (keys.length === 0) return undefined;
+        const cardinality = (declaredEdge?.cardinality ?? 'many_to_one') as 'one_to_one' | 'one_to_many' | 'many_to_one' | 'many_to_many' | 'unknown';
+        if (cardinality === 'unknown') return undefined;
+        const manifestFingerprint = deps.getManifest().manifest?.dbtProvenance?.manifestFingerprint ?? deps.getManifest().snapshotId;
+        const cacheKey = `${fromRelation}->${toRelation}|${keys.map((key) => `${key.from}=${key.to}`).join(',')}|${cardinality}|${manifestFingerprint}`;
+        const now = Date.now();
+        const cached = provenJoinPath.get(cacheKey);
+        if (cached && cached.expiresAt > now && cached.generationToken === (await evidenceGenerationToken(connection))) return cached.steps;
         try {
-          const proof = await executor.executePositional(relationshipProofSql(fromRelation, toRelation, column, (name) => dialect.quoteIdentifier(name)), [], connection, { maxRows: 1 });
-          const row = (proof.rows as Array<Record<string, unknown>>)[0] ?? {};
-          const rows = Number(row.label_rows ?? 0);
-          const keys = Number(row.label_keys ?? 0);
-          const uncovered = Number(row.uncovered ?? 1);
-          // Unique there, and covering every row here: anything else is not a
-          // relationship, it is a guess that would multiply or drop rows.
-          if (rows === 0 || rows !== keys || uncovered !== 0) return undefined;
+          const evidence = await validateRelationshipOnWarehouse(
+            { fromRelation, toRelation, keys, cardinality, fanout: 'safe', keyTypes: catalogKeyTypes(deps.getManifest().manifest, { fromRelation, toRelation, keys }) },
+            async (sql) => executor.executePositional!(sql, [], connection, { maxRows: 1 }).then((result) => ({ rows: result.rows as Array<Record<string, unknown>> })),
+            (name) => dialect.quoteIdentifier(name),
+          );
+          // Unique there, and covering every row here (Ask's own rule on top of
+          // the declared cardinality): anything else is not a relationship, it
+          // is a guess that would multiply or drop rows.
+          if (evidence.status !== 'passed' || evidence.unmatchedFrom !== 0) return undefined;
+          const ttlHours = relationshipEvidenceTtlHours();
+          const generationToken = await evidenceGenerationToken(connection);
+          const freshness = { checkedAt: evidence.checkedAt, expiresAt: new Date(now + ttlHours * 3_600_000).toISOString(), target: connectionKey(connection), ...(generationToken ? { generationToken } : {}) };
+          const authority: JoinAuthorityV1 = { version: 1, from: fromRelation, to: toRelation, keys, source: 'warehouse_proof', ...(declaredEdge ? { relationshipId: declaredEdge.id } : {}), authority: 'proven_default', scope, domains: { from: fromDomains, to: toDomains }, evidence, freshness, snapshotId: deps.getManifest().snapshotId };
           const left = fromRelation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
           const right = toRelation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
-          const step = [{ relation: toRelation, on: `${left}.${dialect.quoteIdentifier(column)} = ${right}.${dialect.quoteIdentifier(column)}` }];
-          provenJoinPath.set(`${fromRelation}->${toRelation}`, step);
-          return step;
+          const steps: RelationalJoinStep[] = [{ relation: toRelation, on: keys.map((key) => `${left}.${dialect.quoteIdentifier(key.from)} = ${right}.${dialect.quoteIdentifier(key.to)}`).join(' AND '), authority }];
+          provenJoinPath.set(cacheKey, { steps, expiresAt: now + ttlHours * 3_600_000, generationToken });
+          writeRelationshipEvidence(deps.projectRoot, { fromRelation, toRelation, keys, cardinality, fanout: 'safe', ...(declaredEdge ? { relationshipId: declaredEdge.id } : {}), evidence, freshness, snapshotId: deps.getManifest().snapshotId });
+          return steps;
         } catch { return undefined; }
       },
       dialect: { quoteIdentifier: (name) => dialect.quoteIdentifier(name), dateTrunc: (grain, expr) => dialect.dateTrunc(grain, expr), limitClause: (limit) => dialect.limitClause(limit) },
@@ -430,7 +625,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     } catch (error) {
       connectionError = error;
     }
-    const vocabulary = await vocabularyFor(connection);
+    const view = await vocabularyFor(request, connection);
+    const vocabulary = view.vocabulary;
     const prior = request.threadId ? deps.priorIntent(request) : undefined;
     let engine: PrepareDeps['engine'];
     try { engine = await deps.semanticEngine?.(); } catch { engine = undefined; }
@@ -504,6 +700,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       // An identity the user settled is carried the same way: the option names
       // the dimension and the member, so the next turn reads that person.
       ...(selectedMember(request) ? { memberSelection: selectedMember(request)! } : {}),
+      ...(view.context ? { context: view.context } : {}),
+      ...(deps.conversation?.(request) ? { conversation: deps.conversation(request)! } : {}),
       explorationOptIn: explorationOptIn(request),
       // Research branches phrase hypotheses ("because", "drivers"); the
       // full-question clause check is for questions a person asked.
@@ -599,14 +797,43 @@ export function memberCandidatesSql(relation: string, column: string, quote: (na
  * admitted only when the warehouse says the key is unique there AND every key
  * the facts carry appears there. One statement answers both.
  */
-export function relationshipProofSql(factRelation: string, labelRelation: string, column: string, quote: (name: string) => string): string {
-  const fact = factRelation.split('.').map((part) => quote(part)).join('.');
-  const label = labelRelation.split('.').map((part) => quote(part)).join('.');
-  const key = quote(column);
-  return `SELECT (SELECT COUNT(*) FROM ${label}) AS label_rows,`
-    + ` (SELECT COUNT(DISTINCT ${key}) FROM ${label}) AS label_keys,`
-    + ` (SELECT COUNT(*) FROM (SELECT DISTINCT ${key} AS k FROM ${fact} WHERE ${key} IS NOT NULL) AS f`
-    + ` LEFT JOIN ${label} AS l ON f.k = l.${key} WHERE l.${key} IS NULL) AS uncovered`;
+
+/** How long a warehouse proof authorizes execution before it must be gathered again (`agent.relationshipEvidenceTtlHours`, default 24). */
+export function relationshipEvidenceTtlHours(): number {
+  const raw = Number(process.env.DQL_RELATIONSHIP_EVIDENCE_TTL_HOURS ?? '');
+  return Number.isFinite(raw) && raw > 0 ? raw : 24;
+}
+
+/**
+ * A DATA-GENERATION TOKEN, where the driver offers one. The snapshot is
+ * metadata; warehouse rows change without a manifest change, so a proof that
+ * held yesterday may not hold today. A DuckDB file's size and modification
+ * time change when its data does; other drivers yield no token and rely on the
+ * bounded expiry alone.
+ */
+export async function evidenceGenerationToken(connection: ConnectionConfig): Promise<string | undefined> {
+  try {
+    const path = (connection as { path?: unknown; database?: unknown }).path ?? (connection as { database?: unknown }).database;
+    if (connection.driver === 'duckdb' && typeof path === 'string' && path && path !== ':memory:') {
+      const stat = statSync(path);
+      return `duckdb:${stat.size}:${Math.round(stat.mtimeMs)}`;
+    }
+  } catch { /* no token */ }
+  return undefined;
+}
+
+/**
+ * Persist the evidence a proof gathered so Domain Studio can show "validated
+ * by Ask on <date>" and certify from it. Ignored local state, never governed
+ * source; the file names the pair, and a later proof overwrites it.
+ */
+export function writeRelationshipEvidence(projectRoot: string, record: Record<string, unknown> & { fromRelation: string; toRelation: string }): void {
+  try {
+    const dir = join(projectRoot, '.dql', 'evidence', 'relationships');
+    mkdirSync(dir, { recursive: true });
+    const name = `${record.fromRelation}__${record.toRelation}`.replace(/[^A-Za-z0-9_.-]+/g, '_');
+    writeFileSync(join(dir, `${name}.relationship-evidence.json`), `${JSON.stringify({ version: 1, gatheredBy: 'ask', ...record }, null, 2)}\n`);
+  } catch { /* evidence is a convenience for review, never a condition of the answer */ }
 }
 
 /** A key both relations spell the same way, and that reads like an identifier. */
@@ -614,6 +841,24 @@ export function sharedKeyColumn(factColumns: Iterable<string>, labelColumns: Ite
   const label = new Map([...labelColumns].map((column) => [column.toLowerCase(), column]));
   const shared = [...factColumns].filter((column) => label.has(column.toLowerCase()));
   return shared.find((column) => /(^|_)(id|key)$/i.test(column)) ?? undefined;
+}
+
+/**
+ * The context ledger, in one line the reader can check: how many governed
+ * objects the question was read against and in which domain, how many were
+ * shown, which skills and hints were selected, and what the answer used.
+ */
+export function contextEvaluation(receipt: { context?: ContextLedgerV1 }): Array<{ id: string; label: string; passed: boolean; severity: 'info'; message: string }> {
+  const ledger = receipt.context;
+  if (!ledger?.admitted) return [];
+  const admitted = Object.values(ledger.admitted.byKind).reduce((sum, count) => sum + count, 0);
+  const shown = Object.values(ledger.rendered?.byKind ?? {}).reduce((sum, count) => sum + count, 0);
+  const where = ledger.envelope?.activeDomain ? ` in ${ledger.envelope.activeDomain}` : '';
+  const skills = ledger.rendered?.skills.length ? `; ${ledger.rendered.skills.length} skill${ledger.rendered.skills.length === 1 ? '' : 's'}` : '';
+  const hints = ledger.rendered?.hints.length ? `; ${ledger.rendered.hints.length} approved correction${ledger.rendered.hints.length === 1 ? '' : 's'}` : '';
+  const unrendered = ledger.selected?.unrendered.length ? `; ${ledger.selected.unrendered.length} of the refs the reading used were found beyond the cards shown` : '';
+  const used = ledger.used?.tier ? `; answered on the ${ledger.used.tier} tier${ledger.used.engine ? ` (${ledger.used.engine})` : ''}` : '';
+  return [{ id: 'pipeline-context', label: 'Context read', passed: true, severity: 'info', message: `Read against ${admitted} governed objects${where} (${shown} shown)${skills}${hints}${unrendered}${used}.` }];
 }
 
 export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['gap'], message?: string): { title: string; code: 'policy_blocked' | 'ambiguous' | 'no_data' | 'modeling_gap' } {
@@ -815,6 +1060,7 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     resolvedRoute: certified ? 'certified_answer' : candidate.tier === 'semantic' ? 'semantic_answer' : 'generated_answer',
     answerTier: route.tier, result: payload.result, artifacts: [artifact],
     evaluations: [
+      ...contextEvaluation(receipt),
       { id: 'pipeline-interpretation', label: 'Interpretation', passed: true, severity: 'info', message: `Read as: ${outcome.intent.reading || 'the intent below'}` },
       { id: 'pipeline-preparation', label: certified ? 'Certified entailment' : candidate.tier === 'semantic' ? 'Semantic compilation' : 'Governed composition', passed: true, severity: 'info', message: candidate.proof.join(' ') },
       ...(receipt.executed?.proofs ?? []).map((proof, index) => ({ id: `pipeline-execution-${index + 1}`, label: 'Execution proof', passed: true, severity: 'info' as const, message: proof })),

@@ -100,7 +100,12 @@ function findColumn(actualColumns: string[], candidates: string[]): string | und
   const exact = actualColumns.find((column) => wanted.includes(norm(column)));
   if (exact) return exact;
   // `order_id__customer` carries `customer`; `customer__customer_name` carries `customer_name`.
-  return actualColumns.find((column) => wanted.some((candidate) => norm(column).endsWith(candidate) && candidate.length >= 4));
+  const carried = actualColumns.find((column) => wanted.some((candidate) => norm(column).endsWith(candidate) && candidate.length >= 4));
+  if (carried) return carried;
+  // A period the question named may be spelled into the alias (`gross_profit_2025`,
+  // `revenue_2025_q1`): the name is the same column; the values are still compared.
+  const unperiod = (column: string) => norm(column.toLowerCase().replace(/_(19|20)\d{2}(_(q[1-4]|\d{2}))?$/, ''));
+  return actualColumns.find((column) => wanted.includes(unperiod(column)));
 }
 
 function sameValue(expected: unknown, actual: unknown): boolean {

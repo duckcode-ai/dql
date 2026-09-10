@@ -33,7 +33,7 @@ relationships:
       status: passed
       checked_at: "2026-07-11T00:00:00.000Z"
       query_fingerprint: fixture-order-customer-proof
-      proof_fingerprint: 5b4ccb4990be9c2b158cd4d644c02c19f264b20c750e3558d7916d0646a835fc
+      proof_fingerprint: 73e2c7fb45ef0d62408c8fed8e5e87716545f215f5defdb8c90165462516b876
       from_rows: 8
       to_rows: 5
       joined_rows: 8

@@ -47,6 +47,23 @@ export interface PipelineReceipt {
   unmet?: Array<{ obligation: 'display_label' | 'coverage'; message: string; refs?: string[] }>;
   /** The original question's obligations and what each later reading did with them. */
   ledger?: { clauses: Array<{ clause: string; kind?: string }>; timeGrain?: { ref: string; grain: string }; measures: string[]; entries: Array<{ clause: string; kind?: string; disposition: string; by?: string; round: number }> };
+  /** The context ledger (CTX-010): what was retrieved, admitted, rendered, selected, enforced and used. Identifiers and counts only. */
+  context?: ContextLedgerV1;
+  /** Every typed policy effect applied to the reading (SKILL-004), by skill and field. */
+  policies?: Array<{ policyId: string; field: string; effect: string }>;
+}
+
+export interface ContextLedgerV1 {
+  version: 1;
+  packId?: string;
+  snapshotId?: string;
+  envelope?: { activeDomain: string | null; ancestors: string[]; descendants: string[]; allowedImports: number; purpose?: string; modelAreaId?: string; skillRefs?: string[]; source: string; confidence: string };
+  retrieved?: { lanes?: Record<string, number>; fused?: number };
+  admitted?: { byKind: Record<string, number>; dropped?: Record<string, number>; unindexed?: Record<string, number>; eligibleFingerprint?: string };
+  rendered?: { byKind: Record<string, number>; charsByKind: Record<string, number>; totalChars: number; truncated: Array<{ kind: string; shown: number; total: number }>; skills: string[]; hints: string[] };
+  selected?: { refs: string[]; byKind: Record<string, number>; unrendered: string[] };
+  enforced?: { policies: Array<{ policyId: string; field: string; effect: string }>; requiredFilters: string[]; gaps: string[] };
+  used?: { joins: Array<{ source: string; relationshipId?: string; authority: string; scope?: string }>; relations: string[]; tier?: string; engine?: string };
 }
 
 /**
@@ -227,7 +244,11 @@ export function composeAnsweredText(intent: AnalyticalIntentV1, result: Executed
     lines.push(`Together the ${result.rowCount} rows are ${formatValue(total, metaOf(shareColumn))} of the whole period.`);
   }
   // Identity: several members share the asked-for name; the rows keep them apart.
-  for (const note of extras.notes ?? []) if (note.startsWith('identity:')) lines.push(`${note.slice('identity:'.length).trim().replace(/[.\s]+$/, '')}.`);
+  for (const note of extras.notes ?? []) {
+    if (note.startsWith('identity:')) lines.push(`${note.slice('identity:'.length).trim().replace(/[.\s]+$/, '')}.`);
+    // A join the warehouse proved but nobody certified is said out loud.
+    else if (note.startsWith('relationship:')) lines.push(`${note.slice('relationship:'.length).trim().replace(/[.\s]+$/, '')}.`);
+  }
   // Definitions: a grouping or filter dimension with a governed description
   // is explained ("new" is a customer with one lifetime order).
   const defined = [...intent.groupBy.map((group) => group.ref), ...intent.filters.map((predicate) => predicate.ref)]

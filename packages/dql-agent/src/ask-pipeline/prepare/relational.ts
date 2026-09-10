@@ -1,6 +1,6 @@
 import type { AnalyticalIntentV1, IntentPredicate } from '../intent.js';
 import { suggestSameGrainColumns, suggestSameRelationFields, type VocabularyEntry, type VocabularyIndex } from '../vocabulary.js';
-import type { PrepareDeps, PreparedCandidate, PreparedRefusal, SqlDialectLike } from './types.js';
+import type { PrepareDeps, PreparedCandidate, PreparedRefusal, RelationalJoinStep, SqlDialectLike } from './types.js';
 
 /**
  * RELATIONAL: a governed program composed over physical columns.
@@ -235,6 +235,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   // two hidden aggregates and is projected afterwards as their quotient.
   const measures: PhysicalMeasure[] = [];
   const visible: VisibleMeasure[] = [];
+  const usedJoins: RelationalJoinStep[] = [];
   const bindMeasure = (ref: string, alias: string, aggregation: string | undefined, scope: IntentPredicate[], overall = false): PhysicalMeasure | PreparedRefusal => {
     const entry = vocabulary.get(ref);
     const physical = physicalOf(entry);
@@ -460,12 +461,14 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
         const fields = suggestSameRelationFields(vocabulary, [...intent.filters.map((filter) => filter.ref), ...intent.groupBy.map((group) => group.ref), ...intent.display], base);
         const hint = moved.length ? ` The same facts exist on ${relation}: ${moved.map((item) => `${item.from} -> ${item.to} (${item.aggregation})`).join('; ')}; read every measure from there and keep the period.` : '';
         const fieldHint = fields.length ? ` The same fields exist on ${base}: ${fields.map((item) => `${item.from} -> ${item.to}`).join('; ')}; restrict and group there instead.` : '';
-        return { refusal: { tier: 'relational', code: 'join_path_required', message: `no governed join path from ${base} to ${relation}; read the question over one relation, taking the measures from the relation that carries the period or grouping.${hint}${fieldHint}`, repairable: true, relations: [base, relation] } };
+        const unproven = deps.unprovenJoinPath?.(base, relation) ?? [];
+        return { refusal: { tier: 'relational', code: 'join_path_required', message: `no governed join path from ${base} to ${relation}; read the question over one relation, taking the measures from the relation that carries the period or grouping.${hint}${fieldHint}`, repairable: true, relations: [base, relation], ...(unproven.length ? { unproven } : {}) } };
       }
       for (const step of path) {
         if (joined.has(step.relation)) continue;
         joins.push(`JOIN ${qualifyRelation(dialect, step.relation)} ON ${step.on}`);
         joined.add(step.relation);
+        usedJoins.push(step);
       }
     }
     for (const relation of joined) joinedAll.add(relation);
@@ -650,7 +653,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     candidate: {
       tier: 'relational', trust: 'governed', sql, params,
       columns: [...columns.map((column) => column.alias), ...visible.map((measure) => measure.alias)],
-      proof, ...(tieProbe ? { tieProbe } : {}),
+      proof, ...(tieProbe ? { tieProbe } : {}), ...(usedJoins.length ? { joins: usedJoins } : {}),
     },
   };
 }

@@ -1,0 +1,24 @@
+{
+  "key": "379181ec3975bab0056b80e785b8c74d",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top 10 players by total points scored in games dated in calendar year 2017, identified by player id with their name shown, along with their number of games played.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"},{\"ref\":\"column:dev.player_game_stats.played\",\"aggregation\":\"count\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}],\"alias\":\"games_played\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"calendar year 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.pts\":\"inherited\",\"column:dev.player_game_stats.played\":\"inherited\",\"dimension:player_game_stats.player_id\":\"inherited\",\"dimension:player_game_stats.player_name\":\"inherited\",\"dimension:player_game_stats.game_date\":\"q:calendar year 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T03:28:10.288Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "379181ec3975bab0056b80e785b8c74d5e308eb1de34ee67987383c27c1754e8",
+    "postCanonicalHash": "379181ec3975bab0056b80e785b8c74d5e308eb1de34ee67987383c27c1754e8",
+    "appliedRuleClasses": []
+  }
+}

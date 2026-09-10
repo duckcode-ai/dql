@@ -169,8 +169,14 @@ export type EmptyAggregateCause = { kind: 'member'; literals: string[] } | { kin
 export function emptyAggregateCause(intent: AnalyticalIntentV1, result: ExecutedRows): EmptyAggregateCause | undefined {
   if (result.rows.length > 1) return undefined;
   if (result.rows.length === 1) {
+    // A sum over no rows is NULL; a count over the same no rows is 0. One row
+    // that is nothing but nulls, or nulls beside zeros, came from no rows at
+    // all. A row of plain zeros with no null is a member who really scored
+    // nothing, and is kept.
     const cells = Object.values(result.rows[0] ?? {});
-    if (cells.length === 0 || !cells.every((value) => value === null || value === undefined)) return undefined;
+    const isNull = (value: unknown) => value === null || value === undefined;
+    const isZero = (value: unknown) => value === 0 || value === 0n || value === '0';
+    if (cells.length === 0 || !cells.some(isNull) || !cells.every((value) => isNull(value) || isZero(value))) return undefined;
   }
   const predicates = [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])];
   const literals = predicates.flatMap((predicate) => predicate.values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0 && !/^(true|false)$/i.test(value)));

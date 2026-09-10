@@ -52,7 +52,7 @@ relationships:
       status: passed
       checked_at: "2026-08-22T00:00:00.000Z"
       query_fingerprint: fixture-lost-opportunity-account-proof
-      proof_fingerprint: e1fcb6bbd7bbcbaa8a2ee63a2dfd239036a6e34bf8cf965c94a0b6738cac9297
+      proof_fingerprint: cbfb4a5e715fbb1ad66a8ffedfaf20ebef5f4a301333f0608ded1e4ea0d2d075
       from_rows: 12
       to_rows: 8
       joined_rows: 12
@@ -78,7 +78,7 @@ relationships:
       status: passed
       checked_at: "2026-08-22T00:00:00.000Z"
       query_fingerprint: fixture-account-customer-proof
-      proof_fingerprint: c5bb2dd77b9bb712b44019596e4e84b6d19d656e17ad9875d970ea0c2e6907ec
+      proof_fingerprint: 058cbea69ab7decd9119024ab9634205430cc7f4f86e93d6799caac2ea49fbd5
       from_rows: 8
       to_rows: 8
       joined_rows: 8
@@ -104,7 +104,7 @@ relationships:
       status: passed
       checked_at: "2026-08-22T00:00:00.000Z"
       query_fingerprint: fixture-account-revenue-account-proof
-      proof_fingerprint: b80e59ea344820940f773388080ed2492ccded7c7f72df854f2dc4dd2d6b5dac
+      proof_fingerprint: ec542a9486ed9db5b2fd0ea8c6a4d571803cf847f22152d9b128c131b057e36b
       from_rows: 16
       to_rows: 8
       joined_rows: 16

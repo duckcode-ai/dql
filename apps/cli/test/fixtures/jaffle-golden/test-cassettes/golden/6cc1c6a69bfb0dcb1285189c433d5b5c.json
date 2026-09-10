@@ -1,0 +1,23 @@
+{
+  "key": "6cc1c6a69bfb0dcb1285189c433d5b5c",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for weather information in Chicago, which is not related to Jaffle Shop commerce data.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[{\"clause\":\"what is the weather in Chicago\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T06:33:57.376Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "6cc1c6a69bfb0dcb1285189c433d5b5ca8bf3742e85ab9cb98f142f47c4e023a",
+    "postCanonicalHash": "6cc1c6a69bfb0dcb1285189c433d5b5ca8bf3742e85ab9cb98f142f47c4e023a",
+    "appliedRuleClasses": []
+  }
+}

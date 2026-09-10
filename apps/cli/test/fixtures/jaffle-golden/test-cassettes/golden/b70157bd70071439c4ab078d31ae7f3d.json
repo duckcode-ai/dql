@@ -1,0 +1,23 @@
+{
+  "key": "b70157bd70071439c4ab078d31ae7f3d",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What is the overall average order value, computed as total order revenue divided by total number of orders?\",\"measures\":[{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"metric:orders.order_total\",\"denominator\":\"metric:orders.order_count\"},\"alias\":\"average_order_value\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:average order value\",\"metric:orders.order_count\":\"q:average order value\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T06:31:29.629Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b70157bd70071439c4ab078d31ae7f3dd9e9e67ea9afc2f1458b7fc4c223d1e2",
+    "postCanonicalHash": "b70157bd70071439c4ab078d31ae7f3dd9e9e67ea9afc2f1458b7fc4c223d1e2",
+    "appliedRuleClasses": []
+  }
+}

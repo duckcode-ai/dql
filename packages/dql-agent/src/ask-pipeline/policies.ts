@@ -1,0 +1,171 @@
+import type { AnalyticalIntentV1, IntentPredicate } from './intent.js';
+import type { PreparedRefusal } from './prepare/types.js';
+import { applySelectedMeaning } from './resolve-intent.js';
+import type { VocabularyIndex } from './vocabulary.js';
+
+/**
+ * TYPED POLICIES ARE ENFORCED; PROSE IS GUIDANCE (SKILL-004).
+ *
+ * A selected skill may declare an analytical policy — the time role a metric
+ * is reported on, which calendar, whether a running period counts, how two
+ * periods are aligned, which period a ranking uses — and required filters.
+ * Sending those words to the model proves nothing about whether it followed
+ * them, so every field that can be enforced deterministically is enforced
+ * here, on the typed intent, after the interpreter has read the question and
+ * before anything is prepared. A required filter that cannot be bound to a
+ * governed ref is a typed refusal, never a silent predicate and never a
+ * silent omission. Every effect is written to the intent's provenance and to
+ * the receipt, and a field this cannot yet enforce is recorded as such rather
+ * than pretended.
+ */
+
+export interface PolicyEffect { policyId: string; field: string; effect: string }
+
+export interface PolicyOutcome {
+  applied: PolicyEffect[];
+  requiredFilters: string[];
+  gaps: string[];
+  refusal?: PreparedRefusal;
+}
+
+const FILTER_KINDS = ['dimension', 'entity', 'column'] as const;
+const REQUIRED_FILTER = /^\s*([A-Za-z_][\w:.]*)\s*(==|=|!=|<>|>=|<=|>|<|not in|in)\s*(.+?)\s*$/i;
+const BARE_FLAG = /^\s*([A-Za-z_][\w:.]*)\s*$/;
+const OPS: Record<string, IntentPredicate['op']> = { '=': 'eq', '==': 'eq', '!=': 'neq', '<>': 'neq', '>=': 'gte', '<=': 'lte', '>': 'gt', '<': 'lt', in: 'in', 'not in': 'not_in' };
+
+function literal(value: string): string | number | boolean {
+  const trimmed = value.trim().replace(/^['"]|['"]$/g, '');
+  if (/^(true|false)$/i.test(trimmed)) return trimmed.toLowerCase() === 'true';
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
+  return trimmed;
+}
+
+/** Parse "<ref or name> <op> <value>" (or a bare boolean flag) into a predicate bound to a governed ref, or say why not. */
+export function bindRequiredFilter(text: string, vocabulary: VocabularyIndex): { predicate: IntentPredicate } | { problem: string } {
+  const bare = BARE_FLAG.exec(text);
+  const match = bare ? null : REQUIRED_FILTER.exec(text);
+  const name = bare?.[1] ?? match?.[1];
+  if (!name) return { problem: `"${text}" is not a filter this host can read (expected <field> <op> <value>)` };
+  const entry = vocabulary.resolve(name, [...FILTER_KINDS]);
+  if (!entry) return { problem: `"${name}" names no governed dimension, entity or column exactly` };
+  if (bare) return { predicate: { ref: entry.ref, op: 'eq', values: [true], source: 'question' } };
+  const op = OPS[match![2]!.toLowerCase()];
+  if (!op) return { problem: `"${match![2]}" is not an operator this host can read` };
+  const raw = match![3]!.trim();
+  const values = op === 'in' || op === 'not_in'
+    ? raw.replace(/^\(|\)$/g, '').split(',').map((part) => literal(part))
+    : [literal(raw)];
+  return { predicate: { ref: entry.ref, op, values, source: 'question' } };
+}
+
+const GRAIN_MS: Record<string, number> = { day: 86_400_000, week: 7 * 86_400_000 };
+
+/** The first instant of the period that contains `now`, at a grain. */
+function periodStart(now: Date, grain: string): Date {
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (grain === 'day') return start;
+  if (grain === 'week') { const day = start.getUTCDay(); start.setUTCDate(start.getUTCDate() - ((day + 6) % 7)); return start; }
+  if (grain === 'month') return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  if (grain === 'quarter') return new Date(Date.UTC(now.getUTCFullYear(), Math.floor(now.getUTCMonth() / 3) * 3, 1));
+  return new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+}
+
+/** The grain a window's length suggests, when the intent declares none. */
+function grainOfWindow(start: string, end: string): string {
+  const days = (Date.parse(end) - Date.parse(start)) / GRAIN_MS.day!;
+  if (days <= 1.5) return 'day';
+  if (days <= 8) return 'week';
+  if (days <= 32) return 'month';
+  if (days <= 93) return 'quarter';
+  return 'year';
+}
+
+export function applySkillPolicies(
+  intent: AnalyticalIntentV1,
+  vocabulary: VocabularyIndex,
+  options: { now?: () => number; extraRequiredFilters?: string[] } = {},
+): PolicyOutcome {
+  const outcome: PolicyOutcome = { applied: [], requiredFilters: [], gaps: [] };
+  if (intent.kind !== 'analytics') return outcome;
+  const now = new Date(options.now?.() ?? Date.now());
+  const skills = vocabulary.entries.filter((entry) => entry.kind === 'skill');
+  const measureIds = new Set(intent.measures.flatMap((measure) => {
+    const refs = measure.derived ? [measure.derived.numerator, measure.derived.denominator] : measure.ref ? [measure.ref] : [];
+    return refs.flatMap((ref) => { const entry = vocabulary.get(ref); return [ref.toLowerCase(), ...(entry?.sourceId ? [entry.sourceId.toLowerCase()] : []), ...(entry ? [entry.name.toLowerCase()] : [])]; });
+  }));
+  const record = (policyId: string, field: string, effect: string) => outcome.applied.push({ policyId, field, effect });
+
+  // Required filters: every selected skill's, then the domain's.
+  const required = [
+    ...skills.flatMap((entry) => (entry.skill?.requiredFilters ?? []).map((text) => ({ policyId: entry.ref, text }))),
+    ...(options.extraRequiredFilters ?? []).map((text) => ({ policyId: 'domain', text })),
+  ];
+  for (const item of required) {
+    const bound = bindRequiredFilter(item.text, vocabulary);
+    if ('problem' in bound) {
+      outcome.gaps.push(`${item.policyId}: required filter ${bound.problem}`);
+      outcome.refusal = { tier: 'relational', code: 'policy_filter_unbindable', message: `a required filter of ${item.policyId === 'domain' ? 'this domain' : item.policyId} could not be bound: ${bound.problem}; the question is not answered without it`, repairable: false };
+      return outcome;
+    }
+    const already = intent.filters.find((filter) => filter.ref === bound.predicate.ref && filter.on !== 'aggregate');
+    if (already) { record(item.policyId, 'requiredFilter', `already restricted on ${bound.predicate.ref}`); continue; }
+    intent.filters.push(bound.predicate);
+    intent.provenance[bound.predicate.ref] = `policy:${item.policyId}:required filter ${item.text}`;
+    outcome.requiredFilters.push(item.text);
+    record(item.policyId, 'requiredFilter', `added ${bound.predicate.ref} ${bound.predicate.op} ${bound.predicate.values.join('/')}`);
+  }
+
+  for (const entry of skills) {
+    const policy = entry.policy as { policyId?: string; metricIds?: string[]; timeRole?: string; calendarId?: string; timezone?: string; completenessPolicy?: string; comparisonAlignment?: string; defaultRankingPeriod?: string } | undefined;
+    if (!policy) continue;
+    const policyId = policy.policyId ?? entry.ref;
+    // Applicability: a policy scoped to metrics applies only when one of them is read.
+    if (policy.metricIds?.length && !policy.metricIds.some((id) => measureIds.has(id.toLowerCase()))) { record(policyId, 'applicability', 'skipped: none of its metrics is read'); continue; }
+
+    if (policy.timeRole) {
+      const role = vocabulary.resolve(policy.timeRole, ['dimension']);
+      const clause = intent.unresolved.find((item) => item.material && item.options.length > 1 && item.options.every((option) => vocabulary.get(option)?.roles.includes('time')));
+      if (role && clause && clause.options.includes(role.ref)) {
+        applySelectedMeaning(intent, { ref: role.ref, ...(role.label ? { label: role.label } : {}) }, vocabulary);
+        intent.provenance[role.ref] = `policy:${policyId}:time role`;
+        record(policyId, 'timeRole', `resolved the period basis to ${role.ref}`);
+      } else if (role && intent.time && !intent.time.ref) {
+        intent.time = { ...intent.time, ref: role.ref };
+        intent.provenance[role.ref] = `policy:${policyId}:time role`;
+        record(policyId, 'timeRole', `bound the window to ${role.ref}`);
+      } else if (!role) outcome.gaps.push(`${policyId}: time role "${policy.timeRole}" names no time dimension`);
+    }
+
+    if ((policy.completenessPolicy === 'latest_complete' || policy.completenessPolicy === 'closed_period') && intent.time?.window) {
+      const window = intent.time.window;
+      if (Date.parse(window.end) > now.getTime()) {
+        const grain = intent.time.grain ?? intent.groupBy.find((group) => group.role === 'time')?.grain ?? grainOfWindow(window.start, window.end);
+        const closed = periodStart(now, grain).toISOString().slice(0, 10);
+        if (Date.parse(closed) <= Date.parse(window.start)) {
+          outcome.gaps.push(`${policyId}: no complete ${grain} lies inside "${window.expression ?? `${window.start}..${window.end}`}"`);
+        } else {
+          intent.time = { ...intent.time, window: { ...window, end: closed, expression: `${window.expression ?? `${window.start}..${window.end}`} (complete ${grain}s only)` } };
+          intent.provenance.time = `policy:${policyId}:${policy.completenessPolicy} — the running ${grain} is left out`;
+          record(policyId, 'completenessPolicy', `closed the window at ${closed} (${policy.completenessPolicy})`);
+        }
+      }
+    }
+
+    if (policy.defaultRankingPeriod && intent.expectedShape === 'ranking' && !intent.ordering) {
+      const scoped = intent.measures.map((measure, index) => ({ index, end: measure.scope?.find((scope) => scope.op === 'lt' && typeof scope.values[0] === 'string' && /^\d{4}-\d{2}/.test(String(scope.values[0])))?.values[0] as string | undefined }))
+        .filter((item): item is { index: number; end: string } => Boolean(item.end)).sort((left, right) => left.end.localeCompare(right.end));
+      if (scoped.length >= 2) {
+        const chosen = policy.defaultRankingPeriod === 'comparison' ? scoped[0]! : scoped[scoped.length - 1]!;
+        intent.ordering = { ref: `measure:${chosen.index}`, direction: 'desc' };
+        intent.provenance[`measure:${chosen.index}`] = `policy:${policyId}:default ranking period ${policy.defaultRankingPeriod}`;
+        record(policyId, 'defaultRankingPeriod', `ordered by the ${policy.defaultRankingPeriod} period`);
+      }
+    }
+
+    if (policy.comparisonAlignment === 'fiscal_period' && !policy.calendarId) outcome.gaps.push(`${policyId}: fiscal alignment declared with no calendar`);
+    else if (policy.comparisonAlignment) record(policyId, 'comparisonAlignment', `recorded (${policy.comparisonAlignment}); not yet applied to period scopes`);
+    if (policy.calendarId) record(policyId, 'calendarId', `recorded (${policy.calendarId})`);
+    if (policy.timezone) record(policyId, 'timezone', `recorded (${policy.timezone})`);
+  }
+  return outcome;
+}

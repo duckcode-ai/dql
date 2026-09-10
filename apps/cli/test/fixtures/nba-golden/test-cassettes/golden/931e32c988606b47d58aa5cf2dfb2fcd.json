@@ -1,0 +1,23 @@
+{
+  "key": "931e32c988606b47d58aa5cf2dfb2fcd",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Ranks players by total points scored in the 2016-17 NBA season (season code 2016), showing the top five.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"dimension:player_game_stats.season\",\"op\":\"eq\",\"values\":[2016],\"source\":\"question\"}],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":5,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:top five scorers\",\"dimension:player_game_stats.player_id\":\"q:top five scorers\",\"dimension:player_game_stats.player_name\":\"q:top five scorers\",\"dimension:player_game_stats.season\":\"q:2016-17 NBA season\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T03:21:57.653Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "931e32c988606b47d58aa5cf2dfb2fcdbe80746dc959ea09fb5cbce8fb2f24aa",
+    "postCanonicalHash": "931e32c988606b47d58aa5cf2dfb2fcdbe80746dc959ea09fb5cbce8fb2f24aa",
+    "appliedRuleClasses": []
+  }
+}

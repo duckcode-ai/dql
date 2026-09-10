@@ -14,6 +14,7 @@ export { detectOutputDrift } from './output-drift.js';
 export {
   loadDbtFirstModeling,
   siblingDbtArtifact,
+  relationshipKeyTypes,
   relationshipValidationProofFingerprint,
   modelAreaLocalId,
   DEFAULT_MODEL_AREA_ID,

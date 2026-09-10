@@ -1,3 +1,4 @@
+import type { RenderedCards } from './vocabulary.js';
 import type { AgentMessage, AgentProvider, ProviderRunOptions } from '../providers/types.js';
 import { generateStructured } from '../providers/structured-output.js';
 import {
@@ -10,7 +11,7 @@ import {
   type IntentPredicate,
   type IntentUnresolved,
 } from './intent.js';
-import { normalizeVocabularyText, suggestSameGrainColumns, suggestSameRelationFields, trigramSimilarity, type VocabularyEntry, type VocabularyIndex, type VocabularyKind } from './vocabulary.js';
+import { normalizeVocabularyText, renderCard, suggestSameGrainColumns, suggestSameRelationFields, trigramSimilarity, type VocabularyEntry, type VocabularyIndex, type VocabularyKind } from './vocabulary.js';
 
 /**
  * THE MODEL'S ONE JOB: say what the question means, in the vocabulary.
@@ -26,6 +27,10 @@ import { normalizeVocabularyText, suggestSameGrainColumns, suggestSameRelationFi
  */
 
 export interface ResolveIntentInput {
+  /** The thread's compacted memory, rendered with the previous analysis. */
+  conversation?: { summary?: string; pendingClarification?: string };
+  /** Cards already rendered by the pipeline (with rank, pins and header); rendered here only when absent. */
+  renderedCards?: RenderedCards;
   question: string;
   vocabulary: VocabularyIndex;
   provider: AgentProvider;
@@ -139,6 +144,15 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
     'VOCABULARY (the only refs that exist)',
     input.cards,
   ].join('\n');
+}
+
+/** What the thread settled earlier, and what it is still waiting on. Context for reading an edit; never a source of refs. */
+function renderConversation(conversation: { summary?: string; pendingClarification?: string } | undefined): string {
+  if (!conversation) return '';
+  const lines: string[] = [];
+  if (conversation.summary) lines.push(`EARLIER IN THIS CONVERSATION (settled facts, for reading an edit; refs come only from the vocabulary): ${conversation.summary.replace(/\s+/g, ' ').slice(0, 600)}`);
+  if (conversation.pendingClarification) lines.push(`A CLARIFICATION IS STILL OPEN: ${conversation.pendingClarification.replace(/\s+/g, ' ').slice(0, 200)}`);
+  return lines.length ? `\n\n${lines.join('\n')}` : '';
 }
 
 function renderPrior(prior: AnalyticalIntentV1, summary?: string, executed = true): string {
@@ -372,6 +386,11 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
   // still a measure with an aggregation, never a modeling gap.
   for (const clause of next.unresolved) {
     if (!clause.material || clause.options.length > 0 || clause.origin === 'ledger') continue;
+    // A clause that asks WHY, or what we SHOULD do, is an operator Ask does not
+    // perform, whatever metrics its words happen to name: the coverage proof
+    // owns it as an unsupported gap, and sending it back as "is modeled"
+    // would make the model re-litigate a question it cannot answer.
+    if (clause.kind === 'unsupported' || causalOperatorsIn(clause.clause).length > 0) continue;
     const words = (clause.clause.toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) ?? []).filter((word) => !CLAUSE_STOPWORDS.has(word));
     const hits = new Map<string, VocabularyEntry>();
     for (let i = 0; i < words.length; i += 1) {
@@ -909,10 +928,23 @@ export function spellingHints(question: string, vocabulary: VocabularyIndex): st
   return hints;
 }
 
-function correctionMessage(problems: IntentProblem[]): string {
+/**
+ * The correction re-ask is THE DISCOVERY PATH, step two: the one bounded
+ * same-snapshot expansion. A suggested ref the first cards had no room for
+ * is sent back WITH its card, so the model reads the object rather than a
+ * bare identifier it has never seen.
+ */
+function correctionMessage(problems: IntentProblem[], cardFor?: (ref: string) => string | undefined): string {
+  const unseen = new Map<string, string>();
+  for (const ref of problems.flatMap((problem) => problem.suggestions ?? [])) {
+    if (unseen.has(ref)) continue;
+    const card = cardFor?.(ref);
+    if (card) unseen.set(ref, card);
+  }
   return [
     'Your intent had problems. Fix ONLY these and resend the complete JSON object:',
     ...problems.map((problem) => `- ${problem.path}: ${problem.message}${problem.suggestions?.length ? ` (authorized refs: ${problem.suggestions.join(', ')})` : ''}`),
+    ...(unseen.size ? ['Entries you were not shown before (they exist and are authorized):', ...unseen.values()] : []),
   ].join('\n');
 }
 
@@ -1395,11 +1427,17 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   let timeoutRetried = false;
   const now = input.now ?? (() => Date.now());
   const seeds = input.question.split(/[^A-Za-z0-9_']+/).filter((word) => word.length > 2);
-  const cards = input.vocabulary.renderCards({ maxChars: input.cardBudget ?? 24_000, seeds });
+  const cards = input.renderedCards?.text ?? input.vocabulary.renderCards({ maxChars: input.cardBudget ?? 24_000, seeds });
   const system = buildIntentSystemPrompt({ cards, guidance: input.guidance, hasPrior: Boolean(input.prior), hints: spellingHints(input.question, input.vocabulary), ...(input.selection ? { selection: input.selection } : {}) });
+  const shownRefs = new Set((input.renderedCards?.refs ?? []).map((ref) => ref.toLowerCase()));
+  const unseenCard = (ref: string): string | undefined => {
+    if (!input.renderedCards || shownRefs.has(ref.toLowerCase())) return undefined;
+    const entry = input.vocabulary.get(ref);
+    return entry ? renderCard(entry) : undefined;
+  };
   const messages: AgentMessage[] = [
     { role: 'system', content: system },
-    ...(input.prior ? [{ role: 'user' as const, content: renderPrior(input.prior, input.priorExecuted === false ? undefined : input.priorAnswerSummary, input.priorExecuted !== false) }] : []),
+    ...(input.prior ? [{ role: 'user' as const, content: `${renderPrior(input.prior, input.priorExecuted === false ? undefined : input.priorAnswerSummary, input.priorExecuted !== false)}${renderConversation(input.conversation)}` }] : []),
     { role: 'user', content: `QUESTION: ${input.question}` },
   ];
   let attempts = 0;
@@ -1435,7 +1473,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     if (!parsed.intent) {
       lastProblems = parsed.errors;
       lastDetail = parsed.errors.map((error) => `${error.path}: ${error.message}`).join('; ');
-      messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: correctionMessage(parsed.errors) });
+      messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: correctionMessage(parsed.errors, unseenCard) });
       continue;
     }
     if (parsed.intent.kind === 'conversation') {
@@ -1623,7 +1661,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     lastProblems = validation.problems;
     lastIntent = validation.intent;
     lastDetail = validation.problems.map((problem) => `${problem.path}: ${problem.message}`).join('; ');
-    messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: correctionMessage(validation.problems) });
+    messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: correctionMessage(validation.problems, unseenCard) });
   }
   // A reading that only failed to account for the PREVIOUS analysis's clauses
   // is not a broken reading, it is an ambiguous continuation: ask which

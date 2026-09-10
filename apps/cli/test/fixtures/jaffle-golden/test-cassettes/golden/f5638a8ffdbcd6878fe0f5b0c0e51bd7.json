@@ -1,0 +1,23 @@
+{
+  "key": "f5638a8ffdbcd6878fe0f5b0c0e51bd7",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count of orders containing drink items, broken down by month.\",\"measures\":[{\"ref\":\"metric:orders.drink_orders\"}],\"groupBy\":[{\"ref\":\"dimension:orders.ordered_at\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"metric:orders.drink_orders\":\"q:drink orders\",\"dimension:orders.ordered_at\":\"q:by month\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T06:31:49.751Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "f5638a8ffdbcd6878fe0f5b0c0e51bd752ba7ef89d8b699966ca471da742f739",
+    "postCanonicalHash": "f5638a8ffdbcd6878fe0f5b0c0e51bd752ba7ef89d8b699966ca471da742f739",
+    "appliedRuleClasses": []
+  }
+}

@@ -331,7 +331,43 @@ export interface BuildLocalContextPackRequest {
    * expensive snapshot reconstruction and performs zero dbt artifact reads.
    */
   preparedMetadataFingerprint?: string;
+  /**
+   * `complete_eligible` (CTX-010) admits EVERY governed object the resolved
+   * envelope allows into `pack.eligible`, so a vocabulary built from the pack
+   * can be whole; ranking still orders the seeds. `ranked` (default) is the
+   * bounded pack the planners have always read.
+   */
+  admission?: 'ranked' | 'complete_eligible';
 }
+
+/** A governed object the envelope admitted, compact: identity, and payload only for the small authored kinds. */
+export interface EligibleObjectRef {
+  objectKey: string;
+  objectType: string;
+  name: string;
+  domain?: string;
+  status?: string;
+  description?: string;
+  payload?: Record<string, unknown>;
+}
+
+/** The complete eligible set for a request's envelope (CTX-010). Transient: never persisted with the pack. */
+export interface EligibleContextSet {
+  objects: EligibleObjectRef[];
+  counts: Record<string, number>;
+  /** The domains the envelope admitted; empty means every object was eligible. */
+  domains: string[];
+  fingerprint: string;
+}
+
+/** Object types whose complete eligible set a vocabulary view is built from. */
+export const ELIGIBLE_CONTEXT_OBJECT_TYPES = [
+  'semantic_metric', 'semantic_measure', 'semantic_dimension', 'semantic_entity', 'semantic_model',
+  'dql_block', 'dql_term', 'dbt_model', 'dbt_source', 'warehouse_table',
+  'relationship', 'dql_entity', 'domain_capsule', 'business_view',
+] as const;
+/** The authored kinds whose payload the eligible set carries (few, and needed to render them). */
+const ELIGIBLE_PAYLOAD_TYPES = new Set(['relationship', 'dql_entity', 'domain_capsule']);
 
 export interface CertifiedFitConfirmationRequest {
   question: string;
@@ -659,6 +695,8 @@ export interface LocalContextPack {
    * scope. Each hint is cited so the agent can attribute the guidance.
    */
   appliedHints: AppliedContextHint[];
+  /** The complete eligible set, when the request asked for `complete_eligible` admission. Transient. */
+  eligible?: EligibleContextSet;
   /** Conflicting approved hints surfaced for review (advisory). */
   hintConflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
   /** Approved hints withheld because they are stale, superseded, or conflicting. */
@@ -1877,6 +1915,16 @@ export async function buildLocalContextPack(
     const domainBriefing = buildDomainBriefing(catalog, effectiveDomainContext)
       ?? buildDomainBriefing(catalog, inferredDomainContextForBriefing(effectiveDomainContext, objects));
 
+    // CTX-010: complete admission before ranking. The envelope decides who is
+    // eligible; the lanes above only decided who came first.
+    const eligible: EligibleContextSet | undefined = request.admission === 'complete_eligible' ? (() => {
+      const domains = domainContextSearchDomains(effectiveDomainContext);
+      const eligibleObjects = catalog.listEligibleObjects({ objectTypes: ELIGIBLE_CONTEXT_OBJECT_TYPES, domains, payloadTypes: ELIGIBLE_PAYLOAD_TYPES });
+      const counts: Record<string, number> = {};
+      for (const object of eligibleObjects) counts[object.objectType] = (counts[object.objectType] ?? 0) + 1;
+      const fingerprint = createHash('sha256').update(`${catalog.state('fingerprint') ?? ''}|${domains.join(',')}|${eligibleObjects.map((object) => object.objectKey).join('\n')}`).digest('hex').slice(0, 24);
+      return { objects: eligibleObjects, counts, domains, fingerprint: `sha256:${fingerprint}` };
+    })() : undefined;
     const payload: LocalContextPack = {
       id: '',
       question: request.question,
@@ -1901,6 +1949,7 @@ export async function buildLocalContextPack(
       missingContext: routeDecision.missingContext,
       conflicts,
       appliedHints: hintResult.applied,
+      ...(eligible ? { eligible } : {}),
       hintConflicts: hintResult.conflicts,
       hintExclusions: hintResult.excluded,
       retrievalDiagnostics: {
@@ -1975,6 +2024,9 @@ export async function buildLocalContextPack(
     };
     const packPayload = { ...payload };
     delete (packPayload as Partial<LocalContextPack>).id;
+    // The eligible set is a request-time view, not history: it can be tens of
+    // thousands of rows on a large project and is rebuilt from the snapshot.
+    delete (packPayload as Partial<LocalContextPack>).eligible;
     const id = runtimeCatalog.insertContextPack(packPayload);
     return { ...payload, id };
   } finally {
@@ -3623,6 +3675,41 @@ export class MetadataCatalog {
       ORDER BY object_key
     `).all(...params) as MetadataObjectRow[];
     return rows.map(rowToObject);
+  }
+
+  /**
+   * Every object of the given types the envelope admits: an undomained object
+   * is always eligible, a domained one only inside the admitted domains, and
+   * an empty domain list admits everything. Compact rows; payload only for the
+   * small authored kinds. This is admission, not retrieval: nothing is ranked
+   * and nothing is cut.
+   */
+  listEligibleObjects(options: { objectTypes: readonly string[]; domains: string[]; payloadTypes?: Set<string> }): EligibleObjectRef[] {
+    if (options.objectTypes.length === 0) return [];
+    const filters: string[] = [`object_type IN (${options.objectTypes.map(() => '?').join(', ')})`];
+    const params: unknown[] = [...options.objectTypes];
+    if (options.domains.length > 0) {
+      filters.push(`(domain IS NULL OR domain IN (${options.domains.map(() => '?').join(', ')}))`);
+      params.push(...options.domains);
+    }
+    const rows = this.db.prepare(`
+      SELECT object_key, object_type, name, domain, status, description, payload_json FROM metadata_objects
+      WHERE ${filters.join(' AND ')}
+      ORDER BY object_type, object_key
+    `).all(...params) as Array<{ object_key: string; object_type: string; name: string; domain: string | null; status: string | null; description: string | null; payload_json: string | null }>;
+    return rows.map((row) => {
+      const wantPayload = options.payloadTypes?.has(row.object_type) ?? false;
+      let payload: Record<string, unknown> | undefined;
+      if (wantPayload && row.payload_json) {
+        try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { payload = undefined; }
+      }
+      return {
+        objectKey: row.object_key, objectType: row.object_type, name: row.name,
+        ...(row.domain ? { domain: row.domain } : {}), ...(row.status ? { status: row.status } : {}),
+        ...(wantPayload && row.description ? { description: row.description } : {}),
+        ...(payload ? { payload } : {}),
+      };
+    });
   }
 
   crossDomainRouteObjects(domainId: string, limit = 100): MetadataObject[] {

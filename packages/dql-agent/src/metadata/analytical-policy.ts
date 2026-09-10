@@ -156,6 +156,7 @@ export function assessAnalyticalRelationship(
     cardinality: relationship.cardinality,
     fanout: relationship.fanout,
     queryFingerprint: validation.queryFingerprint,
+    ...(relationship.keyTypes ? { keyTypes: relationship.keyTypes } : {}),
   });
   if (validation.proofFingerprint !== expectedProof) {
     return denied('relationship_proof_invalid', `Relationship "${relationship.id}" validation proof no longer matches its query, relations, keys, cardinality, or fanout policy.`);

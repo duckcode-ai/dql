@@ -5,9 +5,9 @@ import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerpri
 import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
-import { applyMemberSelection, bindNamedSubject, memberOptionId, namesInQuestion, parseMemberOption, proveSubjectMatchesPopulation, runAskPipeline, unmetDisplayObligation } from './pipeline.js';
+import { applyMemberSelection, bindNamedSubject, memberOptionId, namesInQuestion, parseMemberOption, pinnedRefsFor, proveSubjectMatchesPopulation, runAskPipeline, unmetDisplayObligation } from './pipeline.js';
 import { fillPeriodGaps } from './execute.js';
-import { suggestSameGrainColumns, suggestSameRelationFields, buildVocabularyIndex, trigramSimilarity, type VocabularySource } from './vocabulary.js';
+import { suggestSameGrainColumns, suggestSameRelationFields, buildVocabularyIndex, renderCard, trigramSimilarity, type VocabularySource } from './vocabulary.js';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
 import { extractFirstJsonObject } from '../providers/structured-output.js';
 
@@ -131,7 +131,7 @@ describe('vocabulary index', () => {
     expect(vocabulary.renderCards({ seeds: ['beverage'] })).toBe(cards.replace(/x/g, 'x'));
     const small = vocabulary.renderCards({ maxChars: 600, seeds: ['beverage'] });
     expect(small).toContain('of');
-    expect(small).toContain('lookup_vocabulary');
+    expect(small).toContain('not shown here still exists');
   });
 });
 
@@ -407,6 +407,81 @@ describe('an empty aggregate is not an answer about a member', () => {
   });
 });
 
+describe('the discovery path: what the cards cut is still modeled (CTX-010)', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const reply = (raw: Record<string, unknown>) => JSON.stringify({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped', ...raw });
+  const dimensionsExcept = (ref: string) => vocabulary.entries.filter((entry) => entry.kind === 'dimension' && entry.ref !== ref).map((entry) => entry.ref);
+  const run = (question: string, provider: AgentProvider, rankedRefs: string[]) => runAskPipeline({
+    question, vocabulary, provider, prepareDeps: {}, cardBudget: 700, clauseCoverage: false, context: { rankedRefs },
+    executeDeps: { run: async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1, executionTimeMs: 1 }) },
+  });
+  it('hydration pins what the question names ahead of ranking, even under a budget that cuts the section', () => {
+    const pinned = pinnedRefsFor('top customers by beverage revenue showing customer_name', vocabulary);
+    expect(pinned).toContain('dimension:customers.customer_name');
+    expect(pinned).toContain('metric:order_item.drink_revenue');
+    const ranked = dimensionsExcept('dimension:customers.customer_name');
+    const tight = vocabulary.renderCardsDetailed({ maxChars: 700, seeds: ['revenue'], rankedRefs: ranked });
+    expect(tight.refs).not.toContain('dimension:customers.customer_name');
+    expect(tight.truncated).toContainEqual({ kind: 'dimension', shown: 7, total: 8 });
+    const hydrated = vocabulary.renderCardsDetailed({ maxChars: 700, seeds: ['revenue'], rankedRefs: ranked, pinnedRefs: pinned });
+    expect(hydrated.refs).toContain('dimension:customers.customer_name');
+    expect(hydrated.text).toContain('not shown here still exists');
+  });
+  it('a ref the cards did not show is still authorized: the reading is accepted and the ledger records it as unrendered', async () => {
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => reply({ groupBy: [{ ref: 'dimension:customers.customer_type', role: 'categorical' }] }) };
+    const outcome = await run('revenue by kind of customer', provider, dimensionsExcept('dimension:customers.customer_type'));
+    expect(outcome.receipt.context?.rendered?.truncated).toContainEqual({ kind: 'dimension', shown: 7, total: 8 });
+    expect(outcome.receipt.context?.selected?.refs).toContain('dimension:customers.customer_type');
+    expect(outcome.receipt.context?.selected?.unrendered).toEqual(['dimension:customers.customer_type']);
+    expect(outcome.receipt.failure).toBeUndefined();
+    expect(outcome.receipt.dispatches).toHaveLength(1);
+  });
+  it('a clause the cards had no room for comes back as one correction carrying the card, and the corrected reading is accepted', async () => {
+    const provider = scripted([
+      reply({ unresolved: [{ clause: 'supply_name', options: [], material: true }] }),
+      reply({ groupBy: [{ ref: 'dimension:supplies.supply_name', role: 'categorical' }] }),
+    ]);
+    const outcome = await run('revenue by supplier', provider, dimensionsExcept('dimension:supplies.supply_name'));
+    expect(provider.calls).toHaveLength(2);
+    const correction = String(provider.calls[1]!.at(-1)!.content);
+    expect(correction).toContain('"supply_name" is modeled: dimension:supplies.supply_name');
+    expect(correction).toContain('Entries you were not shown before');
+    expect(correction).toContain(renderCard(vocabulary.get('dimension:supplies.supply_name')!));
+    expect(outcome.receipt.failure).toBeUndefined();
+    expect(outcome.receipt.context?.selected?.refs).toContain('dimension:supplies.supply_name');
+    // A ref that WAS shown gets no card again.
+    const shown = scripted([reply({ unresolved: [{ clause: 'product_type', options: [], material: true }] }), reply({ groupBy: [{ ref: 'dimension:products.product_type', role: 'categorical' }] })]);
+    await run('revenue by product kind', shown, ['dimension:products.product_type']);
+    expect(String(shown.calls[1]!.at(-1)!.content)).not.toContain('Entries you were not shown before');
+  });
+  it('a material clause that carries its own question is an ambiguity, not a modeling gap', async () => {
+    const asking: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => reply({ measures: [], unresolved: [{ clause: 'ranking basis', options: [], material: true, question: "Should 'top customers' be ranked by lifetime spend or by lifetime order count?" }] }) };
+    const gap = await run('who are the top customers by spend or by orders?', asking, []);
+    expect(gap.kind).toBe('gap');
+    if (gap.kind === 'gap') {
+      expect(gap.gap).toBe('ambiguous');
+      expect(gap.text).toContain('it can be read more than one way');
+      expect(gap.text).not.toContain('does not model it');
+    }
+  });
+  it('a clause that asks why, or what we should do, is an unsupported gap even when its words name metrics — never a re-ask, never "not modeled"', async () => {
+    const provider = scripted([reply({ measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:customers.customer_type', role: 'categorical' }], unresolved: [{ clause: 'why revenue is down and which customers should we invest in', options: [], material: true }] })]);
+    const gap = await run('why is revenue down by customer type and which customers should we invest in?', provider, []);
+    expect(provider.calls).toHaveLength(1);
+    expect(gap.kind).toBe('gap');
+    if (gap.kind === 'gap') {
+      expect(gap.gap).toBe('unsupported');
+      expect(gap.text).toContain('Answerable from this reading');
+    }
+  });
+  it('a clause nothing in the whole inventory holds is the only "not modeled"', async () => {
+    const unmodeled: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => reply({ unresolved: [{ clause: 'weather in Philadelphia', options: [], material: true }] }) };
+    const gap = await run('revenue and the weather in Philadelphia', unmodeled, []);
+    expect(gap.kind).toBe('gap');
+    if (gap.kind === 'gap') expect(gap.gap).toBe('not_modeled');
+  });
+});
+
 describe('no partial answers: a clause nothing models stays material', () => {
   const vocabulary = buildVocabularyIndex(jaffle);
   const intent = (raw: Record<string, unknown>): AnalyticalIntentV1 => {
@@ -455,6 +530,15 @@ describe('an empty aggregate under any restriction is not an answer', () => {
       expect(outcome.message).toMatch(/no rows fell inside the window 2027-01-01\.\.2028-01-01/);
       expect(outcome.cause).toEqual({ kind: 'window', start: '2027-01-01', end: '2028-01-01' });
     }
+  });
+  it('nulls beside a zero count under a member literal are no rows at all; plain zeros are a member who scored nothing', async () => {
+    const named = parseIntent({ ...base, measures: [{ ref: 'metric:order_item.revenue' }, { ref: 'metric:customers.customers' }], filters: [{ ref: 'dimension:customers.customer_name', op: 'eq', values: ['Curry'], source: 'question' }] }).intent!;
+    const sql = "SELECT SUM(x) AS revenue, COUNT(DISTINCT c) AS customers FROM t WHERE customer_name = 'Curry'";
+    const mixed = await executeCandidate({ ...candidate, sql }, named, { run: async () => ({ columns: ['revenue', 'customers'], rows: [{ revenue: null, customers: 0 }], rowCount: 1, executionTimeMs: 1 }) });
+    expect(mixed.ok).toBe(false);
+    if (!mixed.ok) expect(mixed.cause).toEqual({ kind: 'member', literals: ['Curry'] });
+    const zeros = await executeCandidate({ ...candidate, sql }, named, { run: async () => ({ columns: ['revenue', 'customers'], rows: [{ revenue: 0, customers: 0 }], rowCount: 1, executionTimeMs: 1 }) });
+    expect(zeros.ok).toBe(true);
   });
   it('a null scalar under a boolean scope names the predicate', async () => {
     const scoped = parseIntent({ ...base, measures: [{ ref: 'metric:order_item.revenue', scope: [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [], source: 'question' }] }] }).intent!;

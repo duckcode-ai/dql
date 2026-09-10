@@ -58,8 +58,26 @@
       ],
       "ordered": true,
       "tier": "any",
-      "note": "Lifetime spend including tax is the customers mart definition; pretax spend is an acceptable reading and is listed as an alias because the ranking is identical on this seed. \"Top customers\" names no measure; the certified customer_profile ordering (lifetime spend) or the lifetime_spend metric are governed readings, and one bounded clarification between gross and pretax spend is also correct.",
-      "outcome": "clarify_or_rows"
+      "note": "Lifetime spend including tax is the customers mart definition; pretax spend is an acceptable reading (the Revenue term's own rule names pretax product revenue) and is an alternative with its own values. \"Top customers\" names no measure; the certified customer_profile ordering (lifetime spend) or the lifetime_spend metric are governed readings, and one bounded clarification between gross and pretax spend is also correct.",
+      "outcome": "clarify_or_rows",
+      "alternatives": [
+        {
+          "sql": "SELECT customer_id, customer_name, lifetime_spend_pretax AS lifetime_spend FROM dev.customers ORDER BY lifetime_spend_pretax DESC LIMIT 10",
+          "columns": {
+            "customer_id": [
+              "customer_id",
+              "customer"
+            ],
+            "customer_name": [
+              "customer_name"
+            ],
+            "lifetime_spend": [
+              "lifetime_spend_pretax",
+              "lifetime_spend"
+            ]
+          }
+        }
+      ]
     },
     {
       "id": "top-5-customers-by-revenue",
