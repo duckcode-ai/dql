@@ -5,6 +5,7 @@ import { describeIntent, intentExecutionFingerprint, intentRefs, type Analytical
 import { composeAnsweredText, composeFailedText, composeGapText, describeResultColumns, labelFor, type ContextLedgerV1, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
 import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal, type PrepareResult } from './prepare/index.js';
 import { applySkillPolicies } from './policies.js';
+import { proveLiterals } from './literal-proof.js';
 import { keepMembersApart, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn } from './resolve-intent.js';
 import type { RenderedCards, VocabularyDomainHeader, VocabularyEntry, VocabularyIndex } from './vocabulary.js';
 
@@ -510,6 +511,19 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   }
   let intent = resolution.intent;
   if (input.memberSelection) applyMemberSelection(intent, input.memberSelection, input.vocabulary);
+  // EVERY LITERAL IS PROVEN AGAINST ITS FIELD BEFORE SQL: a relative period on
+  // a date field becomes its dates, a partial date its window; a value no
+  // field of that kind can take is asked back, never sent to the warehouse.
+  {
+    const proven = proveLiterals(intent, input.vocabulary, new Date(now()));
+    intent = proven.intent;
+    if (proven.notes.length) receipt.grounding = [...(receipt.grounding ?? []), ...proven.notes];
+    if (proven.problems.length) {
+      const question = `${proven.problems.map((problem) => problem.message).join('; ')}.`;
+      receipt.intent = intent; receipt.reading = intent.reading;
+      return { kind: 'clarify', intent, question, options: [], text: question, receipt };
+    }
+  }
   // What the first reading promised to SHOW. A repair may drop a label the
   // engine could not reach; the answer must say so rather than quietly
   // identifying its rows by an opaque key.

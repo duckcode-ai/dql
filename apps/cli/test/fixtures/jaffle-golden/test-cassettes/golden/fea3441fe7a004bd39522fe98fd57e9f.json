@@ -1,0 +1,23 @@
+{
+  "key": "fea3441fe7a004bd39522fe98fd57e9f",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Beverage product revenue and item count, broken down by each product's identity (key) with its name as label.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:products.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"}],\"alias\":\"beverage_revenue\"},{\"ref\":\"column:dev.order_items.order_item_id\",\"aggregation\":\"count_distinct\",\"scope\":[{\"ref\":\"dimension:products.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"}],\"alias\":\"items_sold\"}],\"groupBy\":[{\"ref\":\"entity:products.product\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:beverage catogery\",\"dimension:products.is_drink_item\":\"q:beverage catogery\",\"entity:products.product\":\"q:beverage catogery\",\"dimension:products.product_name\":\"q:beverage catogery\",\"column:dev.order_items.order_item_id\":\"q:beverage catogery\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T23:21:57.507Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "fea3441fe7a004bd39522fe98fd57e9fd33514c6335f3ca37175e047b1e266ec",
+    "postCanonicalHash": "fea3441fe7a004bd39522fe98fd57e9fd33514c6335f3ca37175e047b1e266ec",
+    "appliedRuleClasses": []
+  }
+}

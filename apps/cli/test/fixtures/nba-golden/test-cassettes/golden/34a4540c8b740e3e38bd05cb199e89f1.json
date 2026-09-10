@@ -1,0 +1,23 @@
+{
+  "key": "34a4540c8b740e3e38bd05cb199e89f1",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by their assist-to-turnover ratio (total assists divided by total turnovers) for games played in 2017, restricted to players with at least 20 games played, from best to worst.\",\"measures\":[{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.ast\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:dev.player_game_stats.turnover\",\"denominatorAggregation\":\"sum\"},\"alias\":\"ast_to_turnover_ratio\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}]},{\"ref\":\"column:dev.player_game_stats.game_id\",\"aggregation\":\"count\",\"alias\":\"games_played\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}]}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"measure:1\",\"op\":\"gte\",\"values\":[20],\"source\":\"question\"}],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"2017\"}},\"expectedShape\":\"ranking\",\"population\":\"matching\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.ast\":\"q:assist\",\"column:dev.player_game_stats.turnover\":\"q:turnover ratio\",\"dimension:player_game_stats.played\":\"q:games\",\"column:dev.player_game_stats.game_id\":\"q:at least 20 games\",\"dimension:player_game_stats.player_id\":\"q:Who had\",\"dimension:player_game_stats.player_name\":\"q:Who had\",\"dimension:player_game_stats.game_date\":\"q:in 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T23:36:21.425Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "34a4540c8b740e3e38bd05cb199e89f1702ef61ba20cbc6d9046f6e936a8e7b2",
+    "postCanonicalHash": "34a4540c8b740e3e38bd05cb199e89f1702ef61ba20cbc6d9046f6e936a8e7b2",
+    "appliedRuleClasses": []
+  }
+}

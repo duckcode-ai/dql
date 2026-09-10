@@ -122,7 +122,7 @@ export function buildIntentSystemPrompt(input: { cards: string; guidance?: strin
     '5f. A COMPARISON BETWEEN TWO PERIODS IS TWO SCOPED MEASURES, NEVER A GROUPING. "from 2016 to 2017", "this year versus last": write the SAME measure twice, each with its own period in `scope` and its own `alias` (points_2016, points_2017). Grouping by the period instead returns one row per period per entity and answers a different question. Then, when the question asks for the change, the difference, the growth or the improvement, add ONE more measure `{"change":{"base":"points_2016","comparison":"points_2017","as":"percent"},"alias":"points_change_pct"}` — `as` is "percent" when the question says percentage/percent change and "absolute" otherwise. A superlative over that difference ("improved the most", "biggest increase") orders by that change measure, descending, with the limit the question asks for; a threshold that applies to EACH period is one scoped measure per period with its own threshold filter.',
     '5d. A THRESHOLD ON AN AGGREGATE. "with at least 20 games", "minimum 100 attempts" is a filter on the aggregated measure, not on rows: add that measure (with an alias) and a filter `{"ref":"measure:<index of that measure>","op":"gte","values":[20]}`; it applies after aggregation.',
     '5b. A RATIO OF TWO GOVERNED MEASURES. "average order value", "revenue per order", "X per Y", "share of", "margin %" is a measure with `derived: {"kind":"ratio","numerator":<metric ref>,"denominator":<metric ref>}` and an `alias`, and no `ref` (average order value = the revenue metric / the order-count metric). A governed derived or ratio metric (its card shows `= formula` and `time <dim>`) may be used instead ONLY when it measures the same thing over the same time role as the question: a metric built from lifetime per-customer measures (lifetime spend / lifetime orders, time = the customer\'s first order date) is a cohort average, so "average order value in 2025", "by month", "last quarter" is NEVER that metric; it is the derived ratio of the period\'s revenue and orders. Use the cohort metric only when the question names the cohort itself ("customers first acquired in 2025", "customers who joined in"). "share of ALL", "% of total", "concentration": the denominator is the SAME measure over every row of the period, written `"denominatorScope":"overall"` on the derived ratio (a measure divided by itself without it is 1 for every row).',
-    '6. TIME. A time axis ("by month") is a groupBy with role time and a grain, using the time dimension of the SAME model as the measure (an order total is by the orders model\'s time, an order-line revenue by the order line model\'s time). A time window ("last quarter", "in 2025") is `time.window` with an ISO half-open range plus the expression. Measures under one window must share their `time` role (see the cards); when they do not, add an `unresolved` entry with material=true and the two time dimension refs as options instead of choosing.',
+    '6. TIME. A time axis ("by month") is a groupBy with role time and a grain, using the time dimension of the SAME model as the measure (an order total is by the orders model\'s time, an order-line revenue by the order line model\'s time). A time window ("last quarter", "in 2025") is `time.window` with an ISO half-open range plus the expression. Measures under one window must share their `time` role (see the cards); when they do not, add an `unresolved` entry with material=true and the two time dimension refs as options instead of choosing. A period inside a `scope` or a filter on a DATE field is written as a period token the host resolves against today — current_month, last_month, this_year, last_year, previous_quarter, ytd, mtd, last_3_months, today, yesterday — or as a partial date ("2025", "2025-03", "2025-Q2") meaning that whole period; never guess today\'s date and never write a word the warehouse would read as a date.',
     '7. CLARIFY ONLY WHAT IS MATERIAL. If two vocabulary entries are both plausible and the answer would differ (for example pretax product revenue vs order total including tax when the question says only "total revenue" and the project defines both), add an `unresolved` entry with material=true, the options as refs, and a one-sentence question. But: a metric whose NAME is the word the question uses ("revenue" is metric revenue, "lifetime spend" is metric lifetime_spend) IS the meaning; clarify only when the question adds a qualifier the vocabulary distinguishes ("gross", "including tax", "order revenue"). Never clarify which of two refs to use when they identify the same entity (a key column on the measure\'s model vs the entity on its own model): pick the one on the measure\'s model. Do not clarify spelling mistakes or obvious paraphrases; resolve them. Never ask whether a dimension or entity is reachable from a measure\'s model, or which join to take: the host proves join paths and grain after you answer. A material clause is only ever a choice between two or more refs, or an empty options list for something this project does not hold.',
     '8. KIND. Greetings, thanks, and questions about what you can do are kind "conversation" with a short `reply`. "What does X mean / how is X defined" is kind "definition" with a `reply` drawn from the vocabulary descriptions. Everything that asks for numbers or rows is kind "analytics". A question about something this project does not hold at all (weather, news, a different business) is kind "analytics" with no measures and one `unresolved` entry {clause: what was asked, options: [], material: true}: never a conversational reply, never a guessed metric.',
     '8b. BUSINESS TERMS ARE THE GOVERNED DEFAULT. When a term in the vocabulary defines a word of the question ("Revenue" defined as product revenue excluding tax), the metric that term names is the meaning; do not treat the word as ambiguous. Only two competing definitions with no governing term are material.',
@@ -929,15 +929,27 @@ export function bindExactNames(intent: AnalyticalIntentV1, normalizedQuestion: s
  * parts' scopes because each part restricts its own aggregate.
  */
 export function promoteSoleMeasureScope(intent: AnalyticalIntentV1): void {
-  if (intent.measures.length !== 1 || intent.population === 'all') return;
-  const measure = intent.measures[0]!;
-  if (measure.derived || !measure.scope?.length) return;
-  const promoted = measure.scope;
-  delete measure.scope;
-  intent.filters = [...intent.filters, ...promoted];
-  for (const predicate of promoted) {
-    const key = `filter:${predicate.ref}`;
-    if (!intent.provenance[key]) intent.provenance[key] = `host:the restriction on the only measure (${measure.ref}) restricts the population`;
+  if (intent.population === 'all') return;
+  // A restriction EVERY measure carries is the population, not a per-measure
+  // scope: "the beverage category" with revenue and item counts both scoped
+  // to drink items is the beverage products, not every product with a
+  // beverage column beside it. One measure is the simplest case of this.
+  const plain = intent.measures.filter((measure) => !measure.derived && !measure.change);
+  if (plain.length === 0 || plain.length !== intent.measures.length) return;
+  const key = (predicate: IntentPredicate) => JSON.stringify([predicate.ref, predicate.op, predicate.values, predicate.on ?? null]);
+  const first = plain[0]!.scope ?? [];
+  if (first.length === 0) return;
+  const shared = first.filter((predicate) => plain.every((measure) => (measure.scope ?? []).some((other) => key(other) === key(predicate))));
+  if (shared.length === 0) return;
+  const sharedKeys = new Set(shared.map(key));
+  for (const measure of plain) {
+    const rest = (measure.scope ?? []).filter((predicate) => !sharedKeys.has(key(predicate)));
+    if (rest.length) measure.scope = rest; else delete measure.scope;
+  }
+  intent.filters = [...intent.filters, ...shared];
+  for (const predicate of shared) {
+    const filterKey = `filter:${predicate.ref}`;
+    if (!intent.provenance[filterKey]) intent.provenance[filterKey] = plain.length === 1 ? `host:the restriction on the only measure (${plain[0]!.ref}) restricts the population` : `host:a restriction every measure carries restricts the population`;
   }
 }
 

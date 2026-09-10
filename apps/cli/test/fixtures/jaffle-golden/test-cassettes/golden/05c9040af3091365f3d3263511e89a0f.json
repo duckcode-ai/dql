@@ -1,0 +1,23 @@
+{
+  "key": "05c9040af3091365f3d3263511e89a0f",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show gross revenue by calendar month so month-over-month growth can be compared, since the derived revenue_growth_mom metric cannot be computed by the engine (missing semantic manifest).\",\"measures\":[{\"ref\":\"block:commerce.monthly_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[{\"clause\":\"revenue growth mom\",\"options\":[\"block:commerce.monthly_revenue\",\"metric:order_item.revenue_growth_mom\"],\"material\":true,\"question\":\"The derived revenue_growth_mom metric can't currently be computed by the engine (missing semantic manifest); should I show the monthly revenue trend instead so growth can be read off the series?\"}],\"provenance\":{\"block:commerce.monthly_revenue\":\"q:revenue over time\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T23:45:29.218Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "05c9040af3091365f3d3263511e89a0f346794a47ff2219cfe6497af25212f37",
+    "postCanonicalHash": "05c9040af3091365f3d3263511e89a0f346794a47ff2219cfe6497af25212f37",
+    "appliedRuleClasses": []
+  }
+}

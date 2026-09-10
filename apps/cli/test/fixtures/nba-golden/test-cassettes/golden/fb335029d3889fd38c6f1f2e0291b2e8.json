@@ -1,0 +1,23 @@
+{
+  "key": "fb335029d3889fd38c6f1f2e0291b2e8",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Find the player with the highest total points summed across games played in calendar year 2017.\",\"measures\":[{\"ref\":\"block:nba.top_players_by_total_points\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"block:nba.top_players_by_total_points\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"calendar year 2017\"}},\"unresolved\":[],\"provenance\":{\"block:nba.top_players_by_total_points\":\"q:Who scored the most points in calendar year 2017?\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T23:31:16.036Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "fb335029d3889fd38c6f1f2e0291b2e8ad6415f94bc30eb168cea0893df7216e",
+    "postCanonicalHash": "fb335029d3889fd38c6f1f2e0291b2e8ad6415f94bc30eb168cea0893df7216e",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "key": "e6bf063ee4eb61ef6524376393965ecf",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"For the same top players by points per game in 2017 (min 20 games played), also show rebounds per game and assists per game.\",\"measures\":[{\"ref\":\"ratio:column:dev.player_game_stats.pts/column:dev.player_game_stats.played\",\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.pts\",\"denominator\":\"column:dev.player_game_stats.played\",\"numeratorAggregation\":\"sum\",\"denominatorAggregation\":\"count\"},\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"inherited\"}],\"alias\":\"points_per_game\"},{\"ref\":\"column:dev.player_game_stats.played\",\"aggregation\":\"count\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"inherited\"}],\"alias\":\"games_played\"},{\"ref\":\"ratio:column:dev.player_game_stats.reb/column:dev.player_game_stats.played\",\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.reb\",\"denominator\":\"column:dev.player_game_stats.played\",\"numeratorAggregation\":\"sum\",\"denominatorAggregation\":\"count\"},\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"inherited\"}],\"alias\":\"rebounds_per_game\"},{\"ref\":\"ratio:column:dev.player_game_stats.ast/column:dev.player_game_stats.played\",\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.ast\",\"denominator\":\"column:dev.player_game_stats.played\",\"numeratorAggregation\":\"sum\",\"denominatorAggregation\":\"count\"},\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"inherited\"}],\"alias\":\"assists_per_game\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"measure:1\",\"op\":\"gte\",\"values\":[20],\"source\":\"inherited\"}],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"ratio:column:dev.player_game_stats.pts/column:dev.player_game_stats.played\":\"inherited\",\"column:dev.player_game_stats.played\":\"inherited\",\"ratio:column:dev.player_game_stats.reb/column:dev.player_game_stats.played\":\"q:rebounds per game\",\"ratio:column:dev.player_game_stats.ast/column:dev.player_game_stats.played\":\"q:assists per game\",\"dimension:player_game_stats.player_id\":\"inherited\",\"dimension:player_game_stats.player_name\":\"inherited\",\"dimension:player_game_stats.game_date\":\"inherited\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T23:38:21.563Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "e6bf063ee4eb61ef6524376393965ecfa1d33c5ff7882e5d6a55662dca2598ae",
+    "postCanonicalHash": "e6bf063ee4eb61ef6524376393965ecfa1d33c5ff7882e5d6a55662dca2598ae",
+    "appliedRuleClasses": []
+  }
+}

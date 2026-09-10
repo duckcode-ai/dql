@@ -1,0 +1,25 @@
+{
+  "key": "5cf8fa0762e4e035b01909b9411ffd12",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Interpreting the question using the only applicable governed definition available: a ranking of players by the top_players_by_total_points block, since no injury data is modeled and season is the closest matching concept.\",\"measures\":[{\"ref\":\"block:nba.top_players_by_total_points\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:nba.top_players_by_total_points\":\"q:players most likely to get injured next season\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T23:34:08.928Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "5cf8fa0762e4e035b01909b9411ffd12b0972aa957de9e0d6642c58227740d32",
+    "postCanonicalHash": "5cf8fa0762e4e035b01909b9411ffd12b0972aa957de9e0d6642c58227740d32",
+    "appliedRuleClasses": []
+  }
+}

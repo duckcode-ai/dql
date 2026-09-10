@@ -1,0 +1,23 @@
+{
+  "key": "55b2a4f62d9b03c85e2e237cdfbdef19",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Which players had the most double-doubles (games with double-digit totals in at least two statistical categories such as points, rebounds, assists, steals, or blocks) in 2017?\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"double-doubles (a game where a player reaches double digits in at least two of points/rebounds/assists/steals/blocks) is not a stored metric or column in this project\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T23:32:34.820Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "55b2a4f62d9b03c85e2e237cdfbdef1949c45af343fb097c21da8c8004d006f5",
+    "postCanonicalHash": "55b2a4f62d9b03c85e2e237cdfbdef1949c45af343fb097c21da8c8004d006f5",
+    "appliedRuleClasses": []
+  }
+}

@@ -8,3 +8,4 @@ export * from './execute.js';
 export * from './outcomes.js';
 export * from './policies.js';
 export * from './pipeline.js';
+export { proveLiterals, relativePeriodBounds, dateLiteralBounds, fieldKind } from './literal-proof.js';

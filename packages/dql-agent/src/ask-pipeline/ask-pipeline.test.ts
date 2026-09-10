@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, coverageStates, validateIntentRefs, facetStem } from './resolve-intent.js';
+import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, coverageStates, validateIntentRefs, facetStem, promoteSoleMeasureScope } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { applyMemberSelection, bindNamedSubject, memberOptionId, namesInQuestion, parseMemberOption, pinnedRefsFor, proveSubjectMatchesPopulation, runAskPipeline, unmetDisplayObligation } from './pipeline.js';
@@ -717,6 +717,27 @@ describe('coverage is satisfied through lineage and the reading\'s own names; th
     expect(mentioned).toEqual(['losses']);
     expect(coverageStates('show wins and losses by team', mentioned)).toEqual([{ word: 'losses', state: 'uncertain' }]);
     expect(coverageStates('only losses, please', ['losses'])).toEqual([{ word: 'losses', state: 'unsatisfied' }]);
+  });
+});
+
+describe('a restriction every measure carries is the population', () => {
+  it('two measures scoped identically to drink items become a population filter; a scope only one carries stays a scope', () => {
+    const shared = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [
+      { ref: 'metric:order_item.revenue', scope: [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [true] }] },
+      { ref: 'metric:order_item.order_items', scope: [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [true] }, { ref: 'dimension:order_item.is_food_item', op: 'is_false', values: [false] }] },
+    ], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }).intent!;
+    promoteSoleMeasureScope(shared);
+    expect(shared.filters.map((p) => p.ref)).toEqual(['dimension:order_item.is_drink_item']);
+    expect(shared.measures[0]!.scope).toBeUndefined();
+    expect(shared.measures[1]!.scope?.map((p) => p.ref)).toEqual(['dimension:order_item.is_food_item']);
+    expect(shared.provenance['filter:dimension:order_item.is_drink_item']).toContain('every measure carries');
+    const different = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [
+      { ref: 'metric:order_item.revenue', scope: [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [true] }] },
+      { ref: 'metric:order_item.order_items' },
+    ], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }).intent!;
+    promoteSoleMeasureScope(different);
+    expect(different.filters).toEqual([]);
+    expect(different.measures[0]!.scope).toHaveLength(1);
   });
 });
 
