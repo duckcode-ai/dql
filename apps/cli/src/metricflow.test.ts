@@ -10,6 +10,7 @@ import {
   repairMetricFlowGroupBy,
   parseMetricFlowDimensionList,
   buildMetricFlowArgs,
+  resolveSemanticManifestPath,
 } from './metricflow.js';
 
 describe('MetricFlow compile wrapper', () => {
@@ -299,5 +300,16 @@ describe('buildMetricFlowArgs', () => {
     expect(args[args.indexOf('--group-by') + 1]).toBe('metric_time__month');
     const orders = args.flatMap((arg, index) => (arg === '--order' ? [args[index + 1]] : []));
     expect(orders).toEqual(['metric_time__month asc', 'revenue desc']);
+  });
+});
+
+describe('the semantic manifest is looked up where dbt writes it', () => {
+  it('under the dbt project directory, beside the dbt manifest — not under the DQL root', () => {
+    expect(resolveSemanticManifestPath('/proj')).toBe('/proj/target/semantic_manifest.json');
+    expect(resolveSemanticManifestPath('/proj', { dbtProjectDir: '.' })).toBe('/proj/target/semantic_manifest.json');
+    expect(resolveSemanticManifestPath('/proj', { dbtProjectDir: 'dbt' })).toBe('/proj/dbt/target/semantic_manifest.json');
+    expect(resolveSemanticManifestPath('/proj', { dbtProjectDir: '../dbt_core_models' })).toBe('/dbt_core_models/target/semantic_manifest.json');
+    expect(resolveSemanticManifestPath('/proj', { dbtProjectDir: 'dbt', dbtManifestPath: 'build/manifest.json' })).toBe('/proj/dbt/build/semantic_manifest.json');
+    expect(resolveSemanticManifestPath('/proj', { dbtProjectDir: 'dbt', provenanceManifestPath: '/elsewhere/target/manifest.json' })).toBe('/elsewhere/target/semantic_manifest.json');
   });
 });

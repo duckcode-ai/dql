@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
-import { buildVocabularyIndex, renderCard } from '@duckcodeailabs/dql-agent';
+import { renderPhysicalIdentifier, buildVocabularyIndex, renderCard } from '@duckcodeailabs/dql-agent';
 import { relationshipValidationProofFingerprint } from '@duckcodeailabs/dql-core';
 import { modelingJoinGraph, modelingJoinPaths } from './host.js';
-import { leafName, nativeAggregateBinding, nativeFormulaBinding, normalizeRelationName, parseMetricFilter, qualifyExpression, buildVocabularySource, columnLineageFromSql } from './vocabulary-source.js';
+import { leafName, nativeAggregateBinding, nativeFormulaBinding, normalizeRelationName, parseMetricFilter, qualifyExpression, buildVocabularySource, columnLineageFromSql  } from './vocabulary-source.js';
 
 describe('vocabulary source helpers', () => {
   it('qualifies bare columns in a measure expression, leaving keywords, functions and literals alone', () => {
@@ -395,5 +395,28 @@ describe('column lineage is read from the model SQL, per output column', () => {
     const lineage = columnLineageFromSql('WITH base AS (SELECT a, b FROM t) SELECT a AS x, SUM(b) AS total FROM base GROUP BY 1');
     expect(lineage).toEqual({ x: ['a'], total: ['b'] });
     expect(columnLineageFromSql('not sql at all')).toEqual({});
+  });
+});
+
+describe('a probed relation merges into the manifest spelling case-insensitively', () => {
+  it('CONSUMPTION_METRICS.HEADER from the warehouse and consumption_metrics.header from the manifest are one relation', () => {
+    const merged = buildVocabularySource({
+      manifest: { sources: [], blocks: [], terms: [], modeling: { entities: { 'x::entity::header': { id: 'x::entity::header', localId: 'header', qualifiedId: 'x::entity::header', dbtUniqueId: 'model.p.header', domain: 'x', grain: 'row', keys: [], sourcePath: 'e', identityFingerprint: 'h' } }, relationships: {} }, dbtProvenance: { nodes: { 'model.p.header': { relation: 'consumption_metrics.header' } } } } as never,
+      relations: [{ schema: 'CONSUMPTION_METRICS', name: 'HEADER', columns: [{ name: 'TOTAL_BCM', dataType: 'NUMBER' }] }],
+    });
+    const header = (merged.relations ?? []).filter((relation) => relation.name.toLowerCase() === 'header');
+    expect(header).toHaveLength(1);
+    expect(header[0]!.schema!.toLowerCase()).toBe('consumption_metrics'); // one relation whichever spelling arrived first; the host asks under the manifest's
+    expect(header[0]!.description).toBeUndefined();
+    expect(header[0]!.columns.map((column) => column.name)).toContain('TOTAL_BCM');
+  });
+});
+
+describe('a physical expression is written as the warehouse reads names', () => {
+  it('on Snowflake a plain lower-case name is unquoted (dbt created it unquoted); elsewhere it is quoted as before', () => {
+    const snowflake = (name: string) => renderPhysicalIdentifier(name, 'snowflake', (value) => `"${value}"`);
+    expect(qualifyExpression('SUM(amount)', 'sales.orders', ['amount'], snowflake)).toBe('SUM(sales.orders.amount)');
+    expect(qualifyExpression('SUM("CaseSensitive")', 'sales.orders', [], snowflake)).toBe('SUM("CaseSensitive")');
+    expect(qualifyExpression('SUM(amount)', 'sales.orders', ['amount'])).toBe('SUM("sales"."orders"."amount")');
   });
 });

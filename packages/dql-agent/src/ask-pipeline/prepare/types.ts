@@ -149,7 +149,12 @@ export interface UnprovenJoin {
 }
 
 export interface SqlDialectLike {
+  /** Quotes an ALIAS or any name the program itself mints: always quoted, case kept. */
   quoteIdentifier(name: string): string;
+  /** Renders a PHYSICAL relation segment or column as the warehouse knows it (Snowflake: plain lower/upper-case names unquoted, explicit quotes kept); defaults to `quoteIdentifier`. */
+  quotePhysical?(name: string): string;
+  /** Renders a whole physical relation (`schema.table`) as the warehouse addresses it — with its database on warehouses that need it; defaults to quoting each segment with `quotePhysical`. */
+  qualifyRelation?(relation: string): string;
   dateTrunc(grain: string, expr: string): string;
   limitClause(limit: number): string;
 }

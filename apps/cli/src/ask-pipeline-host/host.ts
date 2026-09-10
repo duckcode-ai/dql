@@ -44,6 +44,8 @@ import {
   type VocabularySource,
   type PreparedBlock,
   type VocabularyEntry,
+  renderPhysicalIdentifier,
+  renderPhysicalRelation,
 } from '@duckcodeailabs/dql-agent';
 import { buildProjectVocabulary, buildVocabularySource, normalizeRelationName, type VocabularySourceInput } from './vocabulary-source.js';
 
@@ -140,6 +142,23 @@ export function relationColumnsProbeSql(relations: string[], maxRelations = 8): 
   ].join('\n');
 }
 
+/**
+ * A probed relation under the name the probe ASKED for: the warehouse spells
+ * CONSUMPTION_METRICS.HEADER where the manifest says consumption_metrics.header,
+ * and the vocabulary must merge the columns into the manifest's relation, not
+ * add a second one. A relation nobody asked for keeps the warehouse's spelling.
+ */
+export function underAskedNames(found: ProbedRelation[], wanted: string[]): ProbedRelation[] {
+  const asked = new Map(wanted.map((name) => [name.replace(/["`[\]]/g, '').toLowerCase(), name]));
+  return found.map((relation) => {
+    const key = (relation.schema ? `${relation.schema}.${relation.name}` : relation.name).toLowerCase();
+    const original = asked.get(key) ?? [...asked.entries()].find(([candidate]) => candidate.endsWith(`.${key}`) || key.endsWith(`.${candidate}`))?.[1];
+    if (!original) return relation;
+    const parts = original.split('.');
+    return { ...relation, name: parts.at(-1)!, ...(parts.length > 1 ? { schema: parts.slice(0, -1).join('.') } : {}) };
+  });
+}
+
 /** Probe rows grouped into relations the vocabulary can merge. */
 export function relationsFromProbeRows(rows: Array<Record<string, unknown>>): ProbedRelation[] {
   const byRelation = new Map<string, ProbedRelation>();
@@ -163,6 +182,36 @@ export function relationsFromProbeRows(rows: Array<Record<string, unknown>>): Pr
  * one documented without types. A partial description is not evidence that
  * the other columns are absent.
  */
+/**
+ * The database each dbt relation lives in, from the manifest's provenance
+ * (`"DB"."SCHEMA"."TABLE"`), keyed by `schema.table` in lower case. The
+ * vocabulary identifies a relation by schema and table; a warehouse that
+ * addresses objects across databases (Snowflake) is written the full name.
+ */
+export function relationDatabases(manifest: { dbtProvenance?: { nodes: Record<string, { relation?: string }> } } | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const node of Object.values(manifest?.dbtProvenance?.nodes ?? {})) {
+    const parts = (node.relation ?? '').replace(/["`]/g, '').split('.').map((part) => part.trim()).filter(Boolean);
+    if (parts.length === 3) out.set(`${parts[1]}.${parts[2]}`.toLowerCase(), parts[0]!);
+  }
+  return out;
+}
+
+/** `schema.table` as the warehouse addresses it: with its database on Snowflake when provenance knows it; unchanged elsewhere. */
+export function physicalRelationName(relation: string, databases: Map<string, string>, driver: string | undefined): string {
+  if (driver?.toLowerCase() !== 'snowflake') return relation;
+  const parts = relation.replace(/["`]/g, '').split('.');
+  if (parts.length !== 2) return relation;
+  const database = databases.get(relation.toLowerCase());
+  return database ? `${database}.${relation}` : relation;
+}
+
+/** The wall-clock budget of the column probe per snapshot and connection; `DQL_ASK_COLUMN_PROBE_MS` overrides (default 12 s). */
+export function columnProbeBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.DQL_ASK_COLUMN_PROBE_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 12_000;
+}
+
 export function relationsNeedingColumns(source: ReturnType<typeof buildVocabularySource>, max = 48): string[] {
   // A relation the warehouse has not described yet: no columns at all, or a
   // handful a cube or a binding happened to name (one exposed key does not
@@ -533,16 +582,24 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     if (cached) return cached;
     const wanted = relationsNeedingColumns(base);
     const found: ProbedRelation[] = [];
-    for (let at = 0; at < wanted.length; at += 8) {
-      const sql = relationColumnsProbeSql(wanted.slice(at, at + 8));
+    // BOUNDED: an information_schema lookup on a large warehouse can take
+    // seconds per statement; the probe stops issuing statements once its
+    // budget is spent and the metadata stands as it was for the rest. What
+    // it did not describe is asked for by name, never assumed absent.
+    const started = Date.now();
+    const budgetMs = columnProbeBudgetMs();
+    for (let at = 0; at < wanted.length; at += 16) {
+      if (Date.now() - started > budgetMs) break;
+      const sql = relationColumnsProbeSql(wanted.slice(at, at + 16), 16);
       if (!sql) continue;
       try {
         const result = await deps.executor.executeQuery(sql, [], {}, connection);
         found.push(...relationsFromProbeRows((result.rows ?? []) as Array<Record<string, unknown>>));
       } catch { /* the metadata stands as it was */ }
     }
-    probedColumns.set(cacheKey, found);
-    return found;
+    const named = underAskedNames(found, wanted);
+    probedColumns.set(cacheKey, named);
+    return named;
   };
   type VocabularyView = { vocabulary: VocabularyIndex; context?: NonNullable<Parameters<typeof runAskPipeline>[0]['context']>; envelope: DomainContextEnvelope };
   let viewCache: { key: string; view: VocabularyView } | undefined;
@@ -577,7 +634,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
   const baseSourceFor = async (connection?: ConnectionConfig): Promise<{ key: string; source: VocabularySource }> => {
     const { manifest, snapshotId } = deps.getManifest();
     const layer = deps.getSemanticLayer();
-    const input: VocabularySourceInput = { ...(layer ? { semanticLayer: layer } : {}), ...(manifest ? { manifest } : {}) };
+    const input: VocabularySourceInput = { ...(layer ? { semanticLayer: layer } : {}), ...(manifest ? { manifest } : {}), ...(connection?.driver ? { driver: connection.driver } : {}) };
     const key = `${snapshotId}|${layer ? layer.listCubes().map((cube) => cube.name).join(',') : 'no-semantic'}|${connection ? connectionKey(connection) : 'no-connection'}`;
     if (vocabularyCache?.key === key) return { key, source: vocabularyCache.source };
     const base = buildVocabularySource(input);
@@ -656,7 +713,11 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       relationOfCube.set(cube.name, relation);
       cubeOfRelation.set(relation, cube.name);
     }
-    const quoteRelation = (relation: string) => relation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
+    // A physical name as the warehouse knows it (Snowflake folds unquoted
+    // names; dbt creates them unquoted), an alias as this program mints it.
+    const quotePhysical = (name: string) => renderPhysicalIdentifier(name, connection.driver, (value) => dialect.quoteIdentifier(value));
+    const databases = relationDatabases(deps.getManifest().manifest);
+    const quoteRelation = (relation: string) => renderPhysicalRelation(physicalRelationName(relation, databases, connection.driver), connection.driver, (value) => dialect.quoteIdentifier(value));
     const joinGraph = modelingJoinGraph(deps.getManifest().manifest, quoteRelation);
     const semanticJoinPath = (fromRelation: string, toRelation: string): RelationalJoinStep[] | undefined => {
       if (!layer) return undefined;
@@ -726,7 +787,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
           const evidence = await validateRelationshipOnWarehouse(
             { fromRelation, toRelation, keys, cardinality, fanout: 'safe', keyTypes: catalogKeyTypes(deps.getManifest().manifest, { fromRelation, toRelation, keys }) },
             async (sql) => executor.executePositional!(sql, [], connection, { maxRows: 1 }).then((result) => ({ rows: result.rows as Array<Record<string, unknown>> })),
-            (name) => dialect.quoteIdentifier(name),
+            quotePhysical,
           );
           // Unique there, and covering every row here (Ask's own rule on top of
           // the declared cardinality): anything else is not a relationship, it
@@ -736,15 +797,15 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
           const generationToken = await evidenceGenerationToken(connection);
           const freshness = { checkedAt: evidence.checkedAt, expiresAt: new Date(now + ttlHours * 3_600_000).toISOString(), target: connectionKey(connection), ...(generationToken ? { generationToken } : {}) };
           const authority: JoinAuthorityV1 = { version: 1, from: fromRelation, to: toRelation, keys, source: 'warehouse_proof', ...(declaredEdge ? { relationshipId: declaredEdge.id } : {}), authority: 'proven_default', scope, domains: { from: fromDomains, to: toDomains }, evidence, freshness, snapshotId: deps.getManifest().snapshotId };
-          const left = fromRelation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
-          const right = toRelation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
-          const steps: RelationalJoinStep[] = [{ relation: toRelation, on: keys.map((key) => `${left}.${dialect.quoteIdentifier(key.from)} = ${right}.${dialect.quoteIdentifier(key.to)}`).join(' AND '), authority }];
+          const left = quoteRelation(fromRelation);
+          const right = quoteRelation(toRelation);
+          const steps: RelationalJoinStep[] = [{ relation: toRelation, on: keys.map((key) => `${left}.${quotePhysical(key.from)} = ${right}.${quotePhysical(key.to)}`).join(' AND '), authority }];
           provenJoinPath.set(cacheKey, { steps, expiresAt: now + ttlHours * 3_600_000, generationToken });
           writeRelationshipEvidence(deps.projectRoot, { fromRelation, toRelation, keys, cardinality, fanout: 'safe', ...(declaredEdge ? { relationshipId: declaredEdge.id } : {}), evidence, freshness, snapshotId: deps.getManifest().snapshotId });
           return steps;
         } catch { return undefined; }
       },
-      dialect: { quoteIdentifier: (name) => dialect.quoteIdentifier(name), dateTrunc: (grain, expr) => dialect.dateTrunc(grain, expr), limitClause: (limit) => dialect.limitClause(limit) },
+      dialect: { quoteIdentifier: (name) => dialect.quoteIdentifier(name), quotePhysical, qualifyRelation: quoteRelation, dateTrunc: (grain, expr) => dialect.dateTrunc(grain, expr), limitClause: (limit) => dialect.limitClause(limit) },
       blockSql: (ref) => vocabulary.get(ref)?.sql,
       prepareBlock: (ref, context) => prepareBlockForAsk(deps.projectRoot, vocabulary.get(ref), context, connection?.driver),
       ...(engine ? { engine } : {}),
@@ -762,18 +823,22 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     // connection surfaces verbatim at the first execution instead.
     let connection: ConnectionConfig | undefined;
     let connectionError: unknown;
+    emit({ type: 'executor.started', message: 'Assembling the governed context for this question.', route: 'generated_answer' });
+    const contextStarted = Date.now();
     try {
       connection = await deps.resolveConnection(request);
     } catch (error) {
       connectionError = error;
     }
-    const contextStarted = Date.now();
     const view = await vocabularyFor(request, connection);
     const contextMs = Date.now() - contextStarted;
     const vocabulary = view.vocabulary;
     const prior = request.threadId ? deps.priorIntent(request) : undefined;
     let engine: PrepareDeps['engine'];
     try { engine = await deps.semanticEngine?.(); } catch { engine = undefined; }
+    // The context is assembled BEFORE the first model call; a run that ends
+    // in this phase must show where its time went, so the assembly is an event.
+    emit({ type: 'executor.started', message: `Context assembled in ${contextMs} ms: ${vocabulary.entries.length} governed objects${engine ? ` · semantic engine ${engine}` : ''}.`, route: 'generated_answer' });
     emit({ type: 'executor.started', message: prior ? 'Reading the question as an edit of the previous analysis.' : 'Reading the question against the governed vocabulary.', route: 'generated_answer' });
     const outcome = await runAskPipeline({
       question: request.question,
@@ -831,7 +896,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         if (!connection || !relation || !column || !entry || entry.roles.includes('time') || entry.roles.includes('numeric') || entry.roles.includes('boolean')) return [];
         const executor = deps.executor as QueryExecutor & { executePositional?: QueryExecutor['executePositional'] };
         if (typeof executor.executePositional !== 'function') return [];
-        const sql = memberCandidatesSql(relation, column, (name) => `"${name.replace(/"/g, '""')}"`);
+        const sql = memberCandidatesSql(physicalRelationName(relation, relationDatabases(deps.getManifest().manifest), connection?.driver), column, (name) => renderPhysicalIdentifier(name, connection?.driver, (value) => `"${value.replace(/"/g, '""')}"`));
         const found = await executor.executePositional(sql, [`%${literal.toLowerCase()}%`], connection, { maxRows: 8 });
         return (found.rows as Array<Record<string, unknown>>)
           .map((row) => row.member)
@@ -1164,6 +1229,7 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
   const telemetry: AgentRouteExecutorResult['telemetry'] = {
     version: 1,
     stageDurationsMs: {
+      ...(receipt.timings.context !== undefined ? { context: receipt.timings.context } : {}),
       ...(receipt.timings.resolve !== undefined ? { meaning: receipt.timings.resolve } : {}),
       ...(receipt.timings.execute !== undefined ? { execution: receipt.timings.execute } : {}),
       total: Date.now() - startedAt,

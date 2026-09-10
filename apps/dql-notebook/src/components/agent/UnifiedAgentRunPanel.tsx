@@ -3286,7 +3286,7 @@ function canonicalPhysicalTraceFacts(trace: Pick<AskTraceDataV1, 'envelope' | 's
   }
 
   const orderedStages = [
-    'conversation', 'snapshot', 'retrieval', 'meaning', 'cascade', 'plan',
+    'conversation', 'snapshot', 'retrieval', 'context', 'meaning', 'cascade', 'plan',
     'provider', 'tool', 'sql', 'repair', 'result', 'narration', 'research', 'persistence',
   ];
   const stages = orderedStages

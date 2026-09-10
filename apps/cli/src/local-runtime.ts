@@ -557,6 +557,7 @@ import {
 import {
   MetricFlowUnavailableError,
   hasDbtSemanticManifest,
+  resolveSemanticManifestPath,
   hasMetricFlowCli,
 } from "./metricflow.js";
 import {
@@ -5949,6 +5950,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (governedAnswer.result) delete governedAnswer.result.dqlArtifact;
   }
 
+  // THE ENGINE, DECIDED ONCE. MetricFlow is planned only when its manifest
+  // exists where dbt writes it — beside the dbt manifest, under the dbt
+  // project directory (`dbt.projectDir`), not under the DQL root. When the
+  // runtime is installed but the manifest is missing, the downgrade to the
+  // native composer is recorded so a compile refusal can say why. Cached
+  // briefly: the runtime status probes the CLI and, when configured, dbt
+  // Cloud, and a question should not pay for that twice.
+  let plannedEngineCache: { at: number; value: { engine: SemanticRuntimeAdapterId; downgraded?: string } } | undefined;
+  const plannedAskEngine = async (): Promise<{ engine: SemanticRuntimeAdapterId; downgraded?: string }> => {
+    if (plannedEngineCache && Date.now() - plannedEngineCache.at < 60_000) return plannedEngineCache.value;
+    const planned = await resolvePlannedSemanticAdapter(projectRoot, undefined);
+    const semanticManifestPath = resolveSemanticManifestPath(projectRoot, { dbtProjectDir: projectConfig.dbt?.projectDir, dbtManifestPath: projectConfig.dbt?.manifestPath, provenanceManifestPath: projectSnapshot().manifest?.dbtProvenance?.manifestPath });
+    const value = planned === 'metricflow-cli' && !existsSync(semanticManifestPath)
+      ? { engine: 'native' as const, downgraded: `MetricFlow is installed but ${semanticManifestPath} was not found; run \`dbt parse\` in the dbt project so derived metrics compile on MetricFlow` }
+      : { engine: planned };
+    plannedEngineCache = { at: Date.now(), value };
+    return value;
+  };
   const askPipelineExecutor = createAskPipelineRouteExecutor({
     projectRoot,
     executor,
@@ -5971,10 +5990,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     },
     // The engine the semantic candidate will compile on, decided the same
     // way `compileSemantic` decides it, so the binder speaks its dialect.
-    semanticEngine: async () => {
-      const planned = await resolvePlannedSemanticAdapter(projectRoot, undefined);
-      return planned === 'metricflow-cli' && !existsSync(join(projectRoot, 'target', 'semantic_manifest.json')) ? 'native' : planned;
-    },
+    semanticEngine: async () => plannedAskEngine().then((planned) => planned.engine),
     compileSemantic: async (request, connection) => {
       if (!semanticLayer) throw new Error('no semantic layer is loaded');
       const connectionName = projectConfig.defaultConnectionName;
@@ -5982,8 +5998,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       // A full runtime that cannot actually run here (MetricFlow without a
       // parsed semantic manifest) must not veto the native composer: the
       // pipeline prepares on whatever engine can compile, and says which.
-      const planned = await resolvePlannedSemanticAdapter(projectRoot, undefined);
-      const plannedAdapter = planned === 'metricflow-cli' && !existsSync(join(projectRoot, 'target', 'semantic_manifest.json')) ? 'native' : planned;
+      const planned = await plannedAskEngine();
+      const plannedAdapter = planned.engine;
       const compiled = await compileSemanticRuntimeQuery({ ...request, engine: plannedAdapter }, {
         projectRoot,
         projectConfig,
@@ -5993,7 +6009,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         tableMapping,
       });
       if (!compiled) {
-        throw new Error(`the ${plannedAdapter} semantic engine could not compose metrics ${request.metrics.join(', ')}${request.dimensions.length ? ` by ${request.dimensions.join(', ')}` : ''}: no join path or grouping satisfied every metric`);
+        // Say WHY the native composer was the engine when a fuller one was planned.
+        throw new Error(`the ${plannedAdapter} semantic engine could not compose metrics ${request.metrics.join(', ')}${planned.downgraded ? ` (${planned.downgraded})` : ''}${request.dimensions.length ? ` by ${request.dimensions.join(', ')}` : ''}: no join path or grouping satisfied every metric`);
       }
       return {
         sql: compiled.sql.trim(),

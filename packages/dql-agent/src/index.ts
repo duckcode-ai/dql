@@ -2028,3 +2028,4 @@ export { generateStructured, extractFirstJsonObject, type StructuredReply } from
 export * from './relationship-validation.js';
 export * from './agentic/research-assets.js';
 export * from './concept-draft.js';
+export { renderPhysicalIdentifier, renderPhysicalRelation } from './governed-relational-compiler.js';

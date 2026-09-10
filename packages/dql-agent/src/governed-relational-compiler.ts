@@ -816,7 +816,7 @@ function splitQualifiedRelation(value: string): string[] {
   return segments;
 }
 
-function renderPhysicalIdentifier(
+export function renderPhysicalIdentifier(
   value: string,
   driver: string | undefined,
   quote: (value: string) => string,
@@ -837,7 +837,7 @@ function renderPhysicalIdentifier(
   return quote(trimmed);
 }
 
-function renderPhysicalRelation(
+export function renderPhysicalRelation(
   value: string,
   driver: string | undefined,
   quote: (value: string) => string,

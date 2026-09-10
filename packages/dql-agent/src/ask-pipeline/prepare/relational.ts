@@ -141,12 +141,20 @@ export function scopeFormulaAggregates(expr: string, renderConditions: () => str
   return wrapped > 0 ? out : undefined;
 }
 
+// A physical name is rendered as the warehouse knows it; an alias is minted
+// by this program and always quoted. Conflating the two named
+// "consumption_metrics"."header" on Snowflake — an object that does not exist.
+function physical(dialect: SqlDialectLike): (name: string) => string {
+  return (name) => (dialect.quotePhysical ?? dialect.quoteIdentifier.bind(dialect))(name);
+}
+
 function qualifyRelation(dialect: SqlDialectLike, relation: string): string {
-  return relation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
+  if (dialect.qualifyRelation) return dialect.qualifyRelation(relation);
+  return relation.split('.').map((part) => physical(dialect)(part)).join('.');
 }
 
 function qualify(dialect: SqlDialectLike, relation: string, column: string): string {
-  return `${qualifyRelation(dialect, relation)}.${dialect.quoteIdentifier(column)}`;
+  return `${qualifyRelation(dialect, relation)}.${physical(dialect)(column)}`;
 }
 
 function physicalOf(entry: VocabularyEntry | undefined): { relation: string; column?: string; expr?: string; aggregate?: string } | undefined {

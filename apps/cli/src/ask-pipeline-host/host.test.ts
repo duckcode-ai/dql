@@ -3,7 +3,7 @@ import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { connectionKey, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes, vocabularyViewKey } from './host.js';
+import { columnProbeBudgetMs, connectionKey, physicalRelationName, relationDatabases, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -85,6 +85,31 @@ describe('a ref outside the envelope is explained as out of scope, never as none
     expect(evaluations[1]!.message).toContain('may cover it under another');
     expect(coverageEvaluations({ uncovered: ['x'] })[0]!.severity).toBe('info');
     expect(coverageEvaluations({})).toEqual([]);
+  });
+});
+
+describe('a Snowflake relation is addressed with its database (Codex: the relational route dropped it)', () => {
+  const manifest = { dbtProvenance: { nodes: { 'model.p.header': { relation: '"ANALYTICS"."CONSUMPTION_METRICS"."HEADER"' }, 'model.p.two': { relation: 'consumption_metrics.two' } } } };
+  it('provenance names the database; the vocabulary name is completed only on Snowflake and only when known', () => {
+    const databases = relationDatabases(manifest as never);
+    expect(databases.get('consumption_metrics.header')).toBe('ANALYTICS');
+    expect(physicalRelationName('consumption_metrics.header', databases, 'snowflake')).toBe('ANALYTICS.consumption_metrics.header');
+    expect(physicalRelationName('consumption_metrics.two', databases, 'snowflake')).toBe('consumption_metrics.two');
+    expect(physicalRelationName('consumption_metrics.header', databases, 'duckdb')).toBe('consumption_metrics.header');
+  });
+});
+
+describe('the column probe is bounded', () => {
+  it('returns a probed relation under the name it asked for, so the warehouse spelling merges into the manifest relation', () => {
+    const named = underAskedNames([{ schema: 'CONSUMPTION_METRICS', name: 'HEADER', columns: [{ name: 'TOTAL_BCM', dataType: 'NUMBER' }] }, { schema: 'OTHER', name: 'THING', columns: [] }], ['consumption_metrics.header']);
+    expect(named[0]).toMatchObject({ schema: 'consumption_metrics', name: 'header' });
+    expect(named[0]!.columns[0]!.name).toBe('TOTAL_BCM');
+    expect(named[1]).toMatchObject({ schema: 'OTHER', name: 'THING' });
+  });
+  it('has a default budget and an override', () => {
+    expect(columnProbeBudgetMs({})).toBe(12_000);
+    expect(columnProbeBudgetMs({ DQL_ASK_COLUMN_PROBE_MS: '3000' })).toBe(3_000);
+    expect(columnProbeBudgetMs({ DQL_ASK_COLUMN_PROBE_MS: 'nope' })).toBe(12_000);
   });
 });
 

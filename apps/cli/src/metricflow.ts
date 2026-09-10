@@ -1,5 +1,5 @@
 import { existsSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
 /**
@@ -331,6 +331,20 @@ export function resolveDbtProjectRoot(projectRoot: string, configuredPath?: stri
 
 export function hasDbtSemanticManifest(projectRoot: string, configuredPath?: string): boolean {
   return existsSync(join(resolveDbtProjectRoot(projectRoot, configuredPath), 'target', 'semantic_manifest.json'));
+}
+
+/**
+ * Where `dbt parse` writes the semantic manifest for THIS project: beside the
+ * dbt manifest, under the dbt project directory — which is the DQL project
+ * root only when the two coincide. A lookup under the DQL root alone said
+ * "no MetricFlow manifest" for every project that wraps a dbt repository,
+ * and silently compiled derived metrics on the native composer instead.
+ */
+export function resolveSemanticManifestPath(projectRoot: string, options: { dbtProjectDir?: string; dbtManifestPath?: string; provenanceManifestPath?: string } = {}): string {
+  if (options.provenanceManifestPath) return join(dirname(options.provenanceManifestPath), 'semantic_manifest.json');
+  const dbtRoot = resolveDbtProjectRoot(projectRoot, options.dbtProjectDir);
+  if (options.dbtManifestPath) return join(dirname(resolve(dbtRoot, options.dbtManifestPath)), 'semantic_manifest.json');
+  return join(dbtRoot, 'target', 'semantic_manifest.json');
 }
 
 /** Check whether the configured MetricFlow executable is callable. */

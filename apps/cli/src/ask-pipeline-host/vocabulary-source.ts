@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { DQLManifest, SemanticLayer } from '@duckcodeailabs/dql-core';
-import { buildVocabularyIndex, extractBlockContract, type VocabularyEntry, type VocabularyIndex, type VocabularySource } from '@duckcodeailabs/dql-agent';
+import { buildVocabularyIndex, extractBlockContract, renderPhysicalIdentifier, type VocabularyEntry, type VocabularyIndex, type VocabularySource } from '@duckcodeailabs/dql-agent';
 
 /**
  * The whole authorized vocabulary of a project, from the objects the host
@@ -16,6 +16,8 @@ export interface VocabularySourceInput {
   manifest?: DQLManifest;
   /** Runtime relations the host has introspected, when the manifest has no dbt sources. */
   relations?: Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }> }>;
+  /** The warehouse driver, so a physical expression is written as that warehouse reads names (Snowflake: unquoted plain names). */
+  driver?: string;
 }
 
 /** `"jaffle_shop"."dev"."customers"` and `jaffle_shop.dev.customers` become `dev.customers`. */
@@ -93,15 +95,15 @@ export function nativeAggregateBinding(sql: string | undefined, declaredType: st
   return AGGREGATES.has(aggregate) ? { expr: text, aggregate } : undefined;
 }
 
-export function qualifyExpression(expr: string, relation: string, columns: Iterable<string>): string {
-  const quoted = relation.split('.').map((part) => `"${part}"`).join('.');
+export function qualifyExpression(expr: string, relation: string, columns: Iterable<string>, quote: (name: string) => string = (name) => `"${name}"`): string {
+  const quoted = relation.split('.').map((part) => quote(part)).join('.');
   const literals: string[] = [];
   let out = expr.replace(/'(?:[^']|'')*'/g, (literal) => { literals.push(literal); return `__lit${literals.length - 1}__`; });
   const known = new Set([...columns].map((column) => column.toLowerCase()));
   out = out.replace(/(?<![\w."])([A-Za-z_][A-Za-z0-9_]*)(?![\w"]|\s*\()/g, (match, identifier: string) => {
     const lower = identifier.toLowerCase();
     if (/^__lit\d+__$/.test(identifier) || SQL_WORDS.has(lower)) return match;
-    if (known.has(lower) || !/^\d/.test(identifier)) return `${quoted}."${identifier}"`;
+    if (known.has(lower) || !/^\d/.test(identifier)) return `${quoted}.${quote(identifier)}`;
     return match;
   });
   return out.replace(/__lit(\d+)__/g, (_m, index: string) => literals[Number(index)]!);
@@ -172,6 +174,17 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
   // dbt column descriptions: the fallback definition for a semantic dimension that declares none.
   const columnDescriptions = new Map<string, string>();
   const relationSeen = new Set<string>();
+  const relationKeyByLower = new Map<string, string>();
+  // A physical name inside an expression is written as this warehouse reads it,
+  // and a relation carries its database on a warehouse that addresses objects
+  // across databases (Snowflake), from the manifest's provenance.
+  const physicalQuote = (name: string) => renderPhysicalIdentifier(name, input.driver, (value) => `"${value.replace(/"/g, '""')}"`);
+  const databaseOf = new Map<string, string>();
+  for (const node of Object.values(input.manifest?.dbtProvenance?.nodes ?? {})) {
+    const parts = ((node as { relation?: string }).relation ?? '').replace(/["`]/g, '').split('.').map((part) => part.trim()).filter(Boolean);
+    if (parts.length === 3) databaseOf.set(`${parts[1]}.${parts[2]}`.toLowerCase(), parts[0]!);
+  }
+  const addressed = (relation: string) => (input.driver?.toLowerCase() === 'snowflake' && relation.split('.').length === 2 && databaseOf.get(relation.toLowerCase()) ? `${databaseOf.get(relation.toLowerCase())}.${relation}` : relation);
 
   // A relation may be described more than once: by a partial dbt manifest
   // (a few documented columns, no types) and by the warehouse itself (every
@@ -179,7 +192,11 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
   // ADD the columns and types the earlier lacked, so a column the manifest
   // never mentioned is still a column, and a typed literal compiles by type.
   const addRelation = (relation: { schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; domain?: string; columnLineage?: Record<string, string[]> }) => {
-    const key = relation.schema ? `${relation.schema}.${relation.name}` : relation.name;
+    // Case-insensitive: the warehouse spells CONSUMPTION_METRICS.HEADER, the
+    // manifest consumption_metrics.header — one relation, the first spelling
+    // kept as the key every later lookup uses.
+    const spelled = relation.schema ? `${relation.schema}.${relation.name}` : relation.name;
+    const key = relationKeyByLower.get(spelled.toLowerCase()) ?? spelled;
     if (relationSeen.has(key)) {
       const existing = source.relations!.find((item) => (item.schema ? `${item.schema}.${item.name}` : item.name) === key);
       if (existing && relation.columnLineage) existing.columnLineage = { ...(existing.columnLineage ?? {}), ...relation.columnLineage };
@@ -200,6 +217,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       return;
     }
     relationSeen.add(key);
+    relationKeyByLower.set(key.toLowerCase(), key);
     relationColumns.set(key, new Set(relation.columns.map((column) => column.name)));
     for (const column of relation.columns) if (column.description) columnDescriptions.set(`${key}.${column.name}`, column.description);
     source.relations!.push({ ...relation, ...(relation.domain ? { domains: [relation.domain] } : {}), columns: relation.columns.map((column) => ({ ...column })) });
@@ -212,6 +230,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     const columns = Object.values(dbt.columns ?? {}).map((column) => ({ name: column.name, ...(column.type ? { dataType: column.type } : {}), ...(column.description ? { description: column.description } : {}) }));
     addRelation({ ...(dbt.schema ? { schema: dbt.schema } : {}), name: item.name, ...(dbt.description ? { description: dbt.description } : {}), columns });
   }
+  // The warehouse's description first (native bindings need the columns), under the names the host asked for.
   for (const relation of input.relations ?? []) addRelation(relation);
   // Every MODELED ENTITY's relation is a physical relation the interpreter may
   // read, whether or not a cube or a dbt source describes it: a table-bound
@@ -275,8 +294,8 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       const localFilters = filterSpec.unparsed.length === 0 && filters.every((filter) => knownColumns.has(filter.column));
       let physical: { relation: string; expr: string; aggregate: string } | undefined;
       if (relation && measure && aggregate && AGGREGATES.has(aggregate) && simple && localFilters) {
-        const base = qualifyExpression(measure.expr ?? measure.name, relation, knownColumns);
-        const expr = scopedAggregateExpression(base, aggregate, filters.map((filter) => `${qualifyExpression(filter.column, relation, knownColumns)} ${filter.condition}`));
+        const base = qualifyExpression(measure.expr ?? measure.name, addressed(relation), knownColumns, physicalQuote);
+        const expr = scopedAggregateExpression(base, aggregate, filters.map((filter) => `${qualifyExpression(filter.column, addressed(relation), knownColumns, physicalQuote)} ${filter.condition}`));
         physical = { relation, expr, aggregate };
       }
       // A derived or ratio metric binds physically ONLY when plain SQL can
@@ -312,7 +331,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
             if (!inputMetric || !inputModel || !inputMeasure || !agg || !AGGREGATES.has(agg) || (inputMetric.metricType && inputMetric.metricType !== 'simple')) return undefined;
             const inputRelation = relationOfCube.get(inputModel);
             if (!inputRelation) return undefined;
-            const inner = qualifyExpression(inputMeasure.expr ?? inputMeasure.name, inputRelation, cubeColumns(inputModel));
+            const inner = qualifyExpression(inputMeasure.expr ?? inputMeasure.name, addressed(inputRelation), cubeColumns(inputModel), physicalQuote);
             return { alias: item.alias ?? item.name!, ref: `metric:${inputModel}.${inputMetric.name}`, sql: agg === 'count_distinct' ? `COUNT(DISTINCT ${inner})` : `${agg.toUpperCase()}(${inner})`, relation: inputRelation };
           });
           if (expression && bound.length && bound.every(Boolean)) {
@@ -342,8 +361,8 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
         // metric stays with the semantic engine.
         const scopable = filterSpec.unparsed.length === 0 && filters.every((filter) => filter.entityPath.length === 0 && nativeColumns?.has(filter.column));
         if (nativeRelation && nativeColumns && native && scopable) {
-          const base = qualifyExpression(native.expr, nativeRelation, nativeColumns);
-          const expr = scopedAggregateExpression(base, native.aggregate, filters.map((filter) => `${qualifyExpression(filter.column, nativeRelation, nativeColumns)} ${filter.condition}`));
+          const base = qualifyExpression(native.expr, addressed(nativeRelation), nativeColumns, physicalQuote);
+          const expr = scopedAggregateExpression(base, native.aggregate, filters.map((filter) => `${qualifyExpression(filter.column, addressed(nativeRelation), nativeColumns, physicalQuote)} ${filter.condition}`));
           physical = { relation: nativeRelation, expr, aggregate: native.aggregate };
         } else if (nativeRelation && nativeColumns && native && !scopable) {
           engineOnly = 'a declared scope the relational tier cannot bind to this relation';
@@ -358,7 +377,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
         const formula = nativeRelation && relationColumns.has(nativeRelation) ? nativeFormulaBinding(metric.sql) : undefined;
         // A formula of aggregates cannot carry a per-row scope: the scope
         // belongs inside each aggregate, and this one is written as a whole.
-        if (nativeRelation && formula && filters.length === 0 && filterSpec.unparsed.length === 0) physical = { relation: nativeRelation, expr: qualifyExpression(formula, nativeRelation, relationColumns.get(nativeRelation) ?? []), aggregate: 'derived' };
+        if (nativeRelation && formula && filters.length === 0 && filterSpec.unparsed.length === 0) physical = { relation: nativeRelation, expr: qualifyExpression(formula, addressed(nativeRelation), relationColumns.get(nativeRelation) ?? [], physicalQuote), aggregate: 'derived' };
         else if (nativeRelation && formula) engineOnly = 'a scoped formula of aggregates';
       }
       if (!physical && !derived && !engineOnly && metric.metricType && metric.metricType !== 'simple') engineOnly = `a ${metric.metricType} metric the relational tier cannot compose`;
@@ -384,7 +403,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       source.measures!.push({
         name: measure.name, model: measure.cube, label: measure.label, description: measure.description, ...(aggregate ? { aggregation: aggregate } : {}),
         ...(measure.expr ? { expr: measure.expr } : {}), sourceId: measure.name,
-        ...(relation && aggregate && AGGREGATES.has(aggregate) ? { physical: { relation, expr: qualifyExpression(measure.expr ?? measure.name, relation, cubeColumns(measure.cube)), aggregate } } : {}),
+        ...(relation && aggregate && AGGREGATES.has(aggregate) ? { physical: { relation, expr: qualifyExpression(measure.expr ?? measure.name, addressed(relation), cubeColumns(measure.cube), physicalQuote), aggregate } } : {}),
         ...(timeRole ? { aggTimeDimension: timeRole } : {}), ...(displayFormat ? { displayFormat } : {}),
       });
     }

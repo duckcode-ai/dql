@@ -24,7 +24,11 @@ export async function prepare(input: PrepareInput): Promise<PrepareResult> {
   const record = (tier: PrepareResult['attempts'][number]['tier'], result: { candidates: PreparedCandidate[]; refusals: PreparedRefusal[] }) => {
     candidates.push(...result.candidates);
     refusals.push(...result.refusals);
-    attempts.push({ tier, outcome: result.candidates.length ? 'prepared' : 'refused', ...(result.refusals[0] ? { detail: `${result.refusals[0].code}: ${result.refusals[0].message.slice(0, 200)}` } : {}) });
+    // A tier with nothing to try — no certified block exists, exploration was
+    // not opted into — is SKIPPED, not refused: the answer went past it, and a
+    // reader must not conclude that a block would have repaired the failure.
+    const skipped = !result.candidates.length && result.refusals.length > 0 && result.refusals.every((refusal) => refusal.code === 'no_certified_block' || refusal.code === 'exploration_not_opted_in');
+    attempts.push({ tier, outcome: result.candidates.length ? 'prepared' : skipped ? 'skipped' : 'refused', ...(result.refusals[0] ? { detail: `${result.refusals[0].code}: ${result.refusals[0].message.slice(0, 200)}` } : {}) });
   };
   const excluded = new Set(input.excludeTiers ?? []);
   let certifiedFallbacks: PreparedCandidate[] = [];

@@ -5207,7 +5207,7 @@ function deterministicTerminalAnswerForRun(run: AgentRun): string {
   const code = incident?.code;
   const known: TerminalIncidentCode[] = [
     'CONNECTION_NOT_CONFIGURED', 'PROVIDER_FAILURE', 'COMPILATION_FAILED', 'RESULT_CONTRACT_MISMATCH',
-    'ANALYTICAL_COVERAGE_GAP', 'ANALYTICAL_EXECUTION_FAILED', 'CANCELLED',
+    'ANALYTICAL_COVERAGE_GAP', 'ANALYTICAL_EXECUTION_FAILED', 'CANCELLED', 'RUN_TIMEOUT',
   ];
   return composeAnswer({
     kind: 'incident',
@@ -5527,6 +5527,11 @@ function terminalIncidentForRun(
   }
   if (failureCode === 'RUN_CANCELLED' || run.status === 'cancelled') {
     return { version: 1, code: 'CANCELLED', boundary: 'run', origin: 'unknown', impact: 'run_cancelled', safeAction: 'none' };
+  }
+  // A deadline that ended the run before any tier decided anything is a
+  // timeout at the phase it reached — never "coverage gap at cascade".
+  if (failureCode === 'TIMEOUT') {
+    return { version: 1, code: 'RUN_TIMEOUT', boundary: 'run', origin: 'governance_gate', impact: 'answer_not_produced', safeAction: 'inspect_failure' };
   }
   if (failureCode === 'CONNECTION_NOT_CONFIGURED' && planFrozen) {
     return { version: 1, code: 'CONNECTION_NOT_CONFIGURED', boundary: 'sql.execute', origin: 'governance_gate', impact: 'execution_not_attempted', safeAction: 'configure_connection' };

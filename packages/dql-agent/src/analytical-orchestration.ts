@@ -754,6 +754,8 @@ export interface AskTerminalIncidentV1 {
     | 'RESULT_CONTRACT_MISMATCH'
     | 'ANALYTICAL_EXECUTION_FAILED'
     | 'ANALYTICAL_COVERAGE_GAP'
+    /** The run's own deadline ended it; the phase says how far it got. */
+    | 'RUN_TIMEOUT'
     | 'PROVIDER_FAILURE'
     /** Every admitted Research branch used its bounded window without a finding. */
     | 'RESEARCH_BRANCH_TIMEOUT'

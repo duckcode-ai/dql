@@ -616,3 +616,22 @@ describe('a superlative that ties has several answers', () => {
     expect(clear.note).toBeUndefined();
   });
 });
+
+describe('the composer writes physical names as the warehouse reads them and aliases as its own', () => {
+  it('a Snowflake-like dialect leaves plain relation and column names unquoted while every alias stays quoted', () => {
+    const vocabulary = buildVocabularyIndex({
+      metrics: [{ name: 'revenue', model: 'orders', aggregation: 'sum', physical: { relation: 'sales.orders', expr: 'SUM(sales.orders.amount)', aggregate: 'sum' } }],
+      dimensions: [{ name: 'region', model: 'orders', dataType: 'string', physical: { relation: 'sales.orders', column: 'region' } }],
+      relations: [{ schema: 'sales', name: 'orders', columns: [{ name: 'amount', dataType: 'NUMBER' }, { name: 'region', dataType: 'VARCHAR' }] }],
+    });
+    const intent = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:orders.revenue' }], groupBy: [{ ref: 'dimension:orders.region', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }).intent!;
+    const snowflakeLike = { quoteIdentifier: (name: string) => `"${name}"`, quotePhysical: (name: string) => (/^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name}"`), dateTrunc: (grain: string, expr: string) => `DATE_TRUNC('${grain}', ${expr})`, limitClause: (limit: number) => `LIMIT ${limit}` };
+    const result = composeRelational(intent, vocabulary, { dialect: snowflakeLike });
+    expect(result.candidate?.sql).toContain('FROM sales.orders');
+    expect(result.candidate?.sql).toContain('sales.orders.region AS "region"');
+    expect(result.candidate?.sql).toContain('AS "revenue"');
+    expect(result.candidate?.sql).not.toContain('"sales"');
+    const addressed = composeRelational(intent, vocabulary, { dialect: { ...snowflakeLike, qualifyRelation: (relation: string) => `ANALYTICS.${relation}` } });
+    expect(addressed.candidate?.sql).toContain('FROM ANALYTICS.sales.orders');
+  });
+});

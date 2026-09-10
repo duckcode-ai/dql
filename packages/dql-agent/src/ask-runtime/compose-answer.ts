@@ -23,6 +23,7 @@ export type TerminalIncidentCode =
   | 'RESULT_CONTRACT_MISMATCH'
   | 'ANALYTICAL_COVERAGE_GAP'
   | 'ANALYTICAL_EXECUTION_FAILED'
+  | 'RUN_TIMEOUT'
   | 'CANCELLED';
 
 export type HostFloorRefusalReason = 'no measure' | 'filter' | 'time' | 'unbound' | `qualifier ${string}`;
@@ -120,6 +121,8 @@ function incident(shape: Extract<TerminalAnswerShape, { kind: 'incident' }>): st
         : 'DQL could not prove one safe analytical path from the governed data it holds. Review the available modeled fields, then retry.';
     case 'ANALYTICAL_EXECUTION_FAILED':
       return 'The selected governed query did not complete on the current connection. Review the connection and trace, then retry.';
+    case 'RUN_TIMEOUT':
+      return 'This Ask run reached its time limit before it finished; the trace says which phase it was in. Retry the same question, or use Research for a longer budget.';
     case 'CANCELLED':
       return 'This Ask run was cancelled before it completed.';
     default:
@@ -199,6 +202,7 @@ function incidentTitle(code: TerminalIncidentCode | undefined): string {
     case 'RESULT_CONTRACT_MISMATCH': return 'The query result did not match the frozen plan';
     case 'ANALYTICAL_COVERAGE_GAP': return REFUSAL_TITLES.modeling_gap;
     case 'ANALYTICAL_EXECUTION_FAILED': return REFUSAL_TITLES.execution_error;
+    case 'RUN_TIMEOUT': return 'The run reached its time limit';
     case 'CANCELLED': return 'Cancelled';
     default: return DEFAULT_TITLE;
   }
