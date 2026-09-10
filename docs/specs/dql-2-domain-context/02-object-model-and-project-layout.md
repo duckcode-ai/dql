@@ -124,6 +124,56 @@ evidence. Ambiguous membership remains unresolved until reviewed.
 - Product ownership is stewardship only; authorization remains a runtime/Cloud
   concern.
 
+## Business concepts (amendment A-005, 2026-09-09)
+
+A **concept** is the one thing a business knows under several keys: a term with
+identity, bound to one or more modeled entities, optionally with a conformance
+rule. It is authored in the modeling source (`modeling/*.dql.yaml` or
+`modeling/areas/*.dql.yaml`) under `concepts:` and compiles to
+`<domain>::concept::<localId>`:
+
+```yaml
+concepts:
+  - id: customer
+    name: Customer
+    description: One purchasing account, however a system keys it.
+    synonyms: [client, account]
+    bindings:
+      - entity: customer              # local or <domain>::entity::<id>
+        role: canonical
+        grain: customer_id
+      - entity: growth::entity::acquisition
+        role: conformed
+        grain: customer_id
+    rule: customer_id is the same identity in both models
+    equivalences:                     # typed, certifiable mapping between two bindings
+      - from: customer
+        to: growth::entity::acquisition
+        keys: [{ from: customer_id, to: customer_id }]
+        cardinality: one_to_one
+        validFrom: 2024-01-01
+        status: draft
+    status: draft                     # draft | reviewed | certified
+    owner: analytics@company.test
+    origin: ai_draft                  # ai_draft | manual
+```
+
+`bindings` say where the concept lives; an `equivalence` is the typed mapping
+(key translation, cardinality, applicable time) that execution may later rely
+on. A cross-domain binding requires the authorized route — certified export,
+matching consumer import and allowed purpose — else it is a diagnostic. A
+concept with two or more bindings and a `rule` derives a conformance
+declaration, so existing `conforms_to` edges keep working.
+
+**Concepts are discovery and clarification first.** In their first release a
+concept reference in a question becomes a clarification listing the bindings
+with their grain and domain; it never rewrites an executable identity.
+Executable equivalence is a separately gated later capability that may resolve
+a concept to one binding only through a **certified** `equivalence`, and across
+domains only when the full interface chain holds. AI may draft concepts on
+demand from existing terms, entities and certified relationships; every draft
+is `status: draft`, `origin: ai_draft`, and nothing auto-certifies.
+
 ## Serialization
 
 Source writers preserve comments and stable ordering where feasible. Compiled

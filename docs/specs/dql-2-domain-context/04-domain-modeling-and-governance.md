@@ -59,6 +59,50 @@ Automatic generated joins require all of the following (`REL-002`):
 Unknown/many-to-many/attribution-required edges may remain visible but cause a
 clarification or refusal. A dbt DAG edge never supplies join proof (`REL-001`).
 
+### Join authority (amendment A-003, 2026-09-09)
+
+A generated join has exactly one of three authorities, recorded on every
+executed join step and in the run receipt (`JoinAuthorityV1`):
+
+| Source | Authority | Promise |
+| ------ | --------- | ------- |
+| Semantic layer (`semantic_layer`) | compiler-owned | The dbt/MetricFlow or native semantic model declares the join; DQL does not re-certify it. |
+| Certified DQL relationship (`dql_relationship`, `certified`) | the six conditions above (`automaticJoinAllowed`) | Business meaning, direction, fanout, freshness and any cross-domain interface are certified by a human. |
+| Warehouse proof (`warehouse_proof`, `proven_default`) | structural only | On this snapshot and execution target the join key is unique in the label relation and every fact key is present there, so the join neither multiplies nor drops rows. **It does not establish that the keys identify the same business entity, that historical mappings hold, or that cross-domain use is permitted; those remain certification.** |
+
+`proven_default` is admitted only when all of the following hold:
+
+1. the two relations resolve to **one** domain, or the project declares no
+   domains at all; an endpoint with unknown or ambiguous domain membership (no
+   modeled entity, or entities in several domains bound to one relation) is a
+   modeling gap, never a proof — missing domain information never widens
+   eligibility;
+2. endpoints in different domains are never probed: cross-domain use requires
+   the complete export/import/purpose/contract/certified-relationship chain
+   (`REL-003`, `CONTRACT-001`), and a blocked import, mismatched purpose or
+   stale route is refused before any warehouse statement runs;
+3. a declared draft relationship, when one exists, supplies the keys, direction
+   and cardinality (a declared `many_to_many` or `attribution_required` is
+   never probed as `many_to_one`); with no draft the probe runs fact → label
+   only, on key columns whose names match on both sides;
+4. the evidence is fresh: it carries `checkedAt`, the execution-target identity,
+   and a data-generation token where the driver offers one; execution authority
+   requires the token to match and `checkedAt` to be within the configured
+   bound (`agent.relationshipEvidenceTtlHours`, default 24). Expired or changed
+   evidence requires another probe. Persisted evidence remains available for
+   review and certification after it has lost execution authority.
+
+Every `proven_default` join is disclosed in the answer in plain words and shown
+in the trust facet as "join: proven, not certified". The emitted evidence has
+the same shape as Domain Studio validation evidence, so certification can reuse
+it without re-running the proof.
+
+**Validation and certification are distinct actions.** Validation gathers
+evidence — from Domain Studio's Validate action or from Ask's warehouse proof —
+and can attach it to a draft. Certification is a separate, explicit human
+promotion that reuses that evidence. Asking a question never certifies anything
+(`REL-005`).
+
 ## Relationship authoring UX contract
 
 Users drag from a source column handle to a target column handle. The UI creates
@@ -101,7 +145,9 @@ tokens (`SKILL-001`, `SKILL-002`).
 All authored semantics use `draft → evaluated → reviewed → certified`, plus
 `deprecated` and computed `stale_certification`. AI, import, migration, and
 warehouse proof can attach evidence or advance evaluation results but cannot
-perform the human review/certification transition. Corrections enter the same
+perform the human review/certification transition; a warehouse proof gathered
+while answering a question attaches evidence to the draft exactly as Domain
+Studio's Validate action does, and nothing more (`REL-005`). Corrections enter the same
 draft/evaluation/review path before they become approved hints.
 
 ## Lineage

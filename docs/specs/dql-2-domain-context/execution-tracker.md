@@ -15,6 +15,7 @@ spec and acceptance matrix first.
 | W06 migration and security | `codex/dql2-w06-migration-security` | TBD | — | unassigned | pending | — | — |
 | W07 integration/evals/performance | `codex/dql2-w07-integration` | TBD | — | unassigned | pending | — | — |
 | W08 OSS release/docs | `codex/dql2-w08-release` | TBD | — | unassigned | pending | — | — |
+| W10 context contract (pack projection + vocabulary view, join authority, policies, concepts) | `claude/dql-routing-failures-b43af4` | `63f6e327` | — | implementer | in progress | independent verifier pending | Phase 0 (spec amendments A-003/A-004/A-005: `REL-002`, `REL-005`, `CTX-010`, spec 02 concepts, spec 04 join authority, spec 06 projection) landed first; Phases 1–2 (projection, view, sections, policies, join authority, key-type freshness) re-record both golden lanes once; Phase 3 surfaces; Phase 4 concepts (discovery-only); Phase 5 measured cleanup after consumer migration; Phase 7 matrix reconciliation. Plan: `~/.claude/plans/we-have-built-the-temporal-rose.md` ("Context contract"). |
 | W09 context authoring and AI | current worktree | current integration base | uncommitted | implementer | implemented | independent verifier pending | `UI-019`, `API-011`, `MIG-003`, `MIG-004`, `REL-004`, `SKILL-005`, `CTX-008`, `AGT-024`, `API-012`, `SKILL-006`, `UI-020`, `UI-021`, and `E2E-018` implemented; `E2E-019` remains specified pending provider-backed and independent verification |
 
 ## Integration protocol

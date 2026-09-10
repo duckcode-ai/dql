@@ -44,6 +44,55 @@ Skills are indexed in the same snapshot as metadata/KG and are available to
 CLI, server, MCP, and Ask. Missing skill ingestion is a snapshot build error,
 not a silent separate loader path.
 
+## Context projection and vocabulary view (amendment A-004, 2026-09-09; `CTX-010`)
+
+The request-bound `LocalContextPack` is the **single context projection** every
+analytical surface reads — Ask, Notebook AI, App planning, Research, CLI, MCP
+and Chat. The Ask interpreter's vocabulary (`VocabularyIndex`) is a **view
+built from the pack**, never from the manifest or semantic layer directly; the
+host attaches physical bindings to that view by stable source identity. There
+is one projection and one view, not two context models.
+
+Admission is complete before ranking. For the resolved `DomainContextEnvelope`
+(domain, allowed descendants, certified imports, lifecycle) the pack carries
+the **complete eligible set**: every metric, measure, dimension, entity,
+certified block, relation, term, relationship, selected skill descriptor,
+approved hint and capsule. Physical columns are hydrated only for relations in
+the seed neighbourhood (spec 06 "Evidence retrieval"); every other eligible
+relation still carries its column names so an exact reference resolves. Lane
+retrieval and fusion order the seeds and choose what renders inside
+per-section character caps; they never remove an eligible object from the set,
+and a truncated section reports its count.
+
+Discovery is a defined path, not a hope: (1) query-aware hydration before the
+first interpretation call pins every full-inventory match for the question's
+terms, with its dependencies, ahead of seed order; (2) the single bounded
+correction re-ask is the same-snapshot expansion, carrying the objects a
+reading named or a clause's words matched but the first cards did not show;
+(3) an answer may say *not modeled* only after the whole-inventory check finds
+nothing, and otherwise says *not shown in this reading* and names the match.
+Acceptance is discovery on natural-language questions whose targets lie
+outside the initial cards, on both the reference fixtures and the large fixture.
+
+Skills are **selected first, then overlaid**: only the eligible, selected skills
+for a request contribute aliases and typed policies, as a request-specific
+overlay on the cached base view, so an unselected or out-of-domain skill can
+never influence interpretation, and every alias used is traceable in the
+receipt to a selected skill. The vocabulary fingerprint covers descriptions,
+aliases, rules, policies and join authority, and the overlay's fingerprint is
+recorded, so the contract identifies what the model actually read.
+
+A missing or mismatched snapshot pointer never falls back to an unscoped
+inventory: the host rebuilds the snapshot within the turn's budget or returns
+`SNAPSHOT_UNAVAILABLE`.
+
+Every run receipt carries a **context ledger**: retrieved (per lane), admitted
+(per kind, plus columns hydrated for how many of how many relations), rendered
+(per kind, characters, truncations), selected by the model, enforced (policies,
+required filters, gaps), and used in execution (joins with their authority,
+relations, tier, engine). It holds identifiers and counts only — never cards,
+SQL or values (`OBS-003`).
+
 ## Retrieval policy
 
 Retrieval first filters by domain/import eligibility and lifecycle, then ranks
