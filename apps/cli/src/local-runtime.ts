@@ -12951,6 +12951,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         dbtProvenance: manifest.dbtProvenance,
         modeling: manifest.modeling,
         domainAssets: collectDomainPackageAssets(projectRoot, loadDomainPackageRegistry(projectRoot)),
+        // Warehouse proofs Ask gathered while answering (REL-005): validation
+        // evidence a person can certify from, never a certification.
+        askEvidence: readAskRelationshipEvidence(projectRoot),
         lineage: manifest.lineage,
         diagnostics: manifest.diagnostics ?? [],
         snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
@@ -23378,6 +23381,48 @@ function providerDispatchTerminalEvidence(value: unknown): ProviderDispatchTermi
     repairs: Number.isInteger(evidence.repairs) && (evidence.repairs ?? -1) >= 0 ? evidence.repairs! : 0,
     fallbackReason: typeof evidence.fallbackReason === 'string' ? evidence.fallbackReason : 'provider_error',
   };
+}
+
+/**
+ * The relationship proofs Ask wrote to `.dql/evidence/relationships/` (one
+ * per relation pair), keyed by the declared relationship id when a draft
+ * existed and by `<from>__<to>` otherwise. Read on demand for Domain Studio;
+ * a malformed file is skipped, never fatal.
+ */
+function readAskRelationshipEvidence(projectRoot: string): Record<string, AskRelationshipEvidenceV1> {
+  const dir = join(projectRoot, '.dql', 'evidence', 'relationships');
+  if (!existsSync(dir)) return {};
+  const out: Record<string, AskRelationshipEvidenceV1> = {};
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith('.relationship-evidence.json')) continue;
+    try {
+      const raw = JSON.parse(readFileSync(join(dir, file), 'utf8')) as Record<string, unknown>;
+      const evidence = raw.evidence as ManifestRelationshipValidationEvidence | undefined;
+      const fromRelation = typeof raw.fromRelation === 'string' ? raw.fromRelation : undefined;
+      const toRelation = typeof raw.toRelation === 'string' ? raw.toRelation : undefined;
+      if (!evidence || !fromRelation || !toRelation) continue;
+      const key = typeof raw.relationshipId === 'string' && raw.relationshipId ? raw.relationshipId : `${fromRelation}__${toRelation}`;
+      out[key] = {
+        fromRelation, toRelation,
+        ...(typeof raw.relationshipId === 'string' ? { relationshipId: raw.relationshipId } : {}),
+        keys: Array.isArray(raw.keys) ? raw.keys as Array<{ from: string; to: string }> : [],
+        evidence,
+        freshness: (raw.freshness ?? {}) as AskRelationshipEvidenceV1['freshness'],
+        path: `.dql/evidence/relationships/${file}`,
+      };
+    } catch { /* one unreadable file never hides the others */ }
+  }
+  return out;
+}
+
+export interface AskRelationshipEvidenceV1 {
+  fromRelation: string;
+  toRelation: string;
+  relationshipId?: string;
+  keys: Array<{ from: string; to: string }>;
+  evidence: ManifestRelationshipValidationEvidence;
+  freshness: { checkedAt?: string; expiresAt?: string; target?: string; generationToken?: string };
+  path: string;
 }
 
 async function validateModelingRelationship(

@@ -3,6 +3,7 @@ import { normalizeDqlArtifactReference, type DqlArtifactReference } from '@duckc
 import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
 import type {
   ManifestDbtFirstModeling,
+  ManifestModelRelationship,
   ManifestDbtProvenance,
   ManifestDiagnostic,
   ManifestLineage,
@@ -300,9 +301,21 @@ export interface DbtFirstModelingResponse {
   dbtProvenance: ManifestDbtProvenance;
   modeling: ManifestDbtFirstModeling;
   domainAssets?: Record<string, Record<string, string[]>>;
+  /** Warehouse proofs Ask gathered (REL-005), keyed by relationship id or `<from>__<to>`; evidence to certify from, never a certification. */
+  askEvidence?: Record<string, AskRelationshipEvidence>;
   lineage: ManifestLineage;
   diagnostics: ManifestDiagnostic[];
   snapshot?: { id: string; stale: boolean; error?: string };
+}
+
+export interface AskRelationshipEvidence {
+  fromRelation: string;
+  toRelation: string;
+  relationshipId?: string;
+  keys: Array<{ from: string; to: string }>;
+  evidence: NonNullable<ManifestModelRelationship['validation']>;
+  freshness: { checkedAt?: string; expiresAt?: string; target?: string; generationToken?: string };
+  path: string;
 }
 
 export interface DbtModelInventoryItem {

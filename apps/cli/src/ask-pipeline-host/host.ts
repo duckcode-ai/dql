@@ -542,6 +542,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       cubeOfRelation.set(relation, cube.name);
     }
     const quoteRelation = (relation: string) => relation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
+    const joinGraph = modelingJoinGraph(deps.getManifest().manifest, quoteRelation);
     const semanticJoinPath = (fromRelation: string, toRelation: string): RelationalJoinStep[] | undefined => {
       if (!layer) return undefined;
       const from = cubeOfRelation.get(fromRelation);
@@ -552,10 +553,17 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       return path.map((join) => {
         const left = relationOfCube.get(join.left) ?? join.left;
         const right = relationOfCube.get(join.right) ?? join.right;
-        return { relation: right, on: join.sql.replace(/\$\{left\}/g, quoteRelation(left)).replace(/\$\{right\}/g, quoteRelation(right)) };
+        // The compiler owns this join (REL-002 source one): the ledger says so
+        // instead of calling it a declared edge of unknown authority.
+        const domains = { from: joinGraph.domainsOf(left), to: joinGraph.domainsOf(right) };
+        const authority: JoinAuthorityV1 = {
+          version: 1, from: left, to: right, keys: [], source: 'semantic_layer', authority: 'certified',
+          scope: !joinGraph.hasDomains ? 'no_domains' : domains.from.length === 1 && domains.to.length === 1 && domains.from[0] === domains.to[0] ? 'within_domain' : 'cross_domain_certified',
+          domains, snapshotId: deps.getManifest().snapshotId,
+        };
+        return { relation: right, on: join.sql.replace(/\$\{left\}/g, quoteRelation(left)).replace(/\$\{right\}/g, quoteRelation(right)), authority };
       });
     };
-    const joinGraph = modelingJoinGraph(deps.getManifest().manifest, quoteRelation);
     const declaredJoinPath = joinGraph.path;
     const sessionProvenPath = (fromRelation: string, toRelation: string): RelationalJoinStep[] | undefined => {
       const prefix = `${fromRelation}->${toRelation}|`;

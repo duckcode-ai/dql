@@ -1,3 +1,4 @@
+import type { AskRelationshipEvidence } from '../../api/client.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Blocks, Boxes, CheckCircle2, Columns3, Download, EyeOff, FileSearch, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, MessageCircle, Network, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, XCircle } from 'lucide-react';
 import { DEFAULT_MODEL_AREA_ID } from '@duckcodeailabs/dql-core/modeling-ids';
@@ -506,6 +507,7 @@ export function DbtFirstModelingPage() {
             />
           ) : selectedRelationship ? (
             <RelationshipInspector
+              askEvidence={data.askEvidence?.[relationshipRecordKey(data.modeling.relationships, selectedRelationship)] ?? data.askEvidence?.[selectedRelationship.qualifiedId ?? selectedRelationship.id]}
               relationship={selectedRelationship}
               t={t}
               onEdit={() =>
@@ -896,7 +898,10 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
   const [change, setChange] = useState<ModelingAuthoringChange | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [validation, setValidation] = useState(existing?.validation);
+  // A draft Ask already proved on the warehouse starts from that evidence
+  // (REL-005): certifying reuses it; the person still presses Certify.
+  const askProof = existing ? data.askEvidence?.[relationshipRecordKey(data.modeling.relationships, existing)] ?? data.askEvidence?.[existing.qualifiedId ?? existing.id] : undefined;
+  const [validation, setValidation] = useState(existing?.validation ?? askProof?.evidence);
   const [selectedDbtDetail, setSelectedDbtDetail] = useState<DbtNodeAuthoringDetail | null>(null);
   const [relationshipDetails, setRelationshipDetails] = useState<Record<string, DbtNodeAuthoringDetail | undefined>>({});
   const [showAdvancedRelationship, setShowAdvancedRelationship] = useState(Boolean(existing && (existing.roles || existing.aggregation || existing.importRefs?.length || existing.attributionBlock || existing.evidenceExpiresAt)));
@@ -1980,7 +1985,7 @@ function SourcePreview({ title, source, t }: { title: string; source: string; t:
   return <section><strong style={{ fontSize: 10 }}>{title}</strong><pre tabIndex={0} style={{ maxHeight: 360, overflow: 'auto', whiteSpace: 'pre-wrap', background: t.appBg, border: `1px solid ${t.headerBorder}`, borderRadius: 6, padding: 10, fontSize: 9.5, color: t.textSecondary }}>{source}</pre></section>;
 }
 
-function RelationshipInspector({ relationship, t, onEdit, onDelete }: { relationship: ManifestModelRelationship; t: Theme; onEdit: () => void; onDelete?: () => void }) {
+function RelationshipInspector({ relationship, askEvidence, t, onEdit, onDelete }: { relationship: ManifestModelRelationship; askEvidence?: AskRelationshipEvidence; t: Theme; onEdit: () => void; onDelete?: () => void }) {
   return (
     <Inspector t={t}>
       <InspectorTitle title={relationship.localId} subtitle={`${relationship.from} → ${relationship.to}`} t={t} />
@@ -1998,7 +2003,14 @@ function RelationshipInspector({ relationship, t, onEdit, onDelete }: { relation
       <Property label="endpoint roles" value={[relationship.roles?.from, relationship.roles?.to].filter(Boolean).join(' → ') || 'Not declared'} t={t} />
       <Property label="allowed joins" value={relationship.joinTypes?.join(', ') || 'left'} t={t} />
       <Property label="automatic agent join" value={relationship.automaticJoinAllowed ? 'Allowed' : 'Blocked'} t={t} />
-      {relationship.validation ? <Evidence evidence={relationship.validation} t={t} /> : <Message text="No warehouse proof has been captured. This edge cannot authorize automatic SQL joins." t={t} />}
+      {relationship.validation
+        ? <Evidence evidence={relationship.validation} t={t} />
+        : askEvidence
+          ? <>
+              <Message text={`Validated by Ask on ${askEvidence.evidence.checkedAt.slice(0, 10)} while answering a question — proven on the warehouse (${askEvidence.freshness.target ?? 'the active connection'}), not certified. Certifying this relationship reuses that evidence; asking never certifies.`} t={t} />
+              <Evidence evidence={askEvidence.evidence} t={t} />
+            </>
+          : <Message text="No warehouse proof has been captured. This edge cannot authorize automatic SQL joins." t={t} />}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
         <Button primary t={t} onClick={onEdit}>Edit relationship</Button>
         {onDelete ? <Button t={t} danger onClick={onDelete}>Delete relationship</Button> : null}
