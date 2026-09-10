@@ -4322,6 +4322,14 @@ function diagnosticReceiptV4ForRun(run: AgentRun): AgentRunDiagnosticReceiptV4 {
   // 0 dimensions, no executable plan" for a run that answered).
   const v9 = run.diagnosticReceiptV9;
   const v9Intent = v9?.intent?.kind === 'analytics' ? v9.intent : undefined;
+  if (v9 && roleCounts.size === 0) {
+    // The ledger counts what the run admitted, by vocabulary kind; those are its roles.
+    const kindRole: Record<string, AskDecisionSummaryV1['evidenceByRole'][number]['role']> = { metric: 'metric', measure: 'metric', entity: 'entity_key', dimension: 'categorical_dimension', relation: 'relation', column: 'context', block: 'context', term: 'context', relationship: 'relationship', skill: 'context', hint: 'context', concept: 'context' };
+    for (const [kind, count] of Object.entries(v9.context?.admitted?.byKind ?? {})) {
+      const role = kindRole[kind];
+      if (role && count > 0) roleCounts.set(role, (roleCounts.get(role) ?? 0) + count);
+    }
+  }
   const v9Understood = v9Intent
     ? {
         measures: v9Intent.measures.length,

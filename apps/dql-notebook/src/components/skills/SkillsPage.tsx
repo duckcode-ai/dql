@@ -252,7 +252,7 @@ export function SkillsPage({
               <FolderOpen size={12} strokeWidth={1.8} />
               <span>Skill folder</span>
               <code style={{ color: t.textSecondary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pathSettings?.path ?? 'skills'}</code>
-              {pathSettings ? <span>· {pathSettings.exists ? `${pathSettings.skillCount} loaded${sourcePathFilter ? ` · ${sorted.length} shown here` : ''}` : 'not found'}</span> : null}
+              {pathSettings ? <span>· {pathSettings.exists ? `${pathSettings.skillCount} loaded${sourcePathFilter ? ` · ${sorted.length} shown here` : ''}` : pathSettings.skillCount > 0 ? `${pathSettings.skillCount} loaded from domain folders · this folder is not created yet` : 'not found'}</span> : null}
             </div>
           </div>
           <div

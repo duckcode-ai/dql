@@ -102,6 +102,55 @@ describe('applySkillPolicies', () => {
     applySkillPolicies(unrelated, regions, { now: () => NOW });
     expect(unrelated.filters).toHaveLength(2);
   });
+  it('a mandatory range and a question range are compared as intervals: an empty intersection is refused, a question inside the rule needs nothing, a partial overlap applies both', () => {
+    const vocabulary = vocabularyWith([{ ref: 'skill:nba.player-reporting', id: 'player-reporting', requiredFilters: ['points >= 10'] }]);
+    const below = intent({ filters: [{ ref: 'column:dev.facts.points', op: 'lt', values: [10], source: 'question' }] });
+    expect(applySkillPolicies(below, vocabulary, { now: () => NOW }).refusal?.code).toBe('policy_conflict');
+    expect(below.filters).toHaveLength(1);
+    const inside = intent({ filters: [{ ref: 'column:dev.facts.points', op: 'gt', values: ['20'], source: 'question' }] });
+    expect(applySkillPolicies(inside, vocabulary, { now: () => NOW }).refusal).toBeUndefined();
+    expect(inside.filters).toHaveLength(1);
+    const point = intent({ filters: [{ ref: 'column:dev.facts.points', op: 'eq', values: [15], source: 'question' }] });
+    expect(applySkillPolicies(point, vocabulary, { now: () => NOW }).refusal).toBeUndefined();
+    expect(point.filters).toHaveLength(1);
+    const outside = intent({ filters: [{ ref: 'column:dev.facts.points', op: 'eq', values: [5], source: 'question' }] });
+    expect(applySkillPolicies(outside, vocabulary, { now: () => NOW }).refusal?.code).toBe('policy_conflict');
+    const overlap = intent({ filters: [{ ref: 'column:dev.facts.points', op: 'lte', values: [30], source: 'question' }] });
+    expect(applySkillPolicies(overlap, vocabulary, { now: () => NOW }).refusal).toBeUndefined();
+    expect(overlap.filters).toHaveLength(2); // 10 ≤ points ≤ 30: the intersection, both applied
+    const mixed = intent({ filters: [{ ref: 'column:dev.facts.points', op: 'in', values: [5, 15], source: 'question' }] });
+    expect(applySkillPolicies(mixed, vocabulary, { now: () => NOW }).refusal).toBeUndefined();
+    expect(mixed.filters).toHaveLength(2);
+    // The Boolean cases keep working beside the ranges.
+    const bool = vocabularyWith([{ ref: 'skill:nba.player-reporting', id: 'player-reporting', requiredFilters: ['participated = true'] }]);
+    const contradiction = intent({ filters: [{ ref: 'dimension:facts.participated', op: 'eq', values: [false], source: 'question' }] });
+    expect(applySkillPolicies(contradiction, bool, { now: () => NOW }).refusal?.code).toBe('policy_conflict');
+  });
+  it('overlapping memberships intersect instead of refusing: "EMEA or APAC" under "not APAC" is EMEA', () => {
+    const regions = vocabularyWith([{ ref: 'skill:x', id: 'x', requiredFilters: ["region not in ('APAC')"] }]);
+    const overlap = intent({ filters: [{ ref: 'dimension:orders.region', op: 'in', values: ['EMEA', 'APAC'], source: 'question' }] });
+    expect(applySkillPolicies(overlap, regions, { now: () => NOW }).refusal).toBeUndefined();
+    expect(overlap.filters).toHaveLength(2);
+    const only = intent({ filters: [{ ref: 'dimension:orders.region', op: 'eq', values: ['APAC'], source: 'question' }] });
+    expect(applySkillPolicies(only, regions, { now: () => NOW }).refusal?.code).toBe('policy_conflict');
+    const elsewhere = intent({ filters: [{ ref: 'dimension:orders.region', op: 'in', values: ['EMEA', 'LATAM'], source: 'question' }] });
+    expect(applySkillPolicies(elsewhere, regions, { now: () => NOW }).refusal).toBeUndefined();
+    expect(elsewhere.filters).toHaveLength(1); // already outside APAC
+    const inclusive = vocabularyWith([{ ref: 'skill:y', id: 'y', requiredFilters: ["region in ('EMEA', 'APAC')"] }]);
+    const excluded = intent({ filters: [{ ref: 'dimension:orders.region', op: 'not_in', values: ['EMEA', 'APAC'], source: 'question' }] });
+    expect(applySkillPolicies(excluded, inclusive, { now: () => NOW }).refusal?.code).toBe('policy_conflict');
+    const partial = intent({ filters: [{ ref: 'dimension:orders.region', op: 'neq', values: ['APAC'], source: 'question' }] });
+    expect(applySkillPolicies(partial, inclusive, { now: () => NOW }).refusal).toBeUndefined();
+    expect(partial.filters).toHaveLength(2);
+  });
+  it('a database-qualified column is the same field as the schema-qualified one', () => {
+    const vocabulary = vocabularyWith([{ ref: 'skill:nba.player-reporting', id: 'player-reporting', requiredFilters: ['participated = true'] }]);
+    const threePart = intent({ filters: [{ ref: 'column:warehouse.dev.facts.participated', op: 'eq', values: [false], source: 'question' }] });
+    expect(applySkillPolicies(threePart, vocabulary, { now: () => NOW }).refusal?.code).toBe('policy_conflict');
+    const met = intent({ filters: [{ ref: 'column:warehouse.dev.facts.participated', op: 'eq', values: [true], source: 'question' }] });
+    expect(applySkillPolicies(met, vocabulary, { now: () => NOW }).refusal).toBeUndefined();
+    expect(met.filters).toHaveLength(1);
+  });
   it('a bare field name that several entries spell on ONE column binds; on different columns it is ambiguous and says so', () => {
     const vocabulary = vocabularyWith([{ ref: 'skill:nba.player-reporting', id: 'player-reporting', requiredFilters: ['participated'] }]);
     const target = intent();

@@ -264,7 +264,7 @@ function normalizeRelation(value: string | undefined): string | undefined {
  * admitted only if an export to this envelope carries it; owned elsewhere →
  * not physical context here (and counted). A relation nobody binds stays.
  */
-function ownedRelations<T extends { schema?: string; name: string; domain?: string }>(relations: T[] | undefined, scope: ProjectionScope | undefined, dropped: Record<string, number>): T[] | undefined {
+function ownedRelations<T extends { schema?: string; name: string; domain?: string; domains?: string[] }>(relations: T[] | undefined, scope: ProjectionScope | undefined, dropped: Record<string, number>): T[] | undefined {
   if (!relations || !scope || scope.own.length === 0) return relations;
   const own = new Set(scope.own.map(lower));
   // One provider may export several interfaces to this envelope: their relations add up.
@@ -275,12 +275,13 @@ function ownedRelations<T extends { schema?: string; name: string; domain?: stri
     imported.set(lower(item.providerDomain), set);
   }
   const kept = relations.filter((relation) => {
-    if (!relation.domain) return true;
-    const owner = lower(relation.domain);
-    if (own.has(owner)) return true;
+    // Ownership is a set: a relation two domains bind is physical context of
+    // both, whichever entity was compiled first.
+    const owners = (relation.domains?.length ? relation.domains : relation.domain ? [relation.domain] : []).map(lower);
+    if (owners.length === 0) return true;
+    if (owners.some((owner) => own.has(owner))) return true;
     const key = lower(relation.schema ? `${relation.schema}.${relation.name}` : relation.name);
-    const exported = imported.get(owner);
-    return Boolean(exported && (exported.has(key) || exported.has(lower(relation.name))));
+    return owners.some((owner) => { const exported = imported.get(owner); return Boolean(exported && (exported.has(key) || exported.has(lower(relation.name)))); });
   });
   if (kept.length < relations.length) dropped.relation = (dropped.relation ?? 0) + (relations.length - kept.length);
   return kept;

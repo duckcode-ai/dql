@@ -884,6 +884,7 @@ describe("AgentRunEngine", () => {
             tiers: [{ round: 1, tier: 'certified', outcome: 'refused' }, { round: 1, tier: 'semantic', outcome: 'refused' }, { round: 1, tier: 'relational', outcome: 'prepared' }],
             executed: { tier: 'relational', sqlFingerprint: 'sha256:x', rowCount: 5, ms: 3, proofs: [] },
             timings: {}, reuse: 'none',
+            context: { version: 1, admitted: { byKind: { metric: 4, dimension: 6, entity: 2, relation: 3, skill: 1, hint: 1 } } },
           },
         } as never),
       },
@@ -891,6 +892,8 @@ describe("AgentRunEngine", () => {
     const run = await engine.run({ question: 'top five players by points', requestedMode: 'ask' });
     expect(run.diagnosticReceiptV4?.summary).toMatchObject({
       understoodRequest: { measures: 2, dimensions: 2, entityRequested: true, ranking: { direction: 'top', limit: 5, defaultedLimit: false } },
+      // The evidence a pipeline run read is its ledger, by role — never "no role evidence" for a run that answered.
+      evidenceByRole: [{ role: 'categorical_dimension', candidateCount: 6 }, { role: 'context', candidateCount: 2 }, { role: 'entity_key', candidateCount: 2 }, { role: 'metric', candidateCount: 4 }, { role: 'relation', candidateCount: 3 }],
       tierDecisions: [
         { tier: 'certified', outcome: 'ineligible', planFrozen: false },
         { tier: 'semantic', outcome: 'ineligible', planFrozen: false },

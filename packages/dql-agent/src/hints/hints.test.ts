@@ -447,6 +447,14 @@ describe('hint recall does not depend on which model ranked first', () => {
     }).applies).toBe(true);
   });
 
+  it('a hint scoped to a dbt unique id is found by the bare relation name at the retrieval gate, not only by the normalizer', () => {
+    const fullId = { dbtModel: 'model.nba_analysis.local_player_game_facts' };
+    expect(hintAppliesToScope(fullId, { dbtModel: 'local_player_game_facts', dbtModels: ['local_player_game_facts'], text: 'weighted shooting' }).applies).toBe(true);
+    expect(hintAppliesToScope(fullId, { dbtModels: ['dim_teams', 'local_player_game_facts'], text: 'weighted shooting' }).applies).toBe(true);
+    expect(hintAppliesToScope({ dbtModel: 'local_player_game_facts' }, { dbtModels: ['model.nba_analysis.local_player_game_facts'], text: '' }).applies).toBe(true);
+    expect(hintAppliesToScope({ metric: 'metric:revenue' }, { metrics: ['revenue'], text: '' }).applies).toBe(true);
+    expect(hintAppliesToScope(fullId, { dbtModels: ['dim_teams'], text: '' }).applies).toBe(false);
+  });
   it('still rejects a model the question never retrieved', () => {
     expect(hintAppliesToScope(scopedHint, {
       dbtModel: 'dim_customers',

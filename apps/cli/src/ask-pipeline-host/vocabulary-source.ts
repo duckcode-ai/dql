@@ -181,7 +181,11 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     const key = relation.schema ? `${relation.schema}.${relation.name}` : relation.name;
     if (relationSeen.has(key)) {
       const existing = source.relations!.find((item) => (item.schema ? `${item.schema}.${item.name}` : item.name) === key);
-      if (existing && !existing.domain && relation.domain) existing.domain = relation.domain;
+      if (existing && relation.domain) {
+        // Ownership is the set of every entity bound to the relation, in no order.
+        existing.domains = [...new Set([...(existing.domains ?? (existing.domain ? [existing.domain] : [])), relation.domain])].sort();
+        existing.domain = existing.domains[0];
+      }
       const names = relationColumns.get(key) ?? new Set<string>();
       for (const column of relation.columns) {
         const known = existing?.columns.find((item) => item.name.toLowerCase() === column.name.toLowerCase());
@@ -196,7 +200,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     relationSeen.add(key);
     relationColumns.set(key, new Set(relation.columns.map((column) => column.name)));
     for (const column of relation.columns) if (column.description) columnDescriptions.set(`${key}.${column.name}`, column.description);
-    source.relations!.push({ ...relation, columns: relation.columns.map((column) => ({ ...column })) });
+    source.relations!.push({ ...relation, ...(relation.domain ? { domains: [relation.domain] } : {}), columns: relation.columns.map((column) => ({ ...column })) });
   };
 
   // Physical relations: dbt sources recorded in the manifest, then anything the host introspected.

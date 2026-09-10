@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildManifest } from '@duckcodeailabs/dql-core';
+import { buildManifest, type DQLManifest } from '@duckcodeailabs/dql-core';
 import {
   applySkillPolicies, buildMetadataSnapshot, buildVocabularyIndex, domainContextSearchDomains, loadSkills, openMetadataCatalog,
   projectVocabularySource, resolveDomainContextEnvelope, upsertMetadataSnapshot, type VocabularySource,
@@ -129,6 +129,21 @@ describe('physical context follows the entity that binds it (A-003, item 3 of th
     expect(byKey.get('commerce.fct_returns')?.domain).toBe('returns');
     expect(byKey.get('commerce.fct_orders')?.domain).toBe('commerce');
     expect(byKey.get('commerce.fct_orders')?.description).toContain('purchase');
+  });
+  it('a relation two domains bind is owned by both, whichever entity was compiled first', () => {
+    const shared = (order: 'commerce-first' | 'finance-first') => {
+      const entities = Object.fromEntries((order === 'commerce-first' ? ['commerce', 'finance'] : ['finance', 'commerce']).map((domain) => [`${domain}::entity::shared`, { id: `${domain}::entity::shared`, localId: 'shared', qualifiedId: `${domain}::entity::shared`, dbtUniqueId: 'model.pkg.shared_facts', domain, grain: 'row', keys: ['id'], sourcePath: 'entities.dql.yaml', identityFingerprint: 'shared' }]));
+      const two = { modeling: { ...manifest.modeling, entities }, dbtProvenance: { nodes: { 'model.pkg.shared_facts': { relation: 'main.shared_facts' } } } } as unknown as DQLManifest;
+      return buildVocabularySource({ manifest: two }).relations!.find((relation) => relation.name === 'shared_facts')!;
+    };
+    expect(shared('commerce-first').domains).toEqual(['commerce', 'finance']);
+    expect(shared('finance-first').domains).toEqual(['commerce', 'finance']);
+    const relations = [{ schema: 'main', name: 'shared_facts', columns: [], domain: 'finance', domains: ['commerce', 'finance'] }];
+    for (const pin of ['commerce', 'finance'] as const) {
+      const kept = projectVocabularySource({ relations }, { objects: [], skills: [], appliedHints: [] }, { own: [pin], imports: [] }).source.relations ?? [];
+      expect(kept.map((relation) => relation.name)).toEqual(['shared_facts']);
+    }
+    expect(projectVocabularySource({ relations }, { objects: [], skills: [], appliedHints: [] }, { own: ['growth'], imports: [] }).source.relations).toEqual([]);
   });
   it('a pinned domain keeps its own relations, an import admits only the exported entity\'s relation, and a sibling\'s relations are not physical context here', () => {
     const scope = projectionScopeFor(envelope('growth', 'growth_attribution'), manifest)!;

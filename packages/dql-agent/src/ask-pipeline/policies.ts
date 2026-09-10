@@ -48,10 +48,12 @@ function literal(value: string): string | number | boolean {
  */
 export function fieldIdentity(ref: string, vocabulary: VocabularyIndex): string {
   const entry = vocabulary.get(ref);
-  const relationKey = (relation: string) => relation.replace(/"/g, '').split('.').slice(-2).join('.');
-  if (entry?.physical?.relation && entry.physical.column) return `${relationKey(entry.physical.relation)}.${entry.physical.column}`.toLowerCase();
+  // One field is `schema.table.column`: a database prefix (`db.schema.table.column`)
+  // names the same column, so the identity keeps the last three parts.
+  const canonical = (parts: string[]) => parts.slice(-3).join('.').toLowerCase();
+  if (entry?.physical?.relation && entry.physical.column) return canonical([...entry.physical.relation.replace(/"/g, '').split('.'), entry.physical.column.replace(/"/g, '')]);
   // A column ref IS its field: `column:<schema.table>.<column>`.
-  if ((entry?.kind ?? ref.split(':')[0]) === 'column') return ref.slice(ref.indexOf(':') + 1).replace(/"/g, '').toLowerCase();
+  if ((entry?.kind ?? ref.split(':')[0]) === 'column') return canonical(ref.slice(ref.indexOf(':') + 1).replace(/"/g, '').split('.'));
   return ref.toLowerCase();
 }
 
@@ -107,17 +109,90 @@ export function comparePredicates(existing: IntentPredicate, required: IntentPre
   const setEq = ev.length === rv.length && ev.every((value) => rv.includes(value));
   const eqLike = (op: string) => op === 'eq' || op === 'in';
   const neqLike = (op: string) => op === 'neq' || op === 'not_in';
+  const rangeLike = (op: string) => op === 'gt' || op === 'gte' || op === 'lt' || op === 'lte';
+  // The semantics are set intersection: the rule and the question both hold.
+  // An empty intersection is a contradiction; a question already inside the
+  // rule needs nothing added; anything else applies both, which IS the
+  // intersection ("EMEA or APAC" under "not APAC" is EMEA, not a refusal).
   if (eqLike(existing.op) && eqLike(required.op)) {
     if (setEq) return 'equal';
     if (ev.every((value) => rv.includes(value))) return 'stronger';
     if (ev.some((value) => rv.includes(value))) return 'unrelated';
     return 'contradicts';
   }
-  if (neqLike(existing.op) && eqLike(required.op)) return ev.some((value) => rv.includes(value)) ? 'contradicts' : 'unrelated';
-  if (eqLike(existing.op) && neqLike(required.op)) return ev.some((value) => rv.includes(value)) ? 'contradicts' : 'stronger';
+  if (neqLike(existing.op) && eqLike(required.op)) return rv.every((value) => ev.includes(value)) ? 'contradicts' : 'unrelated';
+  if (eqLike(existing.op) && neqLike(required.op)) {
+    if (ev.every((value) => rv.includes(value))) return 'contradicts';
+    return ev.some((value) => rv.includes(value)) ? 'unrelated' : 'stronger';
+  }
   if (neqLike(existing.op) && neqLike(required.op)) return setEq ? 'equal' : 'unrelated';
+  // Ranges: `score >= 10` against `score < 10` is empty; `score > 20` is inside it.
+  if ((rangeLike(existing.op) || eqLike(existing.op)) && (rangeLike(required.op) || eqLike(required.op)) && (rangeLike(existing.op) || rangeLike(required.op))) {
+    const a = intervalOf(existing); const b = intervalOf(required);
+    if (a && b) {
+      if (!intervalsOverlap(a, b)) return 'contradicts';
+      if (intervalWithin(a, b)) return intervalWithin(b, a) ? 'equal' : 'stronger';
+      return 'unrelated';
+    }
+    // A list of points against a range: none inside is empty, all inside is already met.
+    if (eqLike(existing.op) && b) {
+      const points = ev.map(scalarOf);
+      if (points.every((point) => point !== undefined)) {
+        const inside = points.filter((point) => intervalWithin({ lo: point!, hi: point!, loOpen: false, hiOpen: false }, b));
+        return inside.length === 0 ? 'contradicts' : inside.length === points.length ? 'stronger' : 'unrelated';
+      }
+    }
+    if (eqLike(required.op) && a) {
+      const points = rv.map(scalarOf);
+      if (points.every((point) => point !== undefined)) return points.some((point) => intervalWithin({ lo: point!, hi: point!, loOpen: false, hiOpen: false }, a)) ? 'unrelated' : 'contradicts';
+    }
+    return 'unrelated';
+  }
   if (existing.op === required.op && setEq) return 'equal';
   return 'unrelated';
+}
+
+interface Interval { lo: number; hi: number; loOpen: boolean; hiOpen: boolean }
+
+/** A number, or an ISO date, as a point on one line; anything else is not comparable. */
+function scalarOf(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  if (/^-?\d+(\.\d+)?$/.test(text)) return Number(text);
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) { const ms = Date.parse(text); return Number.isFinite(ms) ? ms : undefined; }
+  return undefined;
+}
+
+function intervalOf(predicate: IntentPredicate): Interval | undefined {
+  if (predicate.values.length !== 1) return undefined;
+  const point = scalarOf(predicate.values[0]);
+  if (point === undefined) return undefined;
+  switch (predicate.op) {
+    case 'eq': return { lo: point, hi: point, loOpen: false, hiOpen: false };
+    case 'gt': return { lo: point, hi: Infinity, loOpen: true, hiOpen: true };
+    case 'gte': return { lo: point, hi: Infinity, loOpen: false, hiOpen: true };
+    case 'lt': return { lo: -Infinity, hi: point, loOpen: true, hiOpen: true };
+    case 'lte': return { lo: -Infinity, hi: point, loOpen: true, hiOpen: false };
+    default: return undefined;
+  }
+}
+
+function intervalsOverlap(a: Interval, b: Interval): boolean {
+  const lo = Math.max(a.lo, b.lo); const hi = Math.min(a.hi, b.hi);
+  if (lo < hi) return true;
+  if (lo > hi) return false;
+  // They meet at one point: it is in the intersection only if closed on both sides.
+  const loOpen = (a.lo === lo && a.loOpen) || (b.lo === lo && b.loOpen);
+  const hiOpen = (a.hi === hi && a.hiOpen) || (b.hi === hi && b.hiOpen);
+  return !loOpen && !hiOpen;
+}
+
+/** Every point of `a` lies in `b`. */
+function intervalWithin(a: Interval, b: Interval): boolean {
+  const loOk = a.lo > b.lo || (a.lo === b.lo && (a.loOpen || !b.loOpen));
+  const hiOk = a.hi < b.hi || (a.hi === b.hi && (a.hiOpen || !b.hiOpen));
+  return loOk && hiOk;
 }
 
 function describePredicate(predicate: IntentPredicate, vocabulary: VocabularyIndex): string {

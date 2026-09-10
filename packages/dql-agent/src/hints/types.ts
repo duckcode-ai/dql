@@ -396,6 +396,19 @@ function scopesOverlap(a: HintScope, b: HintScope): boolean {
   return sharedConstraint;
 }
 
+/**
+ * One name for every spelling of a scope target: a dbt unique id
+ * (`model.<pkg>.<name>`, `source.<pkg>.<src>.<name>`) and a kind prefix
+ * (`metric:`, `dbt_model:`) name the same object as the bare name. The
+ * retrieval gate compares THESE, so a hint captured under the unique id is
+ * found by a question whose context carries the bare relation name.
+ */
+export function normalizeScopeName(value: string): string {
+  const bare = value.trim().toLowerCase().replace(/^(block|metric|term|dbt_model|dbt_source|domain):/, '');
+  const uniqueId = /^(model|seed|snapshot)\.[^.]+\.(.+)$/.exec(bare) ?? /^source\.[^.]+\.[^.]+\.(.+)$/.exec(bare);
+  return uniqueId ? uniqueId[uniqueId.length - 1]! : bare;
+}
+
 function eqScope(a: string, b: string): boolean {
-  return a.trim().toLowerCase() === b.trim().toLowerCase();
+  return normalizeScopeName(a) === normalizeScopeName(b);
 }

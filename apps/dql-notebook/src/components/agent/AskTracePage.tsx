@@ -365,8 +365,8 @@ function TraceHeader({ trace, t, onRefresh }: { trace: AskTraceDataV1; t: Theme;
   );
 }
 
-function askRuntimeModeLabel(_mode: NonNullable<AskTraceDataV1['runtimeMode']>): string {
-  return 'Authoritative V2 runtime';
+function askRuntimeModeLabel(mode: NonNullable<AskTraceDataV1['runtimeMode']>): string {
+  return mode === 'pipeline_v3' ? 'Ask pipeline runtime' : 'Authoritative V2 runtime';
 }
 
 function TraceTabs({ selected, onSelect, t }: { selected: TraceTab; onSelect: (tab: TraceTab) => void; t: Theme }): JSX.Element {
@@ -970,7 +970,7 @@ export function TraceDecisionStory({ trace, t, onSelectSpan: _onSelectSpan }: { 
     ['Understood request', `${request.measures} measure${request.measures === 1 ? '' : 's'}, ${request.dimensions} dimension${request.dimensions === 1 ? '' : 's'}${request.entityRequested ? ', an entity output' : ''}${request.ranking ? `, ${request.ranking.direction} ${request.ranking.limit}${request.ranking.defaultedLimit ? ' (default)' : ''}` : ''}. Conversation binding: ${request.conversationBinding.replace(/_/g, ' ')}.`],
     ['Evidence by role', summary.evidenceByRole.length > 0
       ? summary.evidenceByRole.map((entry) => `${entry.role.replace(/_/g, ' ')}: ${entry.candidateCount}`).join(' · ')
-      : 'No role evidence was retained for this legacy-compatible run.' ],
+      : 'No role evidence was retained for this run.' ],
     ['Tier decisions', summary.tierDecisions.length > 0
       ? summary.tierDecisions.map((entry) => `${entry.tier}: ${entry.outcome}${entry.planFrozen ? ' (frozen)' : ''}`).join(' · ')
       : 'No cascade tier receipt was recorded.' ],

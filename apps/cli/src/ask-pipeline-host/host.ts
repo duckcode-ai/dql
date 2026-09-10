@@ -400,6 +400,19 @@ export function joinScopeDecision(
  * pinned domain with its ancestors and descendants, plus, per import
  * provider, the relations of the entities its matching exports name.
  */
+/**
+ * The projected vocabulary is a function of the base source AND of the whole
+ * envelope selection. The purpose chooses which exports are imported, and a
+ * different export is different physical context; a key that ignored it
+ * served the previous purpose's provider relations to the next request.
+ */
+export function vocabularyViewKey(baseKey: string, envelope: Pick<DomainContextEnvelope, 'activeDomain' | 'purpose' | 'modelAreaId' | 'allowedImports' | 'descendants'>, pack: Pick<LocalContextPack, 'skills' | 'appliedHints' | 'eligible' | 'domainBriefing'>): string {
+  const skillRefs = pack.skills.map((skill) => skill.qualifiedId ?? skill.id).sort().join(',');
+  const hintIds = pack.appliedHints.map((hint) => hint.hintId).sort().join(',');
+  const imports = envelope.allowedImports.map((item) => `${item.providerDomain}:${item.exportRef}@${item.purpose}`).sort().join(',');
+  return [baseKey, pack.eligible?.fingerprint ?? 'ranked', skillRefs, hintIds, pack.domainBriefing?.domainId ?? '', envelope.activeDomain ?? '', envelope.purpose ?? '', envelope.modelAreaId ?? '', (envelope.descendants ?? []).join(','), imports].join('|');
+}
+
 export function projectionScopeFor(envelope: DomainContextEnvelope, manifest: DQLManifest | undefined): ProjectionScope | undefined {
   if (!envelope.activeDomain) return undefined;
   const own = [envelope.activeDomain, ...envelope.ancestors, ...(envelope.descendants ?? [])];
@@ -516,9 +529,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       const vocabulary = buildVocabularyIndex(base);
       return { vocabulary, envelope, context: { envelope: ledgerEnvelope(envelope), admitted: { byKind: countKinds(vocabulary) } } };
     }
-    const skillRefs = pack.skills.map((skill) => skill.qualifiedId ?? skill.id).sort().join(',');
-    const hintIds = pack.appliedHints.map((hint) => hint.hintId).sort().join(',');
-    const viewKey = `${key}|${pack.eligible?.fingerprint ?? 'ranked'}|${skillRefs}|${hintIds}|${pack.domainBriefing?.domainId ?? ''}`;
+    const viewKey = vocabularyViewKey(key, envelope, pack);
     const projected = projectVocabularySource(base, pack, projectionScopeFor(envelope, deps.getManifest().manifest));
     const vocabulary = viewCache?.key === viewKey ? viewCache.view.vocabulary : buildVocabularyIndex(projected.source);
     const rankedRefs = rankedRefsFromPack(pack.objects);

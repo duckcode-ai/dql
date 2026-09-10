@@ -2450,6 +2450,15 @@ describe('the inspector plan of a pipeline run is its intent', () => {
     expect(rows.Filters).toBe('dimension:customers.customer_name eq Jordan Lee');
     expect(rows.Time).toBe('axis dimension:orders.ordered_at · window 2025-01-01 → 2026-01-01 ("in 2025")');
     expect(rows.Population).toBe('Every member of the grain (zero-filled)');
+    expect(rows['Skills applied']).toBeUndefined(); // no ledger, no context rows
+    const named = Object.fromEntries(askPipelinePlanRows({
+      version: 1, intent: { reading: 'x', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {} }, dispatches: [], candidates: [], refusals: [], tiers: [], timings: {},
+      context: { rendered: { byKind: {}, charsByKind: {}, totalChars: 0, truncated: [], skills: ['skill:nba.player_reporting'], hints: ['hint_1'] }, enforced: { policies: [{ policyId: 'skill:nba.player_reporting', field: 'participated', effect: 'applied participated = true' }], requiredFilters: [], gaps: [] }, used: { joins: [{ source: 'warehouse_proof', authority: 'proven_default', scope: 'within_domain' }], relations: [] } },
+    }));
+    expect(named['Skills applied']).toBe('skill:nba.player_reporting');
+    expect(named['Hints applied']).toBe('hint_1');
+    expect(named['Policies enforced']).toBe('skill:nba.player_reporting · participated · applied participated = true');
+    expect(named['Joins used']).toBe('warehouse_proof (proven_default, within_domain)');
     expect(rows.Ordering).toBe('measure:0 desc · limit 5');
     expect(rows['Tiers tried']).toBe('certified: refused — no block\nsemantic: refused\nrelational: prepared');
     expect(rows.Executed).toBe('relational · 6 row(s) · sha256:abc');

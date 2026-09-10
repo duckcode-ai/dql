@@ -3372,7 +3372,7 @@ function authoritativeV8PlanLabel(projection: AuthoritativeV8CompactInspectorPro
 }
 
 function authoritativeV8TierAttemptsLabel(projection: AuthoritativeV8CompactInspectorProjection): string {
-  if (projection.tierAttempts.length === 0) return 'No V2 tier attempt was retained.';
+  if (projection.tierAttempts.length === 0) return 'No tier attempt was retained.';
   return projection.tierAttempts.map((attempt) =>
     `${attempt.tier}: ${attempt.outcome}${attempt.frozen ? ' (frozen)' : ''}`,
   ).join(' · ');
@@ -3486,6 +3486,25 @@ export function askPipelinePlanRows(receipt: Record<string, unknown>): Array<[st
     ['Proofs', proofs.join('\n') || none],
     ['Grounding', strings(receipt.grounding).join('\n') || none],
     ['Reuse', text(receipt.reuse) || 'none'],
+    ...contextRows(recordOf(receipt.context)),
+  ];
+}
+
+/** What the run READ and ENFORCED from the authored context, by name: the skills and hints rendered, the policies applied, the joins used. */
+function contextRows(context: Record<string, unknown> | undefined): Array<[string, string]> {
+  if (!context) return [];
+  const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  const list = (value: unknown): Record<string, unknown>[] => Array.isArray(value) ? value.map((item) => recordOf(item)).filter((item): item is Record<string, unknown> => Boolean(item)) : [];
+  const rendered = recordOf(context.rendered); const enforced = recordOf(context.enforced); const used = recordOf(context.used);
+  const none = 'None';
+  const skills = strings(rendered?.skills); const hints = strings(rendered?.hints);
+  const policies = list(enforced?.policies).map((policy) => `${String(policy.policyId ?? '')}${policy.field ? ` · ${String(policy.field)}` : ''}${policy.effect ? ` · ${String(policy.effect)}` : ''}`.trim());
+  const joins = list(used?.joins).map((join) => `${String(join.relationshipId ?? join.source ?? '')} (${String(join.authority ?? '')}${join.scope ? `, ${String(join.scope)}` : ''})`);
+  return [
+    ['Skills applied', skills.join(', ') || none],
+    ['Hints applied', hints.join(', ') || none],
+    ['Policies enforced', policies.join('\n') || none],
+    ['Joins used', joins.join('\n') || none],
   ];
 }
 
@@ -4312,7 +4331,7 @@ export function InspectorDecisionStory({ summary, t }: { summary: AskDecisionSum
     ['Understood request', `${request.measures} measure${request.measures === 1 ? '' : 's'}, ${request.dimensions} dimension${request.dimensions === 1 ? '' : 's'}${request.entityRequested ? ', an entity output' : ''}${request.ranking ? `, ${request.ranking.direction} ${request.ranking.limit}${request.ranking.defaultedLimit ? ' (default)' : ''}` : ''}. Conversation binding: ${request.conversationBinding.replace(/_/g, ' ')}.`],
     ['Evidence by role', summary.evidenceByRole.length > 0
       ? summary.evidenceByRole.map((entry) => `${entry.role.replace(/_/g, ' ')}: ${entry.candidateCount}`).join(' · ')
-      : 'No role evidence was retained for this legacy-compatible run.'],
+      : 'No role evidence was retained for this run.'],
     ['Tier decisions', summary.tierDecisions.length > 0
       ? summary.tierDecisions.map((entry) => `${entry.tier}: ${entry.outcome}${entry.planFrozen ? ' (frozen)' : ''}`).join(' · ')
       : 'No cascade tier receipt was recorded.'],

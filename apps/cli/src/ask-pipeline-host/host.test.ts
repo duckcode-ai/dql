@@ -3,7 +3,7 @@ import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { connectionKey, createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes } from './host.js';
+import { connectionKey, createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -39,6 +39,18 @@ function executorFor(provider: AgentProvider, manifest: unknown) {
 
 const run = (executor: ReturnType<typeof createAskPipelineRouteExecutor>, question: string) => executor({
   runId: 'run-1', request: { question, requestedMode: 'ask' } as AgentRunRequest, route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+});
+
+describe('the projected vocabulary is keyed by the whole envelope selection', () => {
+  const pack = { skills: [], appliedHints: [], eligible: undefined, domainBriefing: undefined };
+  const envelope = (purpose: string | undefined, imports: Array<{ providerDomain: string; exportRef: string; purpose: string }>) => ({ activeDomain: 'consumer', purpose, modelAreaId: undefined, allowedImports: imports, descendants: [] });
+  it('a different purpose, and therefore a different export, is a different key', () => {
+    const identity = vocabularyViewKey('base', envelope('identity_lookup', [{ providerDomain: 'provider', exportRef: 'provider:provider_identity@1.0.0', purpose: 'identity_lookup' }]), pack);
+    const orders = vocabularyViewKey('base', envelope('order_reporting', [{ providerDomain: 'provider', exportRef: 'provider:provider_orders@1.0.0', purpose: 'order_reporting' }]), pack);
+    expect(identity).not.toBe(orders);
+    expect(vocabularyViewKey('base', envelope('identity_lookup', [{ providerDomain: 'provider', exportRef: 'provider:provider_identity@1.0.0', purpose: 'identity_lookup' }]), pack)).toBe(identity);
+    expect(vocabularyViewKey('base', envelope(undefined, []), pack)).not.toBe(identity);
+  });
 });
 
 describe('the pipeline host without a warehouse', () => {

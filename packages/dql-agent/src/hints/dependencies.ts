@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { analyzeSqlReferences } from '@duckcodeailabs/dql-core';
-import type { HintDependency, HintDependencyKind, HintScope } from './types.js';
+import { normalizeScopeName, type HintDependency, type HintDependencyKind, type HintScope } from './types.js';
 
 export interface HintDependencyObject {
   objectKey: string;
@@ -242,11 +242,7 @@ function eq(left: string, right: string): boolean {
  * by a source's unique id (`source.<package>.<source>.<name>`) or with a
  * kind prefix; a hint captured under one spelling must be found under any.
  */
-export function normalizeScopeName(value: string): string {
-  const bare = value.trim().toLowerCase().replace(/^(block|metric|term|dbt_model|dbt_source|domain):/, '');
-  const uniqueId = /^(model|seed|snapshot)\.[^.]+\.(.+)$/.exec(bare) ?? /^source\.[^.]+\.[^.]+\.(.+)$/.exec(bare);
-  return uniqueId ? uniqueId[uniqueId.length - 1]! : bare;
-}
+export { normalizeScopeName };
 
 function hintKindForObjectType(objectType: string): HintDependencyKind | undefined {
   const normalized = objectType.toLowerCase();
