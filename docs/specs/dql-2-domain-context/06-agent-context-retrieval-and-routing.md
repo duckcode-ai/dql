@@ -93,6 +93,14 @@ required filters, gaps), and used in execution (joins with their authority,
 relations, tier, engine). It holds identifiers and counts only — never cards,
 SQL or values (`OBS-003`).
 
+### Implementation record (Train A @6b91674e, Train B; 2026-09-10)
+
+- **Admission.** `buildLocalContextPack({ admission: 'complete_eligible' })` enumerates the envelope's eligible set through `MetadataCatalog.listEligibleObjects` (the catalog's own `(domain IS NULL OR domain IN …)` predicate); the set is transient (never persisted with the pack) and fingerprinted. With no domain pinned, an entry the host binds that the catalog never indexed is kept and counted as `unindexed` — a catalog gap is never reported as "not modeled"; under a pinned domain the catalog's set is the authority.
+- **The view.** `projectVocabularySource(base, pack)` projects the host's physically bound source onto the pack; skills are the pack's selected set only, overlaid per request; the vocabulary fingerprint covers descriptions, aliases, rules, policies and join authority.
+- **The discovery path**, three steps in code: `pinnedRefsFor` pins exact question matches ahead of ranking; the one correction re-ask carries the card of every suggested ref the first cards did not show; a gap says "not modeled" only after the whole inventory was asked, otherwise "not shown in this reading" and the object is named.
+- **The ledger.** `receipt.context` (`ContextLedgerV1`: envelope, retrieved, admitted incl. dropped/unindexed, rendered with per-section truncation, selected incl. unrendered, enforced, used joins) and the host's `pipeline-context` evaluation.
+- **One scope (`CTX-001`).** `AskScopeSelectionV1` (`domain`, `purpose`, `modelAreaId`, `skillRefs`) travels in `workspaceContext` from the notebook, `dql agent ask`, the eval driver, MCP `ask_dql`/`answer_question`, Slack (`in <domain>:`, `--domain`, per-channel defaults, one thread per channel) and the notebook build ingress; only the server resolves it into an envelope. Research plans over the same projection (`researchAssetsFromPack`).
+
 ## Retrieval policy
 
 Retrieval first filters by domain/import eligibility and lifecycle, then ranks

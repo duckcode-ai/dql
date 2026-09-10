@@ -164,6 +164,8 @@ import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
 import {
+  researchAssetsFromPack,
+  askScopeFromWorkspace,
   catalogKeyTypes,
   validateRelationshipOnWarehouse,
   applyFinding,
@@ -5455,6 +5457,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     domain?: string;
     purpose?: string;
     modelAreaId?: string;
+    skillRefs?: string[];
     surface: 'notebook' | 'block';
     selectedContext?: Record<string, unknown>;
   }) => {
@@ -5465,6 +5468,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       activeDomain,
       purpose: input.purpose,
       modelAreaId: input.modelAreaId,
+      ...(input.skillRefs?.length ? { skillRefs: input.skillRefs } : {}),
       source: activeDomain ? 'explicit_ui' : 'inferred',
       snapshotId: snapshot.snapshotId,
     });
@@ -6698,10 +6702,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         reasonCode: 'started',
         payload: { kind: 'research', branchCount: 0 },
       });
+      // The hypothesis planner names assets out of the request's own
+      // projection — ranked first, the rest of the eligible set after — not a
+      // bare list of every metric the project has.
+      const researchPack = await buildAgentRunContextPack(request).catch(() => undefined);
+      const researchAssets = researchPack ? researchAssetsFromPack(researchPack) : undefined;
       const plan = await planResearch({
         question: request.question,
         metrics,
         blocks,
+        ...(researchAssets && (researchAssets.metrics.length || researchAssets.blocks.length) ? { assets: researchAssets } : {}),
         ...(researchPlannerProvider ? { provider: researchPlannerProvider } : {}),
         intent: request.intent,
         isFollowUp: conversationHistory.length > 0,
@@ -8556,6 +8566,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       question: request.question,
       focusObjectKey: request.selectedEvidenceId,
       mode: blockAuthoringContext ? 'build' : 'question',
+      // Research plans over the complete eligible set of the envelope (CTX-010).
+      ...(request.requestedMode === 'research' ? { admission: 'complete_eligible' as const } : {}),
       includeDraftBlocks: blockAuthoringContext,
       followUp,
       priorContextPackId: agentRunString(request.conversationContext?.contextPackId),
@@ -14881,6 +14893,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           modelAreaId?: unknown;
           mode?: unknown;
           blockPath?: unknown;
+          skillRefs?: unknown;
+          threadId?: unknown;
+          executionTarget?: unknown;
         };
         const prompt = typeof body?.prompt === 'string' ? body.prompt.trim() : '';
         if (!prompt) {
@@ -14907,6 +14922,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const userId = typeof (body as { userId?: unknown })?.userId === 'string'
           ? (body as { userId?: string }).userId
           : undefined;
+        // The same scope selection Ask carries (CTX-001): skills to select, and
+        // the thread this build belongs to; the execution target below decides
+        // which warehouse the probe runs on.
+        const buildScope = askScopeFromWorkspace({ domain, purpose, modelAreaId, skillRefs: body?.skillRefs });
+        const buildThreadId = typeof body?.threadId === 'string' && body.threadId.trim() ? body.threadId.trim() : undefined;
         // Edit mode (spec 17, part A): modify the block at `blockPath` in place.
         const mode = body?.mode === 'edit' ? 'edit' : 'create';
         const blockPath = typeof body?.blockPath === 'string' && body.blockPath.trim()
@@ -14932,8 +14952,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           domain,
           purpose,
           modelAreaId,
+          skillRefs: buildScope.skillRefs,
           surface: target === 'cell' ? 'notebook' : 'block',
-          selectedContext: { target, mode, blockPath, owner },
+          selectedContext: { target, mode, blockPath, owner, ...(buildThreadId ? { threadId: buildThreadId } : {}) },
         });
         // Inject user-authored Skills as business context; the engine selects the
         // relevant subset and stamps `appliedSkills` on the result.
@@ -14958,7 +14979,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           // can reconcile the output contract + produce a grounded verdict before a
           // human reviews. Best-effort — buildFromPrompt falls back to a static reflection.
           executionProbe: async ({ sql, invariants }) => {
-            const activeConnection = requireActiveConnection();
+            const activeConnection = await resolveExecutionConnection(body as Record<string, unknown>);
             const prepared = prepareLocalExecution(sql, activeConnection, projectRoot, projectConfig);
             const probeSql = `SELECT * FROM (${stripSqlTerminator(prepared.sql)}) _dql_probe LIMIT 2000`;
             const probeResult = await executor.executeQuery(probeSql, [], runtimeVariables({}), prepared.connection);
@@ -21752,7 +21773,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const previewSql = buildAgentPreviewSql(body.sql);
-        const result = await executeLocalSqlForStoredResult(previewSql);
+        // The preview runs where the notebook runs: its execution target, not
+        // whatever connection happens to be active.
+        const result = await executeLocalSqlForStoredResult(previewSql, await resolveExecutionConnection(body as Record<string, unknown>));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true, result }));
       } catch (error) {

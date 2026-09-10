@@ -138,6 +138,18 @@ describe('driveViaRuntime', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it('sends the scope selection the notebook would send, and nothing when there is none', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return { ok: true, status: 201, json: async () => ({ run: run({ id: 'scoped' }) }), text: async () => '' };
+    }) as unknown as typeof fetch;
+    await driveViaRuntime({ runtimeBase: 'http://x', question: 'q', fetchImpl, workspaceContext: { domain: 'growth', purpose: 'growth_attribution' } });
+    await driveViaRuntime({ runtimeBase: 'http://x', question: 'q', fetchImpl, workspaceContext: {} });
+    expect(bodies[0]).toMatchObject({ workspaceContext: { domain: 'growth', purpose: 'growth_attribution' } });
+    expect(bodies[1]).not.toHaveProperty('workspaceContext');
+  });
+
   it('accepts a bare run body as well as the wrapped one', async () => {
     const fetchImpl = vi.fn(async () => ({ ok: true, status: 201, json: async () => run({ id: 'bare' }), text: async () => '' })) as unknown as typeof fetch;
     await expect(driveViaRuntime({ runtimeBase: 'http://x', question: 'q', fetchImpl })).resolves.toMatchObject({ id: 'bare' });

@@ -24,6 +24,7 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import { verifySlackSignature } from './signature.js';
 import { formatAnswerForSlack } from './format.js';
+import { parseSlackAskScope, slackDomainDefaults, slackThreadId } from './scope.js';
 
 export interface SlackServerOptions {
   /** Project root for the agent KG + Skills. */
@@ -134,6 +135,7 @@ async function handleSlashCommand(
   const text = (params.get('text') ?? '').trim();
   const userId = params.get('user_id') ?? '';
   const userName = params.get('user_name') ?? userId;
+  const channelId = params.get('channel_id') ?? undefined;
   const responseUrl = params.get('response_url') ?? '';
 
   // Parse subcommand: `ask <question>` | `block <id>` | `<question>` (default = ask)
@@ -153,7 +155,7 @@ async function handleSlashCommand(
   }));
 
   try {
-    const reply = await runDispatch(sub, arg, userName, kgPath, provider);
+    const reply = await runDispatch(sub, arg, userName, kgPath, provider, channelId);
     if (responseUrl) {
       await postBack(responseUrl, reply);
     }
@@ -175,6 +177,7 @@ async function runDispatch(
   userName: string,
   kgPath: string,
   provider: Awaited<ReturnType<typeof pickProvider>>,
+  channelId?: string,
 ): Promise<ReturnType<typeof formatAnswerForSlack>> {
   if (sub === 'block') {
     const kg = new KGStore(kgPath);
@@ -216,19 +219,29 @@ async function runDispatch(
   // Default: ask. The running DQL runtime owns the answer (routing, the V2
   // lane, the gates, trust); the bot is a thin transport to it, exactly as the
   // MCP server is.
-  const result = await askRuntime(arg, userName);
-  return formatAnswerForSlack(result, { question: arg });
+  const scope = parseSlackAskScope(arg, { channelId, defaults: slackDomainDefaults(process.env.DQL_SLACK_DOMAIN_DEFAULTS) });
+  const result = await askRuntime(scope.question, userName, {
+    ...(scope.domain ? { domain: scope.domain } : {}),
+    ...(scope.purpose ? { purpose: scope.purpose } : {}),
+    threadId: slackThreadId(channelId),
+  });
+  return formatAnswerForSlack(result, { question: scope.question });
 }
 
 /** POST one question to the local runtime and adapt the run for the formatter. */
-async function askRuntime(question: string, userName: string): Promise<AgentAnswer> {
+async function askRuntime(question: string, userName: string, scope: { domain?: string; purpose?: string; threadId?: string } = {}): Promise<AgentAnswer> {
+  const workspaceContext = { ...(scope.domain ? { domain: scope.domain } : {}), ...(scope.purpose ? { purpose: scope.purpose } : {}) };
   const base = (process.env.DQL_RUNTIME_URL ?? 'http://127.0.0.1:3474').replace(/\/$/, '');
   let response: Response;
   try {
     response = await fetch(`${base}/api/agent-runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, requestedMode: 'auto', userId: userName }),
+      body: JSON.stringify({
+        question, requestedMode: 'auto', userId: userName,
+        ...(scope.threadId ? { threadId: scope.threadId } : {}),
+        ...(Object.keys(workspaceContext).length ? { workspaceContext } : {}),
+      }),
     });
   } catch (error) {
     return {

@@ -371,6 +371,32 @@ const APP_DRAFT_PROMPT_LIMIT = 6;
  * material must not override certified artifacts — the correct standing for a
  * review-required draft.
  */
+/**
+ * The App the question was asked in, as a bounded guidance string: name,
+ * domain, audience, outcome, the focused block, and at most two draft names
+ * (never their SQL — a draft's SQL is evidence the governed tiers read for
+ * themselves, not prose for the interpreter). Capped so a large App cannot
+ * crowd the cards out of the prompt.
+ */
+export function renderAppContextGuidance(value: unknown, maxChars = 600): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const envelope = value as {
+    app?: { name?: string; domain?: string; audience?: string; businessOutcome?: string };
+    drafts?: Array<{ name?: string; status?: string }>;
+    focus?: { tileId?: string; blockId?: string };
+  };
+  const app = envelope.app;
+  if (!app?.name) return undefined;
+  const parts = [`Asked inside the App "${app.name}"${app.domain ? ` (domain ${app.domain})` : ''}.`];
+  if (app.audience) parts.push(`Audience: ${app.audience}.`);
+  if (app.businessOutcome) parts.push(`Outcome: ${app.businessOutcome}.`);
+  if (envelope.focus?.blockId) parts.push(`Focused block: ${envelope.focus.blockId}.`);
+  const drafts = (envelope.drafts ?? []).filter((draft) => draft?.name).slice(0, 2);
+  if (drafts.length) parts.push(`Review-required drafts saved here (never certified): ${drafts.map((draft) => draft.name).join(', ')}.`);
+  const text = parts.join(' ');
+  return text.length > maxChars ? `${text.slice(0, maxChars - 1).trimEnd()}…` : text;
+}
+
 export function renderAppContextForPrompt(value: unknown): string | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const envelope = value as {
@@ -419,7 +445,7 @@ export function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowU
     try {
       const rawEnvelope = JSON.parse(upstream) as { workspaceContext?: Record<string, unknown> };
       const appContext = rawEnvelope.workspaceContext?.appContext;
-      const rendered = renderAppContextForPrompt(appContext);
+      const rendered = renderAppContextGuidance(appContext);
       if (rendered) {
         parts.push(rendered);
         const { appContext: _dropped, ...restWorkspace } = rawEnvelope.workspaceContext ?? {};

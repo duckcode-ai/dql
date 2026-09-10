@@ -598,7 +598,7 @@ async function runLegacyDirectAsk(rest: string[], flags: CLIFlags): Promise<void
     // The running runtime owns Ask: routing, the V2 lane, the plan boundary,
     // the gates, and the persisted run. The CLI drives it over HTTP exactly as
     // the notebook and the MCP server do; there is no second, in-process path.
-    const runtimeRun = await driveViaRuntime({ runtimeBase, question, requestedMode: 'auto', timeoutMs: 180_000 });
+    const runtimeRun = await driveViaRuntime({ runtimeBase, question, requestedMode: 'auto', timeoutMs: 180_000, workspaceContext: { ...(domain ? { domain } : {}), ...(purpose ? { purpose } : {}) } });
     const result = answerFromRuntimeRun(runtimeRun);
 
     trace.finalize({ status: 'completed' });

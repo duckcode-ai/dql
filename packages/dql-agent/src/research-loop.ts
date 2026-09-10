@@ -1,5 +1,5 @@
 import { deadlineScale } from './agent-run-engine.js';
-import { hypothesesToSteps, planResearchHypotheses } from './agentic/research-agent.js';
+import { hypothesesToSteps, planResearchHypotheses, type ResearchAssets } from './agentic/research-agent.js';
 /**
  * Research loop (P4) — a grounded, ReAct-style planner for "research / follow-up"
  * questions, so the agent behaves like a real assistant: it DECIDES whether to
@@ -154,6 +154,8 @@ export async function planResearch(input: {
   forceInvestigate?: boolean;
   /** Authoritative root plan. When present, research never re-matches meaning. */
   rootPlan?: ResolvedAnalyticalPlan;
+  /** The assets the hypothesis planner may name; when absent they are derived from `metrics` and `blocks`. */
+  assets?: ResearchAssets;
   /**
    * Optional. With one, the investigation is planned as competing hypotheses
    * about the question; without one, the deterministic template still runs, so
@@ -353,7 +355,7 @@ export async function planResearch(input: {
       ? hypothesesToSteps(await planResearchHypotheses(
         input.provider,
         input.question,
-        {
+        input.assets ?? {
           metrics: input.metrics.map((metric) => metric.name),
           blocks: input.blocks.map((block) => block.name),
           dimensions: Array.from(new Set(input.blocks.flatMap((block) =>

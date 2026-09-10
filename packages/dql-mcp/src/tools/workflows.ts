@@ -1,13 +1,16 @@
 import type { DQLContext } from '../context.js';
 import {
   KGStore,
+  askScopeFromWorkspace,
   defaultKgPath,
   ensureMetadataCatalogFresh,
   generateAppFromPlan,
   planAgentAnswer,
   planAppFromPrompt,
   reindexProject,
+  resolveDomainContextEnvelope,
   validateAppPlan,
+  type DomainContextEnvelope,
   type MetadataAllowedSqlContext,
   type MetadataObject,
   type ReindexProjectResult,
@@ -20,8 +23,20 @@ export const askDqlInput = zodInputShapeForTool('ask_dql');
 
 export async function askDql(
   ctx: DQLContext,
-  args: { question: string; focusObjectKey?: string; limit?: number },
+  args: { question: string; focusObjectKey?: string; limit?: number; domain?: string; purpose?: string; modelAreaId?: string; skillRefs?: string[] },
 ) {
+  // The plan-only path reads the same envelope the executing path does
+  // (CTX-001): a pinned domain admits its descendants and certified imports
+  // and excludes its siblings, here as everywhere.
+  const scope = askScopeFromWorkspace(args);
+  let domainContext: DomainContextEnvelope | undefined;
+  if (scope.domain || scope.purpose || scope.modelAreaId || scope.skillRefs) {
+    try {
+      domainContext = resolveDomainContextEnvelope({ manifest: ctx.manifest, activeDomain: scope.domain ?? null, purpose: scope.purpose, modelAreaId: scope.modelAreaId, skillRefs: scope.skillRefs, source: 'explicit_api' });
+    } catch (error) {
+      return { ok: false as const, error: `The requested scope could not be resolved: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
   const catalog = await ensureMetadataCatalogFresh(ctx.projectRoot).catch((error) => ({
     path: '',
     refreshed: false,
@@ -39,6 +54,7 @@ export async function askDql(
     focusObjectKey: args.focusObjectKey,
     limit: args.limit ?? 100,
     surface: 'mcp',
+    ...(domainContext ? { domainContext, selectedContext: { domain: scope.domain, purpose: scope.purpose, modelAreaId: scope.modelAreaId } } : {}),
   });
   const route = planned.routeDecision;
   const exact = route.exactObjectKey

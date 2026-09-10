@@ -390,7 +390,7 @@ export {
   type GeneratedAnalyticalTupleDriftCode,
   type FrozenRequiredOutputProjectionValidation,
 } from './generated-analytical-proposal.js';
-export { resolveDomainContextEnvelope, domainContextSearchDomains } from './domain-context.js';
+export { resolveDomainContextEnvelope, domainContextSearchDomains, askScopeFromWorkspace, workspaceContextForScope, type AskScopeSelectionV1 } from './domain-context.js';
 export type { DomainContextEnvelope, KnowledgeLens, ResolveDomainContextInput } from './domain-context.js';
 export {
   stampTrustLabel,
@@ -2024,3 +2024,4 @@ export * from './ask-pipeline/index.js';
 export { generateStructured, extractFirstJsonObject, type StructuredReply } from './providers/structured-output.js';
 
 export * from './relationship-validation.js';
+export * from './agentic/research-assets.js';

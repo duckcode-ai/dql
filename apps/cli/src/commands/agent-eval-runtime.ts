@@ -186,6 +186,8 @@ export interface RuntimeDriverOptions {
   question: string;
   requestedMode?: 'ask' | 'auto' | 'research';
   threadId?: string;
+  /** The scope selection (domain, purpose, model area, skills) the notebook would send; resolved server-side. */
+  workspaceContext?: Record<string, unknown>;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
@@ -210,6 +212,7 @@ export async function driveViaRuntime(options: RuntimeDriverOptions): Promise<Ag
         question: options.question,
         requestedMode: options.requestedMode ?? 'ask',
         ...(options.threadId ? { threadId: options.threadId } : {}),
+        ...(options.workspaceContext && Object.keys(options.workspaceContext).length ? { workspaceContext: options.workspaceContext } : {}),
       }),
       signal: controller.signal,
     });

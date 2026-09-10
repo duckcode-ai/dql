@@ -1,3 +1,4 @@
+import { askScopeFromWorkspace, workspaceContextForScope } from '@duckcodeailabs/dql-agent';
 import type { DQLContext } from '../context.js';
 
 /**
@@ -58,6 +59,8 @@ interface AgentRunLike {
   summary?: string;
   artifacts?: Array<{ id?: string; kind?: string; title?: string; trustState?: string; ref?: string; payload?: unknown }>;
   nextActions?: unknown[];
+  /** The Ask pipeline receipt; its context ledger says what the answer was read against. */
+  diagnosticReceiptV9?: { context?: unknown };
 }
 
 /** Reshape a runtime AgentRun into a compact, agent-friendly governed result. */
@@ -90,6 +93,9 @@ function mapRun(run: AgentRunLike) {
       : {}),
     artifacts: run.artifacts,
     nextActions: run.nextActions,
+    // The context ledger (CTX-010): envelope, what was admitted, rendered,
+    // selected, enforced and used — ids and counts, never rows.
+    ...(run.diagnosticReceiptV9?.context ? { context: run.diagnosticReceiptV9.context } : {}),
     trustNote:
       'Report trustState verbatim and never upgrade it. A review-required answer is generated/semantic-layer backed and must be reviewed before it is trusted as certified.',
   };
@@ -105,11 +111,18 @@ export async function answerQuestion(
     analysisDepth?: 'quick' | 'deep';
     threadId?: string;
     serverUrl?: string;
+    domain?: string;
+    purpose?: string;
+    modelAreaId?: string;
+    skillRefs?: string[];
   },
 ) {
   const question = args.question?.trim();
   if (!question) return { ok: false as const, error: 'Provide a non-empty { question }.' };
   const base = runtimeBase(args.serverUrl);
+  // The same four selections the notebook sends (CTX-001); the runtime
+  // resolves them into an envelope, this client never does.
+  const workspaceContext = workspaceContextForScope(askScopeFromWorkspace(args));
   let response: Response;
   try {
     response = await fetch(`${base}/api/agent-runs`, {
@@ -122,6 +135,7 @@ export async function answerQuestion(
         ...(args.reasoningEffort ? { reasoningEffort: args.reasoningEffort } : {}),
         ...(args.analysisDepth ? { analysisDepth: args.analysisDepth } : {}),
         ...(args.threadId ? { threadId: args.threadId } : {}),
+        ...(Object.keys(workspaceContext).length ? { workspaceContext } : {}),
       }),
     });
   } catch (err) {

@@ -151,3 +151,41 @@ export function domainContextSearchDomains(context: DomainContextEnvelope | unde
     ...context.allowedImports.map((item) => item.providerDomain),
   ])];
 }
+
+/**
+ * ONE SCOPE, EVERY SURFACE (CTX-001). The notebook, the CLI, the MCP server
+ * and Slack all carry the same four selections in `workspaceContext`; the
+ * server resolves them into an envelope, never the client. Anything else in
+ * the workspace context is a client hint and is not a scope.
+ */
+export interface AskScopeSelectionV1 {
+  domain?: string;
+  purpose?: string;
+  modelAreaId?: string;
+  skillRefs?: string[];
+}
+
+/** Read the scope selection out of a request's `workspaceContext`; unset or malformed fields are simply absent. */
+export function askScopeFromWorkspace(workspace: unknown): AskScopeSelectionV1 {
+  const record = workspace && typeof workspace === 'object' ? workspace as Record<string, unknown> : {};
+  const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+  const refs = Array.isArray(record.skillRefs)
+    ? record.skillRefs.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+    : text(record.skillRefs) ? [text(record.skillRefs)!] : undefined;
+  return {
+    ...(text(record.domain) ? { domain: text(record.domain) } : {}),
+    ...(text(record.purpose) ? { purpose: text(record.purpose) } : {}),
+    ...(text(record.modelAreaId) ? { modelAreaId: text(record.modelAreaId) } : {}),
+    ...(refs?.length ? { skillRefs: refs } : {}),
+  };
+}
+
+/** The `workspaceContext` fields a client sends for a scope selection (the inverse of `askScopeFromWorkspace`). */
+export function workspaceContextForScope(scope: AskScopeSelectionV1): Record<string, unknown> {
+  return {
+    ...(scope.domain ? { domain: scope.domain } : {}),
+    ...(scope.purpose ? { purpose: scope.purpose } : {}),
+    ...(scope.modelAreaId ? { modelAreaId: scope.modelAreaId } : {}),
+    ...(scope.skillRefs?.length ? { skillRefs: scope.skillRefs } : {}),
+  };
+}

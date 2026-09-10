@@ -7,6 +7,7 @@ import { writeFileSync } from 'node:fs';
 import type { ConnectionConfig, QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { getDialect, type DQLManifest, type SemanticLayer } from '@duckcodeailabs/dql-core';
 import {
+  askScopeFromWorkspace,
   buildVocabularyIndex,
   classifyWarehouseError,
   assessAnalyticalRelationship,
@@ -414,15 +415,14 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
   /** The request's scope, resolved server-side from what the surface sent; never from client-supplied ancestors or imports. */
   const resolveAskEnvelope = (request: AgentRunRequest): DomainContextEnvelope => {
     const { manifest, snapshotId } = deps.getManifest();
-    const workspace = (request.workspaceContext ?? {}) as Record<string, unknown>;
-    const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
-    const list = (value: unknown): string[] | undefined => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : text(value) ? [text(value)!] : undefined;
+    // The four selections every surface carries (CTX-001), read the one way.
+    const scope = askScopeFromWorkspace(request.workspaceContext);
     const empty: DomainContextEnvelope = { activeDomain: null, ancestors: [], descendants: [], allowedImports: [], source: 'inferred', confidence: 'low', snapshotId };
     if (!manifest) return empty;
     try {
       return resolveDomainContextEnvelope({
-        manifest, activeDomain: text(workspace.domain) ?? null, purpose: text(workspace.purpose), modelAreaId: text(workspace.modelAreaId), skillRefs: list(workspace.skillRefs),
-        source: text(workspace.domain) ? 'explicit_ui' : 'inferred', snapshotId,
+        manifest, activeDomain: scope.domain ?? null, purpose: scope.purpose, modelAreaId: scope.modelAreaId, skillRefs: scope.skillRefs,
+        source: scope.domain ? 'explicit_ui' : 'inferred', snapshotId,
       });
     } catch {
       // An unknown domain or area is not a reason to answer unscoped: the

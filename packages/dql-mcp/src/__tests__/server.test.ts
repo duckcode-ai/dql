@@ -210,3 +210,12 @@ describe('DQL MCP server instructions', () => {
     }
   });
 });
+
+describe('every surface carries the same scope (CTX-001)', () => {
+  it('ask_dql and answer_question accept the four scope selections', () => {
+    for (const name of ['ask_dql', 'answer_question'] as DqlToolName[]) {
+      const properties = getDqlToolDefinition(name).inputSchema.properties as Record<string, unknown>;
+      for (const field of ['domain', 'purpose', 'modelAreaId', 'skillRefs']) expect(properties, `${name}.${field}`).toHaveProperty(field);
+    }
+  });
+});

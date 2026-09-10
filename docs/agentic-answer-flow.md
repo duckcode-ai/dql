@@ -131,3 +131,28 @@ tests together. Include fixtures for exact certified answers, description-only
 metric matches, multi-metric aggregate-island queries, dbt-only retrieval packs
 that still resolve semantic metrics, bounded source search, and generated
 fallback/refusal behavior.
+
+## Join authority (REL-002 as amended, REL-005)
+
+A governed join is admitted from exactly three sources, tried in this order:
+
+1. **The semantic layer** — the compiler owns the join; nothing is disclosed.
+2. **A certified DQL relationship** — only when the manifest says
+   `automaticJoinAllowed` (certified, not stale, validation passed, proof
+   fingerprint matches — including the join keys' data types — evidence not
+   expired, and the export/import/contract chain when it crosses a domain).
+   A draft, a stale certification or a proof that no longer matches never joins;
+   it is offered ("validate it in Domain Studio").
+3. **A warehouse proof** (`proven_default`) — within one domain, or on a
+   project with no domains, never across a domain boundary: one statement
+   proves the key is unique on the label side and covers every fact row, on
+   this snapshot and this connection, with a freshness boundary (TTL, target
+   identity, a data-generation token where the driver offers one). The answer
+   discloses it in prose, the receipt records `authority: 'proven_default'`,
+   and the evidence is written to `.dql/evidence/relationships/` for Domain
+   Studio to certify — validation and certification stay two actions.
+
+Domain Studio's Validate and Ask's proof run the same statement and write the
+same evidence (`packages/dql-agent/src/relationship-validation.ts`). Every
+receipt's context ledger lists the joins the answer used with their source,
+authority and scope.
