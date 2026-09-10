@@ -1,0 +1,23 @@
+{
+  "key": "6250b6676b2e2d71427170843714329c",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top five players by total points scored in games dated across calendar 2016 and 2017 combined, including their games played count.\",\"measures\":[{\"ref\":\"block:nba.top_players_by_total_points\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"block:nba.top_players_by_total_points\",\"direction\":\"desc\"},\"limit\":5,\"unresolved\":[],\"provenance\":{\"block:nba.top_players_by_total_points\":\"q:top five players by total points in calendar years 2016 and 2017 combined\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T14:22:32.762Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "6250b6676b2e2d71427170843714329cfdf6287238fa550020aa9ea0ba5078f0",
+    "postCanonicalHash": "6250b6676b2e2d71427170843714329cfdf6287238fa550020aa9ea0ba5078f0",
+    "appliedRuleClasses": []
+  }
+}

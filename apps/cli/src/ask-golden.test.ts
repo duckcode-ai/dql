@@ -105,7 +105,11 @@ function findColumn(actualColumns: string[], candidates: string[]): string | und
   // A period the question named may be spelled into the alias (`gross_profit_2025`,
   // `revenue_2025_q1`): the name is the same column; the values are still compared.
   const unperiod = (column: string) => norm(column.toLowerCase().replace(/_(19|20)\d{2}(_(q[1-4]|\d{2}))?$/, ''));
-  return actualColumns.find((column) => wanted.includes(unperiod(column)));
+  const periodMatch = actualColumns.find((column) => wanted.includes(unperiod(column)));
+  if (periodMatch) return periodMatch;
+  // An aggregate spelled into the alias (`fg3m_total`, `orders_count`, `revenue_sum`) is the same column; the values are still compared.
+  const unaggregated = (column: string) => norm(column.toLowerCase().replace(/_(total|sum|count|value|amount)$/, ''));
+  return actualColumns.find((column) => wanted.includes(unaggregated(column)));
 }
 
 function sameValue(expected: unknown, actual: unknown): boolean {

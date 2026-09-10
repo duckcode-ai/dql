@@ -540,3 +540,14 @@ describe('retrieval governance gates', () => {
     expect(result.excluded.filter((item) => item.reason === 'conflict')).toHaveLength(2);
   });
 });
+
+describe('a dbt model has one scope name whatever spelling named it', () => {
+  it('bare name, unique id, source unique id and kind prefix all normalize to the model name', async () => {
+    const { normalizeScopeName } = await import('./dependencies.js');
+    for (const spelling of ['local_player_game_facts', 'model.nba_analysis.local_player_game_facts', 'dbt_model:model.nba_analysis.local_player_game_facts', 'DBT_MODEL:Local_Player_Game_Facts']) {
+      expect(normalizeScopeName(spelling)).toBe('local_player_game_facts');
+    }
+    expect(normalizeScopeName('source.nba_analysis.raw.games')).toBe('games');
+    expect(normalizeScopeName('metric:revenue')).toBe('revenue');
+  });
+});

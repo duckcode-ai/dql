@@ -315,7 +315,9 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   for (const measure of visible) {
     if (measure.kind !== 'change') continue;
     const parts = [measure.change!.base, measure.change!.comparison];
-    const missing = parts.filter((alias) => !visible.some((item) => item.kind === 'aggregate' && item.alias === alias));
+    // A period's rate is a ratio of this reading; the change between two
+    // periods' rates compares the two ratios after both are computed.
+    const missing = parts.filter((alias) => !visible.some((item) => (item.kind === 'aggregate' || item.kind === 'ratio' || item.kind === 'derived') && item.alias === alias));
     if (missing.length) return refuse('relational_compose_failed', `${measure.alias} compares ${parts.join(' and ')}, and this reading has no measure aliased ${missing.join(', ')}; give each period its own measure with that alias`, true);
   }
 
@@ -526,7 +528,9 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     ? `CAST(${islandOf(part.measure)}.${q(part.measure.alias)} AS DOUBLE)`
     : renderFormula(part.inputs, part.expr);
   const columnOfAlias = (alias: string): string => {
-    const target = visible.find((item) => item.alias === alias && item.physical)!;
+    const target = visible.find((item) => item.alias === alias && (item.physical || item.kind === 'ratio' || item.kind === 'derived'))!;
+    if (target.kind === 'ratio') return `(${renderPart(target.numerator!)} / NULLIF(${renderPart(target.denominator!)}, 0))`;
+    if (target.kind === 'derived') return `(${renderFormula(target.inputs!, target.expr!)})`;
     return `CAST(${islandOf(target.physical!)}.${q(target.alias)} AS DOUBLE)`;
   };
   const projected = (measure: VisibleMeasure): string => {
@@ -654,6 +658,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
       tier: 'relational', trust: 'governed', sql, params,
       columns: [...columns.map((column) => column.alias), ...visible.map((measure) => measure.alias)],
       proof, ...(tieProbe ? { tieProbe } : {}), ...(usedJoins.length ? { joins: usedJoins } : {}),
+      relations: [...new Set([...islandOrder.map((islandKey) => islandKey.replace(/#overall$/, '')), ...usedJoins.map((step) => step.relation)])],
     },
   };
 }

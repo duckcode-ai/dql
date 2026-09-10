@@ -63,7 +63,14 @@ export interface ProjectedVocabularySource {
  * set (a ranked pack), the source is kept whole and only the authored context
  * is added.
  */
-export function projectVocabularySource(base: VocabularySource, pack: Pick<LocalContextPack, 'objects' | 'skills' | 'appliedHints' | 'domainBriefing'> & { eligible?: EligibleContextSet }): ProjectedVocabularySource {
+export interface ProjectionScope {
+  /** The pinned domain, its ancestors and descendants: relations owned here are admitted whole. */
+  own: string[];
+  /** Import providers and, per provider, the relations its exports to this envelope carry; nothing else of that provider is physical context here. */
+  imports: Array<{ providerDomain: string; relations: string[] }>;
+}
+
+export function projectVocabularySource(base: VocabularySource, pack: Pick<LocalContextPack, 'objects' | 'skills' | 'appliedHints' | 'domainBriefing'> & { eligible?: EligibleContextSet }, scope?: ProjectionScope): ProjectedVocabularySource {
   const eligible = pack.eligible;
   const admitted: Record<string, number> = {};
   const dropped: Record<string, number> = {};
@@ -107,7 +114,7 @@ export function projectVocabularySource(base: VocabularySource, pack: Pick<Local
     entities: keep('entity', base.entities, (entity) => qualified(entity.model, entity.name)),
     models: keep('model', base.models, (model) => [model.name]),
     blocks: keep('block', base.blocks, (block) => [block.name]),
-    relations: keep('relation', base.relations, (relation) => [relation.schema ? `${relation.schema}.${relation.name}` : relation.name, relation.name]),
+    relations: keep('relation', ownedRelations(base.relations, scope, dropped), (relation) => [relation.schema ? `${relation.schema}.${relation.name}` : relation.name, relation.name]),
     terms: keep('term', base.terms, (term) => [term.name]),
   };
 
@@ -247,4 +254,34 @@ function normalizeRelation(value: string | undefined): string | undefined {
   const parts = value.split('.').map((part) => part.replace(/^"|"$/g, '').trim()).filter(Boolean);
   if (parts.length === 0) return undefined;
   return parts.slice(-2).join('.');
+}
+
+/**
+ * PHYSICAL OWNERSHIP FOLLOWS THE ENTITY BINDING (A-003). A dbt model carries no
+ * domain of its own, so under a pinned domain the eligible set would admit
+ * every relation in the warehouse; the entity that binds a relation says who
+ * owns it. Owned by this envelope → admitted; owned by an import provider →
+ * admitted only if an export to this envelope carries it; owned elsewhere →
+ * not physical context here (and counted). A relation nobody binds stays.
+ */
+function ownedRelations<T extends { schema?: string; name: string; domain?: string }>(relations: T[] | undefined, scope: ProjectionScope | undefined, dropped: Record<string, number>): T[] | undefined {
+  if (!relations || !scope || scope.own.length === 0) return relations;
+  const own = new Set(scope.own.map(lower));
+  // One provider may export several interfaces to this envelope: their relations add up.
+  const imported = new Map<string, Set<string>>();
+  for (const item of scope.imports) {
+    const set = imported.get(lower(item.providerDomain)) ?? new Set<string>();
+    for (const relation of item.relations) set.add(lower(relation));
+    imported.set(lower(item.providerDomain), set);
+  }
+  const kept = relations.filter((relation) => {
+    if (!relation.domain) return true;
+    const owner = lower(relation.domain);
+    if (own.has(owner)) return true;
+    const key = lower(relation.schema ? `${relation.schema}.${relation.name}` : relation.name);
+    const exported = imported.get(owner);
+    return Boolean(exported && (exported.has(key) || exported.has(lower(relation.name))));
+  });
+  if (kept.length < relations.length) dropped.relation = (dropped.relation ?? 0) + (relations.length - kept.length);
+  return kept;
 }

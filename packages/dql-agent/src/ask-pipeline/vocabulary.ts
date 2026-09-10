@@ -491,7 +491,7 @@ export interface VocabularySource {
   entities?: Array<{ name: string; model: string; type: string; label?: string; description?: string; sourceId?: string; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
   models?: Array<{ name: string; label?: string; description?: string; relation?: string }>;
   blocks?: Array<{ name: string; domain?: string; description?: string; certified: boolean; status?: string; contract: BlockContractV1; examples?: string[]; tags?: string[]; sourceId?: string; sql?: string; sourcePath?: string }>;
-  relations?: Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; sourceId?: string }>;
+  relations?: Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; sourceId?: string; /** The domain whose entity binds this relation, when one does (physical ownership). */ domain?: string }>;
   terms?: Array<{ name: string; synonyms?: string[]; description?: string; metricRefs?: string[]; rules?: string[]; domain?: string }>;
   /** Declared relationships between modeled things, with their authority to join. */
   relationships?: Array<{ id: string; domain?: string; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: string; fanout?: string; verb?: string; description?: string; status?: string; crossDomain?: boolean; joinAuthority: 'certified' | 'draft' | 'unproven' }>;

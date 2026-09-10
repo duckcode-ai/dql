@@ -177,10 +177,11 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
   // column, typed). The first description is not the last word: later ones
   // ADD the columns and types the earlier lacked, so a column the manifest
   // never mentioned is still a column, and a typed literal compiles by type.
-  const addRelation = (relation: { schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }> }) => {
+  const addRelation = (relation: { schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; domain?: string }) => {
     const key = relation.schema ? `${relation.schema}.${relation.name}` : relation.name;
     if (relationSeen.has(key)) {
       const existing = source.relations!.find((item) => (item.schema ? `${item.schema}.${item.name}` : item.name) === key);
+      if (existing && !existing.domain && relation.domain) existing.domain = relation.domain;
       const names = relationColumns.get(key) ?? new Set<string>();
       for (const column of relation.columns) {
         const known = existing?.columns.find((item) => item.name.toLowerCase() === column.name.toLowerCase());
@@ -206,6 +207,17 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     addRelation({ ...(dbt.schema ? { schema: dbt.schema } : {}), name: item.name, ...(dbt.description ? { description: dbt.description } : {}), columns });
   }
   for (const relation of input.relations ?? []) addRelation(relation);
+  // Every MODELED ENTITY's relation is a physical relation the interpreter may
+  // read, whether or not a cube or a dbt source describes it: a table-bound
+  // native layer plus Domain Studio bindings is a complete configuration, and
+  // the warehouse probe fills the columns. The entity's domain is the
+  // relation's owner, which is what a pinned domain admits or excludes.
+  for (const entity of Object.values(input.manifest?.modeling?.entities ?? {})) {
+    const relation = normalizeRelationName(input.manifest?.dbtProvenance?.nodes[entity.dbtUniqueId]?.relation);
+    if (!relation) continue;
+    const [schema, name] = relation.includes('.') ? [relation.split('.')[0], relation.split('.').slice(1).join('.')] : [undefined, relation];
+    addRelation({ ...(schema ? { schema } : {}), name, ...(entity.businessContext ? { description: entity.businessContext } : {}), columns: [], ...(entity.domain ? { domain: entity.domain } : {}) });
+  }
 
   const layer = input.semanticLayer;
   if (layer) {

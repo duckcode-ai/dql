@@ -10,7 +10,10 @@ const source: VocabularySource = {
     { name: 'revenue', model: 'order_item', label: 'Revenue', aggregation: 'sum', sourceId: 'revenue' },
     { name: 'order_total', model: 'orders', label: 'Order Total', aggregation: 'sum', sourceId: 'order_total' },
   ],
+  // `participated` is spelled twice — a semantic dimension and the physical column — on ONE warehouse column.
+  relations: [{ schema: 'dev', name: 'facts', columns: [{ name: 'participated', dataType: 'BOOLEAN' }, { name: 'points', dataType: 'INTEGER' }] }],
   dimensions: [
+    { name: 'participated', model: 'facts', dataType: 'boolean', physical: { relation: 'dev.facts', column: 'participated' } },
     { name: 'is_test', model: 'orders', dataType: 'boolean' },
     { name: 'region', model: 'orders', dataType: 'string' },
     { name: 'ordered_at', model: 'orders', dataType: 'timestamp', isTime: true, timeGrains: ['day', 'month'] },
@@ -54,8 +57,8 @@ describe('applySkillPolicies', () => {
     expect(target.provenance['dimension:orders.is_test']).toBe('policy:skill:commerce.clean-orders:required filter is_test = false');
     expect(outcome.requiredFilters).toEqual(['is_test = false']);
     expect(outcome.refusal).toBeUndefined();
-    // Already restricted on that ref: the question's own restriction stands.
-    const restricted = intent({ filters: [{ ref: 'dimension:orders.is_test', op: 'eq', values: [true], source: 'question' }] });
+    // Already restricted the same way on that ref: the question's own restriction stands.
+    const restricted = intent({ filters: [{ ref: 'dimension:orders.is_test', op: 'eq', values: [false], source: 'question' }] });
     const second = applySkillPolicies(restricted, vocabulary, { now: () => NOW });
     expect(restricted.filters).toHaveLength(1);
     expect(second.applied.map((effect) => effect.effect)).toContain('already restricted on dimension:orders.is_test');
@@ -68,6 +71,45 @@ describe('applySkillPolicies', () => {
     expect(outcome.refusal?.message).toContain('is_internal');
     expect(target.filters).toEqual([]);
   });
+  it('a question that contradicts a mandatory rule is refused by name — through the same ref or an equivalent one — never answered as a governed zero', () => {
+    const vocabulary = vocabularyWith([{ ref: 'skill:nba.player-reporting', id: 'player-reporting', requiredFilters: ['participated = true'] }]);
+    for (const ref of ['dimension:facts.participated', 'column:dev.facts.participated']) {
+      const target = intent({ filters: [{ ref, op: 'eq', values: [false], source: 'question' }] });
+      const outcome = applySkillPolicies(target, vocabulary, { now: () => NOW });
+      expect(outcome.refusal).toMatchObject({ code: 'policy_conflict', repairable: false });
+      expect(outcome.refusal?.message).toContain('requires participated = true');
+      expect(outcome.gaps[0]).toContain('contradicts');
+      // The rule was neither applied beside the contradiction nor dropped.
+      expect(target.filters).toEqual([{ ref, op: 'eq', values: [false], source: 'question' }]);
+    }
+    const neq = intent({ filters: [{ ref: 'dimension:facts.participated', op: 'neq', values: [true], source: 'question' }] });
+    expect(applySkillPolicies(neq, vocabulary, { now: () => NOW }).refusal?.code).toBe('policy_conflict');
+  });
+  it('an equal or stronger restriction on the same field satisfies the rule; a different field never does', () => {
+    const vocabulary = vocabularyWith([{ ref: 'skill:nba.player-reporting', id: 'player-reporting', requiredFilters: ['participated = true'] }]);
+    const viaColumn = intent({ filters: [{ ref: 'column:dev.facts.participated', op: 'eq', values: [true], source: 'question' }] });
+    const outcome = applySkillPolicies(viaColumn, vocabulary, { now: () => NOW });
+    expect(outcome.refusal).toBeUndefined();
+    expect(viaColumn.filters).toHaveLength(1);
+    expect(outcome.applied.map((effect) => effect.effect)).toContain('already restricted on dimension:facts.participated');
+    const regions = vocabularyWith([{ ref: 'skill:x', id: 'x', requiredFilters: ["region in ('EMEA', 'APAC')"] }]);
+    const stronger = intent({ filters: [{ ref: 'dimension:orders.region', op: 'eq', values: ['EMEA'], source: 'question' }] });
+    expect(applySkillPolicies(stronger, regions, { now: () => NOW }).refusal).toBeUndefined();
+    expect(stronger.filters).toHaveLength(1);
+    const other = intent({ filters: [{ ref: 'dimension:orders.region', op: 'eq', values: ['LATAM'], source: 'question' }] });
+    expect(applySkillPolicies(other, regions, { now: () => NOW }).refusal?.code).toBe('policy_conflict');
+    const unrelated = intent({ filters: [{ ref: 'dimension:orders.is_test', op: 'eq', values: [false], source: 'question' }] });
+    applySkillPolicies(unrelated, regions, { now: () => NOW });
+    expect(unrelated.filters).toHaveLength(2);
+  });
+  it('a bare field name that several entries spell on ONE column binds; on different columns it is ambiguous and says so', () => {
+    const vocabulary = vocabularyWith([{ ref: 'skill:nba.player-reporting', id: 'player-reporting', requiredFilters: ['participated'] }]);
+    const target = intent();
+    expect(applySkillPolicies(target, vocabulary, { now: () => NOW }).refusal).toBeUndefined();
+    expect(target.filters).toEqual([{ ref: 'dimension:facts.participated', op: 'eq', values: [true], source: 'question' }]);
+    expect(bindRequiredFilter('is_test = false', buildVocabularyIndex({ ...source, dimensions: [...source.dimensions!, { name: 'is_test', model: 'invoices', dataType: 'boolean', physical: { relation: 'dev.invoices', column: 'is_test' } }] }))).toEqual({ problem: expect.stringContaining('is ambiguous') });
+  });
+
   it('the domain\'s required filters bind the same way', () => {
     const target = intent();
     applySkillPolicies(target, vocabularyWith([]), { now: () => NOW, extraRequiredFilters: ['is_test = false'] });

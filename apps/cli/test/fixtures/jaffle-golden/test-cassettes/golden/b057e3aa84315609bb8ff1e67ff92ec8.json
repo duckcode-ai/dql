@@ -1,0 +1,23 @@
+{
+  "key": "b057e3aa84315609bb8ff1e67ff92ec8",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total food revenue broken down by location.\",\"measures\":[{\"ref\":\"metric:order_item.food_revenue\"}],\"groupBy\":[{\"ref\":\"entity:locations.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:order_item.food_revenue\":\"q:food revenue\",\"entity:locations.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T14:08:28.357Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b057e3aa84315609bb8ff1e67ff92ec8a2eff775a52add8729a50f43a691c754",
+    "postCanonicalHash": "b057e3aa84315609bb8ff1e67ff92ec8a2eff775a52add8729a50f43a691c754",
+    "appliedRuleClasses": []
+  }
+}

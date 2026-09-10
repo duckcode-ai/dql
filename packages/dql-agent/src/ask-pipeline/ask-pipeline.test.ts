@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs } from './resolve-intent.js';
+import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs, facetStem } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { applyMemberSelection, bindNamedSubject, memberOptionId, namesInQuestion, parseMemberOption, pinnedRefsFor, proveSubjectMatchesPopulation, runAskPipeline, unmetDisplayObligation } from './pipeline.js';
@@ -508,6 +508,61 @@ describe('a concept is discovery, not an identity (A-005)', () => {
     expect(validation.intent.unresolved).toEqual([expect.objectContaining({ clause: 'Shopper', material: true, options: ['relation:dev.customers', 'relation:dev.orders'] })]);
     expect(validation.intent.unresolved[0]!.question).toContain('known under several keys');
     expect(validation.intent.unresolved[0]!.question).toContain('customer_id, commerce');
+  });
+});
+
+describe('a part the policy or a concept answered for is covered (item 6 of the NBA validation)', () => {
+  const vocabulary = buildVocabularyIndex({
+    ...jaffle,
+    dimensions: [...(jaffle.dimensions ?? []), { name: 'participated', model: 'order_item', dataType: 'boolean', physical: { relation: 'dev.order_items', column: 'participated' } }],
+    concepts: [{ id: 'participating_item', domain: 'commerce', name: 'Participating order item', synonyms: ['appearance'], bindings: [{ entityRef: 'relation:dev.orders', domain: 'commerce' }] }],
+  });
+  const intent = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [{ ref: 'dimension:order_item.participated', op: 'eq', values: [true], source: 'question' }], unresolved: [], provenance: {}, expectedShape: 'scalar' }).intent!;
+  it('"participating" is met by a filter on "participated", and by the policy text that added it', () => {
+    expect(unmetFacets('total revenue, including revenue and only participating rows', intent, vocabulary)).toEqual([]);
+    const bare = parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }).intent!;
+    expect(unmetFacets('total revenue, including revenue and only participating rows', bare, vocabulary, { policyTexts: ['added dimension:order_item.participated eq true'] })).toEqual([]);
+    expect(unmetFacets('total revenue, including revenue and the weather', bare, vocabulary)).toEqual(['the weather']);
+    expect(facetStem('participating')).toBe(facetStem('participated'));
+    expect(facetStem('participation')).toBe(facetStem('participated'));
+  });
+});
+
+describe('the ledger names the relations an execution read, joins or not (item 7 of the NBA validation)', () => {
+  it('a single-relation relational execution records its base relation under used.relations', async () => {
+    const vocabulary = buildVocabularyIndex({ ...jaffle, metrics: [{ name: 'order_total', model: 'orders', label: 'Order Total', aggregation: 'sum', physical: { relation: 'dev.orders', column: 'order_total', aggregate: 'sum' } }] });
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:orders.order_total' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
+    const outcome = await runAskPipeline({ question: 'total order value', vocabulary, provider, prepareDeps: { dialect: { quoteIdentifier: (name) => `"${name}"`, dateTrunc: (grain, expr) => `DATE_TRUNC('${grain}', ${expr})`, limitClause: (limit) => `LIMIT ${limit}` } }, clauseCoverage: false, executeDeps: { run: async () => ({ columns: ['order_total'], rows: [{ order_total: 5 }], rowCount: 1, executionTimeMs: 1 }) } });
+    expect(outcome.kind).toBe('answered');
+    expect(outcome.receipt.context?.used?.relations).toEqual(['dev.orders']);
+    expect(outcome.receipt.context?.used?.joins).toEqual([]);
+  });
+});
+
+describe('a reading may not add a breakdown the question did not ask for', () => {
+  const vocabulary = buildVocabularyIndex(jaffle);
+  const grouped = (question: string) => validateIntentRefs(parseIntent({
+    version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:order_item.drink_revenue' }],
+    groupBy: [{ ref: 'entity:products.product', role: 'key' }], display: ['dimension:products.product_name'], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped',
+  }).intent!, vocabulary, undefined, question);
+  it('"beverage revenue" is a total: a product grouping is sent back; "by product", "top products" and a named field keep it', () => {
+    expect(grouped('beverage revenue').problems.map((problem) => problem.path)).toEqual(['groupBy']);
+    expect(grouped('beverage revenue by product').problems).toEqual([]);
+    expect(grouped('top beverage products').problems).toEqual([]);
+    expect(grouped('beverage revenue for each product name').problems).toEqual([]);
+    expect(grouped('which products sell the most beverages').problems).toEqual([]);
+    // A word the reading cannot account for may be the breakdown, misspelt.
+    expect(grouped('I need to get the bevereage catogery').problems).toEqual([]);
+    expect(grouped('show scoring leaders').problems).toEqual([]);
+  });
+  it('a certified block that breaks the measure down, named as the measure of a total question, is sent back with the metric to read instead', () => {
+    const byBlock = validateIntentRefs(parseIntent({
+      version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'block:commerce.top_beverage_customers' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped',
+    }).intent!, vocabulary, undefined, 'beverage revenue');
+    expect(byBlock.problems).toEqual([expect.objectContaining({ path: 'measures', message: expect.stringContaining('breaks the measure down by customer_name'), suggestions: expect.arrayContaining(['metric:order_item.drink_revenue']) })]);
+    expect(validateIntentRefs(parseIntent({
+      version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'block:commerce.top_beverage_customers' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'ranking',
+    }).intent!, vocabulary, undefined, 'top customers by beverage revenue').problems).toEqual([]);
   });
 });
 

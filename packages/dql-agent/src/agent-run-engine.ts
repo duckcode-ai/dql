@@ -62,8 +62,7 @@ import {
   type AnalyticalTaskOutcomeSummaryV1,
   type AnalyticalTaskOutcomeTrustStateV1,
   type AnalyticalTurnPlanV1,
-  normalizeCanonicalQueryResult,
-} from './analytical-orchestration.js';
+  normalizeCanonicalQueryResult, type AnalyticalCascadeTierV1, type AnalyticalCascadeTierOutcomeV1 } from './analytical-orchestration.js';
 import type { AgentRetrievalEvidence, MeaningResolution } from './meaning-resolution.js';
 import type { AgentRunDiagnosticReceiptV8, AskRuntimeModeV2 } from './ask-runtime/legacy-receipts.js';
 import { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
@@ -4317,16 +4316,33 @@ function diagnosticReceiptV4ForRun(run: AgentRun): AgentRunDiagnosticReceiptV4 {
   const terminalIncident = terminalIncidentForRun(run, cascade?.stopReason);
   const runtimeReviewRequired = run.askAnalystState?.resolvedPlan?.reviewRequired === true
     || run.routeDecision?.askAnalystDecision?.state.resolvedPlan?.reviewRequired === true;
+  // A pipeline run (V9) carries its reading in the receipt: the story is told
+  // from the typed intent, the tiers it tried and the executable it ran — not
+  // from the V2 cascade fields it never filled (which read as "0 measures,
+  // 0 dimensions, no executable plan" for a run that answered).
+  const v9 = run.diagnosticReceiptV9;
+  const v9Intent = v9?.intent?.kind === 'analytics' ? v9.intent : undefined;
+  const v9Understood = v9Intent
+    ? {
+        measures: v9Intent.measures.length,
+        dimensions: v9Intent.groupBy.length + v9Intent.display.length,
+        entityRequested: v9Intent.groupBy.some((group) => group.role === 'key') || v9Intent.display.length > 0,
+        outputCount: v9Intent.measures.length + v9Intent.groupBy.length + v9Intent.display.length,
+        ...(v9Intent.ordering ? { ranking: { direction: (v9Intent.ordering.direction === 'asc' ? 'bottom' : 'top') as 'top' | 'bottom', limit: v9Intent.limit ?? 0, defaultedLimit: v9Intent.limit === undefined } } : {}),
+      }
+    : undefined;
   const summaryInput = {
     version: 1 as const,
     understoodRequest: {
-      measures: requirements?.measures.length ?? 0,
-      dimensions: requirements?.dimensions.length ?? 0,
-      entityRequested: Boolean((requirements?.entityTerms.length ?? 0) || (requirements?.entityDisplayTerms.length ?? 0)),
-      outputCount: requirements?.outputTerms?.length ?? 0,
-      ...(requirements?.ranking
-        ? { ranking: { ...requirements.ranking } }
-        : {}),
+      ...(v9Understood ?? {
+        measures: requirements?.measures.length ?? 0,
+        dimensions: requirements?.dimensions.length ?? 0,
+        entityRequested: Boolean((requirements?.entityTerms.length ?? 0) || (requirements?.entityDisplayTerms.length ?? 0)),
+        outputCount: requirements?.outputTerms?.length ?? 0,
+        ...(requirements?.ranking
+          ? { ranking: { ...requirements.ranking } }
+          : {}),
+      }),
       // This comes from the server-owned request admission, not a generic
       // `followsUp` heuristic. A complete question with thread history is
       // still `none` unless it explicitly selected a valid binding.
@@ -4335,20 +4351,31 @@ function diagnosticReceiptV4ForRun(run: AgentRun): AgentRunDiagnosticReceiptV4 {
     evidenceByRole: [...roleCounts.entries()]
       .map(([role, candidateCount]) => ({ role, candidateCount }))
       .sort((left, right) => left.role.localeCompare(right.role)),
-    tierDecisions: (cascade?.attempts ?? []).map((attempt) => ({
-      tier: attempt.tier,
-      outcome: attempt.outcome,
-      planFrozen: attempt.planFrozen,
-    })),
-    ...(cascade?.selectedTier
+    tierDecisions: v9
+      ? v9.tiers.map((attempt) => ({
+        tier: ({ certified: 'certified', semantic: 'semantic', relational: 'governed_relational', exploratory: 'exploratory_sql' } as Record<string, AnalyticalCascadeTierV1>)[attempt.tier] ?? 'governed_relational',
+        outcome: (attempt.outcome === 'prepared' || attempt.outcome === 'executed' ? 'executable' : 'ineligible') as AnalyticalCascadeTierOutcomeV1,
+        planFrozen: attempt.outcome === 'prepared' || attempt.outcome === 'executed',
+      }))
+      : (cascade?.attempts ?? []).map((attempt) => ({
+        tier: attempt.tier,
+        outcome: attempt.outcome,
+        planFrozen: attempt.planFrozen,
+      })),
+    ...(v9?.executed
       ? {
-          selectedPlan: {
-            tier: cascade.selectedTier,
-            planFrozen: cascade.planFrozen,
-            reviewRequired: cascade.selectedTier === 'exploratory_sql' || runtimeReviewRequired,
-          },
+          // The pipeline freezes the executable (sql + params + snapshot) before it runs: an executed tier is a frozen plan.
+          selectedPlan: { tier: ({ certified: 'certified', semantic: 'semantic', relational: 'governed_relational', exploratory: 'exploratory_sql' } as Record<string, Exclude<AnalyticalCascadeTierV1, 'clarify_or_gap'>>)[v9.executed.tier] ?? 'governed_relational', planFrozen: true, reviewRequired: v9.executed.tier === 'exploratory' || runtimeReviewRequired },
         }
-      : {}),
+      : cascade?.selectedTier
+        ? {
+            selectedPlan: {
+              tier: cascade.selectedTier,
+              planFrozen: cascade.planFrozen,
+              reviewRequired: cascade.selectedTier === 'exploratory_sql' || runtimeReviewRequired,
+            },
+          }
+        : {}),
     ...(terminalIncident ? { terminalIncident } : {}),
     ...(researchBranchObservability.summary ? { researchBranchSummary: researchBranchObservability.summary } : {}),
     safeNextAction: terminalIncident?.safeAction

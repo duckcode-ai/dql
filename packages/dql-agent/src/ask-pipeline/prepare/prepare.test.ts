@@ -170,6 +170,33 @@ describe('prepare order', () => {
   });
 });
 
+describe('a change between two periods\' rates (item 5 of the NBA validation)', () => {
+  it('composes a scoped ratio per period, a threshold on each period\'s count, and ranks by their difference', () => {
+    const year = (from: string, to: string) => [{ ref: 'dimension:order_item.ordered_at', op: 'gte', values: [from], source: 'question' }, { ref: 'dimension:order_item.ordered_at', op: 'lt', values: [to], source: 'question' }] as const;
+    const composed = composeRelational(intent({
+      measures: [
+        { ref: 'metric:order_item.revenue', aggregation: 'count', scope: [...year('2024-01-01', '2025-01-01')], alias: 'orders_2024' },
+        { ref: 'metric:order_item.revenue', aggregation: 'count', scope: [...year('2025-01-01', '2026-01-01')], alias: 'orders_2025' },
+        { derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:order_item.revenue', numeratorAggregation: 'sum', denominatorAggregation: 'count' }, scope: [...year('2024-01-01', '2025-01-01')], alias: 'rate_2024' },
+        { derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:order_item.revenue', numeratorAggregation: 'sum', denominatorAggregation: 'count' }, scope: [...year('2025-01-01', '2026-01-01')], alias: 'rate_2025' },
+        { change: { base: 'rate_2024', comparison: 'rate_2025', as: 'absolute' }, alias: 'rate_change' },
+      ],
+      groupBy: [{ ref: 'entity:customers.customer', role: 'key' }],
+      filters: [{ ref: 'measure:0', op: 'gte', values: [20], source: 'question', on: 'aggregate' }, { ref: 'measure:1', op: 'gte', values: [20], source: 'question', on: 'aggregate' }],
+      ordering: { ref: 'measure:4', direction: 'desc' }, limit: 5, expectedShape: 'ranking',
+    }), vocabulary, deps);
+    expect(composed.refusal).toBeUndefined();
+    const sql = composed.candidate!.sql;
+    expect(composed.candidate!.columns).toEqual(expect.arrayContaining(['orders_2024', 'orders_2025', 'rate_2024', 'rate_2025', 'rate_change']));
+    // The change subtracts the two computed ratios, not two columns that do not exist.
+    expect(sql).toMatch(/NULLIF\(.*\) - \(.*NULLIF|\(\(.*NULLIF.*\) - \(.*NULLIF/);
+    expect(sql).toContain('AS "rate_change"');
+    expect(sql).toMatch(/"orders_2024" >= \?/);
+    expect(sql).toMatch(/"orders_2025" >= \?/);
+    expect(sql).toMatch(/ORDER BY "rate_change" DESC/);
+  });
+});
+
 describe('relational ratio and population', () => {
   const ratio = (extra: Record<string, unknown> = {}) => intent({
     measures: [{ derived: { kind: 'ratio', numerator: 'metric:order_item.revenue', denominator: 'metric:orders.order_total' }, alias: 'revenue_share' }],

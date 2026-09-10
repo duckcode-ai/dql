@@ -866,6 +866,40 @@ describe("AgentRunEngine", () => {
     ]));
   });
 
+  it('tells the decision story of a pipeline run from its V9 receipt: the typed intent, the tiers tried, a frozen executable (item 7 of the NBA validation)', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-v9-story',
+      now: fixedClock(),
+      router: { decide: () => ({ ...frozenExploratoryDecision(), route: 'generated_answer', reason: 'pipeline' } as IntentDecision) },
+      executors: {
+        generated_answer: () => ({
+          answer: 'points by player',
+          status: 'completed', trustState: 'governed', answerKind: 'governed', resolvedRoute: 'generated_answer',
+          askPipelineReceipt: {
+            version: 9,
+            vocabularyFingerprint: 'v',
+            intent: { version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:points' }, { ref: 'metric:games' }], groupBy: [{ ref: 'entity:player', role: 'key' }], display: ['dimension:player_name'], filters: [], ordering: { ref: 'metric:points', direction: 'desc' }, limit: 5, expectedShape: 'ranking', unresolved: [], provenance: {} },
+            dispatches: [{ purpose: 'intent:read', ms: 10 }],
+            candidates: [], refusals: [],
+            tiers: [{ round: 1, tier: 'certified', outcome: 'refused' }, { round: 1, tier: 'semantic', outcome: 'refused' }, { round: 1, tier: 'relational', outcome: 'prepared' }],
+            executed: { tier: 'relational', sqlFingerprint: 'sha256:x', rowCount: 5, ms: 3, proofs: [] },
+            timings: {}, reuse: 'none',
+          },
+        } as never),
+      },
+    });
+    const run = await engine.run({ question: 'top five players by points', requestedMode: 'ask' });
+    expect(run.diagnosticReceiptV4?.summary).toMatchObject({
+      understoodRequest: { measures: 2, dimensions: 2, entityRequested: true, ranking: { direction: 'top', limit: 5, defaultedLimit: false } },
+      tierDecisions: [
+        { tier: 'certified', outcome: 'ineligible', planFrozen: false },
+        { tier: 'semantic', outcome: 'ineligible', planFrozen: false },
+        { tier: 'governed_relational', outcome: 'executable', planFrozen: true },
+      ],
+      selectedPlan: { tier: 'governed_relational', planFrozen: true },
+    });
+  });
+
   it('AGT-034/OBS-014 records a mismatched exploratory authorization as an internal no-execution incident', async () => {
     const engine = new AgentRunEngine({
       idGenerator: () => 'run-exploratory-authorization-mismatch',

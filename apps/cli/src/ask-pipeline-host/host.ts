@@ -7,6 +7,7 @@ import { writeFileSync } from 'node:fs';
 import type { ConnectionConfig, QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { getDialect, type DQLManifest, type SemanticLayer } from '@duckcodeailabs/dql-core';
 import {
+  type ProjectionScope,
   type PreparedRefusal,
   askScopeFromWorkspace,
   buildVocabularyIndex,
@@ -162,8 +163,13 @@ export function relationsFromProbeRows(rows: Array<Record<string, unknown>>): Pr
  * the other columns are absent.
  */
 export function relationsNeedingColumns(source: ReturnType<typeof buildVocabularySource>, max = 48): string[] {
+  // A relation the warehouse has not described yet: no columns at all, or a
+  // handful a cube or a binding happened to name (one exposed key does not
+  // make "the team directory only exposes team_id" true — the relation has
+  // its columns, the vocabulary just has not asked for them).
+  const sparse = (relation: { columns: Array<{ name: string; dataType?: string }> }) => relation.columns.length < 4 || relation.columns.some((column) => !column.dataType);
   return (source.relations ?? [])
-    .filter((relation) => relation.columns.length === 0 || relation.columns.some((column) => !column.dataType))
+    .filter((relation) => sparse(relation))
     .map((relation) => (relation.schema ? `${relation.schema}.${relation.name}` : relation.name))
     .slice(0, max);
 }
@@ -389,6 +395,29 @@ export function joinScopeDecision(
   return { refusal: { tier: 'relational', code: 'join_requires_domain_contract', message: `${fromRelation} (${fromDomains[0]}) and ${toRelation} (${toDomains[0]}) belong to different domains: a join across them needs a certified export from ${toDomains[0]}, a matching import in ${fromDomains[0]} with an allowed purpose, and a certified relationship; the warehouse is not asked to prove a cross-domain join`, repairable: false, relations: [fromRelation, toRelation] } };
 }
 
+/**
+ * What a pinned envelope owns physically, and what each import carries: the
+ * pinned domain with its ancestors and descendants, plus, per import
+ * provider, the relations of the entities its matching exports name.
+ */
+export function projectionScopeFor(envelope: DomainContextEnvelope, manifest: DQLManifest | undefined): ProjectionScope | undefined {
+  if (!envelope.activeDomain) return undefined;
+  const own = [envelope.activeDomain, ...envelope.ancestors, ...(envelope.descendants ?? [])];
+  const entities = manifest?.modeling?.entities ?? {};
+  const relationOf = (entityRef: string, domain: string): string | undefined => {
+    const entity = entities[entityRef] ?? Object.values(entities).find((item) => item.domain === domain && (item.localId === entityRef || item.id === entityRef || item.qualifiedId === entityRef));
+    return entity ? normalizeRelationName(manifest?.dbtProvenance?.nodes[entity.dbtUniqueId]?.relation) : undefined;
+  };
+  const imports = envelope.allowedImports.map((item) => {
+    const relations = Object.values(manifest?.modeling?.interfaces?.exports ?? {})
+      .filter((exported) => exported.domain === item.providerDomain && [`${exported.domain}.${exported.localId}@${exported.version}`, `${exported.domain}.${exported.localId}`, exported.qualifiedId, exported.id].includes(item.exportRef))
+      .flatMap((exported) => exported.entity ? [relationOf(exported.entity, exported.domain)] : [])
+      .filter((relation): relation is string => Boolean(relation));
+    return { providerDomain: item.providerDomain, relations };
+  });
+  return { own, imports };
+}
+
 /** Compatibility: the authorized path function alone. */
 export function modelingJoinPaths(manifest: DQLManifest | undefined, quoteRelation: (relation: string) => string): (fromRelation: string, toRelation: string) => RelationalJoinStep[] | undefined {
   return modelingJoinGraph(manifest, quoteRelation).path;
@@ -490,7 +519,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     const skillRefs = pack.skills.map((skill) => skill.qualifiedId ?? skill.id).sort().join(',');
     const hintIds = pack.appliedHints.map((hint) => hint.hintId).sort().join(',');
     const viewKey = `${key}|${pack.eligible?.fingerprint ?? 'ranked'}|${skillRefs}|${hintIds}|${pack.domainBriefing?.domainId ?? ''}`;
-    const projected = projectVocabularySource(base, pack);
+    const projected = projectVocabularySource(base, pack, projectionScopeFor(envelope, deps.getManifest().manifest));
     const vocabulary = viewCache?.key === viewKey ? viewCache.view.vocabulary : buildVocabularyIndex(projected.source);
     const rankedRefs = rankedRefsFromPack(pack.objects);
     const lanes: Record<string, number> = {};
@@ -881,11 +910,16 @@ export function contextEvaluation(receipt: { context?: ContextLedgerV1 }): Array
   const admitted = Object.values(ledger.admitted.byKind).reduce((sum, count) => sum + count, 0);
   const shown = Object.values(ledger.rendered?.byKind ?? {}).reduce((sum, count) => sum + count, 0);
   const where = ledger.envelope?.activeDomain ? ` in ${ledger.envelope.activeDomain}` : '';
-  const skills = ledger.rendered?.skills.length ? `; ${ledger.rendered.skills.length} skill${ledger.rendered.skills.length === 1 ? '' : 's'}` : '';
-  const hints = ledger.rendered?.hints.length ? `; ${ledger.rendered.hints.length} approved correction${ledger.rendered.hints.length === 1 ? '' : 's'}` : '';
+  const shortName = (ref: string) => ref.replace(/^(skill|hint):/, '').split('::').pop() ?? ref;
+  const skills = ledger.rendered?.skills.length ? `; skill${ledger.rendered.skills.length === 1 ? '' : 's'} ${ledger.rendered.skills.map(shortName).join(', ')}` : '';
+  const hints = ledger.rendered?.hints.length ? `; approved correction${ledger.rendered.hints.length === 1 ? '' : 's'} ${ledger.rendered.hints.map(shortName).join(', ')}` : '';
   const unrendered = ledger.selected?.unrendered.length ? `; ${ledger.selected.unrendered.length} of the refs the reading used were found beyond the cards shown` : '';
   const used = ledger.used?.tier ? `; answered on the ${ledger.used.tier} tier${ledger.used.engine ? ` (${ledger.used.engine})` : ''}` : '';
-  return [{ id: 'pipeline-context', label: 'Context read', passed: true, severity: 'info', message: `Read against ${admitted} governed objects${where} (${shown} shown)${skills}${hints}${unrendered}${used}.` }];
+  const joins = (ledger.used?.joins ?? []).map((join) => join.authority === 'proven_default'
+    ? 'a join proven on the warehouse (structurally safe on this snapshot and connection; not a certified business relationship)'
+    : join.source === 'semantic_layer' ? 'a semantic-layer join' : `a certified relationship${join.relationshipId ? ` (${shortName(join.relationshipId)})` : ''}`);
+  const joined = joins.length ? `; joins: ${[...new Set(joins)].join(', ')}` : '';
+  return [{ id: 'pipeline-context', label: 'Context read', passed: true, severity: 'info', message: `Read against ${admitted} governed objects${where} (${shown} shown)${skills}${hints}${unrendered}${used}${joined}.` }];
 }
 
 export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['gap'], message?: string): { title: string; code: 'policy_blocked' | 'ambiguous' | 'no_data' | 'modeling_gap' } {

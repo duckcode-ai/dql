@@ -236,8 +236,16 @@ function eq(left: string, right: string): boolean {
   return normalizeScopeName(left) === normalizeScopeName(right);
 }
 
-function normalizeScopeName(value: string): string {
-  return value.trim().toLowerCase().replace(/^(block|metric|term|dbt_model|dbt_source|domain):/, '');
+/**
+ * One scope name for every spelling of the same object. A dbt model may be
+ * named by its bare model name, by its unique id (`model.<package>.<name>`),
+ * by a source's unique id (`source.<package>.<source>.<name>`) or with a
+ * kind prefix; a hint captured under one spelling must be found under any.
+ */
+export function normalizeScopeName(value: string): string {
+  const bare = value.trim().toLowerCase().replace(/^(block|metric|term|dbt_model|dbt_source|domain):/, '');
+  const uniqueId = /^(model|seed|snapshot)\.[^.]+\.(.+)$/.exec(bare) ?? /^source\.[^.]+\.[^.]+\.(.+)$/.exec(bare);
+  return uniqueId ? uniqueId[uniqueId.length - 1]! : bare;
 }
 
 function hintKindForObjectType(objectType: string): HintDependencyKind | undefined {

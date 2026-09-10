@@ -19,6 +19,8 @@ export type PreparedBlock =
   | { error: string; unresolved?: string[] };
 
 export interface PreparedCandidate {
+  /** Every physical relation the executable reads (islands and joined relations), for the context ledger. */
+  relations?: string[];
   tier: PrepareTier;
   trust: PrepareTrust;
   sql: string;
@@ -57,7 +59,7 @@ export interface PreparedCandidate {
 export type PrepareRefusalCode =
   | 'join_requires_domain_contract'
   | 'relationship_domain_unknown'
-  | 'policy_filter_unbindable'
+  | 'policy_filter_unbindable' | 'policy_conflict'
   | 'no_certified_block'
   | 'block_not_applicable'
   | 'not_semantic'

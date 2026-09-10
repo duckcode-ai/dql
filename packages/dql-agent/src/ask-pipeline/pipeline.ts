@@ -96,7 +96,7 @@ function summarizeRefusal(refusal: PreparedRefusal): string {
 }
 
 function gapFromRefusals(refusals: PreparedRefusal[], intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): { gap: GapKind; message: string; nearest: string[] } {
-  const denied = refusals.find((refusal) => refusal.code === 'policy_denied' || refusal.code === 'join_requires_domain_contract' || refusal.code === 'policy_filter_unbindable');
+  const denied = refusals.find((refusal) => refusal.code === 'policy_denied' || refusal.code === 'join_requires_domain_contract' || (refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict'));
   if (denied) return { gap: 'denied', message: denied.message, nearest: [] };
   // A declared relationship nobody validated is an offer, not a path: the
   // reader is told exactly which one and what would make the join possible.
@@ -795,7 +795,9 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // presenting one of them as the single best.
   if (tieNote) caveats.push(tieNote);
   if (judgmentCaveat) caveats.unshift(judgmentCaveat);
-  const facets = unmetFacets(input.question, intent, input.vocabulary);
+  // A part the POLICY answered for is answered: the required filters the
+  // host applied are part of the reading, not context it lacks.
+  const facets = unmetFacets(input.question, intent, input.vocabulary, { policyTexts: [...(receipt.context?.enforced?.requiredFilters ?? []), ...(receipt.policies ?? []).map((policy) => policy.effect ?? '')] });
   if (facets.length > 0) {
     const message = `this answer carries nothing for ${facets.map((facet) => `"${facet}"`).join(', ')}: no governed metric or dimension of this project is named for ${facets.length === 1 ? 'it' : 'them'}`;
     receipt.unmet = [...(receipt.unmet ?? []), { obligation: 'coverage', message }];
@@ -825,6 +827,6 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   const usedJoins = (candidate.joins ?? []).map((step) => step.authority
     ? { source: step.authority.source, ...(step.authority.relationshipId ? { relationshipId: step.authority.relationshipId } : {}), authority: step.authority.authority, scope: step.authority.scope }
     : { source: 'declared', authority: 'unknown' });
-  receipt.context = { ...receipt.context!, used: { joins: usedJoins, relations: [...new Set((candidate.joins ?? []).map((step) => step.relation))], tier: candidate.tier, ...(candidate.engine ? { engine: candidate.engine } : {}) } };
+  receipt.context = { ...receipt.context!, used: { joins: usedJoins, relations: [...new Set([...(candidate.relations ?? []), ...(candidate.joins ?? []).map((step) => step.relation)])], tier: candidate.tier, ...(candidate.engine ? { engine: candidate.engine } : {}) } };
   return { kind: 'answered', intent, candidate, result, text: composeAnsweredText(intent, result, input.vocabulary, candidate.trust, { notes: [...(receipt.grounding ?? []), ...textMatches], caveats }), receipt };
 }

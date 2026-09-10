@@ -1,0 +1,25 @@
+{
+  "key": "0b76a5f7393f256d2cee056bdb3fb92d",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The project has no 'region' dimension, so the revenue-down question is answered with the certified monthly revenue trend block; the causal explanation and investment recommendation are not data queries this project can answer.\",\"measures\":[{\"ref\":\"block:commerce.monthly_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[{\"clause\":\"why revenue is down / which region to invest in (causal explanation and recommendation, not a data query)\",\"options\":[],\"material\":true}],\"provenance\":{\"block:commerce.monthly_revenue\":\"q:revenue down\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T14:12:01.719Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "0b76a5f7393f256d2cee056bdb3fb92df3da8f3ad6f90b6c22cfa486df941960",
+    "postCanonicalHash": "0b76a5f7393f256d2cee056bdb3fb92df3da8f3ad6f90b6c22cfa486df941960",
+    "appliedRuleClasses": []
+  }
+}

@@ -8,7 +8,8 @@ import {
   applySkillPolicies, buildMetadataSnapshot, buildVocabularyIndex, domainContextSearchDomains, loadSkills, openMetadataCatalog,
   projectVocabularySource, resolveDomainContextEnvelope, upsertMetadataSnapshot, type VocabularySource,
 } from '@duckcodeailabs/dql-agent';
-import { joinScopeDecision, modelingJoinGraph } from './ask-pipeline-host/host.js';
+import { joinScopeDecision, modelingJoinGraph, projectionScopeFor } from './ask-pipeline-host/host.js';
+import { buildVocabularySource } from './ask-pipeline-host/vocabulary-source.js';
 
 /**
  * THE MULTI-DOMAIN FIXTURE WITH A DECOY. `commerce` has a child `returns` and
@@ -19,7 +20,7 @@ import { joinScopeDecision, modelingJoinGraph } from './ask-pipeline-host/host.j
 const fixture = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
 const manifest = buildManifest({ projectRoot: fixture, dbtManifestPath: join(fixture, 'target/manifest.json') });
 const quote = (relation: string) => relation.split('.').map((part) => `"${part}"`).join('.');
-const envelope = (activeDomain: string | null) => resolveDomainContextEnvelope({ manifest, activeDomain, source: 'explicit_api' });
+const envelope = (activeDomain: string | null, purpose?: string) => resolveDomainContextEnvelope({ manifest, activeDomain, purpose, source: 'explicit_api' });
 const tmp = mkdtempSync(join(tmpdir(), 'dql-multi-domain-'));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -116,5 +117,35 @@ describe('a skill applies only when selected, and its policy is enforced, not re
     const commerceOnly = projectVocabularySource(base, pack([closed]));
     const outcome2 = applySkillPolicies({ ...intent, filters: [] }, buildVocabularyIndex(commerceOnly.source), { now: () => Date.parse('2026-09-20T00:00:00Z') });
     expect(outcome2.requiredFilters).toEqual([]);
+  });
+});
+
+describe('physical context follows the entity that binds it (A-003, item 3 of the NBA validation)', () => {
+  const base = buildVocabularySource({ manifest });
+  const relationKeys = (relations: NonNullable<VocabularySource['relations']>) => relations.map((relation) => `${relation.schema}.${relation.name}`).sort();
+  it('every modeled entity\'s relation is a base relation carrying its owning domain, before any cube or probe', () => {
+    const byKey = new Map((base.relations ?? []).map((relation) => [`${relation.schema}.${relation.name}`, relation]));
+    expect(byKey.get('finance.fct_invoices')?.domain).toBe('finance');
+    expect(byKey.get('commerce.fct_returns')?.domain).toBe('returns');
+    expect(byKey.get('commerce.fct_orders')?.domain).toBe('commerce');
+    expect(byKey.get('commerce.fct_orders')?.description).toContain('purchase');
+  });
+  it('a pinned domain keeps its own relations, an import admits only the exported entity\'s relation, and a sibling\'s relations are not physical context here', () => {
+    const scope = projectionScopeFor(envelope('growth', 'growth_attribution'), manifest)!;
+    expect(scope.own).toEqual(['growth']);
+    expect(scope.imports.map((item) => item.providerDomain)).toEqual(['commerce', 'commerce']);
+    const projected = projectVocabularySource(base, { objects: [], skills: [], appliedHints: [] }, scope);
+    const kept = relationKeys(projected.source.relations ?? []);
+    expect(kept).toContain('growth.dim_customer_acquisition');
+    expect(kept).toContain('commerce.dim_customers'); // exported as customer_identity
+    expect(kept).toContain('commerce.fct_orders');    // exported as order_analytics
+    expect(kept).not.toContain('commerce.fct_returns'); // returns exports nothing to growth
+    expect(kept).not.toContain('finance.fct_invoices');
+    expect(projected.dropped.relation).toBeGreaterThanOrEqual(2);
+    // Pinned finance with no imports: finance only.
+    const finance = projectVocabularySource(base, { objects: [], skills: [], appliedHints: [] }, projectionScopeFor(envelope('finance'), manifest));
+    expect(relationKeys(finance.source.relations ?? [])).toEqual(['finance.fct_invoices']);
+    // No pin: nothing is dropped.
+    expect(projectVocabularySource(base, { objects: [], skills: [], appliedHints: [] }, projectionScopeFor(envelope(null), manifest)).dropped.relation).toBeUndefined();
   });
 });

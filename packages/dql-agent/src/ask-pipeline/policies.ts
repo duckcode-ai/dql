@@ -1,7 +1,7 @@
 import type { AnalyticalIntentV1, IntentPredicate } from './intent.js';
 import type { PreparedRefusal } from './prepare/types.js';
 import { applySelectedMeaning } from './resolve-intent.js';
-import type { VocabularyIndex } from './vocabulary.js';
+import type { VocabularyEntry, VocabularyIndex } from './vocabulary.js';
 
 /**
  * TYPED POLICIES ARE ENFORCED; PROSE IS GUIDANCE (SKILL-004).
@@ -40,14 +40,56 @@ function literal(value: string): string | number | boolean {
   return trimmed;
 }
 
+/**
+ * THE FIELD BEHIND A REF. A semantic dimension, a cube dimension and a
+ * physical column can all spell the same warehouse column; a policy is about
+ * the column, so two refs that bind to one `relation.column` are one field.
+ * A ref with no physical binding is its own field.
+ */
+export function fieldIdentity(ref: string, vocabulary: VocabularyIndex): string {
+  const entry = vocabulary.get(ref);
+  const relationKey = (relation: string) => relation.replace(/"/g, '').split('.').slice(-2).join('.');
+  if (entry?.physical?.relation && entry.physical.column) return `${relationKey(entry.physical.relation)}.${entry.physical.column}`.toLowerCase();
+  // A column ref IS its field: `column:<schema.table>.<column>`.
+  if ((entry?.kind ?? ref.split(':')[0]) === 'column') return ref.slice(ref.indexOf(':') + 1).replace(/"/g, '').toLowerCase();
+  return ref.toLowerCase();
+}
+
+/**
+ * Resolve a policy's field name: an exact ref, else the one entry the name
+ * matches, else — when several entries spell the same physical field — that
+ * field's first entry. Several entries on DIFFERENT fields are ambiguous, and
+ * the problem names them, so an author picks one instead of reading "no
+ * governed dimension" about a column that plainly exists.
+ */
+function resolvePolicyField(name: string, vocabulary: VocabularyIndex): { entry: VocabularyEntry } | { problem: string } {
+  const exact = vocabulary.resolve(name, [...FILTER_KINDS]);
+  if (exact) return { entry: exact };
+  const trimmed = name.trim().toLowerCase();
+  const candidates = vocabulary.entries.filter((entry) => FILTER_KINDS.includes(entry.kind as typeof FILTER_KINDS[number]) && (
+    entry.ref.slice(entry.ref.indexOf(':') + 1).toLowerCase() === trimmed
+    || entry.name.toLowerCase() === trimmed
+    || entry.sourceId?.toLowerCase() === trimmed
+    || (entry.kind === 'column' && entry.ref.toLowerCase().endsWith(`.${trimmed}`))
+    || entry.aliases.some((alias) => alias.toLowerCase() === trimmed)
+  ));
+  if (candidates.length === 0) return { problem: `"${name}" names no governed dimension, entity or column exactly` };
+  const fields = new Set(candidates.map((entry) => fieldIdentity(entry.ref, vocabulary)));
+  // One field under several names: the governed dimension is the ref to bind, the raw column the last resort.
+  const rank = (entry: VocabularyEntry) => entry.kind === 'dimension' ? 0 : entry.kind === 'entity' ? 1 : 2;
+  if (fields.size === 1) return { entry: [...candidates].sort((left, right) => rank(left) - rank(right))[0]! };
+  return { problem: `"${name}" is ambiguous: it names ${candidates.map((entry) => `${entry.ref}${entry.physical?.column ? ` (${entry.physical.relation}.${entry.physical.column})` : ''}`).join(', ')}; write the policy with one of those refs` };
+}
+
 /** Parse "<ref or name> <op> <value>" (or a bare boolean flag) into a predicate bound to a governed ref, or say why not. */
 export function bindRequiredFilter(text: string, vocabulary: VocabularyIndex): { predicate: IntentPredicate } | { problem: string } {
   const bare = BARE_FLAG.exec(text);
   const match = bare ? null : REQUIRED_FILTER.exec(text);
   const name = bare?.[1] ?? match?.[1];
   if (!name) return { problem: `"${text}" is not a filter this host can read (expected <field> <op> <value>)` };
-  const entry = vocabulary.resolve(name, [...FILTER_KINDS]);
-  if (!entry) return { problem: `"${name}" names no governed dimension, entity or column exactly` };
+  const resolved = resolvePolicyField(name, vocabulary);
+  if ('problem' in resolved) return resolved;
+  const entry = resolved.entry;
   if (bare) return { predicate: { ref: entry.ref, op: 'eq', values: [true], source: 'question' } };
   const op = OPS[match![2]!.toLowerCase()];
   if (!op) return { problem: `"${match![2]}" is not an operator this host can read` };
@@ -56,6 +98,33 @@ export function bindRequiredFilter(text: string, vocabulary: VocabularyIndex): {
     ? raw.replace(/^\(|\)$/g, '').split(',').map((part) => literal(part))
     : [literal(raw)];
   return { predicate: { ref: entry.ref, op, values, source: 'question' } };
+}
+
+/** How an existing restriction relates to a required one on the same field. */
+export function comparePredicates(existing: IntentPredicate, required: IntentPredicate): 'equal' | 'stronger' | 'contradicts' | 'unrelated' {
+  const norm = (value: unknown) => typeof value === 'string' ? value.toLowerCase() : value;
+  const ev = existing.values.map(norm); const rv = required.values.map(norm);
+  const setEq = ev.length === rv.length && ev.every((value) => rv.includes(value));
+  const eqLike = (op: string) => op === 'eq' || op === 'in';
+  const neqLike = (op: string) => op === 'neq' || op === 'not_in';
+  if (eqLike(existing.op) && eqLike(required.op)) {
+    if (setEq) return 'equal';
+    if (ev.every((value) => rv.includes(value))) return 'stronger';
+    if (ev.some((value) => rv.includes(value))) return 'unrelated';
+    return 'contradicts';
+  }
+  if (neqLike(existing.op) && eqLike(required.op)) return ev.some((value) => rv.includes(value)) ? 'contradicts' : 'unrelated';
+  if (eqLike(existing.op) && neqLike(required.op)) return ev.some((value) => rv.includes(value)) ? 'contradicts' : 'stronger';
+  if (neqLike(existing.op) && neqLike(required.op)) return setEq ? 'equal' : 'unrelated';
+  if (existing.op === required.op && setEq) return 'equal';
+  return 'unrelated';
+}
+
+function describePredicate(predicate: IntentPredicate, vocabulary: VocabularyIndex): string {
+  const entry = vocabulary.get(predicate.ref);
+  const label = entry?.label ?? entry?.name ?? predicate.ref;
+  const op = ({ eq: '=', neq: '≠', in: 'in', not_in: 'not in', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: 'contains' } as Record<string, string>)[predicate.op] ?? predicate.op;
+  return `${label} ${op} ${predicate.values.join('/')}`;
 }
 
 const GRAIN_MS: Record<string, number> = { day: 86_400_000, week: 7 * 86_400_000 };
@@ -107,8 +176,21 @@ export function applySkillPolicies(
       outcome.refusal = { tier: 'relational', code: 'policy_filter_unbindable', message: `a required filter of ${item.policyId === 'domain' ? 'this domain' : item.policyId} could not be bound: ${bound.problem}; the question is not answered without it`, repairable: false };
       return outcome;
     }
-    const already = intent.filters.find((filter) => filter.ref === bound.predicate.ref && filter.on !== 'aggregate');
-    if (already) { record(item.policyId, 'requiredFilter', `already restricted on ${bound.predicate.ref}`); continue; }
+    // The question may already restrict the SAME FIELD — through this ref or
+    // an equivalent one. Equal restriction: nothing to add. A contradiction
+    // (the rule says true, the question says false) is a typed refusal that
+    // names the rule: never two predicates that cancel to a governed zero,
+    // never the rule silently dropped because "the field is restricted".
+    const field = fieldIdentity(bound.predicate.ref, vocabulary);
+    const same = intent.filters.filter((filter) => filter.on !== 'aggregate' && fieldIdentity(filter.ref, vocabulary) === field);
+    const verdicts = same.map((filter) => comparePredicates(filter, bound.predicate));
+    if (verdicts.includes('contradicts')) {
+      const clash = same[verdicts.indexOf('contradicts')]!;
+      outcome.gaps.push(`${item.policyId}: the question restricts ${clash.ref} ${clash.op} ${clash.values.join('/')}, which contradicts the required ${item.text}`);
+      outcome.refusal = { tier: 'relational', code: 'policy_conflict', message: `${item.policyId === 'domain' ? 'this domain' : item.policyId} requires ${item.text}, and the question asks for ${describePredicate(clash, vocabulary)} — a rule the question contradicts is not applied and not dropped: the reading is refused, and the rule is named so it can be changed by whoever owns it`, repairable: false };
+      return outcome;
+    }
+    if (verdicts.includes('equal') || verdicts.includes('stronger')) { record(item.policyId, 'requiredFilter', `already restricted on ${bound.predicate.ref}`); continue; }
     intent.filters.push(bound.predicate);
     intent.provenance[bound.predicate.ref] = `policy:${item.policyId}:required filter ${item.text}`;
     outcome.requiredFilters.push(item.text);

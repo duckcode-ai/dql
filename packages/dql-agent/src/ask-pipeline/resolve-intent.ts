@@ -350,6 +350,39 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
     unresolved: [...intent.unresolved, ...conceptClauses],
   };
   for (const clause of conceptClauses) intent.provenance[`concept:${clause.clause}`] = 'host:a concept names several keys; the binding is a choice, not a default';
+  // A BREAKDOWN THE QUESTION DID NOT ASK FOR. "beverage revenue" is a total;
+  // a reading that groups it by product answers a different question. When
+  // the question carries no breakdown cue and names none of the grouping
+  // fields, the grouping is sent back once; a question that says "by",
+  // "top", "which", "compare" or names the field keeps it.
+  // A certified block that breaks a measure down (its contract groups) named
+  // as THE measure of a total question is the same over-reading in block
+  // clothing: "beverage revenue" is not "beverage revenue by product".
+  const groupingBlocks = intent.measures.flatMap((measure) => {
+    const entry = vocabulary.get(measure.ref);
+    return entry?.kind === 'block' && (entry.contract?.groupBy?.length ?? 0) > 0 ? [entry] : [];
+  });
+  if (question && !prior && (intent.groupBy.length > 0 || groupingBlocks.length > 0) && (intent.expectedShape === 'grouped' || intent.expectedShape === 'ranking')) {
+    const cue = /\b(by|per|each|across|breakdown|break\s+down|split|top|bottom|rank|ranking|ranked|which|who|whose|list|compare|comparison|versus|vs|trend|over\s+time|monthly|weekly|daily|yearly|quarterly|annual|distribution|highest|lowest|most|least|best|worst|leaders?|leading)\b/i;
+    const questionWords = new Set(normalizeVocabularyText(question).split(' ').filter(Boolean).flatMap((word) => [word, singularWord(word)]));
+    const namesIt = (texts: Array<string | undefined>) => texts.some((text) => normalizeVocabularyText(text ?? '').split(' ').some((word) => word && (questionWords.has(word) || questionWords.has(singularWord(word)))));
+    const named = intent.groupBy.some((group) => { const entry = vocabulary.get(group.ref); return namesIt([entry?.name, entry?.label, ...(entry?.aliases ?? [])]); })
+      || groupingBlocks.some((block) => namesIt(block.contract?.groupBy ?? []));
+    // A word the reading did not account for may be the breakdown itself,
+    // misspelt or in the reader's own words ("scoring leaders", "bevereage
+    // catogery"): the guard fires only when every word of the question is
+    // spoken for by the measures, the restrictions and the period.
+    const scalarIntent: AnalyticalIntentV1 = { ...intent, groupBy: [], display: [], expectedShape: 'scalar' };
+    const leftover = unaccountedQuestionWords(question, scalarIntent, vocabulary).filter((word) => !FACET_STOPWORDS.has(word));
+    if (!cue.test(question) && !named && leftover.length === 0) {
+      const totals = groupingBlocks.flatMap((block) => (block.contract?.measures ?? []).slice(0, 1).flatMap((measure) => vocabulary.lookup(measure.output.replace(/_/g, ' '), { kinds: ['metric', 'measure'], limit: 2, minScore: 0.5 }).map((hit) => hit.entry.ref)));
+      problems.push({
+        path: groupingBlocks.length && intent.groupBy.length === 0 ? 'measures' : 'groupBy',
+        message: `the question asks for a total, not a breakdown: it names no grouping and carries no breakdown word; ${groupingBlocks.length ? `${groupingBlocks.map((block) => block.ref).join(', ')} breaks the measure down by ${groupingBlocks.flatMap((block) => block.contract?.groupBy ?? []).join(', ')}, so read the total from its metric instead` : 'remove the grouping (groupBy: [], expectedShape: "scalar")'} unless the question itself asks for a breakdown`,
+        ...(totals.length ? { suggestions: [...new Set(totals)] } : {}),
+      });
+    }
+  }
   const groupBy = intent.groupBy.map((group, index) => ({
     ...group,
     ref: canonical(group.role === 'time' ? rebindTime(canonical(group.ref, GROUP_KINDS, `groupBy[${index}].ref`)) : group.ref, GROUP_KINDS, `groupBy[${index}].ref`, (entry) => {
@@ -1283,7 +1316,7 @@ export function droppedChange(question: string, intent: AnalyticalIntentV1, voca
 }
 
 const FACET_LIST = /\b(?:including|include|includes|covering|along with|as well as)\b\s+(.{3,160})$/i;
-const FACET_STOPWORDS = new Set(['his', 'her', 'their', 'its', 'our', 'my', 'your', 'the', 'a', 'an', 'and', 'or', 'also', 'other', 'any', 'all', 'each', 'every', 'some', 'please', 'data', 'details', 'detail', 'information', 'info', 'stats', 'numbers']);
+const FACET_STOPWORDS = new Set(['his', 'her', 'their', 'its', 'our', 'my', 'your', 'the', 'a', 'an', 'and', 'or', 'also', 'other', 'any', 'all', 'each', 'every', 'some', 'please', 'data', 'details', 'detail', 'information', 'info', 'stats', 'numbers', 'only', 'just', 'rows', 'row', 'records', 'record', 'values', 'value', 'include', 'including', 'with', 'from', 'for', 'that', 'this', 'those', 'these']);
 
 /**
  * EACH FACET THE QUESTION LISTED IS ANSWERED OR NAMED. "A complete profile of
@@ -1293,24 +1326,38 @@ const FACET_STOPWORDS = new Set(['his', 'her', 'their', 'its', 'our', 'my', 'you
  * reading uses is NAMED for it — a description that happens to mention the word
  * is not the same as an output that answers it.
  */
-export function unmetFacets(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
+/** A crude stem: "participating", "participated" and "participation" are one word to a coverage check. */
+export function facetStem(word: string): string {
+  const base = singularWord(word.toLowerCase());
+  return base.replace(/(ation|ating|ated|ings?|ers?|ed|es|ly)$/, '').replace(/(.)\1$/, '$1') || base;
+}
+
+/**
+ * The parts a question listed that the executed reading carries nothing for.
+ * A part is covered by any ref the reading uses (name, label, alias), by a
+ * restriction a POLICY added for it, by a concept
+ * whose name or synonyms say it, or by a grain — compared by stem, so a
+ * requirement spelled "participating" is met by a filter on "participated".
+ */
+export function unmetFacets(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, options: { policyTexts?: string[] } = {}): string[] {
   if (intent.kind !== 'analytics' || intent.measures.length === 0) return [];
   const tail = FACET_LIST.exec(question)?.[1];
   if (!tail) return [];
   const named = new Set<string>();
+  const add = (text: string | undefined) => { for (const word of normalizeVocabularyText(text ?? '').split(' ')) if (word) { named.add(word); named.add(singularWord(word)); named.add(facetStem(word)); } };
   for (const ref of intentRefs(intent)) {
     const entry = vocabulary.get(ref);
-    for (const text of [entry?.name, entry?.label, ...(entry?.aliases ?? [])]) {
-      for (const word of normalizeVocabularyText(text ?? '').split(' ')) if (word) { named.add(word); named.add(singularWord(word)); }
-    }
+    for (const text of [entry?.name, entry?.label, ...(entry?.aliases ?? [])]) add(text);
   }
+  for (const text of options.policyTexts ?? []) add(text);
+  for (const entry of vocabulary.entries) if (entry.kind === 'concept') { add(entry.name); for (const alias of entry.aliases) add(alias); }
   for (const grain of [...intent.groupBy.map((group) => group.grain), intent.time?.grain]) if (grain) named.add(grain);
   const facets = tail.split(/,| and | plus /i).map((facet) => facet.trim().replace(/[.?!]+$/, '')).filter(Boolean);
   const unmet: string[] = [];
   for (const facet of facets) {
     const words = normalizeVocabularyText(facet).split(' ').filter((word) => word.length > 2 && !FACET_STOPWORDS.has(word));
     if (words.length === 0) continue;
-    if (words.every((word) => named.has(word) || named.has(singularWord(word)))) continue;
+    if (words.every((word) => named.has(word) || named.has(singularWord(word)) || named.has(facetStem(word)))) continue;
     unmet.push(facet);
   }
   return unmet.slice(0, 4);

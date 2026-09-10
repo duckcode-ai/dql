@@ -113,7 +113,14 @@ export function AppShell() {
   // URLs makes reloads unexpectedly reopen Domains and creates misleading
   // bookmarks after ordinary navigation.
   useEffect(() => {
-    if (state.mainView === 'domains' || state.mainView === 'modeling' || state.mainView === 'skills') return;
+    if (state.mainView === 'domains' || state.mainView === 'modeling' || state.mainView === 'skills') {
+      // Domain Studio owns its own location; an Ask thread left in the URL
+      // would send a reload back to Ask instead of the modeling workspace.
+      const studio = withoutAskLocationHref(window.location.href);
+      const here = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (studio !== here) window.history.replaceState(window.history.state, '', studio);
+      return;
+    }
     const stripped = withoutDomainStudioLocationHref(window.location.href);
     // The Ask thread lives in the URL only while Ask is open; leaving Ask
     // must not leave a reload pointing back at it.

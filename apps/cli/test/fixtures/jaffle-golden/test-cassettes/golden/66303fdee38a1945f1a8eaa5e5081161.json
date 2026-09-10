@@ -1,0 +1,26 @@
+{
+  "key": "66303fdee38a1945f1a8eaa5e5081161",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show Ryan Byrd's total revenue and beverage revenue side by side.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\",\"alias\":\"beverage_revenue\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[{\"clause\":\"total revenue\",\"options\":[\"metric:orders.order_total\",\"metric:order_item.revenue\"],\"material\":true,\"question\":\"Should 'total revenue' mean gross order total including tax (orders.order_total), or product revenue excluding tax at the same order-item grain as beverage revenue (order_item.revenue)?\"}],\"provenance\":{\"metric:order_item.drink_revenue\":\"q:beverage revenue\",\"dimension:customers.customer_name\":\"q:Ryan byrd\",\"entity:orders.customer\":\"inherited\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-10T14:16:03.258Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 5,
+    "messageRoles": [
+      "system",
+      "user",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "66303fdee38a1945f1a8eaa5e50811615aa85dd36128984b811bf6e16f67b31b",
+    "postCanonicalHash": "66303fdee38a1945f1a8eaa5e50811615aa85dd36128984b811bf6e16f67b31b",
+    "appliedRuleClasses": []
+  }
+}

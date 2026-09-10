@@ -807,7 +807,12 @@ function validateDomainHierarchy(
   diagnostics: ManifestDiagnostic[],
 ): void {
   const keyFor = (value: string) => domainAliasKey(value);
-  const byKey = new Map(Object.values(domains).map((domain) => [keyFor(domain.name), domain]));
+  // A parent may be named by the child's `parent = "<id>"`, by the display
+  // name, or by the folder: all three are the same domain.
+  const byKey = new Map<string, ManifestDomain>();
+  for (const domain of Object.values(domains)) {
+    for (const alias of [domain.id, domain.name, domain.filePath?.replace(/\\/g, '/').match(/^domains\/(?:.*\/)?([^/]+)\/[^/]+$/)?.[1]]) if (alias) byKey.set(keyFor(alias), domain);
+  }
   for (const domain of Object.values(domains)) {
     if (!domain.parent) continue;
     const parent = byKey.get(keyFor(domain.parent));
@@ -1169,6 +1174,7 @@ function createManifestDomainResolver(domains: Record<string, ManifestDomain>): 
   for (const domain of Object.values(domains)) {
     aliases.set(domain.name, domain.name);
     aliases.set(domainAliasKey(domain.name), domain.name);
+    if (domain.id) { aliases.set(domain.id, domain.name); aliases.set(domainAliasKey(domain.id), domain.name); }
     const folderAlias = domain.filePath?.replace(/\\/g, '/').match(/^domains\/([^/]+)\//)?.[1];
     if (folderAlias) aliases.set(domainAliasKey(folderAlias), domain.name);
   }

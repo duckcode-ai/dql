@@ -3873,7 +3873,8 @@ function AnalyticalHowAnswered({
       + `${stringList(binding.entityPath).length ? ` via ${stringList(binding.entityPath).join(' → ')}` : ''}`
       + ` (${displayValue(binding.status)})`).join('\n')],
     ['Cascade', displayValue(cascade?.selectedTier) || displayValue(cascade?.stopReason)],
-    ['Plan frozen', displayValue(contract.diagnostic?.planFrozen)],
+    // The pipeline freezes its executable before it runs; a run that never carried a V2 freeze flag shows no row rather than a misleading "false".
+    ...(contract.diagnostic?.planFrozen === undefined ? [] : [['Plan frozen', displayValue(contract.diagnostic.planFrozen)] as [string, string]]),
     ['Provider phase/cause', [displayValue(providerDiagnostic?.phase), displayValue(providerDiagnostic?.cause)].filter(Boolean).join(' · ')],
     ['Provider recovery', displayValue(providerDiagnostic?.safeAction)],
     ['Source coverage', sourceCoverage.map((entry) => `${displayValue(entry.source)}: ${displayValue(entry.status)}`).join('\n')],
