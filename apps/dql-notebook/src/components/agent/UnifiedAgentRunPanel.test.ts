@@ -2453,11 +2453,12 @@ describe('the inspector plan of a pipeline run is its intent', () => {
     expect(rows['Skills applied']).toBeUndefined(); // no ledger, no context rows
     const named = Object.fromEntries(askPipelinePlanRows({
       version: 1, intent: { reading: 'x', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {} }, dispatches: [], candidates: [], refusals: [], tiers: [], timings: {},
-      context: { rendered: { byKind: {}, charsByKind: {}, totalChars: 0, truncated: [], skills: ['skill:nba.player_reporting'], hints: ['hint_1'] }, enforced: { policies: [{ policyId: 'skill:nba.player_reporting', field: 'participated', effect: 'applied participated = true' }], requiredFilters: [], gaps: [] }, used: { joins: [{ source: 'warehouse_proof', authority: 'proven_default', scope: 'within_domain' }], relations: [] } },
+      context: { rendered: { byKind: {}, charsByKind: {}, totalChars: 0, truncated: [], skills: ['skill:nba.player_reporting'], hints: ['hint_1'] }, enforced: { policies: [{ policyId: 'skill:nba.player_reporting', field: 'participated', effect: 'applied participated = true' }, { policyId: 'skill:nba.player_reporting', field: 'comparisonAlignment', effect: 'recorded (calendar_period); not yet applied to period scopes' }], requiredFilters: [], gaps: [] }, used: { joins: [{ source: 'warehouse_proof', authority: 'proven_default', scope: 'within_domain' }], relations: [] } },
     }));
     expect(named['Skills applied']).toBe('skill:nba.player_reporting');
     expect(named['Hints applied']).toBe('hint_1');
     expect(named['Policies enforced']).toBe('skill:nba.player_reporting · participated · applied participated = true');
+    expect(named['Settings recorded, not enforced']).toBe('skill:nba.player_reporting · comparisonAlignment · recorded (calendar_period); not yet applied to period scopes');
     expect(named['Joins used']).toBe('warehouse_proof (proven_default, within_domain)');
     expect(rows.Ordering).toBe('measure:0 desc · limit 5');
     expect(rows['Tiers tried']).toBe('certified: refused — no block\nsemantic: refused\nrelational: prepared');

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, validateIntentRefs, facetStem } from './resolve-intent.js';
+import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, coverageStates, validateIntentRefs, facetStem } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { applyMemberSelection, bindNamedSubject, memberOptionId, namesInQuestion, parseMemberOption, pinnedRefsFor, proveSubjectMatchesPopulation, runAskPipeline, unmetDisplayObligation } from './pipeline.js';
@@ -681,6 +681,45 @@ describe('a question word is covered when the used measure embodies it', () => {
   });
 });
 
+describe('coverage is satisfied through lineage and the reading\'s own names; the rest is a restriction or a question (Codex E03/E09)', () => {
+  const source: VocabularySource = {
+    metrics: [
+      { name: 'wins', model: 'team_season', label: 'Wins', aggregation: 'sum', expr: 'SUM(CASE WHEN team_won THEN 1 ELSE 0 END)', physical: { relation: 'dev.team_facts', expr: 'SUM(CASE WHEN "dev"."team_facts"."team_won" THEN 1 ELSE 0 END)', aggregate: 'sum' } },
+      { name: 'losses', model: 'team_season', label: 'Losses', aggregation: 'sum', expr: 'SUM(CASE WHEN team_lost THEN 1 ELSE 0 END)' },
+      { name: 'games', model: 'team_season', label: 'Games', aggregation: 'count', expr: 'COUNT(game_id)' },
+    ],
+    relations: [{ schema: 'dev', name: 'team_facts', columns: [{ name: 'team_won', dataType: 'BOOLEAN' }, { name: 'team_lost', dataType: 'BOOLEAN' }, { name: 'game_id', dataType: 'INTEGER' }] }],
+  };
+  const local = buildVocabularyIndex(source);
+  const reading = (measures: Array<Record<string, unknown>>) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures, groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }).intent!;
+  it('"team_won" is satisfied by the wins metric whose expression embodies it', () => {
+    expect(uncoveredQuestionTerms('Using team-game rows where team_won=true and source season=2017, show the top five team nicknames by count of those rows', reading([{ ref: 'metric:team_season.wins' }]), local)).toEqual([]);
+  });
+  it('"losses" is satisfied by a measure the reading itself named losses', () => {
+    expect(uncoveredQuestionTerms('show wins, losses and win percentage', reading([{ ref: 'metric:team_season.wins' }, { ref: 'column:dev.team_facts.team_lost', aggregation: 'sum', alias: 'losses' }]), local)).toEqual([]);
+  });
+  it('"team_won" is satisfied through the season model\'s column lineage when wins is a STORED column — and only for that column', () => {
+    const stored = buildVocabularyIndex({
+      metrics: [{ name: 'wins', model: 'team_season', label: 'Wins', aggregation: 'sum', physical: { relation: 'TRANSFORMED.local_team_season_facts', expr: 'SUM("TRANSFORMED"."local_team_season_facts"."wins")', aggregate: 'sum' } }],
+      relations: [{ schema: 'TRANSFORMED', name: 'local_team_season_facts', columns: [{ name: 'wins', dataType: 'INTEGER' }, { name: 'home_games', dataType: 'INTEGER' }], columnLineage: { wins: ['team_won'], home_games: ['is_home'] } },
+        { schema: 'TRANSFORMED', name: 'local_team_game_facts', columns: [{ name: 'team_won', dataType: 'BOOLEAN' }, { name: 'is_home', dataType: 'BOOLEAN' }] }],
+    });
+    const wins = reading([{ ref: 'metric:team_season.wins' }]);
+    expect(uncoveredQuestionTerms('team-game rows where team_won=true in source season 2017, top five by count', wins, stored)).toEqual([]);
+    // is_home feeds home_games, not wins: a restriction on it is NOT satisfied by reading wins.
+    expect(uncoveredQuestionTerms('wins where is_home = true', wins, stored)).toEqual(['is_home']);
+  });
+  it('a restriction the reading did not apply is UNSATISFIED; a word merely mentioned is UNCERTAIN', () => {
+    const dropped = uncoveredQuestionTerms('count of team-game rows where team_won = true', reading([{ ref: 'metric:team_season.games' }]), local);
+    expect(dropped).toEqual(['team_won']);
+    expect(coverageStates('count of team-game rows where team_won = true', dropped)).toEqual([{ word: 'team_won', state: 'unsatisfied' }]);
+    const mentioned = uncoveredQuestionTerms('show wins and losses by team', reading([{ ref: 'metric:team_season.wins' }]), local);
+    expect(mentioned).toEqual(['losses']);
+    expect(coverageStates('show wins and losses by team', mentioned)).toEqual([{ word: 'losses', state: 'uncertain' }]);
+    expect(coverageStates('only losses, please', ['losses'])).toEqual([{ word: 'losses', state: 'unsatisfied' }]);
+  });
+});
+
 describe('a time window without an axis', () => {
   const vocabulary = buildVocabularyIndex(jaffle);
   const windowed = (measure: string) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: measure }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar', time: { window: { start: '2031-01-01', end: '2032-01-01', expression: 'in 2031' } } }).intent!;
@@ -864,6 +903,15 @@ describe('the units contract of a result', () => {
     expect(counts.map((item) => item.kind)).toEqual(['count', 'count']);
     const growth = buildVocabularyIndex({ metrics: [{ name: 'revenue_growth_mom', model: 'order_item', type: 'derived', expr: '(current_revenue - revenue_prev_month)*100/revenue_prev_month' }] });
     expect(describeResultColumns(make({ measures: [{ ref: 'metric:order_item.revenue_growth_mom' }] }), { columns: ['revenue_growth_mom'], rows: [] }, growth)[0]).toMatchObject({ kind: 'percent', unit: 'percentage_points' });
+  });
+  it('an aggregated Boolean is a number, and only an unaggregated Boolean is a flag (Codex E09)', () => {
+    const booleans = buildVocabularyIndex({
+      metrics: [{ name: 'losses', model: 'team_season', aggregation: 'sum', dataType: 'boolean', physical: { relation: 'dev.team_facts', expr: 'SUM("dev"."team_facts"."team_lost")', aggregate: 'sum' } }],
+      relations: [{ schema: 'dev', name: 'team_facts', columns: [{ name: 'team_lost', dataType: 'BOOLEAN' }, { name: 'home_game', dataType: 'BOOLEAN' }] }],
+    });
+    const intent = make({ measures: [{ ref: 'metric:team_season.losses' }, { ref: 'column:dev.team_facts.team_lost', aggregation: 'sum', alias: 'lost_games' }], display: ['column:dev.team_facts.home_game'] });
+    const meta = describeResultColumns(intent, { columns: ['losses', 'lost_games', 'home_game'], rows: [{ losses: 24, lost_games: 24, home_game: true }] }, booleans);
+    expect(meta.map((item) => `${item.name}:${item.kind}`)).toEqual(['losses:number', 'lost_games:number', 'home_game:boolean']);
   });
   it('a semantic column name that qualifies the dimension still finds its meta', () => {
     const intent = make({ measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'month' }] });
@@ -1058,6 +1106,21 @@ describe('a provider timeout is retried once, under the same run, when the budge
     expect(failed.status).toBe('failed');
     expect(other.calls).toBe(1);
     if (failed.status === 'failed') expect(failed.code).toBeUndefined();
+  });
+  it('an empty exit is retried once like a timeout; a usage limit is never retried and keeps its code', async () => {
+    const exit = () => Object.assign(new Error('Claude Code exited before producing an answer.'), { code: 'provider_exit', detail: 'empty reply' });
+    const recovered = flaky(1, exit);
+    const result = await resolveIntent({ question: 'revenue', vocabulary, provider: recovered, budgetMs: 150_000 });
+    expect(result.status).toBe('resolved');
+    expect(recovered.calls).toBe(2);
+    const quota = flaky(5, () => Object.assign(new Error("The AI model's usage limit is reached."), { code: 'provider_quota', detail: "You've hit your session limit · resets 12pm (America/Chicago)" }));
+    const limited = await resolveIntent({ question: 'revenue', vocabulary, provider: quota, budgetMs: 150_000 });
+    expect(limited.status).toBe('failed');
+    expect(quota.calls).toBe(1);
+    if (limited.status === 'failed') expect(limited.code).toBe('provider_quota');
+    const outcome = await runAskPipeline({ question: 'revenue', vocabulary, provider: flaky(5, () => Object.assign(new Error('x'), { code: 'provider_quota', detail: 'resets 12pm' })), prepareDeps: {}, executeDeps: { run: async () => { throw new Error('must not execute'); } }, deadlineMs: 150_000 });
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind === 'failed') { expect(outcome.text).toContain('usage limit is reached'); expect(outcome.text).toContain('resets 12pm'); expect(outcome.receipt.failure?.reason).toBe('provider_quota'); expect(outcome.receipt.dispatches[0]?.promptChars).toBeGreaterThan(100); }
   });
   it('the pipeline says it in one sentence and keeps the provider words in the receipt', async () => {
     const outcome = await runAskPipeline({ question: 'revenue', vocabulary, provider: flaky(3), prepareDeps: {}, executeDeps: { run: async () => { throw new Error('must not execute'); } }, deadlineMs: 150_000 });

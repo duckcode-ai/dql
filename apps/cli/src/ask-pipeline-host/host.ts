@@ -40,6 +40,7 @@ import {
   type SemanticCompileOutput,
   type SemanticCompileRequest,
   type VocabularyIndex,
+  type PipelineReceipt,
   type VocabularySource,
   type PreparedBlock,
   type VocabularyEntry,
@@ -400,6 +401,73 @@ export function joinScopeDecision(
  * pinned domain with its ancestors and descendants, plus, per import
  * provider, the relations of the entities its matching exports name.
  */
+/** The coverage evaluations of a receipt: UNSATISFIED words (a restriction the reading did not apply) warn; UNCERTAIN words (a lexical miss) inform. Neither is a passed check. */
+export function coverageEvaluations(receipt: Pick<PipelineReceipt, 'uncovered' | 'coverage'>): Array<{ id: string; label: string; passed: boolean; severity: 'warning' | 'info'; message: string }> {
+  if (!receipt.uncovered?.length) return [];
+  const states = new Map((receipt.coverage ?? []).map((item) => [item.word, item.state]));
+  const unsatisfied = receipt.uncovered.filter((word) => states.get(word) === 'unsatisfied');
+  const uncertain = receipt.uncovered.filter((word) => states.get(word) !== 'unsatisfied');
+  const quoted = (words: string[]) => words.map((word) => `"${word}"`).join(', ');
+  return [
+    ...(unsatisfied.length ? [{ id: 'pipeline-coverage', label: 'Question coverage', passed: false, severity: 'warning' as const, message: `The question restricts on ${quoted(unsatisfied)}, which this reading does not apply. Say the condition explicitly, or name the field it lives on.` }] : []),
+    ...(uncertain.length ? [{ id: 'pipeline-coverage-uncertain', label: 'Question coverage', passed: false, severity: 'info' as const, message: `The question mentioned ${quoted(uncertain)}; this reading uses no field of that name, though it may cover it under another. If it was a condition or an output, say so explicitly.` }] : []),
+  ];
+}
+
+const SCOPE_WORD_STOPWORDS = new Set(['what', 'which', 'show', 'give', 'list', 'have', 'with', 'from', 'that', 'this', 'each', 'many', 'much', 'total', 'both', 'need', 'please', 'could', 'would', 'should', 'about', 'their', 'there', 'than', 'then', 'into', 'over', 'using', 'calendar', 'season', 'year', 'top', 'five', 'rows', 'row', 'count', 'name', 'names', 'label', 'key', 'directory', 'facts', 'fact', 'table', 'column', 'dimension', 'defined', 'expected', 'specific', 'used', 'instead', 'grouping', 'vocabulary', 'exposes', 'only', 'more', 'than', 'one', 'way', 'read', 'governed', 'query', 'run', 'because', 'nearest']);
+
+/**
+ * Words of a question (or of the gap that answered it) that name an object
+ * the whole inventory holds but this envelope does not — by exact name, and
+ * only objects with a known owner. The explanation names the owner and what
+ * admits it; nothing outside the scope is read.
+ */
+export function explainOutOfScopeWords(text: string, inventory: VocabularyIndex, scoped: VocabularyIndex, envelope: Pick<DomainContextEnvelope, 'activeDomain' | 'purpose'>): { message: string; refs: Array<{ ref: string; domain?: string }> } | undefined {
+  const refs = new Map<string, { ref: string; domain?: string; word: string }>();
+  for (const word of new Set(text.toLowerCase().match(/[a-z][a-z0-9_]{3,}/g) ?? [])) {
+    if (SCOPE_WORD_STOPWORDS.has(word)) continue;
+    for (const hit of inventory.lookup(word, { limit: 4, minScore: 0.97 })) {
+      if (hit.matchedOn !== 'name' && hit.matchedOn !== 'alias') continue;
+      if (scoped.get(hit.entry.ref)) continue; // in scope: not this explanation's business
+      const entry = hit.entry;
+      const relation = entry.physical?.relation ?? (entry.kind === 'column' ? entry.ref.slice(entry.ref.indexOf(':') + 1).split('.').slice(0, -1).join('.') : entry.kind === 'relation' ? entry.model : undefined);
+      const owner = entry.domain ?? (relation ? inventory.get(`relation:${relation}`)?.domain : undefined);
+      if (!owner || owner === envelope.activeDomain) continue;
+      if (!refs.has(entry.ref)) refs.set(entry.ref, { ref: entry.ref, domain: owner, word });
+      if (refs.size >= 3) break;
+    }
+    if (refs.size >= 3) break;
+  }
+  if (refs.size === 0) return undefined;
+  const where = envelope.activeDomain ? `the ${envelope.activeDomain} scope${envelope.purpose ? ` for purpose ${envelope.purpose}` : ' (no purpose given)'}` : 'this scope';
+  const named = [...refs.values()].map((item) => `"${item.word}" (${item.ref}, owned by ${item.domain})`).join(', ');
+  return { message: `${named} ${refs.size === 1 ? 'is' : 'are'} modeled in the project but not in ${where}: ask with a purpose whose import carries it, or declare the import in Domain Studio. Nothing outside the scope was read.`, refs: [...refs.values()].map(({ ref, domain }) => ({ ref, ...(domain ? { domain } : {}) })) };
+}
+
+/**
+ * A ref the interpreter named that the whole inventory holds but this
+ * envelope does not: the explanation names the owning domain and what would
+ * admit it (a purpose whose import carries it, or a declared import) — and
+ * never the object's data. Returns nothing when the ref is truly unknown.
+ */
+export function explainOutOfScope(problems: Array<{ path: string; message: string }>, inventory: VocabularyIndex, envelope: Pick<DomainContextEnvelope, 'activeDomain' | 'purpose'>): { message: string; refs: Array<{ ref: string; domain?: string }> } | undefined {
+  const refs: Array<{ ref: string; domain?: string }> = [];
+  for (const problem of problems) {
+    const match = /^(\S+) is not in the vocabulary/.exec(problem.message);
+    if (!match) continue;
+    const ref = match[1]!;
+    const entry = inventory.get(ref) ?? inventory.resolve(ref);
+    if (!entry) continue;
+    const relation = entry.physical?.relation ?? (entry.kind === 'column' ? ref.slice(ref.indexOf(':') + 1).split('.').slice(0, -1).join('.') : undefined);
+    const owner = entry.domain ?? (relation ? inventory.get(`relation:${relation}`)?.domain : undefined);
+    refs.push({ ref, ...(owner ? { domain: owner } : {}) });
+  }
+  if (!refs.length) return undefined;
+  const where = envelope.activeDomain ? `the ${envelope.activeDomain} scope${envelope.purpose ? ` for purpose ${envelope.purpose}` : ' (no purpose given)'}` : 'this scope';
+  const named = refs.map((item) => `${item.ref}${item.domain ? ` (owned by ${item.domain})` : ''}`).join(', ');
+  return { message: `${named} ${refs.length === 1 ? 'is' : 'are'} modeled in the project but not in ${where}: ask with a purpose whose import carries it, or declare the import in Domain Studio. Nothing outside the scope was read.`, refs };
+}
+
 /**
  * The projected vocabulary is a function of the base source AND of the whole
  * envelope selection. The purpose chooses which exports are imported, and a
@@ -498,6 +566,13 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     }
   };
 
+  /** The whole inventory as an index, for explaining a ref outside this envelope. Cached with the base source. */
+  let baseIndexCache: { key: string; index: VocabularyIndex } | undefined;
+  const baseIndexFor = async (connection?: ConnectionConfig): Promise<VocabularyIndex> => {
+    const { key, source } = await baseSourceFor(connection);
+    if (baseIndexCache?.key !== key) baseIndexCache = { key, index: buildVocabularyIndex(source) };
+    return baseIndexCache.index;
+  };
   /** The base source: everything the host can bind physically, per snapshot and connection. Cached; the pack projects it per request. */
   const baseSourceFor = async (connection?: ConnectionConfig): Promise<{ key: string; source: VocabularySource }> => {
     const { manifest, snapshotId } = deps.getManifest();
@@ -692,7 +767,9 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     } catch (error) {
       connectionError = error;
     }
+    const contextStarted = Date.now();
     const view = await vocabularyFor(request, connection);
+    const contextMs = Date.now() - contextStarted;
     const vocabulary = view.vocabulary;
     const prior = request.threadId ? deps.priorIntent(request) : undefined;
     let engine: PrepareDeps['engine'];
@@ -781,6 +858,30 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       ...(deps.buildIdentity ? { build: deps.buildIdentity() } : {}),
       trace: (event) => emit({ type: 'executor.started', message: `${event.stage}${typeof event.detail === 'number' ? ` ${event.detail} ms` : ''}`, route: 'generated_answer' }),
     });
+    // How long the context took to assemble, beside the stages the pipeline
+    // timed itself: the receipt is the only place a latency claim can be read from.
+    if ('receipt' in outcome && outcome.receipt) outcome.receipt.timings.context = contextMs;
+    // A ref the interpreter named that the whole inventory holds but this
+    // envelope does not is OUT OF SCOPE, not "does not exist": the reader is
+    // told which domain owns it and what admits it — never its data.
+    if (outcome.kind === 'failed' && outcome.stage === 'resolve' && outcome.receipt.failure?.reason === 'invalid' && outcome.receipt.failure.problems?.length) {
+      const explained = explainOutOfScope(outcome.receipt.failure.problems, await baseIndexFor(connection), view.envelope);
+      if (explained) {
+        outcome.message = explained.message;
+        outcome.text = `This could not be completed while reading the question: ${explained.message}`;
+        outcome.receipt.failure = { ...outcome.receipt.failure, reason: 'out_of_scope', message: explained.message };
+        outcome.receipt.outOfScope = explained.refs;
+      }
+    }
+    // The same for a gap: a clause the reading could not place may name an
+    // object another domain owns; the gap says so beside what it already says.
+    if (outcome.kind === 'gap' && (outcome.gap === 'not_modeled' || outcome.gap === 'ambiguous' || outcome.gap === 'not_retrieved')) {
+      const explained = explainOutOfScopeWords(`${request.question} ${outcome.message}`, await baseIndexFor(connection), vocabulary, view.envelope);
+      if (explained) {
+        outcome.text = `${outcome.text} ${explained.message}`;
+        outcome.receipt.outOfScope = explained.refs;
+      }
+    }
     return toExecutorResult(runId, outcome, startedAt);
   };
 }
@@ -1085,6 +1186,7 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
   }
   if (outcome.kind === 'gap') {
     const nextActions: AgentRunNextAction[] = [
+      ...(receipt.outOfScope?.length ? [{ id: 'widen-scope', label: 'Ask with a purpose that imports it, or declare the import in Domain Studio', route: 'modeling_draft' as const }] : []),
       { id: 'review-metadata-gap', label: 'Review what the project models', route: 'blocked' },
       ...(outcome.offerExploration ? [{ id: 'explore-review-required', label: 'Explore the physical tables (review-required)', route: 'generated_answer' as const }] : []),
     ];
@@ -1092,7 +1194,11 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     return withReceipt({ summary: outcome.text, answer: outcome.text, status: 'blocked', trustState: 'blocked', stopReason: 'blocked', resolvedRoute: 'generated_answer', answerRefusalCode: presentation.code, artifacts: [{ id: `${runId}:gap`, kind: 'answer', title: presentation.title, trustState: 'blocked', payload: { kind: 'no_answer', text: outcome.text, answer: outcome.text, gap: { kind: outcome.gap, message: outcome.message, nearest: outcome.nearest }, ...common } }], evaluations: [], nextActions, telemetry });
   }
   if (outcome.kind === 'failed') {
-    return withReceipt({ summary: outcome.text, answer: outcome.text, status: 'blocked', trustState: 'blocked', stopReason: 'blocked', resolvedRoute: 'generated_answer', answerRefusalCode: outcome.stage === 'resolve' ? 'provider_error' : 'execution_error', artifacts: [{ id: `${runId}:failed`, kind: 'answer', title: outcome.stage === 'execute' ? 'The query failed on the warehouse' : 'Could not prepare the query', trustState: 'blocked', payload: { kind: 'no_answer', text: outcome.text, answer: outcome.text, executionError: outcome.message, failedStage: outcome.stage, ...common } }], evaluations: [], nextActions: [{ id: 'review-analytical-failure', label: 'Review the interpretation and the engine message', route: 'blocked' }], telemetry });
+    const outOfScope = receipt.failure?.reason === 'out_of_scope';
+    const invalid = receipt.failure?.reason === 'invalid';
+    return withReceipt({ summary: outcome.text, answer: outcome.text, status: 'blocked', trustState: 'blocked', stopReason: 'blocked', resolvedRoute: 'generated_answer', answerRefusalCode: outOfScope || invalid ? 'modeling_gap' : outcome.stage === 'resolve' ? 'provider_error' : 'execution_error', artifacts: [{ id: `${runId}:failed`, kind: 'answer', title: outcome.stage === 'execute' ? 'The query failed on the warehouse' : outOfScope ? 'Outside this question\'s scope' : 'Could not prepare the query', trustState: 'blocked', payload: { kind: 'no_answer', text: outcome.text, answer: outcome.text, executionError: outcome.message, failedStage: outcome.stage, ...common } }], evaluations: [], nextActions: outOfScope
+      ? [{ id: 'widen-scope', label: 'Ask with a purpose that imports it, or declare the import in Domain Studio', route: 'modeling_draft' }]
+      : [{ id: 'review-analytical-failure', label: 'Review the interpretation and the engine message', route: 'blocked' }], telemetry });
   }
   if (outcome.kind !== 'answered') throw new Error(`unreachable pipeline outcome ${String((outcome as { kind: string }).kind)}`);
   const { candidate, result } = outcome;
@@ -1138,7 +1244,9 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
       ...(receipt.executed?.proofs ?? []).map((proof, index) => ({ id: `pipeline-execution-${index + 1}`, label: 'Execution proof', passed: true, severity: 'info' as const, message: proof })),
       // Words the reading does not use are never a passed check; the
       // evaluation carries no repair action, so it informs and does not loop.
-      ...(receipt.uncovered?.length ? [{ id: 'pipeline-coverage', label: 'Question coverage', passed: false, severity: 'warning' as const, message: `The question mentioned ${receipt.uncovered.map((word) => `"${word}"`).join(', ')}, which this reading does not use. If that was the point, say it explicitly.` }] : []),
+      // A restriction the reading did not apply is a warning; a word it may
+      // cover under another name is a question, never a claim of omission.
+      ...coverageEvaluations(receipt),
       ...(receipt.grounding ?? []).filter((note) => note.startsWith('identity:') && /share the name/.test(note)).map((note, index) => ({ id: `pipeline-identity-${index + 1}`, label: 'Identity', passed: true, severity: 'warning' as const, message: note.slice('identity:'.length).trim() })),
       // A certified block served as published with a label-only grouping
       // says so: the answer cannot keep two same-named entities apart.

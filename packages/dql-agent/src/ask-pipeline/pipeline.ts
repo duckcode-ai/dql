@@ -5,7 +5,7 @@ import { describeIntent, intentExecutionFingerprint, intentRefs, type Analytical
 import { composeAnsweredText, composeFailedText, composeGapText, describeResultColumns, labelFor, type ContextLedgerV1, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
 import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal, type PrepareResult } from './prepare/index.js';
 import { applySkillPolicies } from './policies.js';
-import { keepMembersApart, resolveIntent, uncoveredQuestionTerms, unmetFacets, type IntentResolution, causalOperatorsIn } from './resolve-intent.js';
+import { keepMembersApart, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn } from './resolve-intent.js';
 import type { RenderedCards, VocabularyDomainHeader, VocabularyEntry, VocabularyIndex } from './vocabulary.js';
 
 /**
@@ -414,7 +414,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     guidance: memberGuidance(input), cardBudget: input.cardBudget, providerOptions: input.providerOptions, now,
     renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
     maxAttempts: remaining() > 15_000 ? 2 : 1,
-    onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500) }),
+    onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }),
   });
   mark('resolve', resolveStarted);
   const recordLedger = (resolved: IntentResolution) => {
@@ -426,8 +426,13 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   if (resolution.status === 'failed') {
     // The reader gets one sentence; the receipt keeps the provider's words.
     const timedOut = resolution.reason === 'provider_error' && resolution.code === 'provider_timeout';
-    const message = timedOut ? 'the AI model took too long to read the question; retry the same question' : resolution.reason === 'provider_error' ? `the AI model did not respond (${resolution.detail})` : resolution.reason === 'unparseable' ? 'the AI reply was not a readable interpretation' : `the interpretation named things that do not exist: ${resolution.detail}`;
-    receipt.failure = { stage: 'resolve', reason: timedOut ? 'provider_timeout' : resolution.reason, message: timedOut ? `${message} (${resolution.detail})` : message, problems: resolution.problems };
+    const exited = resolution.reason === 'provider_error' && resolution.code === 'provider_exit';
+    const quota = resolution.reason === 'provider_error' && resolution.code === 'provider_quota';
+    const message = timedOut ? 'the AI model took too long to read the question; retry the same question'
+      : exited ? 'the AI model exited before answering; retry the same question'
+      : quota ? `the AI model's usage limit is reached; wait for it to reset or switch the provider (${resolution.detail})`
+      : resolution.reason === 'provider_error' ? `the AI model did not respond (${resolution.detail})` : resolution.reason === 'unparseable' ? 'the AI reply was not a readable interpretation' : `the interpretation named things that do not exist: ${resolution.detail}`;
+    receipt.failure = { stage: 'resolve', reason: timedOut ? 'provider_timeout' : exited ? 'provider_exit' : quota ? 'provider_quota' : resolution.reason, message: timedOut || exited ? `${message} (${resolution.detail})` : message, problems: resolution.problems };
     return { kind: 'failed', stage: 'resolve', message, text: composeFailedText('resolve', message), receipt };
   }
   if (resolution.status === 'conversation' || resolution.status === 'definition') {
@@ -557,7 +562,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   receipt.reading = intent.reading;
   recordSelection(intent);
   const uncovered = uncoveredQuestionTerms(input.question, intent, input.vocabulary);
-  if (uncovered.length) receipt.uncovered = uncovered;
+  if (uncovered.length) { receipt.uncovered = uncovered; receipt.coverage = coverageStates(input.question, uncovered); }
 
   // 2. Prepare (with cache and one bounded repair).
   const attempted = new Set<string>();
@@ -624,7 +629,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
       // The repair is held to the original question's obligations.
       ...(resolution.status === 'resolved' && resolution.ledger ? { ledger: resolution.ledger, ledgerRound: round + 1 } : {}),
-      onDispatch: (event) => receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500) }),
+      onDispatch: (event) => receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }),
     });
     mark('resolve_repair', repairStarted);
     recordLedger(resolution);

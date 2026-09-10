@@ -3,7 +3,7 @@ import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { connectionKey, createAskPipelineRouteExecutor, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes, vocabularyViewKey } from './host.js';
+import { connectionKey, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -39,6 +39,53 @@ function executorFor(provider: AgentProvider, manifest: unknown) {
 
 const run = (executor: ReturnType<typeof createAskPipelineRouteExecutor>, question: string) => executor({
   runId: 'run-1', request: { question, requestedMode: 'ask' } as AgentRunRequest, route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+});
+
+describe('a ref outside the envelope is explained as out of scope, never as nonexistent (Codex E02)', () => {
+  const inventory = buildVocabularyIndex({
+    relations: [
+      { schema: 'TRANSFORMED', name: 'team_directory', columns: [{ name: 'team_id', dataType: 'INTEGER' }, { name: 'city', dataType: 'VARCHAR' }], domain: 'nba.games', domains: ['nba.games'] },
+      { schema: 'TRANSFORMED', name: 'player_game_facts', columns: [{ name: 'points', dataType: 'INTEGER' }], domain: 'nba.performance', domains: ['nba.performance'] },
+    ],
+  });
+  const problems = [{ path: 'display[0]', message: 'column:TRANSFORMED.team_directory.city is not in the vocabulary' }];
+  it('names the owning domain, the scope that lacks it and what admits it — and nothing of its data', () => {
+    const explained = explainOutOfScope(problems, inventory, { activeDomain: 'nba.performance', purpose: undefined })!;
+    expect(explained.refs).toEqual([{ ref: 'column:TRANSFORMED.team_directory.city', domain: 'nba.games' }]);
+    expect(explained.message).toContain('owned by nba.games');
+    expect(explained.message).toContain('the nba.performance scope (no purpose given)');
+    expect(explained.message).toContain('purpose whose import carries it');
+    expect(explained.message).toContain('Nothing outside the scope was read');
+    expect(explainOutOfScope(problems, inventory, { activeDomain: 'nba.performance', purpose: 'player_team_reporting' })!.message).toContain('for purpose player_team_reporting');
+  });
+  it('a word of the question or of the gap that names an object another domain owns is explained the same way; words in scope are not', () => {
+    const scoped = buildVocabularyIndex({ relations: [{ schema: 'TRANSFORMED', name: 'player_game_facts', columns: [{ name: 'points', dataType: 'INTEGER' }], domain: 'nba.performance' }] });
+    const explained = explainOutOfScopeWords('show the top five team cities by total player points; no city label or dimension is defined for it', inventory, scoped, { activeDomain: 'nba.performance' })!;
+    expect(explained.refs).toEqual([{ ref: 'column:TRANSFORMED.team_directory.city', domain: 'nba.games' }]);
+    expect(explained.message).toContain('"city" (column:TRANSFORMED.team_directory.city, owned by nba.games)');
+    expect(explained.message).toContain('not in the nba.performance scope (no purpose given)');
+    expect(explainOutOfScopeWords('total player points by team', inventory, scoped, { activeDomain: 'nba.performance' })).toBeUndefined();
+  });
+  it('a word of the question or of the gap that names an object another domain owns is explained the same way; words in scope are not', () => {
+    const scoped = buildVocabularyIndex({ relations: [{ schema: 'TRANSFORMED', name: 'player_game_facts', columns: [{ name: 'points', dataType: 'INTEGER' }], domain: 'nba.performance' }] });
+    const explained = explainOutOfScopeWords('show the top five team cities by total player points; no city label or dimension is defined for it', inventory, scoped, { activeDomain: 'nba.performance' })!;
+    expect(explained.refs).toEqual([{ ref: 'column:TRANSFORMED.team_directory.city', domain: 'nba.games' }]);
+    expect(explained.message).toContain('"city" (column:TRANSFORMED.team_directory.city, owned by nba.games)');
+    expect(explained.message).toContain('not in the nba.performance scope (no purpose given)');
+    expect(explainOutOfScopeWords('total player points by team', inventory, scoped, { activeDomain: 'nba.performance' })).toBeUndefined();
+  });
+  it('a ref the whole inventory does not hold stays an unknown ref', () => {
+    expect(explainOutOfScope([{ path: 'measures[0]', message: 'metric:nowhere.thing is not in the vocabulary' }], inventory, { activeDomain: 'nba.performance' })).toBeUndefined();
+    expect(explainOutOfScope([{ path: 'groupBy', message: 'the question asks for a total, not a breakdown' }], inventory, { activeDomain: null as never })).toBeUndefined();
+  });
+  it('coverage evaluations: an unapplied restriction warns, a mentioned word informs, neither passes', () => {
+    const evaluations = coverageEvaluations({ uncovered: ['team_won', 'losses'], coverage: [{ word: 'team_won', state: 'unsatisfied' }, { word: 'losses', state: 'uncertain' }] });
+    expect(evaluations.map((item) => [item.id, item.severity, item.passed])).toEqual([['pipeline-coverage', 'warning', false], ['pipeline-coverage-uncertain', 'info', false]]);
+    expect(evaluations[0]!.message).toContain('restricts on "team_won"');
+    expect(evaluations[1]!.message).toContain('may cover it under another');
+    expect(coverageEvaluations({ uncovered: ['x'] })[0]!.severity).toBe('info');
+    expect(coverageEvaluations({})).toEqual([]);
+  });
 });
 
 describe('the projected vocabulary is keyed by the whole envelope selection', () => {

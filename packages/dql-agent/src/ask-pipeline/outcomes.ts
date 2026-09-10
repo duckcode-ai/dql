@@ -20,7 +20,7 @@ export interface PipelineReceipt {
   vocabularyFingerprint: string;
   intent?: AnalyticalIntentV1;
   reading?: string;
-  dispatches: Array<{ purpose: string; ms: number; reply?: string }>;
+  dispatches: Array<{ purpose: string; ms: number; reply?: string; /** The size of what was sent, so a prompt budget is a measured number. */ promptChars?: number }>;
   candidates: Array<{ tier: string; trust: string; proof: string[]; sqlFingerprint?: string; engine?: string }>;
   refusals: PreparedRefusal[];
   /** Tier attempts per preparation round, in order. */
@@ -31,6 +31,10 @@ export interface PipelineReceipt {
   build?: Record<string, string>;
   /** Question words naming vocabulary the reading does not use; shown as a warning, never a refusal. */
   uncovered?: string[];
+  /** Refs or words the question named that the whole inventory holds outside this envelope — explained, never read. */
+  outOfScope?: Array<{ ref: string; domain?: string }>;
+  /** What each uncovered word means: a restriction the reading did not apply, or a word it may cover under another name. */
+  coverage?: Array<{ word: string; state: 'unsatisfied' | 'uncertain' }>;
   /** Member literals the host grounded against allowlisted columns before preparing (canonical value, or that none matched). */
   grounding?: string[];
   /** Why resolution or execution stopped, verbatim, when it did. */
@@ -144,7 +148,12 @@ export function describeResultColumns(intent: AnalyticalIntentV1, result: Pick<E
     const summedExpr = (entry.physical?.expr ?? entry.expr ?? '').replace(/^SUM\(|\)$/gi, '').replace(/"[^"]*"\./g, '').trim();
     if (aggregate === 'sum' && (/^1$/.test(summedExpr) || /^\s*1\s*$/.test(entry.expr ?? '') || COUNT_NAME.test(entry.name) || COUNT_NAME.test(entry.label ?? '') || /(^|_)count(_|$)/i.test(summedExpr))) return { kind: 'count' };
     if (entry.roles.includes('time')) return { kind: 'date' };
-    if (entry.roles.includes('boolean') || entry.dataType?.toLowerCase() === 'boolean') return { kind: 'boolean' };
+    // An AGGREGATED field takes its type from the aggregation: SUM(team_lost)
+    // over a Boolean is a number of losses, not a flag. Only an unaggregated
+    // field keeps the Boolean kind.
+    const aggregated = Boolean(aggregate) || entry.kind === 'metric' || entry.kind === 'measure' || (aggregation !== undefined && aggregation !== 'none');
+    const booleanField = entry.roles.includes('boolean') || entry.dataType?.toLowerCase() === 'boolean';
+    if (booleanField) return aggregated ? { kind: 'number' } : { kind: 'boolean' };
     if (PERCENT_NAME.test(entry.name)) return { kind: 'percent', unit: 'fraction' };
     if (entry.kind === 'metric' || entry.kind === 'measure') return CURRENCY_NAME.test(entry.name) ? { kind: 'currency', unit: 'USD' } : { kind: 'number' };
     if (/(int|decimal|numeric|double|float|real|bigint)/i.test(entry.dataType ?? '')) return { kind: 'number' };
@@ -181,8 +190,9 @@ export function describeResultColumns(intent: AnalyticalIntentV1, result: Pick<E
       register(name, undefined, meta);
       continue;
     }
-    register(name, measure.ref, kindOfEntry(measure.ref));
-    if (entry?.name && entry.name !== name) register(entry.name, measure.ref, kindOfEntry(measure.ref));
+    // A column measure carries its own aggregation: SUM over a Boolean column is a number.
+    register(name, measure.ref, kindOfEntry(measure.ref, measure.aggregation));
+    if (entry?.name && entry.name !== name) register(entry.name, measure.ref, kindOfEntry(measure.ref, measure.aggregation));
   }
   for (const group of intent.groupBy) {
     const entry = entryOf(group.ref);

@@ -55,7 +55,7 @@ export interface ResolveIntentInput {
   cardBudget?: number;
   maxAttempts?: number;
   providerOptions?: ProviderRunOptions;
-  onDispatch?: (event: { attempt: number; purpose: 'resolve' | 'correct'; raw: string; ms: number; problems?: IntentProblem[] }) => void;
+  onDispatch?: (event: { attempt: number; purpose: 'resolve' | 'correct'; raw: string; ms: number; problems?: IntentProblem[]; promptChars?: number }) => void;
   now?: () => number;
 }
 
@@ -955,14 +955,32 @@ function definitionIdentifiers(entry: VocabularyEntry): string[] {
   return [...new Set(text.match(IDENTIFIER_TOKENS) ?? [])];
 }
 
+/** The column a simple aggregate reads: `SUM("s"."t"."wins")` → wins; a formula over several columns names none. */
+function lastColumnOf(expr: string | undefined): string | undefined {
+  if (!expr) return undefined;
+  const inner = /^\s*(?:sum|avg|min|max|count|count_distinct)\s*\(\s*(?:distinct\s+)?([^()]+?)\s*\)\s*$/i.exec(expr)?.[1] ?? expr.trim();
+  const match = /^(?:"?[A-Za-z_][A-Za-z0-9_]*"?\.)*"?([A-Za-z_][A-Za-z0-9_]*)"?$/.exec(inner.trim());
+  return match?.[1];
+}
+
 export function uncoveredQuestionTerms(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
   const used = new Set(intentRefs(intent));
   const usedIdentifiers = new Set([...used].flatMap((ref) => {
     const entry = vocabulary.get(ref);
     if (!entry) return [];
-    return [entry.name.toLowerCase(), ...(entry.physical?.column ? [entry.physical.column.toLowerCase()] : []), ...definitionIdentifiers(entry)];
+    // LINEAGE: the column a used measure reads is computed, upstream in dbt,
+    // from other columns (`wins` = SUM(CASE WHEN team_won …) in the season
+    // model). Those identifiers are what the question may have named — for
+    // THAT column only, never for every column the model touches.
+    const relation = (entry.physical?.relation ?? (entry.kind === 'column' ? ref.slice(ref.indexOf(':') + 1).split('.').slice(0, -1).join('.') : entry.model) ?? '').replace(/"/g, '');
+    const column = (entry.physical?.column ?? (entry.kind === 'column' ? entry.name : lastColumnOf(entry.physical?.expr ?? entry.expr)) ?? '').replace(/"/g, '').toLowerCase();
+    const lineage = relation && column ? vocabulary.get(`relation:${relation}`)?.columnLineage?.[column] ?? [] : [];
+    return [entry.name.toLowerCase(), ...(entry.physical?.column ? [entry.physical.column.toLowerCase()] : []), ...definitionIdentifiers(entry), ...lineage.map((item) => item.toLowerCase())];
   }));
-  const usedText = [...used].map((ref) => `${ref} ${vocabulary.get(ref)?.name ?? ''} ${vocabulary.get(ref)?.label ?? ''} ${(vocabulary.get(ref)?.aliases ?? []).join(' ')} ${vocabulary.get(ref)?.description ?? ''}`).join(' ').toLowerCase();
+  // The reading's own names count: a measure aliased `losses` over
+  // SUM(team_lost) is the losses the question asked for.
+  const aliases = intent.measures.flatMap((measure) => [measure.alias ?? '', measure.change?.base ?? '']).filter(Boolean);
+  const usedText = [...[...used].map((ref) => `${ref} ${vocabulary.get(ref)?.name ?? ''} ${vocabulary.get(ref)?.label ?? ''} ${(vocabulary.get(ref)?.aliases ?? []).join(' ')} ${vocabulary.get(ref)?.description ?? ''}`), ...aliases].join(' ').toLowerCase();
   const out: string[] = [];
   for (const word of new Set(question.toLowerCase().match(/[a-z][a-z0-9_]{3,}/g) ?? [])) {
     if (['what', 'which', 'show', 'give', 'list', 'have', 'with', 'from', 'that', 'this', 'each', 'many', 'much', 'total', 'both', 'need', 'please', 'could', 'would', 'should', 'about', 'their', 'there', 'than', 'then', 'into', 'over', 'category', 'product', 'products', 'customer', 'customers'].includes(word)) continue;
@@ -971,6 +989,11 @@ export function uncoveredQuestionTerms(question: string, intent: AnalyticalInten
     const stem = word.replace(/s$/, '');
     if (usedText.includes(stem)) continue;
     if (hits.some((hit) => used.has(hit.entry.ref))) continue;
+    // SATISFIED THROUGH LINEAGE: a column the used measure's own expression
+    // embodies (`wins` = SUM(CASE WHEN team_won THEN 1 ELSE 0 END)) is what
+    // the question named, under the metric's name.
+    if (usedIdentifiers.has(word) || usedIdentifiers.has(stem)) continue;
+    if (hits.some((hit) => { const column = hit.entry.physical?.column?.toLowerCase(); return Boolean(column && usedIdentifiers.has(column)); })) continue;
     // A business term or block is covered when its own definition names a
     // column the used measures embody ("beverage": filter on is_drink_item;
     // drink_revenue's expression is a case on is_drink_item).
@@ -978,6 +1001,22 @@ export function uncoveredQuestionTerms(question: string, intent: AnalyticalInten
     out.push(word);
   }
   return out;
+}
+
+/**
+ * What an uncovered word means. A word the question RESTRICTS on ("where
+ * team_won = true", "with at least", "only home games") names a condition
+ * the reading did not apply: UNSATISFIED. A word merely mentioned is a
+ * lexical miss and nothing more: UNCERTAIN — it may be covered under
+ * another name, and it is reported as a question, not as a dropped clause.
+ */
+export function coverageStates(question: string, uncovered: string[]): Array<{ word: string; state: 'unsatisfied' | 'uncertain' }> {
+  const text = question.toLowerCase();
+  return uncovered.map((word) => {
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const restricts = new RegExp(`\\b(where|with|only|having|among|excluding|without|whose|when|if)\\s+(?:\\w+\\s+){0,3}${escaped}\\b|\\b${escaped}\\s*(=|==|!=|<>|>=|<=|>|<|\\bis\\b|\\bequals?\\b|\\b(?:true|false)\\b)`, 'i');
+    return { word, state: restricts.test(text) ? 'unsatisfied' : 'uncertain' };
+  });
 }
 
 /** Question words that match nothing exactly, with the nearest vocabulary: the deterministic pre-lookup. */
@@ -1530,12 +1569,14 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     attempts += 1;
     const started = now();
     const reply = await generateStructured(input.provider, messages, ANALYTICAL_INTENT_JSON_SCHEMA, input.providerOptions);
-    input.onDispatch?.({ attempt: attempts, purpose: attempts === 1 ? 'resolve' : 'correct', raw: reply.raw, ms: now() - started });
+    input.onDispatch?.({ attempt: attempts, purpose: attempts === 1 ? 'resolve' : 'correct', raw: reply.raw, ms: now() - started, promptChars: messages.reduce((sum, message) => sum + message.content.length, 0) });
     if (reply.error === 'provider_error') {
-      // A provider that timed out is retried exactly once, on the same run
-      // and request, when the budget can hold another full dispatch. Any
-      // other provider failure ends the turn.
-      if (reply.code === 'provider_timeout' && !timeoutRetried && (input.budgetMs ?? 0) > PROVIDER_TIMEOUT_RETRY_BUDGET_MS) {
+      // A provider that timed out, or exited with an empty reply, is retried
+      // exactly once, on the same run and request, when the budget can hold
+      // another full dispatch — before anything has executed. A quota, a
+      // missing CLI or any other provider failure ends the turn; a
+      // governance refusal never reaches this branch.
+      if ((reply.code === 'provider_timeout' || reply.code === 'provider_exit') && !timeoutRetried && (input.budgetMs ?? 0) > PROVIDER_TIMEOUT_RETRY_BUDGET_MS) {
         timeoutRetried = true;
         lastDetail = reply.detail ?? 'provider timeout';
         continue;

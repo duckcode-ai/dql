@@ -3498,12 +3498,17 @@ function contextRows(context: Record<string, unknown> | undefined): Array<[strin
   const rendered = recordOf(context.rendered); const enforced = recordOf(context.enforced); const used = recordOf(context.used);
   const none = 'None';
   const skills = strings(rendered?.skills); const hints = strings(rendered?.hints);
-  const policies = list(enforced?.policies).map((policy) => `${String(policy.policyId ?? '')}${policy.field ? ` · ${String(policy.field)}` : ''}${policy.effect ? ` · ${String(policy.effect)}` : ''}`.trim());
+  // A setting the run RECORDED is not a rule it ENFORCED: the two are never one row.
+  const describePolicy = (policy: Record<string, unknown>) => `${String(policy.policyId ?? '')}${policy.field ? ` · ${String(policy.field)}` : ''}${policy.effect ? ` · ${String(policy.effect)}` : ''}`.trim();
+  const isRecorded = (policy: Record<string, unknown>) => /^recorded\b|\bnot (yet )?applied\b|^skipped\b/i.test(String(policy.effect ?? ''));
+  const policies = list(enforced?.policies).filter((policy) => !isRecorded(policy)).map(describePolicy);
+  const recorded = list(enforced?.policies).filter(isRecorded).map(describePolicy);
   const joins = list(used?.joins).map((join) => `${String(join.relationshipId ?? join.source ?? '')} (${String(join.authority ?? '')}${join.scope ? `, ${String(join.scope)}` : ''})`);
   return [
     ['Skills applied', skills.join(', ') || none],
     ['Hints applied', hints.join(', ') || none],
     ['Policies enforced', policies.join('\n') || none],
+    ['Settings recorded, not enforced', recorded.join('\n') || none],
     ['Joins used', joins.join('\n') || none],
   ];
 }

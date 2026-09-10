@@ -44,6 +44,8 @@ export interface VocabularyEntry {
   contract?: BlockContractV1;
   /** Relations list their columns; blocks list their outputs. */
   columns?: string[];
+  /** Host-only: for a relation, the upstream identifiers each of its columns is computed from (dbt model SQL), so a question word is satisfied through lineage. */
+  columnLineage?: Record<string, string[]>;
   /**
    * Documented columns that decide which rows a definition counts (a
    * participation flag, a soft delete). A reader who cannot see them counts
@@ -491,7 +493,7 @@ export interface VocabularySource {
   entities?: Array<{ name: string; model: string; type: string; label?: string; description?: string; sourceId?: string; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
   models?: Array<{ name: string; label?: string; description?: string; relation?: string }>;
   blocks?: Array<{ name: string; domain?: string; description?: string; certified: boolean; status?: string; contract: BlockContractV1; examples?: string[]; tags?: string[]; sourceId?: string; sql?: string; sourcePath?: string }>;
-  relations?: Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; sourceId?: string; /** The domain whose entity binds this relation, when one does (physical ownership). */ domain?: string; /** Every domain with an entity bound to this relation — ownership is a set, never the first entity seen. */ domains?: string[] }>;
+  relations?: Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; sourceId?: string; /** The domain whose entity binds this relation, when one does (physical ownership). */ domain?: string; /** Every domain with an entity bound to this relation — ownership is a set, never the first entity seen. */ domains?: string[]; /** What each column is computed from, by column name (lowercased), from the model's SQL. */ columnLineage?: Record<string, string[]> }>;
   terms?: Array<{ name: string; synonyms?: string[]; description?: string; metricRefs?: string[]; rules?: string[]; domain?: string }>;
   /** Declared relationships between modeled things, with their authority to join. */
   relationships?: Array<{ id: string; domain?: string; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: string; fanout?: string; verb?: string; description?: string; status?: string; crossDomain?: boolean; joinAuthority: 'certified' | 'draft' | 'unproven' }>;
@@ -713,6 +715,9 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       columns: relation.columns.map((column) => column.name),
       ...(eligibilityNotes(relation.columns).length ? { columnNotes: eligibilityNotes(relation.columns) } : {}),
       ...(relation.sourceId ? { sourceId: relation.sourceId } : {}),
+      // The owning domain (first of the sorted set), so a ref outside an envelope can be explained by who owns it.
+      ...(relation.domains?.[0] ?? relation.domain ? { domain: relation.domains?.[0] ?? relation.domain } : {}),
+      ...(relation.columnLineage && Object.keys(relation.columnLineage).length ? { columnLineage: relation.columnLineage } : {}),
     });
     for (const column of relation.columns) {
       entries.push({

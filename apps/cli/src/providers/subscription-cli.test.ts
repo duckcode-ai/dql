@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   ClaudeCodeCliProvider,
   CodexCliProvider,
+  ProviderExitError,
   ProviderTimeoutError,
   parseClaudeResult,
+  sanitizeProviderDetail,
   parseCodexFinalMessage,
   resolveSubscriptionCliTimeoutMs,
 } from './subscription-cli.js';
@@ -16,6 +18,25 @@ describe('subscription CLI timeout', () => {
     expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: '1000' })).toBe(5_000);
     expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: '900000' })).toBe(300_000);
     expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: 'invalid' })).toBe(90_000);
+  });
+});
+
+describe('a CLI exit is classified: a usage limit is a quota, anything else is a retryable empty exit', () => {
+  it('a session-limit message is provider_quota with the reset time in the detail', () => {
+    const error = new ProviderExitError('Claude Code', "You've hit your session limit · resets 12pm (America/Chicago)");
+    expect(error.code).toBe('provider_quota');
+    expect(error.message).toBe("The AI model's usage limit is reached.");
+    expect(error.detail).toContain('resets 12pm');
+  });
+  it('a plain non-zero exit is provider_exit, with the stderr sanitized: no paths, one line, bounded', () => {
+    const error = new ProviderExitError('Claude Code', 'Error: something broke\n   at /Users/someone/.claude/cli.js:12\n' + 'x'.repeat(500));
+    expect(error.code).toBe('provider_exit');
+    expect(error.message).toBe('Claude Code exited before producing an answer.');
+    expect(error.detail).toContain('<path>');
+    expect(error.detail).not.toContain('/Users/');
+    expect(error.detail.length).toBeLessThanOrEqual(300);
+    expect(new ProviderExitError('Codex', '').detail).toBe('empty reply');
+    expect(sanitizeProviderDetail('token sk-abcdefghijklmnop at /tmp/x')).toBe('token <redacted> at <path>');
   });
 });
 

@@ -1,3 +1,4 @@
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { DQLManifest, SemanticLayer } from '@duckcodeailabs/dql-core';
 import { buildVocabularyIndex, extractBlockContract, type VocabularyEntry, type VocabularyIndex, type VocabularySource } from '@duckcodeailabs/dql-agent';
 
@@ -177,10 +178,11 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
   // column, typed). The first description is not the last word: later ones
   // ADD the columns and types the earlier lacked, so a column the manifest
   // never mentioned is still a column, and a typed literal compiles by type.
-  const addRelation = (relation: { schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; domain?: string }) => {
+  const addRelation = (relation: { schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; domain?: string; columnLineage?: Record<string, string[]> }) => {
     const key = relation.schema ? `${relation.schema}.${relation.name}` : relation.name;
     if (relationSeen.has(key)) {
       const existing = source.relations!.find((item) => (item.schema ? `${item.schema}.${item.name}` : item.name) === key);
+      if (existing && relation.columnLineage) existing.columnLineage = { ...(existing.columnLineage ?? {}), ...relation.columnLineage };
       if (existing && relation.domain) {
         // Ownership is the set of every entity bound to the relation, in no order.
         existing.domains = [...new Set([...(existing.domains ?? (existing.domain ? [existing.domain] : [])), relation.domain])].sort();
@@ -473,6 +475,14 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       ...(term.metricRefs?.length ? { metricRefs: term.metricRefs } : {}), ...(term.domain ? { domain: term.domain } : {}),
     });
   }
+  // What each column of a dbt model is COMPUTED FROM, read once from the
+  // model's own SQL: `wins` in the season facts is SUM(CASE WHEN team_won …)
+  // over the game facts, so a question that says "team_won" is satisfied by
+  // a reading of `wins`. Attached to the relation, per column, host-only.
+  for (const [relation, lineage] of Object.entries(modelColumnLineage(input.manifest))) {
+    const [schema, name] = relation.includes('.') ? [relation.split('.')[0], relation.split('.').slice(1).join('.')] : [undefined, relation];
+    addRelation({ ...(schema ? { schema } : {}), name, columns: [], columnLineage: lineage });
+  }
   // What a modeled thing IS: the business context and grain a Domain Studio
   // entity binding carries, attached to the physical relation it binds.
   const nodes = input.manifest?.dbtProvenance?.nodes ?? {};
@@ -488,6 +498,75 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     };
   }
   return source;
+}
+
+const SQL_KEYWORDS = new Set(['select', 'from', 'where', 'as', 'case', 'when', 'then', 'else', 'end', 'and', 'or', 'not', 'null', 'true', 'false', 'is', 'in', 'distinct', 'group', 'by', 'order', 'having', 'on', 'join', 'left', 'right', 'inner', 'outer', 'over', 'partition', 'between', 'like', 'cast', 'integer', 'int', 'varchar', 'text', 'date', 'timestamp', 'boolean', 'double', 'decimal', 'numeric', 'bigint', 'interval', 'coalesce', 'nullif', 'sum', 'count', 'avg', 'min', 'max', 'round', 'abs', 'lower', 'upper', 'trim', 'concat', 'extract', 'year', 'month', 'day', 'with', 'union', 'all', 'limit', 'asc', 'desc', 'row_number', 'rank', 'dense_rank', 'lag', 'lead', 'first_value', 'last_value', 'if', 'ifnull', 'iff', 'greatest', 'least', 'current_date', 'current_timestamp', 'exists', 'any', 'some', 'values', 'using', 'natural', 'cross', 'full', 'filter', 'within', 'try_cast', 'date_trunc', 'datediff', 'dateadd', 'floor', 'ceil', 'ceiling', 'string', 'char', 'float', 'real', 'smallint', 'tinyint']);
+
+/**
+ * The identifiers each output column of a SELECT is computed from, by column
+ * name. Only the outermost select list is read; an expression's alias is the
+ * column, its own tokens (minus keywords, functions and literals) are its
+ * lineage; a bare column is its own lineage. Anything the parser cannot read
+ * yields no lineage — a missing entry is never a false satisfaction.
+ */
+export function columnLineageFromSql(sql: string): Record<string, string[]> {
+  const text = sql.replace(/--[^\n]*/g, ' ').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\s+/g, ' ').trim();
+  // The outermost SELECT list: from the LAST top-level `select` (a CTE's body is not the model's output) to its FROM.
+  let depth = 0; let selectAt = -1; let fromAt = -1;
+  const lower = text.toLowerCase();
+  for (let index = 0; index < lower.length; index += 1) {
+    const char = lower[index];
+    if (char === '(') depth += 1;
+    else if (char === ')') depth = Math.max(0, depth - 1);
+    else if (depth === 0 && /\bselect\b/.test(lower.slice(Math.max(0, index - 1), index + 7)) && lower.startsWith('select', index) && (index === 0 || !/[a-z0-9_]/.test(lower[index - 1]!))) { selectAt = index; fromAt = -1; }
+    else if (depth === 0 && selectAt >= 0 && fromAt < 0 && lower.startsWith('from', index) && !/[a-z0-9_]/.test(lower[index - 1] ?? ' ') && !/[a-z0-9_]/.test(lower[index + 4] ?? ' ')) fromAt = index;
+  }
+  if (selectAt < 0 || fromAt < 0) return {};
+  const list = text.slice(selectAt + 'select'.length, fromAt).replace(/^\s*distinct\b/i, '');
+  const items: string[] = []; let current = ''; depth = 0;
+  for (const char of list) {
+    if (char === '(') depth += 1;
+    if (char === ')') depth -= 1;
+    if (char === ',' && depth === 0) { items.push(current); current = ''; } else current += char;
+  }
+  items.push(current);
+  const out: Record<string, string[]> = {};
+  for (const raw of items) {
+    const item = raw.trim();
+    if (!item || item === '*' || item.endsWith('.*')) continue;
+    const aliased = /^(.*?)\s+as\s+"?([A-Za-z_][A-Za-z0-9_]*)"?\s*$/i.exec(item);
+    const expression = aliased ? aliased[1]! : item;
+    const alias = aliased ? aliased[2]! : (/"?([A-Za-z_][A-Za-z0-9_]*)"?\s*$/.exec(item)?.[1] ?? '');
+    if (!alias) continue;
+    // A token followed by `(` is a function, not a column.
+    const tokens = [...new Set([...expression.replace(/'[^']*'/g, ' ').matchAll(/([A-Za-z_][A-Za-z0-9_]*)(\s*\()?/g)].filter((match) => !match[2]).map((match) => match[1]!.toLowerCase()).filter((token) => !SQL_KEYWORDS.has(token) && !/^\d/.test(token)))];
+    // A qualified reference `t.col` contributes col; the qualifier is not a column.
+    const qualified = new Set((expression.match(/([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*"?[A-Za-z_]/g) ?? []).map((match) => match.split('.')[0]!.trim().toLowerCase()));
+    out[alias.toLowerCase()] = tokens.filter((token) => !qualified.has(token) && token !== alias.toLowerCase() || (token === alias.toLowerCase() && !aliased));
+  }
+  return out;
+}
+
+/** Column lineage for every dbt model of the manifest, keyed by `schema.table`, read once from the model SQL the dbt manifest carries. */
+export function modelColumnLineage(manifest: DQLManifest | undefined): Record<string, Record<string, string[]>> {
+  const path = manifest?.dbtProvenance?.manifestPath;
+  if (!path || !existsSync(path)) return {};
+  try {
+    if (statSync(path).size > 250 * 1024 * 1024) return {};
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as { nodes?: Record<string, { resource_type?: string; compiled_code?: string; raw_code?: string; compiled_sql?: string; raw_sql?: string }> };
+    const out: Record<string, Record<string, string[]>> = {};
+    for (const [uniqueId, node] of Object.entries(raw.nodes ?? {})) {
+      if (node.resource_type !== 'model') continue;
+      const relation = normalizeRelationName(manifest?.dbtProvenance?.nodes[uniqueId]?.relation);
+      const sql = node.compiled_code ?? node.compiled_sql ?? node.raw_code ?? node.raw_sql;
+      if (!relation || !sql) continue;
+      const lineage = columnLineageFromSql(sql);
+      if (Object.keys(lineage).length) out[relation] = lineage;
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 /**

@@ -135,6 +135,31 @@ export class ProviderTimeoutError extends Error {
   }
 }
 
+/**
+ * The CLI ended without an answer. A usage/session limit is a quota the
+ * user must wait out or route around (`provider_quota`, never retried); any
+ * other non-zero exit or empty reply is `provider_exit`, which the pipeline
+ * may retry once before anything executes. `detail` is the CLI's own words,
+ * sanitized (no paths, bounded) for the receipt.
+ */
+export class ProviderExitError extends Error {
+  readonly code: 'provider_exit' | 'provider_quota';
+  readonly detail: string;
+  constructor(cli: string, stderr: string, stdout = '') {
+    const text = `${stderr}\n${stdout}`;
+    const quota = /session limit|usage limit|rate limit|hit your .*limit|quota/i.test(text);
+    super(quota ? `The AI model's usage limit is reached.` : `${cli} exited before producing an answer.`);
+    this.name = 'ProviderExitError';
+    this.code = quota ? 'provider_quota' : 'provider_exit';
+    this.detail = sanitizeProviderDetail(text) || (quota ? 'usage limit' : 'empty reply');
+  }
+}
+
+/** The CLI's words for a receipt: one line, no file paths, no credentials-looking tokens, bounded. */
+export function sanitizeProviderDetail(text: string): string {
+  return text.replace(/\/(?:Users|home|private|tmp|var)\/\S+/g, '<path>').replace(/\b(sk|key|token)[-_][A-Za-z0-9_-]{8,}/gi, '<redacted>').replace(/\s+/g, ' ').trim().slice(0, 300);
+}
+
 export function resolveSubscriptionCliTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const configured = Number(env.DQL_SUBSCRIPTION_CLI_TIMEOUT_MS);
   if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_SUBSCRIPTION_CLI_TIMEOUT_MS;
@@ -382,10 +407,11 @@ export class ClaudeCodeCliProvider implements AgentProvider {
           this.sessions.delete(options.conversationId!);
           return this.generate(messages, options);
         }
-        throw new Error(`Claude Code exited before producing an answer${res.stderr ? `: ${res.stderr.trim()}` : '.'}`);
+        throw new ProviderExitError('Claude Code', res.stderr, res.stdout);
       }
       const parsed = parseClaudeResult(res.stdout);
       if (parsed === undefined) {
+        if (!res.stdout.trim()) throw new ProviderExitError('Claude Code', res.stderr, res.stdout);
         throw new Error(`claude did not return a parseable result${res.stderr ? `: ${res.stderr.trim()}` : '.'}`);
       }
       if (parsed.isError) {
@@ -548,7 +574,7 @@ export class CodexCliProvider implements AgentProvider {
         throw new Error(`Codex CLI not found. Install it and run \`codex login\` with your ChatGPT plan, or switch to an API-key provider. (${res.spawnError.message})`);
       }
       if (res.code !== 0) {
-        throw new Error(`Codex exited before producing an answer${res.stderr ? `: ${res.stderr.trim()}` : '.'}`);
+        throw new ProviderExitError('Codex', res.stderr, res.stdout);
       }
       if (existsSync(outFile)) {
         const text = readFileSync(outFile, 'utf-8').trim();

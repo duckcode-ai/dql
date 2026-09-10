@@ -4,7 +4,7 @@ import type { DQLManifest } from '@duckcodeailabs/dql-core';
 import { buildVocabularyIndex, renderCard } from '@duckcodeailabs/dql-agent';
 import { relationshipValidationProofFingerprint } from '@duckcodeailabs/dql-core';
 import { modelingJoinGraph, modelingJoinPaths } from './host.js';
-import { leafName, nativeAggregateBinding, nativeFormulaBinding, normalizeRelationName, parseMetricFilter, qualifyExpression, buildVocabularySource } from './vocabulary-source.js';
+import { leafName, nativeAggregateBinding, nativeFormulaBinding, normalizeRelationName, parseMetricFilter, qualifyExpression, buildVocabularySource, columnLineageFromSql } from './vocabulary-source.js';
 
 describe('vocabulary source helpers', () => {
   it('qualifies bare columns in a measure expression, leaving keywords, functions and literals alone', () => {
@@ -372,5 +372,28 @@ describe('a native metric that declares which rows its definition counts', () =>
     const source = buildVocabularySource({ manifest: undefined, semanticLayer: undefined, relations } as never);
     const index = buildVocabularyIndex(source);
     expect(renderCard(index.get('relation:TRANSFORMED.local_player_game_facts')!)).toContain('which rows count: participated True when the player appeared');
+  });
+});
+
+describe('column lineage is read from the model SQL, per output column', () => {
+  it('an aliased expression names its columns; a bare column is its own lineage; qualifiers, keywords, functions and literals are not columns', () => {
+    const sql = `-- Grain: one row per team per source season
+      SELECT team_id, season, MIN(game_date) AS first_game_date, COUNT(DISTINCT game_id) AS games_played,
+        SUM(CASE WHEN team_won THEN 1 ELSE 0 END) AS wins, SUM(CASE WHEN is_home AND team_won THEN 1 ELSE 0 END) AS home_wins,
+        g.points_scored AS points, 'literal' AS tag
+      FROM "nba"."TRANSFORMED"."local_team_game_facts" g GROUP BY 1, 2`;
+    const lineage = columnLineageFromSql(sql);
+    expect(lineage.wins).toEqual(['team_won']);
+    expect(lineage.home_wins).toEqual(['is_home', 'team_won']);
+    expect(lineage.games_played).toEqual(['game_id']);
+    expect(lineage.first_game_date).toEqual(['game_date']);
+    expect(lineage.points).toEqual(['points_scored']);
+    expect(lineage.team_id).toEqual(['team_id']);
+    expect(lineage.tag).toEqual([]);
+  });
+  it('a CTE body is not the model output, and unreadable SQL yields nothing', () => {
+    const lineage = columnLineageFromSql('WITH base AS (SELECT a, b FROM t) SELECT a AS x, SUM(b) AS total FROM base GROUP BY 1');
+    expect(lineage).toEqual({ x: ['a'], total: ['b'] });
+    expect(columnLineageFromSql('not sql at all')).toEqual({});
   });
 });
