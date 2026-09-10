@@ -128,6 +128,18 @@ export function projectVocabularySource(base: VocabularySource, pack: Pick<Local
   });
   admitted.relationship = source.relationships.length;
 
+  // Two domains may define the same word; under no pin both are eligible, so
+  // the second carries its domain in its name rather than shadowing the first.
+  if (source.terms?.length) {
+    const seen = new Map<string, number>();
+    source.terms = source.terms.map((term) => {
+      const key = lower(term.name);
+      const count = seen.get(key) ?? 0;
+      seen.set(key, count + 1);
+      return count > 0 && term.domain ? { ...term, name: `${term.name} (${term.domain})` } : term;
+    });
+  }
+
   // Business concepts: one thing under several keys. A binding names a
   // modeled entity; the card offers the entity's relation so a clarification
   // can be answered with a ref the vocabulary resolves.

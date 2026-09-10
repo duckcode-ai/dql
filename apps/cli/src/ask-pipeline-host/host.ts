@@ -7,6 +7,7 @@ import { writeFileSync } from 'node:fs';
 import type { ConnectionConfig, QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { getDialect, type DQLManifest, type SemanticLayer } from '@duckcodeailabs/dql-core';
 import {
+  type PreparedRefusal,
   askScopeFromWorkspace,
   buildVocabularyIndex,
   classifyWarehouseError,
@@ -364,6 +365,30 @@ export function modelingJoinGraph(manifest: DQLManifest | undefined, quoteRelati
   };
 }
 
+/**
+ * DOMAIN BOUNDARIES DECIDE BEFORE ANY PROBE (A-003). A project with no
+ * domains may prove a join anywhere; two relations bound to one domain may be
+ * proven within it; an endpoint nobody modeled, or one bound to several
+ * domains, is a modeling gap; endpoints in different domains need the
+ * governed interface chain and are never probed. Missing domain information
+ * never widens eligibility.
+ */
+export function joinScopeDecision(
+  fromRelation: string,
+  toRelation: string,
+  fromDomains: string[],
+  toDomains: string[],
+  hasDomains: boolean,
+): { scope: JoinAuthorityV1['scope'] } | { refusal: PreparedRefusal } {
+  if (!hasDomains) return { scope: 'no_domains' };
+  if (fromDomains.length === 1 && toDomains.length === 1 && fromDomains[0] === toDomains[0]) return { scope: 'within_domain' };
+  if (fromDomains.length === 0 || toDomains.length === 0 || fromDomains.length > 1 || toDomains.length > 1) {
+    const which = [fromDomains.length !== 1 ? fromRelation : '', toDomains.length !== 1 ? toRelation : ''].filter(Boolean).join(' and ');
+    return { refusal: { tier: 'relational', code: 'relationship_domain_unknown', message: `no certified relationship reaches ${toRelation} from ${fromRelation}, and ${which} ${which.includes(' and ') ? 'are' : 'is'} not bound to exactly one domain, so the warehouse was not asked to prove one; bind the relation to an entity in one domain, or declare and validate the relationship in Domain Studio`, repairable: false, relations: [fromRelation, toRelation] } };
+  }
+  return { refusal: { tier: 'relational', code: 'join_requires_domain_contract', message: `${fromRelation} (${fromDomains[0]}) and ${toRelation} (${toDomains[0]}) belong to different domains: a join across them needs a certified export from ${toDomains[0]}, a matching import in ${fromDomains[0]} with an allowed purpose, and a certified relationship; the warehouse is not asked to prove a cross-domain join`, repairable: false, relations: [fromRelation, toRelation] } };
+}
+
 /** Compatibility: the authorized path function alone. */
 export function modelingJoinPaths(manifest: DQLManifest | undefined, quoteRelation: (relation: string) => string): (fromRelation: string, toRelation: string) => RelationalJoinStep[] | undefined {
   return modelingJoinGraph(manifest, quoteRelation).path;
@@ -555,15 +580,9 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         // governed interface chain and are never probed.
         const fromDomains = joinGraph.domainsOf(fromRelation);
         const toDomains = joinGraph.domainsOf(toRelation);
-        let scope: JoinAuthorityV1['scope'];
-        if (!joinGraph.hasDomains) scope = 'no_domains';
-        else if (fromDomains.length === 1 && toDomains.length === 1 && fromDomains[0] === toDomains[0]) scope = 'within_domain';
-        else if (fromDomains.length === 0 || toDomains.length === 0 || fromDomains.length > 1 || toDomains.length > 1) {
-          const which = [fromDomains.length !== 1 ? fromRelation : '', toDomains.length !== 1 ? toRelation : ''].filter(Boolean).join(' and ');
-          return { refusal: { tier: 'relational', code: 'relationship_domain_unknown', message: `no certified relationship reaches ${toRelation} from ${fromRelation}, and ${which} ${which.includes(' and ') ? 'are' : 'is'} not bound to exactly one domain, so the warehouse was not asked to prove one; bind the relation to an entity in one domain, or declare and validate the relationship in Domain Studio`, repairable: false, relations: [fromRelation, toRelation] } };
-        } else {
-          return { refusal: { tier: 'relational', code: 'join_requires_domain_contract', message: `${fromRelation} (${fromDomains[0]}) and ${toRelation} (${toDomains[0]}) belong to different domains: a join across them needs a certified export from ${toDomains[0]}, a matching import in ${fromDomains[0]} with an allowed purpose, and a certified relationship; the warehouse is not asked to prove a cross-domain join`, repairable: false, relations: [fromRelation, toRelation] } };
-        }
+        const decision = joinScopeDecision(fromRelation, toRelation, fromDomains, toDomains, joinGraph.hasDomains);
+        if ('refusal' in decision) return decision;
+        const scope = decision.scope;
         const declaredEdge = joinGraph.declared(fromRelation, toRelation);
         // A declared draft supplies the keys, direction and cardinality; an
         // attribution or many-to-many declaration is never probed as if it

@@ -1,0 +1,6 @@
+// dql-format: 1
+
+domain "Finance" {
+  id = "finance"
+  owner = "finance@company.test"
+}

@@ -1,0 +1,13 @@
+// dql-format: 1
+
+term "Revenue" {
+  domain = "commerce"
+  type = "metric"
+  status = "certified"
+  description = "Order revenue: the order total on completed orders, on the report date."
+  owner = "commerce@company.test"
+  tags = ["metric", "commerce"]
+  synonyms = ["gross revenue", "sales"]
+  businessRules = ["Use fct_orders.order_total on report_date; the gross_revenue metric is this definition."]
+  caveats = ["Commerce revenue is ordered, not invoiced."]
+}

@@ -1,0 +1,16 @@
+entities:
+  - id: invoice
+    dbt_model: model.dbt_first_commerce.fct_invoices
+    business_name: Invoice
+    business_context: One issued invoice; finance's own view of what was billed.
+relationships:
+  # Keys match perfectly on the warehouse, but no export/import route exists: never joined, never probed.
+  - id: invoice_to_order
+    from: invoice
+    to: commerce:order
+    keys: [{ from: order_id, to: order_id }]
+    cardinality: many_to_one
+    fanout: safe
+    crossDomain: true
+    status: draft
+    owner: finance@company.test

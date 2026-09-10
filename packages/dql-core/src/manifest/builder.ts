@@ -998,6 +998,17 @@ function scanTerms(
           if (term.kind !== 'TermDecl') continue;
 
           if (terms[term.name]) {
+            // Two DOMAINS may each define the same business word differently
+            // ("Revenue" is ordered in Commerce and invoiced in Finance): the
+            // second is kept under its qualified key, and a pinned domain's
+            // envelope decides which one an answer reads (ID-001). The same
+            // name twice in ONE domain is still a duplicate.
+            const existing = terms[term.name];
+            const incoming = termDeclToManifestTerm(term, relPath);
+            if (incoming.domain && existing.domain && existing.domain !== incoming.domain && !terms[`${incoming.domain}::${term.name}`]) {
+              terms[`${incoming.domain}::${term.name}`] = incoming;
+              continue;
+            }
             diagnostics?.push({
               kind: 'resolve',
               filePath: relPath,

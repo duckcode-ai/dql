@@ -1,0 +1,13 @@
+// dql-format: 1
+
+term "Revenue" {
+  domain = "finance"
+  type = "metric"
+  status = "certified"
+  description = "Invoiced revenue: the invoice total on issued invoices, recognised on the invoice date."
+  owner = "finance@company.test"
+  tags = ["metric", "finance"]
+  synonyms = ["billed revenue"]
+  businessRules = ["Use fct_invoices.invoice_total, recognised on invoice_date."]
+  caveats = ["Finance revenue is invoiced, not ordered; do not mix it with Commerce order revenue."]
+}

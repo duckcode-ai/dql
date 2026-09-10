@@ -1,25 +1,275 @@
 {
-  "metadata": { "project_name": "dbt_first_commerce" },
+  "metadata": {
+    "project_name": "dbt_first_commerce"
+  },
   "nodes": {
     "model.dbt_first_commerce.fct_orders": {
-      "resource_type": "model", "name": "fct_orders", "alias": "fct_orders", "database": "analytics", "schema": "commerce", "original_file_path": "models/commerce/fct_orders.sql", "description": "One row per completed order.",
-      "meta": { "dql": { "grain": "order_id", "keys": ["customer_id"] } },
-      "columns": { "order_id": { "name": "order_id", "description": "dbt-owned order identifier", "tests": ["unique", "not_null"] }, "customer_id": { "name": "customer_id", "tests": ["not_null"] }, "report_date": { "name": "report_date", "description": "Authoritative commerce reporting date" }, "order_total": { "name": "order_total" } }, "depends_on": { "nodes": [] }
+      "resource_type": "model",
+      "name": "fct_orders",
+      "alias": "fct_orders",
+      "database": "analytics",
+      "schema": "commerce",
+      "original_file_path": "models/commerce/fct_orders.sql",
+      "description": "One row per completed order.",
+      "meta": {
+        "dql": {
+          "grain": "order_id",
+          "keys": [
+            "customer_id"
+          ]
+        }
+      },
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "description": "dbt-owned order identifier",
+          "tests": [
+            "unique",
+            "not_null"
+          ]
+        },
+        "customer_id": {
+          "name": "customer_id",
+          "tests": [
+            "not_null"
+          ]
+        },
+        "report_date": {
+          "name": "report_date",
+          "description": "Authoritative commerce reporting date"
+        },
+        "order_total": {
+          "name": "order_total"
+        }
+      },
+      "depends_on": {
+        "nodes": []
+      }
     },
     "model.dbt_first_commerce.dim_customers": {
-      "resource_type": "model", "name": "dim_customers", "alias": "dim_customers", "database": "analytics", "schema": "commerce", "original_file_path": "models/commerce/dim_customers.sql", "description": "One row per customer.",
-      "meta": { "dql": { "grain": "customer_id", "keys": ["customer_id"] } },
-      "columns": { "customer_id": { "name": "customer_id", "tests": ["unique", "not_null"] }, "customer_name": { "name": "customer_name" } }, "depends_on": { "nodes": [] }
+      "resource_type": "model",
+      "name": "dim_customers",
+      "alias": "dim_customers",
+      "database": "analytics",
+      "schema": "commerce",
+      "original_file_path": "models/commerce/dim_customers.sql",
+      "description": "One row per customer.",
+      "meta": {
+        "dql": {
+          "grain": "customer_id",
+          "keys": [
+            "customer_id"
+          ]
+        }
+      },
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "tests": [
+            "unique",
+            "not_null"
+          ]
+        },
+        "customer_name": {
+          "name": "customer_name"
+        }
+      },
+      "depends_on": {
+        "nodes": []
+      }
     },
     "model.dbt_first_commerce.dim_customer_acquisition": {
-      "resource_type": "model", "name": "dim_customer_acquisition", "alias": "dim_customer_acquisition", "database": "analytics", "schema": "growth", "original_file_path": "models/growth/dim_customer_acquisition.sql", "description": "One acquisition channel per customer.",
-      "meta": { "dql": { "grain": "customer_id", "keys": ["customer_id"] } },
-      "columns": { "customer_id": { "name": "customer_id", "tests": ["unique", "not_null"] }, "acquisition_channel": { "name": "acquisition_channel" } }, "depends_on": { "nodes": [] }
+      "resource_type": "model",
+      "name": "dim_customer_acquisition",
+      "alias": "dim_customer_acquisition",
+      "database": "analytics",
+      "schema": "growth",
+      "original_file_path": "models/growth/dim_customer_acquisition.sql",
+      "description": "One acquisition channel per customer.",
+      "meta": {
+        "dql": {
+          "grain": "customer_id",
+          "keys": [
+            "customer_id"
+          ]
+        }
+      },
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "tests": [
+            "unique",
+            "not_null"
+          ]
+        },
+        "acquisition_channel": {
+          "name": "acquisition_channel"
+        }
+      },
+      "depends_on": {
+        "nodes": []
+      }
     },
     "model.dbt_first_commerce.fct_campaign_touches": {
-      "resource_type": "model", "name": "fct_campaign_touches", "alias": "fct_campaign_touches", "database": "analytics", "schema": "growth", "original_file_path": "models/growth/fct_campaign_touches.sql", "description": "One marketing touch per customer; not an attributed revenue fact.",
-      "meta": { "dql": { "grain": "touch_id", "keys": ["customer_id"] } },
-      "columns": { "touch_id": { "name": "touch_id", "tests": ["unique", "not_null"] }, "customer_id": { "name": "customer_id" }, "campaign_name": { "name": "campaign_name" } }, "depends_on": { "nodes": [] }
+      "resource_type": "model",
+      "name": "fct_campaign_touches",
+      "alias": "fct_campaign_touches",
+      "database": "analytics",
+      "schema": "growth",
+      "original_file_path": "models/growth/fct_campaign_touches.sql",
+      "description": "One marketing touch per customer; not an attributed revenue fact.",
+      "meta": {
+        "dql": {
+          "grain": "touch_id",
+          "keys": [
+            "customer_id"
+          ]
+        }
+      },
+      "columns": {
+        "touch_id": {
+          "name": "touch_id",
+          "tests": [
+            "unique",
+            "not_null"
+          ]
+        },
+        "customer_id": {
+          "name": "customer_id"
+        },
+        "campaign_name": {
+          "name": "campaign_name"
+        }
+      },
+      "depends_on": {
+        "nodes": []
+      }
+    },
+    "model.dbt_first_commerce.fct_returns": {
+      "resource_type": "model",
+      "name": "fct_returns",
+      "alias": "fct_returns",
+      "database": "analytics",
+      "schema": "commerce",
+      "original_file_path": "models/commerce/fct_returns.sql",
+      "description": "One row per returned order.",
+      "meta": {
+        "dql": {
+          "grain": "return_id",
+          "keys": [
+            "order_id",
+            "reason_id"
+          ]
+        }
+      },
+      "columns": {
+        "return_id": {
+          "name": "return_id",
+          "description": "Return identifier",
+          "tests": [
+            "unique",
+            "not_null"
+          ]
+        },
+        "order_id": {
+          "name": "order_id",
+          "tests": [
+            "not_null"
+          ]
+        },
+        "reason_id": {
+          "name": "reason_id",
+          "tests": [
+            "not_null"
+          ]
+        },
+        "customer_id": {
+          "name": "customer_id"
+        },
+        "report_date": {
+          "name": "report_date",
+          "description": "Return reporting date"
+        },
+        "refund_amount": {
+          "name": "refund_amount"
+        }
+      }
+    },
+    "model.dbt_first_commerce.dim_return_reasons": {
+      "resource_type": "model",
+      "name": "dim_return_reasons",
+      "alias": "dim_return_reasons",
+      "database": "analytics",
+      "schema": "commerce",
+      "original_file_path": "models/commerce/dim_return_reasons.sql",
+      "description": "One row per return reason.",
+      "meta": {
+        "dql": {
+          "grain": "reason_id",
+          "keys": [
+            "reason_id"
+          ]
+        }
+      },
+      "columns": {
+        "reason_id": {
+          "name": "reason_id",
+          "description": "Reason identifier",
+          "tests": [
+            "unique",
+            "not_null"
+          ]
+        },
+        "reason_name": {
+          "name": "reason_name"
+        }
+      }
+    },
+    "model.dbt_first_commerce.fct_invoices": {
+      "resource_type": "model",
+      "name": "fct_invoices",
+      "alias": "fct_invoices",
+      "database": "analytics",
+      "schema": "finance",
+      "original_file_path": "models/finance/fct_invoices.sql",
+      "description": "One row per issued invoice.",
+      "meta": {
+        "dql": {
+          "grain": "invoice_id",
+          "keys": [
+            "order_id"
+          ]
+        }
+      },
+      "columns": {
+        "invoice_id": {
+          "name": "invoice_id",
+          "description": "Invoice identifier",
+          "tests": [
+            "unique",
+            "not_null"
+          ]
+        },
+        "order_id": {
+          "name": "order_id",
+          "tests": [
+            "not_null"
+          ]
+        },
+        "customer_id": {
+          "name": "customer_id"
+        },
+        "invoice_date": {
+          "name": "invoice_date",
+          "description": "Invoice date"
+        },
+        "invoice_total": {
+          "name": "invoice_total"
+        },
+        "is_test": {
+          "name": "is_test"
+        }
+      }
     }
   },
   "sources": {},
@@ -27,33 +277,68 @@
     "semantic_model.dbt_first_commerce.orders": {
       "name": "orders",
       "model": "ref('fct_orders')",
-      "defaults": { "agg_time_dimension": "report_date" },
+      "defaults": {
+        "agg_time_dimension": "report_date"
+      },
       "entities": [
-        { "name": "order", "type": "primary", "expr": "order_id" },
-        { "name": "customer", "type": "foreign", "expr": "customer_id" }
+        {
+          "name": "order",
+          "type": "primary",
+          "expr": "order_id"
+        },
+        {
+          "name": "customer",
+          "type": "foreign",
+          "expr": "customer_id"
+        }
       ],
       "measures": [
-        { "name": "gross_revenue_measure", "agg": "sum", "expr": "order_total", "agg_time_dimension": "report_date" }
+        {
+          "name": "gross_revenue_measure",
+          "agg": "sum",
+          "expr": "order_total",
+          "agg_time_dimension": "report_date"
+        }
       ],
       "dimensions": [
-        { "name": "report_date", "type": "time", "type_params": { "time_granularity": "day" } }
+        {
+          "name": "report_date",
+          "type": "time",
+          "type_params": {
+            "time_granularity": "day"
+          }
+        }
       ]
     },
     "semantic_model.dbt_first_commerce.customers": {
       "name": "customers",
       "model": "ref('dim_customers')",
       "entities": [
-        { "name": "customer", "type": "primary", "expr": "customer_id" }
+        {
+          "name": "customer",
+          "type": "primary",
+          "expr": "customer_id"
+        }
       ],
       "measures": [],
       "dimensions": [
-        { "name": "customer_name", "type": "categorical" }
+        {
+          "name": "customer_name",
+          "type": "categorical"
+        }
       ]
     }
   },
   "metrics": {
     "metric.dbt_first_commerce.gross_revenue": {
-      "name": "gross_revenue", "label": "Gross revenue", "description": "Completed-order revenue reported in the Commerce business timezone.", "type": "simple", "original_file_path": "models/commerce/metrics.yml", "type_params": { "measure": "gross_revenue_measure" }
+      "name": "gross_revenue",
+      "label": "Gross revenue",
+      "description": "Completed-order revenue reported in the Commerce business timezone.",
+      "type": "simple",
+      "original_file_path": "models/commerce/metrics.yml",
+      "type_params": {
+        "measure": "gross_revenue_measure"
+      }
     }
   }
 }

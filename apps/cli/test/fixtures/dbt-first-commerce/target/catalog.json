@@ -1,9 +1,108 @@
 {
   "nodes": {
-    "model.dbt_first_commerce.fct_orders": { "columns": { "order_id": { "type": "integer" }, "customer_id": { "type": "integer" }, "report_date": { "type": "date" }, "order_total": { "type": "numeric" } } },
-    "model.dbt_first_commerce.dim_customers": { "columns": { "customer_id": { "type": "integer" }, "customer_name": { "type": "varchar" } } },
-    "model.dbt_first_commerce.dim_customer_acquisition": { "columns": { "customer_id": { "type": "integer" }, "acquisition_channel": { "type": "varchar" } } },
-    "model.dbt_first_commerce.fct_campaign_touches": { "columns": { "touch_id": { "type": "integer" }, "customer_id": { "type": "integer" }, "campaign_name": { "type": "varchar" } } }
+    "model.dbt_first_commerce.fct_orders": {
+      "columns": {
+        "order_id": {
+          "type": "integer"
+        },
+        "customer_id": {
+          "type": "integer"
+        },
+        "report_date": {
+          "type": "date"
+        },
+        "order_total": {
+          "type": "numeric"
+        }
+      }
+    },
+    "model.dbt_first_commerce.dim_customers": {
+      "columns": {
+        "customer_id": {
+          "type": "integer"
+        },
+        "customer_name": {
+          "type": "varchar"
+        }
+      }
+    },
+    "model.dbt_first_commerce.dim_customer_acquisition": {
+      "columns": {
+        "customer_id": {
+          "type": "integer"
+        },
+        "acquisition_channel": {
+          "type": "varchar"
+        }
+      }
+    },
+    "model.dbt_first_commerce.fct_campaign_touches": {
+      "columns": {
+        "touch_id": {
+          "type": "integer"
+        },
+        "customer_id": {
+          "type": "integer"
+        },
+        "campaign_name": {
+          "type": "varchar"
+        }
+      }
+    },
+    "model.dbt_first_commerce.fct_returns": {
+      "columns": {
+        "return_id": {
+          "type": "integer"
+        },
+        "order_id": {
+          "type": "integer"
+        },
+        "reason_id": {
+          "type": "integer"
+        },
+        "customer_id": {
+          "type": "integer"
+        },
+        "report_date": {
+          "type": "date"
+        },
+        "refund_amount": {
+          "type": "numeric"
+        }
+      }
+    },
+    "model.dbt_first_commerce.dim_return_reasons": {
+      "columns": {
+        "reason_id": {
+          "type": "integer"
+        },
+        "reason_name": {
+          "type": "varchar"
+        }
+      }
+    },
+    "model.dbt_first_commerce.fct_invoices": {
+      "columns": {
+        "invoice_id": {
+          "type": "integer"
+        },
+        "order_id": {
+          "type": "integer"
+        },
+        "customer_id": {
+          "type": "integer"
+        },
+        "invoice_date": {
+          "type": "date"
+        },
+        "invoice_total": {
+          "type": "numeric"
+        },
+        "is_test": {
+          "type": "boolean"
+        }
+      }
+    }
   },
   "sources": {}
 }

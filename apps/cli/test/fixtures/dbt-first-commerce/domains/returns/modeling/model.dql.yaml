@@ -1,0 +1,45 @@
+entities:
+  - id: return
+    dbt_model: model.dbt_first_commerce.fct_returns
+    business_name: Return
+    business_context: One returned order, with the refund it produced.
+  - id: return_reason
+    dbt_model: model.dbt_first_commerce.dim_return_reasons
+    business_name: Return reason
+relationships:
+  # Certified once, but the entity's identity proof has moved on: STALE, never joins automatically.
+  - id: return_to_reason
+    from: return
+    to: return_reason
+    keys: [{ from: reason_id, to: reason_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: certified
+    owner: commerce@company.test
+    certifiedAgainst:
+      from: { grain: return_id, keys: [order_id] }
+      to: { grain: reason_id, keys: [reason_id] }
+    validation:
+      status: passed
+      checked_at: "2026-07-11T00:00:00.000Z"
+      query_fingerprint: fixture-return-reason-proof
+      proof_fingerprint: not-the-current-proof
+      from_rows: 4
+      to_rows: 3
+      joined_rows: 4
+      from_null_keys: 0
+      to_null_keys: 0
+      unmatched_from: 0
+      max_from_per_key: 2
+      max_to_per_key: 1
+  # Inferred from a shared key across the parent boundary; a child domain is not an import.
+  - id: return_to_order
+    from: return
+    to: commerce:order
+    keys: [{ from: order_id, to: order_id }]
+    cardinality: many_to_one
+    fanout: safe
+    crossDomain: true
+    status: draft
+    owner: commerce@company.test
+    rationale: Inferred from the shared order_id; needs the export/import chain before it can be certified.

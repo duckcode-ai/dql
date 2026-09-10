@@ -2599,7 +2599,13 @@ function addManifestKnowledgeGraph(
     const itemPayload = ('payload' in item ? item.payload : undefined) as Record<string, unknown> | undefined;
     const itemAliases = ('aliases' in item ? item.aliases : undefined) as string[] | undefined;
     const displayName = knowledgeDisplayName(item.kind, item.localId, itemPayload);
-    const objectKey = knowledgeMetadataKey(item.kind, displayName, item.id, item.source.system);
+    // A term's legacy key follows the manifest's key for THAT term: the first
+    // "Revenue" is `dql:term:Revenue`, a same-named term of another domain is
+    // `dql:term:<domain>::Revenue` — so two domains' definitions enrich two
+    // objects instead of the second overwriting the first's domain.
+    const objectKey = item.kind === 'term'
+      ? `dql:term:${termManifestKey(manifest, displayName, item.domainId) ?? displayName}`
+      : knowledgeMetadataKey(item.kind, displayName, item.id, item.source.system);
     keyByGraphId.set(item.id, objectKey);
     // The registry emits an UNRESOLVED ALIAS beside the entity-qualified node
     // for the same semantic member: `semantic::metric.jaffle_shop.revenue`
@@ -2746,6 +2752,13 @@ function isUnresolvedSemanticAlias(
     && !record.formula
     && !record.dimensions
     && !record.entities;
+}
+
+/** The key under which the manifest holds a term of this name in this domain (`<name>`, or `<domain>::<name>` for a same-named term of another domain). */
+function termManifestKey(manifest: DQLManifest, name: string, domainId: string | undefined): string | undefined {
+  const entries = Object.entries(manifest.terms ?? {}).filter(([, term]) => term.name === name);
+  if (entries.length <= 1) return entries[0]?.[0];
+  return entries.find(([, term]) => (term.domain ?? undefined) === domainId)?.[0] ?? entries[0]?.[0];
 }
 
 function knowledgeMetadataKey(kind: string, localId: string, qualifiedId: string, sourceSystem: string): string {
@@ -4459,7 +4472,7 @@ function objectKeyFromKGNode(node: KGNode): string {
   }
   switch (node.kind) {
     case 'block': return `dql:block:${node.name}`;
-    case 'term': return `dql:term:${node.name}`;
+    case 'term': return `dql:term:${node.nodeId.startsWith('term:') ? node.nodeId.slice('term:'.length) : node.name}`;
     case 'business_view': return `dql:business_view:${node.name}`;
     case 'metric': return `semantic:metric:${node.name}`;
     case 'dimension': return `semantic:dimension:${node.name}`;

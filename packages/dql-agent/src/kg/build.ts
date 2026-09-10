@@ -39,9 +39,12 @@ export function buildKGFromManifest(manifest: DQLManifest): {
   const edges: KGEdge[] = [];
 
   // Business terms
-  for (const term of Object.values(manifest.terms ?? {})) {
+  // The manifest keys a term by name, and a same-named term from another
+  // domain by `<domain>::<name>`: the node id follows the key, so two domains
+  // defining the same word are two nodes, not one overwrite.
+  for (const [termKey, term] of Object.entries(manifest.terms ?? {})) {
     nodes.push({
-      nodeId: `term:${term.name}`,
+      nodeId: `term:${termKey}`,
       kind: 'term',
       name: term.name,
       domain: term.domain,
@@ -69,7 +72,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
     // A term can now name the governed metrics it describes, so a project's own
     // vocabulary reaches the semantic layer instead of dying in the glossary.
     for (const metricRef of term.metricRefs ?? []) {
-      edges.push({ src: `term:${term.name}`, dst: `metric:${metricRef}`, kind: 'defines' });
+      edges.push({ src: `term:${termKey}`, dst: `metric:${metricRef}`, kind: 'defines' });
     }
   }
 
@@ -369,8 +372,8 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       domain: d,
     });
   }
-  for (const term of Object.values(manifest.terms ?? {})) {
-    if (term.domain) edges.push({ src: `domain:${term.domain}`, dst: `term:${term.name}`, kind: 'contains' });
+  for (const [termKey, term] of Object.entries(manifest.terms ?? {})) {
+    if (term.domain) edges.push({ src: `domain:${term.domain}`, dst: `term:${termKey}`, kind: 'contains' });
   }
   for (const view of Object.values(manifest.businessViews ?? {})) {
     if (view.domain) edges.push({ src: `domain:${view.domain}`, dst: `business_view:${view.name}`, kind: 'contains' });

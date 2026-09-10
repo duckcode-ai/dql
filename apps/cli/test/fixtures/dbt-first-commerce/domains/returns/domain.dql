@@ -1,0 +1,7 @@
+// dql-format: 1
+
+domain "Returns" {
+  id = "returns"
+  parent = "commerce"
+  owner = "commerce@company.test"
+}
