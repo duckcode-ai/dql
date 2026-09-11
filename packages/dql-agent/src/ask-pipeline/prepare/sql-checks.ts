@@ -1,0 +1,162 @@
+import type { AnalyticalIntentV1 } from '../intent.js';
+
+/**
+ * THE CHECKS AN AI-DRAFTED STATEMENT PASSES BEFORE IT RUNS.
+ *
+ * A drafted statement is review-required, but review is not a license to be
+ * wrong without anyone noticing. These checks are deterministic and cheap:
+ * every value the question states is in the statement, every required filter
+ * of the project is in the statement, and the statement is row-guarded. What
+ * the statement filters on is extracted so the answer can say it in words.
+ * They read SQL as text on purpose — a parser that cannot read one dialect is
+ * not a reason to skip them.
+ */
+
+export interface StatedValue { value: string; kind: 'text' | 'year' | 'fiscal_year' | 'quarter' }
+
+const NOT_VALUES = new Set([
+  'what', 'which', 'who', 'whom', 'how', 'when', 'where', 'why', 'show', 'list', 'give', 'find', 'get', 'tell', 'compare', 'top', 'bottom', 'total', 'totals', 'count', 'counts', 'number', 'sum', 'average', 'avg', 'lost', 'won', 'amount', 'amounts', 'revenue', 'by', 'for', 'and', 'or', 'the', 'in', 'of', 'on', 'at', 'to', 'from', 'with', 'per', 'is', 'are', 'was', 'were', 'a', 'an', 'all', 'each', 'every', 'month', 'months', 'year', 'years', 'quarter', 'week', 'day', 'fiscal', 'calendar', 'last', 'this', 'next', 'current', 'previous', 'i', 'we', 'our', 'my', 'please', 'also', 'only', 'and/or',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+]);
+
+function properNouns(text: string): string[] {
+  const found: string[] = [];
+  for (const sentence of text.split(/[.?!\n]+/)) {
+    const tokens = sentence.split(/[\s,;:()]+/).filter(Boolean);
+    tokens.forEach((token, index) => {
+      if (index === 0) return;
+      const word = token.replace(/^["'“”‘’]+|["'“”‘’]+$/g, '');
+      // Capitalized mixed case (Splunk, Curry). ALL-CAPS tokens are field
+      // names or acronyms the user typed, not values the data must hold.
+      if (!/^[A-Z][a-z][A-Za-z0-9&-]*$/.test(word)) return;
+      if (NOT_VALUES.has(word.toLowerCase())) return;
+      found.push(word);
+    });
+  }
+  return found;
+}
+
+/** The values a question (and its reading, when there is one) states and a correct statement must apply. */
+export function statedValues(question: string, intent?: AnalyticalIntentV1): StatedValue[] {
+  const values: StatedValue[] = [];
+  const add = (value: string, kind: StatedValue['kind']) => {
+    const trimmed = value.trim();
+    if (trimmed.length < 2) return;
+    if (!values.some((item) => item.kind === kind && item.value.toLowerCase() === trimmed.toLowerCase())) values.push({ value: trimmed, kind });
+  };
+  const fiscal = new Set<string>();
+  for (const match of question.matchAll(/\bFY\s?'?(\d{4}|\d{2})\b/gi)) { add(`FY${match[1]}`, 'fiscal_year'); fiscal.add(match[1]!); }
+  for (const match of question.matchAll(/\bQ([1-4])\b/g)) add(`Q${match[1]}`, 'quarter');
+  for (const match of question.matchAll(/\b(19|20)\d{2}\b/g)) if (!fiscal.has(match[0])) add(match[0], 'year');
+  for (const match of question.matchAll(/["“‘]([^"”’]{2,80})["”’]/g)) add(match[1]!, 'text');
+  for (const word of properNouns(question)) if (!/^Q[1-4]$/.test(word)) add(word, 'text');
+  if (intent) {
+    const literals = [
+      ...intent.filters.flatMap((filter) => filter.values),
+      ...intent.measures.flatMap((measure) => (measure.scope ?? []).flatMap((scope) => scope.values)),
+    ];
+    for (const literal of literals) if (typeof literal === 'string' && /[A-Za-z]/.test(literal) && literal.length <= 80 && !NOT_VALUES.has(literal.toLowerCase())) add(literal, 'text');
+    for (const clause of intent.unresolved) for (const word of properNouns(`x ${clause.clause}`)) add(word, 'text');
+  }
+  return values;
+}
+
+/** The stated values a statement does not apply. */
+export function missingStatedValues(sql: string, stated: StatedValue[]): StatedValue[] {
+  const lower = sql.toLowerCase();
+  return stated.filter((item) => {
+    if (item.kind === 'text') return !item.value.toLowerCase().split(/\s+/).filter((word) => word.length > 1).every((word) => lower.includes(word));
+    if (item.kind === 'year') return !lower.includes(item.value);
+    if (item.kind === 'quarter') return !(lower.includes(item.value.toLowerCase()) || /\bquarter\b/.test(lower));
+    // A fiscal year may be stored as FY26, 26, 2026, or as the calendar dates
+    // it spans, which begin in the previous calendar year for most calendars.
+    const digits = item.value.replace(/^FY/i, '');
+    const full = digits.length === 2 ? Number(`20${digits}`) : Number(digits);
+    return ![`fy${digits}`, String(full), String(full - 1), `'${digits}'`].some((token) => lower.includes(token.toLowerCase()));
+  });
+}
+
+export interface RequiredFilterCheck { text: string; column: string; values: Array<string | number | boolean> }
+
+const REQUIRED_FILTER_TEXT = /^\s*([A-Za-z_][\w:.]*)\s*(==|=|!=|<>|>=|<=|>|<|not in|in)\s*(.+?)\s*$/i;
+
+/** A project's required filter ("is_test = false", "region in ('EMEA')") as a column and the values a statement must name. */
+export function requiredFilterFromText(text: string): RequiredFilterCheck | undefined {
+  const match = REQUIRED_FILTER_TEXT.exec(text);
+  const bare = match ? undefined : /^\s*([A-Za-z_][\w:.]*)\s*$/.exec(text);
+  const name = match?.[1] ?? bare?.[1];
+  if (!name) return undefined;
+  const column = name.split(/[:.]/).pop()!;
+  if (bare) return { text, column, values: [] };
+  const raw = match![3]!.trim().replace(/^\(|\)$/g, '');
+  const values = raw.split(',').map((part) => part.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+    .map((part) => /^(true|false)$/i.test(part) ? part.toLowerCase() === 'true' : /^-?\d+(\.\d+)?$/.test(part) ? Number(part) : part);
+  return { text, column, values };
+}
+
+/** The required filters a statement does not apply: its column is not named, or one of its values is not. */
+export function missingRequiredFilters(sql: string, required: RequiredFilterCheck[]): RequiredFilterCheck[] {
+  const lower = sql.toLowerCase();
+  return required.filter((filter) => {
+    const column = filter.column.toLowerCase();
+    if (!new RegExp(`(^|[^a-z0-9_])"?${column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"?([^a-z0-9_]|$)`).test(lower)) return true;
+    return !filter.values.every((value) => {
+      if (typeof value === 'boolean') return lower.includes(String(value)) || lower.includes(value ? '= 1' : '= 0') || (!value && new RegExp(`not\\s+"?${column}`).test(lower));
+      return lower.includes(String(value).toLowerCase());
+    });
+  });
+}
+
+/** What a statement filters on, in its own words, for the answer to repeat. */
+export function appliedConditions(sql: string, maxChars = 400): string | undefined {
+  const clauses: string[] = [];
+  const pattern = /\bwhere\b([\s\S]*?)(?=\bgroup\s+by\b|\border\s+by\b|\bhaving\b|\blimit\b|\bqualify\b|\bunion\b|\)\s*(?:,|select\b|$)|$)/gi;
+  for (const match of sql.matchAll(pattern)) {
+    const text = match[1]!.replace(/\s+/g, ' ').trim();
+    if (text) clauses.push(text);
+  }
+  if (clauses.length === 0) return undefined;
+  const joined = clauses.join(' · ');
+  return joined.length > maxChars ? `${joined.slice(0, maxChars - 1)}…` : joined;
+}
+
+export interface JoinKeyPair { left: { relation: string; column: string }; right: { relation: string; column: string } }
+
+const RELATION_TOKEN = String.raw`((?:"[^"]+"|[A-Za-z_$][\w$]*)(?:\.(?:"[^"]+"|[A-Za-z_$][\w$]*)){0,2})`;
+const NOT_ALIAS = new Set(['on', 'where', 'join', 'left', 'right', 'inner', 'outer', 'full', 'cross', 'group', 'order', 'limit', 'using', 'natural', 'union', 'having', 'qualify', 'lateral']);
+
+/** The equi-join keys of a statement, with aliases resolved to the relations they name. CTE references are left out. */
+export function joinKeyPairs(sql: string): JoinKeyPair[] {
+  const ctes = new Set([...sql.matchAll(/(?:\bwith\b|,)\s*([A-Za-z_][\w$]*)\s+as\s*\(/gi)].map((match) => match[1]!.toLowerCase()));
+  const aliases = new Map<string, string>();
+  for (const match of sql.matchAll(new RegExp(String.raw`\b(?:from|join)\s+${RELATION_TOKEN}(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?`, 'gi'))) {
+    const relation = match[1]!;
+    const alias = match[2] && !NOT_ALIAS.has(match[2].toLowerCase()) ? match[2] : undefined;
+    const tail = relation.split('.').pop()!.replace(/"/g, '');
+    aliases.set(tail.toLowerCase(), relation);
+    if (alias) aliases.set(alias.toLowerCase(), relation);
+  }
+  const pairs: JoinKeyPair[] = [];
+  for (const match of sql.matchAll(/\bon\s+("?[\w$]+"?)\.("?[\w$]+"?)\s*=\s*("?[\w$]+"?)\.("?[\w$]+"?)/gi)) {
+    const left = aliases.get(match[1]!.replace(/"/g, '').toLowerCase());
+    const right = aliases.get(match[3]!.replace(/"/g, '').toLowerCase());
+    if (!left || !right) continue;
+    if (ctes.has(left.replace(/"/g, '').toLowerCase()) || ctes.has(right.replace(/"/g, '').toLowerCase())) continue;
+    pairs.push({ left: { relation: left, column: match[2]! }, right: { relation: right, column: match[4]! } });
+  }
+  return pairs;
+}
+
+/** Whether a statement aggregates rows, where a join that repeats keys on both sides counts a row more than once. */
+export function aggregatesRows(sql: string): boolean {
+  return /\b(count|sum|avg|min|max)\s*\(|\bgroup\s+by\b/i.test(sql);
+}
+
+/** A statement with a top-level row limit: the one it has, or one added. */
+export function withRowGuard(sql: string, maxRows: number): string {
+  const trimmed = sql.trim().replace(/;\s*$/, '');
+  if (/\blimit\s+\d+(\s+offset\s+\d+)?\s*$/i.test(trimmed) || /\bfetch\s+(first|next)\s+\d+\s+rows?\s+only\s*$/i.test(trimmed)) return trimmed;
+  return `${trimmed}\nLIMIT ${maxRows}`;
+}

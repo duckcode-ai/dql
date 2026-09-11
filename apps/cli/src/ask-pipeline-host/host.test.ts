@@ -887,6 +887,37 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
     expect(result.trustState).toBe('review_required');
   });
 
+  it('a drafted statement that leaves out a value the question states is fixed once, then run with a row guard', async () => {
+    const provider = drafter('');
+    const prompts: string[] = [];
+    provider.generate = async (messages) => {
+      if (!messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) return unreadable;
+      prompts.push(messages.map((message) => message.content).join('\n'));
+      return prompts.length === 1
+        ? "SELECT COUNT(*) AS lost_deals FROM sales.opportunities WHERE LOWER(stage) = 'closed lost'"
+        : "SELECT COUNT(*) AS lost_deals FROM sales.opportunities WHERE LOWER(stage) = 'closed lost' AND LOWER(competitor) = 'splunk'";
+    };
+    const statements: string[] = [];
+    const result = await ask(routeFor(provider, statements));
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('NOTE: The previous statement was not run because it does not apply "Splunk" from the question');
+    expect(statements.filter((sql) => !sql.includes('information_schema'))).toEqual([
+      "SELECT COUNT(*) AS lost_deals FROM sales.opportunities WHERE LOWER(stage) = 'closed lost' AND LOWER(competitor) = 'splunk'\nLIMIT 501",
+    ]);
+    expect(result.status).toBe('completed');
+    expect(result.answer).toContain("it filters on LOWER(stage) = 'closed lost' AND LOWER(competitor) = 'splunk'");
+  });
+
+  it('a value the draft keeps leaving out is refused, named, and never run', async () => {
+    const provider = drafter("SELECT COUNT(*) AS lost_deals FROM sales.opportunities WHERE LOWER(stage) = 'closed lost'");
+    const statements: string[] = [];
+    const result = await ask(routeFor(provider, statements));
+    expect(provider.draftPrompts).toHaveLength(2);
+    expect(statements.every((sql) => sql.includes('information_schema'))).toBe(true);
+    expect(result.status).not.toBe('completed');
+    expect(JSON.stringify(result)).toContain('failed a check: it does not apply \\"Splunk\\" from the question');
+  });
+
   it('a decline over the first tables searches every table for the missing field, adds it, and drafts again', async () => {
     const wide = { sources: {
       opportunities: { name: 'opportunities', origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: 'model.opportunities', schema: 'sales', columns: { opportunity_id: { name: 'opportunity_id' }, deal_ref: { name: 'deal_ref' }, stage: { name: 'stage' } } } },
@@ -908,6 +939,8 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
       projectRoot: '/tmp/ask-schema-lane-wide',
       executor: { executeQuery: vi.fn(async (sql: string) => {
         statements.push(sql);
+        // A join key that does not repeat on either side: the probe returns no rows.
+        if (/HAVING COUNT\(\*\) > 1/.test(sql)) return { columns: [], rowCount: 0, executionTimeMs: 1, rows: [] };
         if (sql.includes('information_schema.columns')) {
           const rows = [
             ...(/'opportunities'/.test(sql) ? ['opportunity_id', 'deal_ref', 'stage'].map((column) => ({ table_schema: 'sales', table_name: 'opportunities', column_name: column, data_type: 'VARCHAR' })) : []),

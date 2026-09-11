@@ -635,6 +635,16 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       const draftMs = timings[attempt === 1 ? 'schema_draft' : 'schema_redraft'];
       receipt.refusals.push(...drafted.refusals);
       receipt.tiers.push({ round: 97, tier: 'exploratory', outcome: drafted.candidates.length ? 'prepared' : 'refused', detail: drafted.refusals[0] ? `${drafted.refusals[0].code}: ${drafted.refusals[0].message.slice(0, 160)}` : `schema lane: ${why.slice(0, 160)}` });
+      const failedCheck = drafted.refusals.find((refusal) => refusal.code === 'exploration_check_failed');
+      if (failedCheck) {
+        step('schema', 'The drafted SQL failed a check, so it was not run', 'failed', { detail: failedCheck.message, ms: draftMs });
+        // A statement that left out what the question stated is named as such,
+        // even where a decline would fall back to the nearest spellings: those
+        // guesses are about field names, not about the value that was dropped.
+        const message = failedCheck.message.replace(/[.\s]+$/, '');
+        receipt.intent = reading; receipt.reading = reading.reading;
+        return { kind: 'gap', gap: 'not_modeled', message, nearest: [], text: `No query was run because the AI-drafted SQL failed a check: ${message}. Name the field that holds it, and Ask will use it.`, receipt, intent: reading, offerExploration: false };
+      }
       const declined = drafted.refusals.find((refusal) => refusal.code === 'exploration_declined');
       if (declined) {
         step('schema', 'The tables searched do not hold what was asked', 'missed', { detail: declined.message, ms: draftMs });
@@ -665,7 +675,8 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         const result: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(reading, executed.result, input.vocabulary) };
         receipt.context = { ...receipt.context!, used: { joins: [], relations: [...new Set(candidate.relations ?? [])], tier: candidate.tier, ...(candidate.engine ? { engine: candidate.engine } : {}) } };
         const tables = (candidate.relations ?? []).join(', ');
-        const caveat = `no certified block or governed metric answers this, so the SQL was written by AI from the ${tables ? `schema of ${tables}` : 'available table schemas'}; review the SQL before relying on the numbers`;
+        const applied = candidate.proof.find((line) => line.startsWith('applied on the data: '));
+        const caveat = `no certified block or governed metric answers this, so the SQL was written by AI from the ${tables ? `schema of ${tables}` : 'available table schemas'}${applied ? `; it ${applied.replace(/^applied on the data: /, 'filters on ')}` : ''}; review the SQL before relying on the numbers`;
         return { kind: 'answered', intent: reading, candidate, result, text: composeAnsweredText(reading, result, input.vocabulary, candidate.trust, { caveats: [caveat] }), receipt };
       }
       receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: executed.code === 'execution_failed' } as unknown as PreparedRefusal);

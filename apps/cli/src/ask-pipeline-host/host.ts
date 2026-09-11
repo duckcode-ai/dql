@@ -53,6 +53,14 @@ import {
   renderPhysicalIdentifier,
   renderPhysicalRelation,
   mergeDiscoveredRelations,
+  aggregatesRows,
+  appliedConditions,
+  joinKeyPairs,
+  missingRequiredFilters,
+  missingStatedValues,
+  requiredFilterFromText,
+  statedValues,
+  withRowGuard,
   physicalRelationText,
   type PhysicalIdentifierPartV1,
   renderCard,
@@ -1141,7 +1149,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     }
     return found;
   };
-  type VocabularyView = { vocabulary: VocabularyIndex; context?: NonNullable<Parameters<typeof runAskPipeline>[0]['context']>; envelope: DomainContextEnvelope; pack?: LocalContextPack };
+  type VocabularyView = { vocabulary: VocabularyIndex; context?: NonNullable<Parameters<typeof runAskPipeline>[0]['context']>; envelope: DomainContextEnvelope; pack?: LocalContextPack; /** The request's projected source: the relations this envelope admits. Table choice for drafted SQL reads this, never the whole project. */ source?: VocabularySource };
   let viewCache: { key: string; view: VocabularyView } | undefined;
 
   /** The request's scope, resolved server-side from what the surface sent; never from client-supplied ancestors or imports. */
@@ -1233,7 +1241,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     try { pack = await timed('pack', () => deps.buildContextPack?.(request, envelope)); } catch { pack = undefined; }
     if (!pack) {
       const vocabulary = await timed('index', () => buildVocabularyIndex(source));
-      return { vocabulary, envelope, context: { envelope: ledgerEnvelope(envelope), admitted: { byKind: countKinds(vocabulary) }, timings: phases } };
+      return { vocabulary, envelope, source, context: { envelope: ledgerEnvelope(envelope), admitted: { byKind: countKinds(vocabulary) }, timings: phases } };
     }
     const viewKey = vocabularyViewKey(key, envelope, pack);
     const projected = await timed('projection', () => projectVocabularySource(source, pack!, projectionScopeFor(envelope, deps.getManifest().manifest)));
@@ -1244,7 +1252,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     const relationsTotal = pack.eligible ? Object.entries(pack.eligible.counts).filter(([type]) => type === 'dbt_model' || type === 'dbt_source' || type === 'warehouse_table').reduce((sum, [, count]) => sum + count, 0) : (projected.source.relations?.length ?? 0);
     const relationsWithColumns = (projected.source.relations ?? []).filter((relation) => relation.columns.length > 0).length;
     const view: VocabularyView = {
-      vocabulary, envelope, pack,
+      vocabulary, envelope, pack, source: projected.source,
       context: {
         packId: pack.id, snapshotId: envelope.snapshotId, envelope: ledgerEnvelope(envelope),
         retrieved: { lanes, fused: pack.retrievalDiagnostics.fusion?.selectedKeys.length ?? pack.objects.length },
@@ -1608,7 +1616,9 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       const open = intent?.unresolved.map((item) => `${item.clause} ${item.question ?? ''}`).join(' ') ?? '';
       if (relations.length < 4) {
         try {
-          const { source } = await baseSourceFor(connection);
+          // THE ENVELOPE HOLDS: drafted SQL chooses among the relations this
+          // request admits, not every relation in the project.
+          const source = view.source ?? (await baseSourceFor(connection)).source;
           for (const relation of relevantRelationsForQuestion(source, `${question} ${open} ${contextText}`, 5, { splitNames: true })) {
             if (relations.length >= 5) break;
             if (!relations.some((known) => physicalRelationIdentity(known) === physicalRelationIdentity(relation))) relations.push(relation);
@@ -1725,16 +1735,77 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         }
         return { sql, relations: validation.referencedRelations, proof: [`validated against the inspected physical bindings: it reads ${validation.referencedRelations.join(', ') || 'admitted relations only'}`, ...validation.warnings.slice(0, 3)], engine: dialect };
       };
+      // THE CHECKS BEFORE ANYTHING RUNS. Every value the question states and
+      // every required filter of the project must be in the statement, and a
+      // join that repeats its key on both sides must not feed an aggregate.
+      // One redraft names the failure; a failure that survives it is refused,
+      // never run. What passes is row-guarded and says what it filters on.
+      const stated = statedValues(question, intent);
+      const requiredTexts = [...new Set([
+        ...current.entries.filter((entry) => entry.kind === 'skill').flatMap((entry) => entry.skill?.requiredFilters ?? []),
+        ...(view.pack?.domainBriefing?.requiredFilters ?? []),
+      ])];
+      const required = requiredTexts.map((text) => requiredFilterFromText(text)).filter((item): item is NonNullable<typeof item> => Boolean(item));
+      const probeOne = async (sql: string): Promise<boolean> => {
+        if (!connection) return false;
+        const options = { maxRows: 1, ...(request.signal ? { signal: request.signal } : {}), ...(request.runBudget ? { deadlineMs: Math.min(8_000, request.runBudget.remainingMs()) } : {}) };
+        const result = deps.executor.executePositional
+          ? await deps.executor.executePositional(sql, [], connection, options)
+          : await deps.executor.executeQuery(sql, [], {}, connection, options);
+        return (result.rows?.length ?? 0) > 0;
+      };
+      const failedChecks = async (sql: string): Promise<string[]> => {
+        const failures: string[] = [];
+        const missing = missingStatedValues(sql, stated);
+        if (missing.length) failures.push(`it does not apply ${missing.map((item) => `"${item.value}"`).join(', ')} from the question`);
+        const missingRequired = missingRequiredFilters(sql, required);
+        if (missingRequired.length) failures.push(`it does not apply the required filter ${missingRequired.map((item) => item.text).join(', ')}`);
+        if (aggregatesRows(sql)) {
+          for (const pair of joinKeyPairs(sql).slice(0, 3)) {
+            const repeats = async (side: { relation: string; column: string }) => {
+              try { return await probeOne(`SELECT ${side.column} FROM ${side.relation} GROUP BY ${side.column} HAVING COUNT(*) > 1`); } catch { return false; }
+            };
+            if (await repeats(pair.left) && await repeats(pair.right)) failures.push(`its join of ${pair.left.relation} and ${pair.right.relation} on ${pair.left.column} = ${pair.right.column} repeats the key on both sides, so totals would count rows more than once`);
+          }
+        }
+        return failures;
+      };
+      type Drafted = Awaited<ReturnType<typeof attemptDraft>>;
+      const finalize = async (drafted: Drafted): Promise<Drafted> => {
+        if (!drafted || !('sql' in drafted)) return drafted;
+        let chosen = drafted;
+        let failures = await failedChecks(chosen.sql);
+        if (failures.length > 0) {
+          hostStep({ phase: 'schema', title: 'The drafted SQL failed a check: asking the AI to fix it', state: 'failed', detail: failures.join('; ') });
+          const repaired = await attemptDraft(`The previous statement was not run because ${failures.join('; ')}. Fix exactly that and keep everything else the question asks.`);
+          if (!repaired || !('sql' in repaired)) return repaired;
+          chosen = repaired;
+          failures = await failedChecks(chosen.sql);
+          if (failures.length > 0) return { refused: failures.join('; ') };
+        }
+        const applied = appliedConditions(chosen.sql);
+        hostStep({ phase: 'schema', title: 'Checked the drafted SQL', state: 'done', detail: [stated.length ? `applies ${stated.map((item) => item.value).join(', ')}` : '', required.length ? `required filters present: ${required.map((item) => item.text).join(', ')}` : '', applied ? `filters on ${applied}` : ''].filter(Boolean).join('; ') || 'read-only and in scope' });
+        return {
+          ...chosen,
+          sql: withRowGuard(chosen.sql, (deps.maxRows ?? 500) + 1),
+          proof: [
+            ...chosen.proof,
+            ...(applied ? [`applied on the data: ${applied}`] : []),
+            ...(stated.length ? [`stated values applied: ${stated.map((item) => item.value).join(', ')}`] : []),
+            ...(required.length ? [`required filters present: ${required.map((item) => item.text).join(', ')}`] : []),
+          ],
+        };
+      };
       const shown = [...relations];
       const first = await attemptDraft();
-      if (!first || !('declined' in first)) return first;
+      if (!first || !('declined' in first)) return finalize(first);
       // THE WIDER LOOK: a decline over the tables first chosen is not a
       // decline over the project. Search every table for a column the missing
       // words name, add what is found, and draft once more.
       const words = missingFieldWords(`${first.declined} ${open}`);
       let wider: string[] = [];
       try {
-        const { source } = await baseSourceFor(connection);
+        const source = view.source ?? (await baseSourceFor(connection)).source;
         wider = relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, relations, 3);
       } catch { wider = []; }
       if (wider.length > 0) {
@@ -1755,7 +1826,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       hostStep({ phase: 'search', title: `Searched every table for the missing field: found ${wider.join(', ')}`, state: 'done', detail: `looked for ${words.slice(0, 4).join(', ')}; the first draft over ${shown.join(', ')} found none` });
       const second = await attemptDraft(`A first draft over ${shown.join(', ')} found no field for this ("${first.declined.slice(0, 240)}"). The tables ${wider.join(', ')} have columns named for it and were added; use them, joining on a key both tables carry.`);
       if (second && 'declined' in second) return { declined: `${second.declined.replace(/[.\s]+$/, '')} (searched ${relations.join(', ')})` };
-      return second;
+      return finalize(second);
     };
     const outcome = await runAskPipeline({
       question: request.question,

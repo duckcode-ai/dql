@@ -5,6 +5,7 @@ export * from './vocabulary-from-pack.js';
 export * from './block-contract.js';
 export * from './resolve-intent.js';
 export * from './prepare/index.js';
+export * from './prepare/sql-checks.js';
 export * from './execute.js';
 export * from './outcomes.js';
 export * from './policies.js';

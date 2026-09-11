@@ -68,7 +68,7 @@ export interface PreparedCandidate {
 export type PrepareRefusalCode =
   | 'join_requires_domain_contract'
   | 'relationship_domain_unknown'
-  | 'policy_filter_unbindable' | 'policy_conflict' | 'exploration_unavailable' | 'exploration_failed' | 'exploration_declined' | 'exploration_not_read_only'
+  | 'policy_filter_unbindable' | 'policy_conflict' | 'exploration_unavailable' | 'exploration_failed' | 'exploration_declined' | 'exploration_check_failed' | 'exploration_not_read_only'
   | 'no_certified_block'
   | 'block_not_applicable'
   | 'not_semantic'
@@ -240,7 +240,7 @@ export interface PrepareDeps {
    * answered; `previous` carries a draft the warehouse rejected, with its
    * error, for one correction. `declined` means the tables cannot answer.
    */
-  draftSql?: (input: { question: string; intent?: AnalyticalIntentV1; vocabulary: VocabularyIndex; reason?: string; previous?: { sql: string; error: string } }) => Promise<{ sql: string; relations: string[]; proof: string[]; engine?: string } | { error: string } | { declined: string } | undefined>;
+  draftSql?: (input: { question: string; intent?: AnalyticalIntentV1; vocabulary: VocabularyIndex; reason?: string; previous?: { sql: string; error: string } }) => Promise<{ sql: string; relations: string[]; proof: string[]; engine?: string } | { error: string } | { declined: string } | { refused: string } | undefined>;
   /** Dialect for relational composition. */
   dialect?: SqlDialectLike;
   /** Certified block source text by block ref. */

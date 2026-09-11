@@ -2481,6 +2481,29 @@ describe('the schema lane: no certified or governed evidence, the AI writes SQL 
     expect(story.every((entry, index) => index === 0 || entry.at >= story[index - 1]!.at)).toBe(true);
   });
 
+  it('a drafted statement that failed its checks is not run, and the answer names what it left out', async () => {
+    let executed = 0;
+    const outcome = await runAskPipeline({
+      question: 'how many orders involve a competitor', vocabulary, provider: say(invalidReading), clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async () => ({ refused: 'the drafted SQL does not apply "Splunk" from the question' }) },
+      executeDeps: { run: async () => { executed += 1; return rows; } },
+    });
+    expect(executed).toBe(0);
+    expect(outcome.kind).toBe('gap');
+    expect(outcome.text).toContain('failed a check: the drafted SQL does not apply "Splunk"');
+    expect(outcome.receipt.story?.some((entry) => entry.title === 'The drafted SQL failed a check, so it was not run')).toBe(true);
+  });
+
+  it('an answer from drafted SQL says what the statement filters on', async () => {
+    const outcome = await runAskPipeline({
+      question: 'how many orders involve a competitor', vocabulary, provider: say(invalidReading), clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async () => ({ sql: "SELECT COUNT(*) AS n FROM dev.orders WHERE status = 'competitor'", relations: ['dev.orders'], proof: ["applied on the data: status = 'competitor'"] }) },
+      executeDeps: { run: async () => rows },
+    });
+    expect(outcome.kind).toBe('answered');
+    expect(outcome.text).toContain("it filters on status = 'competitor'");
+  });
+
   it('with AI-drafted SQL turned off for the project, nothing is drafted', async () => {
     let drafts = 0;
     const outcome = await runAskPipeline({
