@@ -522,6 +522,324 @@
    "deprecation_date": null,
    "primary_key": [],
    "time_spine": null
+  },
+  "model.office_golden.dirac_comp_agents__stg_dirac_comp_agents_competitor_agents_daily_prod": {
+   "database": "office_dw",
+   "schema": "dirac_comp_agents",
+   "name": "stg_dirac_comp_agents_competitor_agents_daily_prod",
+   "resource_type": "model",
+   "package_name": "office_golden",
+   "path": "marts/dirac_comp_agents/stg_dirac_comp_agents_competitor_agents_daily_prod.sql",
+   "original_file_path": "models/marts/dirac_comp_agents/stg_dirac_comp_agents_competitor_agents_daily_prod.sql",
+   "unique_id": "model.office_golden.dirac_comp_agents__stg_dirac_comp_agents_competitor_agents_daily_prod",
+   "fqn": [
+    "office_golden",
+    "marts",
+    "dirac_comp_agents",
+    "stg_dirac_comp_agents_competitor_agents_daily_prod"
+   ],
+   "alias": "stg_dirac_comp_agents_competitor_agents_daily_prod",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "config": {
+    "enabled": true,
+    "alias": null,
+    "schema": null,
+    "database": null,
+    "tags": [],
+    "meta": {},
+    "group": null,
+    "materialized": "table",
+    "incremental_strategy": null,
+    "persist_docs": {},
+    "quoting": {},
+    "column_types": {},
+    "full_refresh": null,
+    "unique_key": null,
+    "on_schema_change": "ignore",
+    "grants": {},
+    "packages": [],
+    "docs": {
+     "show": true,
+     "node_color": null
+    },
+    "contract": {
+     "enforced": false,
+     "alias_types": true
+    },
+    "access": "protected"
+   },
+   "tags": [],
+   "description": "Conformed model for the raw_batch_s3_prod dirac_comp_agents competitor_agents_daily_clean table.",
+   "columns": {
+    "AGENT_NAME": {
+     "name": "AGENT_NAME",
+     "description": "Name of the competitor-tracking agent.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "COMPETITOR": {
+     "name": "COMPETITOR",
+     "description": "Competitor the agent tracked.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "EVENT_DATE": {
+     "name": "EVENT_DATE",
+     "description": "Date the agent ran.",
+     "meta": {},
+     "data_type": "timestamp",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "SCORE": {
+     "name": "SCORE",
+     "description": "Agent score.",
+     "meta": {},
+     "data_type": "decimal",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    }
+   },
+   "meta": {},
+   "group": null,
+   "docs": {
+    "show": true,
+    "node_color": null
+   },
+   "patch_path": "office_golden://models/marts/dirac_comp_agents/stg_dirac_comp_agents_competitor_agents_daily_prod.yml",
+   "build_path": null,
+   "unrendered_config": {
+    "materialized": "table"
+   },
+   "created_at": 1750000000.0,
+   "relation_name": "OFFICE_DW.DIRAC_COMP_AGENTS.STG_DIRAC_COMP_AGENTS_COMPETITOR_AGENTS_DAILY_PROD",
+   "raw_code": "select * from stg_dirac_comp_agents_competitor_agents_daily_prod",
+   "language": "sql",
+   "refs": [],
+   "sources": [],
+   "metrics": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "compiled_path": null,
+   "compiled": false,
+   "extra_ctes_injected": false,
+   "extra_ctes": [],
+   "contract": {
+    "enforced": false,
+    "alias_types": true,
+    "checksum": null
+   },
+   "access": "protected",
+   "constraints": [],
+   "version": null,
+   "latest_version": null,
+   "deprecation_date": null,
+   "primary_key": [],
+   "time_spine": null
+  },
+  "model.office_golden.nr_silver_nrdb_dl_stg__competitor_agent_analysis_v2": {
+   "database": "office_dw",
+   "schema": "nr_silver_nrdb_dl_stg",
+   "name": "competitor_agent_analysis_v2",
+   "resource_type": "model",
+   "package_name": "office_golden",
+   "path": "marts/nr_silver_nrdb_dl_stg/competitor_agent_analysis_v2.sql",
+   "original_file_path": "models/marts/nr_silver_nrdb_dl_stg/competitor_agent_analysis_v2.sql",
+   "unique_id": "model.office_golden.nr_silver_nrdb_dl_stg__competitor_agent_analysis_v2",
+   "fqn": [
+    "office_golden",
+    "marts",
+    "nr_silver_nrdb_dl_stg",
+    "competitor_agent_analysis_v2"
+   ],
+   "alias": "competitor_agent_analysis_v2",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "config": {
+    "enabled": true,
+    "alias": null,
+    "schema": null,
+    "database": null,
+    "tags": [],
+    "meta": {},
+    "group": null,
+    "materialized": "table",
+    "incremental_strategy": null,
+    "persist_docs": {},
+    "quoting": {},
+    "column_types": {},
+    "full_refresh": null,
+    "unique_key": null,
+    "on_schema_change": "ignore",
+    "grants": {},
+    "packages": [],
+    "docs": {
+     "show": true,
+     "node_color": null
+    },
+    "contract": {
+     "enforced": false,
+     "alias_types": true
+    },
+    "access": "protected"
+   },
+   "tags": [],
+   "description": "Raw silver staging table for competitor agent analysis v2.",
+   "columns": {
+    "ANALYSIS_ID": {
+     "name": "ANALYSIS_ID",
+     "description": "Analysis run id.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "COMPETITOR_NAME": {
+     "name": "COMPETITOR_NAME",
+     "description": "Competitor analysed.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "WIN_RATE": {
+     "name": "WIN_RATE",
+     "description": "Win rate the analysis estimated.",
+     "meta": {},
+     "data_type": "decimal",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "RUN_DATE": {
+     "name": "RUN_DATE",
+     "description": "Date the analysis ran.",
+     "meta": {},
+     "data_type": "timestamp",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    }
+   },
+   "meta": {},
+   "group": null,
+   "docs": {
+    "show": true,
+    "node_color": null
+   },
+   "patch_path": "office_golden://models/marts/nr_silver_nrdb_dl_stg/competitor_agent_analysis_v2.yml",
+   "build_path": null,
+   "unrendered_config": {
+    "materialized": "table"
+   },
+   "created_at": 1750000000.0,
+   "relation_name": "OFFICE_DW.NR_SILVER_NRDB_DL_STG.COMPETITOR_AGENT_ANALYSIS_V2",
+   "raw_code": "select * from competitor_agent_analysis_v2",
+   "language": "sql",
+   "refs": [],
+   "sources": [],
+   "metrics": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "compiled_path": null,
+   "compiled": false,
+   "extra_ctes_injected": false,
+   "extra_ctes": [],
+   "contract": {
+    "enforced": false,
+    "alias_types": true,
+    "checksum": null
+   },
+   "access": "protected",
+   "constraints": [],
+   "version": null,
+   "latest_version": null,
+   "deprecation_date": null,
+   "primary_key": [],
+   "time_spine": null
   }
  },
  "sources": {},
@@ -535,12 +853,16 @@
  "parent_map": {
   "model.office_golden.sales__opportunity_enhanced": [],
   "model.office_golden.sfdc__opportunity": [],
-  "model.office_golden.salesloft__opportunities": []
+  "model.office_golden.salesloft__opportunities": [],
+  "model.office_golden.dirac_comp_agents__stg_dirac_comp_agents_competitor_agents_daily_prod": [],
+  "model.office_golden.nr_silver_nrdb_dl_stg__competitor_agent_analysis_v2": []
  },
  "child_map": {
   "model.office_golden.sales__opportunity_enhanced": [],
   "model.office_golden.sfdc__opportunity": [],
-  "model.office_golden.salesloft__opportunities": []
+  "model.office_golden.salesloft__opportunities": [],
+  "model.office_golden.dirac_comp_agents__stg_dirac_comp_agents_competitor_agents_daily_prod": [],
+  "model.office_golden.nr_silver_nrdb_dl_stg__competitor_agent_analysis_v2": []
  },
  "group_map": {},
  "saved_queries": {},

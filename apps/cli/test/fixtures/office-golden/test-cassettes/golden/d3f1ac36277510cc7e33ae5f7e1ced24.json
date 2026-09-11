@@ -1,0 +1,23 @@
+{
+  "key": "d3f1ac36277510cc7e33ae5f7e1ced24",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Monthly count and total amount of lost opportunities (closed, not won) where the competitor involved is Splunk, for fiscal year FY26 (Feb 2025 - Jan 2026).\",\"measures\":[{\"ref\":\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\",\"aggregation\":\"count_distinct\",\"alias\":\"lost_opportunities_count\"},{\"ref\":\"column:SALES.OPPORTUNITY_ENHANCED.AMOUNT\",\"aggregation\":\"sum\",\"alias\":\"lost_amount\"}],\"groupBy\":[{\"ref\":\"dimension:opportunity_enhanced.CLOSE_DATE\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[{\"ref\":\"dimension:opportunity_enhanced.IS_CLOSED\",\"op\":\"eq\",\"values\":[true],\"source\":\"question\"},{\"ref\":\"dimension:opportunity_enhanced.IS_WON\",\"op\":\"eq\",\"values\":[false],\"source\":\"question\"},{\"ref\":\"dimension:opportunity.COMPETITOR_C\",\"op\":\"eq\",\"values\":[\"Splunk\"],\"source\":\"question\"}],\"expectedShape\":\"trend\",\"time\":{\"ref\":\"dimension:opportunity_enhanced.CLOSE_DATE\",\"grain\":\"month\",\"window\":{\"start\":\"2025-02-01\",\"end\":\"2026-02-01\",\"expression\":\"FY26\"}},\"unresolved\":[],\"provenance\":{\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\":\"q:Lost opportunities count\",\"column:SALES.OPPORTUNITY_ENHANCED.AMOUNT\":\"q:Lost Amount\",\"dimension:opportunity_enhanced.IS_CLOSED\":\"q:Lost\",\"dimension:opportunity_enhanced.IS_WON\":\"q:Lost\",\"dimension:opportunity.COMPETITOR_C\":\"q:competitor involved is Splunk\",\"dimension:opportunity_enhanced.CLOSE_DATE\":\"q:by month for fiscal year FY26\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T23:43:49.794Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d3f1ac36277510cc7e33ae5f7e1ced242e71357cff042357392304b8d8f10f1e",
+    "postCanonicalHash": "d3f1ac36277510cc7e33ae5f7e1ced242e71357cff042357392304b8d8f10f1e",
+    "appliedRuleClasses": []
+  }
+}

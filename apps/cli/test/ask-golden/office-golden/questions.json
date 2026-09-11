@@ -148,11 +148,11 @@
    "id": "of04-win-rate-by-region",
    "question": "What is our win rate against Splunk by sales region?",
    "tier": "none",
-   "outcome": "gap",
-   "note": "No table holds a sales region: the honest answer names what was searched and runs nothing, never an account name or a stage standing in for a region.",
-   "forbids": {
-    "sql": true
-   }
+   "outcome": "gap_or_caveat",
+   "saysAll": [
+    "region"
+   ],
+   "note": "No table holds a sales region. The answer may be an honest gap, or rows grouped by a stand-in field, but then it must say plainly that nothing is named for region and which field stood in for it; it never presents tags or stages as regions without saying so."
   }
  ]
 }

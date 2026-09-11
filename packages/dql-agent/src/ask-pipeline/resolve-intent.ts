@@ -42,6 +42,13 @@ export interface ResolveIntentInput {
   priorAnswerSummary?: string;
   /** Host: skip the full-question clause check (research branches phrase hypotheses, not questions). */
   clauseCoverage?: boolean;
+  /**
+   * The user's own words, when `question` carries more (a repair appends the
+   * engine's message). Every guard that reads the question — coverage,
+   * breakdowns, periods, the ledger — reads these, so "order by one of …" in
+   * an engine message is never mistaken for a breakdown the user asked for.
+   */
+  coverageQuestion?: string;
   /** Milliseconds the run can still spend; a timed-out interpreter dispatch is retried once when this allows another. */
   budgetMs?: number;
   /** The obligations of the original question, when this resolution is a repair of an earlier reading. */
@@ -1371,6 +1378,37 @@ export function proveClauseCoverage(question: string, intent: AnalyticalIntentV1
   }
   // A breakdown the interpreter dropped: "by <noun>" with no categorical or
   // key grouping standing for it (a time grouping cannot stand for "region").
+  // A GROUPING MUST STAND FOR THE BREAKDOWN IT IS READ AS. "By sales region"
+  // grouped by a tags field is not a breakdown by region: the head noun of the
+  // phrase has to be accounted for by the grouping field itself. When nothing
+  // in the project is named for it, the breakdown is not modeled, whatever
+  // field the reading chose instead.
+  const categorical = intent.groupBy.filter((group) => group.role !== 'time');
+  if (categorical.length > 0) {
+    const groupingWords = new Set<string>();
+    for (const group of categorical) {
+      const entry = vocabulary.get(group.ref);
+      for (const text of [entry?.name, entry?.label, entry?.model, ...(entry?.aliases ?? []), entry?.description ?? '', group.ref]) {
+        for (const word of normalizeVocabularyText(text ?? '').split(' ')) if (word) { groupingWords.add(word); groupingWords.add(singularWord(word)); }
+      }
+    }
+    const PHRASE_STOP = new Set(['for', 'in', 'and', 'or', 'where', 'with', 'during', 'over', 'from', 'of', 'to', 'than', 'vs', 'versus', 'against', 'the', 'a', 'an', 'on', 'at', 'since', 'between', 'last', 'this', 'each']);
+    for (const match of question.toLowerCase().matchAll(/\b(?:by|per|across|for each)\s+([a-z][a-z_]*(?:\s+[a-z][a-z_]*){0,2})/g)) {
+      const words: string[] = [];
+      for (const word of match[1]!.split(/\s+/)) { if (PHRASE_STOP.has(word)) break; words.push(word); }
+      const noun = words[words.length - 1];
+      if (!noun || BREAKDOWN_STOP.has(noun)) continue;
+      if (groupingWords.has(noun) || groupingWords.has(singularWord(noun))) continue;
+      if (vocabulary.lookup(noun, { limit: 1, minScore: 0.55 }).length > 0) continue;
+      // The reading answers with a stand-in: the rows are delivered, and the
+      // answer says plainly that nothing is named for the breakdown and which
+      // field stood in for it, so the reader judges the substitution.
+      const phrase = words.join(' ');
+      const standIn = categorical.map((group) => vocabulary.get(group.ref)?.label ?? vocabulary.get(group.ref)?.name ?? group.ref.split('.').pop()).join(', ');
+      intent.unresolved.push({ clause: `by ${phrase}`, options: [], material: false, kind: 'not_modeled', question: `Nothing in this project is named "${phrase}"; the answer is broken down by ${standIn} in its place.` });
+      return;
+    }
+  }
   if (!intent.groupBy.some((group) => group.role !== 'time')) {
     const unaccounted = new Set(unaccountedQuestionWords(question, intent, vocabulary));
     for (const match of question.toLowerCase().matchAll(/\b(?:by|per|across|for each)\s+([a-z][a-z_]+)/g)) {
@@ -1800,6 +1838,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   const maxAttempts = Math.max(1, Math.min(3, input.maxAttempts ?? 2));
   let timeoutRetried = false;
   const now = input.now ?? (() => Date.now());
+  const asked = input.coverageQuestion ?? input.question;
   const seeds = input.question.split(/[^A-Za-z0-9_']+/).filter((word) => word.length > 2);
   const cards = input.renderedCards?.text ?? input.vocabulary.renderCards({ maxChars: input.cardBudget ?? 24_000, seeds });
   const system = buildIntentSystemPrompt({ cards, guidance: input.guidance, hasPrior: Boolean(input.prior), hints: spellingHints(input.question, input.vocabulary), ...(input.selection ? { selection: input.selection } : {}) });
@@ -1865,7 +1904,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       // a conversational reply would judge or explain from rows it cannot
       // compute, so it ends as the unsupported gap the analysis deserves,
       // naming what the previous reading can still answer.
-      const operators = causalOperatorsIn(input.question);
+      const operators = causalOperatorsIn(asked);
       if (input.prior && operators.length > 0) {
         const question = `Explaining why something happened or recommending what to do (${operators.join(', ')}) is not something Ask computes from governed data; Research can investigate the drivers.`;
         const intent: AnalyticalIntentV1 = { ...input.prior, reading: parsed.intent.reading, unresolved: [{ clause: operators.join(', '), options: [], material: true, kind: 'unsupported', question }] };
@@ -1876,9 +1915,9 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     if (parsed.intent.kind === 'definition') return { status: 'definition', intent: parsed.intent, reply: parsed.intent.reply ?? parsed.intent.reading, attempts };
     // The first analytics reading of the original question writes the ledger;
     // every later reading is held to it.
-    if (!ledger) { ledger = buildLedger(input.question, parsed.intent, input.vocabulary); ledgerBuiltHere = true; }
+    if (!ledger) { ledger = buildLedger(asked, parsed.intent, input.vocabulary); ledgerBuiltHere = true; }
     else {
-      const audit = auditLedger(input.question, parsed.intent, ledger, input.vocabulary);
+      const audit = auditLedger(asked, parsed.intent, ledger, input.vocabulary);
       ledgerEntries.push(...audit.entries.map((entry) => ({ ...entry, round })));
       if (audit.dropped.length > 0) {
         if (!ledgerCorrected && attempts < maxAttempts) {
@@ -1902,7 +1941,26 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     // A turn that carries a chosen meaning is not editing the previous turn's
     // reading; it is finishing this one. Holding its repair to the refs the
     // selection replaced rejects exactly the plan the engine asked for.
-    const validation = validateIntentRefs(parsed.intent, input.vocabulary, input.selection ? undefined : input.prior, input.question, { priorExecuted: input.priorExecuted });
+    // A CHOSEN FIELD REPLACES THE ONE THAT DID NOT EXIST. When the user picked
+    // a field for a restriction and the reading still names a field the
+    // project does not hold for it (the model invents the same name again),
+    // the single invented restriction is rebound to the chosen field here, so
+    // the choice is applied rather than asked about a second time.
+    if (input.selection) {
+      const chosen = input.vocabulary.get(input.selection.ref);
+      if (chosen && (chosen.kind === 'column' || chosen.kind === 'dimension' || chosen.kind === 'entity') && !chosen.roles.includes('measure')) {
+        const invented = (ref: string) => !input.vocabulary.resolve(ref);
+        const restrictions = [
+          ...parsed.intent.filters.filter((filter) => filter.on !== 'aggregate' && invented(filter.ref)),
+          ...parsed.intent.measures.flatMap((measure) => (measure.scope ?? []).filter((scope) => invented(scope.ref))),
+        ];
+        if (restrictions.length === 1) {
+          restrictions[0]!.ref = chosen.ref;
+          parsed.intent.provenance[chosen.ref] = 'clarification:the field you chose holds the restriction';
+        }
+      }
+    }
+    const validation = validateIntentRefs(parsed.intent, input.vocabulary, input.selection ? undefined : input.prior, asked, { priorExecuted: input.priorExecuted });
     if (validation.followUpReplacement && attempts > 1 && input.prior) {
       const options = [...new Set([...input.prior.measures.map((measure) => measure.ref), ...validation.intent.measures.map((measure) => measure.ref)])];
       const label = (ref: string) => input.vocabulary.get(ref)?.label ?? input.vocabulary.get(ref)?.name ?? ref;
@@ -1978,10 +2036,10 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     const bare = isBareIntent(parsed.intent);
     const askedQuestions = new Map(validation.intent.unresolved.map((clause) => [clause, clause.question]));
     if (input.selection) applySelectedMeaning(validation.intent, input.selection, input.vocabulary);
-    applyGovernedDefaults(validation.intent, input.question, input.vocabulary, { normalizeScopes: false });
+    applyGovernedDefaults(validation.intent, asked, input.vocabulary, { normalizeScopes: false });
     askWhichFieldHoldsTheRestriction(validation.intent, input.vocabulary, input.selection?.ref);
     proveTimeRoles(validation.intent, input.vocabulary);
-    if (input.clauseCoverage !== false) proveClauseCoverage(input.question, validation.intent, input.vocabulary);
+    if (input.clauseCoverage !== false) proveClauseCoverage(asked, validation.intent, input.vocabulary);
     // NO PARTIAL ANSWERS. When the interpreter wrote down nothing but a
     // clarification and the governed default supplied the only measure, the
     // rest of the question (a time axis, a grain, a member) is still
@@ -1991,7 +2049,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     if (bare && validation.problems.length === 0) {
       const defaulted = validation.intent.unresolved.filter((clause) => !clause.material && askedQuestions.get(clause) !== clause.question && clause.question?.startsWith('Read "'));
       if (defaulted.length > 0) {
-        const leftover = unaccountedQuestionWords(input.question, validation.intent, input.vocabulary);
+        const leftover = unaccountedQuestionWords(asked, validation.intent, input.vocabulary);
         if (leftover.length > 0) {
           if (attempts < maxAttempts) {
             lastDetail = `the question also says "${leftover.join(' ')}"; the intent must carry it`;
@@ -2012,7 +2070,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       // A calendar period is dates, never a season or fiscal field that holds
       // the same number: one correction naming the date dimensions, then a
       // clarification. A wrong period is a wrong population.
-      const basis = calendarBasisProblem(input.question, validation.intent, input.vocabulary);
+      const basis = calendarBasisProblem(asked, validation.intent, input.vocabulary);
       if (basis) {
         const fieldEntry = input.vocabulary.get(basis.field);
         const fieldName = fieldEntry?.label ?? fieldEntry?.name ?? basis.field;
@@ -2033,7 +2091,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       // A relative period ("this season") must restrict the rows. One
       // correction, then the turn says why it cannot be resolved here instead
       // of answering over all history.
-      const relative = relativePeriodProblem(input.question, validation.intent, input.vocabulary);
+      const relative = relativePeriodProblem(asked, validation.intent, input.vocabulary);
       if (relative) {
         if (attempts < maxAttempts) {
           lastDetail = `the question asks for "${relative.phrase}"; the reading restricts no period`;
@@ -2047,7 +2105,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       }
       // A follow-up may not quietly answer a wider population than the one it
       // is editing: one correction, then the turn ends in a clarification.
-      const widened = widenedPopulation(input.question, validation.intent, input.prior);
+      const widened = widenedPopulation(asked, validation.intent, input.prior);
       if (widened.length > 0) {
         if (attempts < maxAttempts) {
           lastDetail = `the previous analysis restricted this to ${widened.join(', ')}; the reading dropped it`;
@@ -2061,17 +2119,17 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
         };
       }
       // The change the question asked for is a column of the answer.
-      const change = droppedChange(input.question, validation.intent, input.vocabulary);
+      const change = droppedChange(asked, validation.intent, input.vocabulary);
       if (change) {
         const aliases = validation.intent.measures.filter((measure) => measure.alias && !measure.derived && !measure.change).map((measure) => measure.alias!);
         if (attempts < maxAttempts) {
           lastDetail = `the question asks for the ${change}; the reading returns the parts and never computes it`;
-          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question asks for the ${change}, and your reading returns ${aliases.join(' and ')} without it. Resend the COMPLETE intent with one more measure that computes it: {"change":{"base":"${aliases[0]}","comparison":"${aliases[1]}","as":"${/percent|percentage/i.test(input.question) ? 'percent' : 'absolute'}"},"alias":"<name>"}. If the answer ranks by that difference, order by it and keep the limit.` });
+          messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question asks for the ${change}, and your reading returns ${aliases.join(' and ')} without it. Resend the COMPLETE intent with one more measure that computes it: {"change":{"base":"${aliases[0]}","comparison":"${aliases[1]}","as":"${/percent|percentage/i.test(asked) ? 'percent' : 'absolute'}"},"alias":"<name>"}. If the answer ranks by that difference, order by it and keep the limit.` });
           continue;
         }
         validation.intent.unresolved.push({ clause: change, options: [], material: true, kind: 'not_modeled', origin: 'ledger', question: `The question asked for the ${change} between the periods; this reading returns ${aliases.join(' and ')} and never computes it, so it was not answered as if it had.` });
       }
-      const grain = droppedGrain(input.question, validation.intent, input.vocabulary);
+      const grain = droppedGrain(asked, validation.intent, input.vocabulary);
       if (grain) {
         if (attempts < maxAttempts) {
           lastDetail = `the question asks for a ${grain} breakdown; the reading carries no time grouping`;
@@ -2080,7 +2138,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
         }
         validation.intent.unresolved.push({ clause: `by ${grain}`, options: [], material: true, kind: 'not_modeled', origin: 'ledger', question: `The question asked for a ${grain} breakdown; a reading without that grain does not answer it.` });
       }
-      const years = droppedYears(input.question, validation.intent, input.vocabulary);
+      const years = droppedYears(asked, validation.intent, input.vocabulary);
       if (years.length > 0) {
         if (attempts < maxAttempts) {
           lastDetail = `the question names the period ${years.join(', ')}; the intent carries no time window for it`;
@@ -2093,10 +2151,10 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     const material = validation.intent.unresolved.find((clause) => clause.material);
     // The question already chose the basis: "calendar 2017" is the date
     // dimension among the options, not a question back to the user.
-    if (material && validation.problems.length === 0 && attempts < maxAttempts && CALENDAR_WORDS.test(input.question)) {
+    if (material && validation.problems.length === 0 && attempts < maxAttempts && CALENDAR_WORDS.test(asked)) {
       const dates = material.options.filter((ref) => input.vocabulary.resolve(ref)?.roles.includes('time'));
       if (dates.length === 1) {
-        const basis = calendarBasisProblem(input.question, { ...validation.intent, unresolved: [] }, input.vocabulary);
+        const basis = calendarBasisProblem(asked, { ...validation.intent, unresolved: [] }, input.vocabulary);
         lastDetail = `the question names a calendar period; ${dates[0]} is the date dimension among the options`;
         messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: `The question says CALENDAR, so "${material.clause}" is not open: use ${dates[0]} as the period (a time window with its bounds) and remove that unresolved clause. The measures must come from ${dates[0]}'s own relation: aggregate its columns${basis?.measuresAt.length ? `, for example ${basis.measuresAt.join(', ')} with an aggregation` : ''}; a metric defined on another table cannot be restricted by this date. Group, display and filter on that relation too${basis?.fieldsAt.length ? `: ${basis.fieldsAt.join(', ')}` : ''}. Resend the COMPLETE intent.` });
         continue;
@@ -2126,8 +2184,22 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   // A reading that keeps naming the wrong field for a place the host can name
   // the right candidates for is a question, not a dead end: "which date should
   // the monthly breakdown use?" with the dates as options.
-  if (lastIntent && lastProblems.length > 0 && lastProblems.every((problem) => problem.suggestions?.length)) {
-    const options = [...new Set(lastProblems.flatMap((problem) => problem.suggestions ?? []))].slice(0, 6);
+  // The options must be things that can stand where the reading used the
+  // missing ref: a field for a filter, a measure for a measure. A table offered
+  // for a filter cannot be applied, so choosing it only asks the same question
+  // again. Fields close to the invented name are offered too
+  // (COMPETITOR_INVOLVED → COMPETITOR_C).
+  const kindsForPath = (path: string): VocabularyKind[] => /^measures\[\d+\]\.scope|^filters/.test(path) ? [...FILTER_KINDS] : /^measures/.test(path) ? [...MEASURE_KINDS] : /^groupBy/.test(path) ? [...GROUP_KINDS] : /^display/.test(path) ? [...DISPLAY_KINDS] : [];
+  const fitting = (problem: IntentProblem): string[] => {
+    const kinds = kindsForPath(problem.path);
+    if (kinds.length === 0) return problem.suggestions ?? [];
+    const missing = /^(.+?) is not in the vocabulary$/.exec(problem.message)?.[1];
+    const leaf = missing?.replace(/^[a-z_]+:/i, '').split('.').pop()?.replace(/_/g, ' ');
+    const fromName = leaf ? input.vocabulary.lookup(leaf, { kinds, limit: 4 }).map((hit) => hit.entry.ref) : [];
+    return [...new Set([...(problem.suggestions ?? []).filter((ref) => { const entry = input.vocabulary.get(ref); return entry ? kinds.includes(entry.kind) : false; }), ...fromName])];
+  };
+  if (lastIntent && lastProblems.length > 0 && lastProblems.every((problem) => fitting(problem).length > 0)) {
+    const options = [...new Set(lastProblems.flatMap((problem) => fitting(problem)))].slice(0, 6);
     const label = (ref: string) => input.vocabulary.get(ref)?.label ?? input.vocabulary.get(ref)?.name ?? ref;
     const question = `${lastProblems.map((problem) => `For ${problem.path}, the reading used something that ${problem.message.replace(/^\S+ /, '')}`).join('; ')}. Which of these should it use: ${options.map(label).join(', ')}?`;
     return { status: 'clarify', intent: { ...lastIntent, unresolved: [...lastIntent.unresolved, { clause: lastProblems.map((problem) => problem.path).join(', '), options, material: true, question }] }, question, options, attempts, unmatched: lastProblems, ...(ledger ? { ledger, ledgerEntries } : {}) };

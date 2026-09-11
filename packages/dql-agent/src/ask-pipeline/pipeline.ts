@@ -143,6 +143,17 @@ function gapFromRefusals(refusals: PreparedRefusal[], intent: AnalyticalIntentV1
   if (unknownDomain) return { gap: 'not_modeled', message: unknownDomain.message, nearest: [] };
   const unresolved = intent.unresolved.filter((clause) => clause.material);
   if (unresolved.length) return { gap: 'ambiguous', message: unresolved.map((clause) => clause.clause).join('; '), nearest: unresolved.flatMap((clause) => clause.options) };
+  // AN AUTHORED SEMANTIC METRIC ONLY THE ENGINE COMPUTES. The relational and
+  // generated-SQL tiers refuse to rebuild it by design, so the reason worth
+  // reading is why the semantic engine itself did not answer (no layer
+  // loaded, a field it does not hold, a compile error), never only the line
+  // saying the other tiers will not approximate the definition.
+  const engineOwned = [...new Set(intent.measures.flatMap((measure) => measure.change ? [] : measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref])
+    .map((ref) => vocabulary.get(ref)).filter((entry) => Boolean(entry?.engineOnly)).map((entry) => entry!.label ?? entry!.name))];
+  const engineRefusal = engineOwned.length ? refusals.find((refusal) => refusal.tier === 'semantic') : undefined;
+  if (engineRefusal && engineRefusal.code !== 'semantic_compile_failed') {
+    return { gap: 'unsupported', message: `the semantic engine did not answer ${engineOwned.join(', ')} (${summarizeRefusal(engineRefusal).replace(/[.\s]+$/, '')}), and generated SQL will not rebuild an authored semantic metric`, nearest: [] };
+  }
   const compile = refusals.find((refusal) => refusal.code === 'semantic_compile_failed' || refusal.code === 'semantic_engine_required' || refusal.code === 'relational_compose_failed' || refusal.code === 'join_path_required' || refusal.code === 'measure_scope_not_expressible');
   const nearest = [...new Set(intent.measures.flatMap((measure) => vocabulary.suggest(measure.ref, 3).map((entry) => entry.ref)))].filter((ref) => !intent.measures.some((measure) => measure.ref === ref)).slice(0, 5);
   // The reader gets the first line of the engine's message; the receipt keeps it verbatim.
@@ -688,7 +699,25 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         receipt.context = { ...receipt.context!, used: { joins: [], relations: [...new Set(candidate.relations ?? [])], tier: candidate.tier, ...(candidate.engine ? { engine: candidate.engine } : {}) } };
         const tables = (candidate.relations ?? []).join(', ');
         const applied = candidate.proof.find((line) => line.startsWith('applied on the data: '));
-        const caveat = `no certified block or governed metric answers this, so the SQL was written by AI from the ${tables ? `schema of ${tables}` : 'available table schemas'}${applied ? `; it ${applied.replace(/^applied on the data: /, 'filters on ')}` : ''}; review the SQL before relying on the numbers`;
+        // Say why the governed tiers did not answer, from their own refusals: a
+        // governed metric that exists but cannot take this reading's filter is
+        // not the same as no metric at all, and the next question reads this.
+        const placeholder = new Set(['no_certified_block', 'exploration_not_opted_in', 'semantic_runtime_unavailable']);
+        const governedRefusal = ['relational', 'semantic', 'certified']
+          .map((tier) => receipt.refusals.find((refusal) => refusal.tier === tier && !placeholder.has(refusal.code)))
+          .find(Boolean);
+        const why = governedRefusal
+          ? `the governed ${governedRefusal.tier} tier could not answer it as read (${governedRefusal.message.replace(/[.\s]+$/, '').slice(0, 180)})`
+          : 'no certified block or governed metric answers this';
+        // An authored semantic metric rebuilt in SQL says which engine did not
+        // run it and why, in the semantic tier's own words.
+        const rebuilt = [...new Set(reading.measures.flatMap((measure) => measure.change ? [] : measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref])
+          .map((ref) => input.vocabulary.get(ref)).filter((entry) => Boolean(entry?.engineOnly)).map((entry) => entry!.label ?? entry!.name))];
+        const engineRefusal = rebuilt.length ? receipt.refusals.find((refusal) => refusal.tier === 'semantic') : undefined;
+        const source = `the SQL was written by AI from the ${tables ? `schema of ${tables}` : 'available table schemas'}${applied ? `; it ${applied.replace(/^applied on the data: /, 'filters on ')}` : ''}`;
+        const caveat = rebuilt.length
+          ? `the semantic engine did not run ${rebuilt.join(', ')}${engineRefusal ? ` (${engineRefusal.message.replace(/[.\s]+$/, '').slice(0, 180)})` : ''}, so ${source}, rebuilding ${rebuilt.length === 1 ? 'that metric' : 'those metrics'} from ${rebuilt.length === 1 ? 'its' : 'their'} authored definition; review the SQL before relying on the numbers`
+          : `${why}, so ${source}; review the SQL before relying on the numbers`;
         return { kind: 'answered', intent: reading, candidate, result, text: composeAnsweredText(reading, result, input.vocabulary, candidate.trust, { caveats: [caveat] }), receipt };
       }
       receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: executed.code === 'execution_failed' } as unknown as PreparedRefusal);
@@ -1109,6 +1138,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     if (!repairable || round > 0 || remaining() < 12_000) break;
     const repairStarted = now();
     resolution = await resolveIntent({
+      coverageQuestion: input.question,
       question: `${input.question}\n\nThe previous interpretation could not be prepared. ${repairable.tier === 'certified' ? 'The certified block is not applicable: ' : 'The engine said: '}${repairable.message}. ${repairable.tier === 'certified' ? 'Express the analysis with metric, entity and dimension refs instead of the block.' : 'Choose refs the engine can bind.'}`,
       vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage, ...(input.selection ? { selection: input.selection } : {}),
       renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
@@ -1203,15 +1233,24 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // already filtered that column, so asking which of its values contain the
   // literal is no wider a reach; one match is canonicalised, several are all
   // shown and named, and too many stay an honest no-match.
+  // Which stated members the warehouse was seen to hold, spelled as asked.
+  const memberLookups = new Map<string, boolean>();
   if (!executed.ok && executed.code === 'no_rows_matched' && executed.cause?.kind === 'member' && input.suggestMembers && remaining() > 5_000) {
-    const candidates: Array<{ predicate: IntentPredicate; values: string[] }> = [];
+    const candidates: Array<{ predicate: IntentPredicate; values: string[]; stored?: { literal: string; values: IntentPredicate['values'] } }> = [];
+    for (const literal of executed.cause.literals) memberLookups.set(literal, false);
     for (const predicate of intent.filters) {
       if (predicate.op !== 'eq' && predicate.op !== 'in') continue;
       const literal = predicate.values.find((value): value is string => typeof value === 'string' && value.trim().length > 2);
       if (!literal || !executed.cause.literals.includes(literal)) continue;
       try {
         const found = await input.suggestMembers(predicate.ref, literal);
-        if (found.length > 0 && found.length <= 6 && !found.some((value) => value.toLowerCase() === literal.toLowerCase())) candidates.push({ predicate, values: found });
+        // The member is stored with other capitals or spacing: an engine that
+        // compares text exactly (MetricFlow on Snowflake) missed the member
+        // the question named, so the query runs again on its stored spelling.
+        if (found.includes(literal)) memberLookups.set(literal, true);
+        const stored = found.find((value) => value !== literal && value.trim().toLowerCase() === literal.trim().toLowerCase());
+        if (stored) candidates.push({ predicate, values: [stored], stored: { literal, values: predicate.values.map((value) => (value === literal ? stored : value)) } });
+        else if (found.length > 0 && found.length <= 6 && !found.some((value) => value.toLowerCase() === literal.toLowerCase())) candidates.push({ predicate, values: found });
       } catch { /* a probe that fails leaves the honest no-match in place */ }
     }
     if (candidates.length > 0) {
@@ -1219,7 +1258,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       // member exactly, and several members that contain it, is a question:
       // which one? Adding their facts together answers about nobody, and the
       // reading above that row would still name whichever one it had in mind.
-      const ambiguous = candidates.find((item) => item.values.length > 1 && item.predicate.op === 'eq' && item.predicate.values.length === 1);
+      const ambiguous = candidates.find((item) => !item.stored && item.values.length > 1 && item.predicate.op === 'eq' && item.predicate.values.length === 1);
       if (ambiguous) {
         const literal = String(ambiguous.predicate.values[0]);
         const name = label(ambiguous.predicate.ref);
@@ -1239,6 +1278,10 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         filters: intent.filters.map((predicate) => {
           const found = candidates.find((item) => item.predicate === predicate);
           if (!found) return predicate;
+          if (found.stored) {
+            notes.push(`identity: ${label(predicate.ref)} ${JSON.stringify(found.stored.literal)} is stored as ${JSON.stringify(found.values[0])}; the query ran again on the stored spelling`);
+            return { ...predicate, values: found.stored.values };
+          }
           notes.push(`identity: ${label(predicate.ref)} ${JSON.stringify(String(predicate.values[0]))} matched no member exactly; ${found.values.length === 1 ? 'it is' : 'these are'} the ${found.values.length === 1 ? 'member' : `${found.values.length} members`} whose name contains it: ${found.values.join(', ')}`);
           return { ...predicate, op: 'in' as const, values: found.values };
         }),
@@ -1260,6 +1303,35 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       }
     }
   }
+  // A TWO-DIGIT YEAR ON A YEAR FIELD. "FY26" read as 26 against a field that
+  // stores 2026 matches nothing. When the restricted query came back empty,
+  // the year is read once as 20YY and the answer says so; a field that really
+  // stores 26 already returned its rows and never reaches this.
+  if (!executed.ok && executed.code === 'no_rows_matched' && remaining() > 5_000) {
+    const shortYear = (predicate: IntentPredicate) => (predicate.op === 'eq' || predicate.op === 'in')
+      && /year|(?:^|[._])fy(?:[._]|$)/i.test(predicate.ref)
+      && !(input.vocabulary.get(predicate.ref)?.roles ?? []).includes('time')
+      && predicate.values.some((value) => /^\d{2}$/.test(String(value).trim()));
+    const widenYear = (predicate: IntentPredicate): IntentPredicate => shortYear(predicate)
+      ? { ...predicate, values: predicate.values.map((value) => /^\d{2}$/.test(String(value).trim()) ? (typeof value === 'number' ? 2000 + value : String(2000 + Number(value))) : value) }
+      : predicate;
+    const years = [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])].filter(shortYear);
+    if (years.length > 0) {
+      const reread: AnalyticalIntentV1 = {
+        ...intent,
+        filters: intent.filters.map(widenYear),
+        measures: intent.measures.map((measure) => (measure.scope?.length ? { ...measure, scope: measure.scope.map(widenYear) } : measure)),
+      };
+      const again = await prepare({ intent: reread, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: false, explorationAuto: false, question: input.question });
+      if (again.chosen) {
+        const retried = await countedExecute(again.chosen, reread, input.executeDeps);
+        if (retried.ok) {
+          receipt.grounding = [...(receipt.grounding ?? []), ...years.map((predicate) => `period: ${label(predicate.ref)} ${predicate.values.join(', ')} matched nothing; a two-digit year was read as ${widenYear(predicate).values.join(', ')}`)];
+          candidate = again.chosen; executed = retried; intent = reread; receipt.intent = reread;
+        }
+      }
+    }
+  }
   if (!executed.ok && executed.code === 'no_rows_matched') {
     receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);
     receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: 0, ms: Math.round(now() - executeStarted), proofs: executed.proofs };
@@ -1269,6 +1341,19 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       : executed.cause?.kind === 'predicate'
         ? 'Loosen the restriction, or ask for the values this field holds.'
         : 'Check the spelling of the member, or ask for the values this field holds.';
+    // The warehouse holds every member the question named, spelled as asked:
+    // the member did not empty the result, the other restrictions did, and
+    // the answer names them instead of doubting the spelling.
+    const cause = executed.cause;
+    if (cause?.kind === 'member' && cause.literals.length > 0 && cause.literals.every((literal) => memberLookups.get(literal))) {
+      const others = [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])]
+        .filter((predicate) => !predicate.values.some((value) => typeof value === 'string' && cause.literals.includes(value)))
+        .map((predicate) => `${label(predicate.ref)} ${predicate.op} ${predicate.values.map((value) => (typeof value === 'string' ? JSON.stringify(value) : String(value))).join(', ')}`);
+      if (intent.time?.window) others.push(`the period ${intent.time.window.start.slice(0, 10)}..${intent.time.window.end.slice(0, 10)}`);
+      const named = cause.literals.map((value) => JSON.stringify(value)).join(', ');
+      const message = `${named} ${cause.literals.length === 1 ? 'is' : 'are'} on the warehouse, but no rows matched ${cause.literals.length === 1 ? 'it' : 'them'} together with ${others.length ? others.join('; ') : 'the other restrictions'}; the aggregate was empty`;
+      return { kind: 'gap', gap: 'not_retrieved', message, nearest, text: `The governed query ran, but ${message}. Loosen one of those restrictions, or ask for the values that field holds.`, receipt, intent, offerExploration: false };
+    }
     return { kind: 'gap', gap: 'not_retrieved', message: executed.message, nearest, text: `The governed query ran, but ${executed.message}.${nearest.length ? ` ${nearest.join('; ')}.` : ''} ${advice}`, receipt, intent, offerExploration: false };
   }
   if (!executed.ok) {
@@ -1308,6 +1393,8 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     receipt.unmet = [...(receipt.unmet ?? []), { obligation: 'coverage', message }];
     caveats.push(message);
   }
+  // A breakdown answered with a stand-in field says so in the answer.
+  for (const clause of intent.unresolved.filter((item) => !item.material && item.kind === 'not_modeled' && item.question)) caveats.push(clause.question!.replace(/[.\s]+$/, ''));
   const unmetLabel = unmetDisplayObligation(requestedDisplay, intent, receipt.refusals, label, input.question);
   if (unmetLabel) {
     receipt.unmet = [...(receipt.unmet ?? []), { obligation: 'display_label', message: unmetLabel.message, refs: unmetLabel.refs }];

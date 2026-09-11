@@ -1,5 +1,5 @@
 {
- "_comment": "Office-shaped golden fixture: Snowflake-style uppercase names in three schemas; the competitor lives in a different table (sfdc.opportunity.COMPETITOR_C) from the amounts (sales.opportunity_enhanced), and reps also tag competitors in salesloft.opportunities.TAGS. Fiscal year starts Feb 1 (FY26 = 2025-02-01..2026-01-31). Lost = IS_CLOSED and not IS_WON.",
+ "_comment": "Office-shaped golden fixture: Snowflake-style uppercase names in three schemas; the competitor lives in a different table (sfdc.opportunity.COMPETITOR_C) from the amounts (sales.opportunity_enhanced), and reps also tag competitors in salesloft.opportunities.TAGS. Fiscal year starts Feb 1 (FY26 = 2025-02-01..2026-01-31). Lost = IS_CLOSED and not IS_WON. Two look-alike tables (dirac_comp_agents.stg_dirac_comp_agents_competitor_agents_daily_prod, nr_silver_nrdb_dl_stg.competitor_agent_analysis_v2) are about competitor-tracking AI agents: their names say competitor and they mention Splunk, but they carry no opportunity key and cannot answer an opportunity question.",
  "tables": {
   "sales.opportunity_enhanced": {
    "columns": [
@@ -312,6 +312,80 @@
      "OPPORTUNITY_ID": "006A12",
      "TAGS": "competitor:splunk",
      "CUSTOM_FIELDS": "{\"segment\": \"mid-market\"}"
+    }
+   ]
+  },
+  "dirac_comp_agents.stg_dirac_comp_agents_competitor_agents_daily_prod": {
+   "columns": [
+    {
+     "name": "AGENT_NAME",
+     "type": "text"
+    },
+    {
+     "name": "COMPETITOR",
+     "type": "text"
+    },
+    {
+     "name": "EVENT_DATE",
+     "type": "timestamp"
+    },
+    {
+     "name": "SCORE",
+     "type": "decimal"
+    }
+   ],
+   "rows": [
+    {
+     "AGENT_NAME": "agent-0",
+     "COMPETITOR": "Splunk",
+     "EVENT_DATE": "2025-03-02 00:00:00",
+     "SCORE": 0.71
+    },
+    {
+     "AGENT_NAME": "agent-1",
+     "COMPETITOR": "Datadog",
+     "EVENT_DATE": "2025-04-11 00:00:00",
+     "SCORE": 0.64
+    },
+    {
+     "AGENT_NAME": "agent-2",
+     "COMPETITOR": "Splunk",
+     "EVENT_DATE": "2025-09-19 00:00:00",
+     "SCORE": 0.82
+    }
+   ]
+  },
+  "nr_silver_nrdb_dl_stg.competitor_agent_analysis_v2": {
+   "columns": [
+    {
+     "name": "ANALYSIS_ID",
+     "type": "text"
+    },
+    {
+     "name": "COMPETITOR_NAME",
+     "type": "text"
+    },
+    {
+     "name": "WIN_RATE",
+     "type": "decimal"
+    },
+    {
+     "name": "RUN_DATE",
+     "type": "timestamp"
+    }
+   ],
+   "rows": [
+    {
+     "ANALYSIS_ID": "run-0",
+     "COMPETITOR_NAME": "Splunk",
+     "WIN_RATE": 0.41,
+     "RUN_DATE": "2025-05-01 00:00:00"
+    },
+    {
+     "ANALYSIS_ID": "run-1",
+     "COMPETITOR_NAME": "Datadog",
+     "WIN_RATE": 0.55,
+     "RUN_DATE": "2025-06-01 00:00:00"
     }
    ]
   }

@@ -38,7 +38,7 @@ import { createSeededSqliteExecutor, type GoldenSeed, type SeededSqliteExecutor 
  * suite carries no known-failure exemptions: every case must pass.
  */
 
-type Outcome = 'rows' | 'clarify_or_rows' | 'gap' | 'conversation' | 'answered_with_caveat';
+type Outcome = 'rows' | 'clarify_or_rows' | 'gap' | 'conversation' | 'answered_with_caveat' | 'gap_or_caveat';
 /** `reviewable`: the rows must be right, and the answer may be certified, governed or review-required (AI-drafted SQL over the schema). */
 type Tier = 'certified' | 'governed' | 'any' | 'reviewable' | 'none';
 interface Reference { sql: string; columns: Record<string, string[]>; identity?: string[] }
@@ -315,6 +315,13 @@ function judge(spec: GoldenCase, run: any, run0?: any): Verdict {
   }
   // An answer that must SAY something: the measured part is delivered and the
   // part this project does not compute is refused in the text.
+  // Either reading is honest: nothing holds the asked-for field, so the turn
+  // is a gap, or it answers with a stand-in and must SAY what stood in.
+  if (outcome === 'gap_or_caveat') {
+    if (isGap || isClarify) return { pass: reasons.length === 0, reasons, observed };
+    for (const phrase of spec.saysAll ?? []) if (!userText(run).toLowerCase().includes(phrase.toLowerCase())) reasons.push(`the answer never says ${JSON.stringify(phrase)}`);
+    return { pass: reasons.length === 0, reasons, observed };
+  }
   if (outcome === 'answered_with_caveat') {
     if (isGap || isClarify) reasons.push(`expected an answer with a caveat, got ${run?.route}/${run?.status}${refusalCode ? ` [${refusalCode}]` : ''}`);
     for (const phrase of spec.saysAll ?? []) if (!userText(run).toLowerCase().includes(phrase.toLowerCase())) reasons.push(`the answer never says ${JSON.stringify(phrase)}`);

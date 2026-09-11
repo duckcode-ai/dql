@@ -585,6 +585,51 @@ export function relationsFromCatalogHits(
   return picked;
 }
 
+/**
+ * A RESTRICTION HAS TO REACH THE FACTS. A table can hold what a question asks
+ * about only if it joins the tables the reading measures: it is one of them, or
+ * it shares a key with one (same name, or <table>_id against that table's ID).
+ * A table whose columns are not documented is not ruled out; the warehouse
+ * description and the checks decide later.
+ */
+export function joinsAnyRelation(candidate: string, anchors: string[], columnsOf: (relation: string) => string[]): boolean {
+  if (anchors.length === 0) return true;
+  if (anchors.some((anchor) => physicalRelationIdentity(anchor) === physicalRelationIdentity(candidate))) return true;
+  const candidateColumns = columnsOf(candidate);
+  if (candidateColumns.length === 0) return true;
+  return anchors.some((anchor) => {
+    const anchorColumns = columnsOf(anchor);
+    if (anchorColumns.length === 0) return true;
+    return Boolean(sharedKeyPair(anchorColumns, candidateColumns, candidate) ?? sharedKeyPair(candidateColumns, anchorColumns, anchor));
+  });
+}
+
+/**
+ * AN APPROVED HINT ABOUT ONE THING STAYS WITH THAT THING. A hint that names a
+ * specific value ("Capital One", a quoted code) is a correction for questions
+ * about that value; it is not a rule for every question in its scope. A hint
+ * naming no value applies as retrieved.
+ */
+export function hintsForQuestion<T extends { title?: string; guidance?: string; lesson?: { rule?: string } }>(hints: T[], question: string): T[] {
+  const asked = ` ${question.toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+  const mentioned = (value: string) => {
+    const words = value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    return !words || asked.includes(` ${words} `);
+  };
+  return hints.filter((hint) => {
+    const text = [hint.title, hint.guidance, hint.lesson?.rule].filter(Boolean).join('. ');
+    // What makes a hint about ONE thing: a quoted literal it filters on
+    // ('CAPITAL ONE') or a multi-word proper name (Capital One). A single
+    // capitalised word (NetSuite, Revenue) is how sentences and systems are
+    // written, not a member.
+    const literals = [...text.matchAll(/'([^']{2,60})'|"([^"]{2,60})"/g)]
+      .map((match) => (match[1] ?? match[2])!.replace(/%/g, '').trim())
+      .filter((value) => /[a-z]{2}/i.test(value) && !/^(true|false|null)$/i.test(value));
+    const names = [...text.matchAll(/(?<![.!?]\s)(?<!^)\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/g)].map((match) => match[1]!);
+    return [...literals, ...names].every(mentioned);
+  });
+}
+
 const MISSING_WORD_STOP = new Set(['column', 'columns', 'table', 'tables', 'relation', 'relations', 'field', 'fields', 'listed', 'available', 'such', 'that', 'this', 'which', 'with', 'from', 'there', 'none', 'into', 'filter', 'value', 'values', 'named', 'name', 'holds', 'hold', 'question', 'asked', 'data', 'these', 'those', 'what', 'where', 'records', 'record', 'cannot', 'answer', 'nothing', 'missing', 'only', 'contain', 'contains']);
 /** The words of a decline and of the reading's open clauses that could name a column. */
 export function missingFieldWords(text: string): string[] {
@@ -1282,6 +1327,10 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       : base;
     let pack: LocalContextPack | undefined;
     try { pack = await timed('pack', () => deps.buildContextPack?.(request, envelope)); } catch { pack = undefined; }
+    if (pack?.appliedHints?.length) {
+      const relevant = hintsForQuestion(pack.appliedHints, request.question);
+      if (relevant.length !== pack.appliedHints.length) pack = { ...pack, appliedHints: relevant };
+    }
     if (!pack) {
       const vocabulary = await timed('index', () => buildVocabularyIndex(source));
       return { vocabulary, envelope, source, context: { envelope: ledgerEnvelope(envelope), admitted: { byKind: countKinds(vocabulary) }, timings: phases } };
@@ -1663,11 +1712,19 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       const open = intent?.unresolved.map((item) => `${item.clause} ${item.question ?? ''}`).join(' ') ?? '';
       // THE CATALOG'S OWN SEARCH first: names, descriptions and documented
       // columns, held to the request's domains, kept only when admitted.
-      const catalogPick = (text: string, exclude: string[], max: number): string[] => {
+      const sourceColumns = (relation: string): string[] => {
+        const found = (view.source?.relations ?? []).find((item) => physicalRelationIdentity(item.binding ? physicalRelationText(item.binding) : [item.schema, item.name].filter(Boolean).join('.')) === physicalRelationIdentity(relation));
+        return found ? [...found.columns, ...(found.embeddedColumns ?? [])].map((column) => column.name) : [];
+      };
+      const readingRelations = [...new Set(refs.map(relationOf).filter((relation): relation is string => Boolean(relation)))];
+      const reachesReading = (candidate: string) => joinsAnyRelation(candidate, readingRelations, sourceColumns);
+      const catalogPick = (text: string, exclude: string[], max: number, objectTypes: string[] = ['dbt_column', 'dbt_model', 'dbt_source', 'warehouse_table']): string[] => {
         if (!deps.searchCatalog || !text.trim()) return [];
         try {
-          const hits = deps.searchCatalog(request, view.envelope, text, { objectTypes: ['dbt_column', 'dbt_model', 'dbt_source', 'warehouse_table'], limit: 40 });
-          return relationsFromCatalogHits(hits, view.source, exclude, max);
+          // A table named like the question is not evidence it holds the answer:
+          // only tables that reach the reading's facts are kept.
+          const hits = deps.searchCatalog(request, view.envelope, text, { objectTypes, limit: 40 });
+          return relationsFromCatalogHits(hits, view.source, exclude, 12).filter(reachesReading).slice(0, max);
         } catch { return []; }
       };
       const catalogPicked = catalogPick(`${question} ${open} ${contextText}`, relations, 3);
@@ -1679,6 +1736,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
           const source = view.source ?? (await baseSourceFor(connection)).source;
           for (const relation of relevantRelationsForQuestion(source, `${question} ${open} ${contextText}`, 5, { splitNames: true })) {
             if (relations.length >= 5) break;
+            if (!reachesReading(relation)) continue;
             if (!relations.some((known) => physicalRelationIdentity(known) === physicalRelationIdentity(relation))) relations.push(relation);
           }
         } catch { /* the relations named so far stand */ }
@@ -1718,9 +1776,12 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       // governed way: its definition is part of the context, never re-invented.
       const measureRefs = new Set(intent ? intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]) : []);
       const metricLines = current.entries
-        .filter((entry) => (entry.kind === 'metric' || entry.kind === 'measure') && !entry.engineOnly && (measureRefs.has(entry.ref) || [entry.name.replace(/_/g, ' '), entry.label ?? '', ...entry.aliases].some((name) => name.length > 3 && spoken.includes(name.toLowerCase()))))
+        .filter((entry) => (entry.kind === 'metric' || entry.kind === 'measure') && (measureRefs.has(entry.ref) || [entry.name.replace(/_/g, ' '), entry.label ?? '', ...entry.aliases].some((name) => name.length > 3 && spoken.includes(name.toLowerCase()))))
         .slice(0, 5)
         .map((entry) => {
+          // An authored semantic metric the engine did not run is rebuilt from
+          // its definition as written, never re-invented from its name.
+          if (entry.engineOnly) return `- governed ${entry.kind} ${entry.label ?? entry.name} (semantic engine only: ${entry.engineOnly}; rebuild it exactly from this definition): ${entry.expr ?? 'as described'}${entry.timeRef ? `, time ${entry.timeRef}` : ''}${entry.description ? ` (${entry.description.slice(0, 300)})` : ''}`;
           const physical = entry.physical;
           const definition = entry.derived
             ? `${entry.derived.expr} over ${entry.derived.inputs.map((input) => `${input.alias} = ${input.ref}`).join(', ')}`
@@ -1849,6 +1910,15 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       };
       type Drafted = Awaited<ReturnType<typeof attemptDraft>>;
       const finalize = async (drafted: Drafted): Promise<Drafted> => {
+        // A statement rejected before running (a column the tables do not have,
+        // a table nobody inspected) gets the same one correction a failed check
+        // gets, with the reason, before anything is given up.
+        if (drafted && 'error' in drafted && /^the drafted SQL /.test(drafted.error)) {
+          hostStep({ phase: 'schema', title: 'The drafted SQL named something the tables do not have: asking the AI to fix it', state: 'failed', detail: drafted.error });
+          const retried = await attemptDraft(`The previous statement was rejected before running: ${drafted.error}. Use only the columns listed under each relation, spelled as listed, and join only on columns both relations list.`);
+          if (!retried || !('sql' in retried)) return retried;
+          drafted = retried;
+        }
         if (!drafted || !('sql' in drafted)) return drafted;
         let chosen = drafted;
         let failures = await failedChecks(chosen.sql);
@@ -1890,6 +1960,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
             for (const column of [...relation.columns, ...(relation.embeddedColumns ?? [])]) {
               if (column.dataType && !/char|text|string|variant|array|json|object/i.test(column.dataType)) continue;
               if (!allowed(name, column.name)) continue;
+              if (!reachesReading(name)) continue;
               const overlap = [...relevanceWords([column.name, column.description], true)].filter((word) => asked.has(word)).length;
               candidates.push({ relation: name, column: column.name, rank: (chosen.has(physicalRelationIdentity(name)) ? 10 : 0) + overlap });
             }
@@ -1941,8 +2012,9 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       let wider: string[] = [];
       try {
         const source = view.source ?? (await baseSourceFor(connection)).source;
-        const fromCatalog = catalogPick(words.join(' '), relations, 3);
-        wider = [...fromCatalog, ...relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, [...relations, ...fromCatalog], 3)].slice(0, 3);
+        // A missing FIELD is found by its column, not by a table's name.
+        const fromCatalog = catalogPick(words.join(' '), relations, 3, ['dbt_column']);
+        wider = [...fromCatalog, ...relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, [...relations, ...fromCatalog], 6)].filter(reachesReading).slice(0, 3);
       } catch { wider = []; }
       if (wider.length > 0) {
         try {
@@ -2213,7 +2285,9 @@ export function memberCandidatesSql(relation: string, column: string, quote: (na
   const qualified = parsePhysicalIdentifier(relation)
     .map((part) => part.quoted ? `"${part.value.replace(/"/g, '""')}"` : quote(part.value))
     .join('.');
-  return `SELECT DISTINCT ${quote(column)} AS member FROM ${qualified} WHERE ${quote(column)} IS NOT NULL AND LOWER(CAST(${quote(column)} AS VARCHAR)) LIKE ? ORDER BY 1 LIMIT ${limit}`;
+  // Shortest first: a member spelled exactly like the name, whatever its
+  // capitals, is the shortest value containing it and is never cut by LIMIT.
+  return `SELECT DISTINCT ${quote(column)} AS member FROM ${qualified} WHERE ${quote(column)} IS NOT NULL AND LOWER(CAST(${quote(column)} AS VARCHAR)) LIKE ? ORDER BY LENGTH(CAST(${quote(column)} AS VARCHAR)), 1 LIMIT ${limit}`;
 }
 
 /**

@@ -633,7 +633,9 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
   // A limit with no ordering returns whichever rows the warehouse happened to
   // produce and calls them the top ones. A lookup may take any few rows; a
   // ranking may not.
-  if (intent.limit !== undefined && !intent.ordering && intent.expectedShape !== 'lookup') {
+  // A trend has a natural order — its time axis — so a limit over it orders
+  // by the period rather than being refused.
+  if (intent.limit !== undefined && !intent.ordering && intent.expectedShape !== 'lookup' && !columns.some((column) => column.grain)) {
     return refuse('relational_compose_failed', `this reading takes the first ${intent.limit} rows with no ordering, so which rows come back is arbitrary; order by one of ${visible.map((measure) => measure.alias).join(', ')}`, true);
   }
   let orderingAlias: string | undefined;

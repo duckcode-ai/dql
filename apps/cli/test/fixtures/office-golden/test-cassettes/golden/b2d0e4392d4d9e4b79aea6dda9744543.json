@@ -1,0 +1,23 @@
+{
+  "key": "b2d0e4392d4d9e4b79aea6dda9744543",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"List the opportunities whose Salesloft tags include 'Splunk'.\",\"measures\":[],\"groupBy\":[{\"ref\":\"dimension:opportunities.OPPORTUNITY_ID\",\"role\":\"key\"}],\"display\":[\"dimension:opportunity_enhanced.ACCOUNT_NAME\"],\"filters\":[{\"ref\":\"dimension:opportunities.TAGS\",\"op\":\"contains\",\"values\":[\"Splunk\"],\"source\":\"question\"}],\"expectedShape\":\"lookup\",\"unresolved\":[],\"provenance\":{\"dimension:opportunities.OPPORTUNITY_ID\":\"q:Which opportunities\",\"dimension:opportunities.TAGS\":\"q:tagged Splunk\",\"dimension:opportunity_enhanced.ACCOUNT_NAME\":\"inherited\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T23:44:35.384Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b2d0e4392d4d9e4b79aea6dda9744543965c758b60b78d45c9d494d39140bcc7",
+    "postCanonicalHash": "b2d0e4392d4d9e4b79aea6dda9744543965c758b60b78d45c9d494d39140bcc7",
+    "appliedRuleClasses": []
+  }
+}

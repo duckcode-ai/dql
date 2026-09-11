@@ -1,0 +1,23 @@
+{
+  "key": "da0900829522c6541ab7092c0be631b2",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"You're asking for the win rate against the competitor Splunk, broken down by sales region.\",\"measures\":[{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:SALES.OPPORTUNITY_ENHANCED.IS_WON\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\",\"denominatorAggregation\":\"count_distinct\"},\"alias\":\"win_rate_vs_splunk\",\"scope\":[{\"ref\":\"dimension:opportunity_enhanced.IS_CLOSED\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"},{\"ref\":\"dimension:opportunity.COMPETITOR_C\",\"op\":\"eq\",\"values\":[\"Splunk\"],\"source\":\"question\"}]}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[{\"clause\":\"by sales region\",\"options\":[],\"material\":true,\"question\":\"This project has no sales region dimension to break the win rate down by — should I give the overall win rate against Splunk instead?\"}],\"provenance\":{\"column:SALES.OPPORTUNITY_ENHANCED.IS_WON\":\"q:win rate\",\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\":\"q:win rate\",\"dimension:opportunity_enhanced.IS_CLOSED\":\"q:win rate (closed opportunities)\",\"dimension:opportunity.COMPETITOR_C\":\"q:against Splunk\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T23:45:52.137Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "da0900829522c6541ab7092c0be631b24a7f111e819a832ec24702ca3d9eb748",
+    "postCanonicalHash": "da0900829522c6541ab7092c0be631b24a7f111e819a832ec24702ca3d9eb748",
+    "appliedRuleClasses": []
+  }
+}

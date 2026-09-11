@@ -4,7 +4,7 @@ import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeaila
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, createAgentRunBudget, parseIntent, physicalRelationBinding, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import { sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
+import { hintsForQuestion, joinsAnyRelation, sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -321,6 +321,32 @@ describe('the key a warehouse join proof tests', () => {
     expect(sharedKeyPair(['customer_id', 'amount'], ['customer_id', 'id'], 'dev.customers')).toEqual({ from: 'customer_id', to: 'customer_id' });
     expect(sharedKeyPair(['account_id'], ['id'], 'SFDC.OPPORTUNITY')).toBeUndefined();
     expect(sharedKeyPair(['opportunity_id'], ['name'], 'SFDC.OPPORTUNITY')).toBeUndefined();
+  });
+});
+
+describe('an approved hint about one thing stays with that thing', () => {
+  const capitalOne = { title: 'Capital One customer filter', guidance: 'For Capital One, filter NR_CUSTOMER_ID through fpa_netsuite2.customer COMPANYNAME.', lesson: { rule: "Resolve Capital One by UPPER(COMPANYNAME) = 'CAPITAL ONE'." } };
+  const general = { title: 'Revenue is pretax', guidance: 'Unqualified revenue means pretax product revenue.', lesson: { rule: 'Use the revenue metric unless the question says gross.' } };
+  it('leaves a hint that names a value out of a question that never mentions it, and keeps general hints', () => {
+    expect(hintsForQuestion([capitalOne, general], 'what is the total ignored usage')).toEqual([general]);
+    expect(hintsForQuestion([capitalOne, general], 'total ignored usage for Capital One')).toEqual([capitalOne, general]);
+  });
+});
+
+describe('a restriction has to reach the facts', () => {
+  const columns: Record<string, string[]> = {
+    'sales.opportunity_enhanced': ['OPPORTUNITY_ID', 'AMOUNT', 'IS_WON'],
+    'sfdc.opportunity': ['ID', 'COMPETITOR_C'],
+    'nr_silver_nrdb_dl_stg.competitor_agent_analysis_v2': ['ANALYSIS_ID', 'COMPETITOR_NAME', 'WIN_RATE'],
+    'raw.undocumented': [],
+  };
+  const columnsOf = (relation: string) => columns[relation] ?? [];
+  it('keeps a table that shares a key with the reading, drops a look-alike that cannot join, and never rules out an undocumented one', () => {
+    const anchors = ['sales.opportunity_enhanced'];
+    expect(joinsAnyRelation('sfdc.opportunity', anchors, columnsOf)).toBe(true);
+    expect(joinsAnyRelation('nr_silver_nrdb_dl_stg.competitor_agent_analysis_v2', anchors, columnsOf)).toBe(false);
+    expect(joinsAnyRelation('raw.undocumented', anchors, columnsOf)).toBe(true);
+    expect(joinsAnyRelation('nr_silver_nrdb_dl_stg.competitor_agent_analysis_v2', [], columnsOf)).toBe(true);
   });
 });
 
@@ -702,6 +728,8 @@ describe('the members a name could mean', () => {
     expect(sql).toContain('LOWER(CAST("player_name" AS VARCHAR)) LIKE ?');
     expect(sql).toContain('LIMIT 7');
     expect(sql).toContain('DISTINCT');
+    // The exact spelling in other capitals comes first, inside the limit.
+    expect(sql).toContain('ORDER BY LENGTH(CAST("player_name" AS VARCHAR)), 1');
   });
   it('keeps a quoted dot inside a physical database identifier', () => {
     const sql = memberCandidatesSql('"Db.With.Dot"."Public"."Events"', 'EventId', (name) => `"${name}"`);
@@ -930,6 +958,23 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
     ]);
     expect(result.status).toBe('completed');
     expect(result.answer).toContain("it filters on LOWER(stage) = 'closed lost' AND LOWER(competitor) = 'splunk'");
+  });
+
+  it('a statement rejected for a column the table does not have is corrected once, with the reason', async () => {
+    const provider = drafter('');
+    const prompts: string[] = [];
+    provider.generate = async (messages) => {
+      if (!messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) return unreadable;
+      prompts.push(messages.map((message) => message.content).join('\n'));
+      return prompts.length === 1
+        ? "SELECT COUNT(*) AS lost_deals FROM sales.opportunities WHERE LOWER(rival_vendor) = 'splunk'"
+        : "SELECT COUNT(*) AS lost_deals FROM sales.opportunities WHERE LOWER(stage) = 'closed lost' AND LOWER(competitor) = 'splunk'";
+    };
+    const statements: string[] = [];
+    const result = await ask(routeFor(provider, statements));
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('NOTE: The previous statement was rejected before running: the drafted SQL');
+    expect(result.status).toBe('completed');
   });
 
   it('a value the draft keeps leaving out is refused, named, and never run', async () => {

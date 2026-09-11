@@ -34,32 +34,27 @@ export async function prepareExploratory(
   question: string,
   context: { reason?: string; previous?: { sql: string; error: string } } = {},
 ): Promise<{ candidates: PreparedCandidate[]; refusals: PreparedRefusal[] }> {
-  // A derived/offset/cumulative dbt metric is an engine-owned definition.
-  // SQL exploration may use physical columns for a manifest-only question,
-  // but it must never recreate an authored MetricFlow formula from a prompt.
+  // A derived/offset/cumulative dbt metric is an engine-owned definition. The
+  // semantic tier runs first; this lane is reached only when it did not answer
+  // (no layer loaded, a compile error, a field it does not hold). The draft
+  // then rebuilds the metric from its authored definition, exactly, or
+  // declines, and the answer is review-required and says so.
   const metricRefs = (intent?.measures ?? []).flatMap((measure) => measure.change
     ? []
     : measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]);
   const engineOwned = metricRefs
     .map((ref) => vocabulary.get(ref))
     .filter((entry) => Boolean(entry?.engineOnly));
-  if (engineOwned.length > 0) {
-    return {
-      candidates: [],
-      refusals: [{
-        tier: 'exploratory',
-        code: 'semantic_engine_required',
-        message: `${[...new Set(engineOwned.map((entry) => entry!.label ?? entry!.name))].join(', ')} ${engineOwned.length === 1 ? 'is' : 'are'} defined by the semantic engine (${[...new Set(engineOwned.map((entry) => entry!.engineOnly))].join('; ')}). Generated SQL will not approximate that authored definition; fix the semantic compiler or run it on the configured MetricFlow target.`,
-        repairable: false,
-      }],
-    };
-  }
+  const engineNote = engineOwned.length > 0
+    ? `${[...new Set(engineOwned.map((entry) => entry!.label ?? entry!.name))].join(', ')} ${engineOwned.length === 1 ? 'is an authored semantic metric' : 'are authored semantic metrics'} (${[...new Set(engineOwned.map((entry) => entry!.engineOnly))].join('; ')}) that the semantic engine did not run here: rebuild ${engineOwned.length === 1 ? 'it' : 'them'} exactly from the definition in CONTEXT, and reply NO_SQL when the listed tables cannot express that definition`
+    : undefined;
+  const reason = [context.reason, engineNote].filter(Boolean).join('; ') || undefined;
   if (!deps.draftSql) {
     return { candidates: [], refusals: [{ tier: 'exploratory', code: 'exploration_unavailable', message: 'no SQL drafting provider is configured for review-required exploration', repairable: false }] };
   }
   let drafted: Awaited<ReturnType<NonNullable<PrepareDeps['draftSql']>>>;
   try {
-    drafted = await deps.draftSql({ question, ...(intent ? { intent } : {}), vocabulary, ...(context.reason ? { reason: context.reason } : {}), ...(context.previous ? { previous: context.previous } : {}) });
+    drafted = await deps.draftSql({ question, ...(intent ? { intent } : {}), vocabulary, ...(reason ? { reason } : {}), ...(context.previous ? { previous: context.previous } : {}) });
   } catch (error) {
     return { candidates: [], refusals: [{ tier: 'exploratory', code: 'exploration_failed', message: `the SQL draft failed: ${error instanceof Error ? error.message : String(error)}`, repairable: false }] };
   }
