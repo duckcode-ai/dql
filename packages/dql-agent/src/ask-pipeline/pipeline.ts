@@ -9,7 +9,7 @@ import { proveLiterals } from './literal-proof.js';
 import { prepareExploratory } from './prepare/exploratory.js';
 import { keepMembersApart, normalizeEffectiveIntent, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn } from './resolve-intent.js';
 import { buildVocabularyIndex, renderCard, type RenderedCards, type VocabularyDomainHeader, type VocabularyEntry, type VocabularyIndex } from './vocabulary.js';
-import { mergePhysicalRelationBinding, physicalRelationIdentity, physicalRelationText } from './physical-binding.js';
+import { mergePhysicalRelationBinding, physicalRelationIdentity, physicalRelationText, samePhysicalRelation } from './physical-binding.js';
 
 /**
  * INTENT → PREPARE → EXECUTE, as one host-neutral function.
@@ -402,17 +402,26 @@ export function mergeDiscoveredRelations(
   const extra: VocabularyEntry[] = [];
   const existingRelations = vocabulary.entries.filter((entry) => entry.kind === 'relation');
 
+  // A warehouse description answers for the object it was asked about: dbt may
+  // have spelled it quoted (`"nba"."dev"."t"`) and the warehouse reports it
+  // bare, so the match is by names, case-insensitive, never by quote state —
+  // otherwise one object gets two bindings and the composer's same-relation
+  // rebinding (a name read on the base relation instead of a join) gives up.
+  const looseIdentity = (binding: NonNullable<VocabularyEntry['physical']>['binding'] | undefined) => binding
+    ? [binding.database, binding.schema, binding.table].filter(Boolean).map((part) => part!.value.toLowerCase()).join('.')
+    : undefined;
   for (const discoveredRelation of discovered.entries.filter((entry) => entry.kind === 'relation')) {
     const discoveredBinding = discoveredRelation.physical?.binding;
     const exactExisting = discoveredBinding
       ? existingRelations.find((entry) => {
         const existingBinding = entry.physical?.binding;
-        return Boolean(existingBinding && physicalRelationIdentity(physicalRelationText(existingBinding)) === physicalRelationIdentity(physicalRelationText(discoveredBinding)));
+        return Boolean(existingBinding && (physicalRelationIdentity(physicalRelationText(existingBinding)) === physicalRelationIdentity(physicalRelationText(discoveredBinding))
+          || looseIdentity(existingBinding) === looseIdentity(discoveredBinding)));
       })
       : undefined;
     const logicalCollision = discoveredBinding
       ? existingRelations.some((entry) => entry.physical?.binding?.logicalRelation.toLowerCase() === discoveredBinding.logicalRelation.toLowerCase()
-        && physicalRelationIdentity(physicalRelationText(entry.physical.binding)) !== physicalRelationIdentity(physicalRelationText(discoveredBinding)))
+        && looseIdentity(entry.physical.binding) !== looseIdentity(discoveredBinding))
       : false;
     const canonical = exactExisting?.model
       ?? (logicalCollision && discoveredBinding ? physicalRelationText(discoveredBinding) : discoveredRelation.model ?? discoveredRelation.name);
@@ -741,6 +750,50 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
   }
   let intent = resolution.intent;
+  // THE RELATIONS THE READING NAMES ARE DESCRIBED BEFORE ANYTHING IS PREPARED.
+  // Context assembly hydrates only the few relations whose words match the
+  // question; the reading may still lean on another (the facts a metric is
+  // bound to, the relation a label lives on) that the manifest documents with
+  // a handful of columns. Composing over it then fails for want of a column
+  // the warehouse has: reading a season relation's player name on the game
+  // facts that carry the same column is exactly that. The named relations are
+  // few, so describing them costs milliseconds and no dispatch.
+  if (input.describeRelations && remaining() > 8_000) {
+    const named = new Map<string, VocabularyEntry>();
+    const refs = new Set<string>();
+    for (const measure of intent.measures) {
+      refs.add(measure.ref);
+      if (measure.derived) { refs.add(measure.derived.numerator); refs.add(measure.derived.denominator); }
+      for (const predicate of measure.scope ?? []) refs.add(predicate.ref);
+    }
+    for (const group of intent.groupBy) refs.add(group.ref);
+    for (const ref of intent.display) refs.add(ref);
+    for (const predicate of intent.filters) refs.add(predicate.ref);
+    if (intent.time?.ref) refs.add(intent.time.ref);
+    for (const ref of refs) {
+      const entry = input.vocabulary.get(ref) ?? input.vocabulary.resolve(ref);
+      const relationName = entry?.physical?.relation ?? (entry && (entry.kind === 'column' || entry.kind === 'relation') ? entry.model : undefined);
+      if (!relationName) continue;
+      const relation = input.vocabulary.get(`relation:${relationName}`)
+        ?? input.vocabulary.entries.find((candidate) => candidate.kind === 'relation' && samePhysicalRelation(candidate.model, relationName));
+      if (!relation || relation.physical?.binding?.columnCompleteness === 'complete') continue;
+      named.set(relation.ref, relation);
+    }
+    if (named.size > 0) {
+      const describeStarted = now();
+      try {
+        const found = await input.describeRelations([...named.values()]
+          .map((entry) => entry.physical?.binding ? physicalRelationText(entry.physical.binding) : entry.model ?? entry.name)
+          .slice(0, 6));
+        if (found.length > 0) {
+          input = { ...input, vocabulary: mergeDiscoveredRelations(input.vocabulary, found) };
+          input.onVocabularyUpdate?.(input.vocabulary);
+          receipt.grounding = [...(receipt.grounding ?? []), `discovery: described ${found.length} relation${found.length === 1 ? '' : 's'} the reading names (${found.map((relation) => [relation.schema, relation.name].filter(Boolean).join('.')).join(', ')})`];
+        }
+      } catch { /* the vocabulary stands as it was */ }
+      mark('describe', describeStarted);
+    }
+  }
   if (input.memberSelection) applyMemberSelection(intent, input.memberSelection, input.vocabulary);
   // EVERY LITERAL IS PROVEN AGAINST ITS FIELD BEFORE SQL: a relative period on
   // a date field becomes its dates, a partial date its window; a value no

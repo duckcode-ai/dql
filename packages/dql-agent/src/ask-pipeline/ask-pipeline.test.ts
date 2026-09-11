@@ -2203,3 +2203,55 @@ describe('one question, one shape', () => {
     expect(intent.provenance.limit).toMatch(/asks which one/);
   });
 });
+
+describe('the relations a reading names are described before it is prepared', () => {
+  // The manifest documents the game facts with two columns; the warehouse has
+  // the player's name there too. Context assembly hydrated neither relation.
+  const source: VocabularySource = {
+    metrics: [{ name: 'points_scored', label: 'Points scored', aggregation: 'sum', physical: { relation: 'dev.game_facts', expr: '"dev"."game_facts"."points"', aggregate: 'sum' } }],
+    dimensions: [{ name: 'player', model: 'season_facts', label: 'Player', dataType: 'string', physical: { relation: 'dev.season_facts', column: 'player_name' } }],
+    relations: [
+      { schema: 'dev', name: 'game_facts', columns: [{ name: 'player_id' }, { name: 'points' }], columnCompleteness: 'partial' },
+      { schema: 'dev', name: 'season_facts', columns: [{ name: 'player_id', dataType: 'INTEGER' }, { name: 'player_name', dataType: 'VARCHAR' }], columnCompleteness: 'complete' },
+    ],
+  };
+  const reading = JSON.stringify({
+    version: 1, kind: 'analytics', reading: 'Points by player.', measures: [{ ref: 'metric:points_scored' }],
+    groupBy: [{ ref: 'dimension:season_facts.player', role: 'key' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped',
+  });
+  const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => reading };
+  const dialect = { quoteIdentifier: (name: string) => `"${name}"`, dateTrunc: (grain: string, expr: string) => `DATE_TRUNC('${grain}', ${expr})`, limitClause: (limit: number) => `LIMIT ${limit}` };
+
+  it('describes the partially documented facts, then reads the label from the same column there', async () => {
+    const asked: string[][] = [];
+    const statements: string[] = [];
+    const outcome = await runAskPipeline({
+      question: 'points by player', vocabulary: buildVocabularyIndex(source), provider, clauseCoverage: false,
+      prepareDeps: { dialect },
+      describeRelations: async (relations) => {
+        asked.push(relations);
+        return relations.some((relation) => relation.endsWith('game_facts'))
+          ? [{ schema: 'dev', name: 'game_facts', columns: [{ name: 'player_id', dataType: 'INTEGER' }, { name: 'player_name', dataType: 'VARCHAR' }, { name: 'points', dataType: 'INTEGER' }], columnCompleteness: 'complete' as const }]
+          : [];
+      },
+      executeDeps: { run: async (sql) => { statements.push(sql); return { columns: ['player_name', 'points_scored'], rows: [{ player_name: 'James Harden', points_scored: 2888 }], rowCount: 1, executionTimeMs: 1 }; } },
+    });
+    // Only the relation that was not already complete is described.
+    expect(asked).toEqual([['dev.game_facts']]);
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind !== 'answered') return;
+    expect(statements[0]).toContain('"dev"."game_facts"."player_name"');
+    expect(statements[0]).not.toContain('season_facts');
+    expect(outcome.receipt.grounding?.join(' ')).toContain('discovery: described 1 relation the reading names (dev.game_facts)');
+  });
+
+  it('without a warehouse description the same reading still refuses the join it cannot prove', async () => {
+    const outcome = await runAskPipeline({
+      question: 'points by player', vocabulary: buildVocabularyIndex(source), provider, clauseCoverage: false,
+      prepareDeps: { dialect }, explorationAuto: false,
+      executeDeps: { run: async () => { throw new Error('must not execute'); } },
+    });
+    expect(outcome.kind).not.toBe('answered');
+    expect(outcome.receipt.refusals.some((refusal) => refusal.code === 'join_path_required')).toBe(true);
+  });
+});
