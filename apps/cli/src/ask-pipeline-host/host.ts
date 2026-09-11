@@ -853,7 +853,19 @@ export function explainOutOfScope(problems: Array<{ path: string; message: strin
     const match = /^(\S+) is not in the vocabulary/.exec(problem.message);
     if (!match) continue;
     const ref = match[1]!;
-    const entry = inventory.get(ref) ?? inventory.resolve(ref);
+    // The model may spell an entry the inventory holds with the wrong kind and
+    // a schema in front (`column:TRANSFORMED.team_directory.city` for
+    // `dimension:team_directory.city`). Drop the kind, then try shorter dotted
+    // tails down to two parts; a bare field name alone is never guessed.
+    const suffixMatch = (): VocabularyEntry | undefined => {
+      const path = ref.replace(/^[a-z_]+:/i, '').split('.');
+      for (let start = 0; path.length - start >= 2; start += 1) {
+        const found = inventory.resolve(path.slice(start).join('.'));
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const entry = inventory.get(ref) ?? inventory.resolve(ref) ?? suffixMatch();
     if (!entry) continue;
     const relation = entry.physical?.relation ?? (entry.kind === 'column' ? ref.slice(ref.indexOf(':') + 1).split('.').slice(0, -1).join('.') : undefined);
     const owner = entry.domain ?? (relation ? inventory.get(`relation:${relation}`)?.domain : undefined);

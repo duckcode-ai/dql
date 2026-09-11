@@ -776,3 +776,20 @@ describe('the Snowflake column probe asks SHOW COLUMNS first', () => {
     expect(result.askPipelineReceipt?.physicalBindings?.find((binding) => /EVENTS$/i.test(binding.relation))?.completeness).toBe('complete');
   });
 });
+
+describe('an out-of-scope ref spelled with the wrong kind and a schema is still explained', () => {
+  // The fixture holds the city as a DIMENSION of the team directory; the model
+  // wrote it as a schema-qualified COLUMN. The owning domain is still known.
+  const inventory = buildVocabularyIndex({
+    dimensions: [{ name: 'city', model: 'team_directory', label: 'City', dataType: 'string', physical: { relation: 'TRANSFORMED.dim_teams_cleansed', column: 'city' } }],
+    relations: [{ schema: 'TRANSFORMED', name: 'dim_teams_cleansed', columns: [], domain: 'nba.games', domains: ['nba.games'] }],
+  });
+  it('finds the dimension by its dotted tail and names its owning domain', () => {
+    const explained = explainOutOfScope([{ path: 'display[0]', message: 'column:TRANSFORMED.team_directory.city is not in the vocabulary' }], inventory, { activeDomain: 'nba.performance', purpose: undefined })!;
+    expect(explained.refs).toEqual([{ ref: 'column:TRANSFORMED.team_directory.city', domain: 'nba.games' }]);
+    expect(explained.message).toContain('owned by nba.games');
+  });
+  it('never guesses from a bare field name on a relation nobody holds', () => {
+    expect(explainOutOfScope([{ path: 'display[0]', message: 'column:TRANSFORMED.nowhere.city is not in the vocabulary' }], inventory, { activeDomain: 'nba.performance', purpose: undefined })).toBeUndefined();
+  });
+});
