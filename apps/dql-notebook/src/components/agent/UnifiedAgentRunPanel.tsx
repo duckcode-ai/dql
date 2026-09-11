@@ -1939,6 +1939,7 @@ export function askStoryActiveLabel(steps: AskStoryStep[]): string {
   if (last.phase === 'context') return 'Asking the AI to read the question';
   if (title === 'Asked the AI to read the question' || title === 'Asked the AI to correct its reading' || title.startsWith('Asked the AI to read the question again')) return 'Checking the reading against the project';
   if (title.startsWith('Fetched ')) return 'Asking the AI to read the question with those fields';
+  if (title.startsWith('Searched every table for the missing field: found')) return 'Asking the AI to draft SQL with those tables';
   if (last.phase === 'read') return 'Looking for a certified or governed answer';
   if (title === 'No governed answer: asking the tables directly' || (last.phase === 'schema' && title.startsWith('Chose '))) return 'Asking the AI to draft SQL from the tables';
   if (last.phase === 'schema' && /^(Re)?[Dd]rafted SQL/.test(title)) return 'Running the drafted query';

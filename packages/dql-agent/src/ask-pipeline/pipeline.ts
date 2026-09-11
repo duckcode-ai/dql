@@ -637,11 +637,13 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       receipt.tiers.push({ round: 97, tier: 'exploratory', outcome: drafted.candidates.length ? 'prepared' : 'refused', detail: drafted.refusals[0] ? `${drafted.refusals[0].code}: ${drafted.refusals[0].message.slice(0, 160)}` : `schema lane: ${why.slice(0, 160)}` });
       const declined = drafted.refusals.find((refusal) => refusal.code === 'exploration_declined');
       if (declined) {
-        step('schema', 'The tables do not hold what was asked', 'missed', { detail: declined.message, ms: draftMs });
+        step('schema', 'The tables searched do not hold what was asked', 'missed', { detail: declined.message, ms: draftMs });
         if (options.onDecline === 'fallthrough') return undefined;
         const message = declined.message.replace(/[.\s]+$/, '') || 'the available tables do not hold what the question asks for';
         receipt.intent = reading; receipt.reading = reading.reading;
-        return { kind: 'gap', gap: 'not_modeled', message, nearest: [], text: composeGapText('not_modeled', message, [], false), receipt, intent: reading, offerExploration: false };
+        // The drafter saw the tables it was given, not the whole project: the
+        // sentence says what was searched, never that the project lacks it.
+        return { kind: 'gap', gap: 'not_modeled', message, nearest: [], text: `No query was run because the tables Ask searched do not hold it: ${message}.`, receipt, intent: reading, offerExploration: false };
       }
       const candidate = drafted.candidates[0];
       if (!candidate) {

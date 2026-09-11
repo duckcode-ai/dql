@@ -423,6 +423,7 @@ type RelevanceIndex = {
 // first shape recomputed every description's words and walked every semantic
 // entry for every relation on each question: 95 s on a 4,700-model project.
 const relevanceIndexCache = new WeakMap<object, RelevanceIndex>();
+const splitRelevanceIndexCache = new WeakMap<object, RelevanceIndex>();
 const relevanceStem = (value: string) => {
   const lower = value.toLowerCase();
   if (lower.endsWith('ies') && lower.length > 4) return `${lower.slice(0, -3)}y`;
@@ -431,11 +432,18 @@ const relevanceStem = (value: string) => {
   if (lower.endsWith('s') && lower.length > 3 && !lower.endsWith('ss')) return lower.slice(0, -1);
   return lower;
 };
-const relevanceWords = (values: Array<string | undefined>): Set<string> => {
+const relevanceWords = (values: Array<string | undefined>, splitNames = false): Set<string> => {
   const words = new Set<string>();
   for (const text of values) {
     if (!text) continue;
-    for (const word of text.toLowerCase().split(/[^a-z0-9_]+/)) if (word.length > 2) words.add(relevanceStem(word));
+    for (const word of text.toLowerCase().split(/[^a-z0-9_]+/)) {
+      if (word.length > 2) words.add(relevanceStem(word));
+      // COMPETITOR_C, PRIMARY_COMPETITOR: a column name is words joined by
+      // underscores, and a question names the words, not the spelling.
+      // The governed context keeps whole names (its cards, and the recorded
+      // prompts, depend on the relations it hydrates); the SQL drafter splits.
+      if (splitNames && word.includes('_')) for (const part of word.split('_')) if (part.length > 2) words.add(relevanceStem(part));
+    }
   }
   return words;
 };
@@ -444,8 +452,9 @@ const relevanceTail = (value: string | undefined) => {
   if (parts.length === 0) return '';
   return parts.slice(-2).map((part) => `${part.quoted ? 'q' : 'u'}:${part.quoted ? part.value : part.value.toLowerCase()}`).join('.');
 };
-function relevanceIndexFor(source: ReturnType<typeof buildVocabularySource>): RelevanceIndex {
-  const cached = relevanceIndexCache.get(source);
+function relevanceIndexFor(source: ReturnType<typeof buildVocabularySource>, splitNames = false): RelevanceIndex {
+  const cache = splitNames ? splitRelevanceIndexCache : relevanceIndexCache;
+  const cached = cache.get(source);
   if (cached) return cached;
   type SemanticSource = NonNullable<VocabularySource['metrics']>[number]
     | NonNullable<VocabularySource['measures']>[number]
@@ -459,7 +468,7 @@ function relevanceIndexFor(source: ReturnType<typeof buildVocabularySource>): Re
     const tail = relevanceTail(physical);
     const list = semanticByTail.get(tail) ?? [];
     list.push({
-      words: relevanceWords([entry.name, 'label' in entry ? entry.label : undefined, entry.description, 'aliases' in entry ? entry.aliases?.join(' ') : undefined, entry.physical?.column]),
+      words: relevanceWords([entry.name, 'label' in entry ? entry.label : undefined, entry.description, 'aliases' in entry ? entry.aliases?.join(' ') : undefined, entry.physical?.column], splitNames),
       isTime: ('isTime' in entry && Boolean(entry.isTime)) || ('dataType' in entry && /(?:date|time|timestamp)/i.test(entry.dataType ?? '')),
     });
     semanticByTail.set(tail, list);
@@ -472,13 +481,13 @@ function relevanceIndexFor(source: ReturnType<typeof buildVocabularySource>): Re
       // than as catalog objects; that relation-level lane is only for
       // selection: physical columns are still hydrated and validated before
       // an Ask run can use them.
-      words: relevanceWords([relation.name, relation.schema, relation.description, ...relation.columns.flatMap((column) => [column.name, column.description]), ...(relation.embeddedColumns ?? []).flatMap((column) => [column.name, column.description])]),
+      words: relevanceWords([relation.name, relation.schema, relation.description, ...relation.columns.flatMap((column) => [column.name, column.description]), ...(relation.embeddedColumns ?? []).flatMap((column) => [column.name, column.description])], splitNames),
       tail: relevanceTail(name),
       partial: relation.columnCompleteness !== 'complete' ? 1 : 0,
     };
   });
   const index = { relations, semanticByTail };
-  relevanceIndexCache.set(source, index);
+  cache.set(source, index);
   return index;
 }
 
@@ -493,13 +502,52 @@ function relevanceIndexFor(source: ReturnType<typeof buildVocabularySource>): Re
  * matching semantic field a bounded boost. The boost selects metadata to
  * inspect; it is never a binding or evidence that two fields compose.
  */
+/**
+ * THE WIDER LOOK. A draft over the tables first chosen found no field for
+ * something the question asks: every relation in the source is searched for a
+ * column whose name or description carries those words. Words the question,
+ * the reading's open clauses or the conversation used weigh more than words
+ * only the drafter's sentence used, so "competitor" outranks "primary".
+ */
+export function relationsWithColumnWords(
+  source: Pick<VocabularySource, 'relations'>,
+  words: string[],
+  emphasis: string,
+  exclude: string[],
+  max = 3,
+): string[] {
+  const wanted = [...relevanceWords(words, true)];
+  if (wanted.length === 0) return [];
+  const emphasized = relevanceWords([emphasis], true);
+  const excluded = new Set(exclude.map((name) => physicalRelationIdentity(name)));
+  return (source.relations ?? [])
+    .map((relation) => {
+      const name = relation.binding ? physicalRelationText(relation.binding) : [relation.schema, relation.name].filter(Boolean).join('.');
+      const columnWords = [...relation.columns, ...(relation.embeddedColumns ?? [])].map((column) => relevanceWords([column.name, column.description], true));
+      let score = 0;
+      for (const word of wanted) if (columnWords.some((set) => set.has(word))) score += emphasized.has(word) ? 3 : 1;
+      return { name, score };
+    })
+    .filter((item) => item.score > 0 && !excluded.has(physicalRelationIdentity(item.name)))
+    .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name))
+    .slice(0, max)
+    .map((item) => item.name);
+}
+
+const MISSING_WORD_STOP = new Set(['column', 'columns', 'table', 'tables', 'relation', 'relations', 'field', 'fields', 'listed', 'available', 'such', 'that', 'this', 'which', 'with', 'from', 'there', 'none', 'into', 'filter', 'value', 'values', 'named', 'name', 'holds', 'hold', 'question', 'asked', 'data', 'these', 'those', 'what', 'where', 'records', 'record', 'cannot', 'answer', 'nothing', 'missing', 'only', 'contain', 'contains']);
+/** The words of a decline and of the reading's open clauses that could name a column. */
+export function missingFieldWords(text: string): string[] {
+  return [...new Set(text.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 3 && !/^\d+$/.test(word) && !MISSING_WORD_STOP.has(word)))].slice(0, 10);
+}
+
 export function relevantRelationsForQuestion(
   source: ReturnType<typeof buildVocabularySource>,
   question: string,
   max = 3,
+  options: { splitNames?: boolean } = {},
 ): string[] {
-  const index = relevanceIndexFor(source);
-  const words = relevanceWords([question]);
+  const index = relevanceIndexFor(source, options.splitNames);
+  const words = relevanceWords([question], options.splitNames);
   if (words.size === 0) return [];
   const requestsTime = [...words].some((word) => ['date', 'day', 'week', 'month', 'quarter', 'year', 'calendar', 'fiscal', 'period'].includes(word));
   const overlap = (set: Set<string>) => { let count = 0; for (const word of words) if (set.has(word)) count += 1; return count; };
@@ -1521,7 +1569,9 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       if (!connection) return [];
       const { source } = await baseSourceFor(connection);
       const remaining = request.runBudget?.remainingMs();
-      return probeColumns(connection, source, deps.getManifest().snapshotId, relations.slice(0, 3), remaining, request.signal);
+      // Up to five: the drafter may choose tables from the reading, the question
+      // and the conversation, and a table it cannot describe cannot be drafted over.
+      return probeColumns(connection, source, deps.getManifest().snapshotId, relations.slice(0, 5), remaining, request.signal);
     };
     // THE LAST TIER'S DRAFT: one read-only statement from the reading and the
     // admitted relations and columns, validated against the catalog before
@@ -1550,11 +1600,17 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       // THE TABLES THE QUESTION IS ABOUT. With no reading to name them, the
       // question's own words choose them, the same relation-first discovery
       // context assembly uses; they are described before any SQL is written.
-      if (relations.length < 2) {
+      // WHAT THE USER HAS SAID counts as much as what the reading named: the
+      // conversation so far and the clauses the reading could not govern
+      // choose tables too ("the competitor is in the deal notes").
+      const conversation = deps.conversation?.(request);
+      const contextText = [conversation?.summary, conversation?.pendingClarification].filter(Boolean).join(' ');
+      const open = intent?.unresolved.map((item) => `${item.clause} ${item.question ?? ''}`).join(' ') ?? '';
+      if (relations.length < 4) {
         try {
           const { source } = await baseSourceFor(connection);
-          for (const relation of relevantRelationsForQuestion(source, question, 4)) {
-            if (relations.length >= 4) break;
+          for (const relation of relevantRelationsForQuestion(source, `${question} ${open} ${contextText}`, 5, { splitNames: true })) {
+            if (relations.length >= 5) break;
             if (!relations.some((known) => physicalRelationIdentity(known) === physicalRelationIdentity(relation))) relations.push(relation);
           }
         } catch { /* the relations named so far stand */ }
@@ -1566,7 +1622,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       });
       if (needsColumns.length > 0) {
         try {
-          const found = await describeRelations(needsColumns.slice(0, 4));
+          const found = await describeRelations(needsColumns.slice(0, 5));
           if (found.length > 0) {
             current = mergeDiscoveredRelations(current, found);
             requestVocabulary = current;
@@ -1577,76 +1633,129 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       relations = relations.filter((relation) => current.entries.some((item) => item.kind === 'column' && (() => { const physical = entryPhysicalRelation(item); return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(relation); })()));
       if (relations.length === 0) return { error: 'the tables that match the question could not be described on this connection' };
       hostStep({ phase: 'schema', title: `Chose ${relations.length === 1 ? 'the table' : 'the tables'} ${relations.join(', ')}`, state: 'done', detail: `picked from ${refs.length ? 'the fields the reading named' : 'the words of the question'}${needsColumns.length ? `; columns of ${needsColumns.slice(0, 4).join(', ')} read from the warehouse` : ''}` });
-      const unresolvedPhysical = current.entries
-        .filter((entry) => entry.kind === 'relation' && relations.some((relation) => {
-          const physical = entryPhysicalRelation(entry);
-          return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(relation);
-        }))
-        .filter((entry) => !entry.physical?.binding || (connection?.driver.toLowerCase() === 'snowflake' && !entry.physical.binding.database));
-      if (unresolvedPhysical.length > 0) {
-        return { error: `the relation ${unresolvedPhysical.map((entry) => entry.model ?? entry.name).join(', ')} does not have one exact physical database binding for this target; refresh metadata or resolve the duplicate database identity before drafting SQL` };
-      }
-      const cards: string[] = [];
-      let chars = 0;
-      for (const relation of relations) {
-        const entry = current.entries.find((item) => {
-          if (item.kind !== 'relation') return false;
-          const physical = entryPhysicalRelation(item);
-          return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(relation);
-        });
-        const lines = [
-          entry ? `- executable relation:${relation} [${entry.physical?.binding?.columnCompleteness ?? 'partial'} columns; logical ${entry.physical?.binding?.logicalRelation ?? entry.model ?? relation}]` : `- executable relation:${relation}`,
-          ...current.entries.filter((item) => item.kind === 'column' && samePhysicalEntry(item, entry)).map((item) => renderCard(item)),
-        ];
-        for (const line of lines) { if (chars + line.length > 14_000) break; cards.push(line); chars += line.length + 1; }
-      }
-      const dialect = connection?.driver ?? 'duckdb';
-      const messages: AgentMessage[] = [
-        { role: 'system', content: `You write exactly ONE read-only SQL statement for ${dialect} that answers the question from the tables below. No certified block or governed metric answers it, so you choose the tables, columns, joins and filters. Use ONLY the executable physical relations and columns listed below, spelled exactly as listed (including database and quoting where shown). Join two relations only on columns that exist in both. Apply every restriction the question states; when unsure how a text value is stored, match it case-insensitively; aggregate at the grain the question asks for; order and limit as it asks; never return more than 500 rows. No DDL or DML, no comments, no explanation. If these relations cannot answer the question, reply exactly NO_SQL: followed by one sentence naming what is missing, and never substitute a different measure or table for the one asked. Otherwise return the SQL only.` },
-        { role: 'user', content: `QUESTION: ${question}\n${reason ? `WHY NO GOVERNED ANSWER: ${reason.slice(0, 600)}\n` : ''}${intent ? `READING: ${intent.reading}\nINTENT: ${JSON.stringify({ measures: intent.measures, groupBy: intent.groupBy, display: intent.display, filters: intent.filters, time: intent.time ?? null, ordering: intent.ordering ?? null, limit: intent.limit ?? null })}\n` : ''}${previous ? `PREVIOUS SQL (the warehouse rejected it; fix it):\n${previous.sql}\nWAREHOUSE ERROR: ${previous.error.slice(0, 600)}\n` : ''}RELATIONS AND COLUMNS:\n${cards.join('\n')}` },
+      // THE CONTEXT THE DRAFT READS: what the user said, the previous reading,
+      // and what the project says about this data (domain notes, business
+      // terms the question uses, approved hints).
+      const spoken = ` ${question} ${contextText} `.toLowerCase();
+      const termLines = current.entries
+        .filter((entry) => entry.kind === 'term' && [entry.name, entry.label ?? '', ...entry.aliases].some((name) => name.length > 2 && spoken.includes(name.toLowerCase())))
+        .slice(0, 5)
+        .map((entry) => `- business term ${entry.label ?? entry.name}: ${[entry.description, ...(entry.rules ?? [])].filter(Boolean).join(' ').slice(0, 300)}`);
+      const briefing = view.pack?.domainBriefing;
+      const hintLines = (view.pack?.appliedHints ?? []).slice(0, 5)
+        .map((hint) => hint.lesson?.rule || hint.guidance)
+        .filter((rule): rule is string => Boolean(rule))
+        .map((rule) => `- approved hint: ${rule.slice(0, 300)}`);
+      const contextLines = [
+        ...(contextText ? [`- conversation so far: ${contextText.slice(0, 600)}`] : []),
+        ...(prior?.intent.reading ? [`- previous reading: ${prior.intent.reading.slice(0, 300)}${prior.summary ? `; its answer: ${prior.summary.slice(0, 300)}` : ''}`] : []),
+        ...(briefing ? [`- domain ${briefing.name}${briefing.description ? `: ${briefing.description.slice(0, 300)}` : ''}${briefing.caveats.length ? `; caveats: ${briefing.caveats.slice(0, 3).join('; ')}` : ''}${briefing.requiredFilters.length ? `; required filters: ${briefing.requiredFilters.slice(0, 3).join('; ')}` : ''}`] : []),
+        ...termLines,
+        ...hintLines,
       ];
-      const draftStarted = Date.now();
-      const trace = deps.dispatchOptions?.('draft', request);
-      let raw: string;
+      const attemptDraft = async (note?: string): Promise<Awaited<ReturnType<NonNullable<PrepareDeps['draftSql']>>>> => {
+        const unresolvedPhysical = current.entries
+          .filter((entry) => entry.kind === 'relation' && relations.some((relation) => {
+            const physical = entryPhysicalRelation(entry);
+            return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(relation);
+          }))
+          .filter((entry) => !entry.physical?.binding || (connection?.driver.toLowerCase() === 'snowflake' && !entry.physical.binding.database));
+        if (unresolvedPhysical.length > 0) {
+          return { error: `the relation ${unresolvedPhysical.map((entry) => entry.model ?? entry.name).join(', ')} does not have one exact physical database binding for this target; refresh metadata or resolve the duplicate database identity before drafting SQL` };
+        }
+        const cards: string[] = [];
+        let chars = 0;
+        for (const relation of relations) {
+          const entry = current.entries.find((item) => {
+            if (item.kind !== 'relation') return false;
+            const physical = entryPhysicalRelation(item);
+            return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(relation);
+          });
+          const lines = [
+            entry ? `- executable relation:${relation} [${entry.physical?.binding?.columnCompleteness ?? 'partial'} columns; logical ${entry.physical?.binding?.logicalRelation ?? entry.model ?? relation}]` : `- executable relation:${relation}`,
+            ...current.entries.filter((item) => item.kind === 'column' && samePhysicalEntry(item, entry)).map((item) => renderCard(item)),
+          ];
+          for (const line of lines) { if (chars + line.length > 14_000) break; cards.push(line); chars += line.length + 1; }
+        }
+        const dialect = connection?.driver ?? 'duckdb';
+        const messages: AgentMessage[] = [
+          { role: 'system', content: `You write exactly ONE read-only SQL statement for ${dialect} that answers the question from the tables below. No certified block or governed metric answers it, so you choose the tables, columns, joins and filters. Use ONLY the executable physical relations and columns listed below, spelled exactly as listed (including database and quoting where shown). Join two relations only on columns that exist in both. Apply every restriction the question states; when unsure how a text value is stored, match it case-insensitively; aggregate at the grain the question asks for; order and limit as it asks; never return more than 500 rows. No DDL or DML, no comments, no explanation. The CONTEXT lines are what the user and the project have said about this data (definitions, rules, where values are kept): follow them, and use a table or field the user names as named. When no column is dedicated to a restriction the question states, apply it to the text, tag, category or custom field that most plausibly holds that value, matched case-insensitively (a partial match is allowed). Reply exactly NO_SQL: followed by one sentence naming what is missing only when no listed column could hold a measure or a restriction the question asks for, and never substitute a different measure for the one asked. Otherwise return the SQL only.` },
+          { role: 'user', content: `QUESTION: ${question}\n${reason ? `WHY NO GOVERNED ANSWER: ${reason.slice(0, 600)}\n` : ''}${intent ? `READING: ${intent.reading}\nINTENT: ${JSON.stringify({ measures: intent.measures, groupBy: intent.groupBy, display: intent.display, filters: intent.filters, time: intent.time ?? null, ordering: intent.ordering ?? null, limit: intent.limit ?? null })}\n` : ''}${contextLines.length ? `CONTEXT:\n${contextLines.join('\n')}\n` : ''}${note ? `NOTE: ${note}\n` : ''}${previous ? `PREVIOUS SQL (the warehouse rejected it; fix it):\n${previous.sql}\nWAREHOUSE ERROR: ${previous.error.slice(0, 600)}\n` : ''}RELATIONS AND COLUMNS:\n${cards.join('\n')}` },
+        ];
+        const draftStarted = Date.now();
+        const trace = deps.dispatchOptions?.('draft', request);
+        let raw: string;
+        try {
+          if (request.signal?.aborted) throw new Error('the request was cancelled before SQL drafting started');
+          raw = await provider.generate(messages, { temperature: 0, ...(trace?.options ?? {}), ...(request.signal ? { signal: request.signal } : {}) });
+          trace?.settle('ok');
+        } catch (error) {
+          trace?.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
+          throw error;
+        } finally {
+          draftDispatches.push({ purpose: 'intent:draft', ms: Date.now() - draftStarted, promptChars: messages.reduce((sum, message) => sum + message.content.length, 0) });
+        }
+        const declined = /^\s*NO_SQL\s*:?\s*([\s\S]*)$/i.exec(raw.trim());
+        if (declined) return { declined: declined[1]!.trim() || 'the available tables do not hold what the question asks for' };
+        const fenced = /```(?:sql)?\s*([\s\S]*?)```/i.exec(raw);
+        const sql = (fenced ? fenced[1]! : raw).trim();
+        if (!sql) return { error: 'the provider returned no SQL' };
+        const runtimeSchema = runtimeSchemaForVocabulary(current)
+          .filter((table) => relations.some((relation) => physicalRelationIdentity(relation) === physicalRelationIdentity(table.relation)));
+        const validation = validateSqlAgainstLocalContext(sql, view.pack, {
+          dialect,
+          question,
+          runtimeSchema,
+          runtimeSchemaExact: true,
+          ...(connection ? { executionTargetFingerprint: fingerprintText(connectionKey(connection)) } : {}),
+          enforceGenerationReadiness: false,
+        });
+        if (!validation.ok) {
+          // A parser that cannot read this dialect is not evidence against the
+          // draft: prove it by the relations it reads, exactly as the frozen
+          // statement is proven before execution. Read-only-ness is proven by
+          // the tier itself.
+          if (!/could not be parsed/i.test(validation.error)) return { error: `the drafted SQL was not accepted: ${validation.error}` };
+          const inspected = new Set(runtimeSchema.map((table) => executionRelationIdentityFor(table.relation, dialect)));
+          const read = relationsInSql(sql).filter((relation) => parsePhysicalIdentifier(relation).length >= 2);
+          const foreign = read.find((relation) => !inspected.has(executionRelationIdentityFor(relation, dialect)));
+          if (foreign) return { error: `the drafted SQL reads ${foreign}, which this request did not inspect` };
+          if (read.length === 0) return { error: 'the drafted SQL names no inspected relation' };
+          return { sql, relations: read, proof: [`reads only the inspected physical bindings: ${read.join(', ')} (the SQL parser could not read this dialect; relations proven by name)`], engine: dialect };
+        }
+        return { sql, relations: validation.referencedRelations, proof: [`validated against the inspected physical bindings: it reads ${validation.referencedRelations.join(', ') || 'admitted relations only'}`, ...validation.warnings.slice(0, 3)], engine: dialect };
+      };
+      const shown = [...relations];
+      const first = await attemptDraft();
+      if (!first || !('declined' in first)) return first;
+      // THE WIDER LOOK: a decline over the tables first chosen is not a
+      // decline over the project. Search every table for a column the missing
+      // words name, add what is found, and draft once more.
+      const words = missingFieldWords(`${first.declined} ${open}`);
+      let wider: string[] = [];
       try {
-        if (request.signal?.aborted) throw new Error('the request was cancelled before SQL drafting started');
-        raw = await provider.generate(messages, { temperature: 0, ...(trace?.options ?? {}), ...(request.signal ? { signal: request.signal } : {}) });
-        trace?.settle('ok');
-      } catch (error) {
-        trace?.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
-        throw error;
-      } finally {
-        draftDispatches.push({ purpose: 'intent:draft', ms: Date.now() - draftStarted, promptChars: messages.reduce((sum, message) => sum + message.content.length, 0) });
+        const { source } = await baseSourceFor(connection);
+        wider = relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, relations, 3);
+      } catch { wider = []; }
+      if (wider.length > 0) {
+        try {
+          const found = await describeRelations(wider);
+          if (found.length > 0) {
+            current = mergeDiscoveredRelations(current, found);
+            requestVocabulary = current;
+          }
+        } catch { /* only tables already described can be added */ }
+        wider = wider.filter((relation) => current.entries.some((item) => item.kind === 'column' && (() => { const physical = entryPhysicalRelation(item); return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(relation); })()));
       }
-      const declined = /^\s*NO_SQL\s*:?\s*([\s\S]*)$/i.exec(raw.trim());
-      if (declined) return { declined: declined[1]!.trim() || 'the available tables do not hold what the question asks for' };
-      const fenced = /```(?:sql)?\s*([\s\S]*?)```/i.exec(raw);
-      const sql = (fenced ? fenced[1]! : raw).trim();
-      if (!sql) return { error: 'the provider returned no SQL' };
-      const runtimeSchema = runtimeSchemaForVocabulary(current)
-        .filter((table) => relations.some((relation) => physicalRelationIdentity(relation) === physicalRelationIdentity(table.relation)));
-      const validation = validateSqlAgainstLocalContext(sql, view.pack, {
-        dialect,
-        question,
-        runtimeSchema,
-        runtimeSchemaExact: true,
-        ...(connection ? { executionTargetFingerprint: fingerprintText(connectionKey(connection)) } : {}),
-        enforceGenerationReadiness: false,
-      });
-      if (!validation.ok) {
-        // A parser that cannot read this dialect is not evidence against the
-        // draft: prove it by the relations it reads, exactly as the frozen
-        // statement is proven before execution. Read-only-ness is proven by
-        // the tier itself.
-        if (!/could not be parsed/i.test(validation.error)) return { error: `the drafted SQL was not accepted: ${validation.error}` };
-        const inspected = new Set(runtimeSchema.map((table) => executionRelationIdentityFor(table.relation, dialect)));
-        const read = relationsInSql(sql).filter((relation) => parsePhysicalIdentifier(relation).length >= 2);
-        const foreign = read.find((relation) => !inspected.has(executionRelationIdentityFor(relation, dialect)));
-        if (foreign) return { error: `the drafted SQL reads ${foreign}, which this request did not inspect` };
-        if (read.length === 0) return { error: 'the drafted SQL names no inspected relation' };
-        return { sql, relations: read, proof: [`reads only the inspected physical bindings: ${read.join(', ')} (the SQL parser could not read this dialect; relations proven by name)`], engine: dialect };
+      if (wider.length === 0) {
+        hostStep({ phase: 'search', title: 'Searched every table for the missing field: none has it', state: 'missed', detail: `looked for ${words.slice(0, 4).join(', ') || 'the missing field'} beyond ${shown.join(', ')}` });
+        return { declined: `${first.declined.replace(/[.\s]+$/, '')} (searched ${shown.join(', ')}, and no other table has a column for ${words.slice(0, 3).join(', ') || 'it'})` };
       }
-      return { sql, relations: validation.referencedRelations, proof: [`validated against the inspected physical bindings: it reads ${validation.referencedRelations.join(', ') || 'admitted relations only'}`, ...validation.warnings.slice(0, 3)], engine: dialect };
+      relations = [...relations, ...wider];
+      hostStep({ phase: 'search', title: `Searched every table for the missing field: found ${wider.join(', ')}`, state: 'done', detail: `looked for ${words.slice(0, 4).join(', ')}; the first draft over ${shown.join(', ')} found none` });
+      const second = await attemptDraft(`A first draft over ${shown.join(', ')} found no field for this ("${first.declined.slice(0, 240)}"). The tables ${wider.join(', ')} have columns named for it and were added; use them, joining on a key both tables carry.`);
+      if (second && 'declined' in second) return { declined: `${second.declined.replace(/[.\s]+$/, '')} (searched ${relations.join(', ')})` };
+      return second;
     };
     const outcome = await runAskPipeline({
       question: request.question,

@@ -2548,6 +2548,7 @@ describe('the story an Ask run tells while it works and keeps afterwards', () =>
     expect(askStoryActiveLabel([at('schema', 'No governed answer: asking the tables directly')])).toBe('Asking the AI to draft SQL from the tables');
     expect(askStoryActiveLabel([at('schema', 'Chose the tables dev.products, dev.supplies')])).toBe('Asking the AI to draft SQL from the tables');
     expect(askStoryActiveLabel([at('schema', 'Drafted SQL over dev.products')])).toBe('Running the drafted query');
+    expect(askStoryActiveLabel([at('search', 'Searched every table for the missing field: found crm.deal_notes')])).toBe('Asking the AI to draft SQL with those tables');
     expect(askStoryActiveLabel([at('execute', 'The warehouse rejected the draft: correcting it once', 'failed')])).toBe('Asking the AI to correct the query');
     expect(askStoryActiveLabel([at('tier', 'Governed tables and joins: prepared an answer')])).toBe('Running the query');
     expect(askStoryActiveLabel([at('execute', 'Ran the governed tables and joins query: 1 row')])).toBe('Writing the answer');
