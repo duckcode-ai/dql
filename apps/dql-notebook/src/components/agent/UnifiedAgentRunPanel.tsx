@@ -482,7 +482,7 @@ export function UnifiedAgentRunPanel({
     if (activeRunIdRef.current === run.id) activeRunIdRef.current = null;
     pendingRunRef.current = null;
     setBackgroundRun(null);
-    setRunningEvents(run.events.slice(-8));
+    setRunningEvents(retainLiveAgentEvents(run.events));
     resetStreamingAnswer();
     setItems((current) => mergeFinishedRun(current, run, pending));
     if (run.route !== 'certified_answer') {
@@ -539,11 +539,11 @@ export function UnifiedAgentRunPanel({
           saveActiveAgentRun(current);
           accepted = true;
         } else if (message.kind === 'event') {
-          setRunningEvents((existing) => [...existing, message.event].slice(-8));
+          setRunningEvents((existing) => retainLiveAgentEvents([...existing, message.event]));
         } else if (message.kind === 'answer-delta') {
           appendStreamingDelta(message.delta);
         } else {
-          setRunningEvents(message.run.events.slice(-8));
+          setRunningEvents(retainLiveAgentEvents(message.run.events));
         }
       }, controller.signal).then((run) => {
         if (recoveryEpoch !== recoveryEpochRef.current) return;
@@ -590,7 +590,7 @@ export function UnifiedAgentRunPanel({
           setRunning(false);
           return;
         }
-        setRunningEvents(state.progress.events.slice(-8));
+        setRunningEvents(retainLiveAgentEvents(state.progress.events));
         recoveryTimerRef.current = window.setTimeout(() => { void check(); }, 600);
       } catch {
         if (recoveryEpoch !== recoveryEpochRef.current || activeRunIdRef.current !== pending.id) return;
@@ -792,11 +792,11 @@ export function UnifiedAgentRunPanel({
           saveActiveAgentRun(pending);
           acceptedServerRun = true;
         } else if (message.kind === 'event') {
-          setRunningEvents((current) => [...current, message.event].slice(-8));
+          setRunningEvents((current) => retainLiveAgentEvents([...current, message.event]));
         } else if (message.kind === 'answer-delta') {
           appendStreamingDelta(message.delta);
         } else {
-          setRunningEvents(message.run.events.slice(-8));
+          setRunningEvents(retainLiveAgentEvents(message.run.events));
         }
       };
       let run: AgentRun;
@@ -1884,6 +1884,149 @@ export function completedRunGuidanceFor(
   };
 }
 
+/** One step of an Ask run's story: what it searched, what it missed, what ran. */
+export interface AskStoryStep {
+  phase: string;
+  title: string;
+  detail?: string;
+  state: 'done' | 'missed' | 'failed';
+  ms?: number;
+  at: number;
+}
+
+function askStoryStepOf(value: unknown): AskStoryStep | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.title !== 'string' || typeof record.at !== 'number') return undefined;
+  const state = record.state === 'missed' || record.state === 'failed' ? record.state : 'done';
+  return {
+    phase: typeof record.phase === 'string' ? record.phase : 'step',
+    title: record.title,
+    state,
+    at: record.at,
+    ...(typeof record.detail === 'string' && record.detail ? { detail: record.detail } : {}),
+    ...(typeof record.ms === 'number' ? { ms: record.ms } : {}),
+  };
+}
+
+/** The story steps a live run has streamed so far, in order. */
+export function askStoryStepsFromEvents(events: AgentRunEvent[]): AskStoryStep[] {
+  return events
+    .map((event) => askStoryStepOf((event.payload as { askStep?: unknown } | undefined)?.askStep))
+    .filter((entry): entry is AskStoryStep => Boolean(entry));
+}
+
+/** The story a finished run kept on its pipeline receipt. */
+export function askStoryStepsFromReceipt(receipt: unknown): AskStoryStep[] {
+  const story = receipt && typeof receipt === 'object' ? (receipt as { story?: unknown }).story : undefined;
+  return Array.isArray(story) ? story.map(askStoryStepOf).filter((entry): entry is AskStoryStep => Boolean(entry)) : [];
+}
+
+/** Live events kept for the progress view: every story step, plus the most recent other events. */
+export function retainLiveAgentEvents(events: AgentRunEvent[], tail = 8): AgentRunEvent[] {
+  const others = new Set(events.filter((event) => !askStoryStepOf((event.payload as { askStep?: unknown } | undefined)?.askStep)).slice(-tail));
+  return events.filter((event) => others.has(event) || Boolean(askStoryStepOf((event.payload as { askStep?: unknown } | undefined)?.askStep)));
+}
+
+/**
+ * What the run is doing right now, named from the last step it finished: the
+ * long wait is usually an AI call, and "Working" alone does not say so.
+ */
+export function askStoryActiveLabel(steps: AskStoryStep[]): string {
+  const last = steps[steps.length - 1];
+  if (!last) return 'Searching the project';
+  const title = last.title;
+  if (last.phase === 'context') return 'Asking the AI to read the question';
+  if (title === 'Asked the AI to read the question' || title === 'Asked the AI to correct its reading' || title.startsWith('Asked the AI to read the question again')) return 'Checking the reading against the project';
+  if (title.startsWith('Fetched ')) return 'Asking the AI to read the question with those fields';
+  if (last.phase === 'read') return 'Looking for a certified or governed answer';
+  if (title === 'No governed answer: asking the tables directly' || (last.phase === 'schema' && title.startsWith('Chose '))) return 'Asking the AI to draft SQL from the tables';
+  if (last.phase === 'schema' && /^(Re)?[Dd]rafted SQL/.test(title)) return 'Running the drafted query';
+  if (last.phase === 'execute' && last.state === 'failed') return 'Asking the AI to correct the query';
+  if (last.phase === 'tier' && last.state === 'done') return 'Running the query';
+  if (last.phase === 'join') return 'Preparing the query again with the proven join';
+  if (last.phase === 'execute') return 'Writing the answer';
+  return 'Looking for a certified or governed answer';
+}
+
+export function formatStepDuration(ms: number | undefined): string {
+  if (ms === undefined || !Number.isFinite(ms) || ms < 50) return '';
+  if (ms < 1_000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)} s`;
+  return `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1_000)} s`;
+}
+
+export function AskStoryList({ steps, t, active }: { steps: AskStoryStep[]; t: Theme; active?: string }): JSX.Element {
+  const [open, setOpen] = useState<Record<number, boolean>>({});
+  return (
+    <ol aria-label="What the agent did" style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 5 }}>
+      {steps.map((entry, index) => {
+        const color = entry.state === 'failed' ? 'var(--status-warning)' : entry.state === 'missed' ? t.textMuted : t.textSecondary;
+        const expanded = Boolean(open[index]);
+        const sqlLike = entry.phase === 'schema' && /^\s*(select|with)\b/i.test(entry.detail ?? '');
+        return (
+          <li key={`${entry.at}-${index}`} style={{ display: 'grid', gridTemplateColumns: '16px minmax(0, 1fr) auto', columnGap: 9, alignItems: 'start' }}>
+            <span aria-hidden="true" style={{ height: 18, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color }}>
+              {entry.state === 'done' ? <Check size={12} strokeWidth={2.2} /> : entry.state === 'failed' ? <X size={12} strokeWidth={2.2} /> : <ChevronRight size={12} strokeWidth={2.2} />}
+            </span>
+            <span style={{ minWidth: 0 }}>
+              {entry.detail ? (
+                <button
+                  type="button"
+                  className="dql-hover"
+                  aria-expanded={expanded}
+                  onClick={() => setOpen((current) => ({ ...current, [index]: !current[index] }))}
+                  style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left', color: entry.state === 'missed' ? t.textMuted : t.textPrimary, fontSize: 12.5, lineHeight: 1.4, fontFamily: t.font, display: 'inline-flex', alignItems: 'baseline', gap: 4 }}
+                >
+                  {entry.title}
+                  {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                </button>
+              ) : (
+                <span style={{ color: entry.state === 'missed' ? t.textMuted : t.textPrimary, fontSize: 12.5, lineHeight: 1.4 }}>{entry.title}</span>
+              )}
+              {entry.detail && expanded ? (
+                <span style={{ display: 'block', marginTop: 3, fontSize: 11, lineHeight: 1.45, color: t.textMuted, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: sqlLike ? 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)' : t.font }}>{entry.detail}</span>
+              ) : null}
+            </span>
+            <span style={{ fontSize: 10.5, lineHeight: '18px', color: t.textMuted, fontVariantNumeric: 'tabular-nums' }}>{formatStepDuration(entry.ms)}</span>
+          </li>
+        );
+      })}
+      {active ? (
+        <li style={{ display: 'grid', gridTemplateColumns: '16px minmax(0, 1fr)', columnGap: 9, alignItems: 'center', color: t.textPrimary }}>
+          <span aria-hidden="true" style={{ display: 'inline-flex', justifyContent: 'center' }}><AgentThinkingDots /></span>
+          <span style={{ fontSize: 12.5, lineHeight: 1.4, fontWeight: 620 }}>{active}</span>
+        </li>
+      ) : null}
+    </ol>
+  );
+}
+
+/** The kept story of a finished Ask run, collapsed to one line until opened. */
+export function AskRunStory({ receipt, t }: { receipt: unknown; t: Theme }): JSX.Element | null {
+  const [expanded, setExpanded] = useState(false);
+  const steps = askStoryStepsFromReceipt(receipt);
+  if (steps.length === 0) return null;
+  const timings = receipt && typeof receipt === 'object' ? (receipt as { timings?: Record<string, number> }).timings : undefined;
+  const total = typeof timings?.total === 'number' ? timings.total + (typeof timings.context === 'number' ? timings.context : 0) : undefined;
+  const missed = steps.filter((entry) => entry.state !== 'done').length;
+  return (
+    <div style={{ display: 'grid', gap: 7 }}>
+      <button
+        type="button"
+        className="dql-hover"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 5, alignSelf: 'flex-start', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, color: t.textMuted, fontSize: 11.5, fontFamily: t.font }}
+      >
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        {`${total !== undefined ? `Worked for ${formatStepDuration(total) || 'under a second'} · ` : ''}${steps.length} step${steps.length === 1 ? '' : 's'}${missed ? ` · ${missed} looked and missed` : ''}`}
+      </button>
+      {expanded ? <div style={{ paddingLeft: 4 }}><AskStoryList steps={steps} t={t} /></div> : null}
+    </div>
+  );
+}
+
 export interface LiveAgentActivity {
   id: 'search' | 'match' | 'execute' | 'verify' | 'background';
   label: string;
@@ -1979,6 +2122,14 @@ function RunProgress({ events, t, streamingAnswer, thinkingMode, backgroundRun }
       <div role="status" aria-live="polite" style={{ alignSelf: 'stretch', display: 'flex', alignItems: 'center', gap: 9, padding: '5px 2px 9px', color: t.textSecondary, animation: 'dql-agent-fadein 0.22s ease-out' }}>
         <AgentThinkingDots />
         <span style={{ fontSize: 13, lineHeight: 1.4 }}>Replying…</span>
+      </div>
+    );
+  }
+  const storySteps = askStoryStepsFromEvents(events);
+  if (storySteps.length > 0) {
+    return (
+      <div role="status" aria-live="polite" aria-label="Agent activity" style={{ alignSelf: 'stretch', display: 'grid', gap: 7, padding: '5px 2px 10px', animation: 'dql-agent-fadein 0.22s ease-out' }}>
+        <AskStoryList steps={storySteps} t={t} active={`${askStoryActiveLabel(storySteps)} · ${elapsedSeconds} s`} />
       </div>
     );
   }
@@ -2282,6 +2433,8 @@ function RunCard({
       ) : (
         <VerificationChecks evaluations={run.evaluations} t={t} />
       )}
+
+      <AskRunStory receipt={run.diagnosticReceiptV9} t={t} />
 
       {run.events.length > 0 || run.traceReference ? (
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -2995,6 +3148,9 @@ function AskRunCard(props: AskRunCardProps) {
           ))}
         </div>
       ) : null}
+
+      {/* What the run did, kept with the answer and replayable after a reload */}
+      <AskRunStory receipt={run.diagnosticReceiptV9} t={t} />
 
       {/* Quiet action row */}
       {(presentationAnswer || failureMessage || insertionPayload || pinnable || canSaveBlock || showResearchDeeper || primaryArtifact) ? (

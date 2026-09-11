@@ -793,3 +793,82 @@ describe('an out-of-scope ref spelled with the wrong kind and a schema is still 
     expect(explainOutOfScope([{ path: 'display[0]', message: 'column:TRANSFORMED.nowhere.city is not in the vocabulary' }], inventory, { activeDomain: 'nba.performance', purpose: undefined })).toBeUndefined();
   });
 });
+
+describe('a run that cannot reach an AI model says so, with its story', () => {
+  it('keeps the specific reason and a failed step instead of a generic sentence', async () => {
+    const executor = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/none', executor: {} as QueryExecutor,
+      resolveConnection: async () => { throw new Error('unused'); },
+      getSemanticLayer: () => undefined,
+      getManifest: () => ({ manifest: {} as never, snapshotId: 'snapshot:no-provider' }),
+      selectProvider: async () => undefined,
+      compileSemantic: async () => { throw new Error('unused'); },
+      priorIntent: () => undefined,
+    });
+    const result = await run(executor, 'total revenue');
+    expect(result.answer).toContain('No AI model is configured');
+    expect(result.askPipelineReceipt?.story).toEqual([expect.objectContaining({ title: 'Could not reach an AI model', state: 'failed', detail: expect.stringContaining('No AI model is configured') })]);
+  });
+});
+
+describe('the schema lane on the host: no governed reading, the AI drafts SQL from the tables it inspects', () => {
+  const connection: ConnectionConfig = { driver: 'duckdb', path: ':memory:' } as ConnectionConfig;
+  const manifest = { sources: { opportunities: { name: 'opportunities', origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: 'model.opportunities', schema: 'sales', columns: { opportunity_id: { name: 'opportunity_id' }, stage: { name: 'stage' }, competitor: { name: 'competitor' }, amount: { name: 'amount' } } } } } };
+  const unreadable = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Lost deals to a competitor.', measures: [{ ref: 'metric:crm.lost_deal_count' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+  const drafter = (draft: string): AgentProvider & { draftPrompts: string[] } => {
+    const draftPrompts: string[] = [];
+    return {
+      name: 'ollama', draftPrompts, available: async () => true,
+      generate: async (messages) => {
+        if (messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) { draftPrompts.push(messages.map((message) => message.content).join('\n')); return draft; }
+        return unreadable;
+      },
+    };
+  };
+  const routeFor = (provider: AgentProvider, statements: string[]) => createAskPipelineRouteExecutor({
+    projectRoot: '/tmp/ask-schema-lane',
+    executor: { executeQuery: vi.fn(async (sql: string) => {
+      statements.push(sql);
+      if (sql.includes('information_schema.columns')) {
+        return { columns: [], rowCount: 4, executionTimeMs: 1, rows: ['opportunity_id', 'stage', 'competitor', 'amount'].map((column) => ({ table_schema: 'sales', table_name: 'opportunities', column_name: column, data_type: column === 'amount' ? 'DOUBLE' : 'VARCHAR' })) };
+      }
+      return { columns: ['lost_deals'], rowCount: 1, executionTimeMs: 1, rows: [{ lost_deals: 12 }] };
+    }) } as unknown as QueryExecutor,
+    resolveConnection: async () => connection,
+    getSemanticLayer: () => undefined,
+    getManifest: () => ({ snapshotId: 'snapshot:schema-lane', manifest: manifest as never }),
+    selectProvider: async () => provider,
+    compileSemantic: async () => { throw new Error('no semantic layer'); },
+    priorIntent: () => undefined,
+  });
+  const ask = (route: ReturnType<typeof createAskPipelineRouteExecutor>) => route({
+    runId: 'run:schema-lane',
+    request: { question: 'How many opportunities did we lose to Splunk?', requestedMode: 'ask' } as AgentRunRequest,
+    route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+  });
+
+  it('drafts one statement over the inspected opportunities table, runs it, and labels the answer review-required', async () => {
+    const provider = drafter("SELECT COUNT(*) AS lost_deals FROM sales.opportunities WHERE LOWER(stage) = 'closed lost' AND LOWER(competitor) = 'splunk'");
+    const statements: string[] = [];
+    const result = await ask(routeFor(provider, statements));
+    expect(provider.draftPrompts).toHaveLength(1);
+    expect(provider.draftPrompts[0]).toContain('WHY NO GOVERNED ANSWER');
+    expect(provider.draftPrompts[0]).toContain('competitor');
+    expect(statements.some((sql) => sql.includes('FROM sales.opportunities WHERE'))).toBe(true);
+    expect(result.status).toBe('completed');
+    expect(result.askPipelineReceipt?.executed?.tier).toBe('exploratory');
+    expect(result.answer).toContain('written by AI from the schema');
+    expect(result.artifacts?.find((artifact) => artifact.kind === 'answer')?.title).toBe('AI-drafted answer');
+    expect(result.trustState).toBe('review_required');
+  });
+
+  it('a decline is an honest gap: nothing is executed beyond describing the table', async () => {
+    const provider = drafter('NO_SQL: nothing in sales.opportunities records a lost deal count by quarter of the fiscal calendar.');
+    const statements: string[] = [];
+    const result = await ask(routeFor(provider, statements));
+    expect(provider.draftPrompts).toHaveLength(1);
+    expect(statements.every((sql) => sql.includes('information_schema'))).toBe(true);
+    expect(result.status).not.toBe('completed');
+    expect(JSON.stringify(result)).toContain('nothing in sales.opportunities records a lost deal count');
+  });
+});

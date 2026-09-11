@@ -2350,3 +2350,145 @@ describe('office lost-opportunities readings (1.15.5 screenshots)', () => {
     expect(ran.problems.some((problem) => problem.path === 'provenance')).toBe(true);
   });
 });
+
+
+describe('the schema lane: no certified or governed evidence, the AI writes SQL from the tables', () => {
+  const vocabulary = buildVocabularyIndex({
+    relations: [{ schema: 'dev', name: 'orders', columnCompleteness: 'complete', columns: [{ name: 'order_id', dataType: 'VARCHAR' }, { name: 'amount', dataType: 'NUMBER' }, { name: 'status', dataType: 'VARCHAR' }] }],
+  });
+  const dialect = { quoteIdentifier: (name: string) => `"${name}"`, dateTrunc: (grain: string, expr: string) => `DATE_TRUNC('${grain}', ${expr})`, limitClause: (limit: number) => `LIMIT ${limit}` };
+  const invalidReading = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Order count by competitor.', measures: [{ ref: 'column:crm.competitor_deals.deal_key', aggregation: 'count' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+  const say = (reply: string): AgentProvider => ({ name: 'ollama', available: async () => true, generate: async () => reply });
+  const rows = { columns: ['n'], rows: [{ n: 42 }], rowCount: 1, executionTimeMs: 1 };
+
+  it('a question that could not be read into the governed vocabulary is answered by SQL drafted from the schema, review-required', async () => {
+    const asked: Array<{ reason?: string; intent?: unknown }> = [];
+    const outcome = await runAskPipeline({
+      question: 'how many orders involve a competitor', vocabulary, provider: say(invalidReading), clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async (draft) => { asked.push({ reason: draft.reason, intent: draft.intent }); return { sql: 'SELECT COUNT(*) AS n FROM dev.orders', relations: ['dev.orders'], proof: ['validated'] }; } },
+      executeDeps: { run: async () => rows },
+    });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.reason).toContain('not in the vocabulary');
+    expect(asked[0]!.intent).toBeUndefined();
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind !== 'answered') return;
+    expect(outcome.candidate.tier).toBe('exploratory');
+    expect(outcome.candidate.trust).toBe('review_required');
+    expect(outcome.text).toContain('written by AI from the schema of dev.orders');
+  });
+
+  it('when the tables do not hold what was asked, the drafter declines and the answer is an honest gap with nothing executed', async () => {
+    const reply = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Churn rate by region.', measures: [], groupBy: [], display: [], filters: [], unresolved: [{ clause: 'churn rate by region', options: [], material: true }], provenance: {}, expectedShape: 'grouped' });
+    let executed = 0;
+    const outcome = await runAskPipeline({
+      question: 'churn rate by region', vocabulary, provider: say(reply), clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async () => ({ declined: 'these tables hold orders only; nothing records churn or region.' }) },
+      executeDeps: { run: async () => { executed += 1; return rows; } },
+    });
+    expect(executed).toBe(0);
+    expect(outcome.kind).toBe('gap');
+    if (outcome.kind === 'gap') expect(outcome.message).toContain('nothing records churn or region');
+  });
+
+  it('the model itself failing is not a reason to draft: nothing is asked of it again', async () => {
+    let drafts = 0;
+    const outcome = await runAskPipeline({
+      question: 'how many orders', vocabulary, clauseCoverage: false, explorationAuto: true,
+      provider: { name: 'ollama', available: async () => true, generate: async () => { throw Object.assign(new Error('limit'), { code: 'provider_quota', detail: 'resets at noon' }); } },
+      prepareDeps: { dialect, draftSql: async () => { drafts += 1; return { sql: 'SELECT 1', relations: [], proof: [] }; } },
+      executeDeps: { run: async () => rows },
+    });
+    expect(drafts).toBe(0);
+    expect(outcome.kind).toBe('failed');
+  });
+
+  it('a real either/or question stays a question: nothing is drafted in place of the choice', async () => {
+    const reply = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Orders by the field the question means.', measures: [{ ref: 'column:dev.orders.order_id', aggregation: 'count' }], groupBy: [], display: [], filters: [], unresolved: [{ clause: 'by which field', options: ['column:dev.orders.status', 'column:dev.orders.amount'], material: true, question: 'Group by status or by amount?' }], provenance: {}, expectedShape: 'grouped' });
+    let drafts = 0;
+    const outcome = await runAskPipeline({
+      question: 'orders broken down by the field that matters', vocabulary, provider: say(reply), clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async () => { drafts += 1; return { sql: 'SELECT 1', relations: [], proof: [] }; } },
+      executeDeps: { run: async () => rows },
+    });
+    expect(drafts).toBe(0);
+    expect(outcome.kind).toBe('clarify');
+  });
+
+  it('a statement the warehouse rejects is redrafted once with the warehouse error, then answered', async () => {
+    const previous: Array<{ sql: string; error: string } | undefined> = [];
+    const outcome = await runAskPipeline({
+      question: 'how many orders involve a competitor', vocabulary, provider: say(invalidReading), clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async (draft) => { previous.push(draft.previous); return draft.previous ? { sql: 'SELECT COUNT(*) AS n FROM dev.orders', relations: ['dev.orders'], proof: [] } : { sql: 'SELECT COUNT(*) AS n FROM dev.order', relations: ['dev.orders'], proof: [] }; } },
+      executeDeps: { run: async (sql) => { if (sql.includes('dev.order ') || sql.endsWith('dev.order')) throw new Error("Table 'dev.order' does not exist"); return rows; } },
+    });
+    expect(previous[0]).toBeUndefined();
+    expect(previous[1]).toMatchObject({ sql: 'SELECT COUNT(*) AS n FROM dev.order' });
+    expect(previous[1]!.error).toContain("does not exist");
+    expect(outcome.kind).toBe('answered');
+  });
+
+  it('a reading that keeps naming a field the project does not hold asks the tables before offering the nearest spellings', async () => {
+    const nearMiss = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Order count.', measures: [{ ref: 'column:dev.nothere.order_id', aggregation: 'count' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+    const drafted = await runAskPipeline({
+      question: 'how many orders involve a competitor', vocabulary, provider: say(nearMiss), clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async (draft) => { expect(draft.reason).toContain('does not hold'); return { sql: 'SELECT COUNT(*) AS n FROM dev.orders', relations: ['dev.orders'], proof: [] }; } },
+      executeDeps: { run: async () => rows },
+    });
+    expect(drafted.kind).toBe('answered');
+    const declined = await runAskPipeline({
+      question: 'how many orders involve a competitor', vocabulary, provider: say(nearMiss), clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async () => ({ declined: 'no competitor field.' }) },
+      executeDeps: { run: async () => rows },
+    });
+    expect(declined.kind).toBe('clarify');
+  });
+
+  it('a question with nothing to choose between is answered from the tables when the drafter finds them', async () => {
+    const reply = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Order count for competitor deals.', measures: [{ ref: 'column:dev.orders.order_id', aggregation: 'count' }], groupBy: [], display: [], filters: [], unresolved: [{ clause: 'involve a competitor', options: [], material: true }], provenance: {}, expectedShape: 'scalar' });
+    const outcome = await runAskPipeline({
+      question: 'how many orders involve a competitor', vocabulary, provider: say(reply), clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async (draft) => { expect(draft.intent?.reading).toBe('Order count for competitor deals.'); return { sql: "SELECT COUNT(*) AS n FROM dev.orders WHERE status = 'competitor'", relations: ['dev.orders'], proof: [] }; } },
+      executeDeps: { run: async () => rows },
+    });
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.candidate.trust).toBe('review_required');
+  });
+
+  it('the run tells its story in order: what it could not read, that it asked the tables, what it drafted and what ran', async () => {
+    const streamed: string[] = [];
+    const outcome = await runAskPipeline({
+      question: 'how many orders involve a competitor', vocabulary, provider: say(invalidReading), clauseCoverage: false, explorationAuto: true,
+      onStep: (entry) => streamed.push(entry.title),
+      prepareDeps: { dialect, draftSql: async () => ({ sql: 'SELECT COUNT(*) AS n FROM dev.orders', relations: ['dev.orders'], proof: [] }) },
+      executeDeps: { run: async () => rows },
+    });
+    expect(outcome.kind).toBe('answered');
+    const story = outcome.receipt.story ?? [];
+    expect(story.map((entry) => entry.title)).toEqual(streamed);
+    expect(story.map((entry) => entry.title)).toEqual([
+      'Asked the AI to read the question',
+      'Asked the AI to correct its reading',
+      'Could not read the question into governed fields',
+      'No governed answer: asking the tables directly',
+      'Drafted SQL over dev.orders',
+      'Ran the AI-drafted query: 1 row',
+    ]);
+    expect(story[1]!.detail).toContain('because');
+    expect(story[1]!.detail).toContain('column:crm.competitor_deals.deal_key');
+    expect(story[4]!.detail).toBe('SELECT COUNT(*) AS n FROM dev.orders');
+    expect(story.map((entry) => entry.state)).toEqual(['done', 'done', 'missed', 'done', 'done', 'done']);
+    expect(story.every((entry, index) => index === 0 || entry.at >= story[index - 1]!.at)).toBe(true);
+  });
+
+  it('with AI-drafted SQL turned off for the project, nothing is drafted', async () => {
+    let drafts = 0;
+    const outcome = await runAskPipeline({
+      question: 'how many orders involve a competitor', vocabulary, provider: say(invalidReading), clauseCoverage: false, explorationAuto: false,
+      prepareDeps: { dialect, draftSql: async () => { drafts += 1; return { sql: 'SELECT 1', relations: [], proof: [] }; } },
+      executeDeps: { run: async () => rows },
+    });
+    expect(drafts).toBe(0);
+    expect(outcome.kind).toBe('failed');
+  });
+});

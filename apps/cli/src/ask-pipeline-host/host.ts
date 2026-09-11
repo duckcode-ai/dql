@@ -40,6 +40,7 @@ import {
   type SemanticCompileOutput,
   type SemanticCompileRequest,
   type VocabularyIndex,
+  type AskStoryStepV1,
   type PipelineReceipt,
   type VocabularySource,
   type PreparedBlock,
@@ -51,6 +52,7 @@ import {
   physicalRelationTailIdentity,
   renderPhysicalIdentifier,
   renderPhysicalRelation,
+  mergeDiscoveredRelations,
   physicalRelationText,
   type PhysicalIdentifierPartV1,
   renderCard,
@@ -1486,6 +1488,29 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     // The context is assembled BEFORE the first model call; a run that ends
     // in this phase must show where its time went, so the assembly is an event.
     const phaseSummary = Object.entries(view.context?.timings ?? {}).filter(([, ms]) => ms >= 50).map(([phase, ms]) => `${phase} ${ms} ms`).join(' · ');
+    // THE RUN'S STORY. Steps the host takes (the search, the tables the
+    // drafter chose) stream beside the pipeline's own and are kept on the
+    // receipt in order, so a finished answer can replay how it was reached.
+    const hostSteps: AskStoryStepV1[] = [];
+    const hostStep = (entry: Omit<AskStoryStepV1, 'version' | 'at'>) => {
+      const full: AskStoryStepV1 = { version: 1, at: Date.now(), ...entry };
+      hostSteps.push(full);
+      emit({ type: 'executor.started', message: full.title, route: 'generated_answer', payload: { askStep: full } });
+    };
+    {
+      const counts = new Map<string, number>();
+      for (const entry of vocabulary.entries) counts.set(entry.kind, (counts.get(entry.kind) ?? 0) + 1);
+      const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+      const found = [
+        counts.get('block') ? plural(counts.get('block')!, 'certified block', 'certified blocks') : '',
+        (counts.get('metric') ?? 0) + (counts.get('measure') ?? 0) ? plural((counts.get('metric') ?? 0) + (counts.get('measure') ?? 0), 'metric', 'metrics') : '',
+        counts.get('dimension') ? plural(counts.get('dimension')!, 'dimension', 'dimensions') : '',
+        counts.get('relation') ? plural(counts.get('relation')!, 'table', 'tables') : '',
+        counts.get('column') ? plural(counts.get('column')!, 'column', 'columns') : '',
+        counts.get('term') ? plural(counts.get('term')!, 'business term', 'business terms') : '',
+      ].filter(Boolean).join(', ');
+      hostStep({ phase: 'context', title: `Searched the project: ${found || 'no governed objects in scope'}`, state: found ? 'done' : 'missed', ms: contextMs, ...(phaseSummary ? { detail: phaseSummary } : {}) });
+    }
     emit({ type: 'executor.started', message: `Context assembled in ${contextMs} ms: ${vocabulary.entries.length} governed objects${engine ? ` · semantic engine ${engine}` : ''}${phaseSummary ? ` (${phaseSummary})` : ''}.`, route: 'generated_answer' });
     emit({ type: 'executor.started', message: prior ? 'Reading the question as an edit of the previous analysis.' : 'Reading the question against the governed vocabulary.', route: 'generated_answer' });
     const ledgered = withLedger(provider, deps, request);
@@ -1501,20 +1526,57 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     // THE LAST TIER'S DRAFT: one read-only statement from the reading and the
     // admitted relations and columns, validated against the catalog before
     // the tier may even consider it. Review-required by construction.
-    const draftSql: NonNullable<PrepareDeps['draftSql']> = async ({ question, intent, vocabulary: current }) => {
-      const refs = [...intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]), ...intent.groupBy.map((group) => group.ref), ...intent.display, ...intent.filters.map((filter) => filter.ref), ...intent.measures.flatMap((measure) => (measure.scope ?? []).map((predicate) => predicate.ref))];
+    const draftSql: NonNullable<PrepareDeps['draftSql']> = async ({ question, intent, vocabulary: initial, reason, previous }) => {
+      let current = initial;
+      const refs = intent ? [...intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]), ...intent.groupBy.map((group) => group.ref), ...intent.display, ...intent.filters.map((filter) => filter.ref), ...(intent.time?.ref ? [intent.time.ref] : [])] : [];
       const relationOf = (ref: string): string | undefined => {
         const entry = current.get(ref) ?? current.resolve(ref);
-        if (!entry) return undefined;
-        return entryPhysicalRelation(entry);
+        if (entry) return entryPhysicalRelation(entry);
+        // A ref the governed vocabulary rejected still names a table: the part
+        // before the column, matched on its last two parts.
+        const path = ref.replace(/^[a-z_]+:/i, '').split('.');
+        if (path.length < 3) return undefined;
+        const tail = path.slice(-3, -1).join('.').toLowerCase();
+        const relation = current.entries.find((item) => item.kind === 'relation' && [item.model ?? '', ...item.aliases, ...(item.physical?.binding?.aliases ?? [])].some((name) => name.toLowerCase() === tail || name.toLowerCase().endsWith(`.${tail}`)));
+        return relation ? entryPhysicalRelation(relation) : undefined;
       };
-      const text = ` ${question} ${intent.reading} `.toLowerCase();
+      const text = ` ${question} ${intent?.reading ?? ''} `.toLowerCase();
       const named = current.entries
         .filter((entry) => entry.kind === 'relation' && [entry.name, entry.model ?? '', ...(entry.physical?.binding?.aliases ?? [])].some((name) => name && text.includes(` ${name.toLowerCase()} `)))
         .map((entry) => entryPhysicalRelation(entry))
         .filter((relation): relation is string => Boolean(relation));
-      const relations = [...new Set([...refs.map(relationOf).filter((relation): relation is string => Boolean(relation)), ...named])].slice(0, 6);
-      if (relations.length === 0) return { error: 'the reading names no relation to draft from' };
+      const mentioned = [...`${reason ?? ''} ${previous?.error ?? ''}`.matchAll(/\b(?:column|relation|dimension|metric|measure):[A-Za-z0-9_.$"]+/g)].map((match) => match[0]);
+      let relations = [...new Set([...refs, ...mentioned].map(relationOf).filter((relation): relation is string => Boolean(relation)).concat(named))].slice(0, 6);
+      // THE TABLES THE QUESTION IS ABOUT. With no reading to name them, the
+      // question's own words choose them, the same relation-first discovery
+      // context assembly uses; they are described before any SQL is written.
+      if (relations.length < 2) {
+        try {
+          const { source } = await baseSourceFor(connection);
+          for (const relation of relevantRelationsForQuestion(source, question, 4)) {
+            if (relations.length >= 4) break;
+            if (!relations.some((known) => physicalRelationIdentity(known) === physicalRelationIdentity(relation))) relations.push(relation);
+          }
+        } catch { /* the relations named so far stand */ }
+      }
+      if (relations.length === 0) return { error: 'no table in this project matches the question' };
+      const needsColumns = relations.filter((relation) => {
+        const entry = current.entries.find((item) => item.kind === 'relation' && entryPhysicalRelation(item) !== undefined && physicalRelationIdentity(entryPhysicalRelation(item)!) === physicalRelationIdentity(relation));
+        return !entry || entry.physical?.binding?.columnCompleteness !== 'complete' || !current.entries.some((item) => item.kind === 'column' && samePhysicalEntry(item, entry));
+      });
+      if (needsColumns.length > 0) {
+        try {
+          const found = await describeRelations(needsColumns.slice(0, 4));
+          if (found.length > 0) {
+            current = mergeDiscoveredRelations(current, found);
+            requestVocabulary = current;
+          }
+        } catch { /* draft over what is already described */ }
+      }
+      // Only tables whose columns are known can be drafted over.
+      relations = relations.filter((relation) => current.entries.some((item) => item.kind === 'column' && (() => { const physical = entryPhysicalRelation(item); return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(relation); })()));
+      if (relations.length === 0) return { error: 'the tables that match the question could not be described on this connection' };
+      hostStep({ phase: 'schema', title: `Chose ${relations.length === 1 ? 'the table' : 'the tables'} ${relations.join(', ')}`, state: 'done', detail: `picked from ${refs.length ? 'the fields the reading named' : 'the words of the question'}${needsColumns.length ? `; columns of ${needsColumns.slice(0, 4).join(', ')} read from the warehouse` : ''}` });
       const unresolvedPhysical = current.entries
         .filter((entry) => entry.kind === 'relation' && relations.some((relation) => {
           const physical = entryPhysicalRelation(entry);
@@ -1540,8 +1602,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       }
       const dialect = connection?.driver ?? 'duckdb';
       const messages: AgentMessage[] = [
-        { role: 'system', content: `You write exactly ONE read-only SQL statement for ${dialect}. Use ONLY the executable physical relations and columns listed below, spelled exactly as listed (including database and quoting where shown); no other tables, no DDL or DML, no comments, no explanation. Apply every restriction of the reading with its filter values verbatim; aggregate at the grain the reading asks for; order and limit as it asks; never return more than 500 rows. Return the SQL only.` },
-        { role: 'user', content: `QUESTION: ${question}\nREADING: ${intent.reading}\nINTENT: ${JSON.stringify({ measures: intent.measures, groupBy: intent.groupBy, display: intent.display, filters: intent.filters, time: intent.time ?? null, ordering: intent.ordering ?? null, limit: intent.limit ?? null })}\nRELATIONS AND COLUMNS:\n${cards.join('\n')}` },
+        { role: 'system', content: `You write exactly ONE read-only SQL statement for ${dialect} that answers the question from the tables below. No certified block or governed metric answers it, so you choose the tables, columns, joins and filters. Use ONLY the executable physical relations and columns listed below, spelled exactly as listed (including database and quoting where shown). Join two relations only on columns that exist in both. Apply every restriction the question states; when unsure how a text value is stored, match it case-insensitively; aggregate at the grain the question asks for; order and limit as it asks; never return more than 500 rows. No DDL or DML, no comments, no explanation. If these relations cannot answer the question, reply exactly NO_SQL: followed by one sentence naming what is missing, and never substitute a different measure or table for the one asked. Otherwise return the SQL only.` },
+        { role: 'user', content: `QUESTION: ${question}\n${reason ? `WHY NO GOVERNED ANSWER: ${reason.slice(0, 600)}\n` : ''}${intent ? `READING: ${intent.reading}\nINTENT: ${JSON.stringify({ measures: intent.measures, groupBy: intent.groupBy, display: intent.display, filters: intent.filters, time: intent.time ?? null, ordering: intent.ordering ?? null, limit: intent.limit ?? null })}\n` : ''}${previous ? `PREVIOUS SQL (the warehouse rejected it; fix it):\n${previous.sql}\nWAREHOUSE ERROR: ${previous.error.slice(0, 600)}\n` : ''}RELATIONS AND COLUMNS:\n${cards.join('\n')}` },
       ];
       const draftStarted = Date.now();
       const trace = deps.dispatchOptions?.('draft', request);
@@ -1556,6 +1618,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       } finally {
         draftDispatches.push({ purpose: 'intent:draft', ms: Date.now() - draftStarted, promptChars: messages.reduce((sum, message) => sum + message.content.length, 0) });
       }
+      const declined = /^\s*NO_SQL\s*:?\s*([\s\S]*)$/i.exec(raw.trim());
+      if (declined) return { declined: declined[1]!.trim() || 'the available tables do not hold what the question asks for' };
       const fenced = /```(?:sql)?\s*([\s\S]*?)```/i.exec(raw);
       const sql = (fenced ? fenced[1]! : raw).trim();
       if (!sql) return { error: 'the provider returned no SQL' };
@@ -1713,11 +1777,13 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       cacheScope: `${deps.getManifest().snapshotId}|${connection ? connectionKey(connection) : 'none'}|${vocabulary.fingerprint}`,
       ...(deps.buildIdentity ? { build: deps.buildIdentity() } : {}),
       trace: (event) => emit({ type: 'executor.started', message: `${event.stage}${typeof event.detail === 'number' ? ` ${event.detail} ms` : ''}`, route: 'generated_answer' }),
+      onStep: (entry) => emit({ type: 'executor.started', message: entry.title, route: 'generated_answer', payload: { askStep: entry } }),
     });
     // How long the context took to assemble, beside the stages the pipeline
     // timed itself: the receipt is the only place a latency claim can be read from.
     if ('receipt' in outcome && outcome.receipt) {
       outcome.receipt.timings.context = contextMs;
+      outcome.receipt.story = [...hostSteps, ...(outcome.receipt.story ?? [])].sort((left, right) => left.at - right.at);
       outcome.receipt.dispatches.push(...draftDispatches);
       outcome.receipt.physicalBindings = runtimeSchemaForVocabulary(currentVocabulary()).map((table) => ({ relation: table.relation, completeness: table.columnCompleteness ?? 'partial', columns: table.columns.length, targetFingerprint: connection ? fingerprintText(connectionKey(connection)) : undefined }));
     }
@@ -1778,7 +1844,16 @@ function withLedger(provider: AgentProvider, deps: AskPipelineHostDeps, request:
 const sha = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 
 function failure(runId: string, message: string, code: 'provider_error' | 'execution_error', startedAt: number): AgentRouteExecutorResult {
+  // Even a run that stops before reading the question tells the reader where
+  // it stopped and why, in its own words, never a generic "not worked out".
+  const receipt: PipelineReceipt = {
+    version: 1, vocabularyFingerprint: '', dispatches: [], candidates: [], refusals: [], tiers: [],
+    timings: { total: Date.now() - startedAt },
+    failure: { stage: 'resolve', reason: code, message },
+    story: [{ version: 1, phase: 'read', title: code === 'provider_error' ? 'Could not reach an AI model' : 'Could not run the query', detail: message, state: 'failed', at: Date.now() }],
+  };
   return {
+    askPipelineReceipt: receipt,
     summary: message, answer: message, status: 'blocked', trustState: 'blocked', stopReason: 'blocked', resolvedRoute: 'generated_answer', answerRefusalCode: code,
     artifacts: [{ id: `${runId}:diagnostic`, kind: 'answer', title: 'Could not answer', trustState: 'blocked', payload: { kind: 'no_answer', text: message, answer: message, executionError: message } }],
     evaluations: [], nextActions: [{ id: 'retry-after-provider', label: 'Retry after fixing the AI model settings', route: 'generated_answer' }],
@@ -2168,7 +2243,8 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     proof: [...candidate.proof, ...(receipt.executed?.proofs ?? [])],
     ...common,
   };
-  const artifact: AgentRunArtifact = { id: `${runId}:answer`, kind: 'answer', title: certified ? 'Certified answer' : 'Governed answer', trustState, payload };
+  // An answer whose SQL the AI wrote from the schema is never headed as governed.
+  const artifact: AgentRunArtifact = { id: `${runId}:answer`, kind: 'answer', title: certified ? 'Certified answer' : candidate.tier === 'exploratory' ? 'AI-drafted answer' : 'Governed answer', trustState, payload };
   return withReceipt({
     summary: outcome.text, answer: outcome.text, status: 'completed', trustState,
     stopReason: certified ? 'certified_answer_found' : 'governed_semantic_answer',

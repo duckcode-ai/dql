@@ -98,7 +98,7 @@ export interface LedgerEntry { clause: string; kind?: string; disposition: 'disc
 
 export type IntentResolution =
   | { status: 'resolved'; intent: AnalyticalIntentV1; attempts: number; problems: IntentProblem[]; ledger?: IntentLedger; ledgerEntries?: LedgerEntry[] }
-  | { status: 'clarify'; intent: AnalyticalIntentV1; question: string; options: string[]; attempts: number; ledger?: IntentLedger; ledgerEntries?: LedgerEntry[] }
+  | { status: 'clarify'; intent: AnalyticalIntentV1; question: string; options: string[]; attempts: number; ledger?: IntentLedger; ledgerEntries?: LedgerEntry[]; /** The options are the host's nearest guesses for names the reading used that the project does not hold. */ unmatched?: IntentProblem[] }
   | { status: 'conversation'; intent: AnalyticalIntentV1; reply: string; attempts: number }
   | { status: 'definition'; intent: AnalyticalIntentV1; reply: string; attempts: number }
   | { status: 'failed'; reason: 'provider_error' | 'unparseable' | 'invalid'; detail: string; problems: IntentProblem[]; attempts: number; code?: string };
@@ -1834,7 +1834,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     attempts += 1;
     const started = now();
     const reply = await generateStructured(input.provider, messages, ANALYTICAL_INTENT_JSON_SCHEMA, input.providerOptions);
-    input.onDispatch?.({ attempt: attempts, purpose: attempts === 1 ? 'resolve' : 'correct', raw: reply.raw, ms: now() - started, promptChars: messages.reduce((sum, message) => sum + message.content.length, 0) });
+    input.onDispatch?.({ attempt: attempts, purpose: attempts === 1 ? 'resolve' : 'correct', raw: reply.raw, ms: now() - started, promptChars: messages.reduce((sum, message) => sum + message.content.length, 0), ...(attempts > 1 && lastProblems.length ? { problems: lastProblems } : {}) });
     if (reply.error === 'provider_error') {
       // A provider that timed out, or exited with an empty reply, is retried
       // exactly once, on the same run and request, when the budget can hold
@@ -2130,7 +2130,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     const options = [...new Set(lastProblems.flatMap((problem) => problem.suggestions ?? []))].slice(0, 6);
     const label = (ref: string) => input.vocabulary.get(ref)?.label ?? input.vocabulary.get(ref)?.name ?? ref;
     const question = `${lastProblems.map((problem) => `For ${problem.path}, the reading used something that ${problem.message.replace(/^\S+ /, '')}`).join('; ')}. Which of these should it use: ${options.map(label).join(', ')}?`;
-    return { status: 'clarify', intent: { ...lastIntent, unresolved: [...lastIntent.unresolved, { clause: lastProblems.map((problem) => problem.path).join(', '), options, material: true, question }] }, question, options, attempts, ...(ledger ? { ledger, ledgerEntries } : {}) };
+    return { status: 'clarify', intent: { ...lastIntent, unresolved: [...lastIntent.unresolved, { clause: lastProblems.map((problem) => problem.path).join(', '), options, material: true, question }] }, question, options, attempts, unmatched: lastProblems, ...(ledger ? { ledger, ledgerEntries } : {}) };
   }
   return { status: 'failed', reason: lastProblems.length ? 'invalid' : 'unparseable', detail: lastDetail, problems: lastProblems, attempts };
 }

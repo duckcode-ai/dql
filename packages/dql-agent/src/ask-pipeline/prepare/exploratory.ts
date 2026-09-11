@@ -27,11 +27,17 @@ export function readOnlyStatementProblem(sql: string): string | undefined {
   return undefined;
 }
 
-export async function prepareExploratory(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, deps: PrepareDeps, question: string): Promise<{ candidates: PreparedCandidate[]; refusals: PreparedRefusal[] }> {
+export async function prepareExploratory(
+  intent: AnalyticalIntentV1 | undefined,
+  vocabulary: VocabularyIndex,
+  deps: PrepareDeps,
+  question: string,
+  context: { reason?: string; previous?: { sql: string; error: string } } = {},
+): Promise<{ candidates: PreparedCandidate[]; refusals: PreparedRefusal[] }> {
   // A derived/offset/cumulative dbt metric is an engine-owned definition.
   // SQL exploration may use physical columns for a manifest-only question,
   // but it must never recreate an authored MetricFlow formula from a prompt.
-  const metricRefs = intent.measures.flatMap((measure) => measure.change
+  const metricRefs = (intent?.measures ?? []).flatMap((measure) => measure.change
     ? []
     : measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]);
   const engineOwned = metricRefs
@@ -53,9 +59,14 @@ export async function prepareExploratory(intent: AnalyticalIntentV1, vocabulary:
   }
   let drafted: Awaited<ReturnType<NonNullable<PrepareDeps['draftSql']>>>;
   try {
-    drafted = await deps.draftSql({ question, intent, vocabulary });
+    drafted = await deps.draftSql({ question, ...(intent ? { intent } : {}), vocabulary, ...(context.reason ? { reason: context.reason } : {}), ...(context.previous ? { previous: context.previous } : {}) });
   } catch (error) {
     return { candidates: [], refusals: [{ tier: 'exploratory', code: 'exploration_failed', message: `the SQL draft failed: ${error instanceof Error ? error.message : String(error)}`, repairable: false }] };
+  }
+  // The drafter looked at the tables and found nothing that answers the
+  // question: an honest "not in this data", never a substitute measure.
+  if (drafted && 'declined' in drafted) {
+    return { candidates: [], refusals: [{ tier: 'exploratory', code: 'exploration_declined', message: drafted.declined, repairable: false }] };
   }
   if (!drafted || 'error' in drafted) {
     return { candidates: [], refusals: [{ tier: 'exploratory', code: 'exploration_failed', message: drafted?.error ?? 'the provider returned no SQL', repairable: false }] };
@@ -70,6 +81,8 @@ export async function prepareExploratory(intent: AnalyticalIntentV1, vocabulary:
       proof: [
         `AI-drafted SQL over ${drafted.relations.length ? drafted.relations.join(', ') : 'the admitted relations'}: no certified block and no governed metric or composition answered this reading, so the statement was written from the schema and the reading, validated against the catalog (only admitted relations and columns, one read-only statement) and is review-required — read it before you rely on it`,
         ...drafted.proof,
+        ...(context.reason ? [`why no governed answer: ${context.reason.slice(0, 300)}`] : []),
+        ...(context.previous ? ['redrafted once after the warehouse rejected the first statement'] : []),
       ],
       ...(drafted.engine ? { engine: drafted.engine } : {}),
     }],

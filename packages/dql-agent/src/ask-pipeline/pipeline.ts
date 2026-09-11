@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AgentProvider, ProviderRunOptions } from '../providers/types.js';
 import { executeCandidate, fillPeriodGaps, type ExecuteDeps, type ExecutedRows } from './execute.js';
 import { describeIntent, intentExecutionFingerprint, intentRefs, type AnalyticalIntentV1, type IntentPredicate } from './intent.js';
-import { composeAnsweredText, composeFailedText, composeGapText, describeResultColumns, labelFor, type ContextLedgerV1, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
+import { composeAnsweredText, composeFailedText, composeGapText, describeResultColumns, labelFor, type AskStoryStepV1, type ContextLedgerV1, type GapKind, type PipelineOutcome, type PipelineReceipt } from './outcomes.js';
 import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal, type PrepareResult } from './prepare/index.js';
 import { applySkillPolicies } from './policies.js';
 import { proveLiterals } from './literal-proof.js';
@@ -79,6 +79,8 @@ export interface RunAskPipelineInput {
   build?: Record<string, string>;
   now?: () => number;
   trace?: (event: { stage: string; detail?: unknown }) => void;
+  /** Each step of the run's story as it finishes, for a live progress view; the same steps are kept on `receipt.story`. */
+  onStep?: (step: AskStoryStepV1) => void;
   /**
    * Host-owned literal grounding: replace a member literal with the value
    * the warehouse actually holds (its casing, its spelling) on columns the
@@ -552,6 +554,30 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     receipt.lastCompletedPhase = stage;
     input.trace?.({ stage, detail: timings[stage] });
   };
+  const TIER_NAMES: Record<string, string> = { certified: 'Certified blocks', semantic: 'Semantic layer', relational: 'Governed tables and joins', exploratory: 'AI-drafted SQL from the schema' };
+  const step = (phase: AskStoryStepV1['phase'], title: string, state: AskStoryStepV1['state'], extra: { detail?: string; ms?: number } = {}) => {
+    const entry: AskStoryStepV1 = { version: 1, phase, title, state, at: Date.now(), ...(extra.detail ? { detail: extra.detail.slice(0, 600) } : {}), ...(extra.ms !== undefined ? { ms: extra.ms } : {}) };
+    (receipt.story ??= []).push(entry);
+    try { input.onStep?.(entry); } catch { /* a progress view never fails a run */ }
+  };
+  const dispatchStep = (event: { purpose: string; ms: number; promptChars?: number; problems?: Array<{ message: string }> }, repair = false) => {
+    const context = event.promptChars ? `${Math.round(event.promptChars / 100) / 10}k characters of project context sent` : undefined;
+    if (repair) step('read', 'Asked the AI to read the question again with what the tiers found', 'done', { ms: event.ms, ...(context ? { detail: context } : {}) });
+    else if (event.purpose === 'resolve') step('read', 'Asked the AI to read the question', 'done', { ms: event.ms, ...(context ? { detail: context } : {}) });
+    else step('read', 'Asked the AI to correct its reading', 'done', { ms: event.ms, detail: event.problems?.length ? `because ${event.problems.map((problem) => problem.message).join('; ')}` : (context ?? 'the first reading did not hold') });
+  };
+  const tierSteps = (attempts: Array<{ tier: string; outcome: string; detail?: string }>, ms?: number, again = '') => {
+    // The governed rounds prepare with AI-drafted SQL held back; the schema
+    // lane tells its own story, so that placeholder is not a place Ask looked.
+    attempts = attempts.filter((attempt) => !(attempt.tier === 'exploratory' && attempt.outcome !== 'prepared'));
+    attempts.forEach((attempt, index) => {
+      const name = `${TIER_NAMES[attempt.tier] ?? attempt.tier}${again ? ` (${again})` : ''}`;
+      const detail = attempt.detail?.replace(/^[a-z_]+:\s*/, '');
+      if (attempt.outcome === 'prepared') step('tier', `${name}: prepared an answer`, 'done', { ...(detail ? { detail } : {}), ...(index === attempts.length - 1 && ms !== undefined ? { ms } : {}) });
+      else if (attempt.outcome === 'skipped') step('tier', `${name}: nothing to try`, 'missed', detail ? { detail } : {});
+      else step('tier', `${name}: no answer`, 'missed', { ...(detail ? { detail } : {}), ...(index === attempts.length - 1 && ms !== undefined ? { ms } : {}) });
+    });
+  };
 
   // THE DISCOVERY PATH, step one: hydration before the first call. Every
   // exact or alias match for the question's own words is pinned ahead of
@@ -581,6 +607,80 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     },
   };
   const renderedRefs = new Set(renderedCards.refs.map((ref) => ref.toLowerCase()));
+
+  // THE SCHEMA LANE. When no certified block, no governed metric and no
+  // governed composition can answer — including when the question could not
+  // be read into the governed vocabulary at all — the tables may still hold
+  // the answer. The model writes one read-only statement over tables the host
+  // inspects for it; the host validates it against those tables; a statement
+  // the warehouse rejects is redrafted once with the warehouse's error; the
+  // answer is review-required and says the SQL was written by AI from the
+  // schema. A question the tables do not hold is declined by the drafter and
+  // stays an honest gap. A policy or domain-contract denial never reaches it,
+  // and it runs only when AI-drafted SQL is enabled for the project.
+  const schemaLane = async (why: string, hint?: AnalyticalIntentV1, options: { onDecline?: 'gap' | 'fallthrough' } = {}): Promise<PipelineOutcome | undefined> => {
+    if (!input.prepareDeps.draftSql || !(input.explorationOptIn || input.explorationAuto)) return undefined;
+    if (receipt.refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict' || refusal.code === 'join_requires_domain_contract')) return undefined;
+    const reading: AnalyticalIntentV1 = hint && hint.kind === 'analytics'
+      ? hint
+      : { version: 1, kind: 'analytics', reading: input.question, measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' } as AnalyticalIntentV1;
+    let previous: { sql: string; error: string } | undefined;
+    let lastFailure: Extract<Awaited<ReturnType<typeof executeCandidate>>, { ok: false }> | undefined;
+    step('schema', 'No governed answer: asking the tables directly', 'done', { detail: why });
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if (remaining() < 12_000 || input.signal?.aborted) break;
+      const draftStarted = now();
+      const drafted = await prepareExploratory(hint && hint.kind === 'analytics' ? hint : undefined, input.vocabulary, input.prepareDeps, input.question, { reason: why, ...(previous ? { previous } : {}) });
+      mark(attempt === 1 ? 'schema_draft' : 'schema_redraft', draftStarted);
+      const draftMs = timings[attempt === 1 ? 'schema_draft' : 'schema_redraft'];
+      receipt.refusals.push(...drafted.refusals);
+      receipt.tiers.push({ round: 97, tier: 'exploratory', outcome: drafted.candidates.length ? 'prepared' : 'refused', detail: drafted.refusals[0] ? `${drafted.refusals[0].code}: ${drafted.refusals[0].message.slice(0, 160)}` : `schema lane: ${why.slice(0, 160)}` });
+      const declined = drafted.refusals.find((refusal) => refusal.code === 'exploration_declined');
+      if (declined) {
+        step('schema', 'The tables do not hold what was asked', 'missed', { detail: declined.message, ms: draftMs });
+        if (options.onDecline === 'fallthrough') return undefined;
+        const message = declined.message.replace(/[.\s]+$/, '') || 'the available tables do not hold what the question asks for';
+        receipt.intent = reading; receipt.reading = reading.reading;
+        return { kind: 'gap', gap: 'not_modeled', message, nearest: [], text: composeGapText('not_modeled', message, [], false), receipt, intent: reading, offerExploration: false };
+      }
+      const candidate = drafted.candidates[0];
+      if (!candidate) {
+        const refused = drafted.refusals[0];
+        step('schema', 'Could not draft SQL from the schema', 'failed', { ...(refused ? { detail: refused.message } : {}), ms: draftMs });
+        break;
+      }
+      step('schema', `${attempt === 1 ? 'Drafted' : 'Redrafted'} SQL over ${(candidate.relations ?? []).join(', ') || 'the described tables'}`, 'done', { detail: candidate.sql, ms: draftMs });
+      receipt.candidates.push({ tier: candidate.tier, trust: candidate.trust, proof: candidate.proof, sqlFingerprint: fingerprintSql(candidate.sql), ...(candidate.engine ? { engine: candidate.engine } : {}) });
+      const executeStarted = now();
+      const executed = await countedExecute(candidate, reading, input.executeDeps);
+      mark(attempt === 1 ? 'schema_execute' : 'schema_reexecute', executeStarted);
+      const runMs = timings[attempt === 1 ? 'schema_execute' : 'schema_reexecute'];
+      if (executed.ok) {
+        step('execute', `Ran the AI-drafted query: ${executed.result.rowCount} row${executed.result.rowCount === 1 ? '' : 's'}`, 'done', { ms: runMs });
+        receipt.intent = reading; receipt.reading = reading.reading;
+        receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: executed.result.rowCount, ms: Math.round(executed.result.executionTimeMs), proofs: executed.proofs };
+        timings.total = Math.round(now() - started);
+        const result: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(reading, executed.result, input.vocabulary) };
+        receipt.context = { ...receipt.context!, used: { joins: [], relations: [...new Set(candidate.relations ?? [])], tier: candidate.tier, ...(candidate.engine ? { engine: candidate.engine } : {}) } };
+        const tables = (candidate.relations ?? []).join(', ');
+        const caveat = `no certified block or governed metric answers this, so the SQL was written by AI from the ${tables ? `schema of ${tables}` : 'available table schemas'}; review the SQL before relying on the numbers`;
+        return { kind: 'answered', intent: reading, candidate, result, text: composeAnsweredText(reading, result, input.vocabulary, candidate.trust, { caveats: [caveat] }), receipt };
+      }
+      receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: executed.code === 'execution_failed' } as unknown as PreparedRefusal);
+      lastFailure = executed;
+      step('execute', executed.code === 'execution_failed' ? (attempt === 1 ? 'The warehouse rejected the draft: correcting it once' : 'The warehouse rejected the corrected draft') : 'The drafted query was not accepted', 'failed', { detail: executed.message, ms: runMs });
+      if (executed.code !== 'execution_failed') break;
+      previous = { sql: candidate.sql, error: executed.message };
+    }
+    // Two warehouse rejections: the warehouse's own words are the answer, not
+    // a modeling gap the drafted SQL never had.
+    if (lastFailure?.code === 'execution_failed') {
+      receipt.intent = reading; receipt.reading = reading.reading;
+      receipt.failure = { stage: 'execute', reason: lastFailure.code, message: lastFailure.message, ...(lastFailure.warehouse ? { warehouse: lastFailure.warehouse } : {}) };
+      return { kind: 'failed', stage: 'execute', message: lastFailure.message, text: composeFailedText('execute', lastFailure.message, lastFailure.warehouse), receipt, intent: reading };
+    }
+    return undefined;
+  };
   const recordSelection = (selected: AnalyticalIntentV1) => {
     const refs = intentRefs(selected);
     const byKind: Record<string, number> = {};
@@ -641,6 +741,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     // The extended vocabulary serves the rest of this run: preparation and proofs read the probed columns too.
     input = { ...input, vocabulary };
     const note = `discovery: ${cards.size} entries not shown before were fetched for "${need.clauses.join('; ')}"${probed ? ` (${probed} relation${probed === 1 ? '' : 's'} described on demand)` : ''}`;
+    step('search', `Fetched ${cards.size} field${cards.size === 1 ? '' : 's'} the first reading had not seen`, 'done', { detail: `for "${need.clauses.join('; ')}"${probed ? `; ${probed} table${probed === 1 ? '' : 's'} described on the warehouse` : ''}` });
     receipt.grounding = [...(receipt.grounding ?? []), note];
     return { vocabulary, cards: [...cards.values()], note };
   };
@@ -652,16 +753,36 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     guidance: memberGuidance(input), cardBudget: input.cardBudget, providerOptions, now,
     renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
     maxAttempts: remaining() > 15_000 ? 2 : 1,
-    onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }),
+    onDispatch: (event) => { receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }); dispatchStep(event); },
     expand: expandForClauses,
   });
   mark('resolve', resolveStarted);
+  {
+    const calls = receipt.dispatches.filter((dispatch) => dispatch.purpose.startsWith('intent:')).length;
+    const callsNote = `${calls} AI call${calls === 1 ? '' : 's'}`;
+    if (resolution.status === 'resolved' || resolution.status === 'clarify') {
+      const unrenderedNote = receipt.grounding?.filter((note) => note.startsWith('discovery:')).map((note) => note.replace(/^discovery:\s*/, '')).join('; ');
+      step('read', 'Settled the reading', 'done', { detail: `${resolution.intent.reading}${unrenderedNote ? ` · searched again: ${unrenderedNote}` : ''} · ${callsNote} in ${Math.round((timings.resolve ?? 0) / 100) / 10} s` });
+      if (resolution.status === 'clarify' && resolution.unmatched?.length) step('read', 'Named fields this project does not hold', 'missed', { detail: resolution.unmatched.map((problem) => problem.message).join('; ') });
+    } else if (resolution.status === 'failed') {
+      step('read', resolution.reason === 'provider_error' ? 'The AI model did not answer' : 'Could not read the question into governed fields', resolution.reason === 'provider_error' ? 'failed' : 'missed', { detail: `${resolution.detail} · ${callsNote}` });
+    } else {
+      step('read', 'Settled the reading', 'done', { detail: callsNote });
+    }
+  }
   const recordLedger = (resolved: IntentResolution) => {
     if (resolved.status !== 'resolved' && resolved.status !== 'clarify') return;
     if (!resolved.ledger) return;
     receipt.ledger = { clauses: resolved.ledger.clauses.map((clause) => ({ clause: clause.clause, ...(clause.kind ? { kind: clause.kind } : {}) })), ...(resolved.ledger.timeGrain ? { timeGrain: resolved.ledger.timeGrain } : {}), measures: resolved.ledger.measures, entries: [...(receipt.ledger?.entries ?? []), ...(resolved.ledgerEntries ?? [])] };
   };
   recordLedger(resolution);
+  // A question that could not be read into the governed vocabulary is still a
+  // question about these tables. The model itself failing (timeout, quota,
+  // authentication) is not: it could not draft either.
+  if (resolution.status === 'failed' && (resolution.reason === 'invalid' || resolution.reason === 'unparseable')) {
+    const drafted = await schemaLane(`the question could not be read into the governed vocabulary (${resolution.detail.slice(0, 300)})`);
+    if (drafted) return drafted;
+  }
   if (resolution.status === 'failed') {
     // The reader gets one sentence; the receipt keeps the provider's words.
     const timedOut = resolution.reason === 'provider_error' && resolution.code === 'provider_timeout';
@@ -698,6 +819,15 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       resolution = { status: 'resolved', intent: resolution.intent, attempts: resolution.attempts, problems: [], ...(resolution.ledger ? { ledger: resolution.ledger } : {}), ...(resolution.ledgerEntries ? { ledgerEntries: resolution.ledgerEntries } : {}) };
     }
   }
+  // THE READING KEPT NAMING FIELDS THE PROJECT DOES NOT HOLD. The options the
+  // host would offer are its nearest spellings, not meanings the question
+  // could have had, so the tables are asked first; the guesses are offered
+  // only when the drafter finds nothing there or AI-drafted SQL is off.
+  if (resolution.status === 'clarify' && resolution.unmatched?.length) {
+    const guesses = resolution.options.map(label).join(', ');
+    const drafted = await schemaLane(`the reading named fields this project does not hold (${resolution.unmatched.map((problem) => problem.message).join('; ').slice(0, 400)}); the nearest governed fields were ${guesses}`, undefined, { onDecline: 'fallthrough' });
+    if (drafted) return drafted;
+  }
   if (resolution.status === 'clarify') {
     const options = resolution.options.map((ref) => ({ ref, label: label(ref), ...(input.vocabulary.get(ref)?.description ? { description: input.vocabulary.get(ref)!.description } : {}) }));
     // A continuity question the host asked (which population does this
@@ -725,6 +855,12 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         // Every clause the project cannot serve is named, not only the first.
         const message = materials.map((item) => item.question ?? `"${item.clause}" asks for an operation Ask does not perform`).map((text) => text.replace(/[.\s]+$/, '')).join('. ');
         return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: `${composeGapText('unsupported', message.replace(/[.\s]+$/, ''), [], false)}${answerable}${offered}`, receipt, intent: resolution.intent, offerExploration: false };
+      }
+      // NOTHING GOVERNED DESCRIBES IT, AND THERE IS NOTHING TO CHOOSE BETWEEN:
+      // the tables are asked before the answer is "not modeled".
+      {
+        const drafted = await schemaLane(material?.question ?? `"${clause}" is not described by this project's certified blocks or governed metrics`, resolution.intent);
+        if (drafted) return drafted;
       }
       // THE DISCOVERY PATH, step three: "not shown" is never "not modeled".
       // Before the project is said not to hold something, the whole inventory
@@ -869,6 +1005,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   let firstPrepared: PrepareResult | undefined;
   let firstIntent: AnalyticalIntentV1 | undefined;
   let candidate: PreparedCandidate | undefined;
+  let joinProvenForRetry = false;
   for (let round = 0; round < 2; round += 1) {
     const beforePrepare = stopped('prepare');
     if (beforePrepare) return { ...beforePrepare, intent } as PipelineOutcome;
@@ -883,6 +1020,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     if (cached) {
       candidate = cached;
       receipt.reuse = 'preparation';
+      step('tier', `${TIER_NAMES[cached.tier] ?? cached.tier}: reused an earlier validated preparation`, 'done');
       receipt.candidates.push({ tier: cached.tier, trust: cached.trust, proof: [...cached.proof, 'reused a previously validated preparation'], sqlFingerprint: fingerprintSql(cached.sql), ...(cached.engine ? { engine: cached.engine } : {}) });
       mark('prepare', prepareStarted);
       break;
@@ -895,6 +1033,8 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     for (const item of prepared.candidates) receipt.candidates.push({ tier: item.tier, trust: item.trust, proof: item.proof, sqlFingerprint: fingerprintSql(item.sql), ...(item.engine ? { engine: item.engine } : {}) });
     receipt.refusals.push(...prepared.refusals);
     receipt.tiers.push(...prepared.attempts.map((attempt) => ({ round, ...attempt })));
+    tierSteps(prepared.attempts, timings[round === 0 ? 'prepare' : 'prepare_repair'], joinProvenForRetry ? 'with the proven join' : round > 0 ? 'second try' : '');
+    joinProvenForRetry = false;
     if (prepared.chosen) { candidate = prepared.chosen; break; }
     // A RELATIONSHIP NOBODY DECLARED MAY STILL HOLD. Before spending a
     // dispatch on rewriting the question, ask the warehouse whether the key
@@ -908,6 +1048,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       let proven: Awaited<ReturnType<NonNullable<PrepareDeps['proveJoinPath']>>>;
       try { proven = await input.prepareDeps.proveJoinPath(needsJoin.relations[0], needsJoin.relations[1]); } catch { proven = undefined; }
       mark('prove_join', proveStarted);
+      step('join', proven && !Array.isArray(proven) ? `Did not prove a join between ${needsJoin.relations[0]} and ${needsJoin.relations[1]}` : proven ? `Proved on the warehouse that ${needsJoin.relations[0]} joins ${needsJoin.relations[1]}` : `Could not prove a join between ${needsJoin.relations[0]} and ${needsJoin.relations[1]}`, proven && Array.isArray(proven) ? 'done' : 'missed', { ms: timings.prove_join, ...(proven && !Array.isArray(proven) ? { detail: proven.refusal.message } : {}) });
       if (proven && !Array.isArray(proven)) {
         // The host refused to probe: a domain boundary, or membership nobody
         // can name. That is a decision, not a missing path — it ends the turn.
@@ -920,6 +1061,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         const keys = authority?.keys.map((key) => key.from === key.to ? key.from : `${key.from} = ${key.to}`).join(', ') ?? 'a shared key';
         receipt.grounding = [...(receipt.grounding ?? []), `relationship: ${label(`relation:${needsJoin.relations[0]}`)} and ${label(`relation:${needsJoin.relations[1]}`)} are joined on ${keys} because the warehouse showed the key is unique in ${label(`relation:${needsJoin.relations[1]}`)} and every ${label(`relation:${needsJoin.relations[0]}`)} row has one; this join is not yet certified, and Domain Studio can certify it from this evidence`];
         attempted.delete(cacheKey);
+        joinProvenForRetry = true;
         round -= 1;
         continue;
       }
@@ -934,7 +1076,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
       // The repair is held to the original question's obligations.
       ...(resolution.status === 'resolved' && resolution.ledger ? { ledger: resolution.ledger, ledgerRound: round + 1 } : {}),
-      onDispatch: (event) => receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }),
+      onDispatch: (event) => { receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }); dispatchStep(event, true); },
     });
     mark('resolve_repair', repairStarted);
     recordLedger(resolution);
@@ -966,14 +1108,9 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     // never instead of a governed answer one re-ask away. A policy denial or a
     // domain-contract refusal never reaches it.
     const denied = receipt.refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict' || refusal.code === 'join_requires_domain_contract');
-    if (!fallback && !denied && (input.explorationOptIn || input.explorationAuto) && remaining() > 8_000) {
-      const draftStarted = now();
-      const drafted = await prepareExploratory(intent, input.vocabulary, input.prepareDeps, input.question);
-      mark('draft', draftStarted);
-      receipt.refusals.push(...drafted.refusals);
-      for (const item of drafted.candidates) receipt.candidates.push({ tier: item.tier, trust: item.trust, proof: item.proof, sqlFingerprint: fingerprintSql(item.sql), ...(item.engine ? { engine: item.engine } : {}) });
-      receipt.tiers.push({ round: 98, tier: 'exploratory', outcome: drafted.candidates.length ? 'prepared' : 'refused', ...(drafted.refusals[0] ? { detail: `${drafted.refusals[0].code}: ${drafted.refusals[0].message.slice(0, 160)}` } : {}) });
-      if (drafted.candidates[0]) candidate = drafted.candidates[0];
+    if (!fallback && !denied && (input.explorationOptIn || input.explorationAuto)) {
+      const drafted = await schemaLane(gapFromRefusals(receipt.refusals, intent, input.vocabulary).message, intent);
+      if (drafted) return drafted;
     }
     if (candidate) { /* drafted: falls through to execution below */ }
     else if (fallback) {
@@ -1005,6 +1142,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   let executeStarted = now();
   let executed = await countedExecute(candidate, intent, input.executeDeps);
   mark('execute', executeStarted);
+  step('execute', executed.ok ? `Ran the ${TIER_NAMES[candidate.tier]?.toLowerCase() ?? candidate.tier} query: ${executed.result.rowCount} row${executed.result.rowCount === 1 ? '' : 's'}` : `The ${TIER_NAMES[candidate.tier]?.toLowerCase() ?? candidate.tier} query did not succeed`, executed.ok ? 'done' : 'failed', { ms: timings.execute, ...(!executed.ok ? { detail: executed.message } : {}) });
   while (!executed.ok && (executed.code === 'filter_not_applied' || executed.code === 'fanout_detected') && excluded.length < 3 && remaining() > 5_000) {
     receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);
     receipt.tiers.push({ round: 9, tier: candidate.tier, outcome: 'refused', detail: `${executed.code}: ${executed.message.slice(0, 160)}` });
@@ -1013,6 +1151,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     for (const item of again.candidates) receipt.candidates.push({ tier: item.tier, trust: item.trust, proof: item.proof, sqlFingerprint: fingerprintSql(item.sql), ...(item.engine ? { engine: item.engine } : {}) });
     receipt.refusals.push(...again.refusals.filter((refusal) => !excluded.includes(refusal.tier)));
     receipt.tiers.push(...again.attempts.map((attempt) => ({ round: 9, ...attempt })));
+    tierSteps(again.attempts, undefined, 'after a failed proof');
     if (!again.chosen) {
       const gap = gapFromRefusals(receipt.refusals, intent, input.vocabulary);
       return { kind: 'gap', gap: gap.gap, message: gap.message, nearest: gap.nearest.map(label), text: composeGapText(gap.gap, gap.message, gap.nearest.map(label), false), receipt, intent, offerExploration: false };

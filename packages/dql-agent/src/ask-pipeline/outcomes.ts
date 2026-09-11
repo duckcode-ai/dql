@@ -59,6 +59,25 @@ export interface PipelineReceipt {
   context?: ContextLedgerV1;
   /** Every typed policy effect applied to the reading (SKILL-004), by skill and field. */
   policies?: Array<{ policyId: string; field: string; effect: string }>;
+  /** What the run did, in order, in the reader's words: what was searched, what each tier found or missed, what ran. */
+  story?: AskStoryStepV1[];
+}
+
+/**
+ * One step of the story a run tells while it works and keeps afterwards.
+ * `missed` is a place the run looked and did not find an answer (a tier that
+ * refused, a field the reading named that the project does not hold); it is
+ * part of the path, not an error. Titles and details never carry row values.
+ */
+export interface AskStoryStepV1 {
+  version: 1;
+  phase: 'context' | 'read' | 'search' | 'tier' | 'join' | 'schema' | 'execute';
+  title: string;
+  detail?: string;
+  state: 'done' | 'missed' | 'failed';
+  ms?: number;
+  /** Epoch milliseconds when the step finished; orders host and pipeline steps into one story. */
+  at: number;
 }
 
 export interface ContextLedgerV1 {

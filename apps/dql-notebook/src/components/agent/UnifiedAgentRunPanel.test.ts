@@ -38,6 +38,13 @@ let askRunAllowsExecutionRepair: typeof UnifiedAgentRunPanelModule.askRunAllowsE
 let agentRunPerformanceRows: typeof UnifiedAgentRunPanelModule.agentRunPerformanceRows;
 let mergeFinishedRun: typeof UnifiedAgentRunPanelModule.mergeFinishedRun;
 let pipelineV9Activity: typeof UnifiedAgentRunPanelModule.pipelineV9Activity;
+let askStoryStepsFromEvents: typeof UnifiedAgentRunPanelModule.askStoryStepsFromEvents;
+let askStoryStepsFromReceipt: typeof UnifiedAgentRunPanelModule.askStoryStepsFromReceipt;
+let retainLiveAgentEvents: typeof UnifiedAgentRunPanelModule.retainLiveAgentEvents;
+let formatStepDuration: typeof UnifiedAgentRunPanelModule.formatStepDuration;
+let AskStoryList: typeof UnifiedAgentRunPanelModule.AskStoryList;
+let askStoryActiveLabel: typeof UnifiedAgentRunPanelModule.askStoryActiveLabel;
+let AskRunStory: typeof UnifiedAgentRunPanelModule.AskRunStory;
 let askPipelinePlanRows: typeof UnifiedAgentRunPanelModule.askPipelinePlanRows;
 let askRunCaptureWarning: typeof UnifiedAgentRunPanelModule.askRunCaptureWarning;
 let askFailureOriginTyped: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
@@ -95,6 +102,13 @@ beforeAll(async () => {
     agentRunPerformanceRows = module.agentRunPerformanceRows;
     mergeFinishedRun = module.mergeFinishedRun;
     pipelineV9Activity = module.pipelineV9Activity;
+    askStoryStepsFromEvents = module.askStoryStepsFromEvents;
+    askStoryStepsFromReceipt = module.askStoryStepsFromReceipt;
+    retainLiveAgentEvents = module.retainLiveAgentEvents;
+    formatStepDuration = module.formatStepDuration;
+    AskStoryList = module.AskStoryList;
+    askStoryActiveLabel = module.askStoryActiveLabel;
+    AskRunStory = module.AskRunStory;
     askPipelinePlanRows = module.askPipelinePlanRows;
     askRunCaptureWarning = module.askRunCaptureWarning;
     askFailureOriginTyped = module.askFailureOrigin;
@@ -2465,5 +2479,85 @@ describe('the inspector plan of a pipeline run is its intent', () => {
     expect(rows.Executed).toBe('relational · 6 row(s) · sha256:abc');
     expect(rows.Proofs).toBe('every member of dev.locations is a row\nexecuted on the warehouse: 6 rows in 3 ms');
     expect(rows.Grounding).toMatch(/stored as "Jordan Lee"/);
+  });
+});
+
+
+describe('the story an Ask run tells while it works and keeps afterwards', () => {
+  const event = (index: number, payload?: unknown): AgentRunEvent => ({ id: `e${index}`, runId: 'r', type: 'executor.started', at: '2026-09-11T00:00:00Z', message: `m${index}`, ...(payload ? { payload } : {}) });
+  const stepEvent = (index: number, title: string, state = 'done') => event(index, { askStep: { version: 1, phase: 'tier', title, state, at: index, ms: 1200 } });
+
+  it('reads the streamed steps in order and ignores events that are not steps', () => {
+    const steps = askStoryStepsFromEvents([event(1), stepEvent(2, 'Searched the project: 4 tables'), stepEvent(3, 'Certified blocks: no answer', 'missed'), event(4, { other: true })]);
+    expect(steps.map((entry) => [entry.title, entry.state])).toEqual([['Searched the project: 4 tables', 'done'], ['Certified blocks: no answer', 'missed']]);
+  });
+
+  it('keeps every step of a long run while trimming the other live events', () => {
+    const events = [...Array.from({ length: 12 }, (_, index) => stepEvent(index, `step ${index}`)), ...Array.from({ length: 20 }, (_, index) => event(100 + index))];
+    const kept = retainLiveAgentEvents(events);
+    expect(askStoryStepsFromEvents(kept)).toHaveLength(12);
+    expect(kept.filter((entry) => !(entry.payload as { askStep?: unknown } | undefined)?.askStep)).toHaveLength(8);
+  });
+
+  it('replays the kept story of a finished run from its receipt, and a receipt without one has none', () => {
+    expect(askStoryStepsFromReceipt({ story: [{ version: 1, phase: 'execute', title: 'Ran the AI-drafted query: 1 row', state: 'done', at: 5, ms: 80 }] })[0]).toMatchObject({ title: 'Ran the AI-drafted query: 1 row', ms: 80 });
+    expect(askStoryStepsFromReceipt({})).toEqual([]);
+    expect(askStoryStepsFromReceipt(undefined)).toEqual([]);
+  });
+
+  it('renders each step with its outcome and time, and the step still in progress', () => {
+    const markup = renderToStaticMarkup(createElement(AskStoryList, {
+      t: themes.light,
+      active: 'Working · 12 s',
+      steps: [
+        { phase: 'context', title: 'Searched the project: 19 tables', state: 'done', ms: 432, at: 1 },
+        { phase: 'tier', title: 'Semantic layer: no answer', state: 'missed', detail: 'product_price is not a semantic metric', at: 2 },
+        { phase: 'execute', title: 'The warehouse rejected the draft: correcting it once', state: 'failed', ms: 2_300, at: 3 },
+      ],
+    }));
+    expect(markup).toContain('aria-label="What the agent did"');
+    expect(markup).toContain('Searched the project: 19 tables');
+    expect(markup).toContain('432 ms');
+    expect(markup).toContain('Semantic layer: no answer');
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).not.toContain('product_price is not a semantic metric');
+    expect(markup).toContain('2.3 s');
+    expect(markup).toContain('Working · 12 s');
+  });
+
+  it('a finished run shows one line that opens its story: how long, how many steps, how many places it looked and missed', () => {
+    const markup = renderToStaticMarkup(createElement(AskRunStory, {
+      t: themes.light,
+      receipt: { timings: { total: 20_000, context: 400 }, story: [
+        { version: 1, phase: 'read', title: 'Read the question', state: 'done', at: 1 },
+        { version: 1, phase: 'tier', title: 'Certified blocks: no answer', state: 'missed', at: 2 },
+        { version: 1, phase: 'execute', title: 'Ran the AI-drafted query: 3 rows', state: 'done', at: 3 },
+      ] },
+    }));
+    expect(markup).toContain('Worked for 20 s · 3 steps · 1 looked and missed');
+    expect(renderToStaticMarkup(createElement(AskRunStory, { t: themes.light, receipt: {} }))).toBe('');
+  });
+
+  it('names what the run is waiting on from the last step it finished', () => {
+    const at = (phase: string, title: string, state: 'done' | 'missed' | 'failed' = 'done') => ({ phase, title, state, at: 1 });
+    expect(askStoryActiveLabel([])).toBe('Searching the project');
+    expect(askStoryActiveLabel([at('context', 'Searched the project: 19 tables')])).toBe('Asking the AI to read the question');
+    expect(askStoryActiveLabel([at('read', 'Asked the AI to read the question')])).toBe('Checking the reading against the project');
+    expect(askStoryActiveLabel([at('search', 'Fetched 4 fields the first reading had not seen')])).toBe('Asking the AI to read the question with those fields');
+    expect(askStoryActiveLabel([at('read', 'Settled the reading')])).toBe('Looking for a certified or governed answer');
+    expect(askStoryActiveLabel([at('schema', 'No governed answer: asking the tables directly')])).toBe('Asking the AI to draft SQL from the tables');
+    expect(askStoryActiveLabel([at('schema', 'Chose the tables dev.products, dev.supplies')])).toBe('Asking the AI to draft SQL from the tables');
+    expect(askStoryActiveLabel([at('schema', 'Drafted SQL over dev.products')])).toBe('Running the drafted query');
+    expect(askStoryActiveLabel([at('execute', 'The warehouse rejected the draft: correcting it once', 'failed')])).toBe('Asking the AI to correct the query');
+    expect(askStoryActiveLabel([at('tier', 'Governed tables and joins: prepared an answer')])).toBe('Running the query');
+    expect(askStoryActiveLabel([at('execute', 'Ran the governed tables and joins query: 1 row')])).toBe('Writing the answer');
+  });
+
+  it('formats step timings the way a person reads them', () => {
+    expect(formatStepDuration(20)).toBe('');
+    expect(formatStepDuration(640)).toBe('640 ms');
+    expect(formatStepDuration(2_340)).toBe('2.3 s');
+    expect(formatStepDuration(27_400)).toBe('27 s');
+    expect(formatStepDuration(95_000)).toBe('1 min 35 s');
   });
 });
