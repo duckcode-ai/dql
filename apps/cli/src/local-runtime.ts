@@ -6093,10 +6093,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const intent = (turn.contract as Record<string, unknown> | undefined)?.askIntentV1;
         if (!intent || typeof intent !== 'object') continue;
         const executed = !turn.runStatus || ['completed', 'needs_review'].includes(turn.runStatus);
+        // An answer whose SQL the AI drafted carries that statement forward, so
+        // the next turn edits it; a governed answer is edited through its reading.
+        const drafted = executed && Boolean(turn.sql) && [turn.certification, turn.trustLabel].includes('review_required');
         return {
           intent: intent as AnalyticalIntentV1,
           ...(executed ? {} : { executed: false }),
           ...(executed && turn.answerSummary ? { summary: turn.answerSummary } : {}),
+          ...(drafted ? { sql: turn.sql, drafted: true } : {}),
         };
       }
       return undefined;

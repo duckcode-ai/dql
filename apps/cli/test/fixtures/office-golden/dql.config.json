@@ -1,0 +1,39 @@
+{
+  "project": "office-golden",
+  "manifestVersion": 3,
+  "layout": {
+    "version": 2,
+    "mode": "oss-dbt-workspace",
+    "skillsPath": "skills"
+  },
+  "identity": {
+    "owner": "revops-analytics@office.test"
+  },
+  "modeling": {
+    "mode": "dbt-first"
+  },
+  "dbt": {
+    "projectDir": ".",
+    "manifestPath": "target/manifest.json"
+  },
+  "connections": {
+    "default": {
+      "driver": "sqlite",
+      "filepath": ":memory:"
+    }
+  },
+  "semanticLayer": {
+    "provider": "dbt",
+    "projectPath": "."
+  },
+  "agent": {
+    "runtimeValueGrounding": {
+      "mode": "safe_automatic",
+      "searchSafeColumns": [
+        "salesloft.opportunities.TAGS",
+        "sfdc.opportunity.COMPETITOR_C",
+        "sales.opportunity_enhanced.ACCOUNT_NAME"
+      ]
+    }
+  }
+}

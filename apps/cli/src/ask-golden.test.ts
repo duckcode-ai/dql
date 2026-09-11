@@ -39,7 +39,8 @@ import { createSeededSqliteExecutor, type GoldenSeed, type SeededSqliteExecutor 
  */
 
 type Outcome = 'rows' | 'clarify_or_rows' | 'gap' | 'conversation' | 'answered_with_caveat';
-type Tier = 'certified' | 'governed' | 'any' | 'none';
+/** `reviewable`: the rows must be right, and the answer may be certified, governed or review-required (AI-drafted SQL over the schema). */
+type Tier = 'certified' | 'governed' | 'any' | 'reviewable' | 'none';
 interface Reference { sql: string; columns: Record<string, string[]>; identity?: string[] }
 interface GoldenCase extends Reference {
   id: string; question: string; outcome?: Outcome; tier: Tier;
@@ -247,7 +248,8 @@ const userText = (run: any): string => [run?.answer, run?.summary, run?.business
   .filter((value) => typeof value === 'string').join('\n');
 const trustOk = (tier: Tier, trust: string | undefined) => tier === 'none' ? true
   : tier === 'certified' ? trust === 'certified'
-    : ['certified', 'governed'].includes(trust ?? '');
+    : tier === 'reviewable' ? ['certified', 'governed', 'review_required'].includes(trust ?? '')
+      : ['certified', 'governed'].includes(trust ?? '');
 
 interface Verdict { pass: boolean; reasons: string[]; observed: Record<string, unknown> }
 

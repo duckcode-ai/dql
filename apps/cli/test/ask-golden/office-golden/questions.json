@@ -1,0 +1,158 @@
+{
+ "questions": [
+  {
+   "id": "of01-lost-splunk-fy26-monthly",
+   "question": "Lost opportunities count, Lost Amount by month for fiscal year FY26 and competitor involved is Splunk",
+   "sql": "WITH months(month) AS (VALUES ('2025-02-01'),('2025-03-01'),('2025-04-01'),('2025-05-01'),('2025-06-01'),('2025-07-01'),('2025-08-01'),('2025-09-01'),('2025-10-01'),('2025-11-01'),('2025-12-01'),('2026-01-01')), lost AS (SELECT strftime('%Y-%m-01', e.CLOSE_DATE) AS month, e.OPPORTUNITY_ID, e.AMOUNT FROM sales.opportunity_enhanced e JOIN sfdc.opportunity o ON o.ID = e.OPPORTUNITY_ID WHERE e.IS_CLOSED = 1 AND e.IS_WON = 0 AND e.FISCAL_YEAR = 2026 AND o.COMPETITOR_C = 'Splunk') SELECT m.month AS month, COUNT(l.OPPORTUNITY_ID) AS lost_opportunities, COALESCE(SUM(l.AMOUNT), 0) AS lost_amount FROM months m LEFT JOIN lost l ON l.month = m.month GROUP BY m.month ORDER BY m.month",
+   "columns": {
+    "month": [
+     "month",
+     "close_month",
+     "close_date",
+     "close_date__month",
+     "month_start",
+     "close_month_start",
+     "month_of_close",
+     "close_year_month",
+     "year_month"
+    ],
+    "lost_opportunities": [
+     "lost_opportunities",
+     "lost_opportunities_count",
+     "lost_opportunity_count",
+     "lost_count",
+     "opportunity_count",
+     "opportunities_lost",
+     "count"
+    ],
+    "lost_amount": [
+     "lost_amount",
+     "total_lost_amount",
+     "lost_amount_usd",
+     "amount",
+     "sum_amount",
+     "total_amount"
+    ]
+   },
+   "keys": [
+    "month"
+   ],
+   "alternatives": [
+    {
+     "sql": "SELECT strftime('%Y-%m-01', e.CLOSE_DATE) AS month, COUNT(*) AS lost_opportunities, SUM(e.AMOUNT) AS lost_amount FROM sales.opportunity_enhanced e JOIN sfdc.opportunity o ON o.ID = e.OPPORTUNITY_ID WHERE e.IS_CLOSED = 1 AND e.IS_WON = 0 AND e.FISCAL_YEAR = 2026 AND o.COMPETITOR_C = 'Splunk' GROUP BY 1 ORDER BY 1",
+     "columns": {
+      "month": [
+       "month",
+       "close_month",
+       "close_date",
+       "close_date__month",
+       "month_start",
+       "close_month_start",
+       "month_of_close",
+       "close_year_month",
+       "year_month"
+      ],
+      "lost_opportunities": [
+       "lost_opportunities",
+       "lost_opportunities_count",
+       "lost_opportunity_count",
+       "lost_count",
+       "opportunity_count",
+       "opportunities_lost",
+       "count"
+      ],
+      "lost_amount": [
+       "lost_amount",
+       "total_lost_amount",
+       "lost_amount_usd",
+       "amount",
+       "sum_amount",
+       "total_amount"
+      ]
+     }
+    },
+    {
+     "sql": "SELECT strftime('%Y-%m', e.CLOSE_DATE) AS month, COUNT(*) AS lost_opportunities, SUM(e.AMOUNT) AS lost_amount FROM sales.opportunity_enhanced e JOIN sfdc.opportunity o ON o.ID = e.OPPORTUNITY_ID WHERE e.IS_CLOSED = 1 AND e.IS_WON = 0 AND e.FISCAL_YEAR = 2026 AND o.COMPETITOR_C = 'Splunk' GROUP BY 1 ORDER BY 1",
+     "columns": {
+      "month": [
+       "month",
+       "close_month",
+       "close_date",
+       "close_date__month",
+       "month_start",
+       "close_month_start",
+       "month_of_close",
+       "close_year_month",
+       "year_month"
+      ],
+      "lost_opportunities": [
+       "lost_opportunities",
+       "lost_opportunities_count",
+       "lost_opportunity_count",
+       "lost_count",
+       "opportunity_count",
+       "opportunities_lost",
+       "count"
+      ],
+      "lost_amount": [
+       "lost_amount",
+       "total_lost_amount",
+       "lost_amount_usd",
+       "amount",
+       "sum_amount",
+       "total_amount"
+      ]
+     }
+    }
+   ],
+   "tier": "reviewable",
+   "note": "The office question verbatim. The competitor is in sfdc.opportunity.COMPETITOR_C, the amounts in sales.opportunity_enhanced; OPPORTUNITY_ID pairs with SFDC.OPPORTUNITY.ID, so a warehouse-proven governed join answers it with every FY26 month (Feb 2025\u2013Jan 2026, zeros where nothing was lost); an AI-drafted statement may return only the months with losses, as a first-day date or year-month. Either way: lost (closed and not won), FY26 and Splunk applied."
+  },
+  {
+   "id": "of02-lost-count-fy26",
+   "question": "How many opportunities did we lose in fiscal year FY26?",
+   "sql": "SELECT COUNT(*) AS lost_opportunities FROM sales.opportunity_enhanced WHERE IS_CLOSED = 1 AND IS_WON = 0 AND FISCAL_YEAR = 2026",
+   "columns": {
+    "lost_opportunities": [
+     "lost_opportunities",
+     "lost_opportunities_count",
+     "lost_opportunity_count",
+     "lost_count",
+     "opportunity_count",
+     "opportunities_lost",
+     "count"
+    ]
+   },
+   "tier": "reviewable",
+   "note": "Lost is closed and not won; FY26 is the FISCAL_YEAR column (the fiscal year starts Feb 1), never calendar 2026."
+  },
+  {
+   "id": "of03-tagged-splunk",
+   "question": "Which opportunities are tagged Splunk?",
+   "sql": "SELECT OPPORTUNITY_ID AS opportunity_id FROM salesloft.opportunities WHERE LOWER(TAGS) LIKE '%splunk%' ORDER BY 1",
+   "columns": {
+    "opportunity_id": [
+     "opportunity_id",
+     "OPPORTUNITY_ID",
+     "id",
+     "ID"
+    ]
+   },
+   "keys": [
+    "opportunity_id"
+   ],
+   "tier": "reviewable",
+   "note": "A value only the tags (and the competitor field) hold: the value locator finds where Splunk is stored. Both fields name the same eight opportunities."
+  },
+  {
+   "id": "of04-win-rate-by-region",
+   "question": "What is our win rate against Splunk by sales region?",
+   "tier": "none",
+   "outcome": "gap",
+   "note": "No table holds a sales region: the honest answer names what was searched and runs nothing, never an account name or a stage standing in for a region.",
+   "forbids": {
+    "sql": true
+   }
+  }
+ ]
+}

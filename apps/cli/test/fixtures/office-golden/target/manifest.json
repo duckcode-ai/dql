@@ -1,0 +1,549 @@
+{
+ "metadata": {
+  "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+  "dbt_version": "1.10.13",
+  "generated_at": "2026-09-07T00:00:00Z",
+  "invocation_id": "office-golden",
+  "env": {},
+  "project_name": "office_golden",
+  "project_id": "office-golden",
+  "user_id": null,
+  "send_anonymous_usage_stats": false,
+  "adapter_type": "sqlite"
+ },
+ "nodes": {
+  "model.office_golden.sales__opportunity_enhanced": {
+   "database": "office_dw",
+   "schema": "sales",
+   "name": "opportunity_enhanced",
+   "resource_type": "model",
+   "package_name": "office_golden",
+   "path": "marts/sales/opportunity_enhanced.sql",
+   "original_file_path": "models/marts/sales/opportunity_enhanced.sql",
+   "unique_id": "model.office_golden.sales__opportunity_enhanced",
+   "fqn": [
+    "office_golden",
+    "marts",
+    "sales",
+    "opportunity_enhanced"
+   ],
+   "alias": "opportunity_enhanced",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "config": {
+    "enabled": true,
+    "alias": null,
+    "schema": null,
+    "database": null,
+    "tags": [],
+    "meta": {},
+    "group": null,
+    "materialized": "table",
+    "incremental_strategy": null,
+    "persist_docs": {},
+    "quoting": {},
+    "column_types": {},
+    "full_refresh": null,
+    "unique_key": null,
+    "on_schema_change": "ignore",
+    "grants": {},
+    "packages": [],
+    "docs": {
+     "show": true,
+     "node_color": null
+    },
+    "contract": {
+     "enforced": false,
+     "alias_types": true
+    },
+    "access": "protected"
+   },
+   "tags": [],
+   "description": "One row per Salesforce opportunity with its amount, stage and close date. Lost means closed and not won.",
+   "columns": {
+    "OPPORTUNITY_ID": {
+     "name": "OPPORTUNITY_ID",
+     "description": "Salesforce opportunity id.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "ACCOUNT_NAME": {
+     "name": "ACCOUNT_NAME",
+     "description": "Customer account name.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "STAGE_NAME": {
+     "name": "STAGE_NAME",
+     "description": "Current sales stage.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "AMOUNT": {
+     "name": "AMOUNT",
+     "description": "Opportunity amount in USD.",
+     "meta": {},
+     "data_type": "decimal",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "IS_CLOSED": {
+     "name": "IS_CLOSED",
+     "description": "True when the opportunity is closed (won or lost).",
+     "meta": {},
+     "data_type": "bool",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "IS_WON": {
+     "name": "IS_WON",
+     "description": "True when the opportunity was won.",
+     "meta": {},
+     "data_type": "bool",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "CLOSE_DATE": {
+     "name": "CLOSE_DATE",
+     "description": "Date the opportunity closed or is expected to close.",
+     "meta": {},
+     "data_type": "timestamp",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "FISCAL_YEAR": {
+     "name": "FISCAL_YEAR",
+     "description": "Fiscal year of the close date; the fiscal year starts on February 1 (FY26 = Feb 2025 through Jan 2026).",
+     "meta": {},
+     "data_type": "int",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    }
+   },
+   "meta": {},
+   "group": null,
+   "docs": {
+    "show": true,
+    "node_color": null
+   },
+   "patch_path": "office_golden://models/marts/sales/opportunity_enhanced.yml",
+   "build_path": null,
+   "unrendered_config": {
+    "materialized": "table"
+   },
+   "created_at": 1750000000.0,
+   "relation_name": "OFFICE_DW.SALES.OPPORTUNITY_ENHANCED",
+   "raw_code": "select * from opportunity_enhanced",
+   "language": "sql",
+   "refs": [],
+   "sources": [],
+   "metrics": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "compiled_path": null,
+   "compiled": false,
+   "extra_ctes_injected": false,
+   "extra_ctes": [],
+   "contract": {
+    "enforced": false,
+    "alias_types": true,
+    "checksum": null
+   },
+   "access": "protected",
+   "constraints": [],
+   "version": null,
+   "latest_version": null,
+   "deprecation_date": null,
+   "primary_key": [],
+   "time_spine": null
+  },
+  "model.office_golden.sfdc__opportunity": {
+   "database": "office_dw",
+   "schema": "sfdc",
+   "name": "opportunity",
+   "resource_type": "model",
+   "package_name": "office_golden",
+   "path": "marts/sfdc/opportunity.sql",
+   "original_file_path": "models/marts/sfdc/opportunity.sql",
+   "unique_id": "model.office_golden.sfdc__opportunity",
+   "fqn": [
+    "office_golden",
+    "marts",
+    "sfdc",
+    "opportunity"
+   ],
+   "alias": "opportunity",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "config": {
+    "enabled": true,
+    "alias": null,
+    "schema": null,
+    "database": null,
+    "tags": [],
+    "meta": {},
+    "group": null,
+    "materialized": "table",
+    "incremental_strategy": null,
+    "persist_docs": {},
+    "quoting": {},
+    "column_types": {},
+    "full_refresh": null,
+    "unique_key": null,
+    "on_schema_change": "ignore",
+    "grants": {},
+    "packages": [],
+    "docs": {
+     "show": true,
+     "node_color": null
+    },
+    "contract": {
+     "enforced": false,
+     "alias_types": true
+    },
+    "access": "protected"
+   },
+   "tags": [],
+   "description": "Raw Salesforce opportunity object, including custom fields.",
+   "columns": {
+    "ID": {
+     "name": "ID",
+     "description": "Salesforce opportunity id.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "COMPETITOR_C": {
+     "name": "COMPETITOR_C",
+     "description": "Primary competitor recorded on the opportunity (custom field).",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "LOSS_REASON_C": {
+     "name": "LOSS_REASON_C",
+     "description": "Loss reason recorded by the rep (custom field).",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    }
+   },
+   "meta": {},
+   "group": null,
+   "docs": {
+    "show": true,
+    "node_color": null
+   },
+   "patch_path": "office_golden://models/marts/sfdc/opportunity.yml",
+   "build_path": null,
+   "unrendered_config": {
+    "materialized": "table"
+   },
+   "created_at": 1750000000.0,
+   "relation_name": "OFFICE_DW.SFDC.OPPORTUNITY",
+   "raw_code": "select * from opportunity",
+   "language": "sql",
+   "refs": [],
+   "sources": [],
+   "metrics": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "compiled_path": null,
+   "compiled": false,
+   "extra_ctes_injected": false,
+   "extra_ctes": [],
+   "contract": {
+    "enforced": false,
+    "alias_types": true,
+    "checksum": null
+   },
+   "access": "protected",
+   "constraints": [],
+   "version": null,
+   "latest_version": null,
+   "deprecation_date": null,
+   "primary_key": [],
+   "time_spine": null
+  },
+  "model.office_golden.salesloft__opportunities": {
+   "database": "office_dw",
+   "schema": "salesloft",
+   "name": "opportunities",
+   "resource_type": "model",
+   "package_name": "office_golden",
+   "path": "marts/salesloft/opportunities.sql",
+   "original_file_path": "models/marts/salesloft/opportunities.sql",
+   "unique_id": "model.office_golden.salesloft__opportunities",
+   "fqn": [
+    "office_golden",
+    "marts",
+    "salesloft",
+    "opportunities"
+   ],
+   "alias": "opportunities",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "config": {
+    "enabled": true,
+    "alias": null,
+    "schema": null,
+    "database": null,
+    "tags": [],
+    "meta": {},
+    "group": null,
+    "materialized": "table",
+    "incremental_strategy": null,
+    "persist_docs": {},
+    "quoting": {},
+    "column_types": {},
+    "full_refresh": null,
+    "unique_key": null,
+    "on_schema_change": "ignore",
+    "grants": {},
+    "packages": [],
+    "docs": {
+     "show": true,
+     "node_color": null
+    },
+    "contract": {
+     "enforced": false,
+     "alias_types": true
+    },
+    "access": "protected"
+   },
+   "tags": [],
+   "description": "Salesloft opportunity sync with free-form tags.",
+   "columns": {
+    "OPPORTUNITY_ID": {
+     "name": "OPPORTUNITY_ID",
+     "description": "Salesforce opportunity id carried by Salesloft.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "TAGS": {
+     "name": "TAGS",
+     "description": "Semicolon-separated tags added by reps.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    },
+    "CUSTOM_FIELDS": {
+     "name": "CUSTOM_FIELDS",
+     "description": "JSON of Salesloft custom fields.",
+     "meta": {},
+     "data_type": "text",
+     "constraints": [],
+     "quote": null,
+     "config": {
+      "meta": {},
+      "tags": []
+     },
+     "tags": [],
+     "granularity": null,
+     "dimension": null,
+     "entity": null,
+     "doc_blocks": []
+    }
+   },
+   "meta": {},
+   "group": null,
+   "docs": {
+    "show": true,
+    "node_color": null
+   },
+   "patch_path": "office_golden://models/marts/salesloft/opportunities.yml",
+   "build_path": null,
+   "unrendered_config": {
+    "materialized": "table"
+   },
+   "created_at": 1750000000.0,
+   "relation_name": "OFFICE_DW.SALESLOFT.OPPORTUNITIES",
+   "raw_code": "select * from opportunities",
+   "language": "sql",
+   "refs": [],
+   "sources": [],
+   "metrics": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "compiled_path": null,
+   "compiled": false,
+   "extra_ctes_injected": false,
+   "extra_ctes": [],
+   "contract": {
+    "enforced": false,
+    "alias_types": true,
+    "checksum": null
+   },
+   "access": "protected",
+   "constraints": [],
+   "version": null,
+   "latest_version": null,
+   "deprecation_date": null,
+   "primary_key": [],
+   "time_spine": null
+  }
+ },
+ "sources": {},
+ "macros": {},
+ "docs": {},
+ "exposures": {},
+ "metrics": {},
+ "groups": {},
+ "selectors": {},
+ "disabled": {},
+ "parent_map": {
+  "model.office_golden.sales__opportunity_enhanced": [],
+  "model.office_golden.sfdc__opportunity": [],
+  "model.office_golden.salesloft__opportunities": []
+ },
+ "child_map": {
+  "model.office_golden.sales__opportunity_enhanced": [],
+  "model.office_golden.sfdc__opportunity": [],
+  "model.office_golden.salesloft__opportunities": []
+ },
+ "group_map": {},
+ "saved_queries": {},
+ "semantic_models": {},
+ "unit_tests": {}
+}

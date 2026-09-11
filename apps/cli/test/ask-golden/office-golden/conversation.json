@@ -1,0 +1,21 @@
+{
+ "turns": [
+  {
+   "id": "of-conv-lost-fy26",
+   "question": "How many opportunities did we lose in fiscal year FY26?",
+   "sql": "SELECT COUNT(*) AS lost_opportunities FROM sales.opportunity_enhanced WHERE IS_CLOSED = 1 AND IS_WON = 0 AND FISCAL_YEAR = 2026",
+   "columns": {
+    "lost_opportunities": [
+     "lost_opportunities",
+     "lost_opportunities_count",
+     "lost_opportunity_count",
+     "lost_count",
+     "opportunity_count",
+     "opportunities_lost",
+     "count"
+    ]
+   },
+   "tier": "reviewable"
+  }
+ ]
+}

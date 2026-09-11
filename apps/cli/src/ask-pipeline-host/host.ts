@@ -112,7 +112,12 @@ export interface AskPipelineHostDeps {
   dispatchOptions?(purpose: 'resolve' | 'correct' | 'repair' | 'draft', request: AgentRunRequest): { options: ProviderRunOptions; settle(outcome: 'ok' | 'error' | 'cancelled', error?: unknown): void };
   /** The executed intent of the last usable turn in this thread, when there is one. */
   /** The previous turn's typed reading. `executed: false` means it was blocked: its question stands, its result does not exist. */
-  priorIntent(request: AgentRunRequest): { intent: AnalyticalIntentV1; summary?: string; executed?: boolean } | undefined;
+  /**
+   * The thread's previous turn: its typed reading, a summary of its answer,
+   * whether it executed, and — for an answer whose SQL the AI drafted — that
+   * statement, so a follow-up edits it instead of starting over.
+   */
+  priorIntent(request: AgentRunRequest): { intent: AnalyticalIntentV1; summary?: string; executed?: boolean; sql?: string; drafted?: boolean } | undefined;
   guidance?(request: AgentRunRequest): string | undefined;
   /**
    * The request-bound context pack for this envelope (CTX-010): complete
@@ -1642,7 +1647,11 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         .map((entry) => entryPhysicalRelation(entry))
         .filter((relation): relation is string => Boolean(relation));
       const mentioned = [...`${reason ?? ''} ${previous?.error ?? ''}`.matchAll(/\b(?:column|relation|dimension|metric|measure):[A-Za-z0-9_.$"]+/g)].map((match) => match[0]);
-      let relations = [...new Set([...refs, ...mentioned].map(relationOf).filter((relation): relation is string => Boolean(relation)).concat(named))].slice(0, 6);
+      // A FOLLOW-UP TO AN AI-DRAFTED ANSWER starts from the tables that statement read.
+      const priorDraftRelations = prior?.drafted && prior.sql
+        ? relationsInSql(prior.sql).filter((relation) => (view.source?.relations ?? []).some((admitted) => physicalRelationIdentity(admitted.binding ? physicalRelationText(admitted.binding) : [admitted.schema, admitted.name].filter(Boolean).join('.')) === physicalRelationIdentity(relation)))
+        : [];
+      let relations = [...new Set([...refs, ...mentioned].map(relationOf).filter((relation): relation is string => Boolean(relation)).concat(named, priorDraftRelations))].slice(0, 6);
       // THE TABLES THE QUESTION IS ABOUT. With no reading to name them, the
       // question's own words choose them, the same relation-first discovery
       // context assembly uses; they are described before any SQL is written.
@@ -1725,6 +1734,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       const contextLines = [
         ...(contextText ? [`- conversation so far: ${contextText.slice(0, 600)}`] : []),
         ...(prior?.intent.reading ? [`- previous reading: ${prior.intent.reading.slice(0, 300)}${prior.summary ? `; its answer: ${prior.summary.slice(0, 300)}` : ''}`] : []),
+        ...(prior?.drafted && prior.sql ? [`- previous AI-drafted SQL in this conversation (this question follows up on it: edit it, and keep every restriction it applies unless the question changes it): ${prior.sql.replace(/\s+/g, ' ').slice(0, 1500)}`] : []),
         ...(briefing ? [`- domain ${briefing.name}${briefing.description ? `: ${briefing.description.slice(0, 300)}` : ''}${briefing.caveats.length ? `; caveats: ${briefing.caveats.slice(0, 3).join('; ')}` : ''}${briefing.requiredFilters.length ? `; required filters: ${briefing.requiredFilters.slice(0, 3).join('; ')}` : ''}`] : []),
         ...termLines,
         ...metricLines,

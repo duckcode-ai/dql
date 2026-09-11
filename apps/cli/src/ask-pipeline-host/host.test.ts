@@ -1146,6 +1146,39 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
     expect(prompts[0]).toContain('A governed metric listed in CONTEXT is computed exactly as it is defined there.');
   });
 
+  it('a follow-up to an AI-drafted answer hands the AI that statement to edit, with its tables', async () => {
+    const provider = drafter('NO_SQL: nothing to draft in this test.');
+    const statements: string[] = [];
+    const base = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-schema-lane-followup',
+      executor: { executeQuery: vi.fn(async (sql: string) => {
+        statements.push(sql);
+        if (sql.includes('information_schema.columns')) {
+          return { columns: [], rowCount: 4, executionTimeMs: 1, rows: ['opportunity_id', 'stage', 'competitor', 'amount'].map((column) => ({ table_schema: 'sales', table_name: 'opportunities', column_name: column, data_type: column === 'amount' ? 'DOUBLE' : 'VARCHAR' })) };
+        }
+        return { columns: [], rowCount: 0, executionTimeMs: 1, rows: [] };
+      }) } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => undefined,
+      getManifest: () => ({ snapshotId: 'snapshot:schema-lane-followup', manifest: manifest as never }),
+      selectProvider: async () => provider,
+      compileSemantic: async () => { throw new Error('no semantic layer'); },
+      priorIntent: () => ({
+        intent: { version: 1, kind: 'analytics', reading: 'Lost deals to Splunk.', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' } as never,
+        summary: '12 lost deals',
+        sql: "SELECT COUNT(*) AS lost_deals FROM sales.opportunities WHERE LOWER(stage) = 'closed lost' AND LOWER(competitor) = 'splunk'",
+        drafted: true,
+      }),
+    });
+    await base({
+      runId: 'run:schema-lane-followup',
+      request: { question: 'now only the ones over 90,000', requestedMode: 'ask', threadId: 'thread-followup' } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+    expect(provider.draftPrompts[0]).toContain("- previous AI-drafted SQL in this conversation (this question follows up on it: edit it, and keep every restriction it applies unless the question changes it): SELECT COUNT(*) AS lost_deals FROM sales.opportunities WHERE LOWER(stage) = 'closed lost' AND LOWER(competitor) = 'splunk'");
+    expect(provider.draftPrompts[0]).toContain('executable relation:sales.opportunities');
+  });
+
   it('a decline is an honest gap: nothing is executed beyond describing the table', async () => {
     const provider = drafter('NO_SQL: nothing in sales.opportunities records a lost deal count by quarter of the fiscal calendar.');
     const statements: string[] = [];

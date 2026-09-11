@@ -1,0 +1,319 @@
+{
+ "_comment": "Office-shaped golden fixture: Snowflake-style uppercase names in three schemas; the competitor lives in a different table (sfdc.opportunity.COMPETITOR_C) from the amounts (sales.opportunity_enhanced), and reps also tag competitors in salesloft.opportunities.TAGS. Fiscal year starts Feb 1 (FY26 = 2025-02-01..2026-01-31). Lost = IS_CLOSED and not IS_WON.",
+ "tables": {
+  "sales.opportunity_enhanced": {
+   "columns": [
+    {
+     "name": "OPPORTUNITY_ID",
+     "type": "text"
+    },
+    {
+     "name": "ACCOUNT_NAME",
+     "type": "text"
+    },
+    {
+     "name": "STAGE_NAME",
+     "type": "text"
+    },
+    {
+     "name": "AMOUNT",
+     "type": "decimal"
+    },
+    {
+     "name": "IS_CLOSED",
+     "type": "bool"
+    },
+    {
+     "name": "IS_WON",
+     "type": "bool"
+    },
+    {
+     "name": "CLOSE_DATE",
+     "type": "timestamp"
+    },
+    {
+     "name": "FISCAL_YEAR",
+     "type": "int"
+    }
+   ],
+   "rows": [
+    {
+     "OPPORTUNITY_ID": "006A01",
+     "ACCOUNT_NAME": "Acme Corp",
+     "STAGE_NAME": "Closed Lost",
+     "AMOUNT": 120000.0,
+     "IS_CLOSED": true,
+     "IS_WON": false,
+     "CLOSE_DATE": "2025-03-14 00:00:00",
+     "FISCAL_YEAR": 2026
+    },
+    {
+     "OPPORTUNITY_ID": "006A02",
+     "ACCOUNT_NAME": "Globex",
+     "STAGE_NAME": "Closed Lost",
+     "AMOUNT": 80000.0,
+     "IS_CLOSED": true,
+     "IS_WON": false,
+     "CLOSE_DATE": "2025-03-28 00:00:00",
+     "FISCAL_YEAR": 2026
+    },
+    {
+     "OPPORTUNITY_ID": "006A03",
+     "ACCOUNT_NAME": "Initech",
+     "STAGE_NAME": "Closed Lost",
+     "AMOUNT": 45000.0,
+     "IS_CLOSED": true,
+     "IS_WON": false,
+     "CLOSE_DATE": "2025-06-02 00:00:00",
+     "FISCAL_YEAR": 2026
+    },
+    {
+     "OPPORTUNITY_ID": "006A04",
+     "ACCOUNT_NAME": "Umbrella",
+     "STAGE_NAME": "Closed Won",
+     "AMOUNT": 150000.0,
+     "IS_CLOSED": true,
+     "IS_WON": true,
+     "CLOSE_DATE": "2025-06-20 00:00:00",
+     "FISCAL_YEAR": 2026
+    },
+    {
+     "OPPORTUNITY_ID": "006A05",
+     "ACCOUNT_NAME": "Hooli",
+     "STAGE_NAME": "Closed Lost",
+     "AMOUNT": 60000.0,
+     "IS_CLOSED": true,
+     "IS_WON": false,
+     "CLOSE_DATE": "2025-09-09 00:00:00",
+     "FISCAL_YEAR": 2026
+    },
+    {
+     "OPPORTUNITY_ID": "006A06",
+     "ACCOUNT_NAME": "Stark Industries",
+     "STAGE_NAME": "Closed Lost",
+     "AMOUNT": 30000.0,
+     "IS_CLOSED": true,
+     "IS_WON": false,
+     "CLOSE_DATE": "2025-09-30 00:00:00",
+     "FISCAL_YEAR": 2026
+    },
+    {
+     "OPPORTUNITY_ID": "006A07",
+     "ACCOUNT_NAME": "Wayne Enterprises",
+     "STAGE_NAME": "Closed Lost",
+     "AMOUNT": 95000.0,
+     "IS_CLOSED": true,
+     "IS_WON": false,
+     "CLOSE_DATE": "2026-01-15 00:00:00",
+     "FISCAL_YEAR": 2026
+    },
+    {
+     "OPPORTUNITY_ID": "006A08",
+     "ACCOUNT_NAME": "Soylent",
+     "STAGE_NAME": "Negotiation",
+     "AMOUNT": 70000.0,
+     "IS_CLOSED": false,
+     "IS_WON": false,
+     "CLOSE_DATE": "2026-01-20 00:00:00",
+     "FISCAL_YEAR": 2026
+    },
+    {
+     "OPPORTUNITY_ID": "006A09",
+     "ACCOUNT_NAME": "Tyrell",
+     "STAGE_NAME": "Closed Lost",
+     "AMOUNT": 110000.0,
+     "IS_CLOSED": true,
+     "IS_WON": false,
+     "CLOSE_DATE": "2025-01-10 00:00:00",
+     "FISCAL_YEAR": 2025
+    },
+    {
+     "OPPORTUNITY_ID": "006A10",
+     "ACCOUNT_NAME": "Cyberdyne",
+     "STAGE_NAME": "Closed Lost",
+     "AMOUNT": 40000.0,
+     "IS_CLOSED": true,
+     "IS_WON": false,
+     "CLOSE_DATE": "2024-11-05 00:00:00",
+     "FISCAL_YEAR": 2025
+    },
+    {
+     "OPPORTUNITY_ID": "006A11",
+     "ACCOUNT_NAME": "Wonka",
+     "STAGE_NAME": "Closed Won",
+     "AMOUNT": 55000.0,
+     "IS_CLOSED": true,
+     "IS_WON": true,
+     "CLOSE_DATE": "2025-02-11 00:00:00",
+     "FISCAL_YEAR": 2026
+    },
+    {
+     "OPPORTUNITY_ID": "006A12",
+     "ACCOUNT_NAME": "Oscorp",
+     "STAGE_NAME": "Closed Lost",
+     "AMOUNT": 25000.0,
+     "IS_CLOSED": true,
+     "IS_WON": false,
+     "CLOSE_DATE": "2026-02-03 00:00:00",
+     "FISCAL_YEAR": 2027
+    }
+   ]
+  },
+  "sfdc.opportunity": {
+   "columns": [
+    {
+     "name": "ID",
+     "type": "text"
+    },
+    {
+     "name": "COMPETITOR_C",
+     "type": "text"
+    },
+    {
+     "name": "LOSS_REASON_C",
+     "type": "text"
+    }
+   ],
+   "rows": [
+    {
+     "ID": "006A01",
+     "COMPETITOR_C": "Splunk",
+     "LOSS_REASON_C": "Price"
+    },
+    {
+     "ID": "006A02",
+     "COMPETITOR_C": "Splunk",
+     "LOSS_REASON_C": "Features"
+    },
+    {
+     "ID": "006A03",
+     "COMPETITOR_C": "Datadog",
+     "LOSS_REASON_C": "Price"
+    },
+    {
+     "ID": "006A04",
+     "COMPETITOR_C": "Splunk",
+     "LOSS_REASON_C": null
+    },
+    {
+     "ID": "006A05",
+     "COMPETITOR_C": "Splunk",
+     "LOSS_REASON_C": "Timing"
+    },
+    {
+     "ID": "006A06",
+     "COMPETITOR_C": null,
+     "LOSS_REASON_C": "No budget"
+    },
+    {
+     "ID": "006A07",
+     "COMPETITOR_C": "Splunk",
+     "LOSS_REASON_C": "Price"
+    },
+    {
+     "ID": "006A08",
+     "COMPETITOR_C": "Splunk",
+     "LOSS_REASON_C": null
+    },
+    {
+     "ID": "006A09",
+     "COMPETITOR_C": "Splunk",
+     "LOSS_REASON_C": "Price"
+    },
+    {
+     "ID": "006A10",
+     "COMPETITOR_C": "Datadog",
+     "LOSS_REASON_C": "Features"
+    },
+    {
+     "ID": "006A11",
+     "COMPETITOR_C": "Datadog",
+     "LOSS_REASON_C": null
+    },
+    {
+     "ID": "006A12",
+     "COMPETITOR_C": "Splunk",
+     "LOSS_REASON_C": "Price"
+    }
+   ]
+  },
+  "salesloft.opportunities": {
+   "columns": [
+    {
+     "name": "OPPORTUNITY_ID",
+     "type": "text"
+    },
+    {
+     "name": "TAGS",
+     "type": "text"
+    },
+    {
+     "name": "CUSTOM_FIELDS",
+     "type": "text"
+    }
+   ],
+   "rows": [
+    {
+     "OPPORTUNITY_ID": "006A01",
+     "TAGS": "competitor:splunk;renewal",
+     "CUSTOM_FIELDS": "{\"segment\": \"enterprise\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A02",
+     "TAGS": "competitor:splunk",
+     "CUSTOM_FIELDS": "{\"segment\": \"enterprise\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A03",
+     "TAGS": "competitor:datadog",
+     "CUSTOM_FIELDS": "{\"segment\": \"mid-market\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A04",
+     "TAGS": "competitor:splunk;expansion",
+     "CUSTOM_FIELDS": "{\"segment\": \"enterprise\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A05",
+     "TAGS": "Splunk displacement",
+     "CUSTOM_FIELDS": "{\"segment\": \"mid-market\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A06",
+     "TAGS": null,
+     "CUSTOM_FIELDS": "{\"segment\": \"mid-market\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A07",
+     "TAGS": "competitor:splunk",
+     "CUSTOM_FIELDS": "{\"segment\": \"enterprise\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A08",
+     "TAGS": "competitor:splunk",
+     "CUSTOM_FIELDS": "{\"segment\": \"mid-market\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A09",
+     "TAGS": "competitor:splunk",
+     "CUSTOM_FIELDS": "{\"segment\": \"enterprise\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A10",
+     "TAGS": "competitor:datadog",
+     "CUSTOM_FIELDS": "{\"segment\": \"mid-market\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A11",
+     "TAGS": "competitor:datadog",
+     "CUSTOM_FIELDS": "{\"segment\": \"mid-market\"}"
+    },
+    {
+     "OPPORTUNITY_ID": "006A12",
+     "TAGS": "competitor:splunk",
+     "CUSTOM_FIELDS": "{\"segment\": \"mid-market\"}"
+    }
+   ]
+  }
+ }
+}
