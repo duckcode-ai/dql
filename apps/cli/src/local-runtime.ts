@@ -360,6 +360,8 @@ import {
   setProcessDefaultDeadlineScale,
   upgradeVectorIndexForProject,
   openMetadataCatalog,
+  openActiveKnowledgeSnapshot,
+  domainContextSearchDomains,
   type DomainContextEnvelope,
   type ResolveDomainContextInput,
   defaultKgPath,
@@ -6104,6 +6106,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // the resolved envelope, the selected skills and approved hints, the domain
     // briefing; no reranker and no fit-confirm call, so an Ask turn gains no
     // dispatch. The vocabulary the interpreter reads is built from it.
+    // The catalog's own search, held to the request's domains (CTX-001): the
+    // SQL drafter finds tables by names, descriptions and documented columns.
+    searchCatalog: (_request, envelope, query, options) => {
+      const catalog = openActiveKnowledgeSnapshot(projectRoot);
+      try {
+        return catalog.searchObjects({ query, objectTypes: options.objectTypes, domains: domainContextSearchDomains(envelope), limit: options.limit })
+          .map((object) => {
+            const relation = typeof object.payload?.relation === 'string' ? object.payload.relation : typeof object.payload?.model === 'string' ? object.payload.model : undefined;
+            return { objectType: object.objectType, name: object.name, ...(relation ? { relation } : {}), ...(object.description ? { description: object.description } : {}) };
+          });
+      } finally {
+        catalog.close();
+      }
+    },
     buildContextPack: async (request, envelope) => {
       const snapshot = projectSnapshot();
       const followUp = resolveAgentFollowUpContext(request.conversationContext, request.question);

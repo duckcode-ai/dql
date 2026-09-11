@@ -4,7 +4,7 @@ import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeaila
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, createAgentRunBudget, parseIntent, physicalRelationBinding, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import { missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
+import { relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -311,6 +311,20 @@ describe('a column is found by the words of its name', () => {
       ],
     } as never;
     expect(relationsWithColumnWords(source, missingFieldWords('No competitor column (such as PRIMARY_COMPETITOR) is available'), 'lost to a competitor', ['sales.opportunities'])).toEqual(['crm.deal_notes', 'crm.accounts']);
+  });
+});
+
+describe('catalog hits are kept only inside the request scope', () => {
+  it('maps a documented column to its admitted relation and drops a relation the scope does not admit', () => {
+    const scoped = { relations: [
+      { schema: 'sfdc', name: 'opportunity', columns: [{ name: 'COMPETITOR_C' }] },
+      { schema: 'sales', name: 'opportunity_enhanced', columns: [{ name: 'AMOUNT' }] },
+    ] } as never;
+    expect(relationsFromCatalogHits([
+      { objectType: 'dbt_column', name: 'COMPETITOR_C', relation: 'nr_silver.sfdc.opportunity' },
+      { objectType: 'dbt_column', name: 'SECRET', relation: 'finance.payroll' },
+      { objectType: 'dbt_model', name: 'opportunity_enhanced', relation: 'sales.opportunity_enhanced' },
+    ], scoped, ['sales.opportunity_enhanced'])).toEqual(['sfdc.opportunity']);
   });
 });
 
@@ -1000,6 +1014,126 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
     await ask(route);
     expect(prompts[0]).toContain('crm.deal_notes');
     expect(prompts[0]).toContain('CONTEXT:\n- conversation so far: The user said the competitor is kept in the deal notes rival vendor field.');
+  });
+
+  it('the catalog search chooses a table the question never names, before anything is drafted', async () => {
+    const wide = { sources: {
+      opportunities: { name: 'opportunities', origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: 'model.opportunities', schema: 'sales', columns: { deal_ref: { name: 'deal_ref' }, stage: { name: 'stage' } } } },
+      deal_notes: { name: 'deal_notes', origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: 'model.deal_notes', schema: 'crm', columns: { deal_ref: { name: 'deal_ref' }, rival_vendor: { name: 'rival_vendor' } } } },
+    } };
+    const prompts: string[] = [];
+    const queries: string[] = [];
+    const provider: AgentProvider = {
+      name: 'ollama', available: async () => true,
+      generate: async (messages) => {
+        if (!messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) return unreadable;
+        prompts.push(messages.map((message) => message.content).join('\n'));
+        return 'NO_SQL: nothing to draft in this test.';
+      },
+    };
+    const route = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-schema-lane-catalog',
+      executor: { executeQuery: vi.fn(async (sql: string) => {
+        const rows = sql.includes('information_schema.columns') ? [
+          ...(/'opportunities'/.test(sql) ? ['deal_ref', 'stage'].map((column) => ({ table_schema: 'sales', table_name: 'opportunities', column_name: column, data_type: 'VARCHAR' })) : []),
+          ...(/'deal_notes'/.test(sql) ? ['deal_ref', 'rival_vendor'].map((column) => ({ table_schema: 'crm', table_name: 'deal_notes', column_name: column, data_type: 'VARCHAR' })) : []),
+        ] : [];
+        return { columns: [], rowCount: rows.length, executionTimeMs: 1, rows };
+      }) } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => undefined,
+      getManifest: () => ({ snapshotId: 'snapshot:schema-lane-catalog', manifest: wide as never }),
+      selectProvider: async () => provider,
+      compileSemantic: async () => { throw new Error('no semantic layer'); },
+      priorIntent: () => undefined,
+      searchCatalog: (_request, _envelope, query) => { queries.push(query); return [{ objectType: 'dbt_column', name: 'rival_vendor', relation: 'crm.deal_notes', description: 'the competitor named on the deal' }]; },
+    });
+    await ask(route);
+    expect(queries[0]).toContain('How many opportunities did we lose to Splunk?');
+    expect(prompts[0]).toContain('crm.deal_notes');
+  });
+
+  it('a value the question states is looked for in allowlisted text columns, and where it lives reaches the draft', async () => {
+    const wide = { sources: {
+      opportunities: { name: 'opportunities', origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: 'model.opportunities', schema: 'sales', columns: { deal_ref: { name: 'deal_ref' }, stage: { name: 'stage' } } } },
+      deal_notes: { name: 'deal_notes', origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: 'model.deal_notes', schema: 'crm', columns: { deal_ref: { name: 'deal_ref' }, tags: { name: 'tags' } } } },
+    } };
+    const prompts: string[] = [];
+    const probed: string[] = [];
+    const provider: AgentProvider = {
+      name: 'ollama', available: async () => true,
+      generate: async (messages) => {
+        if (!messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) return unreadable;
+        prompts.push(messages.map((message) => message.content).join('\n'));
+        return 'NO_SQL: nothing to draft in this test.';
+      },
+    };
+    const route = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-schema-lane-values',
+      executor: { executeQuery: vi.fn(async (sql: string) => {
+        if (sql.includes(' LIKE ')) { probed.push(sql); return { columns: ['hit'], rowCount: 1, executionTimeMs: 1, rows: sql.includes('tags') ? [{ hit: 1 }] : [] }; }
+        const rows = sql.includes('information_schema.columns') ? [
+          ...(/'opportunities'/.test(sql) ? ['deal_ref', 'stage'].map((column) => ({ table_schema: 'sales', table_name: 'opportunities', column_name: column, data_type: 'VARCHAR' })) : []),
+          ...(/'deal_notes'/.test(sql) ? ['deal_ref', 'tags'].map((column) => ({ table_schema: 'crm', table_name: 'deal_notes', column_name: column, data_type: 'VARCHAR' })) : []),
+        ] : [];
+        return { columns: [], rowCount: rows.length, executionTimeMs: 1, rows };
+      }) } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => undefined,
+      getManifest: () => ({ snapshotId: 'snapshot:schema-lane-values', manifest: wide as never }),
+      selectProvider: async () => provider,
+      compileSemantic: async () => { throw new Error('no semantic layer'); },
+      priorIntent: () => undefined,
+      literalProbeAllowed: (_relation, column) => column === 'tags',
+    });
+    const result = await ask(route);
+    expect(probed).toHaveLength(1);
+    expect(probed[0]).toMatch(/FROM "?crm"?\."?deal_notes"? WHERE LOWER\(CAST\("?tags"? AS VARCHAR\)\) LIKE '%splunk%'$/);
+    expect(prompts[0]).toContain('- the value "Splunk" occurs in crm.deal_notes.tags');
+    expect(prompts[0]).toContain('crm.deal_notes');
+    expect(result.askPipelineReceipt?.story?.some((entry) => entry.title === 'Found where "Splunk" is stored: crm.deal_notes.tags')).toBe(true);
+  });
+
+  it('a governed metric the question names reaches the draft with its definition', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{ name: 'lost_amount', label: 'Lost amount', description: 'Amount on closed lost opportunities', domain: 'sales', sql: 'amount', type: 'sum', metricType: 'simple', table: 'sales.opportunities' }],
+      dimensions: [],
+    });
+    const prompts: string[] = [];
+    const provider: AgentProvider = {
+      name: 'ollama', available: async () => true,
+      generate: async (messages) => {
+        if (!messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) return unreadable;
+        prompts.push(messages.map((message) => message.content).join('\n'));
+        return 'NO_SQL: nothing to draft in this test.';
+      },
+    };
+    const statements: string[] = [];
+    const base = routeFor(provider, statements);
+    void base;
+    const route = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-schema-lane-metric',
+      executor: { executeQuery: vi.fn(async (sql: string) => {
+        if (sql.includes('information_schema.columns')) {
+          return { columns: [], rowCount: 4, executionTimeMs: 1, rows: ['opportunity_id', 'stage', 'competitor', 'amount'].map((column) => ({ table_schema: 'sales', table_name: 'opportunities', column_name: column, data_type: column === 'amount' ? 'DOUBLE' : 'VARCHAR' })) };
+        }
+        return { columns: [], rowCount: 0, executionTimeMs: 1, rows: [] };
+      }) } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => semanticLayer,
+      getManifest: () => ({ snapshotId: 'snapshot:schema-lane-metric', manifest: manifest as never }),
+      selectProvider: async () => provider,
+      semanticEngine: async () => 'native',
+      compileSemantic: async () => { throw new Error('not compiled in this test'); },
+      priorIntent: () => undefined,
+    });
+    await route({
+      runId: 'run:schema-lane-metric',
+      request: { question: 'What was the lost amount to Splunk?', requestedMode: 'ask' } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+    expect(prompts[0]).toContain('- governed metric Lost amount:');
+    expect(prompts[0]).toContain('A governed metric listed in CONTEXT is computed exactly as it is defined there.');
   });
 
   it('a decline is an honest gap: nothing is executed beyond describing the table', async () => {

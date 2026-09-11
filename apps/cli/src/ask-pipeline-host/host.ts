@@ -122,6 +122,13 @@ export interface AskPipelineHostDeps {
   buildContextPack?(request: AgentRunRequest, envelope: DomainContextEnvelope): Promise<LocalContextPack | undefined>;
   /** The thread's compacted memory for a follow-up. */
   conversation?(request: AgentRunRequest): { summary?: string; pendingClarification?: string } | undefined;
+  /**
+   * The catalog's own search (full text over names, descriptions and documented
+   * columns), held to the request's domains. The SQL drafter finds the tables a
+   * question or a missing field names with it; a hit is kept only when the
+   * request's projected source admits its relation.
+   */
+  searchCatalog?(request: AgentRunRequest, envelope: DomainContextEnvelope, query: string, options: { objectTypes: string[]; limit: number }): Array<{ objectType: string; name: string; relation?: string; description?: string }>;
   buildIdentity?(): Record<string, string>;
   maxRows?: number;
   /** Run the review-required SQL tier on its own when nothing governed prepares (default true); `agent.askAutoExploration: false` keeps it opt-in. */
@@ -540,6 +547,37 @@ export function relationsWithColumnWords(
     .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name))
     .slice(0, max)
     .map((item) => item.name);
+}
+
+/**
+ * Catalog hits (a documented column, a model) named as the relations the
+ * request's projected source admits, in hit order. A hit whose relation is
+ * outside the source is outside the envelope and is dropped.
+ */
+export function relationsFromCatalogHits(
+  hits: Array<{ objectType: string; name: string; relation?: string }>,
+  scoped: Pick<VocabularySource, 'relations'> | undefined,
+  exclude: string[],
+  max = 3,
+): string[] {
+  const tail = (value: string) => parsePhysicalIdentifier(value).slice(-2).map((part) => part.value.toLowerCase()).join('.');
+  const admitted = new Map<string, string>();
+  for (const relation of scoped?.relations ?? []) {
+    const name = relation.binding ? physicalRelationText(relation.binding) : [relation.schema, relation.name].filter(Boolean).join('.');
+    admitted.set(tail(name), name);
+    if (!admitted.has(relation.name.toLowerCase())) admitted.set(relation.name.toLowerCase(), name);
+  }
+  const excluded = new Set(exclude.map((name) => physicalRelationIdentity(name)));
+  const picked: string[] = [];
+  for (const hit of hits) {
+    const raw = hit.relation ?? (hit.objectType === 'dbt_column' ? undefined : hit.name);
+    if (!raw) continue;
+    const name = admitted.get(tail(raw)) ?? admitted.get(raw.toLowerCase());
+    if (!name || excluded.has(physicalRelationIdentity(name)) || picked.includes(name)) continue;
+    picked.push(name);
+    if (picked.length >= max) break;
+  }
+  return picked;
 }
 
 const MISSING_WORD_STOP = new Set(['column', 'columns', 'table', 'tables', 'relation', 'relations', 'field', 'fields', 'listed', 'available', 'such', 'that', 'this', 'which', 'with', 'from', 'there', 'none', 'into', 'filter', 'value', 'values', 'named', 'name', 'holds', 'hold', 'question', 'asked', 'data', 'these', 'those', 'what', 'where', 'records', 'record', 'cannot', 'answer', 'nothing', 'missing', 'only', 'contain', 'contains']);
@@ -1614,6 +1652,17 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       const conversation = deps.conversation?.(request);
       const contextText = [conversation?.summary, conversation?.pendingClarification].filter(Boolean).join(' ');
       const open = intent?.unresolved.map((item) => `${item.clause} ${item.question ?? ''}`).join(' ') ?? '';
+      // THE CATALOG'S OWN SEARCH first: names, descriptions and documented
+      // columns, held to the request's domains, kept only when admitted.
+      const catalogPick = (text: string, exclude: string[], max: number): string[] => {
+        if (!deps.searchCatalog || !text.trim()) return [];
+        try {
+          const hits = deps.searchCatalog(request, view.envelope, text, { objectTypes: ['dbt_column', 'dbt_model', 'dbt_source', 'warehouse_table'], limit: 40 });
+          return relationsFromCatalogHits(hits, view.source, exclude, max);
+        } catch { return []; }
+      };
+      const catalogPicked = catalogPick(`${question} ${open} ${contextText}`, relations, 3);
+      for (const relation of catalogPicked) if (relations.length < 5) relations.push(relation);
       if (relations.length < 4) {
         try {
           // THE ENVELOPE HOLDS: drafted SQL chooses among the relations this
@@ -1642,7 +1691,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       // Only tables whose columns are known can be drafted over.
       relations = relations.filter((relation) => current.entries.some((item) => item.kind === 'column' && (() => { const physical = entryPhysicalRelation(item); return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(relation); })()));
       if (relations.length === 0) return { error: 'the tables that match the question could not be described on this connection' };
-      hostStep({ phase: 'schema', title: `Chose ${relations.length === 1 ? 'the table' : 'the tables'} ${relations.join(', ')}`, state: 'done', detail: `picked from ${refs.length ? 'the fields the reading named' : 'the words of the question'}${needsColumns.length ? `; columns of ${needsColumns.slice(0, 4).join(', ')} read from the warehouse` : ''}` });
+      hostStep({ phase: 'schema', title: `Chose ${relations.length === 1 ? 'the table' : 'the tables'} ${relations.join(', ')}`, state: 'done', detail: `picked from ${refs.length ? 'the fields the reading named' : 'the words of the question'}${catalogPicked.length ? `; found by the catalog search: ${catalogPicked.join(', ')}` : ''}${needsColumns.length ? `; columns of ${needsColumns.slice(0, 4).join(', ')} read from the warehouse` : ''}` });
       // THE CONTEXT THE DRAFT READS: what the user said, the previous reading,
       // and what the project says about this data (domain notes, business
       // terms the question uses, approved hints).
@@ -1656,11 +1705,29 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         .map((hint) => hint.lesson?.rule || hint.guidance)
         .filter((rule): rule is string => Boolean(rule))
         .map((rule) => `- approved hint: ${rule.slice(0, 300)}`);
+      // A GOVERNED METRIC the question or the reading names is computed the
+      // governed way: its definition is part of the context, never re-invented.
+      const measureRefs = new Set(intent ? intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]) : []);
+      const metricLines = current.entries
+        .filter((entry) => (entry.kind === 'metric' || entry.kind === 'measure') && !entry.engineOnly && (measureRefs.has(entry.ref) || [entry.name.replace(/_/g, ' '), entry.label ?? '', ...entry.aliases].some((name) => name.length > 3 && spoken.includes(name.toLowerCase()))))
+        .slice(0, 5)
+        .map((entry) => {
+          const physical = entry.physical;
+          const definition = entry.derived
+            ? `${entry.derived.expr} over ${entry.derived.inputs.map((input) => `${input.alias} = ${input.ref}`).join(', ')}`
+            : physical?.expr
+              ? physical.expr
+              : physical?.column
+                ? `${(physical.aggregate ?? entry.aggregation ?? 'sum').toUpperCase()}(${physical.column})`
+                : entry.expr ?? 'as described';
+          return `- governed ${entry.kind} ${entry.label ?? entry.name}: ${definition}${physical?.relation ? ` on ${physical.relation}` : ''}${entry.timeRef ? `, time ${entry.timeRef}` : ''}${entry.description ? ` (${entry.description.slice(0, 120)})` : ''}`;
+        });
       const contextLines = [
         ...(contextText ? [`- conversation so far: ${contextText.slice(0, 600)}`] : []),
         ...(prior?.intent.reading ? [`- previous reading: ${prior.intent.reading.slice(0, 300)}${prior.summary ? `; its answer: ${prior.summary.slice(0, 300)}` : ''}`] : []),
         ...(briefing ? [`- domain ${briefing.name}${briefing.description ? `: ${briefing.description.slice(0, 300)}` : ''}${briefing.caveats.length ? `; caveats: ${briefing.caveats.slice(0, 3).join('; ')}` : ''}${briefing.requiredFilters.length ? `; required filters: ${briefing.requiredFilters.slice(0, 3).join('; ')}` : ''}`] : []),
         ...termLines,
+        ...metricLines,
         ...hintLines,
       ];
       const attemptDraft = async (note?: string): Promise<Awaited<ReturnType<NonNullable<PrepareDeps['draftSql']>>>> => {
@@ -1689,7 +1756,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         }
         const dialect = connection?.driver ?? 'duckdb';
         const messages: AgentMessage[] = [
-          { role: 'system', content: `You write exactly ONE read-only SQL statement for ${dialect} that answers the question from the tables below. No certified block or governed metric answers it, so you choose the tables, columns, joins and filters. Use ONLY the executable physical relations and columns listed below, spelled exactly as listed (including database and quoting where shown). Join two relations only on columns that exist in both. Apply every restriction the question states; when unsure how a text value is stored, match it case-insensitively; aggregate at the grain the question asks for; order and limit as it asks; never return more than 500 rows. No DDL or DML, no comments, no explanation. The CONTEXT lines are what the user and the project have said about this data (definitions, rules, where values are kept): follow them, and use a table or field the user names as named. When no column is dedicated to a restriction the question states, apply it to the text, tag, category or custom field that most plausibly holds that value, matched case-insensitively (a partial match is allowed). Reply exactly NO_SQL: followed by one sentence naming what is missing only when no listed column could hold a measure or a restriction the question asks for, and never substitute a different measure for the one asked. Otherwise return the SQL only.` },
+          { role: 'system', content: `You write exactly ONE read-only SQL statement for ${dialect} that answers the question from the tables below. No certified block or governed metric answers it, so you choose the tables, columns, joins and filters. Use ONLY the executable physical relations and columns listed below, spelled exactly as listed (including database and quoting where shown). Join two relations only on columns that exist in both. Apply every restriction the question states; when unsure how a text value is stored, match it case-insensitively; aggregate at the grain the question asks for; order and limit as it asks; never return more than 500 rows. No DDL or DML, no comments, no explanation. The CONTEXT lines are what the user and the project have said about this data (definitions, rules, where values are kept): follow them, and use a table or field the user names as named. A governed metric listed in CONTEXT is computed exactly as it is defined there. When no column is dedicated to a restriction the question states, apply it to the text, tag, category or custom field that most plausibly holds that value, matched case-insensitively (a partial match is allowed). Reply exactly NO_SQL: followed by one sentence naming what is missing only when no listed column could hold a measure or a restriction the question asks for, and never substitute a different measure for the one asked. Otherwise return the SQL only.` },
           { role: 'user', content: `QUESTION: ${question}\n${reason ? `WHY NO GOVERNED ANSWER: ${reason.slice(0, 600)}\n` : ''}${intent ? `READING: ${intent.reading}\nINTENT: ${JSON.stringify({ measures: intent.measures, groupBy: intent.groupBy, display: intent.display, filters: intent.filters, time: intent.time ?? null, ordering: intent.ordering ?? null, limit: intent.limit ?? null })}\n` : ''}${contextLines.length ? `CONTEXT:\n${contextLines.join('\n')}\n` : ''}${note ? `NOTE: ${note}\n` : ''}${previous ? `PREVIOUS SQL (the warehouse rejected it; fix it):\n${previous.sql}\nWAREHOUSE ERROR: ${previous.error.slice(0, 600)}\n` : ''}RELATIONS AND COLUMNS:\n${cards.join('\n')}` },
         ];
         const draftStarted = Date.now();
@@ -1796,6 +1863,64 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
           ],
         };
       };
+      // WHERE A STATED VALUE LIVES. A name the question states ("Splunk") is
+      // looked for in the stored values of text columns the project allows to
+      // be searched (agent.runtimeValueGrounding.searchSafeColumns). The probe
+      // answers only whether the value occurs, never what else is stored, and
+      // a column nobody allowlisted is never read.
+      const textValues = stated.filter((item) => item.kind === 'text').slice(0, 3);
+      if (textValues.length > 0 && connection) {
+        const allowed = deps.literalProbeAllowed;
+        const chosen = new Set(relations.map((relation) => physicalRelationIdentity(relation)));
+        const asked = relevanceWords([`${question} ${open} ${contextText}`], true);
+        const candidates: Array<{ relation: string; column: string; rank: number }> = [];
+        if (allowed) {
+          for (const relation of view.source?.relations ?? []) {
+            const name = relation.binding ? physicalRelationText(relation.binding) : [relation.schema, relation.name].filter(Boolean).join('.');
+            for (const column of [...relation.columns, ...(relation.embeddedColumns ?? [])]) {
+              if (column.dataType && !/char|text|string|variant|array|json|object/i.test(column.dataType)) continue;
+              if (!allowed(name, column.name)) continue;
+              const overlap = [...relevanceWords([column.name, column.description], true)].filter((word) => asked.has(word)).length;
+              candidates.push({ relation: name, column: column.name, rank: (chosen.has(physicalRelationIdentity(name)) ? 10 : 0) + overlap });
+            }
+          }
+        }
+        const probes = candidates.sort((left, right) => right.rank - left.rank || left.relation.localeCompare(right.relation)).slice(0, 6);
+        const probeDialect = getDialect(connection.driver);
+        const quoteName = (value: string) => renderPhysicalIdentifier(value, connection.driver, (part) => probeDialect.quoteIdentifier(part));
+        for (const item of textValues) {
+          if (probes.length === 0) {
+            hostStep({ phase: 'search', title: `Did not look for "${item.value}" in stored values`, state: 'missed', detail: 'no text column of these tables is allowlisted for value search (agent.runtimeValueGrounding.searchSafeColumns); the AI chooses the field from names and descriptions' });
+            continue;
+          }
+          let found: { relation: string; column: string } | undefined;
+          for (const probe of probes) {
+            const relationSql = parsePhysicalIdentifier(probe.relation).map((part) => part.quoted ? `"${part.value.replace(/"/g, '""')}"` : quoteName(part.value)).join('.');
+            // The value is the question's own text: quotes are escaped and a
+            // wildcard in it is dropped, so it can neither break nor widen the probe.
+            const pattern = item.value.toLowerCase().replace(/[%_]/g, '').replace(/'/g, "''");
+            try {
+              if (await probeOne(`SELECT 1 AS hit FROM ${relationSql} WHERE LOWER(CAST(${quoteName(probe.column)} AS VARCHAR)) LIKE '%${pattern}%'`)) { found = probe; break; }
+            } catch { /* a column that cannot be read is not where the value lives */ }
+          }
+          if (!found) {
+            hostStep({ phase: 'search', title: `Looked for "${item.value}" in stored values: not found`, state: 'missed', detail: `searched ${probes.map((probe) => `${probe.relation}.${probe.column}`).join(', ')}` });
+            continue;
+          }
+          contextLines.push(`- the value "${item.value}" occurs in ${found.relation}.${found.column}`);
+          hostStep({ phase: 'search', title: `Found where "${item.value}" is stored: ${found.relation}.${found.column}`, state: 'done' });
+          if (!relations.some((relation) => physicalRelationIdentity(relation) === physicalRelationIdentity(found!.relation)) && relations.length < 6) {
+            relations.push(found.relation);
+            const hasColumns = current.entries.some((entry) => entry.kind === 'column' && (() => { const physical = entryPhysicalRelation(entry); return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(found!.relation); })());
+            if (!hasColumns) {
+              try {
+                const described = await describeRelations([found.relation]);
+                if (described.length > 0) { current = mergeDiscoveredRelations(current, described); requestVocabulary = current; }
+              } catch { /* drafted over what is described */ }
+            }
+          }
+        }
+      }
       const shown = [...relations];
       const first = await attemptDraft();
       if (!first || !('declined' in first)) return finalize(first);
@@ -1806,7 +1931,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       let wider: string[] = [];
       try {
         const source = view.source ?? (await baseSourceFor(connection)).source;
-        wider = relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, relations, 3);
+        const fromCatalog = catalogPick(words.join(' '), relations, 3);
+        wider = [...fromCatalog, ...relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, [...relations, ...fromCatalog], 3)].slice(0, 3);
       } catch { wider = []; }
       if (wider.length > 0) {
         try {
