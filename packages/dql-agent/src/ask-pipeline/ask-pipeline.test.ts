@@ -2255,3 +2255,98 @@ describe('the relations a reading names are described before it is prepared', ()
     expect(outcome.receipt.refusals.some((refusal) => refusal.code === 'join_path_required')).toBe(true);
   });
 });
+
+import { resolveIntent as resolveIntentForOffice, validateIntentRefs as validateRefsForOffice } from './resolve-intent.js';
+
+describe('office lost-opportunities readings (1.15.5 screenshots)', () => {
+  const Q = 'Lost opportunities count, Lost Amount by month for fiscal year FY26 and competitor involved is Splunk';
+  const OPP = 'SALESLOFT_PRODUCTION.opportunities';
+  const col = (name: string) => `column:${OPP}.${name}`;
+  const vocabulary = buildVocabularyIndex({
+    relations: [
+      { schema: 'SALESLOFT_PRODUCTION', name: 'opportunities', columnCompleteness: 'complete', columns: [
+        { name: 'ID', dataType: 'VARCHAR' }, { name: 'AMOUNT', dataType: 'NUMBER' }, { name: 'IS_CLOSED', dataType: 'BOOLEAN' }, { name: 'IS_WON', dataType: 'BOOLEAN' },
+        { name: 'CLOSE_DATE', dataType: 'DATE' }, { name: 'TAGS', dataType: 'VARCHAR' }, { name: 'CUSTOM_FIELDS', dataType: 'VARCHAR' },
+      ] },
+      { schema: 'sfdc', name: 'opportunity', columnCompleteness: 'complete', columns: [{ name: 'COMPETITOR_C', dataType: 'VARCHAR' }, { name: 'AMOUNT', dataType: 'NUMBER' }] },
+    ],
+  });
+  const lost = [{ ref: col('IS_CLOSED'), op: 'eq', values: [true], source: 'question' }, { ref: col('IS_WON'), op: 'eq', values: [false], source: 'question' }];
+  const measures = [
+    { ref: col('ID'), aggregation: 'count', alias: 'lost_opportunities_count', scope: lost },
+    { ref: col('AMOUNT'), aggregation: 'sum', alias: 'lost_amount', scope: lost },
+  ];
+  const informed = (extra: Record<string, unknown> = {}) => ({
+    version: 1, kind: 'analytics', reading: 'Count of lost opportunities and total lost amount by month for fiscal year FY26, where the competitor involved is Splunk.',
+    measures, groupBy: [{ ref: col('CLOSE_DATE'), role: 'time', grain: 'month' }], display: [],
+    filters: [{ ref: col('TAGS'), op: 'eq', values: ['Splunk'], source: 'question' }],
+    time: { ref: col('CLOSE_DATE'), grain: 'month', window: { start: '2025-02-01', end: '2026-02-01', expression: 'fiscal year FY26' } },
+    expectedShape: 'grouped', unresolved: [], provenance: {}, ...extra,
+  });
+
+  it('a reading made before the columns were fetched does not hold the informed reading to its stale obligations', async () => {
+    const uninformed = JSON.stringify({
+      version: 1, kind: 'analytics', reading: 'Count of lost opportunities and lost amount; no date or competitor field is visible.', measures, groupBy: [], display: [], filters: [], expectedShape: 'grouped', provenance: {},
+      unresolved: [
+        { clause: 'fiscal year FY26 time window', options: [], material: true, question: 'Which date column represents the close date? The vocabulary does not expose a time dimension on the opportunity relations.' },
+        { clause: 'competitor involved is Splunk', options: [], material: true },
+      ],
+    });
+    const replies = [uninformed, JSON.stringify(informed())];
+    let calls = 0;
+    const provider = { name: 'scripted', available: async () => true, generate: async () => replies[Math.min(calls++, replies.length - 1)]! };
+    const result = await resolveIntentForOffice({
+      question: Q, vocabulary, provider: provider as never, maxAttempts: 2, clauseCoverage: false,
+      expand: async () => ({ vocabulary, cards: [`- ${col('CLOSE_DATE')} [time]`, `- ${col('TAGS')} [text]`], note: 'discovery' }),
+    });
+    expect(calls).toBe(2);
+    expect(result.status).toBe('resolved');
+    if (result.status === 'resolved') {
+      expect(result.intent.unresolved.filter((clause) => clause.origin === 'ledger')).toEqual([]);
+      expect(result.intent.time?.ref).toBe(col('CLOSE_DATE'));
+    }
+  });
+
+  it('a restriction the reading is unsure where to apply is asked, with the candidate fields, and nothing runs', async () => {
+    const reply = JSON.stringify(informed({ unresolved: [{ clause: 'competitor involved is Splunk', options: [col('TAGS'), col('CUSTOM_FIELDS')], material: false }] }));
+    const outcome = await runAskPipeline({
+      question: Q, vocabulary, provider: { name: 'ollama', available: async () => true, generate: async () => reply }, clauseCoverage: false, explorationAuto: false,
+      prepareDeps: { dialect: { quoteIdentifier: (name) => `"${name}"`, dateTrunc: (grain, expr) => `DATE_TRUNC('${grain}', ${expr})`, limitClause: (limit) => `LIMIT ${limit}` } },
+      executeDeps: { run: async () => { throw new Error('must not execute'); } },
+    });
+    expect(outcome.kind).toBe('clarify');
+    if (outcome.kind === 'clarify') expect(outcome.options.map((option) => option.ref).sort()).toEqual([col('CUSTOM_FIELDS'), col('TAGS')]);
+  });
+
+  it('choosing the field moves the restriction onto it instead of grouping by it', () => {
+    const intent = parseIntent(informed({ unresolved: [{ clause: 'competitor involved is Splunk', options: [col('TAGS'), col('CUSTOM_FIELDS')], material: true }] })).intent!;
+    applySelectedMeaning(intent, { ref: col('CUSTOM_FIELDS') }, vocabulary);
+    expect(intent.filters.map((filter) => [filter.ref, filter.op, filter.values])).toEqual([[col('CUSTOM_FIELDS'), 'eq', ['Splunk']]]);
+    expect(intent.groupBy.map((group) => group.ref)).toEqual([col('CLOSE_DATE')]);
+  });
+
+  it('a column named with its database resolves to the column of that table; an unknown table still does not', () => {
+    const reading = parseIntent({
+      version: 1, kind: 'analytics', reading: 'Opportunity amount by competitor.', measures: [{ ref: 'column:sfdc.opportunity.AMOUNT', aggregation: 'sum' }],
+      groupBy: [{ ref: 'column:nr_silver_datalake_prod.sfdc.opportunity.COMPETITOR_C', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped',
+    }).intent!;
+    const validation = validateRefsForOffice(reading, vocabulary);
+    expect(validation.problems.filter((problem) => problem.path.startsWith('groupBy'))).toEqual([]);
+    expect(validation.intent.groupBy[0]?.ref).toBe('column:sfdc.opportunity.COMPETITOR_C');
+    const unknown = parseIntent({ ...JSON.parse(JSON.stringify(reading)), groupBy: [{ ref: 'column:nr_silver_datalake_prod.sfdc.nothere.COMPETITOR_C', role: 'categorical' }] }).intent!;
+    expect(validateRefsForOffice(unknown, vocabulary).problems.some((problem) => problem.message.includes('is not in the vocabulary'))).toBe(true);
+  });
+
+  it('a follow-up to a question that never ran is not asked to keep or drop that question\'s fields; one that ran still is', () => {
+    const prior = parseIntent(informed()).intent!;
+    const next = parseIntent({
+      version: 1, kind: 'analytics', reading: 'Opportunity amount by competitor.', measures: [{ ref: 'column:sfdc.opportunity.AMOUNT', aggregation: 'sum' }],
+      groupBy: [{ ref: 'column:sfdc.opportunity.COMPETITOR_C', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped',
+    }).intent!;
+    const question = 'who are the competitors opportunity? Can you give me the list by amount';
+    const blocked = (validateRefsForOffice as unknown as (...args: unknown[]) => { problems: Array<{ path: string }> })(next, vocabulary, prior, question, { priorExecuted: false });
+    expect(blocked.problems.filter((problem) => problem.path === 'provenance')).toEqual([]);
+    const ran = validateRefsForOffice(parseIntent(JSON.parse(JSON.stringify(next))).intent!, vocabulary, prior, question);
+    expect(ran.problems.some((problem) => problem.path === 'provenance')).toBe(true);
+  });
+});

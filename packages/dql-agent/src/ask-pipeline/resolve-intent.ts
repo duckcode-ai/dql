@@ -180,7 +180,7 @@ interface Validation { intent: AnalyticalIntentV1; problems: IntentProblem[]
  * problems with suggestions. A canonicalised ref replaces what the model
  * wrote so downstream code never sees an alias.
  */
-export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: VocabularyIndex, prior?: AnalyticalIntentV1, question?: string): Validation {
+export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: VocabularyIndex, prior?: AnalyticalIntentV1, question?: string, options: { priorExecuted?: boolean } = {}): Validation {
   let intent = input;
   // A period named on a field that is not a date is a VALUE, not a window: a
   // season column holding 2017 answers "in 2017" as an equality. Rewriting it
@@ -206,7 +206,22 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
   const problems: IntentProblem[] = [];
   let followUpReplacement: string | undefined;
   const canonical = (ref: string, kinds: VocabularyKind[], path: string, roleCheck?: (entry: VocabularyEntry) => string | undefined): string => {
-    const entry = vocabulary.resolve(ref, kinds) ?? vocabulary.resolve(ref);
+    // A ref spelled with its database in front (`column:db.schema.table.col`)
+    // names the same entry as its usual spelling when exactly one entry holds
+    // that tail. A column keeps at least schema.table.column; a bare field
+    // name is never guessed.
+    const qualifiedTail = (): VocabularyEntry | undefined => {
+      const match = /^([a-z_]+):(.+)$/i.exec(ref);
+      if (!match) return undefined;
+      const parts = match[2]!.split('.');
+      const minParts = match[1]!.toLowerCase() === 'column' ? 3 : 2;
+      for (let start = 1; parts.length - start >= minParts; start += 1) {
+        const found = vocabulary.resolve(`${match[1]}:${parts.slice(start).join('.')}`, kinds);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const entry = vocabulary.resolve(ref, kinds) ?? vocabulary.resolve(ref) ?? qualifiedTail();
     if (!entry) {
       problems.push({ path, message: `${ref} is not in the vocabulary`, suggestions: vocabulary.suggest(ref).map((e) => e.ref) });
       return ref;
@@ -492,7 +507,11 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
     next.time = { ...(next.time ?? {}), ...prior.time };
     next.provenance[`time:${prior.time.ref ?? 'window'}`] = 'inherited';
   }
-  for (const ref of unaccountedInheritedRefs(prior, next)) {
+  // A previous question that never ran left no executed analysis to edit: its
+  // fields are carried as context, not as obligations the follow-up must keep
+  // or drop one by one. The widening guard still holds a follow-up to its
+  // restrictions; only this bookkeeping is skipped.
+  for (const ref of options.priorExecuted === false ? [] : unaccountedInheritedRefs(prior, next)) {
     const entry = vocabulary.get(ref);
     const name = entry?.label ?? entry?.name ?? ref;
     problems.push({ path: 'provenance', message: `the previous analysis used ${name} [${ref}]; keep it (provenance "inherited") or list it as "removed:<why>"` });
@@ -719,10 +738,36 @@ export function scopedColumnOf(expr: string): { column: string; scoped: boolean 
  * interpreter wrote. A selection that only reaches the prompt can be ignored by
  * the model, and the turn then asks the same question again.
  */
+/**
+ * A RESTRICTION THE READING IS UNSURE WHERE TO APPLY IS ASKED. When the
+ * interpreter restricts one field with a value while listing other fields that
+ * might hold it ("competitor is Splunk": TAGS or CUSTOM_FIELDS), it has guessed
+ * where the value lives. Running the guess answers a different question with
+ * the same confidence, so the clause becomes material and the user picks the
+ * field. A clause the user just decided is never asked again.
+ */
+export function askWhichFieldHoldsTheRestriction(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, chosen?: string): void {
+  if (intent.kind !== 'analytics' || intent.measures.length === 0) return;
+  for (const clause of intent.unresolved) {
+    if (clause.material || clause.origin === 'ledger' || clause.options.length < 2) continue;
+    if (chosen && clause.options.includes(chosen)) continue;
+    const fields = clause.options.map((ref) => vocabulary.get(ref));
+    if (fields.some((entry) => !entry || !(FILTER_KINDS as readonly string[]).includes(entry.kind) || entry.roles.includes('time') || entry.roles.includes('measure'))) continue;
+    const columns = new Set(fields.map((entry) => `${entry!.physical?.relation ?? entry!.model ?? ''}.${entry!.physical?.column ?? entry!.name}`.toLowerCase()));
+    if (columns.size < 2) continue;
+    const restricted = intent.filters.filter((filter) => clause.options.includes(filter.ref) && filter.values.some((value) => typeof value === 'string' && value.trim().length > 0));
+    if (restricted.length !== 1) continue;
+    const value = restricted[0]!.values.filter((item): item is string => typeof item === 'string').join(', ');
+    clause.material = true;
+    clause.question = `Which field holds "${value}" for "${clause.clause}": ${fields.map((entry) => entry!.label ?? entry!.name).join(' or ')}?`;
+  }
+}
+
 export function applySelectedMeaning(intent: AnalyticalIntentV1, selection: { ref: string; label?: string }, vocabulary: VocabularyIndex): void {
   const entry = vocabulary.get(selection.ref);
   if (!entry || intent.kind !== 'analytics') return;
   let decided: IntentUnresolved | undefined;
+  const movedFilters: IntentPredicate[] = [];
   for (const clause of intent.unresolved) {
     if (!clause.options.includes(selection.ref)) continue;
     clause.material = false;
@@ -732,6 +777,7 @@ export function applySelectedMeaning(intent: AnalyticalIntentV1, selection: { re
     // pick stop restricting the reading, or the answer keeps the basis they
     // rejected beside the one they chose.
     const rejected = clause.options.filter((option) => option !== selection.ref);
+    movedFilters.push(...intent.filters.filter((filter) => rejected.includes(filter.ref)));
     intent.filters = intent.filters.filter((filter) => !rejected.includes(filter.ref));
     intent.groupBy = intent.groupBy.filter((group) => !rejected.includes(group.ref));
     for (const measure of intent.measures) if (measure.scope?.length) measure.scope = measure.scope.filter((scope) => !rejected.includes(scope.ref));
@@ -747,6 +793,17 @@ export function applySelectedMeaning(intent: AnalyticalIntentV1, selection: { re
       ...(year ? { window: { start: `${year}-01-01`, end: `${Number(year) + 1}-01-01`, expression: decided.clause } } : intent.time?.window ? { window: intent.time.window } : {}),
     };
     intent.provenance[selection.ref] = 'clarification:the period basis you chose';
+    return;
+  }
+  // A RESTRICTION MOVES WITH THE CHOICE. When the options were the fields a
+  // value might live in, the chosen field takes the restriction the rejected
+  // one carried; it does not become a breakdown.
+  if (decided && movedFilters.length > 0 && (entry.kind === 'column' || entry.kind === 'dimension') && !entry.roles.includes('measure')) {
+    for (const filter of movedFilters) {
+      const duplicate = intent.filters.some((existing) => existing.ref === selection.ref && existing.op === filter.op && JSON.stringify(existing.values) === JSON.stringify(filter.values));
+      if (!duplicate) intent.filters.push({ ...filter, ref: selection.ref, source: 'clarification' });
+    }
+    intent.provenance[selection.ref] = 'clarification:the field you chose holds the restriction';
     return;
   }
   const used = intentRefs(intent);
@@ -1765,6 +1822,9 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   const ledgerEntries: LedgerEntry[] = [];
   const round = input.ledgerRound ?? 0;
   let ledgerCorrected = false;
+  // Whether this call wrote the ledger from a reading made before a retrieval
+  // expansion showed the interpreter the fields it was missing.
+  let ledgerBuiltHere = false;
   let expanded = false;
   // A retrieval expansion (columns fetched for a relation the reading named)
   // is not one of the model's attempts: the re-ask after it is one more turn,
@@ -1816,7 +1876,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     if (parsed.intent.kind === 'definition') return { status: 'definition', intent: parsed.intent, reply: parsed.intent.reply ?? parsed.intent.reading, attempts };
     // The first analytics reading of the original question writes the ledger;
     // every later reading is held to it.
-    if (!ledger) ledger = buildLedger(input.question, parsed.intent, input.vocabulary);
+    if (!ledger) { ledger = buildLedger(input.question, parsed.intent, input.vocabulary); ledgerBuiltHere = true; }
     else {
       const audit = auditLedger(input.question, parsed.intent, ledger, input.vocabulary);
       ledgerEntries.push(...audit.entries.map((entry) => ({ ...entry, round })));
@@ -1842,7 +1902,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     // A turn that carries a chosen meaning is not editing the previous turn's
     // reading; it is finishing this one. Holding its repair to the refs the
     // selection replaced rejects exactly the plan the engine asked for.
-    const validation = validateIntentRefs(parsed.intent, input.vocabulary, input.selection ? undefined : input.prior, input.question);
+    const validation = validateIntentRefs(parsed.intent, input.vocabulary, input.selection ? undefined : input.prior, input.question, { priorExecuted: input.priorExecuted });
     if (validation.followUpReplacement && attempts > 1 && input.prior) {
       const options = [...new Set([...input.prior.measures.map((measure) => measure.ref), ...validation.intent.measures.map((measure) => measure.ref)])];
       const label = (ref: string) => input.vocabulary.get(ref)?.label ?? input.vocabulary.get(ref)?.name ?? ref;
@@ -1867,7 +1927,13 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
         const relation = input.vocabulary.entries
           .filter((entry) => entry.kind === 'relation' && entry.physical?.binding?.columnCompleteness !== 'complete')
           .map((entry) => ({ entry, names: [entry.model ?? '', entry.name, ...entry.aliases, ...(entry.physical?.binding?.aliases ?? [])] }))
-          .filter(({ names }) => names.some((name) => name && (raw === name.toLowerCase() || raw.startsWith(`${name.toLowerCase()}.`))))
+          // The model may put the database in front (`db.schema.table.column`); the
+          // relation is still named by the tail once leading parts are dropped.
+          .filter(({ names }) => {
+            const parts = raw.split('.');
+            const tails = parts.map((_, index) => parts.slice(index).join('.')).filter((tail) => tail.includes('.'));
+            return names.some((name) => name && tails.some((tail) => tail === name.toLowerCase() || tail.startsWith(`${name.toLowerCase()}.`)));
+          })
           .sort((left, right) => Math.max(...right.names.map((name) => name.length)) - Math.max(...left.names.map((name) => name.length)))[0]?.entry;
         if (relation) named.set(relation.ref, relation.physical?.binding?.logicalRelation ?? relation.model ?? relation.name);
       }
@@ -1878,6 +1944,12 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       const found = await input.expand({ clauses: invalidPartialRelations, question: input.question, reading: validation.intent.reading });
       if (found && found.cards.length > 0) {
         input = { ...input, vocabulary: found.vocabulary };
+        // THE LEDGER IS WRITTEN BY THE INFORMED READING. The reading it was
+        // taken from could not see these fields and listed what they answer
+        // as unanswerable; holding the next reading, which can see them, to
+        // those clauses restores stale obligations as material and blocks a
+        // correct answer. The next reading writes the ledger again.
+        if (ledgerBuiltHere) { ledger = undefined; ledgerBuiltHere = false; }
         lastDetail = `the reading named fields on partial relation${invalidPartialRelations.length === 1 ? '' : 's'} ${invalidPartialRelations.join(', ')}; their current columns were retrieved`;
         messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: expansionMessage(invalidPartialRelations, found.cards) });
         continue;
@@ -1892,6 +1964,12 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       const found = await input.expand({ clauses: openClauses, question: input.question, reading: validation.intent.reading });
       if (found && found.cards.length > 0) {
         input = { ...input, vocabulary: found.vocabulary };
+        // THE LEDGER IS WRITTEN BY THE INFORMED READING. The reading it was
+        // taken from could not see these fields and listed what they answer
+        // as unanswerable; holding the next reading, which can see them, to
+        // those clauses restores stale obligations as material and blocks a
+        // correct answer. The next reading writes the ledger again.
+        if (ledgerBuiltHere) { ledger = undefined; ledgerBuiltHere = false; }
         lastDetail = `the reading left "${openClauses.join('; ')}" unresolved; entries not shown before were found`;
         messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: expansionMessage(openClauses, found.cards) });
         continue;
@@ -1901,6 +1979,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     const askedQuestions = new Map(validation.intent.unresolved.map((clause) => [clause, clause.question]));
     if (input.selection) applySelectedMeaning(validation.intent, input.selection, input.vocabulary);
     applyGovernedDefaults(validation.intent, input.question, input.vocabulary, { normalizeScopes: false });
+    askWhichFieldHoldsTheRestriction(validation.intent, input.vocabulary, input.selection?.ref);
     proveTimeRoles(validation.intent, input.vocabulary);
     if (input.clauseCoverage !== false) proveClauseCoverage(input.question, validation.intent, input.vocabulary);
     // NO PARTIAL ANSWERS. When the interpreter wrote down nothing but a
