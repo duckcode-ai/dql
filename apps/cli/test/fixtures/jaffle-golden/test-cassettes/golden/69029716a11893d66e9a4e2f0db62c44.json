@@ -1,0 +1,23 @@
+{
+  "key": "69029716a11893d66e9a4e2f0db62c44",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user is asking for the current weather in Chicago, which is not related to this commerce analytics project and is not something this data models.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[{\"clause\":\"weather in Chicago\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:20:11.058Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "69029716a11893d66e9a4e2f0db62c44c362d41120e29cd360b633c81e8b1bf3",
+    "postCanonicalHash": "69029716a11893d66e9a4e2f0db62c44c362d41120e29cd360b633c81e8b1bf3",
+    "appliedRuleClasses": []
+  }
+}

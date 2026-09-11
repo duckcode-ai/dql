@@ -1,5 +1,5 @@
 import type { AnalyticalIntentV1, IntentPredicate } from '../intent.js';
-import { physicalRelationIdentity, physicalRelationText } from '../physical-binding.js';
+import { physicalRelationIdentity, physicalRelationText, samePhysicalRelation } from '../physical-binding.js';
 import { suggestSameGrainColumns, suggestSameRelationFields, type VocabularyEntry, type VocabularyIndex } from '../vocabulary.js';
 import type { PrepareDeps, PreparedCandidate, PreparedRefusal, RelationalJoinStep, SqlDialectLike } from './types.js';
 
@@ -518,7 +518,11 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
         const hint = moved.length ? ` The same facts exist on ${relation}: ${moved.map((item) => `${item.from} -> ${item.to} (${item.aggregation})`).join('; ')}; read every measure from there and keep the period.` : '';
         const fieldHint = fields.length ? ` The same fields exist on ${base}: ${fields.map((item) => `${item.from} -> ${item.to}`).join('; ')}; restrict and group there instead.` : '';
         const unproven = deps.unprovenJoinPath?.(baseLogical, relationLogical) ?? [];
-        return { refusal: { tier: 'relational', code: 'join_path_required', message: `no governed join path from ${base} to ${relation}; read the question over one relation, taking the measures from the relation that carries the period or grouping.${hint}${fieldHint}`, repairable: true, relations: [base, relation], ...(unproven.length ? { unproven } : {}) } };
+        // The refusal names the relations LOGICALLY (`dev.supplies`): the host's
+        // join proof, domain lookup and declared-relationship offers are keyed
+        // by that spelling, while `base` here is the exact physical name SQL
+        // renders.
+        return { refusal: { tier: 'relational', code: 'join_path_required', message: `no governed join path from ${baseLogical} to ${relationLogical}; read the question over one relation, taking the measures from the relation that carries the period or grouping.${hint}${fieldHint}`, repairable: true, relations: [baseLogical, relationLogical], ...(unproven.length ? { unproven } : {}) } };
       }
       for (const step of path) {
         const stepRelation = physicalRelationFor(step.relation, logicalRelationFor(relation) === step.relation ? relation : undefined);
@@ -723,7 +727,7 @@ function partLabel(vocabulary: VocabularyIndex, part: RatioPart): string {
 }
 
 function labelOf(vocabulary: VocabularyIndex, measure: PhysicalMeasure): string {
-  const entry = vocabulary.entries.find((candidate) => candidate.physical?.relation === measure.relation && (candidate.physical?.expr === measure.expr || (candidate.physical?.column && qualifyMatches(measure.expr, candidate.physical.column))));
+  const entry = vocabulary.entries.find((candidate) => samePhysicalRelation(candidate.physical?.relation, measure.relation) && (candidate.physical?.expr === measure.expr || (candidate.physical?.column && qualifyMatches(measure.expr, candidate.physical.column))));
   return entry?.label ?? entry?.name ?? measure.expr;
 }
 

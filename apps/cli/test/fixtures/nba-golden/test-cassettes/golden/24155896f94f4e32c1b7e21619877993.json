@@ -1,0 +1,27 @@
+{
+  "key": "24155896f94f4e32c1b7e21619877993",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Interpreting the request using the closest modeled concept available: top players by total points across the 2016-2017 seasons.\",\"measures\":[{\"ref\":\"block:nba.top_players_by_total_points\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:nba.top_players_by_total_points\":\"q:players most likely to get injured next season\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:52:15.052Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 6,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "24155896f94f4e32c1b7e2161987799312ff8ef544d1fee5a6be8819abd28f99",
+    "postCanonicalHash": "24155896f94f4e32c1b7e2161987799312ff8ef544d1fee5a6be8819abd28f99",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "9ac0ba5cc51a6bc5496efafbea229e05",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Compare pretax product revenue (sales before tax) for July 2025 and August 2025, and show the percentage growth from July to August.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:order_item.ordered_at\",\"op\":\"eq\",\"values\":[\"2025-07\"],\"source\":\"question\"}],\"alias\":\"revenue_jul_2025\"},{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:order_item.ordered_at\",\"op\":\"eq\",\"values\":[\"2025-08\"],\"source\":\"question\"}],\"alias\":\"revenue_aug_2025\"},{\"change\":{\"base\":\"revenue_jul_2025\",\"comparison\":\"revenue_aug_2025\",\"as\":\"percent\"},\"alias\":\"revenue_growth_pct\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:sales before tax\",\"dimension:order_item.ordered_at\":\"q:August with July 2025\",\"revenue_growth_pct\":\"q:percentage growth\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:22:57.620Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "9ac0ba5cc51a6bc5496efafbea229e0586be13a57ad8edcd8412d4d8bc2ddaa3",
+    "postCanonicalHash": "9ac0ba5cc51a6bc5496efafbea229e0586be13a57ad8edcd8412d4d8bc2ddaa3",
+    "appliedRuleClasses": []
+  }
+}

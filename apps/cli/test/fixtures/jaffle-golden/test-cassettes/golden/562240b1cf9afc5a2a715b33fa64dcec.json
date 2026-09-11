@@ -1,0 +1,25 @@
+{
+  "key": "562240b1cf9afc5a2a715b33fa64dcec",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks why revenue is down by region and which region to invest in; this project has no 'region' concept, only individual locations, so revenue is broken down by location as the closest resolvable grouping. The causal explanation for the decline and the investment recommendation are not analytical outputs this project can produce.\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[{\"ref\":\"entity:locations.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:orders.order_total\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"why is our revenue down\",\"options\":[],\"material\":true,\"question\":\"This project can show revenue by location and over time, but cannot produce a causal explanation for why revenue declined — would a revenue-by-location trend over time be useful instead?\"},{\"clause\":\"which region should we invest in\",\"options\":[],\"material\":true,\"question\":\"There is no 'region' entity and no investment-recommendation capability in this project — would a ranking of locations by revenue serve as a substitute?\"}],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"entity:locations.location\":\"q:region\",\"dimension:locations.location_name\":\"q:region\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:38:32.009Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "562240b1cf9afc5a2a715b33fa64dcecbbef16ba8b172375ca629fb0394113c2",
+    "postCanonicalHash": "562240b1cf9afc5a2a715b33fa64dcecbbef16ba8b172375ca629fb0394113c2",
+    "appliedRuleClasses": []
+  }
+}

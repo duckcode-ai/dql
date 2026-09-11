@@ -4,7 +4,7 @@ import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeaila
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, createAgentRunBudget, parseIntent, physicalRelationBinding, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import { columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
+import { columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -289,6 +289,18 @@ describe('question-directed relation discovery', () => {
   });
 });
 
+describe('a question that matches no relation hydrates none', () => {
+  it('returns no candidates instead of the alphabetically first partial relations', () => {
+    const source = {
+      relations: [
+        { schema: 'PUBLIC', name: 'AAA_FIRST', columnCompleteness: 'partial' as const, columns: [{ name: 'id' }] },
+        { schema: 'PUBLIC', name: 'BBB_SECOND', columnCompleteness: 'partial' as const, columns: [{ name: 'id' }] },
+      ],
+    } as never;
+    expect(relevantRelationsForQuestion(source, 'what is the % DOD ACM value?')).toEqual([]);
+  });
+});
+
 describe('the Ask host uses AgentRunBudget remaining duration at every boundary', () => {
   it('hydrates metadata and reaches SQL with positive relative deadlines from a duration budget', async () => {
     const semanticLayer = new SemanticLayer({
@@ -312,6 +324,11 @@ describe('the Ask host uses AgentRunBudget remaining duration at every boundary'
       _connection: ConnectionConfig,
       options?: { deadlineMs?: number },
     ) => {
+      // SHOW COLUMNS is asked first on Snowflake; this warehouse double does not answer it.
+      if (/^SHOW COLUMNS IN /.test(sql)) {
+        metadataDeadlines.push(options?.deadlineMs ?? 0);
+        return { columns: [], rowCount: 0, executionTimeMs: 1, rows: [] };
+      }
       if (sql.includes('information_schema.columns')) {
         metadataDeadlines.push(options?.deadlineMs ?? 0);
         return {
@@ -354,8 +371,8 @@ describe('the Ask host uses AgentRunBudget remaining duration at every boundary'
     });
 
     expect(result.status).toBe('completed');
-    expect(metadataDeadlines).toHaveLength(1);
-    expect(metadataDeadlines[0]).toBeGreaterThan(0);
+    expect(metadataDeadlines).toHaveLength(2);
+    expect(metadataDeadlines.every((deadline) => deadline > 0)).toBe(true);
     expect(executionDeadlines).toHaveLength(1);
     expect(executionDeadlines[0]).toBeGreaterThan(0);
   });
@@ -693,5 +710,69 @@ describe('Snowflake physical metadata identity', () => {
     expect(relations.find((relation) => relation.database === 'DB_A')).toMatchObject({ columnCompleteness: 'partial', truncated: true });
     expect(relations.find((relation) => relation.database === 'DB_B')).toMatchObject({ columnCompleteness: 'complete' });
     expect(relationColumnsProbeSql(['DB_A.PUBLIC.EVENTS'], 1, 800)).toContain('dql_column_page > 800');
+  });
+});
+
+describe('the Snowflake column probe asks SHOW COLUMNS first', () => {
+  it('maps SHOW COLUMNS rows, including JSON data types, into complete probe relations', () => {
+    const rows = snowflakeShowColumnsRows([
+      { table_name: 'OPPORTUNITIES', schema_name: 'SALES', column_name: 'AMOUNT', data_type: '{"type":"FIXED","precision":38,"scale":2,"nullable":true}', database_name: 'DB_A' },
+      { table_name: 'OPPORTUNITIES', schema_name: 'SALES', column_name: 'STAGE', data_type: '{"type":"TEXT","length":16777216,"nullable":true}', database_name: 'DB_A' },
+      { table_name: 'OPPORTUNITIES', schema_name: 'SALES', column_name: 'CLOSE_DATE', data_type: '{"type":"DATE","nullable":true}', database_name: 'DB_A' },
+    ]);
+    expect(rows.map((row) => [row.table_catalog, row.table_schema, row.table_name, row.column_name, row.data_type, row.dql_column_total])).toEqual([
+      ['DB_A', 'SALES', 'OPPORTUNITIES', 'AMOUNT', 'NUMBER(38,2)', 3],
+      ['DB_A', 'SALES', 'OPPORTUNITIES', 'STAGE', 'VARCHAR(16777216)', 3],
+      ['DB_A', 'SALES', 'OPPORTUNITIES', 'CLOSE_DATE', 'DATE', 3],
+    ]);
+    const relations = relationsFromProbeRows(rows, true, 0);
+    expect(relations).toHaveLength(1);
+    expect(relations[0]).toMatchObject({ database: 'DB_A', schema: 'SALES', name: 'OPPORTUNITIES', columnCompleteness: 'complete' });
+    expect(relations[0]!.columns.map((column) => column.dataType)).toEqual(['NUMBER(38,2)', 'VARCHAR(16777216)', 'DATE']);
+  });
+
+  it('hydrates a Snowflake relation with SHOW COLUMNS and never scans information_schema when it answers', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{ name: 'event_total', label: 'Event total', description: '', domain: 'events', sql: 'event_value', type: 'sum', metricType: 'simple', table: 'PUBLIC.EVENTS' }],
+      dimensions: [],
+    });
+    const connection: ConnectionConfig = { driver: 'snowflake', account: 'acct', database: 'DB_B', schema: 'PUBLIC', role: 'ANALYST', warehouse: 'WH' };
+    const provider = scripted([JSON.stringify({
+      version: 1, kind: 'analytics', reading: 'Event total.', measures: [{ ref: 'metric:event_total' }],
+      groupBy: [], display: [], filters: [], unresolved: [], provenance: { 'metric:event_total': 'q:event total' }, expectedShape: 'scalar',
+    })]);
+    const statements: string[] = [];
+    const executeQuery = vi.fn(async (sql: string) => {
+      statements.push(sql);
+      if (/^SHOW COLUMNS IN /.test(sql)) {
+        return { columns: [], rowCount: 1, executionTimeMs: 1, rows: [{ table_name: 'EVENTS', schema_name: 'PUBLIC', column_name: 'EVENT_VALUE', data_type: '{"type":"FIXED","precision":38,"scale":0}', database_name: 'DB_B' }] };
+      }
+      if (sql.includes('information_schema.columns')) throw new Error('information_schema must not be scanned when SHOW COLUMNS answered');
+      return { columns: ['event_total'], rowCount: 1, executionTimeMs: 1, rows: [{ event_total: 7 }] };
+    });
+    const route = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-show-columns',
+      executor: { executeQuery } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => semanticLayer,
+      getManifest: () => ({
+        snapshotId: 'snapshot:show-columns',
+        manifest: { sources: { events: { name: 'EVENTS', origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: 'model.events', schema: 'PUBLIC', columns: { EVENT_VALUE: { name: 'EVENT_VALUE', type: 'NUMBER' } } } } } } as never,
+      }),
+      selectProvider: async () => provider,
+      semanticEngine: async () => 'native',
+      compileSemantic: async () => ({ sql: 'SELECT 7 AS event_total', engine: 'native' }),
+      priorIntent: () => undefined,
+    });
+    const result = await route({
+      runId: 'run:show-columns',
+      request: { question: 'What is event total?', requestedMode: 'ask' } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+    expect(result.status).toBe('completed');
+    // The connection's database qualifies the relation, so SHOW asks the exact object.
+    expect(statements.filter((sql) => /^SHOW COLUMNS IN /.test(sql))).toEqual(['SHOW COLUMNS IN DB_B.PUBLIC.EVENTS']);
+    expect(statements.some((sql) => sql.includes('information_schema.columns'))).toBe(false);
+    expect(result.askPipelineReceipt?.physicalBindings?.find((binding) => /EVENTS$/i.test(binding.relation))?.completeness).toBe('complete');
   });
 });

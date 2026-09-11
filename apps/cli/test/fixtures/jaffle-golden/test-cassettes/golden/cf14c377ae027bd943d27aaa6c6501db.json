@@ -1,0 +1,24 @@
+{
+  "key": "cf14c377ae027bd943d27aaa6c6501db",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top customers by beverage (drink) product revenue, using the certified beverage customers block.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:bevereage catogery\",\"metric:order_item.revenue\":\"removed:certified block covers same grain, scope and ranking\",\"entity:orders.customer\":\"removed:certified block already fixes grain\",\"dimension:customers.customer_name\":\"removed:certified block already fixes display\",\"dimension:products.is_drink_item\":\"removed:certified block already applies this scope\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:41:50.238Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "cf14c377ae027bd943d27aaa6c6501dbcb6969cec28269aae316224142eee7aa",
+    "postCanonicalHash": "cf14c377ae027bd943d27aaa6c6501dbcb6969cec28269aae316224142eee7aa",
+    "appliedRuleClasses": []
+  }
+}

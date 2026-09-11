@@ -1,0 +1,23 @@
+{
+  "key": "348dde589d1e7461072d014a649afd57",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What is the lifetime spend (gross, inclusive of tax) for the customer named Jordan Lee?\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Jordan Lee\"],\"source\":\"question\"}],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:lifetime spend\",\"dimension:customers.customer_name\":\"q:Jordan Lee\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:36:24.068Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "348dde589d1e7461072d014a649afd579440054f2e7b98f5839308846243782a",
+    "postCanonicalHash": "348dde589d1e7461072d014a649afd579440054f2e7b98f5839308846243782a",
+    "appliedRuleClasses": []
+  }
+}

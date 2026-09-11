@@ -1,0 +1,23 @@
+{
+  "key": "b4939102ca1362df93dd99f0e5a31ccd",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show gross revenue (lifetime spend) broken down by customer, using the certified customer profile block.\",\"measures\":[{\"ref\":\"block:commerce.customer_profile\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"block:commerce.customer_profile\":\"q:revenue by customer profile\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:25:41.042Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b4939102ca1362df93dd99f0e5a31ccdcbb7b42065501eb8d5d620b64da07dd4",
+    "postCanonicalHash": "b4939102ca1362df93dd99f0e5a31ccdcbb7b42065501eb8d5d620b64da07dd4",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "59ae4a2fb0ea3430e6f6ad58eaf3c912",
+  "operation": "generate",
+  "text": "{\"hypotheses\":[\n  {\"statement\":\"Beverage revenue is high primarily because a small number of drink products generate most of the revenue (concentration effect), not broad-based demand across the drink menu.\",\"priorConfidence\":0.55,\"target\":\"beverage_revenue_by_product\",\"action\":\"breakdown\",\"expectation\":\"A small subset (e.g., top 2-3) of product_name entries account for a disproportionately large share (e.g., >60%) of beverage_revenue_by_product; if revenue is evenly spread across many products, this is refuted.\"},\n\n  {\"statement\":\"Beverage revenue is high because drink order volume (orders.drink_orders) has grown, not because of higher prices per drink order.\",\"priorConfidence\":0.5,\"target\":\"orders.drink_orders\",\"action\":\"compare_time\",\"expectation\":\"orders.drink_orders shows a rising trend over recent periods that tracks with order_item.drink_revenue growth; if drink order counts are flat while revenue rises, this is refuted (pointing to price/mix instead).\"},\n\n  {\"statement\":\"Beverage revenue is disproportionately driven by one customer_type segment (e.g., returning customers) rather than being evenly distributed across new and existing customers.\",\"priorConfidence\":0.5,\"target\":\"customer_profile\",\"action\":\"breakdown\",\"expectation\":\"customer_profile broken out by customers.customer_type shows one segment contributing a clear majority of beverage-related revenue/orders; if segments contribute roughly proportionally to their size, this is refuted.\"},\n\n  {\"statement\":\"Beverage revenue is high because it is concentrated among a small set of top spending customers rather than broad customer adoption of drinks.\",\"priorConfidence\":0.45,\"target\":\"top_beverage_customers\",\"action\":\"lookup_block\",\"expectation\":\"The top_beverage_customers list shows a steep drop-off, with the top few customers accounting for a large share of beverage revenue; if spend is spread evenly across many customers, this is refuted.\"},\n\n  {\"statement\":\"The high level of beverage revenue reflects an ongoing upward trend (momentum), not a one-time spike, as shown by rising drink revenue share of total revenue over recent months.\",\"priorConfidence\":0.4,\"target\":\"order_item.drink_revenue_pct\",\"action\":\"compare_time\",\"expectation\":\"order_item.drink_revenue_pct increases steadily month-over-month (consistent with order_item.revenue_growth_mom being positive for drinks); if the percentage is flat or was already high long ago with no recent increase, this is refuted.\"}\n]}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:39:19.938Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "59ae4a2fb0ea3430e6f6ad58eaf3c912a5559619c09873962c7d167511cabb5f",
+    "postCanonicalHash": "59ae4a2fb0ea3430e6f6ad58eaf3c912a5559619c09873962c7d167511cabb5f",
+    "appliedRuleClasses": []
+  }
+}

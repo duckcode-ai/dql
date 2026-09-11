@@ -112,6 +112,8 @@ export interface RunAskPipelineInput {
     rankedRefs?: string[];
     header?: VocabularyDomainHeader;
     columnsFor?: { shown: number; total: number };
+    /** Where the host's context assembly spent its time, by phase (ms). */
+    timings?: Record<string, number>;
   };
   /** The thread's compacted memory: what was settled earlier, and a clarification still pending. */
   conversation?: { summary?: string; pendingClarification?: string };
@@ -558,6 +560,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   });
   receipt.context = {
     version: 1,
+    ...(input.context?.timings && Object.keys(input.context.timings).length ? { timings: input.context.timings } : {}),
     ...(input.context?.packId ? { packId: input.context.packId } : {}),
     ...(input.context?.snapshotId ? { snapshotId: input.context.snapshotId } : {}),
     ...(input.context?.envelope ? { envelope: input.context.envelope } : {}),

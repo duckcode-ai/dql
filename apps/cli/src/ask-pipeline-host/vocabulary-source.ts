@@ -49,60 +49,128 @@ const MAX_EMBEDDED_MANIFEST_DESCRIPTIONS = 2_000;
  * can bind or validate a physical field. A bounded/failed hydration remains
  * partial rather than proving the other documented fields absent.
  */
-export function embeddedManifestRelations(manifest: DQLManifest | undefined): NonNullable<VocabularySourceInput['relations']> {
-  const path = manifest?.dbtProvenance?.manifestPath;
+interface DbtArtifactNode {
+  uniqueId: string;
+  resourceType: string;
+  relationName?: string;
+  alias?: string;
+  identifier?: string;
+  name?: string;
+  schema?: string;
+  database?: string;
+  description?: string;
+  columns: Array<{ name: string; dataType?: string; description?: string }>;
+  /** What each output column is computed from, by column name (lowercased), from the model's SQL. */
+  lineage?: Record<string, string[]>;
+}
+
+/**
+ * The dbt artifact is read ONCE per (path, mtime, size) and kept as a slim
+ * node list. Reading it per vocabulary build costs a full parse of a
+ * 50–250 MB file for every question that discovers a relation, and two
+ * consumers (relation selection, column lineage) used to parse it separately.
+ */
+const dbtArtifactCache = new Map<string, { key: string; nodes: DbtArtifactNode[] }>();
+const DBT_ARTIFACT_LINEAGE_MAX_BYTES = 250 * 1024 * 1024;
+
+export function dbtArtifactNodes(path: string | undefined): DbtArtifactNode[] {
   if (!path || !existsSync(path)) return [];
+  let key: string;
+  let size = 0;
+  try {
+    const stat = statSync(path);
+    size = stat.size;
+    key = `${stat.mtimeMs}|${stat.size}`;
+  } catch {
+    return [];
+  }
+  const cached = dbtArtifactCache.get(path);
+  if (cached?.key === key) return cached.nodes;
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as {
       nodes?: Record<string, Record<string, unknown>>;
       sources?: Record<string, Record<string, unknown>>;
     };
-    const admitted = new Set(Object.keys(manifest?.dbtProvenance?.nodes ?? {}));
-    const result: NonNullable<VocabularySourceInput['relations']> = [];
+    const nodes: DbtArtifactNode[] = [];
     for (const [uniqueId, node] of [...Object.entries(raw.nodes ?? {}), ...Object.entries(raw.sources ?? {})]) {
-      if (admitted.size > 0 && !admitted.has(uniqueId)) continue;
-      const resourceType = node.resource_type;
+      const resourceType = typeof node.resource_type === 'string' ? node.resource_type : '';
       if (resourceType !== 'model' && resourceType !== 'source') continue;
-      const exact = manifest?.dbtProvenance?.nodes[uniqueId]?.relation;
-      const physical = parsePhysicalIdentifier(exact ?? String(node.relation_name ?? ''));
-      const name = physical.at(-1)?.value ?? (typeof node.alias === 'string' ? node.alias : typeof node.identifier === 'string' ? node.identifier : typeof node.name === 'string' ? node.name : undefined);
-      if (!name) continue;
-      const schema = physical.at(-2)?.value ?? (typeof node.schema === 'string' ? node.schema : undefined);
-      const database = physical.at(-3)?.value ?? (typeof node.database === 'string' ? node.database : undefined);
       const columnsRecord = node.columns && typeof node.columns === 'object' && !Array.isArray(node.columns)
         ? node.columns as Record<string, unknown>
         : {};
       let described = 0;
-      const embeddedColumns: Array<{ name: string; dataType?: string; description?: string }> = [];
-      for (const [key, candidate] of Object.entries(columnsRecord)) {
-        if (embeddedColumns.length >= MAX_EMBEDDED_MANIFEST_COLUMNS) break;
+      const columns: DbtArtifactNode['columns'] = [];
+      for (const [columnKey, candidate] of Object.entries(columnsRecord)) {
+        if (columns.length >= MAX_EMBEDDED_MANIFEST_COLUMNS) break;
         const column = candidate && typeof candidate === 'object' ? candidate as Record<string, unknown> : {};
-        const columnName = typeof column.name === 'string' && column.name.trim() ? column.name : key;
+        const columnName = typeof column.name === 'string' && column.name.trim() ? column.name : columnKey;
         if (!columnName) continue;
         const type = typeof column.data_type === 'string' ? column.data_type : typeof column.type === 'string' ? column.type : undefined;
         const description = typeof column.description === 'string' && described < MAX_EMBEDDED_MANIFEST_DESCRIPTIONS
           ? column.description
           : undefined;
         if (description) described += 1;
-        embeddedColumns.push({ name: columnName, ...(type ? { dataType: type } : {}), ...(description ? { description } : {}) });
+        columns.push({ name: columnName, ...(type ? { dataType: type } : {}), ...(description ? { description } : {}) });
       }
-      result.push({
-        ...(database ? { database } : {}),
-        ...(schema ? { schema } : {}),
-        name,
+      const sql = resourceType === 'model' && size <= DBT_ARTIFACT_LINEAGE_MAX_BYTES
+        ? [node.compiled_code, node.compiled_sql, node.raw_code, node.raw_sql].find((value): value is string => typeof value === 'string')
+        : undefined;
+      const lineage = sql ? columnLineageFromSql(sql) : undefined;
+      nodes.push({
+        uniqueId,
+        resourceType,
+        ...(typeof node.relation_name === 'string' ? { relationName: node.relation_name } : {}),
+        ...(typeof node.alias === 'string' ? { alias: node.alias } : {}),
+        ...(typeof node.identifier === 'string' ? { identifier: node.identifier } : {}),
+        ...(typeof node.name === 'string' ? { name: node.name } : {}),
+        ...(typeof node.schema === 'string' ? { schema: node.schema } : {}),
+        ...(typeof node.database === 'string' ? { database: node.database } : {}),
         ...(typeof node.description === 'string' && node.description ? { description: node.description } : {}),
-        columns: [],
-        ...(embeddedColumns.length ? { embeddedColumns } : {}),
-        columnCompleteness: 'partial',
+        columns,
+        ...(lineage && Object.keys(lineage).length ? { lineage } : {}),
       });
     }
-    return result;
+    dbtArtifactCache.clear();
+    dbtArtifactCache.set(path, { key, nodes });
+    return nodes;
   } catch {
     // A source artifact may be replaced between snapshots. The host falls
     // back to the already-recorded provenance and warehouse discovery; it
     // never treats a failed artifact read as evidence that a column is gone.
     return [];
   }
+}
+
+/** Test seam: forget every cached dbt artifact. */
+export function resetDbtArtifactCache(): void {
+  dbtArtifactCache.clear();
+}
+
+export function embeddedManifestRelations(manifest: DQLManifest | undefined): NonNullable<VocabularySourceInput['relations']> {
+  const nodes = dbtArtifactNodes(manifest?.dbtProvenance?.manifestPath);
+  if (nodes.length === 0) return [];
+  const admitted = new Set(Object.keys(manifest?.dbtProvenance?.nodes ?? {}));
+  const result: NonNullable<VocabularySourceInput['relations']> = [];
+  for (const node of nodes) {
+    if (admitted.size > 0 && !admitted.has(node.uniqueId)) continue;
+    const exact = manifest?.dbtProvenance?.nodes[node.uniqueId]?.relation;
+    const physical = parsePhysicalIdentifier(exact ?? node.relationName ?? '');
+    const name = physical.at(-1)?.value ?? node.alias ?? node.identifier ?? node.name;
+    if (!name) continue;
+    const schema = physical.at(-2)?.value ?? node.schema;
+    const database = physical.at(-3)?.value ?? node.database;
+    result.push({
+      ...(database ? { database } : {}),
+      ...(schema ? { schema } : {}),
+      name,
+      ...(node.description ? { description: node.description } : {}),
+      columns: [],
+      // Shared with the cache on purpose: the source builder copies what it keeps.
+      ...(node.columns.length ? { embeddedColumns: node.columns } : {}),
+      columnCompleteness: 'partial',
+    });
+  }
+  return result;
 }
 
 const AGGREGATES = new Set(['sum', 'avg', 'count', 'count_distinct', 'min', 'max', 'median']);
@@ -260,6 +328,17 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
   // legitimately expose DB_A.PUBLIC.EVENTS and DB_B.PUBLIC.EVENTS in one
   // snapshot, so the source's internal key must retain physical identity.
   const relationItems = new Map<string, NonNullable<VocabularySource['relations']>[number]>();
+  // Exact physical identity -> source key. A linear scan here is quadratic in
+  // the relation count and was measured at 21 s for 4,700 dbt models; the
+  // office-scale project pays that on every source build.
+  const relationKeyByIdentity = new Map<string, string>();
+  // The same object ignoring quote state and case: dbt-duckdb writes
+  // provenance quoted (`"nba"."dev"."t"`) and a warehouse describes the
+  // object unquoted. A warehouse observation asked for by that name IS the
+  // object; it merges here instead of founding a second relation whose
+  // columns nobody can reach.
+  const relationKeyByLooseIdentity = new Map<string, string>();
+  const looseIdentity = (binding: PhysicalRelationBindingV1) => [binding.database, binding.schema, binding.table].filter(Boolean).map((part) => part!.value.toLowerCase()).join('.');
   const relationKeyByLower = new Map<string, string>();
   // A physical name inside an expression is written as this warehouse reads it,
   // and a relation carries its database on a warehouse that addresses objects
@@ -324,7 +403,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     const bindingDriver = relation.binding?.driver ?? input.driver;
     const bindingSnapshot = relation.binding?.snapshotId ?? input.snapshotId;
     const bindingTarget = relation.binding?.executionTargetFingerprint ?? input.executionTargetFingerprint;
-    const relationBinding = relation.binding ? {
+    const relationBindingInput: PhysicalRelationBindingV1 = relation.binding ? {
       ...relation.binding,
       ...(bindingDriver ? { driver: bindingDriver } : {}),
       ...(bindingSnapshot ? { snapshotId: bindingSnapshot } : {}),
@@ -341,12 +420,20 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       ...(relation.observedAt ? { observedAt: relation.observedAt } : {}),
       ...(relation.truncated ? { truncated: true } : {}),
     });
-    const exactExisting = [...relationItems.entries()].find(([, item]) => item.binding
-      && physicalRelationIdentity(physicalRelationText(item.binding)) === physicalRelationIdentity(physicalRelationText(relationBinding)));
+    let relationBinding = relationBindingInput;
+    const identity = physicalRelationIdentity(physicalRelationText(relationBinding));
+    const observed = relationBinding.source === 'warehouse_probe' || relationBinding.source === 'runtime_catalog' || relation.columnCompleteness === 'complete';
+    const looseExistingKey = observed ? relationKeyByLooseIdentity.get(looseIdentity(relationBinding)) : undefined;
+    const exactExistingKey = relationKeyByIdentity.get(identity) ?? looseExistingKey;
+    if (!relationKeyByIdentity.has(identity) && looseExistingKey) {
+      // Adopt the provenance spelling so the merge below sees one identity.
+      const prior = relationItems.get(looseExistingKey)?.binding;
+      if (prior) relationBinding = { ...relationBinding, ...(prior.database ? { database: prior.database } : {}), ...(prior.schema ? { schema: prior.schema } : {}), table: prior.table };
+    }
     // The first spelling remains a legacy compatibility key. A second exact
     // database receives its full physical identity as the source key; it must
     // never merge into, or overwrite, the first database's columns.
-    const key = exactExisting?.[0]
+    const key = exactExistingKey
       ?? (relationSeen.has(logicalKey) ? physicalRelationText(relationBinding) : logicalKey);
     if (relationSeen.has(key)) {
       const existing = relationItems.get(key);
@@ -387,10 +474,16 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
             // A missing binding is an explicit ambiguity that discovery and
             // the SQL validator can surface; it is never a current-database
             // fallback.
+            relationKeyByIdentity.delete(physicalRelationIdentity(physicalRelationText(prior)));
+            relationKeyByLooseIdentity.delete(looseIdentity(prior));
             existing.binding = undefined;
             existing.columnCompleteness = 'unknown';
           }
-        } else existing.binding = relationBinding;
+        } else {
+          existing.binding = relationBinding;
+          relationKeyByIdentity.set(physicalRelationIdentity(physicalRelationText(relationBinding)), key);
+          relationKeyByLooseIdentity.set(looseIdentity(relationBinding), key);
+        }
         if (relation.columnCompleteness === 'complete') existing.columnCompleteness = 'complete';
         else if (!existing.columnCompleteness) existing.columnCompleteness = relation.columnCompleteness ?? 'partial';
       }
@@ -404,6 +497,8 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     const added = { ...relation, ...(relation.domain ? { domains: [relation.domain] } : {}), binding: relationBinding, columnCompleteness: relation.columnCompleteness ?? 'partial', columns: relation.columns.map((column) => ({ ...column })), ...(relation.embeddedColumns?.length ? { embeddedColumns: relation.embeddedColumns.map((column) => ({ ...column })) } : {}) };
     source.relations!.push(added);
     relationItems.set(key, added);
+    relationKeyByIdentity.set(physicalRelationIdentity(physicalRelationText(relationBinding)), key);
+    relationKeyByLooseIdentity.set(looseIdentity(relationBinding), key);
   };
 
   // Physical relations: dbt sources recorded in the manifest, then anything the host introspected.
@@ -726,15 +821,15 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     for (const item of items ?? []) {
       if (!item.physical?.relation || item.physical.binding) continue;
       const binding = bindingFor(item.physical.relation);
-      // `ref` and `model` keep the legacy logical alias.  The physical field
-      // is consumed by relational SQL, however, so it must carry the same
-      // exact database/schema/table that the binding and expression use.
-      // Without this, a DB_B expression could still emit a DB_A-default FROM.
-      if (binding) item.physical = {
-        ...item.physical,
-        relation: physicalRelationText(binding),
-        binding,
-      };
+      // `physical.relation` KEEPS the logical spelling (`dev.customers`): it is
+      // what column refs are written with and what every comparison in the
+      // pipeline reads (a numeric dimension read as its column, the time axis
+      // a metric owns, the relations a reading names). The exact
+      // database-qualified name travels in `binding`, and every statement
+      // (composer, probes, drafter, validator) renders from the binding.
+      // Rewriting the logical field here silently broke those comparisons on
+      // any project whose provenance carries a database.
+      if (binding) item.physical = { ...item.physical, binding };
     }
   };
   attachBinding(source.metrics);
@@ -805,26 +900,15 @@ export function columnLineageFromSql(sql: string): Record<string, string[]> {
   return out;
 }
 
-/** Column lineage for every dbt model of the manifest, keyed by `schema.table`, read once from the model SQL the dbt manifest carries. */
+/** Column lineage for every dbt model of the manifest, keyed by `schema.table`, from the model SQL the (cached) dbt artifact carries. */
 export function modelColumnLineage(manifest: DQLManifest | undefined): Record<string, Record<string, string[]>> {
-  const path = manifest?.dbtProvenance?.manifestPath;
-  if (!path || !existsSync(path)) return {};
-  try {
-    if (statSync(path).size > 250 * 1024 * 1024) return {};
-    const raw = JSON.parse(readFileSync(path, 'utf-8')) as { nodes?: Record<string, { resource_type?: string; compiled_code?: string; raw_code?: string; compiled_sql?: string; raw_sql?: string }> };
-    const out: Record<string, Record<string, string[]>> = {};
-    for (const [uniqueId, node] of Object.entries(raw.nodes ?? {})) {
-      if (node.resource_type !== 'model') continue;
-      const relation = normalizeRelationName(manifest?.dbtProvenance?.nodes[uniqueId]?.relation);
-      const sql = node.compiled_code ?? node.compiled_sql ?? node.raw_code ?? node.raw_sql;
-      if (!relation || !sql) continue;
-      const lineage = columnLineageFromSql(sql);
-      if (Object.keys(lineage).length) out[relation] = lineage;
-    }
-    return out;
-  } catch {
-    return {};
+  const out: Record<string, Record<string, string[]>> = {};
+  for (const node of dbtArtifactNodes(manifest?.dbtProvenance?.manifestPath)) {
+    if (node.resourceType !== 'model' || !node.lineage) continue;
+    const relation = normalizeRelationName(manifest?.dbtProvenance?.nodes[node.uniqueId]?.relation);
+    if (relation) out[relation] = node.lineage;
   }
+  return out;
 }
 
 /**

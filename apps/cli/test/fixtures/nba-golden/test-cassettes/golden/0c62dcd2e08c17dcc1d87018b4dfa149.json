@@ -1,0 +1,23 @@
+{
+  "key": "0c62dcd2e08c17dcc1d87018b4dfa149",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Find the player who made the most three-pointers in calendar year 2017, along with their three-point attempts and shooting percentage.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.fg3m\",\"aggregation\":\"sum\",\"alias\":\"fg3m_made\"},{\"ref\":\"column:dev.player_game_stats.fg3a\",\"aggregation\":\"sum\",\"alias\":\"fg3a_attempted\"},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.fg3m\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:dev.player_game_stats.fg3a\",\"denominatorAggregation\":\"sum\"},\"alias\":\"fg3_pct\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:fg3m_made\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.fg3m\":\"q:most three-pointers\",\"column:dev.player_game_stats.fg3a\":\"q:attempts\",\"measure:fg3_pct\":\"q:shooting percentage\",\"dimension:player_game_stats.player_id\":\"q:who\",\"dimension:player_game_stats.player_name\":\"q:who\",\"dimension:player_game_stats.game_date\":\"q:in 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:36:52.343Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "0c62dcd2e08c17dcc1d87018b4dfa14919365b77dddd9196ca63481fef47eeff",
+    "postCanonicalHash": "0c62dcd2e08c17dcc1d87018b4dfa14919365b77dddd9196ca63481fef47eeff",
+    "appliedRuleClasses": []
+  }
+}

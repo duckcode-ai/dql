@@ -11,6 +11,7 @@ import {
   type IntentPredicate,
   type IntentUnresolved,
 } from './intent.js';
+import { samePhysicalRelation } from './physical-binding.js';
 import { normalizeVocabularyText, renderCard, suggestSameGrainColumns, suggestSameRelationFields, trigramSimilarity, type VocabularyEntry, type VocabularyIndex, type VocabularyKind } from './vocabulary.js';
 
 /**
@@ -239,7 +240,9 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
     // Counting is a measure over any column; other aggregates need a number.
     const counting = aggregation === 'count' || aggregation === 'count_distinct';
     if (!counting && !entry.roles.includes('numeric')) return ref;
-    const column = vocabulary.get(`column:${entry.physical.relation}.${entry.physical.column}`);
+    const column = vocabulary.get(`column:${entry.physical.relation}.${entry.physical.column}`)
+      // A bound entry may spell its relation with the database; the column ref is logical.
+      ?? vocabulary.entries.find((candidate) => candidate.kind === 'column' && candidate.physical?.column === entry.physical!.column && samePhysicalRelation(candidate.physical?.relation ?? candidate.model, entry.physical!.relation));
     return column ? column.ref : ref;
   };
   // Ordering by a measure's alias ("total_points") names that measure.
@@ -1763,7 +1766,11 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   const round = input.ledgerRound ?? 0;
   let ledgerCorrected = false;
   let expanded = false;
-  while (attempts < maxAttempts + (timeoutRetried ? 1 : 0)) {
+  // A retrieval expansion (columns fetched for a relation the reading named)
+  // is not one of the model's attempts: the re-ask after it is one more turn,
+  // like the retry after a provider timeout. Under a 90 s run budget the
+  // interpreter otherwise spends its only correction on the retrieval fix.
+  while (attempts < maxAttempts + (timeoutRetried ? 1 : 0) + (expanded ? 1 : 0)) {
     attempts += 1;
     const started = now();
     const reply = await generateStructured(input.provider, messages, ANALYTICAL_INTENT_JSON_SCHEMA, input.providerOptions);
@@ -1866,7 +1873,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       }
       return [...named.values()].slice(0, 3);
     })();
-    if (!expanded && input.expand && invalidPartialRelations.length > 0 && attempts < maxAttempts) {
+    if (!expanded && input.expand && invalidPartialRelations.length > 0 && attempts <= maxAttempts) {
       expanded = true;
       const found = await input.expand({ clauses: invalidPartialRelations, question: input.question, reading: validation.intent.reading });
       if (found && found.cards.length > 0) {
@@ -1880,7 +1887,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     // reading names a relation (or words the inventory holds) is a retrieval
     // gap first. Once.
     const openClauses = validation.intent.kind === 'analytics' ? validation.intent.unresolved.filter((clause) => clause.material && clause.options.length === 0 && clause.kind !== 'unsupported').map((clause) => clause.clause) : [];
-    if (!expanded && input.expand && openClauses.length > 0 && attempts < maxAttempts) {
+    if (!expanded && input.expand && openClauses.length > 0 && attempts <= maxAttempts) {
       expanded = true;
       const found = await input.expand({ clauses: openClauses, question: input.question, reading: validation.intent.reading });
       if (found && found.cards.length > 0) {

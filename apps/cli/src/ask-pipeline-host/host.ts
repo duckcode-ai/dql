@@ -48,6 +48,7 @@ import {
   parsePhysicalIdentifier,
   physicalRelationBinding,
   physicalRelationIdentity,
+  physicalRelationTailIdentity,
   renderPhysicalIdentifier,
   renderPhysicalRelation,
   physicalRelationText,
@@ -304,6 +305,44 @@ export function relationsFromProbeRows(rows: Array<Record<string, unknown>>, com
  * the other columns are absent.
  */
 /**
+ * Rows of Snowflake's `SHOW COLUMNS IN <table>` in the shape of the
+ * information_schema probe (`table_catalog … dql_column_total`), so one
+ * grouping routine serves both. `data_type` arrives as JSON
+ * (`{"type":"FIXED","precision":38,"scale":0,…}`); the type name is kept and
+ * FIXED/TEXT/REAL are spelled as the column roles expect.
+ */
+export function snowflakeShowColumnsRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    const record = Object.fromEntries(Object.entries(row).map(([key, value]) => [key.toLowerCase(), value]));
+    const name = typeof record.column_name === 'string' ? record.column_name : undefined;
+    const table = typeof record.table_name === 'string' ? record.table_name : undefined;
+    if (!name || !table) continue;
+    let type: string | undefined = typeof record.data_type === 'string' ? record.data_type : undefined;
+    if (type && type.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(type) as { type?: string; precision?: number; scale?: number; length?: number };
+        const kind = typeof parsed.type === 'string' ? parsed.type.toUpperCase() : undefined;
+        type = kind === 'FIXED' ? `NUMBER(${parsed.precision ?? 38},${parsed.scale ?? 0})`
+          : kind === 'TEXT' ? `VARCHAR${parsed.length ? `(${parsed.length})` : ''}`
+            : kind === 'REAL' ? 'FLOAT'
+              : kind;
+      } catch { /* keep the raw spelling */ }
+    }
+    out.push({
+      ...(typeof record.database_name === 'string' ? { table_catalog: record.database_name } : {}),
+      ...(typeof record.schema_name === 'string' ? { table_schema: record.schema_name } : {}),
+      table_name: table,
+      column_name: name,
+      ...(type ? { data_type: type } : {}),
+      ordinal_position: out.length + 1,
+    });
+  }
+  for (const row of out) row.dql_column_total = out.filter((other) => other.table_name === row.table_name && other.table_schema === row.table_schema).length;
+  return out;
+}
+
+/**
  * The database each dbt relation lives in, from the manifest's provenance
  * (`"DB"."SCHEMA"."TABLE"`), keyed by `schema.table` in lower case. The
  * vocabulary identifies a relation by schema and table; a warehouse that
@@ -372,105 +411,110 @@ export function relationsNeedingColumns(source: ReturnType<typeof buildVocabular
  * tables.  Score embedded column metadata too, which keeps the enterprise
  * catalog storage bound without making the columns invisible to retrieval.
  */
+type RelevanceIndex = {
+  relations: Array<{ name: string; words: Set<string>; tail: string; partial: number }>;
+  semanticByTail: Map<string, Array<{ words: Set<string>; isTime: boolean }>>;
+};
+// The word sets of every relation and semantic entry, computed ONCE per base
+// source (the source object is cached per snapshot and connection). Scoring
+// per question is then an intersection with the question's few words. The
+// first shape recomputed every description's words and walked every semantic
+// entry for every relation on each question: 95 s on a 4,700-model project.
+const relevanceIndexCache = new WeakMap<object, RelevanceIndex>();
+const relevanceStem = (value: string) => {
+  const lower = value.toLowerCase();
+  if (lower.endsWith('ies') && lower.length > 4) return `${lower.slice(0, -3)}y`;
+  if (lower.endsWith('ing') && lower.length > 5) return lower.slice(0, -3);
+  if (lower.endsWith('ed') && lower.length > 4) return lower.slice(0, -2);
+  if (lower.endsWith('s') && lower.length > 3 && !lower.endsWith('ss')) return lower.slice(0, -1);
+  return lower;
+};
+const relevanceWords = (values: Array<string | undefined>): Set<string> => {
+  const words = new Set<string>();
+  for (const text of values) {
+    if (!text) continue;
+    for (const word of text.toLowerCase().split(/[^a-z0-9_]+/)) if (word.length > 2) words.add(relevanceStem(word));
+  }
+  return words;
+};
+const relevanceTail = (value: string | undefined) => {
+  const parts = parsePhysicalIdentifier(value ?? '');
+  if (parts.length === 0) return '';
+  return parts.slice(-2).map((part) => `${part.quoted ? 'q' : 'u'}:${part.quoted ? part.value : part.value.toLowerCase()}`).join('.');
+};
+function relevanceIndexFor(source: ReturnType<typeof buildVocabularySource>): RelevanceIndex {
+  const cached = relevanceIndexCache.get(source);
+  if (cached) return cached;
+  type SemanticSource = NonNullable<VocabularySource['metrics']>[number]
+    | NonNullable<VocabularySource['measures']>[number]
+    | NonNullable<VocabularySource['dimensions']>[number]
+    | NonNullable<VocabularySource['entities']>[number];
+  const semanticEntries: SemanticSource[] = [...(source.metrics ?? []), ...(source.measures ?? []), ...(source.dimensions ?? []), ...(source.entities ?? [])];
+  const semanticByTail = new Map<string, Array<{ words: Set<string>; isTime: boolean }>>();
+  for (const entry of semanticEntries) {
+    const physical = entry.physical?.relation;
+    if (!physical) continue;
+    const tail = relevanceTail(physical);
+    const list = semanticByTail.get(tail) ?? [];
+    list.push({
+      words: relevanceWords([entry.name, 'label' in entry ? entry.label : undefined, entry.description, 'aliases' in entry ? entry.aliases?.join(' ') : undefined, entry.physical?.column]),
+      isTime: ('isTime' in entry && Boolean(entry.isTime)) || ('dataType' in entry && /(?:date|time|timestamp)/i.test(entry.dataType ?? '')),
+    });
+    semanticByTail.set(tail, list);
+  }
+  const relations = (source.relations ?? []).map((relation) => {
+    const name = relation.binding ? physicalRelationText(relation.binding) : [relation.schema, relation.name].filter(Boolean).join('.');
+    return {
+      name,
+      // Large dbt manifests keep column data embedded on the relation rather
+      // than as catalog objects; that relation-level lane is only for
+      // selection: physical columns are still hydrated and validated before
+      // an Ask run can use them.
+      words: relevanceWords([relation.name, relation.schema, relation.description, ...relation.columns.flatMap((column) => [column.name, column.description]), ...(relation.embeddedColumns ?? []).flatMap((column) => [column.name, column.description])]),
+      tail: relevanceTail(name),
+      partial: relation.columnCompleteness !== 'complete' ? 1 : 0,
+    };
+  });
+  const index = { relations, semanticByTail };
+  relevanceIndexCache.set(source, index);
+  return index;
+}
+
+/**
+ * Relation-first discovery.  A manifest-only project may have tens of
+ * thousands of documented columns, but ordinary questions need a handful of
+ * tables.  Score embedded column metadata too, which keeps the enterprise
+ * catalog storage bound without making the columns invisible to retrieval.
+ *
+ * Compare distinct terms (a relation description repeated on every column
+ * must not outrank the narrow fact table), then give the physical home of a
+ * matching semantic field a bounded boost. The boost selects metadata to
+ * inspect; it is never a binding or evidence that two fields compose.
+ */
 export function relevantRelationsForQuestion(
   source: ReturnType<typeof buildVocabularySource>,
   question: string,
   max = 3,
 ): string[] {
-  // A relation description is often repeated across every documented column.
-  // Counting each occurrence makes a wide, unrelated model outrank the
-  // narrow fact table that owns the request's time/filter semantics.  This is
-  // especially harmful for a manifest-only project: the chosen relations are
-  // the only ones the bounded discovery pass may hydrate.  Compare distinct
-  // terms instead, then give the physical home of a matching semantic field
-  // a bounded boost.  The boost selects metadata to inspect; it is never a
-  // binding or evidence that a semantic field can be composed with another.
-  const stem = (value: string) => {
-    const lower = value.toLowerCase();
-    if (lower.endsWith('ies') && lower.length > 4) return `${lower.slice(0, -3)}y`;
-    if (lower.endsWith('ing') && lower.length > 5) return lower.slice(0, -3);
-    if (lower.endsWith('ed') && lower.length > 4) return lower.slice(0, -2);
-    if (lower.endsWith('s') && lower.length > 3 && !lower.endsWith('ss')) return lower.slice(0, -1);
-    return lower;
-  };
-  const wordsOf = (text: string | undefined) => new Set(
-    (text ?? '').toLowerCase().split(/[^a-z0-9_]+/)
-      .filter((word) => word.length > 2)
-      .map(stem),
-  );
-  const words = wordsOf(question);
-  const overlap = (values: Array<string | undefined>) => {
-    const seen = new Set<string>();
-    for (const value of values) for (const word of wordsOf(value)) if (words.has(word)) seen.add(word);
-    return seen.size;
-  };
-  const relationTail = (value: string | undefined) => {
-    const parts = parsePhysicalIdentifier(value ?? '');
-    if (parts.length === 0) return '';
-    return parts.slice(-2).map((part) => `${part.quoted ? 'q' : 'u'}:${part.quoted ? part.value : part.value.toLowerCase()}`).join('.');
-  };
+  const index = relevanceIndexFor(source);
+  const words = relevanceWords([question]);
+  if (words.size === 0) return [];
   const requestsTime = [...words].some((word) => ['date', 'day', 'week', 'month', 'quarter', 'year', 'calendar', 'fiscal', 'period'].includes(word));
-  type SemanticSource = NonNullable<VocabularySource['metrics']>[number]
-    | NonNullable<VocabularySource['measures']>[number]
-    | NonNullable<VocabularySource['dimensions']>[number]
-    | NonNullable<VocabularySource['entities']>[number];
-  const semanticEntries: SemanticSource[] = [
-    ...(source.metrics ?? []),
-    ...(source.measures ?? []),
-    ...(source.dimensions ?? []),
-    ...(source.entities ?? []),
-  ];
-  const scored = (source.relations ?? [])
-    .map((relation) => {
-      // Large dbt manifests intentionally keep column data embedded on the
-      // relation rather than creating a catalog object for every field. That
-      // relation-level lane is only for selection: physical columns are still
-      // hydrated and validated before an Ask run can use them.
-      const values = [relation.name, relation.schema, relation.description, ...relation.columns.flatMap((column) => [column.name, column.description]), ...(relation.embeddedColumns ?? []).flatMap((column) => [column.name, column.description])];
-      const matched = overlap(values);
-      const tail = relationTail(relation.binding ? physicalRelationText(relation.binding) : [relation.schema, relation.name].filter(Boolean).join('.'));
-      const semanticAffinity = semanticEntries.reduce((sum, entry) => {
-        const physical = entry.physical?.relation;
-        if (!physical || relationTail(physical) !== tail) return sum;
-        const semanticTerms = overlap([
-          entry.name,
-          'label' in entry ? entry.label : undefined,
-          entry.description,
-          'aliases' in entry ? entry.aliases?.join(' ') : undefined,
-          entry.physical?.column,
-        ]);
-        // A requested time grain must hydrate the fact relation that owns a
-        // compatible time field even when its manifest lists only keys.  A
-        // direct semantic-name hit is intentionally stronger than a repeated
-        // word in an unrelated model's column descriptions.
-        const isTime = ('isTime' in entry && entry.isTime)
-          || ('dataType' in entry && /(?:date|time|timestamp)/i.test(entry.dataType ?? ''));
-        const timeAffinity = requestsTime && isTime ? 12 : 0;
-        return sum + semanticTerms * 12 + timeAffinity;
-      }, 0);
-      const partial = relation.columnCompleteness !== 'complete' ? 1 : 0;
-      return {
-        relation,
-        matched,
-        semanticAffinity,
-        score: matched * 10 + semanticAffinity + partial,
-        name: relation.binding ? physicalRelationText(relation.binding) : [relation.schema, relation.name].filter(Boolean).join('.'),
-      };
-    });
-  // A partial relation is a hydration candidate, not question evidence. Only
-  // use its partialness as a tie-breaker once the question matched it. If no
-  // relation has lexical/description evidence at all, retain the bounded
-  // partial fallback so a generic question can still be clarified/discovered.
-  // Semantic ownership is independent evidence for discovery.  Do not let a
-  // lexical hit on a decoy relation suppress the partial fact relation that
-  // owns the requested metric or time dimension: the latter is precisely the
-  // relation whose missing columns must be hydrated before interpretation.
-  // Keep the existing max bound below, so this adds no unbounded prefetch.
-  const admitted = scored.filter((item) => item.matched > 0 || item.semanticAffinity > 0);
-  const candidates = admitted.length > 0
-    ? admitted
-    : scored.filter((item) => item.score > 0);
-  return candidates
+  const overlap = (set: Set<string>) => { let count = 0; for (const word of words) if (set.has(word)) count += 1; return count; };
+  const scored = index.relations.map((relation) => {
+    const matched = overlap(relation.words);
+    // A requested time grain must hydrate the fact relation that owns a
+    // compatible time field even when its manifest lists only keys. A direct
+    // semantic-name hit is stronger than a repeated word in an unrelated
+    // model's column descriptions.
+    const semanticAffinity = (index.semanticByTail.get(relation.tail) ?? []).reduce((sum, entry) => sum + overlap(entry.words) * 12 + (requestsTime && entry.isTime ? 12 : 0), 0);
+    return { name: relation.name, matched, semanticAffinity, score: matched * 10 + semanticAffinity + relation.partial };
+  });
+  // A question that matches nothing hydrates nothing: probing three
+  // alphabetically-first partial relations costs warehouse round trips and
+  // tells the interpreter nothing about this question.
+  return scored
+    .filter((item) => item.matched > 0 || item.semanticAffinity > 0)
     .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name))
     .slice(0, max)
     .map((item) => item.name);
@@ -894,7 +938,9 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     signal?: AbortSignal,
   ): Promise<ProbedRelation[]> => {
     if (!connection) return [];
-    const wanted = requested?.length ? requested : relationsNeedingColumns(base);
+    // An explicit empty list probes nothing; only an absent list falls back to
+    // the relations the metadata left without columns.
+    const wanted = requested ?? relationsNeedingColumns(base);
     if (wanted.length === 0) return [];
     const cacheKey = (relation: string) => `${snapshotId}|${connectionKey(connection)}|${physicalRelationIdentity(relation)}`;
     const found: ProbedRelation[] = [];
@@ -904,68 +950,132 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     // it did not describe is asked for by name, never assumed absent.
     const started = Date.now();
     const budgetMs = Math.max(0, Math.min(columnProbeBudgetMs(), remainingMs ?? columnProbeBudgetMs()));
-    for (const raw of wanted) {
-      const identifier = probeIdentifier(raw);
-      if (!identifier) continue;
-      const key = cacheKey(raw);
-      const cached = probedColumns.get(key);
-      if (cached && cached.expiresAt > Date.now()) {
-        if (cached.relation) found.push(cached.relation);
-        continue;
-      }
-      let offset = 0;
-      let aggregate: ProbedRelation | undefined;
-      let state: ProbeCacheState = 'negative';
-      while (true) {
-        if (signal?.aborted || Date.now() - started >= budgetMs) {
-          state = aggregate ? 'partial' : 'negative';
-          break;
-        }
-        const sql = relationColumnsProbeSql([raw], 1, offset, connection.driver);
-        if (!sql) break;
-        try {
-          const result = await deps.executor.executeQuery(sql, [], {}, connection, {
-            ...(signal ? { signal } : {}),
-            deadlineMs: Math.max(0, budgetMs - (Date.now() - started)),
-          });
-          const rows = (result.rows ?? []) as Array<Record<string, unknown>>;
-          const page = underAskedNames(relationsFromProbeRows(rows, true, offset), [raw])[0];
-          if (!page) { state = aggregate ? 'partial' : 'negative'; break; }
-          if (!aggregate) aggregate = { ...page, columns: [...page.columns] };
-          else {
-            const seenColumns = new Set(aggregate.columns.map((column) => column.name.toLowerCase()));
-            for (const column of page.columns) if (!seenColumns.has(column.name.toLowerCase())) {
-              aggregate.columns.push(column);
-              seenColumns.add(column.name.toLowerCase());
-            }
-            aggregate.binding = page.binding ?? aggregate.binding;
-            aggregate.observedAt = page.observedAt ?? aggregate.observedAt;
-          }
-          if (page.columnCompleteness === 'complete') { state = 'complete'; break; }
-          const advanced = page.columns.length;
-          if (advanced === 0) { state = 'partial'; break; }
-          offset += advanced;
-          // A bounded page remains explicitly partial if the inherited run
-          // budget does not allow its next exact relation page.
-          state = 'partial';
-        } catch {
-          // This might be stale catalog metadata, a different current DB or a
-          // role change. Keep it short-lived and never convert it into proof
-          // that the object is absent.
-          state = aggregate ? 'partial' : 'negative';
-          break;
-        }
-      }
+    const budgetLeft = () => Math.max(0, budgetMs - (Date.now() - started));
+    const remember = (raw: string, aggregate: ProbedRelation | undefined, state: ProbeCacheState) => {
       if (aggregate) {
         aggregate.columnCompleteness = state === 'complete' ? 'complete' : 'partial';
         if (state !== 'complete') aggregate.truncated = true;
         found.push(aggregate);
       }
-      probedColumns.set(key, {
+      probedColumns.set(cacheKey(raw), {
         ...(aggregate ? { relation: aggregate } : {}),
         state,
         expiresAt: Date.now() + (state === 'complete' ? 15 * 60_000 : 60_000),
       });
+    };
+    const mergePage = (aggregate: ProbedRelation | undefined, page: ProbedRelation): ProbedRelation => {
+      if (!aggregate) return { ...page, columns: [...page.columns] };
+      const seenColumns = new Set(aggregate.columns.map((column) => column.name.toLowerCase()));
+      for (const column of page.columns) if (!seenColumns.has(column.name.toLowerCase())) {
+        aggregate.columns.push(column);
+        seenColumns.add(column.name.toLowerCase());
+      }
+      aggregate.binding = page.binding ?? aggregate.binding;
+      aggregate.observedAt = page.observedAt ?? aggregate.observedAt;
+      return aggregate;
+    };
+    // Which requested spelling a returned page answers (the batch may hold several).
+    // Names only, case-insensitive, quote state ignored: the warehouse answered
+    // for the object this request named, whether provenance spelled it
+    // `"db"."schema"."table"` or the request said `DB.SCHEMA.TABLE`.
+    const loose = (parts: Array<string | undefined>) => parts.filter(Boolean).map((part) => part!.toLowerCase()).join('.');
+    const pageOwner = (page: ProbedRelation, candidates: string[]): string | undefined => {
+      const named = loose([page.database, page.schema, page.name]);
+      const tail = loose([page.schema, page.name]);
+      const values = (raw: string) => parsePhysicalIdentifier(raw).map((part) => part.value);
+      return candidates.find((raw) => loose(values(raw)) === named)
+        ?? candidates.find((raw) => loose(values(raw).slice(-2)) === tail);
+    };
+    const pending: string[] = [];
+    for (const raw of wanted) {
+      if (!probeIdentifier(raw)) continue;
+      const cached = probedColumns.get(cacheKey(raw));
+      if (cached && cached.expiresAt > Date.now()) {
+        if (cached.relation) found.push(cached.relation);
+        continue;
+      }
+      pending.push(raw);
+    }
+    if (pending.length === 0) return found;
+    // ONE statement for every relation this question needs (they are a
+    // handful), then further pages only for a relation wider than a page. The
+    // earlier shape issued one round trip per relation, and each metadata
+    // statement on a large warehouse is seconds.
+    const aggregates = new Map<string, ProbedRelation>();
+    const settled = new Set<string>();
+    const runPage = async (relations: string[], offset: number): Promise<ProbedRelation[] | undefined> => {
+      if (signal?.aborted || budgetLeft() <= 0) return undefined;
+      const sql = relationColumnsProbeSql(relations, Math.max(relations.length, 1), offset, connection.driver);
+      if (!sql) return [];
+      const result = await deps.executor.executeQuery(sql, [], {}, connection, {
+        ...(signal ? { signal } : {}),
+        deadlineMs: budgetLeft(),
+      });
+      const rows = (result.rows ?? []) as Array<Record<string, unknown>>;
+      return underAskedNames(relationsFromProbeRows(rows, true, offset), relations);
+    };
+    // SNOWFLAKE FAST PATH: `SHOW COLUMNS IN <table>` is a metadata command
+    // answered in milliseconds, where `information_schema.columns` scans every
+    // column of the database and is the statement that spent the whole probe
+    // budget on the office warehouse. It answers one relation completely; a
+    // relation it cannot describe falls through to the information_schema
+    // batch below, so nothing is lost when the command is refused.
+    if (connection.driver.toLowerCase() === 'snowflake') {
+      for (const raw of [...pending]) {
+        if (signal?.aborted || budgetLeft() <= 0) break;
+        const identifier = probeIdentifier(raw);
+        if (!identifier) continue;
+        try {
+          const target = [identifier.database, identifier.schema, identifier.table].filter((part): part is PhysicalIdentifierPartV1 => Boolean(part)).map(probeSegment).join('.');
+          const result = await deps.executor.executeQuery(`SHOW COLUMNS IN ${target}`, [], {}, connection, { ...(signal ? { signal } : {}), deadlineMs: budgetLeft() });
+          const rows = snowflakeShowColumnsRows((result.rows ?? []) as Array<Record<string, unknown>>);
+          if (rows.length === 0) continue;
+          const page = underAskedNames(relationsFromProbeRows(rows, true, 0), [raw])[0];
+          if (!page) continue;
+          remember(raw, mergePage(undefined, page), 'complete');
+          settled.add(raw);
+          pending.splice(pending.indexOf(raw), 1);
+        } catch { /* described by the batch below */ }
+      }
+      if (pending.length === 0) return found;
+    }
+    let firstPage: ProbedRelation[] | undefined;
+    try {
+      firstPage = await runPage(pending.slice(0, 8), 0);
+    } catch {
+      // Stale catalog metadata, a different current database or a role
+      // change: keep the negative evidence short-lived and never turn it into
+      // proof that the object is absent.
+      firstPage = undefined;
+    }
+    if (firstPage === undefined) {
+      for (const raw of pending) remember(raw, undefined, 'negative');
+      return found;
+    }
+    for (const page of firstPage) {
+      const owner = pageOwner(page, pending);
+      if (!owner) continue;
+      aggregates.set(owner, mergePage(aggregates.get(owner), page));
+      if (page.columnCompleteness === 'complete') { remember(owner, aggregates.get(owner), 'complete'); settled.add(owner); }
+    }
+    for (const raw of pending) {
+      if (settled.has(raw)) continue;
+      let aggregate = aggregates.get(raw);
+      if (!aggregate) { remember(raw, undefined, 'negative'); continue; }
+      let offset = aggregate.columns.length;
+      let state: ProbeCacheState = 'partial';
+      // A relation wider than one page: keep paging this one alone while the budget lasts.
+      while (true) {
+        let page: ProbedRelation[] | undefined;
+        try { page = await runPage([raw], offset); } catch { page = undefined; }
+        if (page === undefined) { state = 'partial'; break; }
+        const own = page[0];
+        if (!own || own.columns.length === 0) { state = 'partial'; break; }
+        aggregate = mergePage(aggregate, own);
+        if (own.columnCompleteness === 'complete') { state = 'complete'; break; }
+        offset += own.columns.length;
+      }
+      remember(raw, aggregate, state);
     }
     return found;
   };
@@ -1030,23 +1140,42 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
    * host builder, or a snapshot that could not be opened) the base source is
    * served whole and the ledger says no envelope was applied.
    */
+  // A source rebuilt with this question's discovered columns, kept for the
+  // next question about the same relations (the base is cached above; a
+  // rebuild is a few hundred milliseconds at 5,000 relations, but not free).
+  const discoveredSourceCache = new Map<string, VocabularySource>();
   const vocabularyFor = async (request: AgentRunRequest, connection?: ConnectionConfig): Promise<VocabularyView> => {
+    // Where the context time goes, phase by phase: the office trace reads it.
+    const phases: Record<string, number> = {};
+    const timed = async <T>(phase: string, work: () => Promise<T> | T): Promise<T> => {
+      const started = Date.now();
+      try { return await work(); } finally { phases[phase] = (phases[phase] ?? 0) + (Date.now() - started); }
+    };
     const envelope = resolveAskEnvelope(request);
-    const { key: baseKey, source: base } = await baseSourceFor(connection);
+    const { key: baseKey, source: base } = await timed('base', () => baseSourceFor(connection));
     const remaining = request.runBudget?.remainingMs();
-    const relevant = relevantRelationsForQuestion(base, request.question, 3);
-    const discovered = await probeColumns(connection, base, envelope.snapshotId, relevant, remaining, request.signal);
-    const source = discovered.length ? buildVocabularySource(sourceInputFor(connection, discovered)) : base;
+    const relevant = await timed('relevance', () => relevantRelationsForQuestion(base, request.question, 3));
+    const discovered = await timed('probe', () => probeColumns(connection, base, envelope.snapshotId, relevant, remaining, request.signal));
     const key = `${baseKey}|discovery:${discovered.map((relation) => `${relation.database ?? ''}.${relation.schema ?? ''}.${relation.name}:${relation.columns.length}:${relation.columnCompleteness ?? 'unknown'}`).join(',')}`;
+    const source = discovered.length
+      ? await timed('source', () => {
+        const cached = discoveredSourceCache.get(key);
+        if (cached) return cached;
+        const rebuilt = buildVocabularySource(sourceInputFor(connection, discovered));
+        if (discoveredSourceCache.size >= 8) discoveredSourceCache.delete(discoveredSourceCache.keys().next().value!);
+        discoveredSourceCache.set(key, rebuilt);
+        return rebuilt;
+      })
+      : base;
     let pack: LocalContextPack | undefined;
-    try { pack = await deps.buildContextPack?.(request, envelope); } catch { pack = undefined; }
+    try { pack = await timed('pack', () => deps.buildContextPack?.(request, envelope)); } catch { pack = undefined; }
     if (!pack) {
-      const vocabulary = buildVocabularyIndex(source);
-      return { vocabulary, envelope, context: { envelope: ledgerEnvelope(envelope), admitted: { byKind: countKinds(vocabulary) } } };
+      const vocabulary = await timed('index', () => buildVocabularyIndex(source));
+      return { vocabulary, envelope, context: { envelope: ledgerEnvelope(envelope), admitted: { byKind: countKinds(vocabulary) }, timings: phases } };
     }
     const viewKey = vocabularyViewKey(key, envelope, pack);
-    const projected = projectVocabularySource(source, pack, projectionScopeFor(envelope, deps.getManifest().manifest));
-    const vocabulary = viewCache?.key === viewKey ? viewCache.view.vocabulary : buildVocabularyIndex(projected.source);
+    const projected = await timed('projection', () => projectVocabularySource(source, pack!, projectionScopeFor(envelope, deps.getManifest().manifest)));
+    const vocabulary = viewCache?.key === viewKey ? viewCache.view.vocabulary : await timed('index', () => buildVocabularyIndex(projected.source));
     const rankedRefs = rankedRefsFromPack(pack.objects);
     const lanes: Record<string, number> = {};
     for (const [lane, result] of Object.entries(pack.retrievalDiagnostics.fusion?.lanes ?? {})) lanes[lane] = result.returned;
@@ -1061,6 +1190,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         admitted: { byKind: countKinds(vocabulary), ...(Object.keys(projected.dropped).length ? { dropped: projected.dropped } : {}), ...(Object.keys(projected.unindexed).length ? { unindexed: projected.unindexed } : {}), ...(pack.eligible ? { eligibleFingerprint: pack.eligible.fingerprint } : {}) },
         rankedRefs, ...(projected.source.domain ? { header: projected.source.domain } : {}),
         columnsFor: { shown: relationsWithColumns, total: Math.max(relationsTotal, relationsWithColumns) },
+        timings: phases,
       },
     };
     viewCache = { key: viewKey, view };
@@ -1343,7 +1473,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     try { engine = await deps.semanticEngine?.(); } catch { engine = undefined; }
     // The context is assembled BEFORE the first model call; a run that ends
     // in this phase must show where its time went, so the assembly is an event.
-    emit({ type: 'executor.started', message: `Context assembled in ${contextMs} ms: ${vocabulary.entries.length} governed objects${engine ? ` · semantic engine ${engine}` : ''}.`, route: 'generated_answer' });
+    const phaseSummary = Object.entries(view.context?.timings ?? {}).filter(([, ms]) => ms >= 50).map(([phase, ms]) => `${phase} ${ms} ms`).join(' · ');
+    emit({ type: 'executor.started', message: `Context assembled in ${contextMs} ms: ${vocabulary.entries.length} governed objects${engine ? ` · semantic engine ${engine}` : ''}${phaseSummary ? ` (${phaseSummary})` : ''}.`, route: 'generated_answer' });
     emit({ type: 'executor.started', message: prior ? 'Reading the question as an edit of the previous analysis.' : 'Reading the question against the governed vocabulary.', route: 'generated_answer' });
     const ledgered = withLedger(provider, deps, request);
     const draftDispatches: Array<{ purpose: string; ms: number; reply?: string; promptChars?: number }> = [];
@@ -1426,7 +1557,19 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         ...(connection ? { executionTargetFingerprint: fingerprintText(connectionKey(connection)) } : {}),
         enforceGenerationReadiness: false,
       });
-      if (!validation.ok) return { error: `the drafted SQL was not accepted: ${validation.error}` };
+      if (!validation.ok) {
+        // A parser that cannot read this dialect is not evidence against the
+        // draft: prove it by the relations it reads, exactly as the frozen
+        // statement is proven before execution. Read-only-ness is proven by
+        // the tier itself.
+        if (!/could not be parsed/i.test(validation.error)) return { error: `the drafted SQL was not accepted: ${validation.error}` };
+        const inspected = new Set(runtimeSchema.map((table) => executionRelationIdentityFor(table.relation, dialect)));
+        const read = relationsInSql(sql).filter((relation) => parsePhysicalIdentifier(relation).length >= 2);
+        const foreign = read.find((relation) => !inspected.has(executionRelationIdentityFor(relation, dialect)));
+        if (foreign) return { error: `the drafted SQL reads ${foreign}, which this request did not inspect` };
+        if (read.length === 0) return { error: 'the drafted SQL names no inspected relation' };
+        return { sql, relations: read, proof: [`reads only the inspected physical bindings: ${read.join(', ')} (the SQL parser could not read this dialect; relations proven by name)`], engine: dialect };
+      }
       return { sql, relations: validation.referencedRelations, proof: [`validated against the inspected physical bindings: it reads ${validation.referencedRelations.join(', ') || 'admitted relations only'}`, ...validation.warnings.slice(0, 3)], engine: dialect };
     };
     const outcome = await runAskPipeline({
@@ -1452,19 +1595,29 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
               || relation.toLowerCase().endsWith(`.${logical.toLowerCase()}`);
           }));
           if (usesUnbound) throw new Error(`SQL references ${usesUnbound}, whose physical database binding is ambiguous for this target. Refresh the relation metadata before executing.`);
+          // The composer's own SQL is proven by what it READS: every qualified
+          // relation it names must be one this request inspected, compared by
+          // the warehouse's identifier rule. That proof needs no SQL parser; a
+          // third-party parser that cannot read a dialect (three-part names on
+          // SQLite, a window clause) must never veto a governed statement.
+          const inspected = new Set(runtimeSchema.map((table) => executionRelationIdentityFor(table.relation, connection.driver)));
+          const foreign = relationsInSql(candidate.sql)
+            .filter((relation) => parsePhysicalIdentifier(relation).length >= 2)
+            .find((relation) => !inspected.has(executionRelationIdentityFor(relation, connection.driver)));
+          if (foreign) throw new Error(`the frozen SQL reads ${foreign}, which this request did not inspect (it inspected ${runtimeSchema.map((table) => table.relation).join(', ')}). Use the exact bound physical relation.`);
+          if (candidate.tier !== 'exploratory') return;
+          // Drafted SQL was parsed and validated when it was drafted; the same
+          // check is repeated on the frozen statement, and a parser limitation
+          // falls back to the relation proof above rather than refusing.
           const validation = validateSqlAgainstLocalContext(candidate.sql, view.pack, {
             dialect: connection.driver,
             runtimeSchema,
             runtimeSchemaExact: true,
             executionTargetFingerprint: fingerprintText(connectionKey(connection)),
             enforceGenerationReadiness: false,
-            // Relational compilation keeps literal values as bound positional
-            // parameters. The validator parses a neutral parser-only form,
-            // after proving this count; execution still receives the original
-            // SQL and original values below.
             positionalParameterCount: candidate.params?.length ?? 0,
           });
-          if (!validation.ok) throw new Error(`the frozen SQL is not bound to this execution target: ${validation.error}`);
+          if (!validation.ok && !/could not be parsed/i.test(validation.error)) throw new Error(`the frozen SQL is not bound to this execution target: ${validation.error}`);
         },
         run: async (sql, params, options) => {
           if (request.signal?.aborted) throw new Error('the request was cancelled before warehouse execution started');
@@ -1838,6 +1991,18 @@ function relationsInSql(sql: string): string[] {
     if (name) found.add(name);
   }
   return [...found];
+}
+
+/**
+ * The identity a warehouse gives a relation written in SQL. Snowflake keeps
+ * quote state; DuckDB and SQLite compare quoted and unquoted names alike and
+ * case-insensitively (their compilers quote every component), so only the
+ * component count and the folded spelling count there.
+ */
+function executionRelationIdentityFor(relation: string, driver: string | undefined): string {
+  const lower = driver?.trim().toLowerCase();
+  if (lower !== 'duckdb' && lower !== 'sqlite') return physicalRelationIdentity(relation);
+  return parsePhysicalIdentifier(relation).map((part) => `d:${part.value.toLocaleLowerCase('en-US')}`).join('.');
 }
 
 /** Exact Snowflake-aware identity for a relation already written in SQL. */

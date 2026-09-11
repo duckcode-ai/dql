@@ -1,0 +1,23 @@
+{
+  "key": "43fba9fb10e7cbb758ee3baf7f3fbd8d",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total product revenue (excluding tax) broken down by product type.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\"}],\"groupBy\":[{\"ref\":\"dimension:products.product_type\",\"role\":\"categorical\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"dimension:products.product_type\":\"q:by product type\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:15:49.767Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "43fba9fb10e7cbb758ee3baf7f3fbd8d6692b1146f4b879fda1c8072a5d1a572",
+    "postCanonicalHash": "43fba9fb10e7cbb758ee3baf7f3fbd8d6692b1146f4b879fda1c8072a5d1a572",
+    "appliedRuleClasses": []
+  }
+}

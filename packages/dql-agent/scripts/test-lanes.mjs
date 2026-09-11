@@ -42,13 +42,13 @@ const REQUIRED_TEST_FILES = [
 // Keep this audited set explicit: new Ask analytical-frame and observability
 // regressions must participate in the same serial package gate rather than
 // being silently omitted from the receipt audit.
-const EXPECTED_TEST_FILES = 157;
+const EXPECTED_TEST_FILES = 158;
 // Keep the aggregate receipt exact. The Ask pipeline suites (intent contract,
 // vocabulary, governed defaults and host proofs, prepare tiers), the engine,
 // observability, retrieval, semantic-proof, research-ledger, conversation and
 // provider-transport regressions total 1,891 non-skipped tests; a future
 // accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2117;
+const EXPECTED_TESTS = 2140;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

@@ -1,0 +1,23 @@
+{
+  "key": "3ba40a3854495c56c18a6251155fa89c",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What is the overall average order value (average revenue per order)?\",\"measures\":[{\"ref\":\"metric:customers.average_order_value\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:customers.average_order_value\":\"q:average order value\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:17:18.897Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "3ba40a3854495c56c18a6251155fa89cc4df4b2ae91ab07ee987475ef1278f19",
+    "postCanonicalHash": "3ba40a3854495c56c18a6251155fa89cc4df4b2ae91ab07ee987475ef1278f19",
+    "appliedRuleClasses": []
+  }
+}

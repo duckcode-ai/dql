@@ -1,0 +1,23 @@
+{
+  "key": "871bb2965314369bf04e70139acc0223",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"conversation\",\"reading\":\"The user greeted me.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{},\"reply\":\"Hi there! I can help you explore Jaffle Shop's commerce data — revenue, customers, products, and beverage performance. What would you like to know?\"}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:34:08.334Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "871bb2965314369bf04e70139acc0223c9b08e5887a6d626ca7704bf9224bbd0",
+    "postCanonicalHash": "871bb2965314369bf04e70139acc0223c9b08e5887a6d626ca7704bf9224bbd0",
+    "appliedRuleClasses": []
+  }
+}

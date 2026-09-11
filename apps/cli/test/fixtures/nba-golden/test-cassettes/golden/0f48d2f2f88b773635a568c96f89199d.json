@@ -1,0 +1,23 @@
+{
+  "key": "0f48d2f2f88b773635a568c96f89199d",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total points scored by players, broken down by month, for games played in calendar 2017.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.game_date\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.pts\":\"q:scoring totals\",\"dimension:player_game_stats.game_date\":\"q:monthly during calendar 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:45:13.266Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "0f48d2f2f88b773635a568c96f89199ddbd394cceb7d2863faea8a5b50d8d9af",
+    "postCanonicalHash": "0f48d2f2f88b773635a568c96f89199ddbd394cceb7d2863faea8a5b50d8d9af",
+    "appliedRuleClasses": []
+  }
+}

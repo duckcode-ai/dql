@@ -1,0 +1,23 @@
+{
+  "key": "8c32048d8a65817a2400921237303568",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Which customers generate the most beverage (drink) revenue, ranked highest first?\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:top customers for beverage product category\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:27:05.463Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "8c32048d8a65817a2400921237303568a028689f4ffa462145fa07e75b00172c",
+    "postCanonicalHash": "8c32048d8a65817a2400921237303568a028689f4ffa462145fa07e75b00172c",
+    "appliedRuleClasses": []
+  }
+}

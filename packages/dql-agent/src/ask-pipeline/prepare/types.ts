@@ -153,6 +153,8 @@ export interface SemanticCompileOutput {
   artifact?: unknown;
   /** Optional adapter-native compilation of up to four semantic branches. */
   program?: SemanticExecutionProgram;
+  /** What the engine noted while compiling (a profile target it could not verify, a clamped grain); recorded on the candidate's proof. */
+  warnings?: string[];
 }
 
 export interface RelationalJoinStep {

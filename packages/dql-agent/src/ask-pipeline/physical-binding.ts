@@ -185,3 +185,23 @@ export function mergePhysicalRelationBinding(
     },
   };
 }
+
+/**
+ * Whether two spellings name one physical relation. Exact identities agree
+ * (quote state and case rule included); a two-part logical spelling
+ * (`dev.customers`) names the same object as its database-qualified binding
+ * (`nba_analysis.dev.customers`) when their tails agree — the vocabulary keeps
+ * a two-part alias only while one binding owns it. Column refs are written
+ * with the logical spelling while a bound semantic entry carries the exact
+ * one, so every comparison between the two goes through here.
+ */
+export function samePhysicalRelation(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const leftParts = parsePhysicalIdentifier(left);
+  const rightParts = parsePhysicalIdentifier(right);
+  if (leftParts.length === 0 || rightParts.length === 0) return false;
+  if (leftParts.length === rightParts.length) return physicalRelationIdentity(left) === physicalRelationIdentity(right);
+  if (Math.min(leftParts.length, rightParts.length) !== 2 || Math.max(leftParts.length, rightParts.length) !== 3) return false;
+  return physicalRelationTailIdentity(left) === physicalRelationTailIdentity(right);
+}

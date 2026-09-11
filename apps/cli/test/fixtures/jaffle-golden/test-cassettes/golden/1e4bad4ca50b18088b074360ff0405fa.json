@@ -1,0 +1,23 @@
+{
+  "key": "1e4bad4ca50b18088b074360ff0405fa",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Break down gross customer revenue (lifetime spend including tax) by each customer profile.\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:revenue\",\"entity:customers.customer\":\"q:by customer profile\",\"dimension:customers.customer_name\":\"q:by customer profile\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:39:45.302Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "1e4bad4ca50b18088b074360ff0405fa68d39c55ad709da03dad8f8998c6cd1e",
+    "postCanonicalHash": "1e4bad4ca50b18088b074360ff0405fa68d39c55ad709da03dad8f8998c6cd1e",
+    "appliedRuleClasses": []
+  }
+}

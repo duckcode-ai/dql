@@ -1,0 +1,25 @@
+{
+  "key": "d8fc05d89e9eb0e505b704ed02973c7f",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks which players are most likely to be injured in the next season, a predictive injury-risk assessment.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"players most likely to get injured next season\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:52:04.692Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "d8fc05d89e9eb0e505b704ed02973c7f3f9f7f0e954dab9ab245cdc581a572b7",
+    "postCanonicalHash": "d8fc05d89e9eb0e505b704ed02973c7f3f9f7f0e954dab9ab245cdc581a572b7",
+    "appliedRuleClasses": []
+  }
+}

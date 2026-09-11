@@ -84,8 +84,10 @@ describe('source database provenance qualifies semantic physical bindings', () =
     const source = sourceFor(['DB_B']);
     const metric = source.metrics!.find((item) => item.name === 'revenue')!;
 
+    // The logical spelling stays on `relation` (column refs and every pipeline
+    // comparison read it); the exact database-qualified name is the binding.
     expect(metric.physical).toMatchObject({
-      relation: 'DB_B.PUBLIC.EVENTS',
+      relation: 'PUBLIC.EVENTS',
       binding: { database: { value: 'DB_B' }, schema: { value: 'PUBLIC' }, table: { value: 'EVENTS' } },
     });
     expect(metric.physical?.expr).toContain('DB_B.PUBLIC.EVENTS.amount');
@@ -529,5 +531,74 @@ describe('a physical expression is written as the warehouse reads names', () => 
     expect(qualifyExpression('SUM(amount)', 'sales.orders', ['amount'], snowflake)).toBe('SUM(sales.orders.amount)');
     expect(qualifyExpression('SUM("CaseSensitive")', 'sales.orders', [], snowflake)).toBe('SUM("CaseSensitive")');
     expect(qualifyExpression('SUM(amount)', 'sales.orders', ['amount'])).toBe('SUM("sales"."orders"."amount")');
+  });
+});
+
+describe('the source builder scales with the manifest', () => {
+  it('builds 3,000 relations in well under a second (a per-relation scan was 21 s at 4,700)', () => {
+    const relations = Array.from({ length: 3_000 }, (_, index) => ({
+      database: 'DB', schema: `S${index % 7}`, name: `T${index}`, columns: [], columnCompleteness: 'partial' as const,
+      embeddedColumns: [{ name: 'id' }, { name: `field_${index}` }],
+    }));
+    const started = performance.now();
+    const source = buildVocabularySource({ driver: 'snowflake', relations });
+    const ms = performance.now() - started;
+    expect(source.relations).toHaveLength(3_000);
+    expect(source.relations?.[2_999]?.binding?.database?.value).toBe('DB');
+    expect(ms).toBeLessThan(3_000);
+  });
+
+  it('reads the dbt artifact once per file version and shares it between relation selection and lineage', async () => {
+    const { mkdtempSync, writeFileSync, utimesSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { dbtArtifactNodes, embeddedManifestRelations, modelColumnLineage, resetDbtArtifactCache } = await import('./vocabulary-source.js');
+    resetDbtArtifactCache();
+    const dir = mkdtempSync(join(tmpdir(), 'dql-dbt-artifact-'));
+    const path = join(dir, 'manifest.json');
+    const write = (relation: string) => writeFileSync(path, JSON.stringify({
+      nodes: {
+        'model.p.orders': { resource_type: 'model', name: 'orders', relation_name: relation, description: 'Orders', columns: { id: { name: 'id', data_type: 'INTEGER', description: 'the id' }, amount: { name: 'amount' } }, compiled_code: 'select id, price as amount from raw.orders' },
+        'seed.p.x': { resource_type: 'seed', name: 'x', columns: {} },
+      },
+    }));
+    write('DB.SALES.ORDERS');
+    const manifest = { dbtProvenance: { manifestPath: path, nodes: { 'model.p.orders': { relation: 'DB.SALES.ORDERS' } } } } as unknown as DQLManifest;
+    const first = dbtArtifactNodes(path);
+    expect(first.map((node) => node.uniqueId)).toEqual(['model.p.orders']);
+    expect(dbtArtifactNodes(path)).toBe(first);
+    expect(embeddedManifestRelations(manifest)).toEqual([{ database: 'DB', schema: 'SALES', name: 'ORDERS', description: 'Orders', columns: [], embeddedColumns: [{ name: 'id', dataType: 'INTEGER', description: 'the id' }, { name: 'amount' }], columnCompleteness: 'partial' }]);
+    expect(modelColumnLineage(manifest)).toEqual({ 'SALES.ORDERS': { id: ['id'], amount: ['price'] } });
+    // A rewritten artifact (new mtime and size) is read again.
+    write('DB2.SALES.ORDERS_V2');
+    const later = new Date(Date.now() + 5_000);
+    utimesSync(path, later, later);
+    const second = dbtArtifactNodes(path);
+    expect(second).not.toBe(first);
+    expect(second[0]?.relationName).toBe('DB2.SALES.ORDERS_V2');
+  });
+});
+
+describe('a warehouse observation merges into the relation dbt spelled with quotes', () => {
+  it('adds probed columns to the provenance relation instead of creating a second one', async () => {
+    const { physicalRelationBinding } = await import('@duckcodeailabs/dql-agent');
+    const manifest = {
+      sources: { stats: { name: 'player_game_stats', origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: 'model.nba.player_game_stats', database: 'nba_analysis', schema: 'dev', columns: { pts: { name: 'pts', type: 'REAL' } } } } },
+      dbtProvenance: { nodes: { 'model.nba.player_game_stats': { relation: '"nba_analysis"."dev"."player_game_stats"' } } },
+    } as unknown as DQLManifest;
+    const probed = {
+      database: 'nba_analysis', schema: 'dev', name: 'player_game_stats', columnCompleteness: 'complete' as const,
+      columns: [{ name: 'pts', dataType: 'REAL' }, { name: 'turnover', dataType: 'REAL' }],
+      binding: physicalRelationBinding({ logicalRelation: 'dev.player_game_stats', physicalRelation: 'nba_analysis.dev.player_game_stats', source: 'warehouse_probe', columns: [{ name: 'pts' }, { name: 'turnover' }], columnCompleteness: 'complete' }),
+    };
+    const source = buildVocabularySource({ driver: 'duckdb', manifest, relations: [probed] });
+    const stats = source.relations?.filter((relation) => relation.name === 'player_game_stats') ?? [];
+    expect(stats).toHaveLength(1);
+    expect(stats[0]!.columns.map((column) => column.name)).toEqual(['pts', 'turnover']);
+    expect(stats[0]!.binding?.columnCompleteness).toBe('complete');
+    expect(stats[0]!.binding?.database?.value).toBe('nba_analysis');
+    const vocabulary = buildVocabularyIndex(source);
+    expect(vocabulary.get('column:dev.player_game_stats.turnover')).toBeDefined();
+    expect(vocabulary.get('relation:dev.player_game_stats')).toBeDefined();
   });
 });

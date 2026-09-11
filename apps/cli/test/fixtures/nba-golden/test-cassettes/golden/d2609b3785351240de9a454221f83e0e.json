@@ -1,0 +1,23 @@
+{
+  "key": "d2609b3785351240de9a454221f83e0e",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Which players had the most double-double games (double-digit totals in at least two of points, rebounds, assists, steals, or blocks) in 2017?\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"count of double-doubles per player (a game where at least two of points/rebounds/assists/steals/blocks reach double digits)\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:45:33.940Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d2609b3785351240de9a454221f83e0e17d39e40d3c15a2d48a9d2fca2437701",
+    "postCanonicalHash": "d2609b3785351240de9a454221f83e0e17d39e40d3c15a2d48a9d2fca2437701",
+    "appliedRuleClasses": []
+  }
+}

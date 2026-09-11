@@ -6058,6 +6058,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         engine: compiled.engine,
         ...(compiled.fanoutProbeSql ? { fanoutProbeSql: compiled.fanoutProbeSql } : {}),
         ...(compiled.strategy ? { strategy: compiled.strategy } : {}),
+        ...(compiled.warnings?.length ? { warnings: compiled.warnings } : {}),
       };
     },
     dispatchOptions: (purpose, request) => {
@@ -6148,11 +6149,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // bounded equality lookup that returns stored values only.
     literalProbeAllowed: (relation, column) => {
       const policy = resolveAgentRuntimeValueGrounding(projectConfig);
-      return policy.mode === 'safe_automatic' && policy.searchSafeColumns.has(normalizeAgentSafeColumnReference(`${relation}.${column}`));
+      if (policy.mode !== 'safe_automatic') return false;
+      // The host names a relation by its exact physical binding (quoted,
+      // database-qualified on Snowflake); the allowlist is written as
+      // schema.table.column. Compare the unquoted tail, and the full spelling.
+      const parts = parsePhysicalIdentifier(relation).map((part) => part.value);
+      const candidates = new Set([`${relation}.${column}`, `${parts.join('.')}.${column}`, `${parts.slice(-2).join('.')}.${column}`]);
+      return [...candidates].some((reference) => policy.searchSafeColumns.has(normalizeAgentSafeColumnReference(reference)));
     },
     probeLiteral: async (relation, column, value, connection) => {
       const dialect = getDialect(connection.driver);
-      const quotedRelation = relation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
+      const quotedRelation = parsePhysicalIdentifier(relation).map((part) => part.quoted ? `"${part.value.replace(/"/g, '""')}"` : dialect.quoteIdentifier(part.value)).join('.');
       const quotedColumn = dialect.quoteIdentifier(column);
       const literal = value.replace(/'/g, "''");
       const sql = `SELECT DISTINCT ${quotedColumn} AS stored_value FROM ${quotedRelation} WHERE LOWER(CAST(${quotedColumn} AS VARCHAR)) = LOWER('${literal}') LIMIT 5`;
@@ -6183,7 +6190,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // equality shape: which members a singular name actually denotes.
     probeLabelKeys: async (relation, keyColumn, labelColumn, value, connection) => {
       const dialect = getDialect(connection.driver);
-      const quotedRelation = relation.split('.').map((part) => dialect.quoteIdentifier(part)).join('.');
+      const quotedRelation = parsePhysicalIdentifier(relation).map((part) => part.quoted ? `"${part.value.replace(/"/g, '""')}"` : dialect.quoteIdentifier(part.value)).join('.');
       const quotedKey = dialect.quoteIdentifier(keyColumn);
       const quotedLabel = dialect.quoteIdentifier(labelColumn);
       const literal = value.replace(/'/g, "''");

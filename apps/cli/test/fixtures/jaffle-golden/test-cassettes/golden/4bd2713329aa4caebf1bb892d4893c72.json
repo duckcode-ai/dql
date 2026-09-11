@@ -1,0 +1,23 @@
+{
+  "key": "4bd2713329aa4caebf1bb892d4893c72",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks why revenue has declined by region and which region to invest in, but this project has no 'region' concept (only individual locations) and cannot produce causal explanations or investment recommendations.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"revenue down by region, and which region to invest in\",\"options\":[],\"material\":true,\"question\":\"This project models locations, not regions, and has no way to explain 'why' revenue changed or to recommend where to invest — could you clarify if you mean revenue by location instead, and are you looking for a trend/ranking rather than a causal explanation?\"}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:38:02.866Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "4bd2713329aa4caebf1bb892d4893c7271bf7ba0b5d03abe52e2c4e95508957f",
+    "postCanonicalHash": "4bd2713329aa4caebf1bb892d4893c7271bf7ba0b5d03abe52e2c4e95508957f",
+    "appliedRuleClasses": []
+  }
+}

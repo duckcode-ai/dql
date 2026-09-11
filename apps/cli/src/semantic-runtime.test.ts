@@ -248,7 +248,7 @@ describe('shared semantic runtime selector', () => {
     expect(result).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
   });
 
-  it('AGT-017 refuses MetricFlow before dispatch when Ask selected DB_B but dbt defaults to DB_A, and compiles when they match', async () => {
+  it('AGT-017 records a dbt profile target that differs from the selected connection as a warning on the compile, and refuses only a different driver', async () => {
     mkdirSync(join(root, 'target'), { recursive: true });
     writeFileSync(join(root, 'target', 'semantic_manifest.json'), '{}');
     const bin = join(root, 'mf');
@@ -262,7 +262,10 @@ describe('shared semantic runtime selector', () => {
     chmodSync(bin, 0o755);
     process.env.DQL_METRICFLOW_BIN = bin;
 
-    await expect(compileSemanticRuntimeQuery({
+    // MetricFlow renders the SQL; the selected connection runs it. A profile
+    // default target in another database changes nothing in the statement, so
+    // the compile proceeds and the difference is recorded, never hidden.
+    const differing = await compileSemanticRuntimeQuery({
       metrics: ['revenue_ratio'],
       dimensions: [],
       engine: 'metricflow-cli',
@@ -272,16 +275,17 @@ describe('shared semantic runtime selector', () => {
       detectedProvider: 'dbt',
       semanticLayer: layer(),
       metricFlowAskTarget: askMetricFlowTarget('DB_B', 'DB_A'),
-    })).rejects.toMatchObject({
-      code: 'SEMANTIC_RUNTIME_REQUIRED',
-      name: 'MetricFlowAskTargetMismatchError',
     });
-    expect(existsSync(argsPath)).toBe(false);
+    expect(differing).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
+    expect((differing?.warnings ?? []).join(' ')).toContain('differs from the selected connection in database');
+    expect(readFileSync(argsPath, 'utf8')).toContain('--metrics revenue_ratio');
 
+    rmSync(argsPath, { force: true });
     const compiled = await compileSemanticRuntimeQuery({
       metrics: ['revenue_ratio'],
       dimensions: [],
       engine: 'metricflow-cli',
+      limit: 3,
     }, {
       projectRoot: root,
       projectConfig: { dbt: { projectDir: '.' } },
@@ -290,31 +294,21 @@ describe('shared semantic runtime selector', () => {
       metricFlowAskTarget: askMetricFlowTarget('DB_B', 'DB_B'),
     });
     expect(compiled).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
-    expect(readFileSync(argsPath, 'utf8')).toContain('--metrics revenue_ratio');
+    expect((compiled?.warnings ?? []).some((warning) => warning.includes('differs from the selected connection'))).toBe(false);
+    expect(readFileSync(argsPath, 'utf8')).toContain('--limit 3');
 
-    // A distinct request key prevents the MetricFlow compile cache from
-    // turning the lowercase target comparison into a cache-only assertion.
-    rmSync(argsPath, { force: true });
-    expect(existsSync(argsPath)).toBe(false);
-    const lowerCaseProfileCompiled = await compileSemanticRuntimeQuery({
-      metrics: ['revenue_ratio'],
-      dimensions: [],
-      engine: 'metricflow-cli',
-      limit: 17,
-    }, {
-      projectRoot: root,
-      projectConfig: { dbt: { projectDir: '.' } },
-      detectedProvider: 'dbt',
-      semanticLayer: layer(),
-      metricFlowAskTarget: askMetricFlowTarget('DB_B', 'db_b', { preserveConfiguredSpelling: true }),
-    });
-    expect(lowerCaseProfileCompiled).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
-    expect(readFileSync(argsPath, 'utf8')).toContain('--limit 17');
-
-    // Unlike unquoted components, quoted Snowflake names preserve their case.
-    expect(() => assertMetricFlowAskTarget(
-      askMetricFlowTarget('"DB_B"', '"db_b"', { preserveConfiguredSpelling: true }),
-    )).toThrow('does not match the warehouse selected');
+    // Unquoted Snowflake components fold to upper case: `db_b` is `DB_B`.
+    expect(assertMetricFlowAskTarget(askMetricFlowTarget('DB_B', 'db_b', { preserveConfiguredSpelling: true }))).toEqual([]);
+    // Quoted names keep their case, so this IS a difference — recorded, not refused.
+    expect(assertMetricFlowAskTarget(askMetricFlowTarget('"DB_B"', '"db_b"', { preserveConfiguredSpelling: true })).join(' ')).toContain('differs from the selected connection');
+    // A profile that could not be read is a warning too; the person keeps their engine.
+    const unverifiable = askMetricFlowTarget('DB_B', 'DB_B');
+    delete (unverifiable as { profileTarget?: unknown }).profileTarget;
+    expect(assertMetricFlowAskTarget(unverifiable).join(' ')).toContain('could not be verified');
+    // A different DRIVER would render different SQL: that one stops before dispatch.
+    const otherDriver = askMetricFlowTarget('DB_B', 'DB_B');
+    otherDriver.profileTarget.expectedTarget = { ...otherDriver.profileTarget.expectedTarget, driver: 'duckdb', dialect: 'duckdb' } as typeof otherDriver.profileTarget.expectedTarget;
+    expect(() => assertMetricFlowAskTarget(otherDriver)).toThrow('does not match the warehouse selected');
   });
 
   it('AGT-005/API-007 sends the frozen qualified group-by identity to MetricFlow order-by', async () => {

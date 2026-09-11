@@ -1,0 +1,23 @@
+{
+  "key": "b755b13a7eaca491132754c3876424ad",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Break down total customer lifetime revenue (including tax) by whether the customer is new or returning.\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[{\"ref\":\"dimension:customers.customer_type\",\"role\":\"categorical\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:revenue\",\"dimension:customers.customer_type\":\"q:new versus returning customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:37:44.619Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b755b13a7eaca491132754c3876424adf4a9de62043d6354b91dc570157dca9f",
+    "postCanonicalHash": "b755b13a7eaca491132754c3876424adf4a9de62043d6354b91dc570157dca9f",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "d067bd41d2653f91aea91bd0f73f689c",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Break down beverage (drink) revenue by product and separately by customer type, to understand what is driving the high beverage revenue seen among top beverage customers.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:products.is_drink_item\",\"op\":\"eq\",\"values\":[\"true\"],\"source\":\"question\"}],\"alias\":\"beverage_revenue\"}],\"groupBy\":[{\"ref\":\"entity:products.product\",\"role\":\"key\"},{\"ref\":\"dimension:customers.customer_type\",\"role\":\"categorical\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:beverage revenue\",\"dimension:products.is_drink_item\":\"q:beverage\",\"entity:products.product\":\"q:by product\",\"dimension:products.product_name\":\"q:by product\",\"dimension:customers.customer_type\":\"q:by customer type\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:40:26.634Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d067bd41d2653f91aea91bd0f73f689c2c5d6670387d238b16a3d2c744979987",
+    "postCanonicalHash": "d067bd41d2653f91aea91bd0f73f689c2c5d6670387d238b16a3d2c744979987",
+    "appliedRuleClasses": []
+  }
+}

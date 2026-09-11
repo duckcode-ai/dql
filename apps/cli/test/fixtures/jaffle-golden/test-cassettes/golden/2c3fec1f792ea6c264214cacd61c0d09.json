@@ -1,0 +1,23 @@
+{
+  "key": "2c3fec1f792ea6c264214cacd61c0d09",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Get the breakdown of beverage products with their revenue and item counts.\",\"measures\":[{\"ref\":\"block:commerce.beverage_revenue_by_product\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:bevereage catogery\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:33:08.525Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "2c3fec1f792ea6c264214cacd61c0d0930d65839531316b2f48d13cbe59705a2",
+    "postCanonicalHash": "2c3fec1f792ea6c264214cacd61c0d0930d65839531316b2f48d13cbe59705a2",
+    "appliedRuleClasses": []
+  }
+}

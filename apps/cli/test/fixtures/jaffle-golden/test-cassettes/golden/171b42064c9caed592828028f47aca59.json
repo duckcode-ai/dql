@@ -1,0 +1,23 @@
+{
+  "key": "171b42064c9caed592828028f47aca59",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What is the average order value (lifetime spend pre-tax per lifetime order) across customers?\",\"measures\":[{\"ref\":\"metric:customers.average_order_value\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:customers.average_order_value\":\"q:average order value\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:31:15.845Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "171b42064c9caed592828028f47aca59ce1b84ff8d2034e960607aa0fa52155f",
+    "postCanonicalHash": "171b42064c9caed592828028f47aca59ce1b84ff8d2034e960607aa0fa52155f",
+    "appliedRuleClasses": []
+  }
+}

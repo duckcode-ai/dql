@@ -1,0 +1,23 @@
+{
+  "key": "ea64fbab8feddc61861589170bcd42f8",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top 10 players by total points scored in games dated in calendar 2030.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:scoring leaders\",\"dimension:player_game_stats.player_id\":\"q:scoring leaders\",\"dimension:player_game_stats.player_name\":\"q:scoring leaders\",\"dimension:player_game_stats.game_date\":\"q:calendar 2030\"},\"ordering\":{\"ref\":\"total_points\",\"direction\":\"desc\"},\"limit\":10,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2030-01-01\",\"end\":\"2031-01-01\",\"expression\":\"in calendar 2030\"}},\"population\":\"matching\"}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:32:14.644Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "ea64fbab8feddc61861589170bcd42f87705282bac1e10125e7f2766e0718704",
+    "postCanonicalHash": "ea64fbab8feddc61861589170bcd42f87705282bac1e10125e7f2766e0718704",
+    "appliedRuleClasses": []
+  }
+}

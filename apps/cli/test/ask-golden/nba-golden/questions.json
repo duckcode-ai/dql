@@ -306,6 +306,7 @@
           "fg3m",
           "threes_made",
           "three_point_makes",
+          "fg3m_made",
           "total_three_pointers"
         ],
         "three_point_attempts": [
@@ -314,7 +315,8 @@
           "three_point_attempts",
           "three_point_attempts_total",
           "three_pointers_attempted",
-          "threes_attempted"
+          "threes_attempted",
+          "fg3a_attempted"
         ],
         "three_point_pct": [
           "fg3_pct",
@@ -353,7 +355,8 @@
               "fg3m",
               "threes_made",
               "three_point_makes",
-              "total_three_pointers"
+              "total_three_pointers",
+              "fg3m_made"
             ],
             "three_point_attempts": [
               "attempts",
@@ -361,7 +364,8 @@
               "three_point_attempts",
               "three_point_attempts_total",
               "three_pointers_attempted",
-              "threes_attempted"
+              "threes_attempted",
+              "fg3a_attempted"
             ],
             "three_point_pct": [
               "fg3_pct",

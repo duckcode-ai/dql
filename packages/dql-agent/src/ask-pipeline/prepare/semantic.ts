@@ -357,7 +357,22 @@ export function bindSemanticExecutionProgram(
 
 export async function prepareSemantic(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, deps: PrepareDeps): Promise<{ candidates: PreparedCandidate[]; refusals: PreparedRefusal[] }> {
   if (!deps.compileSemantic) return { candidates: [], refusals: [{ tier: 'semantic', code: 'semantic_runtime_unavailable', message: 'no semantic layer is loaded for this project', repairable: false }] };
-  const programBound = bindSemanticExecutionProgram(intent, vocabulary, deps.engine);
+  // The bounded branch program exists for metrics ONLY the semantic engine can
+  // compute (an authored prior-period offset, a cumulative window) read under
+  // different periods. A plain metric with a scope is the relational tier's
+  // island, as it has been since round 2; running it through branches here
+  // regrouped a one-customer question by its display label.
+  // ... or when a metric has no physical binding at all (a MetricFlow-only
+  // project whose measure expressions Ask cannot see): then the relational
+  // islands cannot compose it and the engine's branches are the only route.
+  const needsEngine = intent.measures.some((measure) => {
+    const refs = measure.change ? [] : measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref];
+    return refs.some((ref) => {
+      const entry = vocabulary.get(ref);
+      return Boolean(entry?.engineOnly) || ((entry?.kind === 'metric' || entry?.kind === 'measure') && !entry.physical);
+    });
+  });
+  const programBound = needsEngine ? bindSemanticExecutionProgram(intent, vocabulary, deps.engine) : undefined;
   if (programBound?.refusal) return { candidates: [], refusals: [programBound.refusal] };
   if (programBound?.program) {
     if (!deps.compileSemanticProgram) {
@@ -409,6 +424,7 @@ export async function prepareSemantic(intent: AnalyticalIntentV1, vocabulary: Vo
           `compiled on the ${compiled.engine} semantic engine from metrics ${bound.request.metrics.join(', ')}${bound.request.dimensions.length ? ` by ${bound.request.dimensions.join(', ')}` : ''}${compiled.strategy ? ` (${compiled.strategy})` : ''}`,
           ...(bound.derived ?? []).map((item) => `${item.alias} = ${item.numerator} / ${item.denominator}, computed from the executed metrics (null when the denominator is 0)`),
           ...(bound.changes ?? []).map((item) => `${item.alias} = ${item.comparison} - ${item.base}${item.as === 'percent' ? `, over ${item.base}` : ''}, computed from the semantic metrics${item.as === 'percent' ? ' (null when the earlier value is 0)' : ''}`),
+          ...(compiled.warnings ?? []).slice(0, 3).map((warning) => `engine note: ${warning}`),
         ],
       }],
       refusals: [],

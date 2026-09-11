@@ -1,0 +1,27 @@
+{
+  "key": "13f55641719af71dc8d39138ca1c1b84",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Which players recorded the most double-doubles (games with points and rebounds each at least 10) in 2017?\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.game_id\",\"aggregation\":\"count_distinct\",\"alias\":\"double_doubles\",\"scope\":[{\"ref\":\"dimension:player_game_stats.pts\",\"op\":\"gte\",\"values\":[10],\"source\":\"question\"},{\"ref\":\"dimension:player_game_stats.reb\",\"op\":\"gte\",\"values\":[10],\"source\":\"question\"}]}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.game_id\":\"q:double-doubles (count of games)\",\"dimension:player_game_stats.pts\":\"q:double-doubles (points threshold)\",\"dimension:player_game_stats.reb\":\"q:double-doubles (rebounds threshold)\",\"dimension:player_game_stats.player_id\":\"q:players\",\"dimension:player_game_stats.player_name\":\"q:players\",\"dimension:player_game_stats.game_date\":\"q:in 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T14:50:08.668Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 6,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "13f55641719af71dc8d39138ca1c1b84b13caeb8c8f0c918aad30ecd764ec493",
+    "postCanonicalHash": "13f55641719af71dc8d39138ca1c1b84b13caeb8c8f0c918aad30ecd764ec493",
+    "appliedRuleClasses": []
+  }
+}

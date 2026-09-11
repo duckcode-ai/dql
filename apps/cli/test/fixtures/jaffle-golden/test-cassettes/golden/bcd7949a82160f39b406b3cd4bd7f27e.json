@@ -1,0 +1,23 @@
+{
+  "key": "bcd7949a82160f39b406b3cd4bd7f27e",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show beverage (drink) product revenue and items sold, broken down by product.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"alias\":\"beverage_revenue\"},{\"ref\":\"column:dev.order_items.order_item_id\",\"aggregation\":\"count_distinct\",\"alias\":\"items_sold\"}],\"groupBy\":[{\"ref\":\"entity:products.product\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[{\"ref\":\"dimension:products.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"}],\"ordering\":{\"ref\":\"beverage_revenue\",\"direction\":\"desc\"},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:bevereage catogery\",\"column:dev.order_items.order_item_id\":\"q:bevereage catogery\",\"entity:products.product\":\"q:bevereage catogery (per-product breakdown, key required for identity)\",\"dimension:products.product_name\":\"q:bevereage catogery (label for product key)\",\"dimension:products.is_drink_item\":\"q:bevereage (term:Beverage rule)\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:19:32.837Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "bcd7949a82160f39b406b3cd4bd7f27e749b6292156a4339b03eb9705052334a",
+    "postCanonicalHash": "bcd7949a82160f39b406b3cd4bd7f27e749b6292156a4339b03eb9705052334a",
+    "appliedRuleClasses": []
+  }
+}

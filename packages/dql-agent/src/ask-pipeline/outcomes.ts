@@ -63,6 +63,8 @@ export interface PipelineReceipt {
 
 export interface ContextLedgerV1 {
   version: 1;
+  /** Where the host's context assembly spent its time, by phase (ms): base source, relevance, warehouse probe, source rebuild, pack, projection, index. */
+  timings?: Record<string, number>;
   packId?: string;
   snapshotId?: string;
   envelope?: { activeDomain: string | null; ancestors: string[]; descendants: string[]; allowedImports: number; purpose?: string; modelAreaId?: string; skillRefs?: string[]; source: string; confidence: string };

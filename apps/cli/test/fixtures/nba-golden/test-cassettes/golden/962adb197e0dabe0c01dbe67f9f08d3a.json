@@ -1,0 +1,23 @@
+{
+  "key": "962adb197e0dabe0c01dbe67f9f08d3a",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by the ratio of total assists to total turnovers in games played during calendar year 2017, restricted to players with at least 20 games played, and return the single best.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.played\",\"aggregation\":\"count\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}],\"alias\":\"games_played\"},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.ast\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:dev.player_game_stats.turnover\",\"denominatorAggregation\":\"sum\"},\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}],\"alias\":\"ast_to_turnover_ratio\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"measure:0\",\"op\":\"gte\",\"values\":[20],\"source\":\"question\"}],\"ordering\":{\"ref\":\"measure:1\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"expectedShape\":\"ranking\",\"population\":\"matching\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.played\":\"q:at least 20 games\",\"dimension:player_game_stats.played\":\"q:games\",\"column:dev.player_game_stats.ast\":\"q:assist-to-turnover ratio\",\"column:dev.player_game_stats.turnover\":\"q:assist-to-turnover ratio\",\"dimension:player_game_stats.player_id\":\"q:who had the best\",\"dimension:player_game_stats.player_name\":\"q:who had the best\",\"dimension:player_game_stats.game_date\":\"q:in 2017\",\"measure:0\":\"q:with at least 20 games\",\"measure:1\":\"q:best assist-to-turnover ratio\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:10:45.287Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "962adb197e0dabe0c01dbe67f9f08d3a783e4072a5e0d7439417a3069955ded1",
+    "postCanonicalHash": "962adb197e0dabe0c01dbe67f9f08d3a783e4072a5e0d7439417a3069955ded1",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "key": "e4c03782c345fd0c2e9ed6879ea9d76e",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"This project has no distinct 'region' concept, so I'm reading 'region' as the Jaffle Shop location and showing gross order revenue by location; the project cannot produce a causal explanation for a revenue decline or an investment recommendation.\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[{\"ref\":\"entity:locations.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:orders.order_total\",\"direction\":\"desc\"},\"expectedShape\":\"grouped\",\"unresolved\":[{\"clause\":\"causal explanation for why revenue is down\",\"options\":[],\"material\":true,\"question\":\"This project can report revenue by location but cannot determine causes of a revenue decline; do you want the revenue-by-location breakdown only?\"},{\"clause\":\"recommendation on which region to invest in\",\"options\":[],\"material\":true,\"question\":\"This project has no investment-recommendation capability; would you like the raw revenue-by-location figures instead so you can decide?\"}],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"entity:locations.location\":\"q:region\",\"dimension:locations.location_name\":\"q:region\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:24:46.400Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "e4c03782c345fd0c2e9ed6879ea9d76e12385450e79a01b56744223f2bc92ca5",
+    "postCanonicalHash": "e4c03782c345fd0c2e9ed6879ea9d76e12385450e79a01b56744223f2bc92ca5",
+    "appliedRuleClasses": []
+  }
+}

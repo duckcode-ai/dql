@@ -1,0 +1,23 @@
+{
+  "key": "1146e60da1faddf65dc9815fa63d74cf",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total count of orders.\",\"measures\":[{\"ref\":\"metric:orders.orders\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.orders\":\"q:how many orders are there\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:21:05.281Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "1146e60da1faddf65dc9815fa63d74cfa514f191dccc42ca87f61c816ac28172",
+    "postCanonicalHash": "1146e60da1faddf65dc9815fa63d74cfa514f191dccc42ca87f61c816ac28172",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "37bb05427bd4f3fc333853b852a8c5a8",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Ranking of players by total points scored, for the current NBA season, showing the top scorers.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:players.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:players.player_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"measure:total_points\",\"direction\":\"desc\"},\"limit\":10,\"unresolved\":[{\"clause\":\"this season\",\"options\":[\"2016\",\"2017\"],\"material\":true,\"question\":\"The data covers the 2016 and 2017 NBA seasons only - which season do you mean by this season?\"}],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:top scorers\",\"dimension:players.player_id\":\"q:who are the top scorers\",\"dimension:players.player_name\":\"q:who are the top scorers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:34:50.633Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "37bb05427bd4f3fc333853b852a8c5a8d7a6909e86fcef001f4b95111aa6bb07",
+    "postCanonicalHash": "37bb05427bd4f3fc333853b852a8c5a8d7a6909e86fcef001f4b95111aa6bb07",
+    "appliedRuleClasses": []
+  }
+}

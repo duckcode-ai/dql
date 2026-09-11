@@ -1,0 +1,23 @@
+{
+  "key": "fdd4ddece8d761556db0edcf522a6a5c",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Find the player who made the most three-pointers in 2017, showing their three-point attempts and shooting percentage as well.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.fg3m\",\"aggregation\":\"sum\",\"alias\":\"three_pointers_made\"},{\"ref\":\"dimension:player_game_stats.fg3a\",\"aggregation\":\"sum\",\"alias\":\"three_point_attempts\"},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.fg3m\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:dev.player_game_stats.fg3a\",\"denominatorAggregation\":\"sum\"},\"alias\":\"three_point_pct\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"three_pointers_made\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.fg3m\":\"q:three-pointers\",\"dimension:player_game_stats.fg3a\":\"q:attempts\",\"dimension:player_game_stats.player_id\":\"q:Who made the most\",\"dimension:player_game_stats.player_name\":\"q:Who made the most\",\"dimension:player_game_stats.game_date\":\"q:in 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:45:06.997Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "fdd4ddece8d761556db0edcf522a6a5c137a377e9a8cd2856c2d209edfbdeac7",
+    "postCanonicalHash": "fdd4ddece8d761556db0edcf522a6a5c137a377e9a8cd2856c2d209edfbdeac7",
+    "appliedRuleClasses": []
+  }
+}

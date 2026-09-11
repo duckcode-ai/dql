@@ -1,0 +1,23 @@
+{
+  "key": "39cf100670a2246b16e70943d2c50871",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks which players had the most double-doubles (games with double-digit totals in two of points/rebounds/assists/steals/blocks) in 2017, a derived per-game condition this project does not define or compute.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"most double-doubles in 2017\",\"options\":[],\"material\":true,\"question\":\"This project has no definition or computed flag for a 'double-double' (a game with double-digit totals in two major stat categories); it cannot be derived from the available metrics, dimensions, or columns. Should I instead rank players by a specific stat total (e.g., points, rebounds) for 2017?\"}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:30:52.272Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "39cf100670a2246b16e70943d2c50871c73b45e99ae65240499dbef6003040a2",
+    "postCanonicalHash": "39cf100670a2246b16e70943d2c50871c73b45e99ae65240499dbef6003040a2",
+    "appliedRuleClasses": []
+  }
+}

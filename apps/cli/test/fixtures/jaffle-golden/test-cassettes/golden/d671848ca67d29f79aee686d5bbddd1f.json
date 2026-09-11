@@ -1,0 +1,23 @@
+{
+  "key": "d671848ca67d29f79aee686d5bbddd1f",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user is asking for total revenue, which this project defines two ways: gross order total including tax, or product revenue from order items excluding tax.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[{\"clause\":\"How much revenue do we have?\",\"options\":[\"metric:orders.order_total\",\"metric:order_item.revenue\"],\"material\":true,\"question\":\"Do you mean gross order revenue including tax (order_total), or product revenue excluding tax (order_items revenue)?\"}],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"metric:order_item.revenue\":\"q:revenue\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T15:23:25.398Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d671848ca67d29f79aee686d5bbddd1f97c6dfde525fe0dbbeafa82ec175a768",
+    "postCanonicalHash": "d671848ca67d29f79aee686d5bbddd1f97c6dfde525fe0dbbeafa82ec175a768",
+    "appliedRuleClasses": []
+  }
+}

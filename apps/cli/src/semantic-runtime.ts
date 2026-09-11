@@ -1154,33 +1154,37 @@ function semanticRequestWithoutPathSelectors(
  */
 export function assertMetricFlowAskTarget(
   target: MetricFlowAskTargetContext | undefined,
-): void {
-  if (!target) return;
-  if (target.physicalBindings.some((binding) =>
-    binding.executionTargetFingerprint !== target.executionTargetFingerprint,
-  )) {
-    throw new MetricFlowAskTargetMismatchError({
-      target,
-      reason: 'binding_target_mismatch',
-    });
+): string[] {
+  if (!target) return [];
+  // MetricFlow only RENDERS SQL here (`mf query --explain`); DQL executes that
+  // SQL on the connection the person selected, and the relation names in it
+  // come from the semantic manifest. A profile whose default target names a
+  // different database, schema, role or warehouse therefore does not change
+  // the statement, and refusing on it would silence the semantic engine on
+  // every project whose connection form differs from profiles.yml (a role
+  // left blank is enough). Such differences are RECORDED as warnings on the
+  // candidate; only a different driver, whose dialect would render different
+  // SQL, stops the compile before dispatch.
+  const warnings: string[] = [];
+  if (target.physicalBindings.some((binding) => binding.executionTargetFingerprint !== target.executionTargetFingerprint)) {
+    warnings.push(new MetricFlowAskTargetMismatchError({ target, reason: 'binding_target_mismatch' }).message);
   }
   if (!target.profileTarget?.expectedTarget) {
-    throw new MetricFlowAskTargetMismatchError({
-      target,
-      reason: 'profile_target_missing',
-    });
+    warnings.push('the dbt profile default target that local MetricFlow reads could not be verified against the selected connection; the compiled SQL runs on the selected connection');
+    return warnings;
   }
   const mismatches = compareMetricFlowAskTargets(
     target.profileTarget.expectedTarget,
     target.selectedExecutionTarget,
   );
-  if (mismatches.length > 0) {
-    throw new MetricFlowAskTargetMismatchError({
-      target,
-      reason: 'profile_target_mismatch',
-      mismatchFields: mismatches.map((mismatch) => mismatch.field),
-    });
+  if (mismatches.length === 0) return warnings;
+  const fields = mismatches.map((mismatch) => mismatch.field);
+  if (fields.includes('driver') || fields.includes('dialect')) {
+    throw new MetricFlowAskTargetMismatchError({ target, reason: 'profile_target_mismatch', mismatchFields: fields });
   }
+  const profile = target.profileTarget.profileName ? `dbt profile "${target.profileTarget.profileName}"${target.profileTarget.targetName ? ` target "${target.profileTarget.targetName}"` : ''}` : 'the dbt profile default target';
+  warnings.push(`${profile} differs from the selected connection in ${fields.join(', ')}; MetricFlow rendered the SQL and the selected connection runs it`);
+  return warnings;
 }
 
 /**
@@ -1293,7 +1297,7 @@ export async function compileSemanticRuntimeQuery(
         // `mf query` has no target flag. Do not let the CLI read an unrelated
         // profiles.yml default merely because native compilation received the
         // selected Ask binding separately.
-        assertMetricFlowAskTarget(context.metricFlowAskTarget);
+        const targetWarnings = assertMetricFlowAskTarget(context.metricFlowAskTarget);
         const dbtProjectPath = context.projectConfig.semanticLayer?.provider === 'dbt'
           ? context.projectConfig.semanticLayer.projectPath
           : context.projectConfig.dbt?.projectDir;
@@ -1322,9 +1326,9 @@ export async function compileSemanticRuntimeQuery(
             authoringRequest: effectiveRequest,
             runtimeRequest,
             bindings,
-            warnings: qualifyWarnings,
+            warnings: [...qualifyWarnings, ...targetWarnings],
           }),
-          warnings: qualifyWarnings,
+          warnings: [...qualifyWarnings, ...targetWarnings],
         };
       } catch (error) {
         lastRuntimeError = error instanceof Error ? error : new Error(String(error));
