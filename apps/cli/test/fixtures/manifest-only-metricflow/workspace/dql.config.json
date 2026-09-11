@@ -1,0 +1,11 @@
+{
+  "project": "manifest-only-metricflow-workspace",
+  "manifestVersion": 3,
+  "modeling": { "mode": "dbt-first" },
+  "dbt": {
+    "projectDir": "../dbt",
+    "profilesDir": "../dbt",
+    "manifestPath": "target/manifest.enterprise.json"
+  },
+  "semanticLayer": { "provider": "dbt", "projectPath": "../dbt" }
+}

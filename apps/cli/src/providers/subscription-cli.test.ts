@@ -21,7 +21,7 @@ describe('subscription CLI timeout', () => {
   });
 });
 
-describe('a CLI exit is classified: a usage limit is a quota, anything else is a retryable empty exit', () => {
+describe('a CLI exit is classified: quota waits, authentication needs re-login, and other exits may retry', () => {
   it('a session-limit message is provider_quota with the reset time in the detail', () => {
     const error = new ProviderExitError('Claude Code', "You've hit your session limit · resets 12pm (America/Chicago)");
     expect(error.code).toBe('provider_quota');
@@ -37,6 +37,111 @@ describe('a CLI exit is classified: a usage limit is a quota, anything else is a
     expect(error.detail.length).toBeLessThanOrEqual(300);
     expect(new ProviderExitError('Codex', '').detail).toBe('empty reply');
     expect(sanitizeProviderDetail('token sk-abcdefghijklmnop at /tmp/x')).toBe('token <redacted> at <path>');
+  });
+  it('a structured OAuth 401 is provider_auth with reauthentication guidance, even when stderr is empty', async () => {
+    const provider = new ClaudeCodeCliProvider({
+      command: 'fixture-claude',
+      runProcess: async () => ({
+        code: 1,
+        stderr: '',
+        stdout: JSON.stringify({
+          type: 'result',
+          subtype: 'error',
+          is_error: true,
+          terminal_reason: 'api_error',
+          api_error_status: 401,
+          result: 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.',
+        }),
+      }),
+    });
+    const error = await provider.generate([{ role: 'user', content: 'hi' }]).then(
+      () => undefined,
+      (reason: unknown) => reason as Error & { code?: string; detail?: string },
+    );
+    expect(error).toBeDefined();
+    expect(error?.code).toBe('provider_auth');
+    expect(error?.message).toContain('claude /login');
+    expect(error?.detail).toContain('OAuth access token has expired');
+    expect(error?.detail).toContain('Re-authenticate to continue');
+  });
+  it('uses a structured 401 as authentication evidence even when its result text is neutral', async () => {
+    const provider = new ClaudeCodeCliProvider({
+      command: 'fixture-claude',
+      runProcess: async () => ({
+        code: 1,
+        stderr: '',
+        stdout: JSON.stringify({ is_error: true, terminal_reason: 'api_error', api_error_status: 401, result: 'Request failed' }),
+      }),
+    });
+    const error = await provider.generate([{ role: 'user', content: 'hi' }]).then(
+      () => undefined,
+      (reason: unknown) => reason as Error & { code?: string; detail?: string },
+    );
+    expect(error?.code).toBe('provider_auth');
+    expect(error?.detail).toBe('Request failed');
+  });
+  it('preserves quota classification for a structured non-zero result', async () => {
+    const provider = new ClaudeCodeCliProvider({
+      command: 'fixture-claude',
+      runProcess: async () => ({ code: 1, stderr: '', stdout: JSON.stringify({ is_error: true, result: "You've hit your session limit · resets 12pm (America/Chicago)" }) }),
+    });
+    const error = await provider.generate([{ role: 'user', content: 'hi' }]).then(
+      () => undefined,
+      (reason: unknown) => reason as Error & { code?: string; detail?: string },
+    );
+    expect(error?.code).toBe('provider_quota');
+    expect(error?.detail).toContain('resets 12pm');
+  });
+  it('falls back to a sanitized generic provider exit for malformed stdout', async () => {
+    const provider = new ClaudeCodeCliProvider({
+      command: 'fixture-claude',
+      runProcess: async () => ({ code: 1, stderr: '', stdout: 'not JSON; credential sk-abcdefghijklmnop at /private/tmp/secret' }),
+    });
+    const error = await provider.generate([{ role: 'user', content: 'hi' }]).then(
+      () => undefined,
+      (reason: unknown) => reason as Error & { code?: string; detail?: string },
+    );
+    expect(error?.code).toBe('provider_exit');
+    expect(error?.message).toBe('Claude Code exited before producing an answer.');
+    expect(error?.detail).toBe('The CLI exited with an unreadable error response.');
+    expect(error?.detail).not.toContain('not JSON');
+    expect(error?.detail).not.toContain('sk-abcdefghijklmnop');
+    expect(error?.detail).not.toContain('/private/tmp/secret');
+  });
+  it('redacts complete Basic and custom authorization header values from structured errors, stderr, and debug output', async () => {
+    const bearer = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature';
+    const access = 'access-value-0123456789';
+    const refresh = 'refresh-value-0123456789';
+    const basic = 'dXNlcjpzZWNyZXQ=';
+    const custom = 'custom-scheme-credential-0123456789';
+    const previousDebug = process.env.DQL_DEBUG_PROVIDER_CLI;
+    const logged: unknown[][] = [];
+    const originalError = console.error;
+    const provider = new ClaudeCodeCliProvider({
+      command: 'fixture-claude',
+      runProcess: async () => ({
+        code: 1,
+        stderr: `Proxy-Authorization: Custom ${custom}\nrefresh_token=${refresh}`,
+        stdout: JSON.stringify({ is_error: true, result: `Request failed Authorization: Basic ${basic}; Authorization:Bearer ${bearer}; payload={"access_token":"${access}"}` }),
+      }),
+    });
+    process.env.DQL_DEBUG_PROVIDER_CLI = '1';
+    console.error = (...args: unknown[]) => { logged.push(args); };
+    try {
+      const error = await provider.generate([{ role: 'user', content: 'hi' }]).then(
+        () => undefined,
+        (reason: unknown) => reason as Error & { code?: string; detail?: string },
+      );
+      expect(error?.detail).toContain('<redacted>');
+      for (const secret of [basic, custom, bearer, access, refresh]) expect(error?.detail).not.toContain(secret);
+      expect(logged).toHaveLength(1);
+      const debug = JSON.stringify(logged[0]);
+      for (const secret of [basic, custom, bearer, access, refresh]) expect(debug).not.toContain(secret);
+    } finally {
+      console.error = originalError;
+      if (previousDebug === undefined) delete process.env.DQL_DEBUG_PROVIDER_CLI;
+      else process.env.DQL_DEBUG_PROVIDER_CLI = previousDebug;
+    }
   });
 });
 
@@ -78,6 +183,11 @@ describe('parseClaudeResult', () => {
   it('flags is_error true (e.g. not logged in)', () => {
     const json = JSON.stringify({ is_error: true, result: 'Not logged in · Please run /login' });
     expect(parseClaudeResult(json)).toEqual({ text: 'Not logged in · Please run /login', isError: true });
+  });
+
+  it('retains safe structural terminal fields for a non-zero exit classifier', () => {
+    const json = JSON.stringify({ is_error: true, terminal_reason: 'api_error', api_error_status: 401, result: 'Request failed' });
+    expect(parseClaudeResult(json)).toEqual({ text: 'Request failed', isError: true, terminalReason: 'api_error', apiErrorStatus: 401 });
   });
 
   it('falls back to the last JSON line when stdout has leading noise', () => {

@@ -42,6 +42,10 @@ export interface PipelineReceipt {
   /** Warehouse statements this run dispatched and how many failed; `executed` is the one that succeeded. A failed attempt is never "no query ran". */
   /** What the host sent to the warehouse for this run: queries attempted, of which failed and succeeded. */
   warehouse?: { attempts: number; failures: number; executions?: number };
+  /** Last fully completed pipeline phase; retained when a deadline/cancellation interrupts the next phase. */
+  lastCompletedPhase?: string;
+  /** Exact physical bindings admitted for this request; targets are redacted fingerprints. */
+  physicalBindings?: Array<{ relation: string; completeness: 'complete' | 'partial'; columns: number; targetFingerprint?: string }>;
   /**
    * What the answer does NOT carry although the question asked for it: a
    * requested human label the governed vocabulary could not reach, a facet the

@@ -85,4 +85,33 @@ describe('QueryExecutor stale-session recovery', () => {
     expect(isRecoverableConnectionLoss(new Error('Connection reset by peer'))).toBe(true);
     expect(isRecoverableConnectionLoss(new Error('SQL compilation error'))).toBe(false);
   });
+
+  it('passes an inherited abort signal into an already-running connector call', async () => {
+    const controller = new AbortController();
+    let observed: AbortSignal | undefined;
+    let began = false;
+    const pending = connector(async (_sql, _params, options) => {
+      observed = options?.signal;
+      began = true;
+      return new Promise((resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(options.signal?.reason ?? new Error('cancelled')), { once: true });
+        // A connector must remain pending until the driver settles or the
+        // signal is observed. This is intentionally not a preflight-only test.
+        void resolve;
+      });
+    });
+    const pool = {
+      getConnector: vi.fn(async () => pending),
+      removeConnector: vi.fn(async () => undefined),
+      disconnectAll: vi.fn(async () => undefined),
+    };
+    const execution = new QueryExecutor(pool as never).executePositional(
+      'SELECT * FROM sales.orders', [], config, { signal: controller.signal },
+    );
+    await vi.waitFor(() => expect(began).toBe(true));
+    controller.abort(new Error('cancelled during connector execution'));
+    await expect(execution).rejects.toThrow('cancelled during connector execution');
+    expect(observed).toBe(controller.signal);
+    expect(pool.removeConnector).not.toHaveBeenCalled();
+  });
 });

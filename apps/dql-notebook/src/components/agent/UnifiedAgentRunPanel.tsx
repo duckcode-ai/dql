@@ -4257,6 +4257,14 @@ export function InspectorAskPipelineStory({ receipt, t }: { receipt: Record<stri
   const chosen = executed ? candidates.find((candidate) => candidate.tier === executed.tier) : undefined;
   const dispatches = recordList(receipt.dispatches);
   const failure = recordOf(receipt.failure);
+  const warehouse = recordOf(receipt.warehouse);
+  const warehouseAttempts = typeof warehouse?.attempts === 'number' && warehouse.attempts > 0 ? warehouse.attempts : 0;
+  const warehouseFailures = typeof warehouse?.failures === 'number' && warehouse.failures > 0 ? warehouse.failures : 0;
+  const executionState = executed
+    ? `${displayValue(executed.rowCount)} rows in ${displayValue(executed.ms)} ms · ${stringList(executed.proofs).join(' ')}`
+    : warehouseAttempts > 0
+      ? `${warehouseAttempts} warehouse quer${warehouseAttempts === 1 ? 'y' : 'ies'} attempted · ${warehouseFailures} failed · no successful warehouse query ran`
+      : 'no warehouse query ran';
   const refusals = recordList(receipt.refusals).map((refusal) => `${displayValue(refusal.tier)}/${displayValue(refusal.code)}: ${displayValue(refusal.message)}`);
   const timings = recordOf(receipt.timings);
   const successful = Boolean(executed) && !failure;
@@ -4269,10 +4277,11 @@ export function InspectorAskPipelineStory({ receipt, t }: { receipt: Record<stri
     ['Ordering', ordering ? `${displayValue(ordering.ref)} ${displayValue(ordering.direction)}${intent?.limit ? ` · top ${displayValue(intent.limit)}` : ''}` : intent?.limit ? `top ${displayValue(intent.limit)}` : ''],
     ['Tiers tried', tiers.join(' · ')],
     ['Prepared', chosen ? `${displayValue(chosen.tier)} · ${displayValue(chosen.trust)} · ${stringList(chosen.proof).join(' ')}` : candidates.length ? candidates.map((candidate) => `${displayValue(candidate.tier)} (${displayValue(candidate.trust)})`).join(', ') : 'nothing prepared'],
-    ['Executed', executed ? `${displayValue(executed.rowCount)} rows in ${displayValue(executed.ms)} ms · ${stringList(executed.proofs).join(' ')}` : 'no warehouse query ran'],
+    ['Executed', executionState],
     ['Model calls', dispatches.length ? `${dispatches.length} (${dispatches.map((dispatch) => `${displayValue(dispatch.purpose)} ${displayValue(dispatch.ms)} ms`).join(', ')})` : '0'],
     ['Reuse', typeof receipt.reuse === 'string' && receipt.reuse !== 'none' ? `${receipt.reuse} reused` : ''],
     ['Stopped', failure ? `${displayValue(failure.stage)}: ${displayValue(failure.message)}` : ''],
+    ['Last completed phase', typeof receipt.lastCompletedPhase === 'string' ? receipt.lastCompletedPhase : ''],
     ['Refusals', refusals.join('\n')],
     ['Timings', timings ? Object.entries(timings).map(([stage, ms]) => `${stage} ${displayValue(ms)} ms`).join(' · ') : ''],
     ['Vocabulary', displayValue(receipt.vocabularyFingerprint)],

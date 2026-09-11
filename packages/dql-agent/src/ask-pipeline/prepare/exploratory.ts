@@ -28,6 +28,26 @@ export function readOnlyStatementProblem(sql: string): string | undefined {
 }
 
 export async function prepareExploratory(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, deps: PrepareDeps, question: string): Promise<{ candidates: PreparedCandidate[]; refusals: PreparedRefusal[] }> {
+  // A derived/offset/cumulative dbt metric is an engine-owned definition.
+  // SQL exploration may use physical columns for a manifest-only question,
+  // but it must never recreate an authored MetricFlow formula from a prompt.
+  const metricRefs = intent.measures.flatMap((measure) => measure.change
+    ? []
+    : measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]);
+  const engineOwned = metricRefs
+    .map((ref) => vocabulary.get(ref))
+    .filter((entry) => Boolean(entry?.engineOnly));
+  if (engineOwned.length > 0) {
+    return {
+      candidates: [],
+      refusals: [{
+        tier: 'exploratory',
+        code: 'semantic_engine_required',
+        message: `${[...new Set(engineOwned.map((entry) => entry!.label ?? entry!.name))].join(', ')} ${engineOwned.length === 1 ? 'is' : 'are'} defined by the semantic engine (${[...new Set(engineOwned.map((entry) => entry!.engineOnly))].join('; ')}). Generated SQL will not approximate that authored definition; fix the semantic compiler or run it on the configured MetricFlow target.`,
+        repairable: false,
+      }],
+    };
+  }
   if (!deps.draftSql) {
     return { candidates: [], refusals: [{ tier: 'exploratory', code: 'exploration_unavailable', message: 'no SQL drafting provider is configured for review-required exploration', repairable: false }] };
   }

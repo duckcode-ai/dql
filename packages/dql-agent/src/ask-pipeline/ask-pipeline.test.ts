@@ -527,6 +527,45 @@ describe('a part the policy or a concept answered for is covered (item 6 of the 
     expect(facetStem('participating')).toBe(facetStem('participated'));
     expect(facetStem('participation')).toBe(facetStem('participated'));
   });
+
+  it('credits a used measure only when its bound expression or dbt lineage embodies a listed facet', () => {
+    const expressionVocabulary = buildVocabularyIndex({
+      metrics: [
+        { name: 'points_scored', model: 'player_game', label: 'Points scored', aggregation: 'sum', description: 'Participating appearances are important.', physical: { relation: 'dev.player_game', expr: 'SUM(CASE WHEN "dev"."player_game"."participated" = TRUE THEN "dev"."player_game"."points" ELSE 0 END)', aggregate: 'sum' } },
+        { name: 'games_played', model: 'player_game', label: 'Games played', aggregation: 'count_distinct', physical: { relation: 'dev.player_game', expr: 'COUNT(DISTINCT "dev"."player_game"."game_id")', aggregate: 'count_distinct' } },
+      ],
+      relations: [{ schema: 'dev', name: 'player_game', columns: [{ name: 'points' }, { name: 'participated' }, { name: 'game_id' }] }],
+    });
+    const reading = parseIntent({
+      version: 1, kind: 'analytics', reading: 'x',
+      measures: [{ ref: 'metric:player_game.points_scored' }, { ref: 'metric:player_game.games_played' }],
+      groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar',
+    }).intent!;
+    expect(unmetFacets('Show games played and points, including only games he participated in.', reading, expressionVocabulary)).toEqual([]);
+
+    const proseOnly = buildVocabularyIndex({
+      metrics: [
+        { name: 'points_scored', model: 'player_game', label: 'Points scored', aggregation: 'sum', description: 'Participating appearances are important.', physical: { relation: 'dev.player_game', expr: 'SUM("dev"."player_game"."points")', aggregate: 'sum' } },
+        { name: 'games_played', model: 'player_game', label: 'Games played', aggregation: 'count_distinct', physical: { relation: 'dev.player_game', expr: 'COUNT(DISTINCT "dev"."player_game"."game_id")', aggregate: 'count_distinct' } },
+      ],
+      relations: [{ schema: 'dev', name: 'player_game', columns: [{ name: 'points' }, { name: 'participated' }, { name: 'game_id' }] }],
+    });
+    expect(unmetFacets('Show games played and points, including only games he participated in.', reading, proseOnly)).toEqual(['only games he participated in']);
+
+    const lineageVocabulary = buildVocabularyIndex({
+      metrics: [
+        { name: 'won_games', model: 'season', label: 'Won games', aggregation: 'sum', physical: { relation: 'dev.season', expr: 'SUM("dev"."season"."wins")', aggregate: 'sum' } },
+        { name: 'games_played', model: 'season', label: 'Games played', aggregation: 'count', physical: { relation: 'dev.season', expr: 'COUNT("dev"."season"."game_id")', aggregate: 'count' } },
+      ],
+      relations: [{ schema: 'dev', name: 'season', columns: [{ name: 'wins' }, { name: 'game_id' }], columnLineage: { wins: ['team_won'] } }],
+    });
+    const lineageReading = parseIntent({
+      version: 1, kind: 'analytics', reading: 'x',
+      measures: [{ ref: 'metric:season.won_games' }, { ref: 'metric:season.games_played' }],
+      groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar',
+    }).intent!;
+    expect(unmetFacets('Show won games, including only games the team won.', lineageReading, lineageVocabulary)).toEqual([]);
+  });
 });
 
 describe('the ledger names the relations an execution read, joins or not (item 7 of the NBA validation)', () => {
@@ -1199,6 +1238,33 @@ describe('a provider timeout is retried once, under the same run, when the budge
     const outcome = await runAskPipeline({ question: 'revenue', vocabulary, provider: flaky(5, () => Object.assign(new Error('x'), { code: 'provider_quota', detail: 'resets 12pm' })), prepareDeps: {}, executeDeps: { run: async () => { throw new Error('must not execute'); } }, deadlineMs: 150_000 });
     expect(outcome.kind).toBe('failed');
     if (outcome.kind === 'failed') { expect(outcome.text).toContain('usage limit is reached'); expect(outcome.text).toContain('resets 12pm'); expect(outcome.receipt.failure?.reason).toBe('provider_quota'); expect(outcome.receipt.dispatches[0]?.promptChars).toBeGreaterThan(100); }
+  });
+  it('does not retry an authentication failure and preserves its reauthentication action', async () => {
+    const auth = flaky(5, () => Object.assign(
+      new Error('Claude Code needs authentication. Re-authenticate with `claude /login`, then retry.'),
+      { code: 'provider_auth', detail: 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.' },
+    ));
+    const result = await resolveIntent({ question: 'revenue', vocabulary, provider: auth, budgetMs: 150_000 });
+    expect(result.status).toBe('failed');
+    expect(auth.calls).toBe(1);
+    if (result.status === 'failed') expect(result.code).toBe('provider_auth');
+    const outcome = await runAskPipeline({
+      question: 'revenue',
+      vocabulary,
+      provider: flaky(5, () => Object.assign(
+        new Error('Claude Code needs authentication.'),
+        { code: 'provider_auth', detail: 'OAuth access token has expired. Re-authenticate to continue.' },
+      )),
+      prepareDeps: {},
+      executeDeps: { run: async () => { throw new Error('must not execute'); } },
+      deadlineMs: 150_000,
+    });
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind === 'failed') {
+      expect(outcome.text).toContain('needs authentication');
+      expect(outcome.text).toContain('OAuth access token has expired');
+      expect(outcome.receipt.failure?.reason).toBe('provider_auth');
+    }
   });
   it('the pipeline says it in one sentence and keeps the provider words in the receipt', async () => {
     const outcome = await runAskPipeline({ question: 'revenue', vocabulary, provider: flaky(3), prepareDeps: {}, executeDeps: { run: async () => { throw new Error('must not execute'); } }, deadlineMs: 150_000 });

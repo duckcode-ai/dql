@@ -7,8 +7,9 @@ import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal
 import { applySkillPolicies } from './policies.js';
 import { proveLiterals } from './literal-proof.js';
 import { prepareExploratory } from './prepare/exploratory.js';
-import { keepMembersApart, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn } from './resolve-intent.js';
+import { keepMembersApart, normalizeEffectiveIntent, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn } from './resolve-intent.js';
 import { buildVocabularyIndex, renderCard, type RenderedCards, type VocabularyDomainHeader, type VocabularyEntry, type VocabularyIndex } from './vocabulary.js';
+import { mergePhysicalRelationBinding, physicalRelationIdentity, physicalRelationText } from './physical-binding.js';
 
 /**
  * INTENT → PREPARE → EXECUTE, as one host-neutral function.
@@ -49,8 +50,27 @@ export interface RunAskPipelineInput {
    * (their columns and types), used once when a reading leaves a clause
    * unresolved while naming a relation whose columns it could not see.
    */
-  describeRelations?: (relations: string[]) => Promise<Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }> }>>;
+  describeRelations?: (relations: string[]) => Promise<Array<{
+    database?: string;
+    schema?: string;
+    name: string;
+    description?: string;
+    columns: Array<{ name: string; dataType?: string; description?: string }>;
+    columnCompleteness?: 'complete' | 'partial' | 'unknown';
+    observedAt?: string;
+    truncated?: boolean;
+    binding?: NonNullable<VocabularyEntry['physical']>['binding'];
+  }>>;
+  /**
+   * The host owns the request-local vocabulary used after discovery.  It must
+   * update its final SQL validator, executor and receipt at the same instant
+   * that the interpreter sees hydrated columns; otherwise those stages can
+   * disagree about an exact Snowflake binding.
+   */
+  onVocabularyUpdate?: (vocabulary: VocabularyIndex) => void;
   deadlineMs?: number;
+  /** Host cancellation for the entire request; no new phase starts after it fires. */
+  signal?: AbortSignal;
   cardBudget?: number;
   providerOptions?: ProviderRunOptions;
   preparationCache?: PreparationCache;
@@ -119,7 +139,7 @@ function gapFromRefusals(refusals: PreparedRefusal[], intent: AnalyticalIntentV1
   if (unknownDomain) return { gap: 'not_modeled', message: unknownDomain.message, nearest: [] };
   const unresolved = intent.unresolved.filter((clause) => clause.material);
   if (unresolved.length) return { gap: 'ambiguous', message: unresolved.map((clause) => clause.clause).join('; '), nearest: unresolved.flatMap((clause) => clause.options) };
-  const compile = refusals.find((refusal) => refusal.code === 'semantic_compile_failed' || refusal.code === 'relational_compose_failed' || refusal.code === 'join_path_required' || refusal.code === 'measure_scope_not_expressible');
+  const compile = refusals.find((refusal) => refusal.code === 'semantic_compile_failed' || refusal.code === 'semantic_engine_required' || refusal.code === 'relational_compose_failed' || refusal.code === 'join_path_required' || refusal.code === 'measure_scope_not_expressible');
   const nearest = [...new Set(intent.measures.flatMap((measure) => vocabulary.suggest(measure.ref, 3).map((entry) => entry.ref)))].filter((ref) => !intent.measures.some((measure) => measure.ref === ref)).slice(0, 5);
   // The reader gets the first line of the engine's message; the receipt keeps it verbatim.
   if (compile) return { gap: 'unsupported', message: summarizeRefusal(compile), nearest };
@@ -362,6 +382,80 @@ function memberGuidance(input: RunAskPipelineInput): string | undefined {
   return input.guidance ? `${input.guidance}\n${said}` : said;
 }
 
+/**
+ * Merge a warehouse description into the one vocabulary this request uses.
+ *
+ * `buildVocabularyIndex()` intentionally keeps a short relation ref for a
+ * one-relation source.  That is the wrong identity when the full inventory
+ * already contains DB_A.PUBLIC.EVENTS and DB_B.PUBLIC.EVENTS.  Merge by the
+ * exact parsed physical binding and retain the inventory's canonical ref so a
+ * request-local recovery cannot re-introduce an unsafe PUBLIC.EVENTS alias.
+ */
+export function mergeDiscoveredRelations(
+  vocabulary: VocabularyIndex,
+  relations: Parameters<typeof buildVocabularyIndex>[0]['relations'] extends infer T ? NonNullable<T> : never,
+): VocabularyIndex {
+  if (!relations.length) return vocabulary;
+  const discovered = buildVocabularyIndex({ relations });
+  const extra: VocabularyEntry[] = [];
+  const existingRelations = vocabulary.entries.filter((entry) => entry.kind === 'relation');
+
+  for (const discoveredRelation of discovered.entries.filter((entry) => entry.kind === 'relation')) {
+    const discoveredBinding = discoveredRelation.physical?.binding;
+    const exactExisting = discoveredBinding
+      ? existingRelations.find((entry) => {
+        const existingBinding = entry.physical?.binding;
+        return Boolean(existingBinding && physicalRelationIdentity(physicalRelationText(existingBinding)) === physicalRelationIdentity(physicalRelationText(discoveredBinding)));
+      })
+      : undefined;
+    const logicalCollision = discoveredBinding
+      ? existingRelations.some((entry) => entry.physical?.binding?.logicalRelation.toLowerCase() === discoveredBinding.logicalRelation.toLowerCase()
+        && physicalRelationIdentity(physicalRelationText(entry.physical.binding)) !== physicalRelationIdentity(physicalRelationText(discoveredBinding)))
+      : false;
+    const canonical = exactExisting?.model
+      ?? (logicalCollision && discoveredBinding ? physicalRelationText(discoveredBinding) : discoveredRelation.model ?? discoveredRelation.name);
+    const relationRef = `relation:${canonical}`;
+    const binding = exactExisting?.physical?.binding && discoveredBinding
+      ? mergePhysicalRelationBinding(exactExisting.physical.binding, discoveredBinding).binding ?? exactExisting.physical.binding
+      : discoveredBinding ?? exactExisting?.physical?.binding;
+    const existingColumns = exactExisting?.columns ?? [];
+    const discoveredColumns = discovered.entries
+      .filter((entry) => entry.kind === 'column' && entry.physical?.binding && discoveredBinding
+        && physicalRelationIdentity(physicalRelationText(entry.physical.binding)) === physicalRelationIdentity(physicalRelationText(discoveredBinding)));
+    const names = [...new Set([...existingColumns, ...discoveredColumns.map((entry) => entry.name)])];
+    const relation: VocabularyEntry = {
+      ...(exactExisting ?? discoveredRelation),
+      ref: relationRef,
+      model: canonical,
+      aliases: exactExisting?.aliases ?? (logicalCollision ? [canonical] : discoveredRelation.aliases),
+      columns: names,
+      physical: {
+        relation: canonical,
+        ...(binding ? { binding } : {}),
+      },
+    };
+    extra.push(relation);
+    for (const column of discoveredColumns) {
+      extra.push({
+        ...column,
+        ref: `column:${canonical}.${column.name}`,
+        model: canonical,
+        physical: { relation: canonical, column: column.name, ...(binding ? { binding } : {}) },
+      });
+    }
+    // Existing column cards must read the merged binding too; a runtime
+    // description may be the first complete observation of a manifest column.
+    for (const column of vocabulary.entries.filter((entry) => entry.kind === 'column' && exactExisting && entry.model === exactExisting.model)) {
+      extra.push({
+        ...column,
+        model: canonical,
+        physical: { ...(column.physical ?? { relation: canonical, column: column.name }), relation: canonical, ...(binding ? { binding } : {}) },
+      });
+    }
+  }
+  return vocabulary.withEntries(extra);
+}
+
 export async function runAskPipeline(input: RunAskPipelineInput): Promise<PipelineOutcome> {
   const now = input.now ?? (() => Date.now());
   const started = now();
@@ -371,17 +465,82 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     version: 1, vocabularyFingerprint: input.vocabulary.fingerprint, dispatches: [], candidates: [], refusals: [], tiers: [], timings, reuse: 'none',
     ...(input.build ? { build: input.build } : {}),
   };
-  // Every warehouse dispatch is counted; a failed statement is an attempt, not "no query ran".
+  const remaining = () => (deadline ? deadline - now() : Number.POSITIVE_INFINITY);
+  // Provider calls (initial reading, correction and SQL draft) share the run
+  // cancellation.  A caller-supplied signal takes precedence only when it is
+  // the same inherited request; no helper may accidentally create a detached
+  // provider call after the turn has ended.
+  const providerOptions: ProviderRunOptions | undefined = input.signal
+    ? { ...(input.providerOptions ?? {}), signal: input.signal }
+    : input.providerOptions;
+  const stopped = (stage: 'resolve' | 'prepare' | 'execute'): PipelineOutcome | undefined => {
+    if (!input.signal?.aborted && remaining() > 0) return undefined;
+    const message = input.signal?.aborted
+      ? 'the run was cancelled before the next analytical phase could start'
+      : `the run reached its deadline after ${receipt.lastCompletedPhase ?? 'starting'}; no later phase was started`;
+    receipt.failure = { stage, reason: input.signal?.aborted ? 'cancelled' : 'deadline', message };
+    return { kind: 'failed', stage, message, text: composeFailedText(stage, message), receipt };
+  };
+  const beforeResolve = stopped('resolve');
+  if (beforeResolve) return beforeResolve;
+  // Count only physical dispatches.  Validation/filter failures happen before
+  // the warehouse boundary and must not turn into a false "attempted" receipt.
   const countedExecute: typeof executeCandidate = async (...args) => {
-    receipt.warehouse = { attempts: (receipt.warehouse?.attempts ?? 0) + 1, failures: receipt.warehouse?.failures ?? 0, executions: receipt.warehouse?.executions ?? 0 };
-    const executed = await executeCandidate(...args);
-    if (!executed.ok && executed.code === 'execution_failed') receipt.warehouse.failures += 1;
-    else receipt.warehouse.executions = (receipt.warehouse.executions ?? 0) + 1;
+    const [candidate, intent, executeDeps] = args;
+    let physicalAttempts = 0;
+    let settled = 0;
+    // Legacy host executors and test doubles may not invoke receipt hooks, but
+    // each call into `run` is still one physical statement request. Keep that
+    // count separately so a two-branch MetricFlow program is never recorded
+    // as one warehouse attempt merely because the adapter predates hooks.
+    let invoked = 0;
+    const notedDeps: ExecuteDeps = {
+      ...executeDeps,
+      run: (sql, params, options) => {
+        invoked += 1;
+        return executeDeps.run(sql, params, {
+        ...options,
+        onWarehouseAttempt: () => {
+          physicalAttempts += 1;
+          receipt.warehouse = {
+            attempts: (receipt.warehouse?.attempts ?? 0) + 1,
+            failures: receipt.warehouse?.failures ?? 0,
+            executions: receipt.warehouse?.executions ?? 0,
+          };
+          options.onWarehouseAttempt?.();
+        },
+        onWarehouseResult: (outcome) => {
+          settled += 1;
+          receipt.warehouse = {
+            attempts: receipt.warehouse?.attempts ?? 0,
+            failures: (receipt.warehouse?.failures ?? 0) + (outcome === 'failed' ? 1 : 0),
+            executions: (receipt.warehouse?.executions ?? 0) + (outcome === 'succeeded' ? 1 : 0),
+          };
+          options.onWarehouseResult?.(outcome);
+        },
+        });
+      },
+    };
+    const executed = await executeCandidate(candidate, intent, notedDeps);
+    // Existing host adapters and focused unit doubles predate the receipt
+    // hooks. They represent a real `run` call, so retain one conservative
+    // count for a result/warehouse failure; never do this for preflight or
+    // filter rejections where no dispatch occurred.
+    if (physicalAttempts === 0 && settled === 0 && invoked > 0 && (executed.ok || executed.code === 'execution_failed' || executed.code === 'no_rows_matched' || executed.code === 'fanout_detected')) {
+      receipt.warehouse = {
+        attempts: (receipt.warehouse?.attempts ?? 0) + invoked,
+        failures: (receipt.warehouse?.failures ?? 0) + (!executed.ok && executed.code === 'execution_failed' ? invoked : 0),
+        executions: (receipt.warehouse?.executions ?? 0) + (!executed.ok && executed.code === 'execution_failed' ? 0 : invoked),
+      };
+    }
     return executed;
   };
   const label = labelFor(input.vocabulary);
-  const remaining = () => (deadline ? deadline - now() : Number.POSITIVE_INFINITY);
-  const mark = (stage: string, from: number) => { timings[stage] = Math.round(now() - from); input.trace?.({ stage, detail: timings[stage] }); };
+  const mark = (stage: string, from: number) => {
+    timings[stage] = Math.round(now() - from);
+    receipt.lastCompletedPhase = stage;
+    input.trace?.({ stage, detail: timings[stage] });
+  };
 
   // THE DISCOVERY PATH, step one: hydration before the first call. Every
   // exact or alias match for the question's own words is pinned ahead of
@@ -428,13 +587,25 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     let vocabulary = input.vocabulary;
     const text = ` ${need.question} ${need.reading} ${need.clauses.join(' ')} `.toLowerCase();
     const escape = (value: string) => value.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const namedRelations = vocabulary.entries.filter((entry) => entry.kind === 'relation' && [entry.name, entry.model ?? '', ...entry.aliases].some((name) => name && new RegExp(`(^|[^a-z0-9_])${escape(name)}([^a-z0-9_]|$)`).test(text)));
-    const bare = namedRelations.filter((entry) => !(entry.columns?.length));
+    const namedRelations = vocabulary.entries.filter((entry) => entry.kind === 'relation' && [entry.name, entry.model ?? '', ...entry.aliases, ...(entry.physical?.binding?.aliases ?? [])].some((name) => name && new RegExp(`(^|[^a-z0-9_])${escape(name)}([^a-z0-9_]|$)`).test(text)));
+    // Four typed manifest columns are not evidence that a Salesforce relation
+    // is complete. An admitted partial relation is re-described before an
+    // unresolved field is treated as absent.
+    const incomplete = namedRelations.filter((entry) => !entry.columns?.length || entry.physical?.binding?.columnCompleteness !== 'complete');
     let probed = 0;
-    if (bare.length && input.describeRelations) {
+    if (incomplete.length && input.describeRelations) {
       try {
-        const found = await input.describeRelations(bare.map((entry) => entry.model ?? entry.name).slice(0, 8));
-        if (found.length) { vocabulary = vocabulary.withEntries(buildVocabularyIndex({ relations: found }).entries); probed = found.length; }
+        // A physical binding is the discovery key.  Never send aliases[0]
+        // here: on Snowflake that can turn DB_A.PUBLIC.EVENTS into the
+        // session's PUBLIC.EVENTS and recreate the collision we just avoided.
+        const found = await input.describeRelations(incomplete.map((entry) => entry.physical?.binding
+          ? physicalRelationText(entry.physical.binding)
+          : entry.model ?? entry.name).slice(0, 3));
+        if (found.length) {
+          vocabulary = mergeDiscoveredRelations(vocabulary, found);
+          probed = found.length;
+          input.onVocabularyUpdate?.(vocabulary);
+        }
       } catch { /* the vocabulary stands as it was */ }
     }
     const shown = new Set(renderedCards.refs.map((ref) => ref.toLowerCase()));
@@ -466,7 +637,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   const resolveStarted = now();
   let resolution: IntentResolution = await resolveIntent({
     question: input.question, vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, priorAnswerSummary: input.priorAnswerSummary, clauseCoverage: input.clauseCoverage, budgetMs: remaining(), ...(input.selection ? { selection: input.selection } : {}),
-    guidance: memberGuidance(input), cardBudget: input.cardBudget, providerOptions: input.providerOptions, now,
+    guidance: memberGuidance(input), cardBudget: input.cardBudget, providerOptions, now,
     renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
     maxAttempts: remaining() > 15_000 ? 2 : 1,
     onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }),
@@ -484,11 +655,13 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     const timedOut = resolution.reason === 'provider_error' && resolution.code === 'provider_timeout';
     const exited = resolution.reason === 'provider_error' && resolution.code === 'provider_exit';
     const quota = resolution.reason === 'provider_error' && resolution.code === 'provider_quota';
+    const authentication = resolution.reason === 'provider_error' && resolution.code === 'provider_auth';
     const message = timedOut ? 'the AI model took too long to read the question; retry the same question'
       : exited ? 'the AI model exited before answering; retry the same question'
       : quota ? `the AI model's usage limit is reached; wait for it to reset or switch the provider (${resolution.detail})`
+      : authentication ? `the AI model needs authentication; reauthenticate the configured provider and retry (${resolution.detail})`
       : resolution.reason === 'provider_error' ? `the AI model did not respond (${resolution.detail})` : resolution.reason === 'unparseable' ? 'the AI reply was not a readable interpretation' : `the interpretation named things that do not exist: ${resolution.detail}`;
-    receipt.failure = { stage: 'resolve', reason: timedOut ? 'provider_timeout' : exited ? 'provider_exit' : quota ? 'provider_quota' : resolution.reason, message: timedOut || exited ? `${message} (${resolution.detail})` : message, problems: resolution.problems };
+    receipt.failure = { stage: 'resolve', reason: timedOut ? 'provider_timeout' : exited ? 'provider_exit' : quota ? 'provider_quota' : authentication ? 'provider_auth' : resolution.reason, message: timedOut || exited ? `${message} (${resolution.detail})` : message, problems: resolution.problems };
     return { kind: 'failed', stage: 'resolve', message, text: composeFailedText('resolve', message), receipt };
   }
   if (resolution.status === 'conversation' || resolution.status === 'definition') {
@@ -641,6 +814,13 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   let firstIntent: AnalyticalIntentV1 | undefined;
   let candidate: PreparedCandidate | undefined;
   for (let round = 0; round < 2; round += 1) {
+    const beforePrepare = stopped('prepare');
+    if (beforePrepare) return { ...beforePrepare, intent } as PipelineOutcome;
+    // The resolver, literal grounding, typed policies and one corrective
+    // reading can all add scopes. Normalize only here, immediately before
+    // preparation, so a shared comparison restriction reaches MetricFlow once
+    // and an authored offset remains owned by the semantic engine.
+    normalizeEffectiveIntent(intent);
     const prepareStarted = now();
     const cacheKey = `${input.cacheScope ?? ''}|${intentExecutionFingerprint(intent)}`;
     const cached = input.preparationCache?.get(cacheKey);
@@ -694,7 +874,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     const repairStarted = now();
     resolution = await resolveIntent({
       question: `${input.question}\n\nThe previous interpretation could not be prepared. ${repairable.tier === 'certified' ? 'The certified block is not applicable: ' : 'The engine said: '}${repairable.message}. ${repairable.tier === 'certified' ? 'Express the analysis with metric, entity and dimension refs instead of the block.' : 'Choose refs the engine can bind.'}`,
-      vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions: input.providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage, ...(input.selection ? { selection: input.selection } : {}),
+      vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage, ...(input.selection ? { selection: input.selection } : {}),
       renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
       // The repair is held to the original question's obligations.
       ...(resolution.status === 'resolved' && resolution.ledger ? { ledger: resolution.ledger, ledgerRound: round + 1 } : {}),
@@ -764,6 +944,8 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // multiplying join) is refused and the next governed tier is prepared for
   // the same intent; an unchanged attempt is never repeated.
   const excluded: PreparedCandidate['tier'][] = [];
+  const beforeExecute = stopped('execute');
+  if (beforeExecute) return { ...beforeExecute, intent } as PipelineOutcome;
   let executeStarted = now();
   let executed = await countedExecute(candidate, intent, input.executeDeps);
   mark('execute', executeStarted);

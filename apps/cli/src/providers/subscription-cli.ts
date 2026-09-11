@@ -135,29 +135,77 @@ export class ProviderTimeoutError extends Error {
   }
 }
 
+/** Safe structural fields Claude includes beside a one-shot result. */
+export interface ParsedClaudeResult {
+  text: string;
+  isError: boolean;
+  structured?: boolean;
+  /** Provider-defined terminal category; retained for classification, never rendered verbatim. */
+  terminalReason?: string;
+  /** HTTP-style provider status when Claude emits one; 401 is authentication, not a retryable exit. */
+  apiErrorStatus?: number;
+}
+
+interface ProviderExitContext {
+  terminalReason?: string;
+  apiErrorStatus?: number;
+  /** stdout was not a usable structured error, so its raw content must not enter a receipt. */
+  malformedOutput?: boolean;
+}
+
 /**
  * The CLI ended without an answer. A usage/session limit is a quota the
- * user must wait out or route around (`provider_quota`, never retried); any
- * other non-zero exit or empty reply is `provider_exit`, which the pipeline
- * may retry once before anything executes. `detail` is the CLI's own words,
- * sanitized (no paths, bounded) for the receipt.
+ * user must wait out or route around (`provider_quota`, never retried). An
+ * expired or missing subscription login is `provider_auth`, which must be
+ * repaired by the operator instead of spending the turn on the same CLI
+ * again. Any other non-zero exit or empty reply is `provider_exit`, which the
+ * pipeline may retry once before anything executes. `detail` is the CLI's own
+ * words, sanitized (no paths, bounded) for the receipt.
  */
 export class ProviderExitError extends Error {
-  readonly code: 'provider_exit' | 'provider_quota';
+  readonly code: 'provider_exit' | 'provider_quota' | 'provider_auth';
   readonly detail: string;
-  constructor(cli: string, stderr: string, stdout = '') {
+  constructor(cli: string, stderr: string, stdout = '', context: ProviderExitContext = {}) {
     const text = `${stderr}\n${stdout}`;
-    const quota = /session limit|usage limit|rate limit|hit your .*limit|quota/i.test(text);
-    super(quota ? `The AI model's usage limit is reached.` : `${cli} exited before producing an answer.`);
+    // A structured 401 outranks any incidental word in the response. It is a
+    // stable provider fact, unlike prose which can mention both quota and auth.
+    const authByStatus = context.apiErrorStatus === 401;
+    const quota = !authByStatus && /session limit|usage limit|rate limit|hit your .*limit|quota/i.test(text);
+    const auth = authByStatus || (!quota && /not (?:logged|signed) in|reauthenticate|authenticate|\/login|oauth(?:\s+access)?\s+token.*(?:expired|invalid)|access token.*(?:expired|invalid)|api error:\s*401|\b401\b.*(?:oauth|auth|token)|unauthori[sz]ed/i.test(text));
+    const login = cli === 'Claude Code' ? 'claude /login' : cli === 'Codex' ? 'codex login' : 'the provider login command';
+    super(quota
+      ? `The AI model's usage limit is reached.`
+      : auth
+        ? `${cli} needs authentication. Re-authenticate with \`${login}\`, then retry.`
+        : `${cli} exited before producing an answer.`);
     this.name = 'ProviderExitError';
-    this.code = quota ? 'provider_quota' : 'provider_exit';
-    this.detail = sanitizeProviderDetail(text) || (quota ? 'usage limit' : 'empty reply');
+    this.code = quota ? 'provider_quota' : auth ? 'provider_auth' : 'provider_exit';
+    this.detail = sanitizeProviderDetail(text) || (quota
+      ? 'usage limit'
+      : auth
+        ? 'authentication is required'
+        : context.malformedOutput
+          ? 'The CLI exited with an unreadable error response.'
+          : 'empty reply');
   }
 }
 
 /** The CLI's words for a receipt: one line, no file paths, no credentials-looking tokens, bounded. */
 export function sanitizeProviderDetail(text: string): string {
-  return text.replace(/\/(?:Users|home|private|tmp|var)\/\S+/g, '<path>').replace(/\b(sk|key|token)[-_][A-Za-z0-9_-]{8,}/gi, '<redacted>').replace(/\s+/g, ' ').trim().slice(0, 300);
+  return text
+    // Authentication headers are opaque credentials. Redact the entire
+    // header value whatever authentication scheme it uses (Basic, Bearer,
+    // custom), bounded by its newline or JSON-quoted value.
+    .replace(/(^|[\s,{;])((?:["']?(?:proxy[-_ ]?authorization|authorization)["']?)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gim, '$1$2<redacted>')
+    // Other header-style credentials and JSON/key-value fields can carry JWTs
+    // that do not match the older sk-/key- token heuristic.
+    .replace(/((?:["']?(?:access[_-]?token|refresh[_-]?token|api[_-]?key|secret|password|credential|token)["']?)\s*[:=]\s*)(?:(?:Bearer|JWT)\s+)?(?:"[^"]*"|'[^']*'|[^\s,}\]]+)/gi, '$1<redacted>')
+    .replace(/\b(?:Bearer|JWT)\s+[A-Za-z0-9._~+/=-]+/gi, '<redacted>')
+    .replace(/\/(?:Users|home|private|tmp|var)\/\S+/g, '<path>')
+    .replace(/\b(sk|key|token)[-_][A-Za-z0-9_-]{8,}/gi, '<redacted>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
 }
 
 export function resolveSubscriptionCliTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -390,7 +438,12 @@ export class ClaudeCodeCliProvider implements AgentProvider {
       // reason (e.g. the run deadline's TimeoutError), never a parse error.
       throwIfAlreadyCancelled(options.signal);
       if (process.env.DQL_DEBUG_PROVIDER_CLI) {
-        console.error('[DQL_DEBUG cli]', JSON.stringify({ code: res.code, timedOut: res.timedOut, stderr: res.stderr.slice(0, 800), stdout: res.stdout.length > 1600 ? `${res.stdout.slice(0, 400)}…${res.stdout.slice(-1200)}` : res.stdout }));
+        console.error('[DQL_DEBUG cli]', JSON.stringify({
+          code: res.code,
+          timedOut: res.timedOut,
+          stderr: sanitizeProviderDetail(res.stderr).slice(0, 800),
+          stdout: sanitizeProviderDetail(res.stdout).slice(0, 1600),
+        }));
       }
       if (res.timedOut) {
         throw new ProviderTimeoutError(resolveSubscriptionCliTimeoutMs());
@@ -399,15 +452,35 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         throw new Error(`Claude Code CLI not found. Install it (https://claude.com/claude-code) and run \`claude /login\`, or switch to an API-key provider. (${res.spawnError.message})`);
       }
       if (res.code !== 0) {
+        // Claude returns a structured error result even when its process exit
+        // code is non-zero. Parse it before classifying the exit so an expired
+        // OAuth token reaches the reader as an actionable authentication
+        // failure, rather than an empty generic retry. Malformed stdout is
+        // intentionally not passed through: a CLI can put credentials there,
+        // and the receipt gets a fixed bounded diagnostic instead.
+        const parsed = parseClaudeResult(res.stdout);
+        const structuredError = parsed?.isError === true;
+        const exit = new ProviderExitError(
+          'Claude Code',
+          res.stderr,
+          structuredError ? parsed.text : '',
+          {
+            ...(parsed?.terminalReason ? { terminalReason: parsed.terminalReason } : {}),
+            ...(parsed?.apiErrorStatus !== undefined ? { apiErrorStatus: parsed.apiErrorStatus } : {}),
+            malformedOutput: Boolean(res.stdout.trim()) && !structuredError,
+          },
+        );
         // A resume can fail for reasons that have nothing to do with this
         // request: the session expired, the CLI was upgraded, the store was
         // cleared. Losing the turn over an optimisation would be the worst
         // possible trade, so drop the session and say the whole thing again.
-        if (session?.resumed) {
+        // Authentication and quota failures are not resume failures: retrying
+        // them wastes budget and hides the action the operator must take.
+        if (session?.resumed && exit.code === 'provider_exit') {
           this.sessions.delete(options.conversationId!);
           return this.generate(messages, options);
         }
-        throw new ProviderExitError('Claude Code', res.stderr, res.stdout);
+        throw exit;
       }
       const parsed = parseClaudeResult(res.stdout);
       if (parsed === undefined) {
@@ -415,7 +488,7 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         throw new Error(`claude did not return a parseable result${res.stderr ? `: ${res.stderr.trim()}` : '.'}`);
       }
       if (parsed.isError) {
-        const message = parsed.text || res.stderr.trim() || 'unknown error';
+        const message = sanitizeProviderDetail(parsed.text || res.stderr.trim()) || 'unknown error';
         if (/not logged in|\/login|unauthor/i.test(message)) {
           throw new Error('Claude Code is not logged in. Run `claude /login` with your Claude subscription, then retry.');
         }
@@ -447,18 +520,29 @@ export class ClaudeCodeCliProvider implements AgentProvider {
  * structured object is the answer whenever it is present; `result` is the
  * answer otherwise. An error wrapper is an error whatever else it carries.
  */
-export function parseClaudeResult(stdout: string): { text: string; isError: boolean; structured?: boolean } | undefined {
+export function parseClaudeResult(stdout: string): ParsedClaudeResult | undefined {
   const trimmed = stdout.trim();
   if (!trimmed) return undefined;
-  const tryParse = (raw: string): { text: string; isError: boolean; structured?: boolean } | undefined => {
+  const tryParse = (raw: string): ParsedClaudeResult | undefined => {
     try {
-      const obj = JSON.parse(raw) as { result?: unknown; is_error?: unknown; structured_output?: unknown };
+      const obj = JSON.parse(raw) as { result?: unknown; is_error?: unknown; structured_output?: unknown; terminal_reason?: unknown; api_error_status?: unknown };
       const isError = obj.is_error === true;
       const structured = obj.structured_output;
+      const terminalReason = typeof obj.terminal_reason === 'string' ? obj.terminal_reason : undefined;
+      const statusCandidate = typeof obj.api_error_status === 'number'
+        ? obj.api_error_status
+        : typeof obj.api_error_status === 'string' && /^\d{3}$/.test(obj.api_error_status)
+          ? Number(obj.api_error_status)
+          : undefined;
+      const status = Number.isInteger(statusCandidate) ? statusCandidate : undefined;
+      const metadata = {
+        ...(terminalReason ? { terminalReason } : {}),
+        ...(status !== undefined ? { apiErrorStatus: status } : {}),
+      };
       if (!isError && structured !== undefined && structured !== null && typeof structured === 'object') {
-        return { text: JSON.stringify(structured), isError, structured: true };
+        return { text: JSON.stringify(structured), isError, structured: true, ...metadata };
       }
-      return { text: typeof obj.result === 'string' ? obj.result : '', isError };
+      return { text: typeof obj.result === 'string' ? obj.result : '', isError, ...metadata };
     } catch {
       return undefined;
     }

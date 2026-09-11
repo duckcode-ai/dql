@@ -10,6 +10,7 @@ import { shouldClarifyBeforeGeneration } from '../cascade/triage.js';
 import { aggregationIntegrityIssuesForSql } from './grain-ledger.js';
 import { internalRelationIdsInSql } from './sql-grounding.js';
 import { buildAggregationSafetyProof } from '../aggregation-safety-proof.js';
+import { parsePhysicalIdentifier, physicalRelationIdentity } from '../ask-pipeline/physical-binding.js';
 import type { AggregationSafetyProofV1 } from '@duckcodeailabs/dql-core';
 
 export type SqlContextValidationCode =
@@ -75,6 +76,20 @@ export interface SqlContextValidationOptions {
    * guard does not reject relations it already asked the model to use.
    */
   runtimeSchema?: RuntimeSchemaTable[];
+  /** Require a drafted query to spell an inspected runtime relation exactly. */
+  runtimeSchemaExact?: boolean;
+  /** Reject a runtime binding observed on a different redacted execution target. */
+  executionTargetFingerprint?: string;
+  /**
+   * Number of positional values the host will bind to `?` placeholders.
+   *
+   * Relational compilation deliberately keeps literal values out of SQL and
+   * supplies them separately.  The SQL reference parser does not understand
+   * a bare `?`, so validation replaces only verified, code-position
+   * placeholders with a neutral literal for parsing.  The submitted SQL and
+   * parameter values remain unchanged.
+   */
+  positionalParameterCount?: number;
   /**
    * Whether the retrieval-time "clarify before generating" gate still applies.
    *
@@ -99,6 +114,114 @@ const SQL_ALIAS_STOPWORDS = new Set([
   'where',
 ]);
 
+// The core SQL reference parser deliberately handles a broad range of dialects,
+// but some SQL parsers normalize a dotted quoted Snowflake identifier into a
+// sequence of quote fragments.  That is not safe for a request-local physical
+// binding: `"Db.With.Dot"."Public"."Events"` must remain one exact target.
+// Keep this deliberately narrow fallback at the validation boundary. It only
+// recognizes relation positions (FROM/JOIN) with at least a schema/table pair;
+// bare CTE names remain owned by the parser and never become physical bindings.
+const SQL_IDENTIFIER_PART = String.raw`(?:"(?:[^"]|"")*"|\`(?:[^\`]|\`\`)*\`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_$]*)`;
+const SQL_PHYSICAL_RELATION = new RegExp(
+  String.raw`\b(?:from|join)\s+(${SQL_IDENTIFIER_PART}(?:\s*\.\s*${SQL_IDENTIFIER_PART}){1,2})`,
+  'gi',
+);
+
+/**
+ * Produce parser-only SQL for a positional-parameter candidate.  Question
+ * marks inside strings, quoted identifiers and comments are data, not bind
+ * markers, so they are deliberately preserved.  This is not SQL rewriting:
+ * execution always receives the original statement and its original values.
+ */
+function sqlForReferenceParsing(sql: string): { sql: string; positionalParameters: number } {
+  let out = '';
+  let positionalParameters = 0;
+  type State = 'code' | 'single' | 'double' | 'backtick' | 'bracket' | 'line_comment' | 'block_comment';
+  let state: State = 'code';
+  for (let index = 0; index < sql.length; index += 1) {
+    const char = sql[index]!;
+    const next = sql[index + 1];
+    if (state === 'code') {
+      if (char === "'") { state = 'single'; out += char; continue; }
+      if (char === '"') { state = 'double'; out += char; continue; }
+      if (char === '`') { state = 'backtick'; out += char; continue; }
+      if (char === '[') { state = 'bracket'; out += char; continue; }
+      if (char === '-' && next === '-') { state = 'line_comment'; out += char + next; index += 1; continue; }
+      if (char === '/' && next === '*') { state = 'block_comment'; out += char + next; index += 1; continue; }
+      if (char === '?') { out += 'NULL'; positionalParameters += 1; continue; }
+      out += char;
+      continue;
+    }
+    if (state === 'single') {
+      out += char;
+      if (char === "'" && next === "'") { out += next; index += 1; }
+      else if (char === "'") state = 'code';
+      continue;
+    }
+    if (state === 'double') {
+      out += char;
+      if (char === '"' && next === '"') { out += next; index += 1; }
+      else if (char === '"') state = 'code';
+      continue;
+    }
+    if (state === 'backtick') {
+      out += char;
+      if (char === '`' && next === '`') { out += next; index += 1; }
+      else if (char === '`') state = 'code';
+      continue;
+    }
+    if (state === 'bracket') {
+      out += char;
+      if (char === ']' && next === ']') { out += next; index += 1; }
+      else if (char === ']') state = 'code';
+      continue;
+    }
+    if (state === 'line_comment') {
+      out += char;
+      if (char === '\n') state = 'code';
+      continue;
+    }
+    out += char;
+    if (char === '*' && next === '/') { out += next; index += 1; state = 'code'; }
+  }
+  return { sql: out, positionalParameters };
+}
+
+/**
+ * Extract schema/table or database/schema/table spellings without losing dots
+ * and case inside quoted parts. This supplements, never replaces, the general
+ * parser for the exact-target check and emitted receipt references.
+ */
+function physicalRelationsInSql(sql: string): string[] {
+  const byIdentity = new Map<string, string>();
+  for (const match of sql.matchAll(SQL_PHYSICAL_RELATION)) {
+    const relation = match[1]?.trim();
+    if (!relation) continue;
+    const parts = parsePhysicalIdentifier(relation);
+    if (parts.length < 2 || parts.length > 3) continue;
+    const identity = physicalRelationIdentity(relation);
+    if (identity) byIdentity.set(identity, relation);
+  }
+  return [...byIdentity.values()];
+}
+
+/**
+ * Compare an executed relation to the inspected binding using the active
+ * warehouse's identifier rules.  Snowflake keeps quote state in the identity:
+ * `DB.PUBLIC.EVENTS` and `"DB"."PUBLIC"."EVENTS"` can be different objects.
+ * DuckDB deliberately treats quoted and unquoted identifiers
+ * case-insensitively, and its compiler renders every physical component in
+ * double quotes.  Requiring the Snowflake spelling there would reject the
+ * very inspected object after compilation.  Component count remains part of
+ * the identity in both cases, so a two-part alias cannot select a database.
+ */
+function executionRelationIdentity(relation: string, dialect?: string): string {
+  if (dialect?.trim().toLowerCase() !== 'duckdb') return physicalRelationIdentity(relation);
+  return parsePhysicalIdentifier(relation)
+    .map((part) => `d:${part.value.toLocaleLowerCase('en-US')}`)
+    .join('.');
+}
+
 export function validateSqlAgainstLocalContext(
   sql: string,
   contextPack: LocalContextPack | undefined,
@@ -121,8 +244,23 @@ export function validateSqlAgainstLocalContext(
       },
     };
   }
-  const analysis = analyzeSqlReferences(sql, options.dialect);
-  const referencedRelations = analysis.tables;
+  const parserSql = sqlForReferenceParsing(sql);
+  const quotedPhysicalRelations = physicalRelationsInSql(sql);
+  if (options.positionalParameterCount !== undefined && parserSql.positionalParameters !== options.positionalParameterCount) {
+    return {
+      ok: false,
+      code: 'unsafe_sql',
+      error: `SQL has ${parserSql.positionalParameters} positional placeholder${parserSql.positionalParameters === 1 ? '' : 's'}, but the prepared candidate carries ${options.positionalParameterCount} bound value${options.positionalParameterCount === 1 ? '' : 's'}.`,
+      warnings: [],
+      referencedRelations: quotedPhysicalRelations,
+      referencedColumns: [],
+      aggregationSafetyProof,
+    };
+  }
+  const analysis = analyzeSqlReferences(parserSql.sql, options.dialect);
+  // Prefer the quote-aware relation spelling where it is available. The core
+  // parser remains the source for aliases, columns and CTE scopes.
+  const referencedRelations = quotedPhysicalRelations.length > 0 ? quotedPhysicalRelations : analysis.tables;
   const referencedColumns = analysis.columns.map((column) => ({
     relation: column.relation,
     column: column.column,
@@ -173,6 +311,38 @@ export function validateSqlAgainstLocalContext(
     ? []
     : aggregationIntegrityIssuesForSql(sql, contextPack?.objects ?? [], options.dialect);
 
+  if (options.executionTargetFingerprint) {
+    const targetMismatch = (options.runtimeSchema ?? []).find((table) => table.executionTargetFingerprint && table.executionTargetFingerprint !== options.executionTargetFingerprint);
+    if (targetMismatch) {
+      return {
+        ok: false,
+        code: 'insufficient_context',
+        error: `Runtime metadata for ${targetMismatch.relation} belongs to a different execution target. Refresh the inspected binding before drafting SQL.`,
+        ...base,
+      };
+    }
+  }
+  if (options.runtimeSchemaExact) {
+    const exact = new Set((options.runtimeSchema ?? []).map((table) => executionRelationIdentity(table.relation, options.dialect)));
+    // Exact mode is deliberately stricter than the general context lookup.
+    // `buildAllowedRelationLookup()` retains convenient shortened aliases for
+    // legacy stored refs, but a generated/executed statement must not select a
+    // database through one of them. In particular, DB.PUBLIC.EVENTS is not an
+    // inspected "Db"."Public"."Events" merely because the parser can
+    // normalize either spelling or their schema/table tail happens to match.
+    const mismatch = referencedRelations.find((relation) => !exact.has(executionRelationIdentity(relation, options.dialect)));
+    if (mismatch) {
+      const expected = (options.runtimeSchema ?? []).map((table) => table.relation).join(', ');
+      return {
+        ok: false,
+        code: 'unknown_relation',
+        error: `SQL references ${mismatch}, but this request inspected ${expected}. Use the exact bound physical relation, including database and quoting.`,
+        offending: { relation: mismatch, relations: [mismatch] },
+        ...base,
+      };
+    }
+  }
+
   if (!contextPack && allowed.size === 0) {
     return aggregationIssues.length > 0
       ? aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns, aggregationSafetyProof)
@@ -222,7 +392,26 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
-  const finding = checkSqlReferences({ analysis, allowed, outputAliases });
+  const unresolvedPhysicalRelations = quotedPhysicalRelations.filter((relation) =>
+    !relationLookupKeys(relation).some((key) => allowed.has(key)));
+  if (unresolvedPhysicalRelations.length > 0) {
+    return {
+      ok: false,
+      code: 'unknown_relation',
+      error: `SQL references relation(s) outside the inspected metadata context: ${unresolvedPhysicalRelations.join(', ')}. Use inspect_metadata_context and only query allowed relations.`,
+      offending: { relation: unresolvedPhysicalRelations[0], relations: unresolvedPhysicalRelations },
+      ...base,
+    };
+  }
+
+  const finding = checkSqlReferences({
+    analysis,
+    allowed,
+    outputAliases,
+    // The exact physical walk above validates relation admission. Avoid
+    // allowing a parser-normalized quoted relation to overwrite that result.
+    ...(quotedPhysicalRelations.length > 0 ? { relationsResolved: true } : {}),
+  });
   if (finding?.kind === 'unknown_relation') {
     const unknownRelations = finding.relations;
     return {

@@ -90,6 +90,7 @@ import {
   deleteBlockStudioArtifacts,
   discoverDbtProfileConnections,
   resolveDbtProfileRuntimeConnection,
+  resolveMetricFlowAskTargetContext,
   evaluateBlockInvariants,
   extractAgentValueSearchTerms,
   extractBlockInvariants,
@@ -193,6 +194,7 @@ import {
   toAgentRetrievalEvidence,
   validateFrozenRequiredOutputProjection,
   validateSqlAgainstLocalContext,
+  physicalRelationBinding,
 } from '@duckcodeailabs/dql-agent';
 import type {
   AgentAnswer,
@@ -876,6 +878,83 @@ describe('semantic runtime table mapping', () => {
       { table_catalog: 'ANALYTICS', table_schema: 'SALES', table_name: 'ORDERS' },
       { table_catalog: 'ANALYTICS', table_schema: 'FINANCE', table_name: 'ORDERS' },
     ])).toBeUndefined();
+  });
+
+  it('uses request-local target bindings instead of the default runtime snapshot for same-tail Snowflake tables', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'event_total', label: 'Event total', description: '', domain: 'events',
+        sql: 'SUM(value)', type: 'sum', table: 'PUBLIC.EVENTS',
+      }],
+      dimensions: [],
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'ask-target-bound-mapping-'));
+    tempDirs.push(dir);
+    mkdirSync(join(dir, '.dql', 'cache'), { recursive: true });
+    // This is intentionally the stale/default DB_A snapshot. The Ask request
+    // below selected and hydrated DB_B on another target identity.
+    recordRuntimeSchemaSnapshot(dir, {
+      source: 'default-db-a',
+      scopeFingerprint: 'snapshot-db-a',
+      connectionId: 'default',
+      tables: [{ relation: 'DB_A.PUBLIC.EVENTS', catalogOrDatabase: 'DB_A', schema: 'PUBLIC', name: 'EVENTS', columns: [{ name: 'a_only' }] }],
+    });
+    const executeQuery = vi.fn(async () => { throw new Error('Ask request-local bindings must not issue a fallback catalog scan'); });
+    const mapping = await resolveSemanticTableMapping(
+      { executeQuery } as unknown as QueryExecutor,
+      { driver: 'snowflake', account: 'acct', database: 'DB_B', schema: 'PUBLIC' },
+      semanticLayer,
+      dir,
+      'default',
+      {
+        snapshotId: 'ask-snapshot-b',
+        executionTargetFingerprint: 'target-b',
+        physicalBindings: [
+          physicalRelationBinding({
+            logicalRelation: 'PUBLIC.EVENTS', physicalRelation: 'DB_A.PUBLIC.EVENTS',
+            source: 'runtime_catalog', executionTargetFingerprint: 'target-a',
+            columnCompleteness: 'complete', columns: [{ name: 'a_only' }],
+          }),
+          physicalRelationBinding({
+            logicalRelation: 'PUBLIC.EVENTS', physicalRelation: 'DB_B.PUBLIC.EVENTS',
+            source: 'warehouse_probe', executionTargetFingerprint: 'target-b',
+            columnCompleteness: 'complete', columns: [{ name: 'b_only' }],
+          }),
+        ],
+      },
+    );
+
+    expect(mapping).toEqual({ 'PUBLIC.EVENTS': 'DB_B.PUBLIC.EVENTS' });
+    expect(executeQuery).not.toHaveBeenCalled();
+  });
+
+  it('keeps quote-aware dotted database identities when request-local metadata is enriched', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'quoted_total', label: 'Quoted total', description: '', domain: 'events',
+        sql: 'SUM(value)', type: 'sum', table: '"Db.With.Dot"."Sales.Data"."Events.Table"',
+      }],
+      dimensions: [],
+    });
+    const mapping = await resolveSemanticTableMapping(
+      { executeQuery: vi.fn() } as unknown as QueryExecutor,
+      { driver: 'snowflake', account: 'acct' },
+      semanticLayer,
+      undefined,
+      undefined,
+      {
+        snapshotId: 'quoted',
+        executionTargetFingerprint: 'target-quoted',
+        physicalBindings: [physicalRelationBinding({
+          logicalRelation: '"Sales.Data"."Events.Table"',
+          physicalRelation: '"Db.With.Dot"."Sales.Data"."Events.Table"',
+          source: 'warehouse_probe', executionTargetFingerprint: 'target-quoted',
+          columnCompleteness: 'complete', columns: [{ name: 'enriched_only' }],
+        })],
+      },
+    );
+
+    expect(mapping).toEqual({ '"Db.With.Dot"."Sales.Data"."Events.Table"': '"Db.With.Dot"."Sales.Data"."Events.Table"' });
   });
 });
 
@@ -7878,6 +7957,54 @@ describe('discoverDbtProfileConnections', () => {
     expect(buildDbtParseArgs('/repos/shop', '/secrets/dbt')).toEqual([
       'parse', '--project-dir', '/repos/shop', '--profiles-dir', '/secrets/dbt',
     ]);
+  });
+
+  it('keeps MetricFlow on the actual dbt default target instead of substituting an Ask-selected Snowflake connection', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-mf-ask-target-'));
+    const dbtRoot = join(projectRoot, 'dbt');
+    tempDirs.push(projectRoot);
+    mkdirSync(dbtRoot, { recursive: true });
+    writeFileSync(join(dbtRoot, 'dbt_project.yml'), 'name: office\nprofile: office\n', 'utf-8');
+    writeFileSync(join(dbtRoot, 'profiles.yml'), [
+      'office:',
+      '  target: default',
+      '  outputs:',
+      '    default:',
+      '      type: snowflake',
+      '      account: acme-prod',
+      '      warehouse: reporting',
+      '      database: DB_A',
+      '      schema: semantic',
+      '      user: analyst',
+      '      authenticator: externalbrowser',
+    ].join('\n'), 'utf-8');
+    const askTarget = resolveMetricFlowAskTargetContext(
+      projectRoot,
+      { dbt: { projectDir: 'dbt', profilesDir: 'dbt' } },
+      { driver: 'snowflake', account: 'acme-prod', warehouse: 'reporting', database: 'DB_B', schema: 'semantic', username: 'analyst' },
+      {
+        snapshotId: 'ask-snapshot-b',
+        executionTargetFingerprint: 'ask-target-b',
+        vocabulary: {} as never,
+        physicalBindings: [physicalRelationBinding({
+          logicalRelation: 'PUBLIC.EVENTS',
+          physicalRelation: 'DB_B.PUBLIC.EVENTS',
+          source: 'warehouse_probe',
+          executionTargetFingerprint: 'ask-target-b',
+          columnCompleteness: 'complete',
+        })],
+      },
+    );
+
+    expect(askTarget.selectedExecutionTarget.redactedContext.database).toBe('DB_B');
+    // The profile remains the compiler's actual default. The semantic runtime
+    // compares it with DB_B and refuses before `mf` can compile through DB_A.
+    expect(askTarget.profileTarget).toMatchObject({
+      profileName: 'office',
+      targetName: 'default',
+      expectedTarget: { redactedContext: { database: 'DB_A' } },
+    });
+    expect(askTarget.physicalBindings[0]?.executionTargetFingerprint).toBe('ask-target-b');
   });
 
   it('loads a compatibility profile.yaml from a configured external dbt repo and activates its default target (CFG-003, E2E-003)', () => {

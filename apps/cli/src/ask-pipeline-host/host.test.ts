@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
-import { buildVocabularyIndex, classifyWarehouseError, parseIntent, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
-import { columnProbeBudgetMs, connectionKey, physicalRelationName, relationDatabases, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, tracedProbes, vocabularyViewKey } from './host.js';
+import { buildVocabularyIndex, classifyWarehouseError, createAgentRunBudget, parseIntent, physicalRelationBinding, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
+import { SemanticLayer } from '@duckcodeailabs/dql-core';
+import { columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -92,10 +93,87 @@ describe('a Snowflake relation is addressed with its database (Codex: the relati
   const manifest = { dbtProvenance: { nodes: { 'model.p.header': { relation: '"ANALYTICS"."CONSUMPTION_METRICS"."HEADER"' }, 'model.p.two': { relation: 'consumption_metrics.two' } } } };
   it('provenance names the database; the vocabulary name is completed only on Snowflake and only when known', () => {
     const databases = relationDatabases(manifest as never);
-    expect(databases.get('consumption_metrics.header')).toBe('ANALYTICS');
-    expect(physicalRelationName('consumption_metrics.header', databases, 'snowflake')).toBe('ANALYTICS.consumption_metrics.header');
+    expect(databases.get('consumption_metrics.header')).toBe('"ANALYTICS"');
+    expect(physicalRelationName('consumption_metrics.header', databases, 'snowflake')).toBe('"ANALYTICS".consumption_metrics.header');
     expect(physicalRelationName('consumption_metrics.two', databases, 'snowflake')).toBe('consumption_metrics.two');
     expect(physicalRelationName('consumption_metrics.header', databases, 'duckdb')).toBe('consumption_metrics.header');
+  });
+});
+
+describe('request-local runtime schema keeps same-tail Snowflake columns apart', () => {
+  it('never gives DB_A.PUBLIC.EVENTS the columns admitted for DB_B.PUBLIC.EVENTS', () => {
+    const relation = (database: string, column: string) => ({
+      schema: 'PUBLIC', name: 'EVENTS', columns: [{ name: column, dataType: 'NUMBER' }], columnCompleteness: 'complete' as const,
+      binding: physicalRelationBinding({
+        logicalRelation: 'PUBLIC.EVENTS', physicalRelation: `${database}.PUBLIC.EVENTS`,
+        source: 'warehouse_probe', columnCompleteness: 'complete', columns: [{ name: column, type: 'NUMBER' }],
+      }),
+    });
+    const vocabulary = buildVocabularyIndex({ relations: [relation('DB_A', 'A_ONLY'), relation('DB_B', 'B_ONLY')] });
+    const runtime = runtimeSchemaForVocabulary(vocabulary);
+    expect(runtime.find((entry) => entry.relation === 'DB_A.PUBLIC.EVENTS')?.columns.map((column) => column.name)).toEqual(['A_ONLY']);
+    expect(runtime.find((entry) => entry.relation === 'DB_B.PUBLIC.EVENTS')?.columns.map((column) => column.name)).toEqual(['B_ONLY']);
+    const dbA = vocabulary.entries.find((entry) => entry.kind === 'relation' && entry.physical?.binding?.database?.value === 'DB_A');
+    expect(columnsForPhysicalEntry(vocabulary, dbA).map((column) => column.name)).toEqual(['A_ONLY']);
+  });
+
+  it('hands semantic compilation the hydrated selected target binding and current vocabulary', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'event_total', label: 'Event total', description: '', domain: 'events',
+        sql: 'event_value', type: 'sum', metricType: 'simple', table: 'PUBLIC.EVENTS',
+      }],
+      dimensions: [],
+    });
+    const connection: ConnectionConfig = { driver: 'snowflake', account: 'acct', database: 'DB_B', schema: 'PUBLIC', role: 'ANALYST', warehouse: 'WH' };
+    const provider = scripted([JSON.stringify({
+      version: 1, kind: 'analytics', reading: 'Event total.', measures: [{ ref: 'metric:event_total' }],
+      groupBy: [], display: [], filters: [], unresolved: [], provenance: { 'metric:event_total': 'q:event total' }, expectedShape: 'scalar',
+    })]);
+    const executeQuery = vi.fn(async (sql: string) => {
+      if (sql.includes('information_schema.columns')) {
+        return {
+          columns: [], rowCount: 1, executionTimeMs: 1,
+          rows: [{ table_catalog: 'DB_B', table_schema: 'PUBLIC', table_name: 'EVENTS', column_name: 'EVENT_VALUE', data_type: 'NUMBER', ordinal_position: 1, dql_column_total: 1 }],
+        };
+      }
+      return { columns: ['event_total'], rowCount: 1, executionTimeMs: 1, rows: [{ event_total: 7 }] };
+    });
+    let context: { snapshotId: string; executionTargetFingerprint: string; vocabulary: ReturnType<typeof buildVocabularyIndex>; physicalBindings: Array<{ database?: { value: string }; table: { value: string }; columns: Array<{ name: string }> }> } | undefined;
+    const executor = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-selected-target',
+      executor: { executeQuery } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => semanticLayer,
+      getManifest: () => ({
+        snapshotId: 'snapshot:selected-db-b',
+        manifest: {
+          sources: {
+            events: {
+              name: 'EVENTS', origin: 'dbt', referencedBy: [],
+              dbtModel: { uniqueId: 'model.events', schema: 'PUBLIC', columns: { EVENT_VALUE: { name: 'EVENT_VALUE', type: 'NUMBER' } } },
+            },
+          },
+        } as never,
+      }),
+      selectProvider: async () => provider,
+      semanticEngine: async () => 'native',
+      compileSemantic: async (_request, _connection, compileContext) => {
+        context = compileContext as typeof context;
+        return { sql: 'SELECT 7 AS event_total', engine: 'native' };
+      },
+      priorIntent: () => undefined,
+    });
+
+    await executor({
+      runId: 'run:selected-target', request: { question: 'What is event total?', requestedMode: 'ask' } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+
+    expect(context?.snapshotId).toBe('snapshot:selected-db-b');
+    expect(context?.vocabulary.entries.some((entry) => entry.kind === 'column' && entry.name === 'EVENT_VALUE')).toBe(true);
+    expect(context?.physicalBindings).toHaveLength(1);
+    expect(context?.physicalBindings[0]).toMatchObject({ database: { value: 'DB_B' }, table: { value: 'EVENTS' }, columns: [{ name: 'EVENT_VALUE' }] });
   });
 });
 
@@ -110,6 +188,199 @@ describe('the column probe is bounded', () => {
     expect(columnProbeBudgetMs({})).toBe(12_000);
     expect(columnProbeBudgetMs({ DQL_ASK_COLUMN_PROBE_MS: '3000' })).toBe(3_000);
     expect(columnProbeBudgetMs({ DQL_ASK_COLUMN_PROBE_MS: 'nope' })).toBe(12_000);
+  });
+});
+
+describe('question-directed relation discovery', () => {
+  it('hydrates semantic filter and time homes instead of letting repeated wide-model prose consume all three slots', () => {
+    const source = {
+      relations: [
+        {
+          schema: 'TRANSFORMED', name: 'fct_player_journey', columnCompleteness: 'partial' as const,
+          // A wide season table repeats these words across many descriptions.
+          description: 'Player season totals: points scored and games played. Player points scored and games played.',
+          columns: [
+            { name: 'total_points', description: 'Points scored by the player in games played.' },
+            { name: 'games_played', description: 'Games played by the player.' },
+          ],
+        },
+        {
+          schema: 'TRANSFORMED', name: 'local_player_season_facts', columnCompleteness: 'partial' as const,
+          description: 'Player-season aggregate from participated player-game rows.',
+          columns: [{ name: 'games_played' }],
+        },
+        {
+          schema: 'TRANSFORMED', name: 'local_player_game_facts', columnCompleteness: 'partial' as const,
+          // The manifest has only keys and participated. `player_name`,
+          // `is_home`, and points must be discovered before Ask can bind them.
+          description: 'Player-game fact; participated player rows.',
+          columns: [{ name: 'game_id' }, { name: 'player_id' }, { name: 'participated' }],
+        },
+        {
+          schema: 'TRANSFORMED', name: 'local_team_game_facts', columnCompleteness: 'partial' as const,
+          description: 'Team-game fact with home and away rows.',
+          columns: [{ name: 'game_id' }, { name: 'is_home' }],
+        },
+      ],
+      dimensions: [
+        {
+          name: 'game_date', model: 'local_player_game_facts', label: 'Game date', dataType: 'date', isTime: true,
+          physical: { relation: 'TRANSFORMED.local_player_game_facts', column: 'game_date' },
+        },
+        {
+          name: 'is_home', model: 'local_team_game_facts', label: 'Home game', dataType: 'boolean',
+          physical: { relation: 'TRANSFORMED.local_team_game_facts', column: 'is_home' },
+        },
+      ],
+    };
+
+    const selected = relevantRelationsForQuestion(
+      source,
+      'For Stephen Curry, show games played and points scored by month in calendar 2017, only home games in which he participated.',
+    );
+
+    expect(selected).toHaveLength(3);
+    expect(selected).toEqual(expect.arrayContaining([
+      'TRANSFORMED.local_player_game_facts',
+      'TRANSFORMED.local_team_game_facts',
+    ]));
+  });
+
+  it('keeps a partial physical metric home when a lexical decoy also matches', () => {
+    const source = {
+      relations: [
+        {
+          schema: 'PUBLIC', name: 'FACT', columnCompleteness: 'partial' as const,
+          // The manifest only documented a key. `amount` and `event_date`
+          // belong to this relation through the semantic layer and must cause
+          // it to be hydrated even though its current text has no lexical hit.
+          columns: [{ name: 'id' }],
+          binding: physicalRelationBinding({
+            logicalRelation: 'PUBLIC.FACT', physicalRelation: 'DB_A.PUBLIC.FACT',
+            source: 'dbt_manifest', columnCompleteness: 'partial', columns: [{ name: 'id' }],
+          }),
+        },
+        {
+          schema: 'PUBLIC', name: 'DECOY', columnCompleteness: 'partial' as const,
+          description: 'Revenue overview for a different operational feed.',
+          columns: [{ name: 'id' }],
+          binding: physicalRelationBinding({
+            logicalRelation: 'PUBLIC.DECOY', physicalRelation: 'DB_A.PUBLIC.DECOY',
+            source: 'dbt_manifest', columnCompleteness: 'partial', columns: [{ name: 'id' }],
+          }),
+        },
+      ],
+      metrics: [{
+        name: 'revenue', model: 'fact', label: 'Revenue', description: '',
+        physical: { relation: 'PUBLIC.FACT', column: 'amount' },
+      }],
+      dimensions: [{
+        name: 'metric_time', model: 'fact', label: 'Metric time', description: '', dataType: 'date', isTime: true,
+        physical: { relation: 'PUBLIC.FACT', column: 'event_date' },
+      }],
+    } as never;
+
+    const selected = relevantRelationsForQuestion(source, 'Show revenue by month');
+
+    expect(selected).toEqual(expect.arrayContaining([
+      'DB_A.PUBLIC.FACT',
+      'DB_A.PUBLIC.DECOY',
+    ]));
+  });
+});
+
+describe('the Ask host uses AgentRunBudget remaining duration at every boundary', () => {
+  it('hydrates metadata and reaches SQL with positive relative deadlines from a duration budget', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'event_total', label: 'Event total', description: '', domain: 'events',
+        sql: 'event_value', type: 'sum', metricType: 'simple', table: 'PUBLIC.EVENTS',
+      }],
+      dimensions: [],
+    });
+    const connection: ConnectionConfig = { driver: 'snowflake', account: 'acct', database: 'DB_B', schema: 'PUBLIC', role: 'ANALYST', warehouse: 'WH' };
+    const provider = scripted([JSON.stringify({
+      version: 1, kind: 'analytics', reading: 'Event total.', measures: [{ ref: 'metric:event_total' }],
+      groupBy: [], display: [], filters: [], unresolved: [], provenance: { 'metric:event_total': 'q:event total' }, expectedShape: 'scalar',
+    })]);
+    const metadataDeadlines: number[] = [];
+    const executionDeadlines: number[] = [];
+    const executeQuery = vi.fn(async (
+      sql: string,
+      _params: unknown[],
+      _variables: Record<string, unknown>,
+      _connection: ConnectionConfig,
+      options?: { deadlineMs?: number },
+    ) => {
+      if (sql.includes('information_schema.columns')) {
+        metadataDeadlines.push(options?.deadlineMs ?? 0);
+        return {
+          columns: [], rowCount: 1, executionTimeMs: 1,
+          rows: [{ table_catalog: 'DB_B', table_schema: 'PUBLIC', table_name: 'EVENTS', column_name: 'EVENT_VALUE', data_type: 'NUMBER', ordinal_position: 1, dql_column_total: 1 }],
+        };
+      }
+      executionDeadlines.push(options?.deadlineMs ?? 0);
+      return { columns: ['event_total'], rowCount: 1, executionTimeMs: 1, rows: [{ event_total: 7 }] };
+    });
+    const route = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-budget-duration',
+      executor: { executeQuery } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => semanticLayer,
+      getManifest: () => ({
+        snapshotId: 'snapshot:budget-duration',
+        manifest: {
+          sources: {
+            events: {
+              name: 'EVENTS', origin: 'dbt', referencedBy: [],
+              dbtModel: { uniqueId: 'model.events', schema: 'PUBLIC', columns: { EVENT_VALUE: { name: 'EVENT_VALUE', type: 'NUMBER' } } },
+            },
+          },
+        } as never,
+      }),
+      selectProvider: async () => provider,
+      semanticEngine: async () => 'native',
+      compileSemantic: async () => ({ sql: 'SELECT 7 AS event_total', engine: 'native' }),
+      priorIntent: () => undefined,
+    });
+    const budget = createAgentRunBudget({ requestedMode: 'ask' });
+    expect(budget.hardDeadlineMs).toBeGreaterThan(0);
+    expect(budget.remainingMs()).toBeGreaterThan(0);
+
+    const result = await route({
+      runId: 'run:budget-duration',
+      request: { question: 'What is event total?', requestedMode: 'ask', runBudget: budget, signal: budget.hardSignal } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+
+    expect(result.status).toBe('completed');
+    expect(metadataDeadlines).toHaveLength(1);
+    expect(metadataDeadlines[0]).toBeGreaterThan(0);
+    expect(executionDeadlines).toHaveLength(1);
+    expect(executionDeadlines[0]).toBeGreaterThan(0);
+  });
+
+  it('does not begin interpretation once the real run budget has expired and its hard signal is aborted', async () => {
+    const expired = new AbortController();
+    expired.abort(new Error('deadline elapsed'));
+    const budget = createAgentRunBudget({
+      requestedMode: 'ask',
+      startedAtMs: 0,
+      nowMs: () => 1_000_000,
+      inheritedSignal: expired.signal,
+      timeoutSignal: () => expired.signal,
+    });
+    const provider = scripted([conversation]);
+    const result = await executorFor(provider, undefined)({
+      runId: 'run:expired-budget',
+      request: { question: 'hello', requestedMode: 'ask', runBudget: budget, signal: budget.hardSignal } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+
+    expect(budget.remainingMs()).toBe(0);
+    expect(provider.calls).toHaveLength(0);
+    expect(result.status).toBe('blocked');
+    expect(result.askPipelineReceipt?.failure).toMatchObject({ reason: 'cancelled' });
   });
 });
 
@@ -325,7 +596,7 @@ describe('a connection remembers what it cannot see', () => {
     resetRelationEvidence();
     const sql = 'SELECT COUNT(*) FROM "ANALYTICS"."DEV"."FCT_PLAYER_JOURNEY" AS j JOIN "ANALYTICS"."DEV"."GAMES" g ON g.id = j.id';
     expect(knownMissingRelation(key, sql)).toBeUndefined();
-    recordRelationEvidence(key, sql, classifyWarehouseError("Object 'ANALYTICS.DEV.FCT_PLAYER_JOURNEY' does not exist or not authorized."));
+    recordRelationEvidence(key, sql, classifyWarehouseError("Object 'ANALYTICS.DEV.FCT_PLAYER_JOURNEY' does not exist."), "Object 'ANALYTICS.DEV.FCT_PLAYER_JOURNEY' does not exist.");
     expect(knownMissingRelation(key, sql)).toBe('ANALYTICS.DEV.FCT_PLAYER_JOURNEY');
     // Another connection knows nothing about it.
     expect(knownMissingRelation('duckdb|jaffle', sql)).toBeUndefined();
@@ -340,6 +611,13 @@ describe('a connection remembers what it cannot see', () => {
     expect(knownMissingRelation(key, 'SELECT 1 FROM a.b')).toBeUndefined();
     recordRelationEvidence(key, 'SELECT 1 FROM a.b', classifyWarehouseError('SQL compilation error: syntax error line 1 at position 7'));
     expect(knownMissingRelation(key, 'SELECT 1 FROM a.b')).toBeUndefined();
+  });
+  it('does not turn Snowflake’s ambiguous missing-or-not-authorized wording into cached absence', () => {
+    resetRelationEvidence();
+    const sql = 'SELECT 1 FROM "ANALYTICS"."DEV"."FCT_PLAYER_JOURNEY"';
+    const message = "Object 'ANALYTICS.DEV.FCT_PLAYER_JOURNEY' does not exist or not authorized.";
+    recordRelationEvidence(key, sql, classifyWarehouseError(message), message);
+    expect(knownMissingRelation(key, sql)).toBeUndefined();
   });
   it('the key is the account and database, never a credential', () => {
     const config = { driver: 'snowflake', account: 'acme', database: 'ANALYTICS', schema: 'DEV', username: 'svc', password: 'secret', token: 'tok' } as ConnectionConfig;
@@ -358,5 +636,62 @@ describe('the members a name could mean', () => {
     expect(sql).toContain('LOWER(CAST("player_name" AS VARCHAR)) LIKE ?');
     expect(sql).toContain('LIMIT 7');
     expect(sql).toContain('DISTINCT');
+  });
+  it('keeps a quoted dot inside a physical database identifier', () => {
+    const sql = memberCandidatesSql('"Db.With.Dot"."Public"."Events"', 'EventId', (name) => `"${name}"`);
+    expect(sql).toContain('FROM "Db.With.Dot"."Public"."Events"');
+    expect(sql).not.toContain('"Db"."With"."Dot"');
+  });
+});
+
+describe('Snowflake physical metadata identity', () => {
+  it('keeps quoted dotted databases separate in probes and never chooses an ambiguous short alias', () => {
+    const sql = relationColumnsProbeSql([
+      '"Db.With.Dot"."Public"."Events"',
+      'DB_B.PUBLIC.EVENTS',
+    ])!;
+    expect(sql).toContain('FROM "Db.With.Dot".information_schema.columns');
+    expect(sql).toContain('FROM DB_B.information_schema.columns');
+    expect(sql).toContain('UNION ALL');
+    expect(sql).toContain("table_catalog");
+
+    const databases = relationDatabases({
+      dbtProvenance: {
+        nodes: {
+          a: { relation: 'DB_A.PUBLIC.EVENTS' },
+          b: { relation: 'DB_B.PUBLIC.EVENTS' },
+        },
+      },
+    });
+    expect(databases.size).toBe(0);
+    expect(physicalRelationName('PUBLIC.EVENTS', databases, 'snowflake')).toBe('PUBLIC.EVENTS');
+  });
+
+  it('keeps the relation identity while using the local information schema for DuckDB', () => {
+    const sql = relationColumnsProbeSql(['MAIN.PUBLIC.EVENTS'], 1, 0, 'duckdb')!;
+    expect(sql).toContain('FROM information_schema.columns');
+    expect(sql).not.toContain('FROM MAIN.information_schema.columns');
+    expect(sql).toContain("'MAIN' AS table_catalog");
+  });
+
+  it('maps a probe result only to the exact requested database and keys cache evidence by role', () => {
+    const [mapped] = underAskedNames([
+      { database: 'DB_A', schema: 'PUBLIC', name: 'EVENTS', columns: [{ name: 'EVENT_ID', dataType: 'NUMBER' }], columnCompleteness: 'partial' },
+    ], ['DB_A.PUBLIC.EVENTS', 'DB_B.PUBLIC.EVENTS']);
+    expect(mapped?.binding?.database?.value).toBe('DB_A');
+    expect(mapped?.binding?.table.value).toBe('EVENTS');
+    const base = { driver: 'snowflake', account: 'acme', database: 'DB_A', schema: 'PUBLIC', warehouse: 'WH', username: 'analyst' } as ConnectionConfig;
+    expect(connectionKey({ ...base, role: 'ROLE_A' })).not.toBe(connectionKey({ ...base, role: 'ROLE_B' }));
+  });
+
+  it('marks metadata completeness per relation and carries an exact page cursor', () => {
+    const rows = [
+      ...Array.from({ length: 800 }, (_, index) => ({ table_catalog: 'DB_A', table_schema: 'PUBLIC', table_name: 'EVENTS', column_name: `A_${index}`, data_type: 'NUMBER', dql_column_total: 801 })),
+      { table_catalog: 'DB_B', table_schema: 'PUBLIC', table_name: 'EVENTS', column_name: 'B_ONLY', data_type: 'NUMBER', dql_column_total: 1 },
+    ];
+    const relations = relationsFromProbeRows(rows);
+    expect(relations.find((relation) => relation.database === 'DB_A')).toMatchObject({ columnCompleteness: 'partial', truncated: true });
+    expect(relations.find((relation) => relation.database === 'DB_B')).toMatchObject({ columnCompleteness: 'complete' });
+    expect(relationColumnsProbeSql(['DB_A.PUBLIC.EVENTS'], 1, 800)).toContain('dql_column_page > 800');
   });
 });

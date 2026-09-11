@@ -1,5 +1,6 @@
 import type { AnalyticalIntentV1 } from './intent.js';
-import type { PreparedCandidate } from './prepare/types.js';
+import type { PreparedCandidate, SemanticExecutionProgram } from './prepare/types.js';
+import { divideDecimal, formatDecimal, parseExactDecimal, subtractDecimal } from '../analytical-execution-graph.js';
 
 /**
  * EXECUTE, then prove the executed query did what the intent said.
@@ -40,19 +41,35 @@ export interface ExecuteRunOptions {
   purpose?: 'query' | 'fanout_probe';
   /** The tier whose candidate is being executed. */
   tier?: PreparedCandidate['tier'];
+  /** The request deadline/cancellation signal reaches every physical branch. */
+  signal?: AbortSignal;
+  /** Internal receipt hook, invoked immediately before a physical dispatch. */
+  onWarehouseAttempt?: () => void;
+  /** Internal receipt hook, invoked after that physical dispatch settles. */
+  onWarehouseResult?: (outcome: 'succeeded' | 'failed') => void;
 }
 
 export interface ExecuteDeps {
   run(sql: string, params: unknown[] | undefined, options: ExecuteRunOptions): Promise<ExecutedRows>;
   maxRows?: number;
+  /** Inherited request cancellation for fan-out, semantic branches and SQL. */
+  signal?: AbortSignal;
+  /** Validate a frozen candidate before any physical statement is submitted. */
+  validateCandidate?: (candidate: PreparedCandidate, intent: AnalyticalIntentV1) => Promise<void> | void;
 }
 
-const numeric = (value: unknown): number | undefined => {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-  if (typeof value === 'bigint') return Number(value);
-  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
-  return undefined;
-};
+/**
+ * Keep the historical numeric surface for ordinary small values, but never
+ * lower a warehouse decimal through IEEE-754 before subtracting or dividing.
+ * Snowflake commonly returns NUMBER as text specifically so 9007199254740993
+ * can survive this boundary. Values whose decimal spelling exceeds the safe
+ * compact surface stay strings rather than changing silently.
+ */
+function compatibleExact(value: string): number | string {
+  const digits = value.replace(/^[-+]/, '').replace('.', '').replace(/^0+/, '') || '0';
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && digits.length <= 15 ? numeric : value;
+}
 
 /**
  * Compute ratio columns from two executed columns (semantic candidates carry
@@ -71,14 +88,227 @@ export function applyDerivedColumns(result: ExecutedRows, derived: NonNullable<P
     const next: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(row)) if (!drop.has(key.toLowerCase())) next[key] = value;
     for (const item of derived) {
-      const numerator = numeric(find(row, item.numerator));
-      const denominator = numeric(find(row, item.denominator));
-      next[item.alias] = numerator === undefined || denominator === undefined || denominator === 0 ? null : numerator / denominator;
+      const rawNumerator = find(row, item.numerator);
+      const rawDenominator = find(row, item.denominator);
+      const numerator = parseExactDecimal(rawNumerator);
+      const denominator = parseExactDecimal(rawDenominator);
+      const value = numerator && denominator ? divideDecimal(numerator, denominator) : undefined;
+      next[item.alias] = rawNumerator == null || rawDenominator == null || !numerator || !denominator || value === undefined ? null : compatibleExact(value);
     }
     return next;
   });
   const columns = [...result.columns.filter((column) => !drop.has(column.toLowerCase())), ...derived.map((item) => item.alias).filter((alias) => !result.columns.includes(alias))];
   return { ...result, columns, rows };
+}
+
+/**
+ * Compute a requested comparison after the semantic engine returned the two
+ * authored metrics.  This keeps a MetricFlow prior-period offset owned by
+ * MetricFlow: Ask performs only the declared subtraction/division of the
+ * returned values, with the same null/zero behavior as relational SQL.
+ */
+export function applyChangeColumns(result: ExecutedRows, changes: NonNullable<PreparedCandidate['changes']>): ExecutedRows {
+  if (changes.length === 0) return result;
+  const find = (row: Record<string, unknown>, name: string): unknown => {
+    if (name in row) return row[name];
+    const key = Object.keys(row).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+    return key === undefined ? undefined : row[key];
+  };
+  const rows = result.rows.map((row) => {
+    const next = { ...row };
+    for (const item of changes) {
+      const rawBase = find(row, item.base);
+      const rawComparison = find(row, item.comparison);
+      const base = parseExactDecimal(rawBase);
+      const comparison = parseExactDecimal(rawComparison);
+      if (rawBase == null || rawComparison == null || !base || !comparison) {
+        next[item.alias] = null;
+        continue;
+      }
+      const delta = subtractDecimal(comparison, base);
+      const value = item.as === 'percent' ? divideDecimal(delta, base) : formatDecimal(delta);
+      next[item.alias] = value === undefined ? null : compatibleExact(value);
+    }
+    return next;
+  });
+  const columns = [...result.columns, ...changes.map((item) => item.alias).filter((alias) => !result.columns.some((column) => column.toLowerCase() === alias.toLowerCase()))];
+  return { ...result, columns, rows };
+}
+
+function sameOutputName(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase()
+    || left.replace(/[._ -]+/g, '_').toLowerCase() === right.replace(/[._ -]+/g, '_').toLowerCase();
+}
+
+function sourceColumn(columns: string[], source: string): string | undefined {
+  return columns.find((column) => sameOutputName(column, source));
+}
+
+function valueFor(row: Record<string, unknown>, column: string): unknown {
+  if (column in row) return row[column];
+  const found = Object.keys(row).find((key) => sameOutputName(key, column));
+  return found === undefined ? undefined : row[found];
+}
+
+function typedAlignmentKey(row: Record<string, unknown>, columns: string[]): string {
+  return JSON.stringify(columns.map((column) => {
+    const value = valueFor(row, column);
+    return [typeof value, value];
+  }));
+}
+
+/** Deterministic post-alignment ranking for a semantic comparison program. */
+export function applySemanticProgramPostProcess(
+  result: ExecutedRows,
+  postProcess: SemanticExecutionProgram['postProcess'] | undefined,
+): ExecutedRows {
+  if (!postProcess || result.rows.length === 0) return result;
+  const rows = result.rows.map((row) => ({ ...row }));
+  const valueForOrder = (row: Record<string, unknown>): unknown => postProcess.orderBy ? valueFor(row, postProcess.orderBy.column) : undefined;
+  if (postProcess.orderBy) {
+    if (rows.some((row) => valueForOrder(row) === undefined)) {
+      throw new Error(`semantic comparison ranking column ${postProcess.orderBy.column} was not returned after alignment`);
+    }
+    rows.sort((left, right) => {
+      const leftRaw = valueForOrder(left);
+      const rightRaw = valueForOrder(right);
+      const leftNumber = parseExactDecimal(leftRaw);
+      const rightNumber = parseExactDecimal(rightRaw);
+      let compared: number;
+      if (leftNumber && rightNumber) {
+        // Avoid importing a float comparator: exact subtraction tells only
+        // ordering and preserves Snowflake NUMBER values beyond 2^53.
+        const delta = subtractDecimal(leftNumber, rightNumber);
+        compared = delta.coefficient < 0n ? -1 : delta.coefficient > 0n ? 1 : 0;
+      } else compared = String(leftRaw ?? '').localeCompare(String(rightRaw ?? ''));
+      if (compared !== 0) return postProcess.orderBy!.direction === 'desc' ? -compared : compared;
+      return typedAlignmentKey(left, result.columns).localeCompare(typedAlignmentKey(right, result.columns));
+    });
+  } else {
+    rows.sort((left, right) => typedAlignmentKey(left, result.columns).localeCompare(typedAlignmentKey(right, result.columns)));
+  }
+  if (!postProcess.limit || rows.length <= postProcess.limit) return { ...result, rows, rowCount: rows.length };
+  let selected = rows.slice(0, postProcess.limit);
+  if (postProcess.includeTies && postProcess.orderBy && postProcess.limit > 0) {
+    const cutoff = valueForOrder(rows[postProcess.limit - 1]!);
+    const same = (value: unknown) => {
+      const left = parseExactDecimal(value);
+      const right = parseExactDecimal(cutoff);
+      if (left && right) return subtractDecimal(left, right).coefficient === 0n;
+      return String(value ?? '') === String(cutoff ?? '');
+    };
+    selected = rows.filter((row, index) => index < postProcess.limit! || same(valueForOrder(row)));
+  }
+  return { ...result, rows: selected, rowCount: selected.length };
+}
+
+/**
+ * Execute at most four independently compiled semantic branches and join their
+ * results in memory only at the grain the request declared.  Each branch is
+ * still executed through the same target/adapter; this helper never invents a
+ * metric formula, join, date offset, or SQL expression.
+ */
+export async function executeSemanticProgram(
+  program: SemanticExecutionProgram,
+  deps: ExecuteDeps,
+  candidate: PreparedCandidate,
+): Promise<ExecutedRows> {
+  if (program.branches.length === 0 || program.branches.length > 4) {
+    throw new Error(`semantic execution program must contain one to four branches; received ${program.branches.length}`);
+  }
+  const results: Array<{ branch: SemanticExecutionProgram['branches'][number]; result: ExecutedRows; metricColumns: string[] }> = [];
+  for (const branch of program.branches) {
+    if (!branch.sql) throw new Error(`semantic branch ${branch.id} was not compiled before execution`);
+    const branchMaxRows = deps.maxRows ?? 500;
+    const result = await deps.run(branch.sql, undefined, {
+      maxRows: branchMaxRows,
+      purpose: 'query',
+      tier: candidate.tier,
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    });
+    const metricColumns = branch.outputs.map((output) => sourceColumn(result.columns, output.source)).filter((column): column is string => Boolean(column));
+    if (metricColumns.length !== branch.outputs.length) {
+      const absent = branch.outputs.filter((output) => !sourceColumn(result.columns, output.source)).map((output) => output.source);
+      throw new Error(`semantic branch ${branch.id} did not return its requested metric column${absent.length === 1 ? '' : 's'} ${absent.join(', ')}`);
+    }
+    if (program.postProcess?.requireCompletePopulation && (result.truncated || result.rowCount >= branchMaxRows)) {
+      throw new Error(`semantic branch ${branch.id} reached the bounded ${branchMaxRows}-row candidate population before comparison ranking. Narrow the grouping or filter; Ask will not rank a truncated branch.`);
+    }
+    results.push({ branch, result, metricColumns });
+  }
+  const allOutputs = results.flatMap(({ branch }) => branch.outputs.map((output) => output.as));
+  const totalMs = results.reduce((sum, item) => sum + item.result.executionTimeMs, 0);
+  const truncated = results.some((item) => item.result.truncated);
+
+  if (program.shape === 'scalar') {
+    const rows = results.filter((item) => item.result.rows.length > 0);
+    for (const item of results) {
+      const keyColumns = item.result.columns.filter((column) => !item.metricColumns.some((metric) => sameOutputName(metric, column)));
+      // MetricFlow requires `metric_time` for an authored offset metric. A
+      // one-row, explicitly bounded compiler support column is not a user
+      // requested time series, so remove it while retaining the scalar shape.
+      // Any extra key, more than one row, or an implicit compiler addition is
+      // a changed result shape and is refused rather than quietly returned as
+      // an unrelated trend.
+      const supportDimension = item.branch.request.timeDimension
+        ? `${item.branch.request.timeDimension.name}__${item.branch.request.timeDimension.granularity}`
+        : undefined;
+      const compilerMetricTimeOnly = keyColumns.length === 1
+        && supportDimension !== undefined
+        // MetricFlow renders an explicit month support axis as
+        // `metric_time__month`, not the bare `metric_time` request name.
+        // Accept only that declared name and one row; any other grouping
+        // remains a shape change that a scalar answer must refuse.
+        && sameOutputName(keyColumns[0]!, supportDimension)
+        && item.result.rows.length <= 1;
+      if ((!compilerMetricTimeOnly && keyColumns.length > 0) || item.result.rows.length > 1) {
+        throw new Error(`semantic branch ${item.branch.id} returned ${keyColumns.join(', ') || `${item.result.rows.length} rows`} for a scalar request; MetricFlow must not add metric_time or another grouping unless the question asks for it`);
+      }
+    }
+    if (rows.length === 0) return { columns: allOutputs, rows: [], rowCount: 0, executionTimeMs: totalMs, ...(truncated ? { truncated } : {}) };
+    const row: Record<string, unknown> = {};
+    for (const output of allOutputs) row[output] = null;
+    for (const { branch, result } of results) {
+      const source = result.rows[0];
+      if (!source) continue;
+      for (const output of branch.outputs) {
+        const column = sourceColumn(result.columns, output.source)!;
+        row[output.as] = valueFor(source, column) ?? null;
+      }
+    }
+    return { columns: allOutputs, rows: [row], rowCount: 1, executionTimeMs: totalMs, ...(truncated ? { truncated } : {}) };
+  }
+
+  const first = results[0]!;
+  const keyColumns = first.result.columns.filter((column) => !first.metricColumns.some((metric) => sameOutputName(metric, column)));
+  if (keyColumns.length === 0) {
+    throw new Error('semantic program declared a grouped result but its first branch returned no grouping columns');
+  }
+  const rows = new Map<string, Record<string, unknown>>();
+  for (const { branch, result, metricColumns } of results) {
+    const branchKeys = result.columns.filter((column) => !metricColumns.some((metric) => sameOutputName(metric, column)));
+    if (branchKeys.length !== keyColumns.length || branchKeys.some((column, index) => !sameOutputName(column, keyColumns[index]!))) {
+      throw new Error(`semantic branch ${branch.id} changed the declared result grain (${branchKeys.join(', ') || 'none'} vs ${keyColumns.join(', ')})`);
+    }
+    for (const source of result.rows) {
+      const key = typedAlignmentKey(source, branchKeys);
+      const row = rows.get(key) ?? Object.fromEntries(keyColumns.map((column, index) => [column, valueFor(source, branchKeys[index]!)]));
+      for (const output of branch.outputs) {
+        const column = sourceColumn(result.columns, output.source)!;
+        row[output.as] = valueFor(source, column) ?? null;
+      }
+      rows.set(key, row);
+    }
+  }
+  const aligned = [...rows.values()];
+  for (const row of aligned) for (const output of allOutputs) if (!(output in row)) row[output] = null;
+  return {
+    columns: [...keyColumns, ...allOutputs.filter((output, index) => allOutputs.findIndex((candidateOutput) => sameOutputName(candidateOutput, output)) === index)],
+    rows: aligned,
+    rowCount: aligned.length,
+    executionTimeMs: totalMs,
+    ...(truncated ? { truncated } : {}),
+  };
 }
 
 /**
@@ -109,7 +339,7 @@ export function resolveTie(result: ExecutedRows, probe: NonNullable<PreparedCand
 
 export type ExecutionOutcome =
   | { ok: true; result: ExecutedRows; proofs: string[] }
-  | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed' | 'no_rows_matched'; message: string; proofs: string[]; cause?: EmptyAggregateCause; warehouse?: WarehouseFailure };
+  | { ok: false; code: 'filter_not_applied' | 'fanout_detected' | 'execution_failed' | 'preflight_failed' | 'no_rows_matched'; message: string; proofs: string[]; cause?: EmptyAggregateCause; warehouse?: WarehouseFailure };
 
 /**
  * What the warehouse said, in a class the answer can name. A driver message is
@@ -194,10 +424,18 @@ function describeEmptyAggregate(cause: EmptyAggregateCause): string {
 
 export async function executeCandidate(candidate: PreparedCandidate, intent: AnalyticalIntentV1, deps: ExecuteDeps): Promise<ExecutionOutcome> {
   const proofs: string[] = [];
+  try {
+    await deps.validateCandidate?.(candidate, intent);
+  } catch (error) {
+    return { ok: false, code: 'preflight_failed', message: error instanceof Error ? error.message : String(error), proofs };
+  }
   // Fail-closed filter proof: the SQL must mention every literal the intent filters on.
   const literals = [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])]
     .flatMap((predicate) => predicate.values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0));
-  const haystack = `${candidate.sql}\n${(candidate.params ?? []).map(String).join('\n')}`.toLowerCase();
+  const semanticProgramContext = candidate.semanticProgram
+    ? candidate.semanticProgram.branches.map((branch) => `${branch.sql ?? ''}\n${JSON.stringify(branch.request)}`).join('\n')
+    : '';
+  const haystack = `${candidate.sql}\n${semanticProgramContext}\n${(candidate.params ?? []).map(String).join('\n')}`.toLowerCase();
   const missing = literals.filter((literal) => !haystack.includes(literal.toLowerCase()));
   if (missing.length > 0) {
     return { ok: false, code: 'filter_not_applied', message: `the prepared query does not apply the filter value${missing.length > 1 ? 's' : ''} ${missing.map((value) => JSON.stringify(value)).join(', ')}; nothing was executed`, proofs };
@@ -216,7 +454,7 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
 
   if (candidate.fanoutProbeSql) {
     try {
-      const probe = await deps.run(candidate.fanoutProbeSql, undefined, { maxRows: 1, purpose: 'fanout_probe', tier: candidate.tier });
+      const probe = await deps.run(candidate.fanoutProbeSql, undefined, { maxRows: 1, purpose: 'fanout_probe', tier: candidate.tier, ...(deps.signal ? { signal: deps.signal } : {}) });
       const row = probe.rows[0] ?? {};
       const base = Number(row.base_rows ?? row.BASE_ROWS ?? NaN);
       const joined = Number(row.joined_rows ?? row.JOINED_ROWS ?? NaN);
@@ -229,13 +467,20 @@ export async function executeCandidate(candidate: PreparedCandidate, intent: Ana
     }
   }
   try {
-    const executed = await deps.run(candidate.sql, candidate.params, { maxRows: deps.maxRows ?? 500, purpose: 'query', tier: candidate.tier });
+    const executed = candidate.semanticProgram
+      ? await executeSemanticProgram(candidate.semanticProgram, deps, candidate)
+      : await deps.run(candidate.sql, candidate.params, { maxRows: deps.maxRows ?? 500, purpose: 'query', tier: candidate.tier, ...(deps.signal ? { signal: deps.signal } : {}) });
     const computed = candidate.derived?.length ? applyDerivedColumns(executed, candidate.derived) : executed;
-    const tie = candidate.tieProbe ? resolveTie(computed, candidate.tieProbe) : { result: computed };
+    const compared = candidate.changes?.length ? applyChangeColumns(computed, candidate.changes) : computed;
+    const postProcessed = candidate.semanticProgram
+      ? applySemanticProgramPostProcess(compared, candidate.semanticProgram.postProcess)
+      : compared;
+    const tie = candidate.tieProbe ? resolveTie(postProcessed, candidate.tieProbe) : { result: postProcessed };
     const result = tie.result;
     if (tie.note) proofs.push(`tie: ${tie.note}`);
     proofs.push(`executed on the warehouse: ${result.rowCount} row${result.rowCount === 1 ? '' : 's'} in ${Math.round(result.executionTimeMs)} ms`);
     if (candidate.derived?.length) proofs.push(`ratio${candidate.derived.length > 1 ? 's' : ''} ${candidate.derived.map((item) => `${item.alias} = ${item.numerator} / ${item.denominator}`).join('; ')} computed from the executed columns`);
+    if (candidate.changes?.length) proofs.push(`comparison${candidate.changes.length > 1 ? 's' : ''} ${candidate.changes.map((item) => `${item.alias} = ${item.comparison} - ${item.base}${item.as === 'percent' ? ` over ${item.base}` : ''}`).join('; ')} computed from the semantic result${candidate.changes.some((item) => item.as === 'percent') ? ' (null when the earlier value is 0)' : ''}`);
     const cause = emptyAggregateCause(intent, result);
     if (cause) return { ok: false, code: 'no_rows_matched', message: describeEmptyAggregate(cause), proofs, cause };
     return { ok: true, result, proofs };

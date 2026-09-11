@@ -45,6 +45,15 @@ export interface PreparedCandidate {
    * helper columns are dropped unless the intent asked for them.
    */
   derived?: Array<{ alias: string; numerator: string; denominator: string; keepInputs?: boolean }>;
+  /** Deterministic comparison columns computed from already executed semantic metrics. */
+  changes?: Array<{ alias: string; base: string; comparison: string; as: 'absolute' | 'percent'; keepInputs?: boolean }>;
+  /**
+   * A bounded set of semantic statements for mutually different periods.
+   * These branches are compiled by the selected semantic adapter and aligned
+   * only after they return; relational/generated SQL never recreates an
+   * engine-owned metric formula.
+   */
+  semanticProgram?: SemanticExecutionProgram;
   /** The join steps this candidate's SQL takes, with their authority (relational tier). */
   joins?: RelationalJoinStep[];
   /**
@@ -66,6 +75,7 @@ export type PrepareRefusalCode =
   | 'measure_scope_not_expressible'
   | 'semantic_compile_failed'
   | 'semantic_runtime_unavailable'
+  | 'semantic_engine_required'
   | 'not_relational'
   | 'join_path_required'
   | 'relational_compose_failed'
@@ -93,6 +103,45 @@ export interface SemanticCompileRequest {
   timeDimension?: { name: string; granularity: string };
   orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
   limit?: number;
+  /** Run-bound cancellation for a local semantic compiler process. */
+  signal?: AbortSignal;
+}
+
+/**
+ * A bounded semantic plan for genuinely distinct periods.  The semantic
+ * adapter owns every branch; Ask only aligns declared outputs and applies the
+ * already-defined comparison arithmetic after execution.  It never turns an
+ * engine-owned offset metric into generated SQL.
+ */
+export interface SemanticExecutionProgram {
+  version: 1;
+  /**
+   * At most four independently compiled semantic requests. `sql` is absent
+   * while the program is handed to an adapter and present only after that
+   * adapter compiled the exact same request against its selected target.
+   */
+  branches: Array<{
+    id: string;
+    request: SemanticCompileRequest;
+    role?: 'base' | 'comparison';
+    /** Semantic source columns returned by the branch and their stable Ask names. */
+    outputs: Array<{ source: string; as: string }>;
+    sql?: string;
+    engine?: string;
+  }>;
+  shape: 'scalar' | 'grouped';
+  /**
+   * Branches deliberately fetch the complete bounded candidate population.
+   * Comparisons/ratios do not exist until branch alignment, so a branch-local
+   * ORDER BY/LIMIT would rank the wrong measure and can drop a member that is
+   * top-ranked after the declared arithmetic.
+   */
+  postProcess?: {
+    orderBy?: { column: string; direction: 'asc' | 'desc' };
+    limit?: number;
+    includeTies?: boolean;
+    requireCompletePopulation?: boolean;
+  };
 }
 
 export interface SemanticCompileOutput {
@@ -102,6 +151,8 @@ export interface SemanticCompileOutput {
   fanoutProbeSql?: string;
   strategy?: string;
   artifact?: unknown;
+  /** Optional adapter-native compilation of up to four semantic branches. */
+  program?: SemanticExecutionProgram;
 }
 
 export interface RelationalJoinStep {
@@ -162,6 +213,8 @@ export interface SqlDialectLike {
 export interface PrepareDeps {
   /** Compile a semantic request on the project's active engine. Throws with the engine's message. */
   compileSemantic?: (request: SemanticCompileRequest) => Promise<SemanticCompileOutput>;
+  /** Optional adapter-native program compiler for a bounded multi-period plan. */
+  compileSemanticProgram?: (program: SemanticExecutionProgram) => Promise<SemanticCompileOutput>;
   /** Join steps from one physical relation to another, or undefined when no governed path exists. */
   joinPath?: (fromRelation: string, toRelation: string) => RelationalJoinStep[] | undefined;
   /**

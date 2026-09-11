@@ -1,0 +1,10 @@
+version: 2
+
+models:
+  - name: time_spine
+    description: Small deterministic MetricFlow time spine for this fixture.
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        granularity: day

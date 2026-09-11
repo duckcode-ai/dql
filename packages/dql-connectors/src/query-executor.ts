@@ -77,10 +77,11 @@ export class QueryExecutor {
     params: SQLParamSpec[],
     variables: Record<string, unknown>,
     config: ConnectionConfig,
+    options?: QueryExecutionOptions,
   ): Promise<QueryResult> {
     const expanded = expandArrayParameters(sql, params ?? [], variables ?? {});
     const paramValues = buildParamValues(expanded.params, expanded.variables);
-    return this.executePositional(expanded.sql, paramValues, config);
+    return this.executePositional(expanded.sql, paramValues, config, options);
   }
 
   async executePositional(

@@ -1,11 +1,14 @@
 import {
+  compareWarehouseTargets,
   semanticDimensionReference,
   type ComposeQueryResult,
   type MetricDefinition,
   type SemanticLayer,
   type SemanticExecutionReceiptV1,
   type SemanticTargetBindingV1,
+  type WarehouseTargetIdentityV1,
 } from '@duckcodeailabs/dql-core';
+import type { PhysicalRelationBindingV1 } from '@duckcodeailabs/dql-agent';
 import {
   compileDbtCloudSemanticQuery,
   listDbtCloudCompatibleDimensions,
@@ -138,11 +141,45 @@ export interface SemanticRuntimeCompileContext {
   driver?: string;
   tableMapping?: Record<string, string>;
   /**
+   * Request-local Ask evidence. MetricFlow has no per-query dbt target flag,
+   * so this is used to prove its default dbt profile target agrees with the
+   * warehouse selected for this Ask before the CLI is invoked. The Ask
+   * provenance fingerprint is deliberately not treated as warehouse proof.
+   */
+  metricFlowAskTarget?: MetricFlowAskTargetContext;
+  /**
    * The run's deadline/cancellation. A semantic compile spawns an external
    * process; without this the process outlives the question that asked for it
    * and the run's own deadline cannot stop it.
    */
   signal?: AbortSignal;
+}
+
+/**
+ * The target evidence available only on an Ask request. It is intentionally
+ * additive: ordinary semantic blocks continue to use their existing runtime
+ * target-binding flow, while Ask cannot silently compile through a dbt profile
+ * whose default target is a different warehouse.
+ */
+export interface MetricFlowAskTargetContext {
+  snapshotId: string;
+  /** Request-local provenance for physical bindings, never a MF target proof. */
+  executionTargetFingerprint: string;
+  /** The selected DQL connection rendered as a redacted warehouse identity. */
+  selectedExecutionTarget: WarehouseTargetIdentityV1;
+  /** Exact bindings admitted to this Ask request on the selected target. */
+  physicalBindings: readonly PhysicalRelationBindingV1[];
+  /**
+   * The actual default target MetricFlow will obtain from profiles.yml. It is
+   * absent when DQL cannot resolve a complete default dbt target, which is a
+   * pre-compilation refusal rather than permission to guess.
+   */
+  profileTarget?: {
+    expectedTarget: WarehouseTargetIdentityV1;
+    profileName?: string;
+    targetName?: string;
+    profilesPath?: string;
+  };
 }
 
 export interface SemanticRuntimeCompileResult extends ComposeQueryResult {
@@ -172,6 +209,62 @@ export class SemanticRuntimeRequiredError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'SemanticRuntimeRequiredError';
+  }
+}
+
+/**
+ * MetricFlow reads dbt's profile default target and its CLI currently exposes
+ * no per-query target selection. Ask must therefore stop before dispatch when
+ * that default cannot be proven to be the selected warehouse.
+ */
+export class MetricFlowAskTargetMismatchError extends SemanticRuntimeRequiredError {
+  readonly details: {
+    adapter: 'metricflow-cli';
+    phase: 'capability';
+    reason: 'profile_target_missing' | 'profile_target_mismatch' | 'binding_target_mismatch';
+    profileName?: string;
+    targetName?: string;
+    mismatchFields?: string[];
+    selectedTargetFingerprint: string;
+    profileTargetFingerprint?: string;
+    snapshotId: string;
+    safeActions: string[];
+  };
+
+  constructor(input: {
+    target: MetricFlowAskTargetContext;
+    reason: 'profile_target_missing' | 'profile_target_mismatch' | 'binding_target_mismatch';
+    mismatchFields?: string[];
+  }) {
+    const profileName = input.target.profileTarget?.profileName ?? 'default';
+    const targetName = input.target.profileTarget?.targetName ?? 'default';
+    const profileLabel = `dbt profile "${profileName}" target "${targetName}"`;
+    const message = input.reason === 'binding_target_mismatch'
+      ? 'The exact physical metadata selected for this Ask request belongs to a different execution target. '
+        + 'DQL did not invoke local MetricFlow. Refresh the selected connection metadata and retry.'
+      : input.reason === 'profile_target_missing'
+        ? 'Local MetricFlow cannot prove that its default dbt profile target matches the warehouse selected for this Ask request. '
+          + 'DQL did not invoke MetricFlow. Configure a complete default target in profiles.yml for the selected DQL connection, then retry.'
+        : `Local MetricFlow uses ${profileLabel}, which does not match the warehouse selected for this Ask request`
+          + `${input.mismatchFields?.length ? ` (${input.mismatchFields.join(', ')})` : ''}. `
+          + 'MetricFlow CLI has no per-query dbt target override, so DQL did not invoke it. '
+          + 'Select the matching DQL connection or make the dbt default target match it, then retry.';
+    super(message);
+    this.name = 'MetricFlowAskTargetMismatchError';
+    this.details = {
+      adapter: 'metricflow-cli',
+      phase: 'capability',
+      reason: input.reason,
+      ...(input.target.profileTarget?.profileName ? { profileName: input.target.profileTarget.profileName } : {}),
+      ...(input.target.profileTarget?.targetName ? { targetName: input.target.profileTarget.targetName } : {}),
+      ...(input.mismatchFields?.length ? { mismatchFields: [...input.mismatchFields] } : {}),
+      selectedTargetFingerprint: input.target.selectedExecutionTarget.identityFingerprint,
+      ...(input.target.profileTarget?.expectedTarget
+        ? { profileTargetFingerprint: input.target.profileTarget.expectedTarget.identityFingerprint }
+        : {}),
+      snapshotId: input.target.snapshotId,
+      safeActions: ['select_matching_connection', 'configure_dbt_profile_target', 'refresh_snapshot'],
+    };
   }
 }
 
@@ -1053,6 +1146,86 @@ function semanticRequestWithoutPathSelectors(
   };
 }
 
+/**
+ * Verify the one profile target that the local MetricFlow CLI will actually
+ * use. `executionTargetFingerprint` is retained solely to bind the Ask
+ * metadata overlay together; it is never substituted for an observed or
+ * configured warehouse identity.
+ */
+export function assertMetricFlowAskTarget(
+  target: MetricFlowAskTargetContext | undefined,
+): void {
+  if (!target) return;
+  if (target.physicalBindings.some((binding) =>
+    binding.executionTargetFingerprint !== target.executionTargetFingerprint,
+  )) {
+    throw new MetricFlowAskTargetMismatchError({
+      target,
+      reason: 'binding_target_mismatch',
+    });
+  }
+  if (!target.profileTarget?.expectedTarget) {
+    throw new MetricFlowAskTargetMismatchError({
+      target,
+      reason: 'profile_target_missing',
+    });
+  }
+  const mismatches = compareMetricFlowAskTargets(
+    target.profileTarget.expectedTarget,
+    target.selectedExecutionTarget,
+  );
+  if (mismatches.length > 0) {
+    throw new MetricFlowAskTargetMismatchError({
+      target,
+      reason: 'profile_target_mismatch',
+      mismatchFields: mismatches.map((mismatch) => mismatch.field),
+    });
+  }
+}
+
+/**
+ * dbt profile files and connection forms commonly retain unquoted Snowflake
+ * target components exactly as users typed them, while Snowflake folds those
+ * components to upper case. This comparison is intentionally local to the
+ * MetricFlow Ask preflight: the shared target contract remains strict, and
+ * exact physical bindings keep their own quote-aware identity checks.
+ */
+function compareMetricFlowAskTargets(
+  expected: WarehouseTargetIdentityV1,
+  actual: WarehouseTargetIdentityV1,
+) {
+  if (expected.driver !== 'snowflake' || actual.driver !== 'snowflake') {
+    return compareWarehouseTargets(expected, actual);
+  }
+  return compareWarehouseTargets(
+    withNormalizedSnowflakeConfiguredTargetComponents(expected),
+    withNormalizedSnowflakeConfiguredTargetComponents(actual),
+  );
+}
+
+function withNormalizedSnowflakeConfiguredTargetComponents(
+  target: WarehouseTargetIdentityV1,
+): WarehouseTargetIdentityV1 {
+  return {
+    ...target,
+    redactedContext: {
+      ...target.redactedContext,
+      database: normalizeSnowflakeConfiguredTargetComponent(target.redactedContext.database),
+      schema: normalizeSnowflakeConfiguredTargetComponent(target.redactedContext.schema),
+      role: normalizeSnowflakeConfiguredTargetComponent(target.redactedContext.role),
+      warehouse: normalizeSnowflakeConfiguredTargetComponent(target.redactedContext.warehouse),
+    },
+  };
+}
+
+function normalizeSnowflakeConfiguredTargetComponent(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  // Double quoted Snowflake identifiers are case-sensitive. Keep their exact
+  // spelling, including escaped quote pairs; only unquoted components fold.
+  return /^"(?:[^"]|"")*"$/.test(trimmed) ? trimmed : trimmed.toUpperCase();
+}
+
 export async function compileSemanticRuntimeQuery(
   request: SemanticRuntimeQueryRequest,
   context: SemanticRuntimeCompileContext,
@@ -1117,6 +1290,10 @@ export async function compileSemanticRuntimeQuery(
     if (adapter === 'metricflow-cli') {
       if (!hasMetricFlowCli(context.projectRoot)) continue;
       try {
+        // `mf query` has no target flag. Do not let the CLI read an unrelated
+        // profiles.yml default merely because native compilation received the
+        // selected Ask binding separately.
+        assertMetricFlowAskTarget(context.metricFlowAskTarget);
         const dbtProjectPath = context.projectConfig.semanticLayer?.provider === 'dbt'
           ? context.projectConfig.semanticLayer.projectPath
           : context.projectConfig.dbt?.projectDir;
@@ -1475,6 +1652,7 @@ export function semanticRuntimeErrorCode(
 }
 
 export function semanticRuntimeErrorDetails(error: unknown): unknown {
+  if (error instanceof MetricFlowAskTargetMismatchError) return error.details;
   if (error instanceof SemanticSourceDriftError) return error.details;
   if (error instanceof SemanticRuntimePathAmbiguityError) {
     return {

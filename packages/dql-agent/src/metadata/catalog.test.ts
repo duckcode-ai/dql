@@ -70,6 +70,50 @@ describe('local metadata catalog', () => {
     expect(query).not.toContain('SELECT');
   });
 
+  it('AGT-005 keeps a late embedded column searchable on a >50k-column manifest relation', () => {
+    // Individual dbt_column objects are intentionally omitted at this scale.
+    // The parent relation must still be selected before bounded hydration can
+    // retrieve the real column page; manifest order is not analytical meaning.
+    const columns = Array.from({ length: 50_050 }, (_, index) => ({
+      name: `filler_${String(index + 1).padStart(5, '0')}`,
+      type: 'VARCHAR',
+      description: 'Synthetic fixture filler.',
+    }));
+    columns.push({
+      name: 'competitor_involved',
+      type: 'VARCHAR',
+      description: 'Competitor involved in a lost opportunity.',
+    });
+    const catalog = new MetadataCatalog(join(projectRoot, '.dql', 'cache', 'wide-manifest.sqlite'));
+    try {
+      catalog.rebuild({
+        projectRoot,
+        manifest: { generatedAt: '2026-09-10T00:00:00.000Z' } as never,
+        objects: [{
+          objectKey: 'dbt:model:opportunities_wide',
+          objectType: 'dbt_model',
+          name: 'opportunities_wide',
+          fullName: 'DB_A.TRANSFORMED.OPPORTUNITIES_WIDE',
+          sourcePath: 'target/manifest.json',
+          sourceSystem: 'dbt manifest.json catalog',
+          payload: {
+            relation: 'DB_A.TRANSFORMED.OPPORTUNITIES_WIDE',
+            database: 'DB_A',
+            schema: 'TRANSFORMED',
+            columnCompleteness: 'partial',
+            columns,
+          },
+        }],
+        edges: [], diagnostics: [], compileConflicts: [], fingerprint: 'wide-column-fixture',
+        generatedAt: '2026-09-10T00:00:00.000Z',
+      });
+      expect(catalog.searchObjects({ query: 'competitor involved', objectTypes: ['dbt_model'] })
+        .map((object) => object.objectKey)).toContain('dbt:model:opportunities_wide');
+    } finally {
+      catalog.close();
+    }
+  }, 30_000);
+
   it('CONTRACT-002 admits only exactly bound certified block capability', () => {
     const manifest = {
       manifestVersion: 2,

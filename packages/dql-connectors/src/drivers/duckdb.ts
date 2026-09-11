@@ -1,5 +1,5 @@
 import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
-import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
+import type { QueryExecutionOptions, QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 import { importConnectorDependency } from '../optional-dependency.js';
 
 export class DuckDBConnector implements DatabaseConnector {
@@ -25,29 +25,75 @@ export class DuckDBConnector implements DatabaseConnector {
     });
   }
 
-  async execute(sql: string, params?: unknown[]): Promise<QueryResult> {
+  async execute(sql: string, params?: unknown[], options: QueryExecutionOptions = {}): Promise<QueryResult> {
     if (!this.connection) {
       throw new Error('DuckDB connector not connected. Call connect() first.');
     }
 
+    if (options.signal?.aborted) throw duckDbCancellationError(options.signal.reason);
+    if (options.deadlineMs !== undefined && options.deadlineMs <= 0) throw duckDbDeadlineError(options.deadlineMs);
+
     const startTime = performance.now();
 
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const signal = options.signal;
+      const cleanup = () => {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+        deadlineTimer = undefined;
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const settle = (finish: () => void) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        finish();
+      };
+      const interrupt = () => {
+        // node-duckdb exposes interrupt on different objects depending on the
+        // version/build. Try the active connection first, then its database.
+        // Cancellation must never close a pooled connector merely to stop one
+        // query; late callbacks are ignored below.
+        const candidates = [this.connection, this.db, this.connection?.db];
+        for (const candidate of candidates) {
+          const stop = candidate?.interrupt ?? candidate?.cancel;
+          if (typeof stop !== 'function') continue;
+          try { stop.call(candidate); } catch { /* cancellation remains local */ }
+          return;
+        }
+      };
+      const cancel = (error: Error) => {
+        interrupt();
+        settle(() => reject(error));
+      };
+      const onAbort = () => cancel(duckDbCancellationError(signal?.reason));
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      if (options.deadlineMs !== undefined && Number.isFinite(options.deadlineMs)) {
+        deadlineTimer = setTimeout(() => cancel(duckDbDeadlineError(options.deadlineMs!)), Math.max(0, options.deadlineMs));
+      }
       const callback = (err: Error | null, result: any) => {
+        // The native binding may call back after interrupt(); never turn that
+        // late result into an answer after Ask already recorded cancellation.
+        if (settled) return;
+        if (signal?.aborted) {
+          cancel(duckDbCancellationError(signal.reason));
+          return;
+        }
         const executionTimeMs = performance.now() - startTime;
 
         if (err) {
-          reject(new Error(`DuckDB query failed: ${withMissingTableHint(err.message)}`));
+          settle(() => reject(new Error(`DuckDB query failed: ${withMissingTableHint(err.message)}`)));
           return;
         }
 
         if (!result || !Array.isArray(result) || result.length === 0) {
-          resolve({
+          settle(() => resolve({
             columns: [],
             rows: [],
             rowCount: 0,
             executionTimeMs,
-          });
+          }));
           return;
         }
 
@@ -60,18 +106,22 @@ export class DuckDBConnector implements DatabaseConnector {
           driverType: 'duckdb',
         }));
 
-        resolve({
+        settle(() => resolve({
           columns,
           rows: normalizedRows,
           rowCount: normalizedRows.length,
           executionTimeMs,
-        });
+        }));
       };
 
-      if (params && params.length > 0) {
-        this.connection.all(sql, ...params, callback);
-      } else {
-        this.connection.all(sql, callback);
+      try {
+        if (params && params.length > 0) {
+          this.connection.all(sql, ...params, callback);
+        } else {
+          this.connection.all(sql, callback);
+        }
+      } catch (error) {
+        settle(() => reject(error instanceof Error ? error : new Error(String(error))));
       }
     });
   }
@@ -138,6 +188,15 @@ export class DuckDBConnector implements DatabaseConnector {
       ordinalPosition: Number(row['ordinal_position'] ?? 0),
     }));
   }
+}
+
+function duckDbCancellationError(reason: unknown): Error {
+  const detail = reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : undefined;
+  return new Error(`DuckDB query was cancelled${detail ? `: ${detail}` : ''}.`);
+}
+
+function duckDbDeadlineError(deadlineMs: number): Error {
+  return new Error(`DuckDB query exceeded the ${Math.max(0, deadlineMs)}ms deadline.`);
 }
 
 export function resolveDuckDBModule(module: unknown): { Database: new (path: string, callback: (err: Error | null) => void) => any } {

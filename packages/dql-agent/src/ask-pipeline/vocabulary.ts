@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { BlockContractV1 } from './block-contract.js';
+import { physicalRelationBinding, physicalRelationText, type PhysicalRelationBindingV1, type PhysicalColumnCompleteness } from './physical-binding.js';
 
 /**
  * OPEN-WORLD ADMISSION.
@@ -76,7 +77,7 @@ export interface VocabularyEntry {
    * reads, its column (dimensions, entities, plain measures) or aggregate
    * expression (metrics). Host-attached, never rendered to the model.
    */
-  physical?: { relation: string; column?: string; expr?: string; aggregate?: string };
+  physical?: { relation: string; column?: string; expr?: string; aggregate?: string; binding?: PhysicalRelationBindingV1 };
   /** Certified block source, host-only. */
   sql?: string;
   /** The domain that owns this object, when the project declares domains. */
@@ -510,7 +511,7 @@ export interface VocabularySource {
   entities?: Array<{ name: string; model: string; type: string; label?: string; description?: string; sourceId?: string; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
   models?: Array<{ name: string; label?: string; description?: string; relation?: string }>;
   blocks?: Array<{ name: string; domain?: string; description?: string; certified: boolean; status?: string; contract: BlockContractV1; examples?: string[]; tags?: string[]; sourceId?: string; sql?: string; sourcePath?: string }>;
-  relations?: Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; sourceId?: string; /** The domain whose entity binds this relation, when one does (physical ownership). */ domain?: string; /** Every domain with an entity bound to this relation — ownership is a set, never the first entity seen. */ domains?: string[]; /** What each column is computed from, by column name (lowercased), from the model's SQL. */ columnLineage?: Record<string, string[]> }>;
+  relations?: Array<{ database?: string; schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; /** Bounded dbt-manifest metadata used to choose a relation before its physical columns are hydrated. It never becomes individual vocabulary entries on its own. */ embeddedColumns?: Array<{ name: string; dataType?: string; description?: string }>; sourceId?: string; /** The domain whose entity binds this relation, when one does (physical ownership). */ domain?: string; /** Every domain with an entity bound to this relation — ownership is a set, never the first entity seen. */ domains?: string[]; /** What each column is computed from, by column name (lowercased), from the model's SQL. */ columnLineage?: Record<string, string[]>; /** Exact runtime/dbt identity shared by discovery, drafting, validation and execution. */ binding?: PhysicalRelationBindingV1; /** Manifest descriptions are partial unless a catalog/runtime observation proves otherwise. */ columnCompleteness?: PhysicalColumnCompleteness; observedAt?: string; truncated?: boolean }>;
   terms?: Array<{ name: string; synonyms?: string[]; description?: string; metricRefs?: string[]; rules?: string[]; domain?: string }>;
   /** Declared relationships between modeled things, with their authority to join. */
   relationships?: Array<{ id: string; domain?: string; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: string; fanout?: string; verb?: string; description?: string; status?: string; crossDomain?: boolean; joinAuthority: 'certified' | 'draft' | 'unproven' }>;
@@ -719,13 +720,47 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       ...(block.sourcePath ? { sourcePath: block.sourcePath } : {}),
     });
   }
+  // A legacy two-part alias is safe only when one physical binding owns it in
+  // this snapshot. DB_A.PUBLIC.EVENTS and DB_B.PUBLIC.EVENTS therefore retain
+  // their exact identities instead of sharing the unsafe PUBLIC.EVENTS alias.
+  const logicalBindingCounts = new Map<string, number>();
   for (const relation of source.relations ?? []) {
-    const qualified = relation.schema ? `${relation.schema}.${relation.name}` : relation.name;
+    const binding = relation.binding;
+    if (!binding) continue;
+    const logical = binding.logicalRelation.toLowerCase();
+    logicalBindingCounts.set(logical, (logicalBindingCounts.get(logical) ?? 0) + 1);
+  }
+  const relationQualifiedName = (relation: NonNullable<VocabularySource['relations']>[number]): string => {
+    const logical = relation.schema ? `${relation.schema}.${relation.name}` : relation.name;
+    const binding = relation.binding;
+    // Keep existing two-part refs when there is only one target object. When
+    // the same logical relation occurs in multiple databases, make the full
+    // exact physical spelling the canonical ref and leave the short alias out.
+    return binding && (logicalBindingCounts.get(binding.logicalRelation.toLowerCase()) ?? 0) > 1
+      ? physicalRelationText(binding)
+      : logical;
+  };
+  const relationAliasCounts = new Map<string, number>();
+  for (const relation of source.relations ?? []) {
+    const qualified = relationQualifiedName(relation);
+    for (const alias of new Set([qualified, ...(relation.binding?.aliases ?? [])])) {
+      const key = alias.toLowerCase();
+      relationAliasCounts.set(key, (relationAliasCounts.get(key) ?? 0) + 1);
+    }
+  }
+  for (const relation of source.relations ?? []) {
+    const qualified = relationQualifiedName(relation);
+    const binding = relation.binding ?? physicalRelationBinding({
+      logicalRelation: qualified,
+      columns: relation.columns.map((column) => ({ name: column.name, ...(column.dataType ? { type: column.dataType } : {}), ...(column.description ? { description: column.description } : {}) })),
+      columnCompleteness: relation.columnCompleteness ?? 'partial',
+      source: 'dbt_manifest',
+    });
     entries.push({
       ref: `relation:${qualified}`,
       kind: 'relation',
       name: relation.name,
-      aliases: [qualified],
+      aliases: [...new Set([qualified, ...(binding.aliases ?? []).filter((alias) => relationAliasCounts.get(alias.toLowerCase()) === 1)])],
       ...(relation.description ? { description: relation.description } : {}),
       model: qualified,
       roles: [],
@@ -735,6 +770,9 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       // The owning domain (first of the sorted set), so a ref outside an envelope can be explained by who owns it.
       ...(relation.domains?.[0] ?? relation.domain ? { domain: relation.domains?.[0] ?? relation.domain } : {}),
       ...(relation.columnLineage && Object.keys(relation.columnLineage).length ? { columnLineage: relation.columnLineage } : {}),
+      // Keep the historical logical relation in `relation`; every executable
+      // consumer uses the binding when it needs the database-qualified name.
+      physical: { relation: qualified, binding },
     });
     for (const column of relation.columns) {
       entries.push({
@@ -746,6 +784,7 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
         model: qualified,
         roles: columnRoles(column.name, column.dataType).map((role) => (role === 'categorical' ? 'text' : role)),
         ...(column.dataType ? { dataType: column.dataType } : {}),
+        physical: { relation: qualified, column: column.name, binding },
       });
     }
   }

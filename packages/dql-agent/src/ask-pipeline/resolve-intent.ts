@@ -578,7 +578,7 @@ const FOLLOW_UP_STOPWORDS = new Set(['the', 'and', 'for', 'need', 'get', 'want',
  * word means and exactly one option is named by that word, the question
  * already answered it: take that option, keep the note, stop asking.
  */
-export function applyGovernedDefaults(intent: AnalyticalIntentV1, question: string, vocabulary: VocabularyIndex): void {
+export function applyGovernedDefaults(intent: AnalyticalIntentV1, question: string, vocabulary: VocabularyIndex, options: { normalizeScopes?: boolean } = {}): void {
   const normalizedQuestion = ` ${normalizeVocabularyText(question)} `;
   // Words the question spends on the GRAIN ("customers" in "top customers")
   // name the thing being ranked, not a measure: a metric that happens to share
@@ -659,7 +659,10 @@ export function applyGovernedDefaults(intent: AnalyticalIntentV1, question: stri
   keepMembersApart(intent, vocabulary);
   bindExactNames(intent, normalizedQuestion, grainWords, vocabulary);
   preferGovernedDefinition(intent, vocabulary);
-  promoteSoleMeasureScope(intent);
+  // Resolution may still ground literals or apply typed policy effects after
+  // this helper returns. The pipeline defers scope lifting to its final
+  // pre-prepare normalization; direct callers retain the historical default.
+  if (options.normalizeScopes !== false) promoteSoleMeasureScope(intent);
   freezeSuperlativeShape(intent, question);
 }
 
@@ -937,29 +940,108 @@ export function bindExactNames(intent: AnalyticalIntentV1, normalizedQuestion: s
  * not. An explicit `population: 'all'` keeps the zeros; a ratio keeps its
  * parts' scopes because each part restricts its own aggregate.
  */
-export function promoteSoleMeasureScope(intent: AnalyticalIntentV1): void {
-  if (intent.population === 'all') return;
-  // A restriction EVERY measure carries is the population, not a per-measure
-  // scope: "the beverage category" with revenue and item counts both scoped
-  // to drink items is the beverage products, not every product with a
-  // beverage column beside it. One measure is the simplest case of this.
-  const plain = intent.measures.filter((measure) => !measure.derived && !measure.change);
-  if (plain.length === 0 || plain.length !== intent.measures.length) return;
-  const key = (predicate: IntentPredicate) => JSON.stringify([predicate.ref, predicate.op, predicate.values, predicate.on ?? null]);
-  const first = plain[0]!.scope ?? [];
+/** Predicate identity keeps type and operator semantics intact. Sets are order
+ * independent; range bounds and ordered operators are deliberately not. */
+function normalizedPredicateKey(predicate: IntentPredicate): string {
+  const value = (item: string | number | boolean) => `${typeof item}:${String(item)}`;
+  const values = predicate.op === 'in' || predicate.op === 'not_in'
+    ? [...new Set(predicate.values.map(value))].sort((left, right) => left.localeCompare(right))
+    : predicate.values.map(value);
+  return JSON.stringify([predicate.ref, predicate.op, values, predicate.on ?? null]);
+}
+
+/**
+ * Final scope normalization runs after grounding and policy effects, when all
+ * transformations are visible. A calculated output is not a reason to leave
+ * a shared year/member restriction attached to every base metric: walk its
+ * dependency graph to the measures it actually reads, then lift only a
+ * predicate each leaf carries. Cycles and unknown aliases are intentionally
+ * left untouched rather than guessed through.
+ */
+export function normalizeEffectiveIntent(intent: AnalyticalIntentV1): void {
+  if (intent.kind !== 'analytics' || intent.population === 'all' || intent.measures.length === 0) return;
+  const byAlias = new Map<string, number>();
+  const byRef = new Map<string, number[]>();
+  for (const [index, measure] of intent.measures.entries()) {
+    if (measure.alias) byAlias.set(measure.alias, index);
+    const indices = byRef.get(measure.ref) ?? [];
+    indices.push(index);
+    byRef.set(measure.ref, indices);
+  }
+  type LeafWalk = { leaves: number[]; complete: boolean };
+  const leaves = (index: number, visiting = new Set<number>()): LeafWalk => {
+    if (visiting.has(index)) return { leaves: [], complete: false };
+    const measure = intent.measures[index];
+    if (!measure) return { leaves: [], complete: false };
+    const next = new Set(visiting).add(index);
+    if (measure.change) {
+      const children = [byAlias.get(measure.change.base), byAlias.get(measure.change.comparison)];
+      if (children.some((child) => child === undefined)) return { leaves: [], complete: false };
+      const walked = children.map((child) => leaves(child!, next));
+      return { leaves: walked.flatMap((child) => child.leaves), complete: walked.every((child) => child.complete) };
+    }
+    if (measure.derived) {
+      const children = [measure.derived.numerator, measure.derived.denominator]
+        .flatMap((ref) => (byRef.get(ref) ?? []).filter((child) => child !== index))
+        .map((child) => leaves(child, next));
+      const nonstandardScopes = measure.derived as unknown as { numeratorScope?: unknown; denominatorScope?: unknown };
+      if (nonstandardScopes.numeratorScope !== undefined || nonstandardScopes.denominatorScope !== undefined) {
+        if (JSON.stringify(nonstandardScopes.numeratorScope) !== JSON.stringify(nonstandardScopes.denominatorScope)) return { leaves: [], complete: false };
+      }
+      // A ratio can be the only declared measure. Its own scope is then the
+      // only concrete scope to normalize; its ratio parts remain separate
+      // when they have different scopes in explicitly declared measures.
+      return children.length
+        ? { leaves: children.flatMap((child) => child.leaves), complete: children.every((child) => child.complete) }
+        : { leaves: [index], complete: true };
+    }
+    return { leaves: [index], complete: true };
+  };
+  const walked = intent.measures.map((_, index) => leaves(index));
+  // A graph with a cycle, a missing comparison alias, or a non-equivalent
+  // embedded ratio scope has no proven common leaf set. Leave every scope as
+  // written rather than widening the population through a partial graph.
+  if (!walked.every((result) => result.complete)) return;
+  const leafIndexes = [...new Set(walked.flatMap((result) => result.leaves))];
+  if (leafIndexes.length === 0) return;
+  const first = intent.measures[leafIndexes[0]!]?.scope ?? [];
   if (first.length === 0) return;
-  const shared = first.filter((predicate) => plain.every((measure) => (measure.scope ?? []).some((other) => key(other) === key(predicate))));
+  const shared = first.filter((predicate) => {
+    const key = normalizedPredicateKey(predicate);
+    return leafIndexes.every((index) => (intent.measures[index]?.scope ?? []).some((other) => normalizedPredicateKey(other) === key));
+  });
   if (shared.length === 0) return;
-  const sharedKeys = new Set(shared.map(key));
-  for (const measure of plain) {
-    const rest = (measure.scope ?? []).filter((predicate) => !sharedKeys.has(key(predicate)));
-    if (rest.length) measure.scope = rest; else delete measure.scope;
+  const sharedKeys = new Set(shared.map(normalizedPredicateKey));
+  for (const index of leafIndexes) {
+    const measure = intent.measures[index]!;
+    const rest = (measure.scope ?? []).filter((predicate) => !sharedKeys.has(normalizedPredicateKey(predicate)));
+    if (rest.length) measure.scope = rest;
+    else delete measure.scope;
   }
-  intent.filters = [...intent.filters, ...shared];
+  const existing = new Set(intent.filters.map(normalizedPredicateKey));
   for (const predicate of shared) {
+    if (!existing.has(normalizedPredicateKey(predicate))) intent.filters.push(predicate);
     const filterKey = `filter:${predicate.ref}`;
-    if (!intent.provenance[filterKey]) intent.provenance[filterKey] = plain.length === 1 ? `host:the restriction on the only measure (${plain[0]!.ref}) restricts the population` : `host:a restriction every measure carries restricts the population`;
+    if (!intent.provenance[filterKey]) {
+      const hasCalculatedOutput = intent.measures.some((measure) => measure.change || measure.derived);
+      if (!hasCalculatedOutput) {
+        // Retain the longstanding plain-measure receipts. They remain exact:
+        // one scoped measure defines the population, while a shared scope
+        // across plain measures defines the population those measures share.
+        intent.provenance[filterKey] = leafIndexes.length === 1
+          ? `host:the restriction on the only measure (${intent.measures[leafIndexes[0]!]!.ref}) restricts the population`
+          : 'host:a restriction every measure carries restricts the population';
+      } else {
+        const reads = leafIndexes.map((index) => intent.measures[index]!.alias ?? intent.measures[index]!.ref).join(', ');
+        intent.provenance[filterKey] = `host:the same restriction applies to every underlying measure (${reads})`;
+      }
+    }
   }
+}
+
+/** Backward-compatible name used by callers and existing plans. */
+export function promoteSoleMeasureScope(intent: AnalyticalIntentV1): void {
+  normalizeEffectiveIntent(intent);
 }
 
 /**
@@ -974,6 +1056,54 @@ const IDENTIFIER_TOKENS = /[a-z][a-z0-9]*(?:_[a-z0-9]+)+/g;
 function definitionIdentifiers(entry: VocabularyEntry): string[] {
   const text = [entry.description ?? '', entry.expr ?? '', entry.physical?.expr ?? '', ...(entry.columns ?? []), ...(entry.contract?.staticScope ?? []).map((scope) => scope.column)].join(' ').toLowerCase();
   return [...new Set(text.match(IDENTIFIER_TOKENS) ?? [])];
+}
+
+// Coverage statements are trust claims, so a metric description is not proof
+// that it enforced a facet. These are the SQL/control words that can occur in
+// a definition without naming a business field. Everything else is extracted
+// as the leaf of a qualified identifier (`schema.table.participated` becomes
+// `participated`) and is evidence only when it belongs to a measure the
+// reading actually used.
+const EXPRESSION_KEYWORDS = new Set([
+  'and', 'as', 'asc', 'avg', 'by', 'case', 'cast', 'coalesce', 'count', 'date',
+  'desc', 'distinct', 'else', 'end', 'false', 'from', 'in', 'is', 'max', 'min',
+  'not', 'null', 'nullif', 'or', 'over', 'partition', 'sum', 'then', 'true',
+  'when', 'where', 'window',
+]);
+const SQL_IDENTIFIER_PATH = /(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*))*/g;
+
+/** Leaf field tokens from an authored/compiled measure expression, never its prose description. */
+function expressionFacetTokens(expression: string | undefined): string[] {
+  if (!expression) return [];
+  const tokens = new Set<string>();
+  for (const match of expression.matchAll(SQL_IDENTIFIER_PATH)) {
+    const leaf = match[0]!.split(/\s*\.\s*/).at(-1)!.replace(/^"|"$/g, '').replace(/""/g, '"');
+    for (const word of normalizeVocabularyText(leaf).split(' ')) {
+      if (word.length > 1 && !EXPRESSION_KEYWORDS.has(word)) tokens.add(word);
+    }
+  }
+  return [...tokens];
+}
+
+/**
+ * Facets a used measure structurally embodies. A physical expression is the
+ * relational compiler's bound definition; a stored-column lineage entry is
+ * dbt provenance for that one output column. Neither source lets free-form
+ * descriptions discharge a question restriction.
+ */
+function embodiedMeasureFacetTokens(entry: VocabularyEntry, vocabulary: VocabularyIndex): string[] {
+  const tokens = new Set<string>([
+    ...expressionFacetTokens(entry.expr),
+    ...expressionFacetTokens(entry.physical?.expr),
+    ...(entry.contract?.staticScope ?? []).flatMap((scope) => expressionFacetTokens(scope.column)),
+  ]);
+  const relation = entry.physical?.relation;
+  const column = entry.physical?.column ?? lastColumnOf(entry.physical?.expr ?? entry.expr);
+  const lineage = relation && column
+    ? vocabulary.get(`relation:${relation}`)?.columnLineage?.[column.toLowerCase()] ?? []
+    : [];
+  for (const upstream of lineage) for (const token of expressionFacetTokens(upstream)) tokens.add(token);
+  return [...tokens];
 }
 
 /** The column a simple aggregate reads: `SUM("s"."t"."wins")` → wins; a formula over several columns names none. */
@@ -1223,7 +1353,13 @@ const GRAIN_OF_WORD: Record<string, string> = { day: 'day', daily: 'day', week: 
 export function droppedGrain(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string | undefined {
   if (intent.groupBy.some((group) => group.role === 'time' && group.grain)) return undefined;
   const unaccounted = unaccountedQuestionWords(question, intent, vocabulary);
-  const word = unaccounted.find((candidate) => GRAIN_OF_WORD[candidate]);
+  // A named period is not automatically a requested breakdown. "Current
+  // versus previous month" needs two scalar period branches; treating the
+  // word "month" as "by month" blocks the comparison before semantic
+  // preparation. Require the grammar that actually asks for a series.
+  const breakdown = /\b(?:by|per|each)\s+(day|week|month|quarter)\b|\b(daily|weekly|monthly|quarterly)\b/i.exec(question);
+  const word = (breakdown?.[1] ?? breakdown?.[2])?.toLowerCase();
+  if (!word || !unaccounted.includes(word)) return undefined;
   return word ? GRAIN_OF_WORD[word] : undefined;
 }
 
@@ -1404,9 +1540,10 @@ const FACET_STOPWORDS = new Set(['his', 'her', 'their', 'its', 'our', 'my', 'you
  * EACH FACET THE QUESTION LISTED IS ANSWERED OR NAMED. "A complete profile of
  * X, including his career, teams and achievements" is three requests; a table
  * of season points answers one of them, and calling that a complete profile is
- * the claim that does the damage. A facet counts as carried only when a ref the
- * reading uses is NAMED for it — a description that happens to mention the word
- * is not the same as an output that answers it.
+ * the claim that does the damage. A facet counts as carried when a ref the
+ * reading uses is named for it, or a used measure's bound expression/static
+ * scope or dbt lineage structurally embodies it. A description that happens to
+ * mention a word is not the same as an output that answers or restricts it.
  */
 /** A crude stem: "participating", "participated" and "participation" are one word to a coverage check. */
 export function facetStem(word: string): string {
@@ -1416,10 +1553,11 @@ export function facetStem(word: string): string {
 
 /**
  * The parts a question listed that the executed reading carries nothing for.
- * A part is covered by any ref the reading uses (name, label, alias), by a
- * restriction a POLICY added for it, by a concept
- * whose name or synonyms say it, or by a grain — compared by stem, so a
- * requirement spelled "participating" is met by a filter on "participated".
+ * A part is covered by any ref the reading uses (name, label, alias), a used
+ * measure's structurally bound definition or lineage, a restriction a POLICY
+ * added for it, by a concept whose name or synonyms say it, or by a grain —
+ * compared by stem, so a requirement spelled "participating" is met by a
+ * filter or measure definition on "participated".
  */
 export function unmetFacets(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, options: { policyTexts?: string[] } = {}): string[] {
   if (intent.kind !== 'analytics' || intent.measures.length === 0) return [];
@@ -1430,6 +1568,22 @@ export function unmetFacets(question: string, intent: AnalyticalIntentV1, vocabu
   for (const ref of intentRefs(intent)) {
     const entry = vocabulary.get(ref);
     for (const text of [entry?.name, entry?.label, ...(entry?.aliases ?? [])]) add(text);
+  }
+  // Definitions count only for measures the reading uses. This is narrowly
+  // stronger than the name check above: accepted evidence is the bound
+  // expression/static scope or dbt lineage, never a metric description.
+  const measureRefs = new Set<string>();
+  for (const measure of intent.measures) {
+    if (measure.change) continue;
+    if (measure.derived) {
+      measureRefs.add(measure.derived.numerator);
+      measureRefs.add(measure.derived.denominator);
+    } else measureRefs.add(measure.ref);
+  }
+  for (const ref of measureRefs) {
+    const entry = vocabulary.get(ref);
+    if (!entry) continue;
+    for (const token of embodiedMeasureFacetTokens(entry, vocabulary)) add(token);
   }
   for (const text of options.policyTexts ?? []) add(text);
   for (const entry of vocabulary.entries) if (entry.kind === 'concept') { add(entry.name); for (const alias of entry.aliases) add(alias); }
@@ -1689,6 +1843,39 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       return { status: 'clarify', intent: clarify, question: clarify.unresolved[0]!.question!, options, attempts };
     }
     if (validation.followUpReplacement && attempts > 1) validation.problems = validation.problems.filter((problem) => problem.message !== validation.followUpReplacement);
+    // A model can name a conventional Salesforce/raw-column ref that was not
+    // rendered because the manifest only documented a prefix of a wide
+    // relation.  That is discovery work, not evidence that the field is
+    // absent.  Re-describe the admitted partial relation once, then let the
+    // normal correction path revalidate the new vocabulary.  A complete
+    // relation intentionally skips this branch so its real compatible fields
+    // remain the correction suggestions.
+    const invalidPartialRelations = (() => {
+      const refs = validation.problems
+        .map((problem) => /^(.+?) is not in the vocabulary$/.exec(problem.message)?.[1])
+        .filter((ref): ref is string => Boolean(ref));
+      const named = new Map<string, string>();
+      for (const ref of refs) {
+        const raw = ref.replace(/^(?:column|dimension|entity|metric|measure):/i, '').toLowerCase();
+        const relation = input.vocabulary.entries
+          .filter((entry) => entry.kind === 'relation' && entry.physical?.binding?.columnCompleteness !== 'complete')
+          .map((entry) => ({ entry, names: [entry.model ?? '', entry.name, ...entry.aliases, ...(entry.physical?.binding?.aliases ?? [])] }))
+          .filter(({ names }) => names.some((name) => name && (raw === name.toLowerCase() || raw.startsWith(`${name.toLowerCase()}.`))))
+          .sort((left, right) => Math.max(...right.names.map((name) => name.length)) - Math.max(...left.names.map((name) => name.length)))[0]?.entry;
+        if (relation) named.set(relation.ref, relation.physical?.binding?.logicalRelation ?? relation.model ?? relation.name);
+      }
+      return [...named.values()].slice(0, 3);
+    })();
+    if (!expanded && input.expand && invalidPartialRelations.length > 0 && attempts < maxAttempts) {
+      expanded = true;
+      const found = await input.expand({ clauses: invalidPartialRelations, question: input.question, reading: validation.intent.reading });
+      if (found && found.cards.length > 0) {
+        input = { ...input, vocabulary: found.vocabulary };
+        lastDetail = `the reading named fields on partial relation${invalidPartialRelations.length === 1 ? '' : 's'} ${invalidPartialRelations.join(', ')}; their current columns were retrieved`;
+        messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: expansionMessage(invalidPartialRelations, found.cards) });
+        continue;
+      }
+    }
     // RETRIEVE, THEN RE-ASK: a material clause with no options while the
     // reading names a relation (or words the inventory holds) is a retrieval
     // gap first. Once.
@@ -1706,7 +1893,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
     const bare = isBareIntent(parsed.intent);
     const askedQuestions = new Map(validation.intent.unresolved.map((clause) => [clause, clause.question]));
     if (input.selection) applySelectedMeaning(validation.intent, input.selection, input.vocabulary);
-    applyGovernedDefaults(validation.intent, input.question, input.vocabulary);
+    applyGovernedDefaults(validation.intent, input.question, input.vocabulary, { normalizeScopes: false });
     proveTimeRoles(validation.intent, input.vocabulary);
     if (input.clauseCoverage !== false) proveClauseCoverage(input.question, validation.intent, input.vocabulary);
     // NO PARTIAL ANSWERS. When the interpreter wrote down nothing but a

@@ -1,5 +1,6 @@
 export * from './intent.js';
 export * from './vocabulary.js';
+export * from './physical-binding.js';
 export * from './vocabulary-from-pack.js';
 export * from './block-contract.js';
 export * from './resolve-intent.js';

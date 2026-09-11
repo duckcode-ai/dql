@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { DQLManifest, SemanticLayer } from '@duckcodeailabs/dql-core';
-import { buildVocabularyIndex, extractBlockContract, renderPhysicalIdentifier, type VocabularyEntry, type VocabularyIndex, type VocabularySource } from '@duckcodeailabs/dql-agent';
+import { buildVocabularyIndex, extractBlockContract, parsePhysicalIdentifier, physicalRelationBinding, physicalRelationIdentity, physicalRelationText, mergePhysicalRelationBinding, renderPhysicalIdentifier, type PhysicalRelationBindingV1, type VocabularyEntry, type VocabularyIndex, type VocabularySource } from '@duckcodeailabs/dql-agent';
 
 /**
  * The whole authorized vocabulary of a project, from the objects the host
@@ -15,17 +15,94 @@ export interface VocabularySourceInput {
   semanticLayer?: SemanticLayer;
   manifest?: DQLManifest;
   /** Runtime relations the host has introspected, when the manifest has no dbt sources. */
-  relations?: Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }> }>;
+  relations?: Array<{ database?: string; schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; /** Manifest-only relation metadata used for relation selection, never rendered as full column vocabulary until hydration. */ embeddedColumns?: Array<{ name: string; dataType?: string; description?: string }>; columnCompleteness?: 'complete' | 'partial' | 'unknown'; binding?: PhysicalRelationBindingV1; observedAt?: string; truncated?: boolean }>;
   /** The warehouse driver, so a physical expression is written as that warehouse reads names (Snowflake: unquoted plain names). */
   driver?: string;
+  /** Active execution database when dbt provenance did not qualify a relation. */
+  defaultDatabase?: string;
+  /** Snapshot and redacted target identity are carried with runtime observations. */
+  snapshotId?: string;
+  executionTargetFingerprint?: string;
 }
 
 /** `"jaffle_shop"."dev"."customers"` and `jaffle_shop.dev.customers` become `dev.customers`. */
 export function normalizeRelationName(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  const parts = value.replace(/"/g, '').replace(/`/g, '').split('.').map((part) => part.trim()).filter(Boolean);
+  const parts = parsePhysicalIdentifier(value).map((part) => part.value.trim()).filter(Boolean);
   if (parts.length === 0) return undefined;
   return parts.slice(-2).join('.');
+}
+
+const MAX_EMBEDDED_MANIFEST_COLUMNS = 60_000;
+const MAX_EMBEDDED_MANIFEST_DESCRIPTIONS = 2_000;
+
+/**
+ * The compiled DQL manifest intentionally keeps dbt provenance small: it
+ * points to the immutable dbt artifact instead of copying every physical
+ * column into the workspace manifest.  Ask still needs those names to choose
+ * a relation on a manifest-only project, especially when the catalog has
+ * suppressed individual column objects above the enterprise threshold.
+ *
+ * This returns relation-level search metadata only. `embeddedColumns` is not
+ * converted into column vocabulary entries; the host hydrates one of the
+ * selected relations from the current catalog/warehouse before the provider
+ * can bind or validate a physical field. A bounded/failed hydration remains
+ * partial rather than proving the other documented fields absent.
+ */
+export function embeddedManifestRelations(manifest: DQLManifest | undefined): NonNullable<VocabularySourceInput['relations']> {
+  const path = manifest?.dbtProvenance?.manifestPath;
+  if (!path || !existsSync(path)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as {
+      nodes?: Record<string, Record<string, unknown>>;
+      sources?: Record<string, Record<string, unknown>>;
+    };
+    const admitted = new Set(Object.keys(manifest?.dbtProvenance?.nodes ?? {}));
+    const result: NonNullable<VocabularySourceInput['relations']> = [];
+    for (const [uniqueId, node] of [...Object.entries(raw.nodes ?? {}), ...Object.entries(raw.sources ?? {})]) {
+      if (admitted.size > 0 && !admitted.has(uniqueId)) continue;
+      const resourceType = node.resource_type;
+      if (resourceType !== 'model' && resourceType !== 'source') continue;
+      const exact = manifest?.dbtProvenance?.nodes[uniqueId]?.relation;
+      const physical = parsePhysicalIdentifier(exact ?? String(node.relation_name ?? ''));
+      const name = physical.at(-1)?.value ?? (typeof node.alias === 'string' ? node.alias : typeof node.identifier === 'string' ? node.identifier : typeof node.name === 'string' ? node.name : undefined);
+      if (!name) continue;
+      const schema = physical.at(-2)?.value ?? (typeof node.schema === 'string' ? node.schema : undefined);
+      const database = physical.at(-3)?.value ?? (typeof node.database === 'string' ? node.database : undefined);
+      const columnsRecord = node.columns && typeof node.columns === 'object' && !Array.isArray(node.columns)
+        ? node.columns as Record<string, unknown>
+        : {};
+      let described = 0;
+      const embeddedColumns: Array<{ name: string; dataType?: string; description?: string }> = [];
+      for (const [key, candidate] of Object.entries(columnsRecord)) {
+        if (embeddedColumns.length >= MAX_EMBEDDED_MANIFEST_COLUMNS) break;
+        const column = candidate && typeof candidate === 'object' ? candidate as Record<string, unknown> : {};
+        const columnName = typeof column.name === 'string' && column.name.trim() ? column.name : key;
+        if (!columnName) continue;
+        const type = typeof column.data_type === 'string' ? column.data_type : typeof column.type === 'string' ? column.type : undefined;
+        const description = typeof column.description === 'string' && described < MAX_EMBEDDED_MANIFEST_DESCRIPTIONS
+          ? column.description
+          : undefined;
+        if (description) described += 1;
+        embeddedColumns.push({ name: columnName, ...(type ? { dataType: type } : {}), ...(description ? { description } : {}) });
+      }
+      result.push({
+        ...(database ? { database } : {}),
+        ...(schema ? { schema } : {}),
+        name,
+        ...(typeof node.description === 'string' && node.description ? { description: node.description } : {}),
+        columns: [],
+        ...(embeddedColumns.length ? { embeddedColumns } : {}),
+        columnCompleteness: 'partial',
+      });
+    }
+    return result;
+  } catch {
+    // A source artifact may be replaced between snapshots. The host falls
+    // back to the already-recorded provenance and warehouse discovery; it
+    // never treats a failed artifact read as evidence that a column is gone.
+    return [];
+  }
 }
 
 const AGGREGATES = new Set(['sum', 'avg', 'count', 'count_distinct', 'min', 'max', 'median']);
@@ -96,7 +173,12 @@ export function nativeAggregateBinding(sql: string | undefined, declaredType: st
 }
 
 export function qualifyExpression(expr: string, relation: string, columns: Iterable<string>, quote: (name: string) => string = (name) => `"${name}"`): string {
-  const quoted = relation.split('.').map((part) => quote(part)).join('.');
+  // `split('.')` turns a quoted Snowflake database such as
+  // `"Db.With.Dot"` into three unrelated identifiers.  Relation bindings
+  // intentionally retain quote semantics, so expression rendering does too.
+  const quoted = parsePhysicalIdentifier(relation)
+    .map((part) => part.quoted ? `"${part.value.replace(/"/g, '""')}"` : quote(part.value))
+    .join('.');
   const literals: string[] = [];
   let out = expr.replace(/'(?:[^']|'')*'/g, (literal) => { literals.push(literal); return `__lit${literals.length - 1}__`; });
   const known = new Set([...columns].map((column) => column.toLowerCase()));
@@ -174,31 +256,100 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
   // dbt column descriptions: the fallback definition for a semantic dimension that declares none.
   const columnDescriptions = new Map<string, string>();
   const relationSeen = new Set<string>();
+  // `schema.table` is only a compatibility alias. A Snowflake project can
+  // legitimately expose DB_A.PUBLIC.EVENTS and DB_B.PUBLIC.EVENTS in one
+  // snapshot, so the source's internal key must retain physical identity.
+  const relationItems = new Map<string, NonNullable<VocabularySource['relations']>[number]>();
   const relationKeyByLower = new Map<string, string>();
   // A physical name inside an expression is written as this warehouse reads it,
   // and a relation carries its database on a warehouse that addresses objects
   // across databases (Snowflake), from the manifest's provenance.
   const physicalQuote = (name: string) => renderPhysicalIdentifier(name, input.driver, (value) => `"${value.replace(/"/g, '""')}"`);
-  const databaseOf = new Map<string, string>();
+  // A two-part logical name can exist in more than one Snowflake database.
+  // Retain that ambiguity here; a later physical binding must name one exact
+  // database instead of letting the last manifest node win.
+  const physicalCandidates = new Map<string, Set<string>>();
+  const addPhysicalCandidate = (logical: string | undefined, physical: string | undefined) => {
+    const normalized = normalizeRelationName(logical ?? physical);
+    if (!normalized || !physical?.trim()) return;
+    const candidates = physicalCandidates.get(normalized.toLowerCase()) ?? new Set<string>();
+    // Preserve the exact dbt spelling here. This map supplies physical
+    // qualification to semantic expressions before bindings are attached, so
+    // it must not lower-case, strip quotes, or collapse a quoted database.
+    candidates.add(physical.trim());
+    physicalCandidates.set(normalized.toLowerCase(), candidates);
+  };
   for (const node of Object.values(input.manifest?.dbtProvenance?.nodes ?? {})) {
-    const parts = ((node as { relation?: string }).relation ?? '').replace(/["`]/g, '').split('.').map((part) => part.trim()).filter(Boolean);
-    if (parts.length === 3) databaseOf.set(`${parts[1]}.${parts[2]}`.toLowerCase(), parts[0]!);
+    const relation = (node as { relation?: string }).relation;
+    const logical = normalizeRelationName(relation);
+    addPhysicalCandidate(logical, relation);
   }
-  const addressed = (relation: string) => (input.driver?.toLowerCase() === 'snowflake' && relation.split('.').length === 2 && databaseOf.get(relation.toLowerCase()) ? `${databaseOf.get(relation.toLowerCase())}.${relation}` : relation);
+  // dbt sources can carry physical database provenance even when the compact
+  // provenance-node inventory has no entry for them. Seed the same
+  // collision-aware lookup before semantic expressions are rendered; otherwise
+  // a semantic `PUBLIC.EVENTS` metric silently uses the connection's default
+  // database while the source binding correctly says `DB_B.PUBLIC.EVENTS`.
+  for (const item of Object.values(input.manifest?.sources ?? {})) {
+    const dbt = item.dbtModel;
+    if (!dbt?.database || !dbt.schema || !item.name) continue;
+    const logical = `${dbt.schema}.${item.name}`;
+    const physical = [dbt.database, dbt.schema, item.name]
+      .map((part) => physicalQuote(part))
+      .join('.');
+    addPhysicalCandidate(logical, physical);
+  }
+  const physicalOf = (relation: string): string | undefined => {
+    const candidates = physicalCandidates.get((normalizeRelationName(relation) ?? relation).toLowerCase());
+    return candidates?.size === 1 ? [...candidates][0] : undefined;
+  };
+  const databaseOf = (relation: string): string | undefined => {
+    const parts = physicalOf(relation) ? parsePhysicalIdentifier(physicalOf(relation)!) : [];
+    const database = parts.length >= 3 ? parts.at(-3) : undefined;
+    return database ? (database.quoted ? `"${database.value.replace(/"/g, '""')}"` : database.value) : undefined;
+  };
+  const addressed = (relation: string) => physicalOf(relation)
+    ?? (input.driver?.toLowerCase() === 'snowflake' && relation.split('.').length === 2 && databaseOf(relation) ? `${databaseOf(relation)}.${relation}` : relation);
 
   // A relation may be described more than once: by a partial dbt manifest
   // (a few documented columns, no types) and by the warehouse itself (every
   // column, typed). The first description is not the last word: later ones
   // ADD the columns and types the earlier lacked, so a column the manifest
   // never mentioned is still a column, and a typed literal compiles by type.
-  const addRelation = (relation: { schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; domain?: string; columnLineage?: Record<string, string[]> }) => {
+  const addRelation = (relation: { database?: string; schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; embeddedColumns?: Array<{ name: string; dataType?: string; description?: string }>; domain?: string; columnLineage?: Record<string, string[]>; columnCompleteness?: 'complete' | 'partial' | 'unknown'; binding?: PhysicalRelationBindingV1; observedAt?: string; truncated?: boolean }) => {
     // Case-insensitive: the warehouse spells CONSUMPTION_METRICS.HEADER, the
     // manifest consumption_metrics.header — one relation, the first spelling
     // kept as the key every later lookup uses.
     const spelled = relation.schema ? `${relation.schema}.${relation.name}` : relation.name;
-    const key = relationKeyByLower.get(spelled.toLowerCase()) ?? spelled;
+    const logicalKey = relationKeyByLower.get(spelled.toLowerCase()) ?? spelled;
+    const bindingDriver = relation.binding?.driver ?? input.driver;
+    const bindingSnapshot = relation.binding?.snapshotId ?? input.snapshotId;
+    const bindingTarget = relation.binding?.executionTargetFingerprint ?? input.executionTargetFingerprint;
+    const relationBinding = relation.binding ? {
+      ...relation.binding,
+      ...(bindingDriver ? { driver: bindingDriver } : {}),
+      ...(bindingSnapshot ? { snapshotId: bindingSnapshot } : {}),
+      ...(bindingTarget ? { executionTargetFingerprint: bindingTarget } : {}),
+    } : physicalRelationBinding({
+      logicalRelation: logicalKey,
+      physicalRelation: physicalOf(logicalKey) ?? [relation.database ?? databaseOf(logicalKey) ?? (input.driver?.toLowerCase() === 'snowflake' ? input.defaultDatabase : undefined), relation.schema, relation.name].filter(Boolean).join('.'),
+      driver: input.driver,
+      snapshotId: input.snapshotId,
+      executionTargetFingerprint: input.executionTargetFingerprint,
+      source: relation.columnCompleteness === 'complete' ? 'runtime_catalog' : 'dbt_manifest',
+      columns: relation.columns.map((column) => ({ name: column.name, ...(column.dataType ? { type: column.dataType } : {}), ...(column.description ? { description: column.description } : {}) })),
+      columnCompleteness: relation.columnCompleteness ?? 'partial',
+      ...(relation.observedAt ? { observedAt: relation.observedAt } : {}),
+      ...(relation.truncated ? { truncated: true } : {}),
+    });
+    const exactExisting = [...relationItems.entries()].find(([, item]) => item.binding
+      && physicalRelationIdentity(physicalRelationText(item.binding)) === physicalRelationIdentity(physicalRelationText(relationBinding)));
+    // The first spelling remains a legacy compatibility key. A second exact
+    // database receives its full physical identity as the source key; it must
+    // never merge into, or overwrite, the first database's columns.
+    const key = exactExisting?.[0]
+      ?? (relationSeen.has(logicalKey) ? physicalRelationText(relationBinding) : logicalKey);
     if (relationSeen.has(key)) {
-      const existing = source.relations!.find((item) => (item.schema ? `${item.schema}.${item.name}` : item.name) === key);
+      const existing = relationItems.get(key);
       if (existing && relation.columnLineage) existing.columnLineage = { ...(existing.columnLineage ?? {}), ...relation.columnLineage };
       if (existing && relation.domain) {
         // Ownership is the set of every entity bound to the relation, in no order.
@@ -213,14 +364,46 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
         if (column.description && !columnDescriptions.has(`${key}.${column.name}`)) columnDescriptions.set(`${key}.${column.name}`, column.description);
       }
       relationColumns.set(key, names);
+      if (existing && relation.embeddedColumns?.length) {
+        const seenEmbedded = new Set((existing.embeddedColumns ?? []).map((column) => column.name.toLowerCase()));
+        for (const column of relation.embeddedColumns) {
+          if (!seenEmbedded.has(column.name.toLowerCase())) {
+            (existing.embeddedColumns ??= []).push({ ...column });
+            seenEmbedded.add(column.name.toLowerCase());
+          }
+        }
+      }
       if (existing && !existing.description && relation.description) existing.description = relation.description;
+      if (existing) {
+        const prior = existing.binding;
+        if (prior) {
+          const merged = mergePhysicalRelationBinding(prior, relationBinding);
+          // A cross-database collision stays explicit in the binding rather
+          // than silently moving a logical relation to another Snowflake DB.
+          if (merged.binding) existing.binding = merged.binding;
+          else {
+            // No route is allowed to reuse the first binding after dbt
+            // described the same logical schema.table in another database.
+            // A missing binding is an explicit ambiguity that discovery and
+            // the SQL validator can surface; it is never a current-database
+            // fallback.
+            existing.binding = undefined;
+            existing.columnCompleteness = 'unknown';
+          }
+        } else existing.binding = relationBinding;
+        if (relation.columnCompleteness === 'complete') existing.columnCompleteness = 'complete';
+        else if (!existing.columnCompleteness) existing.columnCompleteness = relation.columnCompleteness ?? 'partial';
+      }
       return;
     }
     relationSeen.add(key);
+    if (!relationKeyByLower.has(spelled.toLowerCase())) relationKeyByLower.set(spelled.toLowerCase(), logicalKey);
     relationKeyByLower.set(key.toLowerCase(), key);
     relationColumns.set(key, new Set(relation.columns.map((column) => column.name)));
     for (const column of relation.columns) if (column.description) columnDescriptions.set(`${key}.${column.name}`, column.description);
-    source.relations!.push({ ...relation, ...(relation.domain ? { domains: [relation.domain] } : {}), columns: relation.columns.map((column) => ({ ...column })) });
+    const added = { ...relation, ...(relation.domain ? { domains: [relation.domain] } : {}), binding: relationBinding, columnCompleteness: relation.columnCompleteness ?? 'partial', columns: relation.columns.map((column) => ({ ...column })), ...(relation.embeddedColumns?.length ? { embeddedColumns: relation.embeddedColumns.map((column) => ({ ...column })) } : {}) };
+    source.relations!.push(added);
+    relationItems.set(key, added);
   };
 
   // Physical relations: dbt sources recorded in the manifest, then anything the host introspected.
@@ -228,7 +411,20 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     const dbt = item.dbtModel;
     if (!dbt) continue;
     const columns = Object.values(dbt.columns ?? {}).map((column) => ({ name: column.name, ...(column.type ? { dataType: column.type } : {}), ...(column.description ? { description: column.description } : {}) }));
-    addRelation({ ...(dbt.schema ? { schema: dbt.schema } : {}), name: item.name, ...(dbt.description ? { description: dbt.description } : {}), columns });
+    // `dbtModel.database` is the provenance for this logical source.  Dropping
+    // it creates an unqualified manifest relation beside the qualified runtime
+    // observation of the *same* target.  The interpreter then renders the
+    // partial alias while validation sees the complete one.  Keep the exact
+    // database here so the normal exact-binding merge can add the discovered
+    // columns to the legacy `schema.table` relation.  Cross-database sources
+    // remain separate because `addRelation()` keys their full bindings apart.
+    addRelation({
+      ...(dbt.database ? { database: dbt.database } : {}),
+      ...(dbt.schema ? { schema: dbt.schema } : {}),
+      name: item.name,
+      ...(dbt.description ? { description: dbt.description } : {}),
+      columns,
+    });
   }
   // The warehouse's description first (native bindings need the columns), under the names the host asked for.
   for (const relation of input.relations ?? []) addRelation(relation);
@@ -502,6 +698,49 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
     const [schema, name] = relation.includes('.') ? [relation.split('.')[0], relation.split('.').slice(1).join('.')] : [undefined, relation];
     addRelation({ ...(schema ? { schema } : {}), name, columns: [], columnLineage: lineage });
   }
+  // Keep semantic refs backward compatible (`schema.table`) while attaching
+  // the one executable binding their compiler, relational composer, drafter,
+  // validator and executor must share.  If a short alias reaches two physical
+  // databases, no binding is attached through that alias; preparation can
+  // report the ambiguity without reading from an arbitrary current database.
+  const bindingByLogical = new Map<string, PhysicalRelationBindingV1[]>();
+  for (const relation of source.relations ?? []) {
+    if (!relation.binding) continue;
+    const keys = new Set([relation.binding.logicalRelation, relation.schema ? `${relation.schema}.${relation.name}` : relation.name, ...(relation.binding.aliases ?? [])]);
+    for (const key of keys) {
+      const normalized = normalizeRelationName(key)?.toLowerCase();
+      if (!normalized) continue;
+      const bindings = bindingByLogical.get(normalized) ?? [];
+      bindings.push(relation.binding);
+      bindingByLogical.set(normalized, bindings);
+    }
+  }
+  const bindingFor = (relation: string | undefined): PhysicalRelationBindingV1 | undefined => {
+    const normalized = normalizeRelationName(relation)?.toLowerCase();
+    if (!normalized) return undefined;
+    const candidates = bindingByLogical.get(normalized) ?? [];
+    const physical = new Map(candidates.map((binding) => [physicalRelationIdentity(physicalRelationText(binding)), binding]));
+    return physical.size === 1 ? [...physical.values()][0] : undefined;
+  };
+  const attachBinding = <T extends { physical?: VocabularyEntry['physical'] }>(items: T[] | undefined) => {
+    for (const item of items ?? []) {
+      if (!item.physical?.relation || item.physical.binding) continue;
+      const binding = bindingFor(item.physical.relation);
+      // `ref` and `model` keep the legacy logical alias.  The physical field
+      // is consumed by relational SQL, however, so it must carry the same
+      // exact database/schema/table that the binding and expression use.
+      // Without this, a DB_B expression could still emit a DB_A-default FROM.
+      if (binding) item.physical = {
+        ...item.physical,
+        relation: physicalRelationText(binding),
+        binding,
+      };
+    }
+  };
+  attachBinding(source.metrics);
+  attachBinding(source.measures);
+  attachBinding(source.dimensions);
+  attachBinding(source.entities);
   // What a modeled thing IS: the business context and grain a Domain Studio
   // entity binding carries, attached to the physical relation it binds.
   const nodes = input.manifest?.dbtProvenance?.nodes ?? {};

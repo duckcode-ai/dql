@@ -1,0 +1,9 @@
+name: manifest_only_metricflow
+version: "1.0.0"
+config-version: 2
+profile: manifest_only_metricflow
+model-paths: ["models"]
+
+models:
+  manifest_only_metricflow:
+    +materialized: table

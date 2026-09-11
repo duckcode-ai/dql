@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWarehouseTargetIdentity, SemanticLayer } from '@duckcodeailabs/dql-core';
+import { physicalRelationBinding } from '@duckcodeailabs/dql-agent';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 import {
+  assertMetricFlowAskTarget,
   assertDbtCloudMetricInventory,
   compileSemanticRuntimeQuery,
   getSemanticRuntimeStatus,
@@ -50,6 +52,52 @@ function layer(): SemanticLayer {
     ],
     dimensions: [],
   });
+}
+
+function askMetricFlowTarget(
+  selectedDatabase: string,
+  profileDatabase: string,
+  options: { preserveConfiguredSpelling?: boolean } = {},
+) {
+  const targetFingerprint = `ask-target:${selectedDatabase}`;
+  const target = (database: string, connectionRef: string) => {
+    const identity = createWarehouseTargetIdentity({
+      connectionRef,
+      driver: 'snowflake',
+      dialect: 'snowflake',
+      redactedContext: {
+        account: 'ACME-PROD',
+        database,
+        schema: 'SEMANTIC',
+        role: 'ANALYST',
+        warehouse: 'REPORTING',
+      },
+    });
+    return options.preserveConfiguredSpelling
+      ? { ...identity, redactedContext: { ...identity.redactedContext, database } }
+      : identity;
+  };
+  return {
+    snapshotId: 'snapshot:ask-selected-target',
+    executionTargetFingerprint: targetFingerprint,
+    selectedExecutionTarget: target(selectedDatabase, `connection:${selectedDatabase}`),
+    physicalBindings: [physicalRelationBinding({
+      logicalRelation: 'PUBLIC.ORDERS',
+      physicalRelation: `${selectedDatabase}.PUBLIC.ORDERS`,
+      driver: 'snowflake',
+      snapshotId: 'snapshot:ask-selected-target',
+      executionTargetFingerprint: targetFingerprint,
+      source: 'warehouse_probe',
+      columns: [{ name: 'AMOUNT', type: 'NUMBER' }],
+      columnCompleteness: 'complete',
+    })],
+    profileTarget: {
+      expectedTarget: target(profileDatabase, `profile:${profileDatabase}`),
+      profileName: 'office',
+      targetName: 'default',
+      profilesPath: '/redacted/profiles.yml',
+    },
+  };
 }
 
 describe('shared semantic runtime selector', () => {
@@ -198,6 +246,75 @@ describe('shared semantic runtime selector', () => {
       semanticLayer: layer(),
     });
     expect(result).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
+  });
+
+  it('AGT-017 refuses MetricFlow before dispatch when Ask selected DB_B but dbt defaults to DB_A, and compiles when they match', async () => {
+    mkdirSync(join(root, 'target'), { recursive: true });
+    writeFileSync(join(root, 'target', 'semantic_manifest.json'), '{}');
+    const bin = join(root, 'mf');
+    const argsPath = join(root, 'mf-args.txt');
+    writeFileSync(bin, [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then printf "%s\\n" "mf, version 0.14.0"; exit 0; fi',
+      `printf "%s\\n" "$*" > '${argsPath.replace(/'/g, "'\\''")}'`,
+      'printf "%s\\n" "SELECT revenue_ratio FROM metricflow_compiled"',
+    ].join('\n'));
+    chmodSync(bin, 0o755);
+    process.env.DQL_METRICFLOW_BIN = bin;
+
+    await expect(compileSemanticRuntimeQuery({
+      metrics: ['revenue_ratio'],
+      dimensions: [],
+      engine: 'metricflow-cli',
+    }, {
+      projectRoot: root,
+      projectConfig: { dbt: { projectDir: '.' } },
+      detectedProvider: 'dbt',
+      semanticLayer: layer(),
+      metricFlowAskTarget: askMetricFlowTarget('DB_B', 'DB_A'),
+    })).rejects.toMatchObject({
+      code: 'SEMANTIC_RUNTIME_REQUIRED',
+      name: 'MetricFlowAskTargetMismatchError',
+    });
+    expect(existsSync(argsPath)).toBe(false);
+
+    const compiled = await compileSemanticRuntimeQuery({
+      metrics: ['revenue_ratio'],
+      dimensions: [],
+      engine: 'metricflow-cli',
+    }, {
+      projectRoot: root,
+      projectConfig: { dbt: { projectDir: '.' } },
+      detectedProvider: 'dbt',
+      semanticLayer: layer(),
+      metricFlowAskTarget: askMetricFlowTarget('DB_B', 'DB_B'),
+    });
+    expect(compiled).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
+    expect(readFileSync(argsPath, 'utf8')).toContain('--metrics revenue_ratio');
+
+    // A distinct request key prevents the MetricFlow compile cache from
+    // turning the lowercase target comparison into a cache-only assertion.
+    rmSync(argsPath, { force: true });
+    expect(existsSync(argsPath)).toBe(false);
+    const lowerCaseProfileCompiled = await compileSemanticRuntimeQuery({
+      metrics: ['revenue_ratio'],
+      dimensions: [],
+      engine: 'metricflow-cli',
+      limit: 17,
+    }, {
+      projectRoot: root,
+      projectConfig: { dbt: { projectDir: '.' } },
+      detectedProvider: 'dbt',
+      semanticLayer: layer(),
+      metricFlowAskTarget: askMetricFlowTarget('DB_B', 'db_b', { preserveConfiguredSpelling: true }),
+    });
+    expect(lowerCaseProfileCompiled).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
+    expect(readFileSync(argsPath, 'utf8')).toContain('--limit 17');
+
+    // Unlike unquoted components, quoted Snowflake names preserve their case.
+    expect(() => assertMetricFlowAskTarget(
+      askMetricFlowTarget('"DB_B"', '"db_b"', { preserveConfiguredSpelling: true }),
+    )).toThrow('does not match the warehouse selected');
   });
 
   it('AGT-005/API-007 sends the frozen qualified group-by identity to MetricFlow order-by', async () => {

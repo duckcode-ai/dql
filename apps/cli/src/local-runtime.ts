@@ -1,5 +1,11 @@
 import type { ProviderDispatchPhaseV1, ProviderEgressPurpose, SemanticAggregationCompilerReceiptV1, SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
-import { terminalTitle } from '@duckcodeailabs/dql-agent';
+import {
+  terminalTitle,
+  parsePhysicalIdentifier,
+  physicalRelationIdentity,
+  physicalRelationText,
+  type PhysicalRelationBindingV1,
+} from '@duckcodeailabs/dql-agent';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync, execSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -582,9 +588,10 @@ import {
   type SemanticRuntimeAdapterId,
   type SemanticRuntimeCompileResult,
   type SemanticRuntimeQueryRequest,
+  type MetricFlowAskTargetContext,
   parseSemanticDimensionSelection,
 } from './semantic-runtime.js';
-import { createAskPipelineRouteExecutor } from './ask-pipeline-host/host.js';
+import { createAskPipelineRouteExecutor, type AskSemanticCompileContext } from './ask-pipeline-host/host.js';
 import type { AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import {
   getSemanticRuntimeSettings,
@@ -6002,15 +6009,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // The engine the semantic candidate will compile on, decided the same
     // way `compileSemantic` decides it, so the binder speaks its dialect.
     semanticEngine: async () => plannedAskEngine().then((planned) => planned.engine),
-    compileSemantic: async (request, connection) => {
+    compileSemantic: async (request, connection, askContext?: AskSemanticCompileContext) => {
       if (!semanticLayer) throw new Error('no semantic layer is loaded');
-      const connectionName = projectConfig.defaultConnectionName;
-      const tableMapping = await resolveSemanticTableMapping(executor, connection, semanticLayer, projectRoot, connectionName);
+      // Ask supplies the request-local bindings it discovered against this
+      // exact target. Never substitute the default connection's cached
+      // runtime-schema snapshot here: it may name the same schema/table in a
+      // different Snowflake database.
+      const tableMapping = await resolveSemanticTableMapping(
+        executor,
+        connection,
+        semanticLayer,
+        projectRoot,
+        askContext ? undefined : projectConfig.defaultConnectionName,
+        askContext ? {
+          physicalBindings: askContext.physicalBindings,
+          snapshotId: askContext.snapshotId,
+          executionTargetFingerprint: askContext.executionTargetFingerprint,
+        } : undefined,
+      );
       // A full runtime that cannot actually run here (MetricFlow without a
       // parsed semantic manifest) must not veto the native composer: the
       // pipeline prepares on whatever engine can compile, and says which.
       const planned = await plannedAskEngine();
       const plannedAdapter = planned.engine;
+      // MetricFlow's `mf query` command has no per-query dbt target option.
+      // Give the runtime the selected Ask target and strict default-profile
+      // provenance so it can refuse before dispatch instead of compiling
+      // through a DB_A profile for a DB_B Ask request.
+      const metricFlowAskTarget = askContext && plannedAdapter === 'metricflow-cli'
+        ? resolveMetricFlowAskTargetContext(projectRoot, projectConfig, connection, askContext)
+        : undefined;
       const compiled = await compileSemanticRuntimeQuery({ ...request, engine: plannedAdapter }, {
         projectRoot,
         projectConfig,
@@ -6018,6 +6046,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         semanticLayer,
         driver: connection.driver,
         tableMapping,
+        ...(metricFlowAskTarget ? { metricFlowAskTarget } : {}),
+        ...(request.signal ? { signal: request.signal } : {}),
       });
       if (!compiled) {
         // Say WHY the native composer was the engine when a fuller one was planned.
@@ -30012,14 +30042,45 @@ function parseSemanticBlockConfig(source: string): ParsedSemanticBlockConfig {
   };
 }
 
+/**
+ * Request-local relation evidence for semantic compilation.  Supplying this
+ * context makes mapping strict: no project-default cached snapshot and no
+ * fresh unqualified catalog scan may replace an Ask-selected physical target.
+ */
+export interface SemanticTableMappingContext {
+  physicalBindings: readonly PhysicalRelationBindingV1[];
+  snapshotId?: string;
+  executionTargetFingerprint?: string;
+}
+
+function semanticTableRowsFromBindings(context: SemanticTableMappingContext): Array<Record<string, unknown>> {
+  return context.physicalBindings
+    .filter((binding) => !context.executionTargetFingerprint || binding.executionTargetFingerprint === context.executionTargetFingerprint)
+    .map((binding) => ({
+      table_catalog: binding.database?.value,
+      table_schema: binding.schema?.value,
+      table_name: binding.table.value,
+      // The exact relation text preserves quoted dots and case-sensitive
+      // Snowflake names. `table_catalog/schema/name` are descriptive only.
+      table_relation: physicalRelationText(binding),
+      table_logical_relation: binding.logicalRelation,
+      table_target_fingerprint: binding.executionTargetFingerprint,
+    }));
+}
+
 export async function resolveSemanticTableMapping(
   executor: QueryExecutor,
   connection: ConnectionConfig,
   semanticLayer?: SemanticLayer,
   projectRoot?: string,
   connectionId?: string,
+  context?: SemanticTableMappingContext,
 ): Promise<Record<string, string> | undefined> {
   if (!semanticLayer) return undefined;
+  // This is the Ask path. The caller has already selected the request-local
+  // target and relation bindings. Falling through to a default connection
+  // snapshot here would reintroduce DB_A/DB_B cross-target compilation.
+  if (context) return buildSemanticTableMapping(semanticLayer, semanticTableRowsFromBindings(context));
   if (projectRoot) {
     const snapshot = latestRuntimeSchemaSnapshotForProject(projectRoot, connectionId);
     if (snapshot?.scopeFingerprint && snapshot.tables.length) {
@@ -30028,7 +30089,7 @@ export async function resolveSemanticTableMapping(
         snapshot.tables.map((table) => ({
           table_catalog: table.catalogOrDatabase,
           table_schema: table.schema,
-          table_name: table.name ?? table.relation.split('.').at(-1),
+          table_name: table.name ?? parsePhysicalIdentifier(table.relation).at(-1)?.value,
           table_relation: table.relation,
         })),
       );
@@ -30048,56 +30109,57 @@ export async function resolveSemanticTableMapping(
   }
 }
 
+/**
+ * Quote-aware component comparison for semantic source names. A quoted all-
+ * uppercase Snowflake name denotes the same object as its unquoted folded
+ * spelling; mixed/lower quoted names remain distinct. Physical binding
+ * identities remain stricter elsewhere, where quote state itself is stored.
+ */
+function sameSemanticIdentifier(left: { value: string; quoted?: boolean }, right: { value: string; quoted?: boolean }): boolean {
+  if (left.quoted && right.quoted) return left.value === right.value;
+  if (left.quoted) return left.value === right.value.toUpperCase();
+  if (right.quoted) return left.value.toUpperCase() === right.value;
+  return left.value.toUpperCase() === right.value.toUpperCase();
+}
+
+function semanticRelationSuffixMatches(candidate: string, semanticTable: string): boolean {
+  const candidateParts = parsePhysicalIdentifier(candidate);
+  const semanticParts = parsePhysicalIdentifier(semanticTable);
+  if (candidateParts.length === 0 || semanticParts.length === 0 || candidateParts.length < semanticParts.length) return false;
+  return semanticParts.every((part, index) => sameSemanticIdentifier(part, candidateParts[candidateParts.length - semanticParts.length + index]!));
+}
+
 export function buildSemanticTableMapping(
   semanticLayer: SemanticLayer,
   rows: Array<Record<string, unknown>>,
 ): Record<string, string> | undefined {
-  const normalizeIdentifierPart = (value: string): string => value
-    .trim()
-    .replace(/^["'`\[]|["'`\]]$/g, '')
-    .toLowerCase();
-  const normalizeRelation = (value: string): string => value
-    .split('.')
-    .map(normalizeIdentifierPart)
-    .filter(Boolean)
-    .join('.');
-  const candidates: Array<{ name: string; relation: string; normalizedRelation: string }> = [];
+  const candidates: Array<{ relation: string; identity: string }> = [];
   for (const row of rows) {
-    const catalog = String(row['table_catalog'] ?? '');
-    const schema = String(row['table_schema'] ?? '');
-    const name = String(row['table_name'] ?? '');
+    const catalog = typeof row['table_catalog'] === 'string' ? row['table_catalog'] : '';
+    const schema = typeof row['table_schema'] === 'string' ? row['table_schema'] : '';
+    const name = typeof row['table_name'] === 'string' ? row['table_name'] : '';
     const relation = typeof row['table_relation'] === 'string' && row['table_relation'].trim()
       ? row['table_relation']
       : [catalog, schema, name].filter(Boolean).join('.');
-    if (!name) continue;
-    candidates.push({
-      name: normalizeIdentifierPart(name),
-      relation,
-      normalizedRelation: normalizeRelation(relation),
-    });
+    if (!name || parsePhysicalIdentifier(relation).length === 0) continue;
+    candidates.push({ relation, identity: physicalRelationIdentity(relation) });
   }
 
   const tableMapping: Record<string, string> = {};
   const allSemanticTables = new Set<string>();
-  for (const metric of semanticLayer.listMetrics()) allSemanticTables.add(metric.table);
-  for (const dimension of semanticLayer.listDimensions()) allSemanticTables.add(dimension.table);
-  for (const measure of semanticLayer.listMeasures()) allSemanticTables.add(measure.table);
-  for (const model of semanticLayer.listSemanticModels()) allSemanticTables.add(model.table);
+  for (const metric of semanticLayer.listMetrics()) if (metric.table) allSemanticTables.add(metric.table);
+  for (const dimension of semanticLayer.listDimensions(undefined, { includeVariants: true })) if (dimension.table) allSemanticTables.add(dimension.table);
+  for (const measure of semanticLayer.listMeasures()) if (measure.table) allSemanticTables.add(measure.table);
+  for (const model of semanticLayer.listSemanticModels()) if (model.table) allSemanticTables.add(model.table);
   for (const semTable of allSemanticTables) {
-    if (!semTable) continue;
-    const normalizedSemantic = normalizeRelation(semTable);
-    const semanticLeaf = normalizedSemantic.split('.').at(-1);
-    if (!semanticLeaf) continue;
-    const qualifiedMatches = candidates.filter((candidate) =>
-      candidate.normalizedRelation === normalizedSemantic
-      || candidate.normalizedRelation.endsWith(`.${normalizedSemantic}`),
-    );
-    const leafMatches = candidates.filter((candidate) => candidate.name === semanticLeaf);
-    const matches = qualifiedMatches.length > 0 ? qualifiedMatches : leafMatches;
-    // Never guess when the same semantic leaf exists in several schemas. A
-    // qualified semantic relation can disambiguate; otherwise the semantic
-    // runtime must surface the modeling gap instead of executing the wrong one.
-    if (matches.length === 1) tableMapping[semTable] = matches[0]!.relation;
+    const matches = new Map<string, string>();
+    for (const candidate of candidates) {
+      if (semanticRelationSuffixMatches(candidate.relation, semTable)) matches.set(candidate.identity, candidate.relation);
+    }
+    // A two-part semantic relation may match a three-part physical relation,
+    // but it must still name exactly one physical identity. Tails are never a
+    // tie-breaker for two databases that share schema.table.
+    if (matches.size === 1) tableMapping[semTable] = [...matches.values()][0]!;
   }
   return Object.keys(tableMapping).length > 0 ? tableMapping : undefined;
 }
@@ -30136,6 +30198,59 @@ function resolveMetricFlowTargetMetadata(
     profileName: candidate.profileName,
     targetName: candidate.targetName,
     profilesPath: candidate.path,
+  };
+}
+
+/**
+ * The local MetricFlow CLI always takes dbt's profile default target: unlike
+ * dbt itself, its query command has no per-query target flag. Ask must use
+ * this strict resolver rather than the legacy single-candidate fallback, or a
+ * non-default profile output could be labelled as the compiler target while
+ * `mf` still reads a different default.
+ */
+function resolveMetricFlowDefaultTargetMetadata(
+  projectRoot: string,
+  projectConfig: ProjectConfig,
+): MetricFlowTargetMetadata | undefined {
+  const candidate = discoverDbtProfileConnections(projectRoot, projectConfig)
+    .find((item) => item.missingFields.length === 0
+      && !item.warnings.some((warning) => warning.startsWith('Not the default dbt target')));
+  if (!candidate) return undefined;
+  return {
+    expectedTarget: configuredWarehouseTargetIdentity(candidate.connection),
+    profileName: candidate.profileName,
+    targetName: candidate.targetName,
+    profilesPath: candidate.path,
+  };
+}
+
+/**
+ * Build only redacted, request-local MetricFlow target evidence. The Ask
+ * provenance fingerprint is checked against its physical bindings but is not
+ * used as an execution-target assertion; the semantic runtime compares actual
+ * redacted connection identities before it spawns MetricFlow.
+ */
+export function resolveMetricFlowAskTargetContext(
+  projectRoot: string,
+  projectConfig: ProjectConfig,
+  connection: ConnectionConfig,
+  askContext: AskSemanticCompileContext,
+): MetricFlowAskTargetContext {
+  const profileTarget = resolveMetricFlowDefaultTargetMetadata(projectRoot, projectConfig);
+  const askProfileTarget = profileTarget?.expectedTarget
+    ? {
+      expectedTarget: profileTarget.expectedTarget,
+      ...(profileTarget.profileName ? { profileName: profileTarget.profileName } : {}),
+      ...(profileTarget.targetName ? { targetName: profileTarget.targetName } : {}),
+      ...(profileTarget.profilesPath ? { profilesPath: profileTarget.profilesPath } : {}),
+    }
+    : undefined;
+  return {
+    snapshotId: askContext.snapshotId,
+    executionTargetFingerprint: askContext.executionTargetFingerprint,
+    selectedExecutionTarget: configuredWarehouseTargetIdentity(connection),
+    physicalBindings: askContext.physicalBindings,
+    ...(askProfileTarget ? { profileTarget: askProfileTarget } : {}),
   };
 }
 

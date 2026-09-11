@@ -74,4 +74,35 @@ describe('Claude Code CLI session reuse', () => {
       else process.env.DQL_SUBSCRIPTION_CLI_SESSION = previous;
     }
   });
+
+  it('does not retry a resumed turn when Claude reports a structured 401 with neutral text', async () => {
+    const previous = process.env.DQL_SUBSCRIPTION_CLI_SESSION;
+    process.env.DQL_SUBSCRIPTION_CLI_SESSION = 'on';
+    try {
+      const calls: Array<{ args: string[]; input: string }> = [];
+      const provider = new ClaudeCodeCliProvider({
+        runProcess: async (_command, args, options) => {
+          calls.push({ args, input: options?.input ?? '' });
+          if (calls.length === 1) return { code: 0, stdout: result('ok'), stderr: '' };
+          return {
+            code: 1,
+            stderr: '',
+            stdout: JSON.stringify({ is_error: true, terminal_reason: 'api_error', api_error_status: 401, result: 'Request failed' }),
+          };
+        },
+      });
+      await provider.generate(turn(1), { conversationId: 'turn-1' });
+      const error = await provider.generate(turn(2), { conversationId: 'turn-1' }).then(
+        () => undefined,
+        (reason: unknown) => reason as Error & { code?: string; detail?: string },
+      );
+      expect(error?.code).toBe('provider_auth');
+      expect(error?.detail).toBe('Request failed');
+      expect(calls).toHaveLength(2);
+      expect(calls[1]!.args).toContain('--resume');
+    } finally {
+      if (previous === undefined) delete process.env.DQL_SUBSCRIPTION_CLI_SESSION;
+      else process.env.DQL_SUBSCRIPTION_CLI_SESSION = previous;
+    }
+  });
 });

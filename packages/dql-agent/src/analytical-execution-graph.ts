@@ -807,12 +807,13 @@ function executionFailure(
   return { status: 'failed', code, reason, nodeId, ...(missingOutputIds?.length ? { missingOutputIds } : {}) };
 }
 
-interface ExactDecimal {
+/** Exact base-10 representation shared by analytical graph and Ask post-processing. */
+export interface ExactDecimal {
   coefficient: bigint;
   scale: number;
 }
 
-function parseExactDecimal(value: unknown): ExactDecimal | undefined {
+export function parseExactDecimal(value: unknown): ExactDecimal | undefined {
   if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'bigint') return undefined;
   if (typeof value === 'number' && !Number.isFinite(value)) return undefined;
   const expanded = expandExponent(String(value).trim());
@@ -846,7 +847,7 @@ function normalizeDecimal(value: ExactDecimal): ExactDecimal {
   return { coefficient, scale };
 }
 
-function subtractDecimal(left: ExactDecimal, right: ExactDecimal): ExactDecimal {
+export function subtractDecimal(left: ExactDecimal, right: ExactDecimal): ExactDecimal {
   const scale = Math.max(left.scale, right.scale);
   return normalizeDecimal({
     coefficient:
@@ -856,14 +857,14 @@ function subtractDecimal(left: ExactDecimal, right: ExactDecimal): ExactDecimal 
   });
 }
 
-function compareDecimal(left: ExactDecimal, right: ExactDecimal): number {
+export function compareDecimal(left: ExactDecimal, right: ExactDecimal): number {
   const scale = Math.max(left.scale, right.scale);
   const leftValue = left.coefficient * pow10(scale - left.scale);
   const rightValue = right.coefficient * pow10(scale - right.scale);
   return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
 }
 
-function percentChange(delta: ExactDecimal, denominator: ExactDecimal, scale: number): string {
+export function percentChange(delta: ExactDecimal, denominator: ExactDecimal, scale: number): string {
   const safeScale = Math.min(Math.max(0, scale), 18);
   const numerator = delta.coefficient * 100n * pow10(denominator.scale + safeScale);
   const divisor = denominator.coefficient * pow10(delta.scale);
@@ -875,11 +876,24 @@ function percentChange(delta: ExactDecimal, denominator: ExactDecimal, scale: nu
   return formatDecimal(normalizeDecimal({ coefficient: quotient, scale: safeScale }));
 }
 
-function formatDecimal(value: ExactDecimal): string {
+export function formatDecimal(value: ExactDecimal): string {
   const sign = value.coefficient < 0n ? '-' : '';
   const digits = abs(value.coefficient).toString().padStart(value.scale + 1, '0');
   if (value.scale === 0) return `${sign}${digits}`;
   return `${sign}${digits.slice(0, -value.scale)}.${digits.slice(-value.scale)}`;
+}
+
+export function divideDecimal(numerator: ExactDecimal, denominator: ExactDecimal, scale = 18): string | undefined {
+  if (denominator.coefficient === 0n) return undefined;
+  const safeScale = Math.min(Math.max(0, scale), 18);
+  const scaled = numerator.coefficient * pow10(denominator.scale + safeScale);
+  const divisor = denominator.coefficient * pow10(numerator.scale);
+  let quotient = scaled / divisor;
+  const remainder = scaled % divisor;
+  if (abs(remainder) * 2n >= abs(divisor)) {
+    quotient += (scaled < 0n) !== (divisor < 0n) ? -1n : 1n;
+  }
+  return formatDecimal(normalizeDecimal({ coefficient: quotient, scale: safeScale }));
 }
 
 function pow10(exponent: number): bigint {

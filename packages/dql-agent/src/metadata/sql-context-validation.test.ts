@@ -39,6 +39,63 @@ describe('validateSqlAgainstLocalContext', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('validates a frozen relational statement with verified positional values without rewriting the submitted SQL', () => {
+    const sql = `
+      SELECT DATE_TRUNC('month', p.game_date) AS month,
+        COUNT(DISTINCT p.game_id) AS games_played,
+        SUM(p.points_scored) AS points_scored
+      FROM nba_analysis.TRANSFORMED.local_player_game_facts AS p
+      WHERE p.player_name = ? AND p.is_home = ? AND p.participated = ?
+        AND p.game_date >= ? AND p.game_date < ?
+      GROUP BY 1
+      ORDER BY 1
+    `;
+    const runtimeSchema = [{
+      relation: 'nba_analysis.TRANSFORMED.local_player_game_facts',
+      columns: [
+        { name: 'game_id', type: 'BIGINT' }, { name: 'player_name', type: 'VARCHAR' }, { name: 'is_home', type: 'BOOLEAN' },
+        { name: 'participated', type: 'BOOLEAN' }, { name: 'game_date', type: 'DATE' }, { name: 'points_scored', type: 'INTEGER' },
+      ],
+      source: 'warehouse probe', columnCompleteness: 'complete' as const,
+    }];
+
+    const result = validateSqlAgainstLocalContext(sql, undefined, {
+      dialect: 'duckdb', runtimeSchema, runtimeSchemaExact: true,
+      positionalParameterCount: 5, enforceGenerationReadiness: false,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.referencedRelations).toEqual(['nba_analysis.TRANSFORMED.local_player_game_facts']);
+  });
+
+  it('accepts DuckDB compiler quoting for the same exact inspected physical binding', () => {
+    const runtimeSchema = [{
+      relation: 'nba_analysis.TRANSFORMED.local_player_game_facts',
+      columns: [{ name: 'player_name', type: 'VARCHAR' }],
+      source: 'warehouse probe', columnCompleteness: 'complete' as const,
+    }];
+
+    const result = validateSqlAgainstLocalContext(
+      'SELECT "player_name" FROM "nba_analysis"."TRANSFORMED"."local_player_game_facts"',
+      undefined,
+      { dialect: 'duckdb', runtimeSchema, runtimeSchemaExact: true, enforceGenerationReadiness: false },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.referencedRelations).toEqual(['"nba_analysis"."TRANSFORMED"."local_player_game_facts"']);
+  });
+
+  it('rejects a positional candidate whose bound-value count does not match its SQL', () => {
+    const result = validateSqlAgainstLocalContext(
+      'SELECT SUM(p.points_scored) FROM nba_analysis.TRANSFORMED.local_player_game_facts p WHERE p.player_name = ?',
+      undefined,
+      { positionalParameterCount: 0 },
+    );
+
+    expect(result).toMatchObject({ ok: false, code: 'unsafe_sql' });
+    if (!result.ok) expect(result.error).toContain('1 positional placeholder');
+  });
+
   it('AGT-005 rejects pre-aggregation rounding and preserves final currency rounding', () => {
     const unsafe = validateSqlAgainstLocalContext(
       'SELECT SUM(ROUND(COALESCE(o.amount, 0), 2)) AS amount FROM analytics.fct_orders o',
@@ -834,5 +891,67 @@ describe('unknown relations are reported completely', () => {
     expect(reported.some((relation) => relation.endsWith('customers'))).toBe(true);
     expect(reported.some((relation) => relation.endsWith('products'))).toBe(true);
     expect(reported.some((relation) => relation.endsWith('orders'))).toBe(false);
+  });
+});
+
+describe('physical execution bindings', () => {
+  it('does not let a same-tail Snowflake relation select a different database', () => {
+    const runtimeSchema = [{
+      relation: '"Db.With.Dot"."Public"."Events"',
+      catalogOrDatabase: 'Db.With.Dot',
+      schema: 'Public',
+      name: 'Events',
+      executionTargetFingerprint: 'target:role-a',
+      source: 'warehouse_probe',
+      columnCompleteness: 'complete' as const,
+      columns: [{ name: 'EventId', type: 'NUMBER' }],
+    }];
+    const wrongDatabase = validateSqlAgainstLocalContext(
+      'SELECT "EventId" FROM "Other.Db"."Public"."Events"',
+      undefined,
+      { dialect: 'snowflake', runtimeSchema, runtimeSchemaExact: true, executionTargetFingerprint: 'target:role-a' },
+    );
+    expect(wrongDatabase).toMatchObject({ ok: false, code: 'unknown_relation' });
+    if (!wrongDatabase.ok) expect(wrongDatabase.error).toContain('exact bound physical relation');
+
+    const exact = validateSqlAgainstLocalContext(
+      'SELECT "EventId" FROM "Db.With.Dot"."Public"."Events"',
+      undefined,
+      { dialect: 'snowflake', runtimeSchema, runtimeSchemaExact: true, executionTargetFingerprint: 'target:role-a' },
+    );
+    expect(exact.ok).toBe(true);
+  });
+
+  it('requires the submitted unquoted database identity, not a normalized alias', () => {
+    const runtimeSchema = [{
+      relation: '"Db"."Public"."Events"',
+      catalogOrDatabase: 'Db', schema: 'Public', name: 'Events',
+      source: 'warehouse_probe', columnCompleteness: 'complete' as const,
+      executionTargetFingerprint: 'target:role-a', columns: [{ name: 'EventId', type: 'NUMBER' }],
+    }];
+    const result = validateSqlAgainstLocalContext(
+      'SELECT EventId FROM DB.PUBLIC.EVENTS',
+      undefined,
+      { dialect: 'snowflake', runtimeSchema, runtimeSchemaExact: true, executionTargetFingerprint: 'target:role-a' },
+    );
+    expect(result).toMatchObject({ ok: false, code: 'unknown_relation' });
+    if (!result.ok) expect(result.error).toContain('exact bound physical relation');
+  });
+
+  it('rejects request-local metadata observed under a different role target', () => {
+    const result = validateSqlAgainstLocalContext(
+      'SELECT order_id FROM analytics.fct_orders',
+      pack(),
+      {
+        runtimeSchema: [{
+          relation: 'analytics.fct_orders', name: 'fct_orders', source: 'warehouse_probe', columnCompleteness: 'complete',
+          executionTargetFingerprint: 'target:role-a', columns: [{ name: 'order_id' }],
+        }],
+        runtimeSchemaExact: true,
+        executionTargetFingerprint: 'target:role-b',
+      },
+    );
+    expect(result).toMatchObject({ ok: false, code: 'insufficient_context' });
+    if (!result.ok) expect(result.error).toContain('different execution target');
   });
 });

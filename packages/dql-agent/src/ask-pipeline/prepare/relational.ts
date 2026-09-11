@@ -1,4 +1,5 @@
 import type { AnalyticalIntentV1, IntentPredicate } from '../intent.js';
+import { physicalRelationIdentity, physicalRelationText } from '../physical-binding.js';
 import { suggestSameGrainColumns, suggestSameRelationFields, type VocabularyEntry, type VocabularyIndex } from '../vocabulary.js';
 import type { PrepareDeps, PreparedCandidate, PreparedRefusal, RelationalJoinStep, SqlDialectLike } from './types.js';
 
@@ -159,8 +160,14 @@ function qualify(dialect: SqlDialectLike, relation: string, column: string): str
 
 function physicalOf(entry: VocabularyEntry | undefined): { relation: string; column?: string; expr?: string; aggregate?: string } | undefined {
   if (!entry) return undefined;
-  if (entry.kind === 'column' && entry.model) return { relation: entry.model, column: entry.name };
-  return entry.physical;
+  const physical = entry.physical;
+  // The logical relation remains the stable user-facing alias, but execution
+  // must use the exact binding when one was admitted for this target.  This
+  // applies equally to metric expressions and raw-column SQL.
+  const relation = physical?.binding ? physicalRelationText(physical.binding) : physical?.relation ?? entry.model;
+  if (!relation) return undefined;
+  if (entry.kind === 'column') return { relation, column: physical?.column ?? entry.name };
+  return physical ? { ...physical, relation } : undefined;
 }
 
 const asBoolean = (value: unknown): boolean | undefined =>
@@ -231,6 +238,39 @@ const ADDITIVE = new Set(['sum', 'count', 'count_distinct']);
 export function composeRelational(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, deps: PrepareDeps): { candidate?: PreparedCandidate; refusal?: PreparedRefusal } {
   const dialect = deps.dialect ?? DEFAULT_DIALECT;
   const refuse = (code: PreparedRefusal['code'], message: string, repairable = false): { refusal: PreparedRefusal } => ({ refusal: { tier: 'relational', code, message, repairable } });
+
+  // SQL must render the exact database-qualified binding, while join
+  // authority is registered under its stable logical schema.table identity.
+  // Keep the mapping deliberately one-to-one: if DB_A and DB_B both expose
+  // PUBLIC.ORDERS, neither gets to borrow the other's join path.
+  const logicalByPhysical = new Map<string, string>();
+  const physicalByLogical = new Map<string, Map<string, string>>();
+  for (const entry of vocabulary.entries) {
+    const binding = entry.physical?.binding;
+    if (!binding) continue;
+    const physical = physicalRelationText(binding);
+    const physicalKey = physicalRelationIdentity(physical);
+    const logicalKey = physicalRelationIdentity(binding.logicalRelation);
+    logicalByPhysical.set(physicalKey, binding.logicalRelation);
+    const candidates = physicalByLogical.get(logicalKey) ?? new Map<string, string>();
+    candidates.set(physicalKey, physical);
+    physicalByLogical.set(logicalKey, candidates);
+  }
+  const logicalRelationFor = (relation: string): string => {
+    const physicalKey = physicalRelationIdentity(relation);
+    const logical = logicalByPhysical.get(physicalKey);
+    if (!logical) return relation;
+    // The logical authority is safe only when this snapshot has one exact
+    // physical target for it. A second database is an ambiguity, not an alias.
+    return (physicalByLogical.get(physicalRelationIdentity(logical))?.size ?? 0) === 1
+      ? logical
+      : relation;
+  };
+  const physicalRelationFor = (relation: string, fallback?: string): string => {
+    const candidates = physicalByLogical.get(physicalRelationIdentity(relation));
+    if (candidates?.size === 1) return [...candidates.values()][0]!;
+    return fallback ?? relation;
+  };
 
   const bindPredicate = (predicate: IntentPredicate): BoundPredicate | PreparedRefusal => {
     const entry = vocabulary.get(predicate.ref);
@@ -412,7 +452,7 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     // has one (an order date lives on orders and on order lines alike);
     // joining a finer relation only to filter by time would multiply rows.
     const islandWindow = window
-      ? (vocabulary.entries.some((candidate) => candidate.kind === 'dimension' && candidate.roles.includes('time') && candidate.physical?.relation === base && candidate.physical.column === window!.column)
+      ? (vocabulary.entries.some((candidate) => candidate.kind === 'dimension' && candidate.roles.includes('time') && logicalRelationFor(candidate.physical?.relation ?? candidate.model ?? '') === logicalRelationFor(base) && candidate.physical?.column === window!.column)
         ? { ...window, relation: base }
         : window)
       : undefined;
@@ -427,13 +467,17 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     // season on both its season table and its game table has spelled one
     // column twice, and which spelling the reading happened to name should not
     // decide whether the question can be answered.
-    const sameNameOnBase = (relation: string, column: string): boolean =>
-      relation !== base
-      && (deps.joinPath?.(base, relation)?.length ?? 0) === 0
+    const sameNameOnBase = (relation: string, column: string): boolean => {
+      const baseLogical = logicalRelationFor(base);
+      const relationLogical = logicalRelationFor(relation);
+      return relation !== base
+      && baseLogical !== relationLogical
+      && (deps.joinPath?.(baseLogical, relationLogical)?.length ?? 0) === 0
       && vocabulary.entries.some((candidate) =>
         (candidate.kind === 'column' || candidate.kind === 'dimension')
-        && (candidate.physical?.relation ?? candidate.model) === base
+        && logicalRelationFor(candidate.physical?.relation ?? candidate.model ?? '') === baseLogical
         && (candidate.physical?.column ?? candidate.name).toLowerCase() === column.toLowerCase());
+    };
     const islandColumnsBound = islandColumns.map((column) => {
       if (!sameNameOnBase(column.relation, column.column)) return column;
       const bound = qualify(dialect, base, column.column);
@@ -461,7 +505,9 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
     const joined = new Set([base]);
     for (const relation of needed) {
       if (joined.has(relation)) continue;
-      const path = deps.joinPath?.(base, relation);
+      const baseLogical = logicalRelationFor(base);
+      const relationLogical = logicalRelationFor(relation);
+      const path = deps.joinPath?.(baseLogical, relationLogical);
       // Mixed grains with no declared path is a reading the interpreter can
       // fix (measures from one relation, a period or grouping from another).
       if (!path || path.length === 0) {
@@ -471,14 +517,15 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
         const fields = suggestSameRelationFields(vocabulary, [...intent.filters.map((filter) => filter.ref), ...intent.groupBy.map((group) => group.ref), ...intent.display], base);
         const hint = moved.length ? ` The same facts exist on ${relation}: ${moved.map((item) => `${item.from} -> ${item.to} (${item.aggregation})`).join('; ')}; read every measure from there and keep the period.` : '';
         const fieldHint = fields.length ? ` The same fields exist on ${base}: ${fields.map((item) => `${item.from} -> ${item.to}`).join('; ')}; restrict and group there instead.` : '';
-        const unproven = deps.unprovenJoinPath?.(base, relation) ?? [];
+        const unproven = deps.unprovenJoinPath?.(baseLogical, relationLogical) ?? [];
         return { refusal: { tier: 'relational', code: 'join_path_required', message: `no governed join path from ${base} to ${relation}; read the question over one relation, taking the measures from the relation that carries the period or grouping.${hint}${fieldHint}`, repairable: true, relations: [base, relation], ...(unproven.length ? { unproven } : {}) } };
       }
       for (const step of path) {
-        if (joined.has(step.relation)) continue;
-        joins.push(`JOIN ${qualifyRelation(dialect, step.relation)} ON ${step.on}`);
-        joined.add(step.relation);
-        usedJoins.push(step);
+        const stepRelation = physicalRelationFor(step.relation, logicalRelationFor(relation) === step.relation ? relation : undefined);
+        if (joined.has(stepRelation)) continue;
+        joins.push(`JOIN ${qualifyRelation(dialect, stepRelation)} ON ${step.on}`);
+        joined.add(stepRelation);
+        usedJoins.push({ ...step, relation: stepRelation });
       }
     }
     for (const relation of joined) joinedAll.add(relation);

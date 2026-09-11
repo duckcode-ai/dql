@@ -28,16 +28,21 @@ function predicateToFilter(predicate: IntentPredicate, entry: VocabularyEntry): 
   return { dimension: semanticName(entry), operator: OPERATORS[predicate.op], values };
 }
 
-export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, engine?: PrepareDeps['engine']): { request?: SemanticCompileRequest; refusal?: PreparedRefusal; groupedByLabel?: boolean; derived?: NonNullable<PreparedCandidate['derived']> } {
+export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, engine?: PrepareDeps['engine']): { request?: SemanticCompileRequest; refusal?: PreparedRefusal; groupedByLabel?: boolean; derived?: NonNullable<PreparedCandidate['derived']>; changes?: NonNullable<PreparedCandidate['changes']> } {
   const entry = (ref: string) => vocabulary.get(ref);
   if (intent.population === 'all') {
     return { refusal: { tier: 'semantic', code: 'not_semantic', message: 'the semantic layer returns the members it matched; including every member of the entity is composed relationally', repairable: false } };
   }
   const metrics: string[] = [];
   const derived: NonNullable<PreparedCandidate['derived']> = [];
+  const changes: NonNullable<PreparedCandidate['changes']> = [];
+  const outputByAlias = new Map<string, string>();
   const asked = new Set<string>();
   for (const measure of intent.measures) {
-    if (measure.change) return { refusal: { tier: 'semantic', code: 'not_semantic', message: `${measure.alias ?? measure.ref} is the difference between two measures of this reading; the semantic tier returns metrics, not arithmetic between them`, repairable: false } };
+    if (measure.change) {
+      changes.push({ alias: measure.alias ?? measure.ref.replace(/^change:/, '').replace(/[^A-Za-z0-9_]+/g, '_'), ...measure.change });
+      continue;
+    }
     if (measure.derived) {
       if (measure.derived.denominatorScope === 'overall') return { refusal: { tier: 'semantic', code: 'not_semantic', message: `${measure.alias ?? measure.ref} divides by the whole period; the semantic tier computes ratios at one grouping only`, repairable: false } };
       // A ratio is two governed metrics compiled together and divided after execution.
@@ -53,7 +58,9 @@ export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: Voca
       }
       const [numerator, denominator] = parts.map((part) => semanticName(part!)) as [string, string];
       for (const name of [numerator, denominator]) if (!metrics.includes(name)) metrics.push(name);
-      derived.push({ alias: measure.alias ?? measure.ref.replace(/^ratio:/, '').replace(/[^A-Za-z0-9_]+/g, '_'), numerator, denominator });
+      const alias = measure.alias ?? measure.ref.replace(/^ratio:/, '').replace(/[^A-Za-z0-9_]+/g, '_');
+      derived.push({ alias, numerator, denominator });
+      if (measure.alias) outputByAlias.set(measure.alias, alias);
       continue;
     }
     const found = entry(measure.ref);
@@ -66,6 +73,18 @@ export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: Voca
     const name = semanticName(found);
     asked.add(name);
     if (!metrics.includes(name)) metrics.push(name);
+    if (measure.alias) outputByAlias.set(measure.alias, name);
+  }
+  // A comparison names aliases of measures in THIS reading.  Both leaves must
+  // have compiled through the semantic engine above; this is the safe path for
+  // an authored previous-period MetricFlow metric, not a generated date-shift.
+  const nonChangeAliases = new Set(intent.measures.filter((measure) => !measure.change).map((measure) => measure.alias).filter((alias): alias is string => Boolean(alias)));
+  for (const change of changes) {
+    if (!nonChangeAliases.has(change.base) || !nonChangeAliases.has(change.comparison)) {
+      return { refusal: { tier: 'semantic', code: 'not_semantic', message: `${change.alias} needs semantic measures aliased ${change.base} and ${change.comparison} in the same reading`, repairable: true } };
+    }
+    change.base = outputByAlias.get(change.base) ?? change.base;
+    change.comparison = outputByAlias.get(change.comparison) ?? change.comparison;
   }
   for (const item of derived) if (asked.has(item.numerator) || asked.has(item.denominator)) item.keepInputs = true;
   // MetricFlow and dbt Cloud address a metric's own aggregation time as
@@ -100,7 +119,14 @@ export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: Voca
     if (!found || (found.kind !== 'dimension' && found.kind !== 'entity')) {
       return { refusal: { tier: 'semantic', code: 'not_semantic', message: `${predicate.ref} is not a semantic dimension`, repairable: false } };
     }
-    filters.push(predicateToFilter(predicate, found));
+    // A lifted common restriction on the aggregation time belongs to
+    // MetricFlow's `metric_time`, including when a calculated output caused
+    // normalization to run after the reading was grounded. Keeping the
+    // concrete source dimension here was the source of the photographed
+    // prior-period refusal: the authored offset metric could no longer share
+    // the one common time restriction.
+    const filter = predicateToFilter(predicate, found);
+    filters.push({ ...filter, dimension: timeName(predicate.ref, found) });
   }
   if (intent.time?.window) {
     const axis = intent.time.ref ? entry(intent.time.ref) : undefined;
@@ -135,11 +161,237 @@ export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: Voca
       ...(intent.limit ? { limit: intent.limit } : {}),
     },
     ...(derived.length ? { derived } : {}),
+    ...(changes.length ? { changes } : {}),
+  };
+}
+
+type SemanticProgramBinding = {
+  program?: import('./types.js').SemanticExecutionProgram;
+  refusal?: PreparedRefusal;
+  derived?: NonNullable<PreparedCandidate['derived']>;
+  changes?: NonNullable<PreparedCandidate['changes']>;
+};
+
+type SemanticProgramLeaf = {
+  ref: string;
+  scope: IntentPredicate[];
+  /** The stable output name used after branch alignment. */
+  output: string;
+  /** Original alias/reference a change expression can name. */
+  aliases: string[];
+};
+
+function predicateKey(predicate: IntentPredicate): string {
+  // Membership is a set while range bounds are ordered.  Type tags retain the
+  // distinction between a string "1" and numeric 1 through the normalizer.
+  const values = (predicate.op === 'in' || predicate.op === 'not_in')
+    ? [...new Set(predicate.values.map((value) => `${typeof value}:${String(value)}`))].sort()
+    : predicate.values.map((value) => `${typeof value}:${String(value)}`);
+  return `${predicate.ref}|${predicate.op}|${values.join(',')}`;
+}
+
+function mergedFilters(filters: IntentPredicate[], scope: IntentPredicate[]): IntentPredicate[] {
+  const out: IntentPredicate[] = [];
+  const seen = new Set<string>();
+  for (const predicate of [...filters, ...scope]) {
+    const key = predicateKey(predicate);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(predicate);
+    }
+  }
+  return out;
+}
+
+function safeOutputName(value: string): string {
+  return value.replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'metric';
+}
+
+/**
+ * Build a semantic execution program only after final normalization left
+ * genuinely different per-measure scopes.  Each branch asks the selected
+ * semantic engine for one authored metric under its own scope; Ask aligns the
+ * returned values at the declared shape, but never rewrites a metric formula
+ * or a MetricFlow offset in SQL.
+ */
+export function bindSemanticExecutionProgram(
+  intent: AnalyticalIntentV1,
+  vocabulary: VocabularyIndex,
+  engine?: PrepareDeps['engine'],
+): SemanticProgramBinding | undefined {
+  if (!intent.measures.some((measure) => (measure.scope?.length ?? 0) > 0)) return undefined;
+  const entry = (ref: string) => vocabulary.get(ref);
+  const leaves: SemanticProgramLeaf[] = [];
+  const originalOutput = new Map<string, string>();
+  const derived: NonNullable<PreparedCandidate['derived']> = [];
+
+  const addLeaf = (ref: string, scope: IntentPredicate[] | undefined, output: string, aliases: string[]): PreparedRefusal | undefined => {
+    const found = entry(ref);
+    if (!found || (found.kind !== 'metric' && found.kind !== 'measure')) {
+      return { tier: 'semantic', code: 'not_semantic', message: `${ref} is not a semantic metric`, repairable: false };
+    }
+    leaves.push({ ref, scope: scope ?? [], output, aliases });
+    for (const alias of aliases) originalOutput.set(alias, output);
+    return undefined;
+  };
+
+  for (const measure of intent.measures) {
+    if (measure.change) continue;
+    if (measure.derived) {
+      const alias = measure.alias ?? safeOutputName(measure.ref.replace(/^ratio:/, ''));
+      const numerator = `__dql_${safeOutputName(alias)}_numerator`;
+      const denominator = `__dql_${safeOutputName(alias)}_denominator`;
+      const numeratorError = addLeaf(measure.derived.numerator, measure.scope, numerator, [measure.derived.numerator]);
+      if (numeratorError) return { refusal: numeratorError };
+      const denominatorError = addLeaf(measure.derived.denominator, measure.scope, denominator, [measure.derived.denominator]);
+      if (denominatorError) return { refusal: denominatorError };
+      derived.push({ alias, numerator, denominator });
+      if (measure.alias) originalOutput.set(measure.alias, alias);
+      continue;
+    }
+    const found = entry(measure.ref);
+    if (!found || (found.kind !== 'metric' && found.kind !== 'measure')) {
+      return { refusal: { tier: 'semantic', code: 'not_semantic', message: `${measure.ref} is not a semantic metric`, repairable: false } };
+    }
+    const output = measure.alias ?? semanticName(found);
+    const error = addLeaf(measure.ref, measure.scope, output, [measure.ref, ...(measure.alias ? [measure.alias] : [])]);
+    if (error) return { refusal: error };
+  }
+  if (leaves.length === 0) return undefined;
+
+  // Identical authoring metric/scope pairs compile once. Their output aliases
+  // remain distinct after execution, which makes two requested names for one
+  // metric deterministic instead of issuing redundant warehouse statements.
+  const grouped = new Map<string, SemanticProgramLeaf[]>();
+  for (const leaf of leaves) {
+    const key = `${leaf.ref}|${leaf.scope.map(predicateKey).sort().join(';')}`;
+    const current = grouped.get(key) ?? [];
+    current.push(leaf);
+    grouped.set(key, current);
+  }
+  if (grouped.size > 4) {
+    return { refusal: { tier: 'semantic', code: 'measure_scope_not_expressible', message: `this comparison needs ${grouped.size} distinct semantic periods; Ask runs at most four bounded semantic branches`, repairable: true } };
+  }
+
+  const branches: NonNullable<SemanticProgramBinding['program']>['branches'] = [];
+  let ordinal = 0;
+  for (const group of grouped.values()) {
+    const first = group[0]!;
+    const branchIntent: AnalyticalIntentV1 = {
+      ...intent,
+      measures: [{ ref: first.ref }],
+      filters: mergedFilters(intent.filters, first.scope),
+      // Ranking/limiting an input period before aligned comparison is wrong.
+      // It also makes an authored offset metric's branch shape dependent on
+      // a calculated output that MetricFlow never sees. Apply these once,
+      // deterministically, after both branches have returned.
+      ordering: undefined,
+      limit: undefined,
+    };
+    const bound = bindSemanticRequest(branchIntent, vocabulary, engine);
+    if (!bound.request) return { refusal: bound.refusal };
+    branches.push({
+      id: `semantic-period-${ordinal += 1}`,
+      request: bound.request,
+      outputs: group.map((leaf) => ({ source: bound.request!.metrics[0]!, as: leaf.output })),
+      // A metric carrying an authored prior-period offset is a comparison
+      // branch by definition; its SQL still comes from MetricFlow.
+      role: /previous|prior|last[_ -]?month|last[_ -]?year/i.test(first.ref) ? 'comparison' : 'base',
+    });
+  }
+
+  const changes: NonNullable<PreparedCandidate['changes']> = [];
+  for (const measure of intent.measures) {
+    if (!measure.change) continue;
+    // A comparison expression itself has no semantic compiler identity. Its
+    // two authored inputs may each have a period/scope, but an extra scope on
+    // the calculated output would be silently discarded by a branch program.
+    // Refuse it rather than widening the result or inventing a SQL formula.
+    if (measure.scope?.length) {
+      return { refusal: { tier: 'semantic', code: 'measure_scope_not_expressible', message: `${measure.alias ?? measure.ref} carries a restriction on a calculated comparison; apply it to each authored semantic metric instead`, repairable: true } };
+    }
+    const base = originalOutput.get(measure.change.base);
+    const comparison = originalOutput.get(measure.change.comparison);
+    if (!base || !comparison) {
+      return { refusal: { tier: 'semantic', code: 'not_semantic', message: `${measure.alias ?? measure.ref} needs semantic measures aliased ${measure.change.base} and ${measure.change.comparison} in the same reading`, repairable: true } };
+    }
+    changes.push({ alias: measure.alias ?? safeOutputName(measure.ref.replace(/^change:/, '')), base, comparison, as: measure.change.as });
+  }
+
+  const outputForOrder = (reference: string): string | undefined => {
+    const measureAt = reference.startsWith('measure:') ? Number(reference.slice('measure:'.length)) : undefined;
+    const measure = Number.isInteger(measureAt) ? intent.measures[measureAt!] : intent.measures.find((candidate) => candidate.ref === reference || candidate.alias === reference);
+    if (measure) {
+      if (measure.change || measure.derived) return measure.alias ?? safeOutputName(measure.ref.replace(/^(?:change|ratio):/, ''));
+      return originalOutput.get(measure.alias ?? measure.ref) ?? (entry(measure.ref) ? semanticName(entry(measure.ref)!) : undefined);
+    }
+    const found = entry(reference);
+    return found ? semanticName(found) : reference || undefined;
+  };
+  const orderingOutput = intent.ordering ? outputForOrder(intent.ordering.ref) : undefined;
+  if (intent.ordering && !orderingOutput) {
+    return { refusal: { tier: 'semantic', code: 'measure_scope_not_expressible', message: `the comparison ranking ${intent.ordering.ref} cannot be aligned to a declared semantic output`, repairable: true } };
+  }
+  const requiresPostProcess = Boolean(intent.ordering || intent.limit);
+
+  return {
+    program: {
+      version: 1,
+      branches,
+      shape: intent.expectedShape === 'grouped' || intent.groupBy.length > 0 || intent.display.length > 0 || Boolean(intent.time?.grain) ? 'grouped' : 'scalar',
+      ...(requiresPostProcess ? {
+        postProcess: {
+          ...(orderingOutput && intent.ordering ? { orderBy: { column: orderingOutput, direction: intent.ordering.direction } } : {}),
+          ...(intent.limit ? { limit: intent.limit, includeTies: true } : {}),
+          // Branch truncation is not a harmless presentation detail when an
+          // aligned calculated value decides the rank. Refuse rather than
+          // silently rank only the first adapter page.
+          requireCompletePopulation: true,
+        },
+      } : {}),
+    },
+    ...(derived.length ? { derived } : {}),
+    ...(changes.length ? { changes } : {}),
   };
 }
 
 export async function prepareSemantic(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex, deps: PrepareDeps): Promise<{ candidates: PreparedCandidate[]; refusals: PreparedRefusal[] }> {
   if (!deps.compileSemantic) return { candidates: [], refusals: [{ tier: 'semantic', code: 'semantic_runtime_unavailable', message: 'no semantic layer is loaded for this project', repairable: false }] };
+  const programBound = bindSemanticExecutionProgram(intent, vocabulary, deps.engine);
+  if (programBound?.refusal) return { candidates: [], refusals: [programBound.refusal] };
+  if (programBound?.program) {
+    if (!deps.compileSemanticProgram) {
+      return { candidates: [], refusals: [{ tier: 'semantic', code: 'semantic_runtime_unavailable', message: 'the selected semantic adapter does not expose a bounded multi-period compiler', repairable: false }] };
+    }
+    try {
+      const compiled = await deps.compileSemanticProgram(programBound.program);
+      const program = compiled.program
+        ? { ...compiled.program, postProcess: compiled.program.postProcess ?? programBound.program.postProcess }
+        : undefined;
+      if (!program || program.branches.length === 0 || program.branches.some((branch) => !branch.sql || !branch.engine)) {
+        return { candidates: [], refusals: [{ tier: 'semantic', code: 'semantic_compile_failed', message: 'the semantic adapter did not return executable SQL for every requested period', repairable: false, detail: programBound.program }] };
+      }
+      return {
+        candidates: [{
+          tier: 'semantic', trust: 'governed', sql: compiled.sql, engine: compiled.engine,
+          semanticProgram: program,
+          ...(programBound.derived ? { derived: programBound.derived } : {}),
+          ...(programBound.changes ? { changes: programBound.changes } : {}),
+          compileRequest: programBound.program,
+          proof: [
+            `compiled ${program.branches.length} bounded period${program.branches.length === 1 ? '' : 's'} on the ${compiled.engine} semantic engine at ${program.shape} shape`,
+            ...program.branches.map((branch) => `${branch.id}: metrics ${branch.request.metrics.join(', ')}${branch.request.filters?.length ? ` with ${branch.request.filters.length} semantic filter${branch.request.filters.length === 1 ? '' : 's'}` : ''}`),
+            ...(programBound.derived ?? []).map((item) => `${item.alias} = ${item.numerator} / ${item.denominator}, computed from aligned semantic metrics (null when the denominator is 0)`),
+            ...(programBound.changes ?? []).map((item) => `${item.alias} = ${item.comparison} - ${item.base}${item.as === 'percent' ? `, over ${item.base}` : ''}, computed after the authored semantic metrics return${item.as === 'percent' ? ' (null when the earlier value is 0)' : ''}`),
+          ],
+        }],
+        refusals: [],
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { candidates: [], refusals: [{ tier: 'semantic', code: 'semantic_compile_failed', message, repairable: /not found|unknown|no such|could not resolve|ambiguous|cannot be grouped|not a dimension/i.test(message), detail: programBound.program }] };
+    }
+  }
   const bound = bindSemanticRequest(intent, vocabulary, deps.engine);
   if (!bound.request) return { candidates: [], refusals: [bound.refusal!] };
   try {
@@ -151,10 +403,12 @@ export async function prepareSemantic(intent: AnalyticalIntentV1, vocabulary: Vo
         ...(compiled.fanoutProbeSql ? { fanoutProbeSql: compiled.fanoutProbeSql } : {}),
         ...(compiled.artifact !== undefined ? { artifact: compiled.artifact } : {}),
         ...(bound.derived ? { derived: bound.derived } : {}),
+        ...(bound.changes ? { changes: bound.changes } : {}),
         compileRequest: bound.request,
         proof: [
           `compiled on the ${compiled.engine} semantic engine from metrics ${bound.request.metrics.join(', ')}${bound.request.dimensions.length ? ` by ${bound.request.dimensions.join(', ')}` : ''}${compiled.strategy ? ` (${compiled.strategy})` : ''}`,
           ...(bound.derived ?? []).map((item) => `${item.alias} = ${item.numerator} / ${item.denominator}, computed from the executed metrics (null when the denominator is 0)`),
+          ...(bound.changes ?? []).map((item) => `${item.alias} = ${item.comparison} - ${item.base}${item.as === 'percent' ? `, over ${item.base}` : ''}, computed from the semantic metrics${item.as === 'percent' ? ' (null when the earlier value is 0)' : ''}`),
         ],
       }],
       refusals: [],

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from '../block-contract.js';
 import { parseIntent, type AnalyticalIntentV1 } from '../intent.js';
+import { physicalRelationBinding } from '../physical-binding.js';
 import { validateIntentRefs } from '../resolve-intent.js';
 import { buildVocabularyIndex, type VocabularySource } from '../vocabulary.js';
 import { bindSemanticRequest, composeRelational, entails, prepare } from './index.js';
@@ -633,5 +634,101 @@ describe('the composer writes physical names as the warehouse reads them and ali
     expect(result.candidate?.sql).not.toContain('"sales"');
     const addressed = composeRelational(intent, vocabulary, { dialect: { ...snowflakeLike, qualifyRelation: (relation: string) => `ANALYTICS.${relation}` } });
     expect(addressed.candidate?.sql).toContain('FROM ANALYTICS.sales.orders');
+  });
+
+  it('uses an admitted exact binding for FROM as well as a metric expression', () => {
+    const binding = physicalRelationBinding({
+      logicalRelation: 'PUBLIC.EVENTS', physicalRelation: 'DB_B.PUBLIC.EVENTS',
+      source: 'dbt_manifest', columnCompleteness: 'partial', columns: [{ name: 'amount', type: 'NUMBER' }],
+    });
+    const exact = buildVocabularyIndex({
+      metrics: [{
+        name: 'revenue', model: 'events', aggregation: 'sum',
+        physical: { relation: 'PUBLIC.EVENTS', expr: 'SUM(DB_B.PUBLIC.EVENTS.amount)', aggregate: 'sum', binding },
+      }],
+      relations: [{
+        schema: 'PUBLIC', name: 'EVENTS', columns: [{ name: 'amount', dataType: 'NUMBER' }], binding,
+      }],
+    });
+    const parsed = parseIntent({
+      version: 1, kind: 'analytics', reading: 'Revenue.', measures: [{ ref: 'metric:events.revenue' }],
+      groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar',
+    }).intent!;
+
+    const composed = composeRelational(parsed, exact, {});
+
+    expect(composed.candidate?.sql).toContain('FROM "DB_B"."PUBLIC"."EVENTS"');
+    expect(composed.candidate?.sql).not.toContain('FROM "PUBLIC"."EVENTS"');
+  });
+
+  it('uses logical relation identities for governed joins while rendering their exact target bindings', () => {
+    const orders = physicalRelationBinding({
+      logicalRelation: 'PUBLIC.ORDERS', physicalRelation: 'DB_B.PUBLIC.ORDERS',
+      source: 'warehouse_probe', columnCompleteness: 'complete', columns: [{ name: 'customer_id', type: 'NUMBER' }, { name: 'amount', type: 'NUMBER' }],
+    });
+    const customers = physicalRelationBinding({
+      logicalRelation: 'PUBLIC.CUSTOMERS', physicalRelation: 'DB_B.PUBLIC.CUSTOMERS',
+      source: 'warehouse_probe', columnCompleteness: 'complete', columns: [{ name: 'customer_id', type: 'NUMBER' }, { name: 'customer_name', type: 'VARCHAR' }],
+    });
+    const exact = buildVocabularyIndex({
+      metrics: [{ name: 'revenue', model: 'orders', aggregation: 'sum', physical: { relation: 'PUBLIC.ORDERS', expr: 'DB_B.PUBLIC.ORDERS.amount', aggregate: 'sum', binding: orders } }],
+      dimensions: [{ name: 'customer_name', model: 'customers', dataType: 'string', physical: { relation: 'PUBLIC.CUSTOMERS', column: 'customer_name', binding: customers } }],
+      relations: [
+        { schema: 'PUBLIC', name: 'ORDERS', columns: [{ name: 'customer_id', dataType: 'NUMBER' }, { name: 'amount', dataType: 'NUMBER' }], binding: orders },
+        { schema: 'PUBLIC', name: 'CUSTOMERS', columns: [{ name: 'customer_id', dataType: 'NUMBER' }, { name: 'customer_name', dataType: 'VARCHAR' }], binding: customers },
+      ],
+    });
+    const parsed = parseIntent({
+      version: 1, kind: 'analytics', reading: 'Revenue by customer.', measures: [{ ref: 'metric:orders.revenue' }],
+      groupBy: [{ ref: 'dimension:customers.customer_name', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped',
+    }).intent!;
+    const joinPath: PrepareDeps['joinPath'] = (from, to) => from === 'PUBLIC.ORDERS' && to === 'PUBLIC.CUSTOMERS'
+      ? [{
+        relation: 'PUBLIC.CUSTOMERS',
+        on: '"DB_B"."PUBLIC"."ORDERS"."customer_id" = "DB_B"."PUBLIC"."CUSTOMERS"."customer_id"',
+      }]
+      : undefined;
+
+    const composed = composeRelational(parsed, exact, { joinPath });
+
+    expect(composed.refusal).toBeUndefined();
+    expect(composed.candidate?.sql).toContain('FROM "DB_B"."PUBLIC"."ORDERS"');
+    expect(composed.candidate?.sql).toContain('JOIN "DB_B"."PUBLIC"."CUSTOMERS" ON "DB_B"."PUBLIC"."ORDERS"."customer_id" = "DB_B"."PUBLIC"."CUSTOMERS"."customer_id"');
+  });
+
+  it('does not borrow a governed path when the base logical relation is ambiguous across databases', () => {
+    const dbAOrders = physicalRelationBinding({
+      logicalRelation: 'PUBLIC.ORDERS', physicalRelation: 'DB_A.PUBLIC.ORDERS',
+      source: 'dbt_manifest', columnCompleteness: 'partial', columns: [{ name: 'amount', type: 'NUMBER' }],
+    });
+    const dbBOrders = physicalRelationBinding({
+      logicalRelation: 'PUBLIC.ORDERS', physicalRelation: 'DB_B.PUBLIC.ORDERS',
+      source: 'warehouse_probe', columnCompleteness: 'complete', columns: [{ name: 'customer_id', type: 'NUMBER' }, { name: 'amount', type: 'NUMBER' }],
+    });
+    const customers = physicalRelationBinding({
+      logicalRelation: 'PUBLIC.CUSTOMERS', physicalRelation: 'DB_B.PUBLIC.CUSTOMERS',
+      source: 'warehouse_probe', columnCompleteness: 'complete', columns: [{ name: 'customer_id', type: 'NUMBER' }, { name: 'customer_name', type: 'VARCHAR' }],
+    });
+    const ambiguous = buildVocabularyIndex({
+      metrics: [{ name: 'revenue', model: 'orders', aggregation: 'sum', physical: { relation: 'PUBLIC.ORDERS', expr: 'DB_B.PUBLIC.ORDERS.amount', aggregate: 'sum', binding: dbBOrders } }],
+      dimensions: [{ name: 'customer_name', model: 'customers', dataType: 'string', physical: { relation: 'PUBLIC.CUSTOMERS', column: 'customer_name', binding: customers } }],
+      relations: [
+        { schema: 'PUBLIC', name: 'ORDERS', columns: [{ name: 'amount', dataType: 'NUMBER' }], binding: dbAOrders },
+        { schema: 'PUBLIC', name: 'ORDERS', columns: [{ name: 'customer_id', dataType: 'NUMBER' }, { name: 'amount', dataType: 'NUMBER' }], binding: dbBOrders },
+        { schema: 'PUBLIC', name: 'CUSTOMERS', columns: [{ name: 'customer_id', dataType: 'NUMBER' }, { name: 'customer_name', dataType: 'VARCHAR' }], binding: customers },
+      ],
+    });
+    const parsed = parseIntent({
+      version: 1, kind: 'analytics', reading: 'Revenue by customer.', measures: [{ ref: 'metric:orders.revenue' }],
+      groupBy: [{ ref: 'dimension:customers.customer_name', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped',
+    }).intent!;
+    const logicalOnlyPath: PrepareDeps['joinPath'] = (from, to) => from === 'PUBLIC.ORDERS' && to === 'PUBLIC.CUSTOMERS'
+      ? [{ relation: 'PUBLIC.CUSTOMERS', on: 'ignored' }]
+      : undefined;
+
+    const composed = composeRelational(parsed, ambiguous, { joinPath: logicalOnlyPath });
+
+    expect(composed.candidate).toBeUndefined();
+    expect(composed.refusal).toMatchObject({ code: 'join_path_required' });
   });
 });

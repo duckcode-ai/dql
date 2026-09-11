@@ -30,6 +30,81 @@ describe('vocabulary source helpers', () => {
     expect(normalizeRelationName('dev.orders')).toBe('dev.orders');
     expect(normalizeRelationName(undefined)).toBeUndefined();
   });
+
+  it('keeps same-tail Snowflake relations as separate exact bindings and withholds an unsafe short alias', () => {
+    const source = buildVocabularySource({
+      driver: 'snowflake', snapshotId: 'snapshot:fixture', executionTargetFingerprint: 'target:role-a',
+      relations: [
+        { database: 'DB_A', schema: 'PUBLIC', name: 'EVENTS', columnCompleteness: 'complete', columns: [{ name: 'EVENT_ID', dataType: 'NUMBER' }] },
+        { database: 'DB_B', schema: 'PUBLIC', name: 'EVENTS', columnCompleteness: 'complete', columns: [{ name: 'EVENT_ID', dataType: 'NUMBER' }] },
+      ],
+    });
+    expect(source.relations).toHaveLength(2);
+    expect(source.relations?.map((relation) => relation.binding?.database?.value).sort()).toEqual(['DB_A', 'DB_B']);
+    const vocabulary = buildVocabularyIndex(source);
+    const relations = vocabulary.entries.filter((entry) => entry.kind === 'relation');
+    expect(relations.map((entry) => entry.physical?.binding?.database?.value).sort()).toEqual(['DB_A', 'DB_B']);
+    expect(vocabulary.resolve('PUBLIC.EVENTS', ['relation'])).toBeUndefined();
+    expect(relations.every((entry) => entry.physical?.binding?.executionTargetFingerprint === 'target:role-a')).toBe(true);
+  });
+});
+
+describe('source database provenance qualifies semantic physical bindings', () => {
+  const semanticLayer = {
+    listCubes: () => [{ name: 'events', table: 'PUBLIC.EVENTS', dimensions: [], measures: [{ name: 'amount' }] }],
+    listMetrics: () => [{
+      name: 'revenue', cube: 'events', semanticModelIds: ['events'], metricType: 'simple',
+      typeParams: { measure: { name: 'amount' } }, label: 'Revenue', description: '', sql: 'amount', type: 'sum', aggregation: 'sum', table: 'PUBLIC.EVENTS',
+    }],
+    listMeasures: () => [{ name: 'amount', cube: 'events', agg: 'sum', expr: 'amount', label: 'Amount', description: '' }],
+    listTimeDimensions: () => [], listDimensions: () => [], listEntities: () => [],
+    listSemanticModels: () => [{ name: 'events', defaults: {} }],
+    findJoinPath: () => [], displayFormatFor: () => undefined,
+  } as unknown as SemanticLayer;
+
+  const sourceFor = (databases: string[]) => buildVocabularySource({
+    driver: 'snowflake', defaultDatabase: 'DB_A', snapshotId: 'snapshot:source', executionTargetFingerprint: 'target:source',
+    semanticLayer,
+    manifest: {
+      sources: Object.fromEntries(databases.map((database, index) => [`events_${index}`, {
+        name: 'EVENTS', origin: 'dbt', referencedBy: [],
+        dbtModel: {
+          uniqueId: `source.project.events_${index}`, database, schema: 'PUBLIC',
+          columns: { amount: { name: 'amount', type: 'NUMBER' } },
+        },
+      }])),
+      // The source is intentionally absent from `dbtProvenance.nodes`: dbt
+      // sources still supply their own exact database identity.
+      dbtProvenance: { nodes: {} },
+    } as unknown as DQLManifest,
+    relations: [],
+  });
+
+  it('uses the source database for both a semantic expression and its physical binding without provenance nodes', () => {
+    const source = sourceFor(['DB_B']);
+    const metric = source.metrics!.find((item) => item.name === 'revenue')!;
+
+    expect(metric.physical).toMatchObject({
+      relation: 'DB_B.PUBLIC.EVENTS',
+      binding: { database: { value: 'DB_B' }, schema: { value: 'PUBLIC' }, table: { value: 'EVENTS' } },
+    });
+    expect(metric.physical?.expr).toContain('DB_B.PUBLIC.EVENTS.amount');
+    expect(metric.physical?.expr).not.toContain('DB_A');
+    expect(source.relations?.find((relation) => relation.binding?.database?.value === 'DB_B')?.binding)
+      .toMatchObject({ logicalRelation: 'PUBLIC.EVENTS', database: { value: 'DB_B' } });
+  });
+
+  it('withholds a two-part semantic binding when separate source databases share its short name', () => {
+    const source = sourceFor(['DB_A', 'DB_B']);
+    const metric = source.metrics!.find((item) => item.name === 'revenue')!;
+
+    expect(metric.physical).toMatchObject({ relation: 'PUBLIC.EVENTS' });
+    expect(metric.physical?.binding).toBeUndefined();
+    expect(metric.physical?.expr).not.toContain('DB_A.PUBLIC.EVENTS');
+    expect(metric.physical?.expr).not.toContain('DB_B.PUBLIC.EVENTS');
+    expect(source.relations?.filter((relation) => relation.name === 'EVENTS').map((relation) => relation.binding?.database?.value).sort())
+      .toEqual(['DB_A', 'DB_B']);
+  });
 });
 
 describe('declared relationship join paths', () => {
@@ -226,7 +301,8 @@ describe('a dimension without a governed description is defined by its dbt colum
   it('a dimension with no expression is its own column, so the dbt description defines it', () => {
     const type = source.dimensions!.find((dimension) => dimension.name === 'customer_type')!;
     expect(type.description).toMatch(/ordered more than once/);
-    expect(type.physical).toEqual({ relation: 'dev.customers', column: 'customer_type' });
+    expect(type.physical).toMatchObject({ relation: 'dev.customers', column: 'customer_type' });
+    expect(type.physical?.binding).toMatchObject({ logicalRelation: 'dev.customers', columnCompleteness: 'partial' });
     expect(source.dimensions!.find((dimension) => dimension.name === 'first_ordered_at')!.description).toBe('The timestamp of the first order.');
   });
 });
@@ -244,7 +320,7 @@ describe('a dbt-inventory model names its columns once', () => {
     expect(leafName('player_game_stats', 'player_game_stats.pts')).toBe('pts');
     expect(leafName('player_game_stats', 'pts')).toBe('pts');
     expect(source.dimensions!.map((dimension) => dimension.name).sort()).toEqual(['game_date', 'pts']);
-    expect(source.dimensions!.find((dimension) => dimension.name === 'pts')?.physical).toEqual({ relation: 'dev.player_game_stats', column: 'pts' });
+    expect(source.dimensions!.find((dimension) => dimension.name === 'pts')?.physical).toMatchObject({ relation: 'dev.player_game_stats', column: 'pts' });
     expect(source.relations!.find((relation) => relation.name === 'player_game_stats')?.columns.map((column) => column.name)).toEqual(['pts', 'game_date']);
   });
 });
@@ -295,7 +371,7 @@ describe('a native DQL semantic layer binds through its own table', () => {
   const source = buildVocabularySource({ manifest: undefined, semanticLayer: layer, relations } as never);
   it('a metric with no cube and no measure still executes: table, expression and type are its binding', () => {
     const total = source.metrics!.find((metric) => metric.name === 'total_points');
-    expect(total?.physical).toEqual({ relation: 'TRANSFORMED.local_player_season_facts', expr: '"TRANSFORMED"."local_player_season_facts"."points"', aggregate: 'sum' });
+    expect(total?.physical).toMatchObject({ relation: 'TRANSFORMED.local_player_season_facts', expr: '"TRANSFORMED"."local_player_season_facts"."points"', aggregate: 'sum' });
     // A ratio of aggregates binds as a derived aggregate, emitted as written.
     expect(source.metrics!.find((metric) => metric.name === 'points_per_game')?.physical).toMatchObject({ aggregate: 'derived' });
   });
@@ -323,7 +399,7 @@ describe('a native metric written as a formula of aggregates', () => {
       listMeasures: () => [], listTimeDimensions: () => [], listDimensions: () => [], listEntities: () => [], listSemanticModels: () => [], findJoinPath: () => [], displayFormatFor: () => undefined,
     } as unknown as SemanticLayer;
     const source = buildVocabularySource({ manifest: undefined, semanticLayer: layer, relations: [{ schema: 'TRANSFORMED', name: 'local_player_season_facts', columns: [{ name: 'total_points' }, { name: 'games_played' }] }] } as never);
-    expect(source.metrics!.find((metric) => metric.name === 'points_per_game')?.physical).toEqual({
+    expect(source.metrics!.find((metric) => metric.name === 'points_per_game')?.physical).toMatchObject({
       relation: 'TRANSFORMED.local_player_season_facts',
       expr: 'SUM("TRANSFORMED"."local_player_season_facts"."total_points") / NULLIF(SUM("TRANSFORMED"."local_player_season_facts"."games_played"), 0)',
       aggregate: 'derived',
@@ -344,7 +420,7 @@ describe('a native metric that declares which rows its definition counts', () =>
       { name: 'points_scored', label: 'Points scored', description: 'Points in games played.', sql: 'points', type: 'sum', table: 'TRANSFORMED.local_player_game_facts', filter: 'participated = true' },
       { name: 'games_played', label: 'Games played', description: 'Games a player appeared in.', sql: 'COUNT(DISTINCT game_id)', type: 'count_distinct', table: 'TRANSFORMED.local_player_game_facts', filter: 'participated = true' },
     ]), relations } as never);
-    expect(source.metrics!.find((metric) => metric.name === 'points_scored')?.physical).toEqual({
+    expect(source.metrics!.find((metric) => metric.name === 'points_scored')?.physical).toMatchObject({
       relation: 'TRANSFORMED.local_player_game_facts',
       expr: 'CASE WHEN "TRANSFORMED"."local_player_game_facts"."participated" = true THEN "TRANSFORMED"."local_player_game_facts"."points" ELSE 0 END',
       aggregate: 'sum',
@@ -409,6 +485,41 @@ describe('a probed relation merges into the manifest spelling case-insensitively
     expect(header[0]!.schema!.toLowerCase()).toBe('consumption_metrics'); // one relation whichever spelling arrived first; the host asks under the manifest's
     expect(header[0]!.description).toBeUndefined();
     expect(header[0]!.columns.map((column) => column.name)).toContain('TOTAL_BCM');
+  });
+
+  it('merges a current-target complete observation into the dbt source relation instead of rendering a partial two-part duplicate', () => {
+    const source = buildVocabularySource({
+      driver: 'duckdb', defaultDatabase: 'nba_analysis', snapshotId: 'nba-snapshot', executionTargetFingerprint: 'target:nba',
+      manifest: {
+        sources: {
+          player_games: {
+            name: 'local_player_game_facts', origin: 'dbt', referencedBy: [],
+            dbtModel: {
+              uniqueId: 'model.nba.local_player_game_facts', database: 'nba_analysis', schema: 'TRANSFORMED',
+              columns: {
+                game_id: { name: 'game_id' }, player_id: { name: 'player_id' }, participated: { name: 'participated' },
+              },
+            },
+          },
+        },
+      } as never,
+      relations: [{
+        database: 'nba_analysis', schema: 'TRANSFORMED', name: 'local_player_game_facts', columnCompleteness: 'complete',
+        columns: [
+          { name: 'game_id', dataType: 'BIGINT' }, { name: 'player_id', dataType: 'BIGINT' }, { name: 'participated', dataType: 'BOOLEAN' },
+          { name: 'player_name', dataType: 'VARCHAR' }, { name: 'is_home', dataType: 'BOOLEAN' }, { name: 'game_date', dataType: 'DATE' }, { name: 'points_scored', dataType: 'INTEGER' },
+        ],
+      }],
+    });
+
+    const relations = source.relations?.filter((relation) => relation.name === 'local_player_game_facts') ?? [];
+    expect(relations).toHaveLength(1);
+    expect(relations[0]!.binding).toMatchObject({ database: { value: 'nba_analysis' }, columnCompleteness: 'complete' });
+    expect(relations[0]!.columns.map((column) => column.name)).toEqual(expect.arrayContaining(['player_name', 'is_home', 'game_date', 'points_scored']));
+
+    const vocabulary = buildVocabularyIndex(source);
+    const playerName = vocabulary.get('column:TRANSFORMED.local_player_game_facts.player_name');
+    expect(playerName?.physical?.binding).toMatchObject({ database: { value: 'nba_analysis' }, columnCompleteness: 'complete' });
   });
 });
 

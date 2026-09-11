@@ -458,6 +458,8 @@ export interface RuntimeSchemaTable {
   catalogOrDatabase?: string;
   schema?: string;
   name?: string;
+  /** Redacted target identity carried from the binding that inspected it. */
+  executionTargetFingerprint?: string;
   description?: string;
   columns: RuntimeSchemaColumn[];
   source?: string;
@@ -938,7 +940,11 @@ const OBJECT_PRIORITY: Record<string, number> = {
 
 const COLUMN_OBJECT_TYPES = new Set(['dbt_column', 'warehouse_column', 'runtime_column', 'runtime_value']);
 // v3 removes the legacy persisted plaintext runtime-value cache (SEC-003).
-const METADATA_INDEX_VERSION = 'metadata-index-v5-qualified-vector-lanes';
+// v6 expands the bounded relation-level FTS projection for embedded dbt
+// columns.  This must invalidate older snapshots: enterprise imports above
+// the individual-column object threshold otherwise retain the old first-500
+// column projection and cannot discover a relevant later column.
+const METADATA_INDEX_VERSION = 'metadata-index-v7-qualified-vector-lanes-relation-columns';
 const DEFAULT_VECTOR_PROVIDER = new HashedTokenEmbeddingProvider();
 
 export function defaultMetadataPath(projectRoot: string): string {
@@ -8535,6 +8541,14 @@ const SEARCHABLE_NESTED_METADATA_KEYS = new Set([
  */
 function searchableMetadataPayload(payload: Record<string, unknown>): string {
   const tokens: string[] = [];
+  // Above the individual-column-object threshold, a dbt model is the only
+  // searchable representation of many physical fields. Index all of the
+  // *names* on that relation (with a hard bound) rather than only the first
+  // manifest-order slice. A name-only lane is compact compared with one FTS
+  // row + graph edge per column and lets a field late in a wide table trigger
+  // relation-first hydration. Descriptions remain bounded because they are
+  // comparatively large and are not needed for exact physical discovery.
+  const relationColumnTokens = searchableRelationColumnTokens(payload.columns);
   const visit = (value: unknown, depth: number): void => {
     if (tokens.length >= 2_000 || depth > 3 || value === null || value === undefined) return;
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
@@ -8543,18 +8557,60 @@ function searchableMetadataPayload(payload: Record<string, unknown>): string {
       return;
     }
     if (Array.isArray(value)) {
-      for (const item of value.slice(0, 500)) visit(item, depth + 1);
+      // Enterprise dbt imports intentionally omit individual dbt_column
+      // objects above 50k columns. Their parent model still carries embedded
+      // column metadata, so give that relation-level search path a larger,
+      // bounded budget than ordinary payload arrays. This is metadata names
+      // and descriptions only; it does not change catalog storage or prompt
+      // rendering limits.
+      const limit = depth === 1 ? 2_000 : 500;
+      for (const item of value.slice(0, limit)) visit(item, depth + 1);
       return;
     }
     if (typeof value !== 'object') return;
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
       if (depth === 0 ? !SEARCHABLE_METADATA_KEYS.has(key) : !SEARCHABLE_NESTED_METADATA_KEYS.has(key)) continue;
       if (/sql|secret|password|token|credential|api.?key/i.test(key)) continue;
+      // `searchableRelationColumnTokens` above owns the relation-level column
+      // lane. Visiting it here would reintroduce the old manifest-order cap.
+      if (depth === 0 && key === 'columns') continue;
       visit(item, depth + 1);
     }
   };
   visit(payload, 0);
-  return tokens.join(' ');
+  return [...tokens, ...relationColumnTokens].join(' ');
+}
+
+const MAX_RELATION_COLUMN_SEARCH_NAMES = 60_000;
+const MAX_RELATION_COLUMN_SEARCH_DESCRIPTIONS = 2_000;
+
+/**
+ * Return a compact, relation-level FTS lane for embedded dbt column metadata.
+ * This is intentionally not exported as a general payload renderer: it is a
+ * bounded retrieval aid, and callers still hydrate the selected relation
+ * before treating a missing field as absent.
+ */
+function searchableRelationColumnTokens(columns: unknown): string[] {
+  const candidates = Array.isArray(columns)
+    ? columns
+    : columns && typeof columns === 'object'
+      ? Object.values(columns as Record<string, unknown>)
+      : [];
+  const tokens: string[] = [];
+  let descriptions = 0;
+  for (const candidate of candidates.slice(0, MAX_RELATION_COLUMN_SEARCH_NAMES)) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const record = candidate as Record<string, unknown>;
+    const name = stringValue(record.name) ?? stringValue(record.column) ?? stringValue(record.id);
+    if (!name) continue;
+    tokens.push(`column ${name}`);
+    const description = stringValue(record.description);
+    if (description && descriptions < MAX_RELATION_COLUMN_SEARCH_DESCRIPTIONS) {
+      tokens.push(description.replace(/\s+/g, ' ').trim().slice(0, 240));
+      descriptions += 1;
+    }
+  }
+  return tokens;
 }
 
 const VECTOR_EXCLUDED_OBJECT_TYPES = new Set([

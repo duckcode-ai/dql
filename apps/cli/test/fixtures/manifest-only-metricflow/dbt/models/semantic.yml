@@ -1,0 +1,107 @@
+semantic_models:
+  - name: bcm
+    label: BCM daily facts
+    model: ref('fct_bcm')
+    defaults:
+      agg_time_dimension: report_as_of_dt
+    entities:
+      - name: customer
+        type: primary
+        expr: customer_id
+    measures:
+      - name: total_bcm_measure
+        label: Total BCM measure
+        agg: sum
+        expr: total_bcm
+        agg_time_dimension: report_as_of_dt
+      - name: dod_ccu_bcm_change_qty_measure
+        label: DOD CCU BCM change quantity measure
+        agg: sum
+        expr: dod_ccu_bcm_change_qty
+        agg_time_dimension: report_as_of_dt
+      - name: dod_ccu_bcm_change_pct_measure
+        label: DOD CCU BCM change percentage measure
+        agg: sum
+        expr: dod_ccu_bcm_change_pct
+        agg_time_dimension: report_as_of_dt
+    dimensions:
+      - name: report_as_of_dt
+        label: Report as of date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: customer_name
+        label: Customer name
+        type: categorical
+
+  - name: opportunities
+    label: Opportunity facts
+    model: ref('fct_opportunities')
+    defaults:
+      agg_time_dimension: close_date
+    entities:
+      - name: opportunity
+        type: primary
+        expr: opportunity_id
+    measures:
+      - name: lost_opportunity_count_measure
+        label: Lost opportunity count measure
+        agg: sum
+        expr: lost_opportunity_count
+        agg_time_dimension: close_date
+      - name: lost_amount_measure
+        label: Lost amount measure
+        agg: sum
+        expr: lost_amount
+        agg_time_dimension: close_date
+    dimensions:
+      - name: close_date
+        label: Close date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: fiscal_year
+        label: Fiscal year
+        type: categorical
+      - name: competitor
+        label: Competitor
+        type: categorical
+      - name: opportunity_outcome
+        label: Opportunity outcome
+        type: categorical
+
+metrics:
+  - name: total_bcm
+    label: Total BCM
+    type: simple
+    type_params:
+      measure: total_bcm_measure
+  - name: dod_ccu_bcm_change_qty
+    label: DOD CCU BCM change quantity
+    type: simple
+    type_params:
+      measure: dod_ccu_bcm_change_qty_measure
+  - name: dod_ccu_bcm_change_pct
+    label: DOD CCU BCM change percentage
+    type: simple
+    type_params:
+      measure: dod_ccu_bcm_change_pct_measure
+  - name: previous_year_bcm
+    label: Previous year BCM
+    type: derived
+    type_params:
+      expr: previous_total_bcm
+      metrics:
+        - name: total_bcm
+          alias: previous_total_bcm
+          offset_window: 1 year
+  - name: lost_opportunity_count
+    label: Lost opportunities count
+    type: simple
+    type_params:
+      measure: lost_opportunity_count_measure
+  - name: lost_amount
+    label: Lost amount
+    type: simple
+    type_params:
+      measure: lost_amount_measure
