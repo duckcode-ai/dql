@@ -1512,7 +1512,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         // key whose name matches on both sides.
         if (declaredEdge && (declaredEdge.cardinality === 'many_to_many' || declaredEdge.fanout === 'attribution_required' || declaredEdge.fanout === 'forbidden')) return undefined;
         const columnsOf = (relation: string): string[] => currentVocabulary().entries.find((entry) => entry.kind === 'relation' && entry.ref.endsWith(relation))?.columns ?? [];
-        const keys = declaredEdge?.keys ?? (() => { const column = sharedKeyColumn(columnsOf(fromRelation), columnsOf(toRelation)); return column ? [{ from: column, to: column }] : []; })();
+        const keys = declaredEdge?.keys ?? (() => { const pair = sharedKeyPair(columnsOf(fromRelation), columnsOf(toRelation), toRelation); return pair ? [pair] : []; })();
         if (keys.length === 0) return undefined;
         const cardinality = (declaredEdge?.cardinality ?? 'many_to_one') as 'one_to_one' | 'one_to_many' | 'many_to_one' | 'many_to_many' | 'unknown';
         if (cardinality === 'unknown') return undefined;
@@ -2257,6 +2257,25 @@ export function sharedKeyColumn(factColumns: Iterable<string>, labelColumns: Ite
   const label = new Map([...labelColumns].map((column) => [column.toLowerCase(), column]));
   const shared = [...factColumns].filter((column) => label.has(column.toLowerCase()));
   return shared.find((column) => /(^|_)(id|key)$/i.test(column)) ?? undefined;
+}
+
+/**
+ * The key a warehouse proof tests between two relations: a key column both
+ * carry under one name, or a key named for the table it points at
+ * (OPPORTUNITY_ID on the facts, ID on SFDC.OPPORTUNITY). A candidate is only a
+ * candidate; the proof of uniqueness and coverage decides.
+ */
+export function sharedKeyPair(factColumns: Iterable<string>, labelColumns: Iterable<string>, labelRelation?: string): { from: string; to: string } | undefined {
+  const facts = [...factColumns];
+  const labels = [...labelColumns];
+  const same = sharedKeyColumn(facts, labels);
+  if (same) return { from: same, to: same };
+  const table = labelRelation ? parsePhysicalIdentifier(labelRelation).pop()?.value.toLowerCase() : undefined;
+  const labelId = labels.find((column) => /^id$/i.test(column));
+  if (!table || !labelId) return undefined;
+  const singular = table.endsWith('ies') ? `${table.slice(0, -3)}y` : table.endsWith('s') && !table.endsWith('ss') ? table.slice(0, -1) : table;
+  const from = facts.find((column) => [`${singular}_id`, `${table}_id`].includes(column.toLowerCase()));
+  return from ? { from, to: labelId } : undefined;
 }
 
 /**

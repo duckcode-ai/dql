@@ -4,7 +4,7 @@ import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeaila
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, createAgentRunBudget, parseIntent, physicalRelationBinding, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import { relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
+import { sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -311,6 +311,16 @@ describe('a column is found by the words of its name', () => {
       ],
     } as never;
     expect(relationsWithColumnWords(source, missingFieldWords('No competitor column (such as PRIMARY_COMPETITOR) is available'), 'lost to a competitor', ['sales.opportunities'])).toEqual(['crm.deal_notes', 'crm.accounts']);
+  });
+});
+
+describe('the key a warehouse join proof tests', () => {
+  it('pairs a key named for its table with that table id, and keeps same-name keys first', () => {
+    expect(sharedKeyPair(['OPPORTUNITY_ID', 'AMOUNT'], ['ID', 'COMPETITOR_C'], 'SFDC.OPPORTUNITY')).toEqual({ from: 'OPPORTUNITY_ID', to: 'ID' });
+    expect(sharedKeyPair(['customer_id', 'amount'], ['id', 'name'], 'dev.customers')).toEqual({ from: 'customer_id', to: 'id' });
+    expect(sharedKeyPair(['customer_id', 'amount'], ['customer_id', 'id'], 'dev.customers')).toEqual({ from: 'customer_id', to: 'customer_id' });
+    expect(sharedKeyPair(['account_id'], ['id'], 'SFDC.OPPORTUNITY')).toBeUndefined();
+    expect(sharedKeyPair(['opportunity_id'], ['name'], 'SFDC.OPPORTUNITY')).toBeUndefined();
   });
 });
 
