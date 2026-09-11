@@ -1,0 +1,24 @@
+{
+  "key": "0348aac70a186024acde89c0d4292907",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by points per game (total points divided by games played) for games dated in calendar year 2017, restricted to players with at least 20 games played, grouped by player identity.\",\"measures\":[{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.pts\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:dev.player_game_stats.game_id\",\"denominatorAggregation\":\"count_distinct\"},\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"inherited\"}],\"alias\":\"points_per_game\"},{\"ref\":\"column:dev.player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"},{\"ref\":\"column:dev.player_game_stats.game_id\",\"aggregation\":\"count_distinct\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"inherited\"}],\"alias\":\"games_played\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"measure:2\",\"op\":\"gte\",\"values\":[20],\"source\":\"question\"}],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"calendar year 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.pts\":\"inherited\",\"column:dev.player_game_stats.game_id\":\"inherited\",\"dimension:player_game_stats.played\":\"inherited\",\"dimension:player_game_stats.player_id\":\"inherited\",\"dimension:player_game_stats.player_name\":\"inherited\",\"dimension:player_game_stats.game_date\":\"inherited\",\"measure:2\":\"q:with at least 20 games played\",\"measure:0\":\"q:rank them by points per game\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T01:37:18.094Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "0348aac70a186024acde89c0d429290760a16fba6ac0f54bf1eb4c8048d15800",
+    "postCanonicalHash": "0348aac70a186024acde89c0d429290760a16fba6ac0f54bf1eb4c8048d15800",
+    "appliedRuleClasses": []
+  }
+}

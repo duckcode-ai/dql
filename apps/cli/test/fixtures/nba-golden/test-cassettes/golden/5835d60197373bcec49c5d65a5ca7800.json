@@ -1,0 +1,25 @@
+{
+  "key": "5835d60197373bcec49c5d65a5ca7800",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks which players had the most double-doubles (games with 10 or more in two of the five statistical categories: points, rebounds, assists, steals, blocks) in 2017; this project's vocabulary has no metric, column, or derivable ratio expressing that per-game, multi-column threshold condition, even with the newly shown games and players relations.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"most double-doubles in 2017\",\"options\":[],\"material\":true,\"question\":\"No metric or column defines a 'double-double' (10+ in two of five stat categories per game); this needs cross-column conditional logic not available in this vocabulary.\"}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T01:30:52.801Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 4,
+    "messageRoles": [
+      "system",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "5835d60197373bcec49c5d65a5ca780049582da7274e1bcdb5883c55c49b495a",
+    "postCanonicalHash": "5835d60197373bcec49c5d65a5ca780049582da7274e1bcdb5883c55c49b495a",
+    "appliedRuleClasses": []
+  }
+}

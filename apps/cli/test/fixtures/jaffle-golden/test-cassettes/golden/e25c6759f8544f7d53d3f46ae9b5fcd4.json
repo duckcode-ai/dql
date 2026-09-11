@@ -1,0 +1,23 @@
+{
+  "key": "e25c6759f8544f7d53d3f46ae9b5fcd4",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Return the customer lifetime profile for the customer named Ryan Byrd.\",\"measures\":[{\"ref\":\"block:commerce.customer_profile\"}],\"groupBy\":[],\"display\":[],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan Byrd\"],\"source\":\"question\"}],\"expectedShape\":\"lookup\",\"unresolved\":[],\"provenance\":{\"block:commerce.customer_profile\":\"q:customer profile\",\"dimension:customers.customer_name\":\"q:Ryan Byrd\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T01:03:07.829Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "e25c6759f8544f7d53d3f46ae9b5fcd452e6c5ded543000f5833bc2d85a916bb",
+    "postCanonicalHash": "e25c6759f8544f7d53d3f46ae9b5fcd452e6c5ded543000f5833bc2d85a916bb",
+    "appliedRuleClasses": []
+  }
+}

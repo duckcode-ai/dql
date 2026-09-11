@@ -1,0 +1,23 @@
+{
+  "key": "92323ddda17c632069ed4e210c878e1e",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks which players had the most double-doubles (games with 10+ in two statistical categories) in 2017, a concept this project does not define or compute.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"most double-doubles in 2017\",\"options\":[],\"material\":true,\"question\":\"This project has no metric, column, or definition for a 'double-double' (a game with 10+ in two statistical categories); it cannot be computed from the available measures.\"}],\"provenance\":{}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T01:30:28.483Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "92323ddda17c632069ed4e210c878e1ecaa5ba7d0021a7d07d9a440141636e88",
+    "postCanonicalHash": "92323ddda17c632069ed4e210c878e1ecaa5ba7d0021a7d07d9a440141636e88",
+    "appliedRuleClasses": []
+  }
+}

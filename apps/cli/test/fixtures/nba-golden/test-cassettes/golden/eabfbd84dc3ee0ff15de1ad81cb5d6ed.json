@@ -1,0 +1,23 @@
+{
+  "key": "eabfbd84dc3ee0ff15de1ad81cb5d6ed",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top 5 players by total points scored in games dated between 2016-01-01 and 2017-12-31, with their number of games played, grouped by player identity.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"},{\"ref\":\"column:dev.player_game_stats.game_id\",\"aggregation\":\"count_distinct\",\"alias\":\"games_played\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}]}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"total_points\",\"direction\":\"desc\"},\"limit\":5,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2016-01-01\",\"end\":\"2018-01-01\",\"expression\":\"calendar years 2016 and 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.pts\":\"q:total points\",\"column:dev.player_game_stats.game_id\":\"q:games played\",\"dimension:player_game_stats.played\":\"q:games played\",\"dimension:player_game_stats.player_id\":\"q:top five players\",\"dimension:player_game_stats.player_name\":\"q:top five players\",\"dimension:player_game_stats.game_date\":\"q:calendar years 2016 and 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T01:36:23.927Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "eabfbd84dc3ee0ff15de1ad81cb5d6edd681924757d768e0be33e8d5321bdce0",
+    "postCanonicalHash": "eabfbd84dc3ee0ff15de1ad81cb5d6edd681924757d768e0be33e8d5321bdce0",
+    "appliedRuleClasses": []
+  }
+}

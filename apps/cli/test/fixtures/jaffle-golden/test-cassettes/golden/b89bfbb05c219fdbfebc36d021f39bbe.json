@@ -1,0 +1,23 @@
+{
+  "key": "b89bfbb05c219fdbfebc36d021f39bbe",
+  "operation": "generate",
+  "text": "```sql\nSELECT p.product_name AS product_name, SUM(s.supply_cost) AS supply_cost\nFROM dev.supplies s\nJOIN dev.products p ON s.product_id = p.product_id\nGROUP BY p.product_name\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T01:03:27.633Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b89bfbb05c219fdbfebc36d021f39bbeab8c99253b2bd00d7552ee44ba6078ed",
+    "postCanonicalHash": "b89bfbb05c219fdbfebc36d021f39bbeab8c99253b2bd00d7552ee44ba6078ed",
+    "appliedRuleClasses": []
+  }
+}

@@ -6,8 +6,9 @@ import { composeAnsweredText, composeFailedText, composeGapText, describeResultC
 import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal, type PrepareResult } from './prepare/index.js';
 import { applySkillPolicies } from './policies.js';
 import { proveLiterals } from './literal-proof.js';
+import { prepareExploratory } from './prepare/exploratory.js';
 import { keepMembersApart, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn } from './resolve-intent.js';
-import type { RenderedCards, VocabularyDomainHeader, VocabularyEntry, VocabularyIndex } from './vocabulary.js';
+import { buildVocabularyIndex, renderCard, type RenderedCards, type VocabularyDomainHeader, type VocabularyEntry, type VocabularyIndex } from './vocabulary.js';
 
 /**
  * INTENT → PREPARE → EXECUTE, as one host-neutral function.
@@ -41,6 +42,14 @@ export interface RunAskPipelineInput {
   /** False for research branches: their questions are hypotheses, not asks for causes or decisions. */
   clauseCoverage?: boolean;
   explorationOptIn?: boolean;
+  /** Run the review-required SQL tier on its own when nothing governed prepares; false keeps it opt-in. */
+  explorationAuto?: boolean;
+  /**
+   * Host-owned on-demand description of relations the probe had not described
+   * (their columns and types), used once when a reading leaves a clause
+   * unresolved while naming a relation whose columns it could not see.
+   */
+  describeRelations?: (relations: string[]) => Promise<Array<{ schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }> }>>;
   deadlineMs?: number;
   cardBudget?: number;
   providerOptions?: ProviderRunOptions;
@@ -408,6 +417,51 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     receipt.context = { ...receipt.context!, selected: { refs, byKind, unrendered: refs.filter((ref) => !renderedRefs.has(ref.toLowerCase())) } };
   };
 
+  // RETRIEVE, THEN RE-ASK. A reading that leaves a clause unresolved while
+  // naming a relation it could not see the columns of is not a business gap:
+  // it is a retrieval gap. The relation's columns (probed on demand when the
+  // vocabulary has none) and every inventory entry the clause's words name
+  // that was not shown go back to the interpreter once, with the rules for
+  // reading a count, an amount and a status from raw columns. Only what those
+  // still do not cover becomes a clarification.
+  const expandForClauses = async (need: { clauses: string[]; question: string; reading: string }): Promise<{ vocabulary: VocabularyIndex; cards: string[]; note: string } | undefined> => {
+    let vocabulary = input.vocabulary;
+    const text = ` ${need.question} ${need.reading} ${need.clauses.join(' ')} `.toLowerCase();
+    const escape = (value: string) => value.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const namedRelations = vocabulary.entries.filter((entry) => entry.kind === 'relation' && [entry.name, entry.model ?? '', ...entry.aliases].some((name) => name && new RegExp(`(^|[^a-z0-9_])${escape(name)}([^a-z0-9_]|$)`).test(text)));
+    const bare = namedRelations.filter((entry) => !(entry.columns?.length));
+    let probed = 0;
+    if (bare.length && input.describeRelations) {
+      try {
+        const found = await input.describeRelations(bare.map((entry) => entry.model ?? entry.name).slice(0, 8));
+        if (found.length) { vocabulary = vocabulary.withEntries(buildVocabularyIndex({ relations: found }).entries); probed = found.length; }
+      } catch { /* the vocabulary stands as it was */ }
+    }
+    const shown = new Set(renderedCards.refs.map((ref) => ref.toLowerCase()));
+    const cards = new Map<string, string>();
+    for (const relation of namedRelations) {
+      const entry = vocabulary.get(relation.ref);
+      if (!entry) continue;
+      cards.set(entry.ref, renderCard(entry));
+      for (const column of vocabulary.entries.filter((item) => item.kind === 'column' && item.ref.toLowerCase().startsWith(`column:${(entry.model ?? '').toLowerCase()}.`))) {
+        if (!shown.has(column.ref.toLowerCase()) && cards.size < 90) cards.set(column.ref, renderCard(column));
+      }
+    }
+    for (const clause of need.clauses) {
+      const words = clause.split(/[^A-Za-z0-9_']+/).filter((word) => word.length > 2).slice(0, 12);
+      const terms = new Set<string>([clause, ...words, ...words.slice(0, -1).map((word, index) => `${word} ${words[index + 1]}`)]);
+      for (const term of terms) for (const hit of vocabulary.lookup(term, { limit: 4, minScore: 0.8 })) {
+        if (!shown.has(hit.entry.ref.toLowerCase()) && !cards.has(hit.entry.ref) && cards.size < 120) cards.set(hit.entry.ref, renderCard(hit.entry));
+      }
+    }
+    if (cards.size === 0) return undefined;
+    // The extended vocabulary serves the rest of this run: preparation and proofs read the probed columns too.
+    input = { ...input, vocabulary };
+    const note = `discovery: ${cards.size} entries not shown before were fetched for "${need.clauses.join('; ')}"${probed ? ` (${probed} relation${probed === 1 ? '' : 's'} described on demand)` : ''}`;
+    receipt.grounding = [...(receipt.grounding ?? []), note];
+    return { vocabulary, cards: [...cards.values()], note };
+  };
+
   // 1. Resolve.
   const resolveStarted = now();
   let resolution: IntentResolution = await resolveIntent({
@@ -416,6 +470,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
     maxAttempts: remaining() > 15_000 ? 2 : 1,
     onDispatch: (event) => receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }),
+    expand: expandForClauses,
   });
   mark('resolve', resolveStarted);
   const recordLedger = (resolved: IntentResolution) => {
@@ -598,7 +653,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     }
     if (attempted.has(cacheKey)) break; // never repeat an unchanged failed attempt
     attempted.add(cacheKey);
-    prepared = await prepare({ intent, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: input.explorationOptIn });
+    prepared = await prepare({ intent, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: false, explorationAuto: false, question: input.question });
     if (round === 0) { firstPrepared = prepared; firstIntent = intent; }
     mark(round === 0 ? 'prepare' : 'prepare_repair', prepareStarted);
     for (const item of prepared.candidates) receipt.candidates.push({ tier: item.tier, trust: item.trust, proof: item.proof, sqlFingerprint: fingerprintSql(item.sql), ...(item.engine ? { engine: item.engine } : {}) });
@@ -670,7 +725,22 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // could not express the analysis by entity key. Never a dead end.
   if (!candidate) {
     const fallback = prepared?.fallbacks?.[0] ?? firstPrepared?.fallbacks?.[0];
-    if (fallback) {
+    // THE LAST TIER, LAST: only after the governed repair and the certified
+    // fallback have both come up empty does SQL get drafted from the schema —
+    // never instead of a governed answer one re-ask away. A policy denial or a
+    // domain-contract refusal never reaches it.
+    const denied = receipt.refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict' || refusal.code === 'join_requires_domain_contract');
+    if (!fallback && !denied && (input.explorationOptIn || input.explorationAuto) && remaining() > 8_000) {
+      const draftStarted = now();
+      const drafted = await prepareExploratory(intent, input.vocabulary, input.prepareDeps, input.question);
+      mark('draft', draftStarted);
+      receipt.refusals.push(...drafted.refusals);
+      for (const item of drafted.candidates) receipt.candidates.push({ tier: item.tier, trust: item.trust, proof: item.proof, sqlFingerprint: fingerprintSql(item.sql), ...(item.engine ? { engine: item.engine } : {}) });
+      receipt.tiers.push({ round: 98, tier: 'exploratory', outcome: drafted.candidates.length ? 'prepared' : 'refused', ...(drafted.refusals[0] ? { detail: `${drafted.refusals[0].code}: ${drafted.refusals[0].message.slice(0, 160)}` } : {}) });
+      if (drafted.candidates[0]) candidate = drafted.candidates[0];
+    }
+    if (candidate) { /* drafted: falls through to execution below */ }
+    else if (fallback) {
       // Served from the certified block, but not certified FOR this question:
       // the badge is governed, the source stays the block.
       candidate = { ...fallback, trust: 'governed' };
@@ -685,7 +755,8 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   }
   if (!candidate) {
     const gap = gapFromRefusals(receipt.refusals, intent, input.vocabulary);
-    const offerExploration = !input.explorationOptIn && receipt.refusals.some((refusal) => refusal.code === 'exploration_not_opted_in');
+    // The offer stands only when exploration was neither opted into nor run on its own.
+    const offerExploration = !input.explorationOptIn && !input.explorationAuto && receipt.refusals.some((refusal) => refusal.code === 'exploration_not_opted_in');
     return { kind: 'gap', gap: gap.gap, message: gap.message, nearest: gap.nearest.map(label), text: composeGapText(gap.gap, gap.message, gap.nearest.map(label), offerExploration), receipt, intent, offerExploration };
   }
 
@@ -700,7 +771,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: false } as unknown as PreparedRefusal);
     receipt.tiers.push({ round: 9, tier: candidate.tier, outcome: 'refused', detail: `${executed.code}: ${executed.message.slice(0, 160)}` });
     excluded.push(candidate.tier);
-    const again = await prepare({ intent, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: input.explorationOptIn, excludeTiers: excluded });
+    const again = await prepare({ intent, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: false, explorationAuto: false, question: input.question, excludeTiers: excluded });
     for (const item of again.candidates) receipt.candidates.push({ tier: item.tier, trust: item.trust, proof: item.proof, sqlFingerprint: fingerprintSql(item.sql), ...(item.engine ? { engine: item.engine } : {}) });
     receipt.refusals.push(...again.refusals.filter((refusal) => !excluded.includes(refusal.tier)));
     receipt.tiers.push(...again.attempts.map((attempt) => ({ round: 9, ...attempt })));
@@ -764,7 +835,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       const merged = proveSubjectMatchesPopulation(widened, input.vocabulary);
       if (!merged) {
         receipt.grounding = [...(receipt.grounding ?? []), ...notes];
-        const again = await prepare({ intent: widened, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: input.explorationOptIn });
+        const again = await prepare({ intent: widened, vocabulary: input.vocabulary, deps: input.prepareDeps, explorationOptIn: false, explorationAuto: false, question: input.question });
         if (again.chosen) {
           const retried = await countedExecute(again.chosen, widened, input.executeDeps);
           if (retried.ok) { candidate = again.chosen; executed = retried; intent = widened; receipt.intent = widened; }

@@ -1,0 +1,23 @@
+{
+  "key": "df1fdf77b87b37f569198444840205fe",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Compare pre-tax product revenue (order_item revenue, which excludes tax) between July 2025 and August 2025, and show the percentage growth from July to August.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"alias\":\"revenue_jul\",\"scope\":[{\"ref\":\"dimension:order_item.ordered_at\",\"op\":\"eq\",\"values\":[\"2025-07\"],\"source\":\"question\"}]},{\"ref\":\"metric:order_item.revenue\",\"alias\":\"revenue_aug\",\"scope\":[{\"ref\":\"dimension:order_item.ordered_at\",\"op\":\"eq\",\"values\":[\"2025-08\"],\"source\":\"question\"}]},{\"change\":{\"base\":\"revenue_jul\",\"comparison\":\"revenue_aug\",\"as\":\"percent\"},\"alias\":\"revenue_growth_pct\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:sales before tax\",\"dimension:order_item.ordered_at\":\"q:August with July 2025\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T01:07:17.583Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "df1fdf77b87b37f569198444840205fe146dccfa23e3787eb0dd89f301d00fac",
+    "postCanonicalHash": "df1fdf77b87b37f569198444840205fe146dccfa23e3787eb0dd89f301d00fac",
+    "appliedRuleClasses": []
+  }
+}

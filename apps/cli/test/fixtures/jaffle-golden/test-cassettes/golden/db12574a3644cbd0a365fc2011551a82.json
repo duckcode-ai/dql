@@ -1,0 +1,23 @@
+{
+  "key": "db12574a3644cbd0a365fc2011551a82",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show revenue over time by month (the month-over-month revenue growth % metric cannot be computed by the current engine, so monthly gross revenue and order count are shown as the trend instead).\",\"measures\":[{\"ref\":\"block:commerce.monthly_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[{\"clause\":\"revenue growth mom (metric:order_item.revenue_growth_mom)\",\"options\":[\"block:commerce.monthly_revenue\"],\"material\":false}],\"provenance\":{\"block:commerce.monthly_revenue\":\"q:revenue over time\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-11T01:10:37.289Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "db12574a3644cbd0a365fc2011551a8254a3fc535c8ebd7a3f644374341a59d8",
+    "postCanonicalHash": "db12574a3644cbd0a365fc2011551a8254a3fc535c8ebd7a3f644374341a59d8",
+    "appliedRuleClasses": []
+  }
+}

@@ -222,6 +222,12 @@ export class VocabularyIndex {
     return this.byRef.get(ref.trim().toLowerCase());
   }
 
+  /** This index plus entries fetched on demand (a relation's columns the probe had not described); an entry with the same ref is replaced. */
+  withEntries(extra: VocabularyEntry[]): VocabularyIndex {
+    const override = new Map(extra.map((entry) => [entry.ref.toLowerCase(), entry]));
+    return new VocabularyIndex([...this.entries.filter((entry) => !override.has(entry.ref.toLowerCase())), ...extra]);
+  }
+
   /**
    * Turn what the model wrote into an authorized entry: an exact ref, a ref
    * missing its kind prefix (`order_item.drink_revenue`), the host's own id,
@@ -333,8 +339,14 @@ export class VocabularyIndex {
     const included = new Set<VocabularyEntry>();
     const charsByKind: Record<string, number> = {};
     let chars = header ? header.length + 2 : 0;
+    // A ranked column may be spelled by its model name alone (`column:<model>.<col>`): match on the last two segments too.
+    const tail = (ref: string) => ref.toLowerCase().replace(/^[a-z]+:/, '').split('.').slice(-2).join('.');
+    const preferredTails = new Set([...rankedAt.keys(), ...pinned].filter((ref) => ref.startsWith('column:')).map(tail));
+    const preferColumn = (ref: string) => pinned.has(ref.toLowerCase()) || rankedAt.has(ref.toLowerCase()) || preferredTails.has(tail(ref));
+    const cardOf = new Map<VocabularyEntry, string>();
     for (const entry of ordered) {
-      const line = renderCard(entry);
+      const line = renderCard(entry, { preferColumn });
+      cardOf.set(entry, line);
       const used = charsByKind[entry.kind] ?? 0;
       if (used + line.length + 1 > caps[entry.kind]) continue;
       if (chars + line.length + 1 > maxChars) continue;
@@ -355,7 +367,7 @@ export class VocabularyIndex {
         ? ` (listed for ${options.columnsFor.shown} of ${options.columnsFor.total} relations; name any other column as column:<schema.table>.<name>, exact spelling)`
         : '';
       out.push(`${title}${rows.length < total ? ` (${rows.length} of ${total} shown; an entry not shown here still exists — name it exactly, or say what you were looking for and it will be looked up)` : ''}${columnsNote}`);
-      for (const entry of rows) out.push(renderCard(entry));
+      for (const entry of rows) out.push(cardOf.get(entry) ?? renderCard(entry, { preferColumn }));
       out.push('');
     }
     const text = out.join('\n').trim();
@@ -390,7 +402,7 @@ function renderDomainHeader(header: VocabularyDomainHeader): string {
   return parts.join('\n').slice(0, 900);
 }
 
-export function renderCard(entry: VocabularyEntry): string {
+export function renderCard(entry: VocabularyEntry, options: { preferColumn?: (columnRef: string) => boolean } = {}): string {
   if (entry.kind === 'relationship') return renderRelationshipCard(entry);
   if (entry.kind === 'skill') return renderSkillCard(entry);
   if (entry.kind === 'hint') return renderHintCard(entry);
@@ -409,7 +421,12 @@ export function renderCard(entry: VocabularyEntry): string {
   // whether it is a period ratio or a lifetime one.
   const formula = (entry.metricType === 'derived' || entry.metricType === 'ratio') && entry.expr ? ` = ${entry.expr.replace(/\s+/g, ' ').slice(0, 120)}` : '';
   const description = entry.description ? ` ${entry.description.replace(/\s+/g, ' ').slice(0, entry.kind === 'term' || entry.kind === 'block' ? 400 : entry.kind === 'relation' ? 300 : 160)}` : '';
-  const columns = entry.columns?.length ? ` columns: ${entry.columns.slice(0, 40).join(', ')}${entry.columns.length > 40 ? ', ...' : ''}` : '';
+  // The columns the question ranked or named come first on a relation card,
+  // so a wide table shows what was asked about, not its first forty names.
+  const orderedColumns = entry.columns?.length && options.preferColumn
+    ? [...entry.columns].sort((a, b) => Number(options.preferColumn!(`column:${entry.model ?? ''}.${b}`)) - Number(options.preferColumn!(`column:${entry.model ?? ''}.${a}`)))
+    : entry.columns ?? [];
+  const columns = orderedColumns.length ? ` columns: ${orderedColumns.slice(0, 40).join(', ')}${orderedColumns.length > 40 ? ', ...' : ''}` : '';
   const notes = entry.columnNotes?.length ? ` which rows count: ${entry.columnNotes.join('; ')}` : '';
   const scope = entry.contract?.staticScope.length
     ? ` scope: ${entry.contract.staticScope.map((p) => `${p.column} ${p.op}${p.values.length ? ` ${p.values.join('/')}` : ''}`).join(' and ')}`

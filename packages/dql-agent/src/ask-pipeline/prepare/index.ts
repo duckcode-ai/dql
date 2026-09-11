@@ -1,4 +1,5 @@
 import { prepareCertified } from './certified.js';
+import { prepareExploratory } from './exploratory.js';
 import { prepareRelational } from './relational.js';
 import { prepareSemantic } from './semantic.js';
 import type { PrepareInput, PrepareResult, PreparedCandidate, PreparedRefusal } from './types.js';
@@ -44,7 +45,13 @@ export async function prepare(input: PrepareInput): Promise<PrepareResult> {
   if (excluded.has('relational')) attempts.push({ tier: 'relational', outcome: 'skipped', detail: 'failed an execution proof' });
   else if (candidates.length === 0) record('relational', prepareRelational(input.intent, input.vocabulary, input.deps));
   else attempts.push({ tier: 'relational', outcome: 'skipped' });
-  if (candidates.length === 0 && !input.explorationOptIn) {
+  // THE LAST TIER RUNS ON ITS OWN when nothing governed could prepare the
+  // reading (unless the project turned automatic exploration off, in which
+  // case it stays an explicit opt-in). A policy denial never reaches it.
+  const denied = refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict' || refusal.code === 'join_requires_domain_contract');
+  if (candidates.length === 0 && excluded.has('exploratory')) attempts.push({ tier: 'exploratory', outcome: 'skipped', detail: 'failed an execution proof' });
+  else if (candidates.length === 0 && !denied && (input.explorationOptIn || input.explorationAuto)) record('exploratory', await prepareExploratory(input.intent, input.vocabulary, input.deps, input.question ?? input.intent.reading));
+  else if (candidates.length === 0 && !denied) {
     refusals.push({ tier: 'exploratory', code: 'exploration_not_opted_in', message: 'no governed tier could prepare this intent; review-required exploration needs an explicit opt-in', repairable: false });
     attempts.push({ tier: 'exploratory', outcome: 'refused', detail: 'exploration_not_opted_in' });
   }

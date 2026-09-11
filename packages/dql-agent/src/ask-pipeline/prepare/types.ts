@@ -59,7 +59,7 @@ export interface PreparedCandidate {
 export type PrepareRefusalCode =
   | 'join_requires_domain_contract'
   | 'relationship_domain_unknown'
-  | 'policy_filter_unbindable' | 'policy_conflict'
+  | 'policy_filter_unbindable' | 'policy_conflict' | 'exploration_unavailable' | 'exploration_failed' | 'exploration_not_read_only'
   | 'no_certified_block'
   | 'block_not_applicable'
   | 'not_semantic'
@@ -173,6 +173,13 @@ export interface PrepareDeps {
   proveJoinPath?: (fromRelation: string, toRelation: string) => Promise<RelationalJoinStep[] | { refusal: PreparedRefusal } | undefined>;
   /** Declared relationships between two relations that are NOT authorized to join: the offers a refusal names. */
   unprovenJoinPath?: (fromRelation: string, toRelation: string) => UnprovenJoin[];
+  /**
+   * Draft one read-only SQL statement from the question, the reading and the
+   * admitted vocabulary, validated by the host against the catalog (only
+   * admitted relations and columns). Returns the referenced relations and
+   * the host's proof lines, or the reason it could not.
+   */
+  draftSql?: (input: { question: string; intent: AnalyticalIntentV1; vocabulary: VocabularyIndex }) => Promise<{ sql: string; relations: string[]; proof: string[]; engine?: string } | { error: string } | undefined>;
   /** Dialect for relational composition. */
   dialect?: SqlDialectLike;
   /** Certified block source text by block ref. */
@@ -198,6 +205,10 @@ export interface PrepareInput {
   explorationOptIn?: boolean;
   /** Tiers whose candidate already failed an execution proof for this intent. */
   excludeTiers?: PrepareTier[];
+  /** The question as asked, for the drafting tier. */
+  question?: string;
+  /** Run the review-required SQL tier automatically when nothing governed prepares (the default); false keeps it opt-in. */
+  explorationAuto?: boolean;
 }
 
 export interface PrepareResult {

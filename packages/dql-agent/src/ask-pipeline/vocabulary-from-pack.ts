@@ -118,6 +118,31 @@ export function projectVocabularySource(base: VocabularySource, pack: Pick<Local
     terms: keep('term', base.terms, (term) => [term.name]),
   };
 
+  // COLUMNS THE RETRIEVAL RANKED. A question about "lost opportunities" and
+  // "amount" ranks the column objects that carry those words; they must reach
+  // the vocabulary with their descriptions and types, or a wide table shows
+  // the model its first forty column names and nothing it asked about. Each
+  // ranked column merges into its relation (an eligible relation only; a
+  // column of a relation outside the scope is not admitted through the back).
+  const relationByKey = new Map((source.relations ?? []).map((relation) => [lower(relation.schema ? `${relation.schema}.${relation.name}` : relation.name), relation]));
+  let mergedColumns = 0;
+  for (const object of pack.objects) {
+    if (object.objectType !== 'dbt_column' && object.objectType !== 'warehouse_column' && object.objectType !== 'runtime_column') continue;
+    const payload = (object.payload ?? {}) as { relation?: string; model?: string; type?: string };
+    const relationKey = normalizeRelation(payload.relation) ?? (payload.model ? lower(payload.model) : undefined);
+    const relation = relationKey ? relationByKey.get(lower(relationKey)) ?? [...relationByKey.entries()].find(([key]) => key.endsWith(`.${lower(relationKey)}`))?.[1] : undefined;
+    if (!relation) continue;
+    const column = relation.columns.find((item) => lower(item.name) === lower(object.name));
+    if (column) {
+      if (!column.dataType && payload.type) column.dataType = payload.type;
+      if (!column.description && object.description) column.description = object.description;
+    } else {
+      relation.columns.push({ name: object.name, ...(payload.type ? { dataType: payload.type } : {}), ...(object.description ? { description: object.description } : {}) });
+      mergedColumns += 1;
+    }
+  }
+  if (mergedColumns) admitted.column = (admitted.column ?? 0) + mergedColumns;
+
   // Declared relationships, with their authority to join. The pack's eligible
   // set carries their payload because they are few and authored.
   const relationshipObjects = byType.get('relationship') ?? (eligible ? [] : pack.objects.filter((object) => object.objectType === 'relationship'));
@@ -240,6 +265,12 @@ export function rankedRefsFromPack(objects: MetadataObject[]): string[] {
       case 'dbt_model': case 'dbt_source': case 'warehouse_table': {
         const relation = typeof object.payload?.relation === 'string' ? object.payload.relation.replace(/"/g, '').split('.').slice(-2).join('.') : name;
         refs.push(`relation:${relation}`);
+        break;
+      }
+      case 'dbt_column': case 'warehouse_column': case 'runtime_column': {
+        const payload = (object.payload ?? {}) as { relation?: string; model?: string };
+        const relation = normalizeRelation(payload.relation) ?? payload.model;
+        if (relation) refs.push(`column:${relation}.${name}`);
         break;
       }
       default: break;

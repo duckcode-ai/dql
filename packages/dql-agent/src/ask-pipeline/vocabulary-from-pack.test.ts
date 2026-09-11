@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { pinnedRefsFor } from './pipeline.js';
-import { projectVocabularySource, rankedRefsFromPack } from './vocabulary-from-pack.js';
+import { projectVocabularySource, rankedRefsFromPack  } from './vocabulary-from-pack.js';
 import { buildVocabularyIndex, type VocabularySource } from './vocabulary.js';
 import type { EligibleContextSet, LocalContextSkill } from '../metadata/catalog.js';
 
@@ -186,5 +186,30 @@ describe('a business concept is projected with its bindings as resolvable refs',
     const vocabulary = buildVocabularyIndex(projected.source);
     expect(vocabulary.get('concept:commerce.customer')?.kind).toBe('concept');
     expect(vocabulary.resolve('buyer', ['concept'])?.ref).toBe('concept:commerce.customer');
+  });
+});
+
+describe('columns the retrieval ranked reach the vocabulary and lead their relation card', () => {
+  const base = { relations: [{ schema: 'ada', name: 'ada_sfdc_opportunity', columns: Array.from({ length: 60 }, (_, index) => ({ name: `col_${String(index).padStart(2, '0')}` })) }] };
+  const objects = [
+    { objectKey: 'dbt:column:ada_sfdc_opportunity.amount', objectType: 'dbt_column', name: 'amount', fullName: 'ada_sfdc_opportunity.amount', description: 'Opportunity amount', payload: { relation: '"DB"."ada"."ada_sfdc_opportunity"', type: 'NUMBER' } },
+    { objectKey: 'dbt:column:ada_sfdc_opportunity.col_59', objectType: 'dbt_column', name: 'col_59', fullName: 'ada_sfdc_opportunity.col_59', payload: { model: 'ada_sfdc_opportunity', type: 'VARCHAR' } },
+    { objectKey: 'dbt:column:elsewhere.x', objectType: 'dbt_column', name: 'x', fullName: 'elsewhere.x', payload: { relation: 'other.elsewhere' } },
+  ] as never[];
+  it('a ranked column merges into its relation with its type and description; a column of an unadmitted relation is not', () => {
+    const projected = projectVocabularySource(base as never, { objects, skills: [], appliedHints: [] });
+    const relation = projected.source.relations![0]!;
+    expect(relation.columns.find((column) => column.name === 'amount')).toEqual({ name: 'amount', dataType: 'NUMBER', description: 'Opportunity amount' });
+    expect(relation.columns.find((column) => column.name === 'col_59')?.dataType).toBe('VARCHAR');
+    expect(projected.source.relations).toHaveLength(1);
+    expect(rankedRefsFromPack(objects)).toEqual(['column:ada.ada_sfdc_opportunity.amount', 'column:ada_sfdc_opportunity.col_59', 'column:other.elsewhere.x']);
+  });
+  it('the ranked columns lead the relation card instead of the first forty names', () => {
+    const projected = projectVocabularySource(base as never, { objects, skills: [], appliedHints: [] });
+    const index = buildVocabularyIndex(projected.source);
+    const card = index.renderCardsDetailed({ rankedRefs: rankedRefsFromPack(objects) }).text.split('\n').find((line) => line.startsWith('- relation:ada.ada_sfdc_opportunity'))!;
+    expect(card).toMatch(/columns: (amount, col_59|col_59, amount)/);
+    expect(card).toContain(', ...');
+    expect(index.withEntries([{ ref: 'column:ada.ada_sfdc_opportunity.new_col', kind: 'column', name: 'new_col', aliases: [], model: 'ada.ada_sfdc_opportunity', roles: ['numeric'], dataType: 'NUMBER' }]).get('column:ada.ada_sfdc_opportunity.new_col')?.dataType).toBe('NUMBER');
   });
 });

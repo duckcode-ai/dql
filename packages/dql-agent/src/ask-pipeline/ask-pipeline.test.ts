@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, coverageStates, validateIntentRefs, facetStem, promoteSoleMeasureScope } from './resolve-intent.js';
+import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, coverageStates, validateIntentRefs, facetStem, promoteSoleMeasureScope, timeAxesFor } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { applyMemberSelection, bindNamedSubject, memberOptionId, namesInQuestion, parseMemberOption, pinnedRefsFor, proveSubjectMatchesPopulation, runAskPipeline, unmetDisplayObligation } from './pipeline.js';
@@ -444,8 +444,9 @@ describe('the discovery path: what the cards cut is still modeled (CTX-010)', ()
     const outcome = await run('revenue by supplier', provider, dimensionsExcept('dimension:supplies.supply_name'));
     expect(provider.calls).toHaveLength(2);
     const correction = String(provider.calls[1]!.at(-1)!.content);
-    expect(correction).toContain('"supply_name" is modeled: dimension:supplies.supply_name');
-    expect(correction).toContain('Entries you were not shown before');
+    // Retrieval comes first: the clause's own words name the entry, so the re-ask carries its card.
+    expect(correction).toMatch(/"supply_name" is modeled: dimension:supplies\.supply_name|were not shown before/);
+    expect(correction).toMatch(/not shown before/);
     expect(correction).toContain(renderCard(vocabulary.get('dimension:supplies.supply_name')!));
     expect(outcome.receipt.failure).toBeUndefined();
     expect(outcome.receipt.context?.selected?.refs).toContain('dimension:supplies.supply_name');
@@ -717,6 +718,62 @@ describe('coverage is satisfied through lineage and the reading\'s own names; th
     expect(mentioned).toEqual(['losses']);
     expect(coverageStates('show wins and losses by team', mentioned)).toEqual([{ word: 'losses', state: 'uncertain' }]);
     expect(coverageStates('only losses, please', ['losses'])).toEqual([{ word: 'losses', state: 'unsatisfied' }]);
+  });
+});
+
+describe('retrieve, then re-ask: a clause left unresolved while naming a relation is a retrieval gap first', () => {
+  const vocabulary = buildVocabularyIndex({
+    relations: [{ schema: 'ada', name: 'ada_sfdc_opportunity', columns: [{ name: 'opportunity_id', dataType: 'VARCHAR' }, { name: 'amount', dataType: 'NUMBER', description: 'Opportunity amount' }, { name: 'opportunity_outcome', dataType: 'VARCHAR' }, { name: 'close_date', dataType: 'DATE' }] }],
+  });
+  const first = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Count of lost opportunities. The project has opportunity relations (ada.ada_sfdc_opportunity) but no column or metric for it is exposed.', measures: [], groupBy: [], display: [], filters: [], expectedShape: 'scalar', unresolved: [{ clause: 'lost opportunities count', options: [], material: true, question: 'Can you confirm the exact column?' }], provenance: {} });
+  const second = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Count of lost opportunities', measures: [{ ref: 'column:ada.ada_sfdc_opportunity.opportunity_id', aggregation: 'count', scope: [{ ref: 'column:ada.ada_sfdc_opportunity.opportunity_outcome', op: 'eq', values: ['lost'], source: 'question' }] }], groupBy: [], display: [], filters: [], expectedShape: 'scalar', unresolved: [], provenance: { 'column:ada.ada_sfdc_opportunity.opportunity_id': 'q:lost opportunities count' } });
+  it('the interpreter is sent the relation\'s columns once and reads the clause with them', async () => {
+    const seen: string[] = [];
+    const provider = { name: 'scripted', available: async () => true, generate: async (messages: Array<{ role: string; content: string }>) => { seen.push(messages.at(-1)!.content); return seen.length === 1 ? first : second; } };
+    const expanded: string[][] = [];
+    const result = await resolveIntent({
+      question: 'Lost opportunities count', vocabulary, provider: provider as never, maxAttempts: 2,
+      renderedCards: { refs: ['relation:ada.ada_sfdc_opportunity'], rendered: {}, chars: {}, totalChars: 0, truncated: [], text: '' } as never,
+      expand: async (need) => { expanded.push(need.clauses); return { vocabulary, cards: ['- column:ada.ada_sfdc_opportunity.opportunity_outcome [text]', '- column:ada.ada_sfdc_opportunity.amount [numeric] Opportunity amount'], note: 'discovery' }; },
+    });
+    expect(expanded).toEqual([['lost opportunities count']]);
+    expect(result.status).toBe('resolved');
+    if (result.status === 'resolved') expect(result.intent.measures[0]?.ref).toBe('column:ada.ada_sfdc_opportunity.opportunity_id');
+    expect(seen[1]).toContain('were not shown before');
+    expect(seen[1]).toContain('a COUNT of things is');
+    expect(seen[1]).toContain('column:ada.ada_sfdc_opportunity.amount');
+  });
+  it('with nothing new to show, the clarification stands', async () => {
+    const provider = { name: 'scripted', available: async () => true, generate: async () => first };
+    const result = await resolveIntent({ question: 'Lost opportunities count', vocabulary, provider: provider as never, maxAttempts: 2, expand: async () => undefined });
+    expect(result.status).toBe('clarify');
+  });
+});
+
+describe('a wrong time axis is corrected with the real date fields, and a repeated miss is a question, not a dead end', () => {
+  const vocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'lost_amount', model: 'opportunity', aggregation: 'sum', physical: { relation: 'ada.ada_sfdc_opportunity', expr: 'SUM(ada.ada_sfdc_opportunity.amount)', aggregate: 'sum' } }],
+    dimensions: [
+      { name: 'close_date', model: 'opportunity', dataType: 'date', isTime: true, physical: { relation: 'ada.ada_sfdc_opportunity', column: 'close_date' } },
+      { name: 'metric', model: 'ccu_daily', dataType: 'string', physical: { relation: 'sm.ccu_daily', column: 'metric' } },
+      { name: 'usage_date', model: 'ccu_daily', dataType: 'date', isTime: true, physical: { relation: 'sm.ccu_daily', column: 'usage_date' } },
+    ],
+  });
+  const wrong = { version: 1, kind: 'analytics', reading: 'lost amount by month', measures: [{ ref: 'metric:opportunity.lost_amount' }], groupBy: [{ ref: 'dimension:ccu_daily.metric', role: 'time', grain: 'month' }], display: [], filters: [], expectedShape: 'grouped', unresolved: [], provenance: {} };
+  it('the correction suggests the measure\'s own date first', () => {
+    const validation = validateIntentRefs(parseIntent(wrong).intent!, vocabulary);
+    const problem = validation.problems.find((item) => /not a time dimension/.test(item.message))!;
+    expect(problem.suggestions).toEqual(['dimension:opportunity.close_date', 'dimension:ccu_daily.usage_date']);
+    expect(timeAxesFor(parseIntent(wrong).intent!, vocabulary)[0]).toBe('dimension:opportunity.close_date');
+  });
+  it('two readings with the same wrong axis end in a clarification listing the dates', async () => {
+    const provider = { name: 'scripted', available: async () => true, generate: async () => JSON.stringify(wrong) };
+    const result = await resolveIntent({ question: 'lost amount by month', vocabulary, provider: provider as never, maxAttempts: 2 });
+    expect(result.status).toBe('clarify');
+    if (result.status === 'clarify') {
+      expect(result.options).toEqual(['dimension:opportunity.close_date', 'dimension:ccu_daily.usage_date']);
+      expect(result.question).toContain('Which of these should it use');
+    }
   });
 });
 

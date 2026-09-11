@@ -908,6 +908,16 @@ export function resolveAskAgentRuntimeMode(
  * `authoritative_v2` is served by the pipeline with a warning, and any other
  * value fails loudly rather than silently.
  */
+/** `agent.askAutoExploration` in `dql.config.json`: false keeps the review-required SQL tier opt-in; anything else lets it run when nothing governed prepares. */
+export function readProjectAskAutoExploration(projectRoot: string): boolean {
+  try {
+    const parsed = JSON.parse(readFileSync(join(projectRoot, 'dql.config.json'), 'utf-8')) as { agent?: { askAutoExploration?: unknown } };
+    return parsed?.agent?.askAutoExploration !== false;
+  } catch {
+    return true;
+  }
+}
+
 export function readProjectAskRuntimeMode(projectRoot: string): unknown {
   try {
     const raw = readFileSync(join(projectRoot, 'dql.config.json'), 'utf-8');
@@ -5971,6 +5981,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const askPipelineExecutor = createAskPipelineRouteExecutor({
     projectRoot,
     executor,
+    autoExploration: readProjectAskAutoExploration(projectRoot),
     resolveConnection: resolveAgentRunExecutionConnection,
     getSemanticLayer: () => semanticLayer,
     getManifest: () => {

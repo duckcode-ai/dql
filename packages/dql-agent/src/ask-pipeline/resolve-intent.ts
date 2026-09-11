@@ -57,6 +57,8 @@ export interface ResolveIntentInput {
   providerOptions?: ProviderRunOptions;
   onDispatch?: (event: { attempt: number; purpose: 'resolve' | 'correct'; raw: string; ms: number; problems?: IntentProblem[]; promptChars?: number }) => void;
   now?: () => number;
+  /** Pipeline-owned retrieval for a clause the reading left unresolved: entries not shown before (a named relation's columns, inventory hits), once. */
+  expand?: (need: { clauses: string[]; question: string; reading: string }) => Promise<{ vocabulary: VocabularyIndex; cards: string[]; note: string } | undefined>;
 }
 
 export interface IntentProblem { path: string; message: string; suggestions?: string[] }
@@ -391,6 +393,13 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
       return undefined;
     }),
   }));
+  // A time-axis problem suggests the DATE fields of the relations the measures
+  // read, never the nearest name to the wrong field: "metric is not a time
+  // dimension (authorized refs: metric_2, metric_x)" corrects nothing.
+  for (const problem of problems) {
+    if (!/is not a time dimension$/.test(problem.message)) continue;
+    problem.suggestions = timeAxesFor(intent, vocabulary);
+  }
   const display = intent.display.map((ref, index) => canonical(ref, DISPLAY_KINDS, `display[${index}]`));
   const filters = intent.filters.map((p, index) => predicate(p, `filters[${index}]`));
   const ordering = intent.ordering
@@ -975,6 +984,15 @@ function lastColumnOf(expr: string | undefined): string | undefined {
   return match?.[1];
 }
 
+/** The date fields a time breakdown of these measures could use: those on the measures' own relations first, then any. */
+export function timeAxesFor(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
+  const relationOf = (entry: VocabularyEntry | undefined) => (entry?.physical?.relation ?? entry?.model ?? '').replace(/"/g, '').toLowerCase();
+  const measureRelations = new Set(intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]).map((ref) => relationOf(vocabulary.get(ref) ?? vocabulary.resolve(ref))).filter(Boolean));
+  const dated = vocabulary.entries.filter((entry) => (entry.kind === 'dimension' || entry.kind === 'column') && entry.roles.includes('time'));
+  const own = dated.filter((entry) => measureRelations.has(relationOf(entry)));
+  return [...new Set([...own, ...dated].map((entry) => entry.ref))].slice(0, 6);
+}
+
 export function uncoveredQuestionTerms(question: string, intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): string[] {
   const used = new Set(intentRefs(intent));
   const usedIdentifiers = new Set([...used].flatMap((ref) => {
@@ -1049,6 +1067,15 @@ export function spellingHints(question: string, vocabulary: VocabularyIndex): st
  * is sent back WITH its card, so the model reads the object rather than a
  * bare identifier it has never seen.
  */
+/** The re-ask after retrieval: the entries the clause's words name, and how a count, an amount and a status read from raw columns. */
+function expansionMessage(clauses: string[], cards: string[]): string {
+  return [
+    `You left ${clauses.map((clause) => `"${clause}"`).join(', ')} unresolved. These entries exist, are authorized, and were not shown before:`,
+    ...cards,
+    'Read the clauses with them and resend the complete JSON object. Rules: a COUNT of things is `column:<relation>.<key column>` with aggregation count (a count of opportunities is the count of the opportunity key); an AMOUNT is its numeric column with aggregation sum; the rows that count ("lost", "won", "open") are a `scope` predicate on the outcome, stage or status column with the value as the question says it — the host grounds the stored value; a date breakdown is a groupBy with role time on the relation\'s date column; a fiscal period is a filter on the fiscal column when one exists. Keep unresolved ONLY what these entries do not cover.',
+  ].join('\n');
+}
+
 function correctionMessage(problems: IntentProblem[], cardFor?: (ref: string) => string | undefined): string {
   const unseen = new Map<string, string>();
   for (const ref of problems.flatMap((problem) => problem.suggestions ?? [])) {
@@ -1229,6 +1256,10 @@ export function coveredWords(intent: AnalyticalIntentV1, vocabulary: VocabularyI
   for (const predicate of [...intent.filters, ...intent.measures.flatMap((measure) => measure.scope ?? [])]) {
     for (const value of predicate.values) for (const word of normalizeVocabularyText(String(value)).split(' ')) if (word) covered.add(word);
   }
+  // A measure's aggregation accounts for the word that asked for it: "count"
+  // in "lost opportunities count" is the count of the opportunity key.
+  const AGGREGATION_WORDS: Record<string, string[]> = { count: ['count', 'counts', 'number'], count_distinct: ['count', 'counts', 'number', 'distinct', 'unique'], sum: ['sum', 'total', 'totals'], avg: ['average', 'avg', 'mean'], min: ['minimum', 'min', 'lowest', 'earliest'], max: ['maximum', 'max', 'highest', 'latest'], median: ['median'] };
+  for (const measure of intent.measures) for (const word of AGGREGATION_WORDS[measure.aggregation ?? ''] ?? []) covered.add(word);
   return covered;
 }
 
@@ -1577,6 +1608,7 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
   const ledgerEntries: LedgerEntry[] = [];
   const round = input.ledgerRound ?? 0;
   let ledgerCorrected = false;
+  let expanded = false;
   while (attempts < maxAttempts + (timeoutRetried ? 1 : 0)) {
     attempts += 1;
     const started = now();
@@ -1657,6 +1689,20 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       return { status: 'clarify', intent: clarify, question: clarify.unresolved[0]!.question!, options, attempts };
     }
     if (validation.followUpReplacement && attempts > 1) validation.problems = validation.problems.filter((problem) => problem.message !== validation.followUpReplacement);
+    // RETRIEVE, THEN RE-ASK: a material clause with no options while the
+    // reading names a relation (or words the inventory holds) is a retrieval
+    // gap first. Once.
+    const openClauses = validation.intent.kind === 'analytics' ? validation.intent.unresolved.filter((clause) => clause.material && clause.options.length === 0 && clause.kind !== 'unsupported').map((clause) => clause.clause) : [];
+    if (!expanded && input.expand && openClauses.length > 0 && attempts < maxAttempts) {
+      expanded = true;
+      const found = await input.expand({ clauses: openClauses, question: input.question, reading: validation.intent.reading });
+      if (found && found.cards.length > 0) {
+        input = { ...input, vocabulary: found.vocabulary };
+        lastDetail = `the reading left "${openClauses.join('; ')}" unresolved; entries not shown before were found`;
+        messages.push({ role: 'assistant', content: reply.raw }, { role: 'user', content: expansionMessage(openClauses, found.cards) });
+        continue;
+      }
+    }
     const bare = isBareIntent(parsed.intent);
     const askedQuestions = new Map(validation.intent.unresolved.map((clause) => [clause, clause.question]));
     if (input.selection) applySelectedMeaning(validation.intent, input.selection, input.vocabulary);
@@ -1803,6 +1849,15 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       status: 'clarify', intent: lastIntent, attempts, options: [],
       question: `The previous analysis also used ${clause}. Should this question keep that, or apply without it?`,
     };
+  }
+  // A reading that keeps naming the wrong field for a place the host can name
+  // the right candidates for is a question, not a dead end: "which date should
+  // the monthly breakdown use?" with the dates as options.
+  if (lastIntent && lastProblems.length > 0 && lastProblems.every((problem) => problem.suggestions?.length)) {
+    const options = [...new Set(lastProblems.flatMap((problem) => problem.suggestions ?? []))].slice(0, 6);
+    const label = (ref: string) => input.vocabulary.get(ref)?.label ?? input.vocabulary.get(ref)?.name ?? ref;
+    const question = `${lastProblems.map((problem) => `For ${problem.path}, the reading used something that ${problem.message.replace(/^\S+ /, '')}`).join('; ')}. Which of these should it use: ${options.map(label).join(', ')}?`;
+    return { status: 'clarify', intent: { ...lastIntent, unresolved: [...lastIntent.unresolved, { clause: lastProblems.map((problem) => problem.path).join(', '), options, material: true, question }] }, question, options, attempts, ...(ledger ? { ledger, ledgerEntries } : {}) };
   }
   return { status: 'failed', reason: lastProblems.length ? 'invalid' : 'unparseable', detail: lastDetail, problems: lastProblems, attempts };
 }

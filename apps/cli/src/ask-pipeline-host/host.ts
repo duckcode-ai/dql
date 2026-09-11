@@ -46,6 +46,9 @@ import {
   type VocabularyEntry,
   renderPhysicalIdentifier,
   renderPhysicalRelation,
+  renderCard,
+  validateSqlAgainstLocalContext,
+  type AgentMessage,
 } from '@duckcodeailabs/dql-agent';
 import { buildProjectVocabulary, buildVocabularySource, normalizeRelationName, type VocabularySourceInput } from './vocabulary-source.js';
 
@@ -86,6 +89,8 @@ export interface AskPipelineHostDeps {
   conversation?(request: AgentRunRequest): { summary?: string; pendingClarification?: string } | undefined;
   buildIdentity?(): Record<string, string>;
   maxRows?: number;
+  /** Run the review-required SQL tier on its own when nothing governed prepares (default true); `agent.askAutoExploration: false` keeps it opt-in. */
+  autoExploration?: boolean;
   /** Whether the project allowlists this physical column for an exact literal probe (`agent.runtimeValueGrounding`). */
   literalProbeAllowed?(relation: string, column: string): boolean;
   /** Distinct stored values equal to the literal ignoring case, on an allowlisted column; bounded, equality-predicated. */
@@ -601,7 +606,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     probedColumns.set(cacheKey, named);
     return named;
   };
-  type VocabularyView = { vocabulary: VocabularyIndex; context?: NonNullable<Parameters<typeof runAskPipeline>[0]['context']>; envelope: DomainContextEnvelope };
+  type VocabularyView = { vocabulary: VocabularyIndex; context?: NonNullable<Parameters<typeof runAskPipeline>[0]['context']>; envelope: DomainContextEnvelope; pack?: LocalContextPack };
   let viewCache: { key: string; view: VocabularyView } | undefined;
 
   /** The request's scope, resolved server-side from what the surface sent; never from client-supplied ancestors or imports. */
@@ -670,7 +675,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     const relationsTotal = pack.eligible ? Object.entries(pack.eligible.counts).filter(([type]) => type === 'dbt_model' || type === 'dbt_source' || type === 'warehouse_table').reduce((sum, [, count]) => sum + count, 0) : (projected.source.relations?.length ?? 0);
     const relationsWithColumns = (projected.source.relations ?? []).filter((relation) => relation.columns.length > 0).length;
     const view: VocabularyView = {
-      vocabulary, envelope,
+      vocabulary, envelope, pack,
       context: {
         packId: pack.id, snapshotId: envelope.snapshotId, envelope: ledgerEnvelope(envelope),
         retrieved: { lanes, fused: pack.retrievalDiagnostics.fusion?.selectedKeys.length ?? pack.objects.length },
@@ -840,11 +845,59 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     // in this phase must show where its time went, so the assembly is an event.
     emit({ type: 'executor.started', message: `Context assembled in ${contextMs} ms: ${vocabulary.entries.length} governed objects${engine ? ` · semantic engine ${engine}` : ''}.`, route: 'generated_answer' });
     emit({ type: 'executor.started', message: prior ? 'Reading the question as an edit of the previous analysis.' : 'Reading the question against the governed vocabulary.', route: 'generated_answer' });
+    const ledgered = withLedger(provider, deps, request);
+    // ON-DEMAND DESCRIPTION: a relation the reading names whose columns the
+    // bounded probe never reached is described now, for this one run.
+    const describeRelations = async (relations: string[]) => {
+      if (!connection) return [];
+      const sql = relationColumnsProbeSql(relations, 8);
+      if (!sql) return [];
+      const result = await deps.executor.executeQuery(sql, [], {}, connection);
+      return underAskedNames(relationsFromProbeRows((result.rows ?? []) as Array<Record<string, unknown>>), relations);
+    };
+    // THE LAST TIER'S DRAFT: one read-only statement from the reading and the
+    // admitted relations and columns, validated against the catalog before
+    // the tier may even consider it. Review-required by construction.
+    const draftSql: NonNullable<PrepareDeps['draftSql']> = async ({ question, intent, vocabulary: current }) => {
+      const refs = [...intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]), ...intent.groupBy.map((group) => group.ref), ...intent.display, ...intent.filters.map((filter) => filter.ref), ...intent.measures.flatMap((measure) => (measure.scope ?? []).map((predicate) => predicate.ref))];
+      const relationOf = (ref: string): string | undefined => {
+        const entry = current.get(ref) ?? current.resolve(ref);
+        if (!entry) return undefined;
+        if (entry.kind === 'relation') return entry.model ?? entry.name;
+        if (entry.kind === 'column') return ref.slice(ref.indexOf(':') + 1).split('.').slice(0, -1).join('.');
+        return entry.physical?.relation?.replace(/"/g, '') ?? undefined;
+      };
+      const text = ` ${question} ${intent.reading} `.toLowerCase();
+      const named = current.entries.filter((entry) => entry.kind === 'relation' && [entry.name, entry.model ?? ''].some((name) => name && text.includes(` ${name.toLowerCase()} `))).map((entry) => entry.model ?? entry.name);
+      const relations = [...new Set([...refs.map(relationOf).filter((relation): relation is string => Boolean(relation)), ...named])].slice(0, 6);
+      if (relations.length === 0) return { error: 'the reading names no relation to draft from' };
+      const cards: string[] = [];
+      let chars = 0;
+      for (const relation of relations) {
+        const entry = current.get(`relation:${relation}`);
+        const lines = [entry ? renderCard(entry) : `- relation:${relation}`, ...current.entries.filter((item) => item.kind === 'column' && item.ref.toLowerCase().startsWith(`column:${relation.toLowerCase()}.`)).map((item) => renderCard(item))];
+        for (const line of lines) { if (chars + line.length > 14_000) break; cards.push(line); chars += line.length + 1; }
+      }
+      const dialect = connection?.driver ?? 'duckdb';
+      const messages: AgentMessage[] = [
+        { role: 'system', content: `You write exactly ONE read-only SQL statement for ${dialect}. Use ONLY the relations and columns listed below, spelled exactly as listed (schema.table and column names); no other tables, no DDL or DML, no comments, no explanation. Apply every restriction of the reading with its filter values verbatim; aggregate at the grain the reading asks for; order and limit as it asks; never return more than 500 rows. Return the SQL only.` },
+        { role: 'user', content: `QUESTION: ${question}\nREADING: ${intent.reading}\nINTENT: ${JSON.stringify({ measures: intent.measures, groupBy: intent.groupBy, display: intent.display, filters: intent.filters, time: intent.time ?? null, ordering: intent.ordering ?? null, limit: intent.limit ?? null })}\nRELATIONS AND COLUMNS:\n${cards.join('\n')}` },
+      ];
+      const raw = await ledgered.generate(messages, { temperature: 0 });
+      const fenced = /```(?:sql)?\s*([\s\S]*?)```/i.exec(raw);
+      const sql = (fenced ? fenced[1]! : raw).trim();
+      if (!sql) return { error: 'the provider returned no SQL' };
+      const validation = validateSqlAgainstLocalContext(sql, view.pack, { dialect, question });
+      if (!validation.ok) return { error: `the drafted SQL was not accepted: ${validation.error}` };
+      return { sql, relations: validation.referencedRelations, proof: [`validated against the catalog: it reads ${validation.referencedRelations.join(', ') || 'admitted relations only'}`, ...validation.warnings.slice(0, 3)], engine: dialect };
+    };
     const outcome = await runAskPipeline({
       question: request.question,
       vocabulary,
-      provider: withLedger(provider, deps, request),
-      prepareDeps: prepareDeps(connection ?? { driver: 'duckdb' } as ConnectionConfig, vocabulary, engine),
+      provider: ledgered,
+      describeRelations,
+      explorationAuto: deps.autoExploration !== false,
+      prepareDeps: { ...prepareDeps(connection ?? { driver: 'duckdb' } as ConnectionConfig, vocabulary, engine), draftSql },
       executeDeps: {
         maxRows: deps.maxRows ?? 500,
         run: async (sql, params, options) => {
@@ -1269,17 +1322,18 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
   if (outcome.kind !== 'answered') throw new Error(`unreachable pipeline outcome ${String((outcome as { kind: string }).kind)}`);
   const { candidate, result } = outcome;
   const certified = candidate.trust === 'certified';
+  const reviewRequired = candidate.trust === 'review_required';
   // A certified block served as published for a question it cannot answer
   // with identity is evidence: governed trust, the block as its source.
   const blockAsEvidence = candidate.tier === 'certified' && !certified;
-  const route = certified ? { tier: 'certified_block', label: 'Certified block' } : blockAsEvidence ? { tier: 'certified_block', label: 'Certified block, served as evidence' } : candidate.tier === 'semantic' ? { tier: 'semantic_metric', label: 'Semantic metric' } : { tier: 'governed_relational', label: 'Governed relational program' };
-  const trustState = certified ? 'certified' : 'governed';
+  const route = certified ? { tier: 'certified_block', label: 'Certified block' } : blockAsEvidence ? { tier: 'certified_block', label: 'Certified block, served as evidence' } : reviewRequired ? { tier: 'generated_sql', label: 'AI-drafted SQL (review required)' } : candidate.tier === 'semantic' ? { tier: 'semantic_metric', label: 'Semantic metric' } : { tier: 'governed_relational', label: 'Governed relational program' };
+  const trustState = certified ? 'certified' : reviewRequired ? 'review_required' : 'governed';
   const payload = {
     kind: certified ? 'certified' : 'uncertified',
     route,
     sourceTier: certified || blockAsEvidence ? 'certified_artifact' : candidate.tier === 'semantic' ? 'semantic_layer' : 'dbt_manifest',
-    certification: certified ? 'certified' : 'governed',
-    reviewStatus: certified ? 'certified' : 'governed',
+    certification: certified ? 'certified' : reviewRequired ? 'review_required' : 'governed',
+    reviewStatus: certified ? 'certified' : reviewRequired ? 'review_required' : 'governed',
     text: outcome.text,
     answer: outcome.text,
     sql: candidate.sql,
