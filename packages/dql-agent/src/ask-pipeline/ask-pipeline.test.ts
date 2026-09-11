@@ -2254,6 +2254,37 @@ describe('the relations a reading names are described before it is prepared', ()
     expect(outcome.kind).not.toBe('answered');
     expect(outcome.receipt.refusals.some((refusal) => refusal.code === 'join_path_required')).toBe(true);
   });
+
+  it('a join no governed relationship covers sends the full reading to AI-drafted SQL, and the question is never shrunk', async () => {
+    let dispatches = 0;
+    const counting: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => { dispatches += 1; return reading; } };
+    const drafts: Array<{ reading?: string; reason?: string }> = [];
+    const outcome = await runAskPipeline({
+      question: 'points by player', vocabulary: buildVocabularyIndex(source), provider: counting, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async (draft) => { drafts.push({ reading: draft.intent?.reading, reason: draft.reason }); return { sql: 'SELECT s.player_name, SUM(g.points) AS points_scored FROM dev.game_facts g JOIN dev.season_facts s ON s.player_id = g.player_id GROUP BY s.player_name', relations: ['dev.game_facts', 'dev.season_facts'], proof: [] }; } },
+      executeDeps: { run: async () => ({ columns: ['player_name', 'points_scored'], rows: [{ player_name: 'James Harden', points_scored: 2888 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(dispatches).toBe(1);
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]!.reading).toBe('Points by player.');
+    expect(drafts[0]!.reason).toContain('no governed relationship joins them');
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.candidate.tier).toBe('exploratory');
+  });
+
+  it("a drafted statement runs when it spells the reading's restriction its own way", async () => {
+    const restricted = JSON.stringify({
+      version: 1, kind: 'analytics', reading: 'Points for James Harden.', measures: [{ ref: 'metric:points_scored' }],
+      groupBy: [{ ref: 'dimension:season_facts.player', role: 'key' }], display: [], filters: [{ ref: 'dimension:season_facts.player', op: 'eq', values: ['James Harden'], source: 'question' }], unresolved: [], provenance: {}, expectedShape: 'grouped',
+    });
+    const outcome = await runAskPipeline({
+      question: 'points for the player harden', vocabulary: buildVocabularyIndex(source), provider: { name: 'ollama', available: async () => true, generate: async () => restricted }, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { dialect, draftSql: async () => ({ sql: "SELECT s.player_name, SUM(g.points) AS points_scored FROM dev.game_facts g JOIN dev.season_facts s ON s.player_id = g.player_id WHERE LOWER(s.player_name) LIKE '%harden%' GROUP BY s.player_name", relations: ['dev.game_facts', 'dev.season_facts'], proof: [] }) },
+      executeDeps: { run: async () => ({ columns: ['player_name', 'points_scored'], rows: [{ player_name: 'James Harden', points_scored: 2888 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(outcome.kind).toBe('answered');
+    expect(outcome.receipt.refusals.some((refusal) => refusal.code === 'filter_not_applied')).toBe(false);
+  });
 });
 
 import { resolveIntent as resolveIntentForOffice, validateIntentRefs as validateRefsForOffice } from './resolve-intent.js';

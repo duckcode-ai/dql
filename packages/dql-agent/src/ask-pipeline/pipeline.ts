@@ -664,7 +664,19 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       step('schema', `${attempt === 1 ? 'Drafted' : 'Redrafted'} SQL over ${(candidate.relations ?? []).join(', ') || 'the described tables'}`, 'done', { detail: candidate.sql, ms: draftMs });
       receipt.candidates.push({ tier: candidate.tier, trust: candidate.trust, proof: candidate.proof, sqlFingerprint: fingerprintSql(candidate.sql), ...(candidate.engine ? { engine: candidate.engine } : {}) });
       const executeStarted = now();
-      const executed = await countedExecute(candidate, reading, input.executeDeps);
+      // The reading guides the draft; it does not dictate its spelling. A
+      // governed composition must bind the reading's literals and window as
+      // written, but a drafted statement may say FY26 as FISCAL_YEAR = 2026 or
+      // "lost" as NOT IS_WON. What the question states was already checked on
+      // the statement itself before it got here, so the execution proofs read
+      // the measures and groupings, not the filters and window.
+      const executionReading: AnalyticalIntentV1 = {
+        ...reading,
+        filters: [],
+        measures: reading.measures.map(({ scope: _scope, ...measure }) => measure),
+        ...(reading.time ? { time: { ...reading.time, window: undefined } } : {}),
+      } as AnalyticalIntentV1;
+      const executed = await countedExecute(candidate, executionReading, input.executeDeps);
       mark(attempt === 1 ? 'schema_execute' : 'schema_reexecute', executeStarted);
       const runMs = timings[attempt === 1 ? 'schema_execute' : 'schema_reexecute'];
       if (executed.ok) {
@@ -1078,6 +1090,19 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         round -= 1;
         continue;
       }
+    }
+    // A JOIN NOBODY GOVERNS IS NOT A REASON TO SHRINK THE QUESTION. The
+    // reading needs two relations together, no governed relationship joins
+    // them and the warehouse could not prove one. Asking the interpreter to
+    // "read the question over one relation" drops the restriction the other
+    // relation carries (the competitor, in the office run) and costs a
+    // dispatch; the full reading goes to the schema lane instead, which may
+    // join them and is checked before it runs. The shrinking repair remains
+    // only for a draft that declines.
+    const ungovernedJoin = prepared.refusals.find((refusal) => refusal.code === 'join_path_required');
+    if (ungovernedJoin && round === 0 && (input.explorationOptIn || input.explorationAuto) && input.prepareDeps.draftSql) {
+      const drafted = await schemaLane(`the reading needs ${ungovernedJoin.relations?.length ? ungovernedJoin.relations.join(' and ') : 'two relations'} together and no governed relationship joins them (${ungovernedJoin.message.slice(0, 200)})`, intent, { onDecline: 'fallthrough' });
+      if (drafted) return drafted;
     }
     // One bounded repair: a repairable compile refusal goes back to the resolver with the engine's words.
     const repairable = prepared.refusals.find((refusal) => refusal.repairable);
