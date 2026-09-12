@@ -214,6 +214,28 @@ function emptyGitGovernedContextGroup(): GitGovernedContextGroup {
   return { total: 0, tracked: 0, changed: 0, untracked: 0, ignored: 0, paths: [] };
 }
 
+export type BlockHistoryStatus = 'ok' | 'not_a_repo' | 'git_unavailable' | 'error';
+
+export interface BlockHistoryResult {
+  entries: Array<{ hash: string; date: string; author: string; message: string }>;
+  status: BlockHistoryStatus;
+  message?: string;
+}
+
+/** Result of a Git write. `code` is the server's machine-readable reason (e.g. `no_remote`, `already_a_repo`, `invalid_url`). */
+export interface GitWriteResult {
+  ok: boolean;
+  error?: string;
+  code?: string;
+  /** Raw git output behind a plain-language `error`. */
+  detail?: string;
+}
+
+function gitWriteFailure(error: unknown): GitWriteResult {
+  const code = error instanceof DqlApiError && typeof error.code === 'string' ? error.code : undefined;
+  return { ok: false, error: error instanceof Error ? error.message : String(error), ...(code ? { code } : {}) };
+}
+
 // ── Apps API types ───────────────────────────────────────────────────────
 
 export interface AppDocumentSummary {
@@ -3156,7 +3178,8 @@ export interface LocalOperation<TResult = unknown> {
 }
 
 export interface BlockCertificationOperationResult {
-  outcome: 'certified' | 'draft_saved_with_blockers';
+  /** `certified_unchanged_with_blockers`: a re-check of an unchanged certified block failed; nothing was written and it is still certified. */
+  outcome: 'certified' | 'draft_saved_with_blockers' | 'certified_unchanged_with_blockers';
   oldPath: string;
   draftPath: string;
   newPath?: string;
@@ -4777,11 +4800,13 @@ export const api = {
       lastModified: string; description: string;
       llmContext?: string | null;
     }>;
+    /** Why the library could not be read; an empty library is not the same as a failed one. */
+    error?: string;
   }> {
     try {
       return await request('/api/blocks/library');
-    } catch {
-      return { blocks: [] };
+    } catch (error) {
+      return { blocks: [], error: error instanceof Error ? error.message : 'The block library could not be loaded.' };
     }
   },
 
@@ -4816,13 +4841,17 @@ export const api = {
     });
   },
 
-  async getBlockHistory(path: string): Promise<{
-    entries: Array<{ hash: string; date: string; author: string; message: string }>;
-  }> {
+  async getBlockHistory(path: string): Promise<BlockHistoryResult> {
     try {
-      return await request(`/api/blocks/history?path=${encodeURIComponent(path)}`);
-    } catch {
-      return { entries: [] };
+      const result = await request<Partial<BlockHistoryResult>>(`/api/blocks/history?path=${encodeURIComponent(path)}`);
+      return {
+        entries: Array.isArray(result?.entries) ? result.entries : [],
+        // An older server returned only `{ entries }`.
+        status: result?.status ?? 'ok',
+        ...(result?.message ? { message: result.message } : {}),
+      };
+    } catch (e) {
+      return { entries: [], status: 'error', message: e instanceof Error ? e.message : String(e) };
     }
   },
 
@@ -6534,6 +6563,11 @@ export const api = {
     }
   },
 
+  /**
+   * Throws on transport/server errors. `inRepo: false` only ever comes from the
+   * server's own not-a-repository answer, so a 500 or auth failure is never
+   * shown as "Not a git repository".
+   */
   async fetchGitStatus(): Promise<{
     inRepo: boolean;
     branch: string | null;
@@ -6541,11 +6575,7 @@ export const api = {
     behind: number;
     changes: Array<{ path: string; status: string }>;
   }> {
-    try {
-      return await request<any>('/api/git/status');
-    } catch {
-      return { inRepo: false, branch: null, ahead: 0, behind: 0, changes: [] };
-    }
+    return request<any>('/api/git/status');
   },
 
   async fetchGitLog(limit = 20): Promise<{
@@ -6600,11 +6630,28 @@ export const api = {
     }
   },
 
+  /** Throws on transport/server errors (see fetchGitStatus). */
   async fetchGitRemote(): Promise<{ inRepo: boolean; url: string | null; name: string | null }> {
+    return request<any>('/api/git/remote');
+  },
+
+  /** `git init` for a project that is not inside a repository yet. The server refuses an existing repository. */
+  async gitInit(): Promise<GitWriteResult & { status?: { inRepo: boolean; branch: string | null } }> {
     try {
-      return await request<any>('/api/git/remote');
-    } catch {
-      return { inRepo: false, url: null, name: null };
+      return await request<any>('/api/git/init', { method: 'POST', body: '{}' });
+    } catch (e) {
+      return gitWriteFailure(e);
+    }
+  },
+
+  /** Save a remote URL (`git remote add`, or `set-url` with `replace`). Never contacts the remote. */
+  async gitAddRemote(payload: { url: string; name?: string; replace?: boolean }): Promise<GitWriteResult & {
+    name?: string; url?: string | null; replaced?: boolean;
+  }> {
+    try {
+      return await request<any>('/api/git/remote', { method: 'POST', body: JSON.stringify(payload) });
+    } catch (e) {
+      return gitWriteFailure(e);
     }
   },
 
@@ -6675,19 +6722,20 @@ export const api = {
     }
   },
 
-  async gitPush(): Promise<{ ok: boolean; error?: string; output?: string }> {
+  /** `code: 'no_remote'` means the project needs a remote before anything can be sent. */
+  async gitPush(): Promise<GitWriteResult & { output?: string }> {
     try {
       return await request<any>('/api/git/push', { method: 'POST', body: '{}' });
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      return gitWriteFailure(e);
     }
   },
 
-  async gitPull(): Promise<{ ok: boolean; error?: string; output?: string }> {
+  async gitPull(): Promise<GitWriteResult & { output?: string }> {
     try {
       return await request<any>('/api/git/pull', { method: 'POST', body: '{}' });
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      return gitWriteFailure(e);
     }
   },
 

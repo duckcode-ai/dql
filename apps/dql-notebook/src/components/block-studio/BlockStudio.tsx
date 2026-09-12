@@ -207,6 +207,8 @@ export function BlockStudio() {
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [historyEntries, setHistoryEntries] = useState<Array<{ hash: string; date: string; author: string; message: string }>>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyStatus, setHistoryStatus] = useState<{ status: Awaited<ReturnType<typeof api.getBlockHistory>>['status']; message?: string }>({ status: 'ok' });
+  const historyRequestRef = useRef<{ key: string; seq: number }>({ key: '', seq: 0 });
   const [lineageLoading, setLineageLoading] = useState(false);
   const [lineageDetail, setLineageDetail] = useState<{
     node: { id: string; type: string; name: string; domain?: string } | null;
@@ -291,6 +293,7 @@ export function BlockStudio() {
     setCertificationOperationId(null);
     setHistoryEntries([]);
     setHistoryLoaded(false);
+    setHistoryStatus({ status: 'ok' });
     setResultTab('results');
   }, []);
 
@@ -323,6 +326,9 @@ export function BlockStudio() {
       sourceFingerprint: state.blockStudioMetadata?.sourceFingerprint,
     });
     if (!operation || handledCertificationOperationsRef.current.has(operation.id)) return;
+    // Only a certification still in progress is picked up again. A finished one
+    // from earlier must not replay its checklist or error, or keep Certify disabled.
+    if (operation.status !== 'queued' && operation.status !== 'running') return;
     trackOperation(operation);
     setCertificationOperationId(operation.id);
     const result = operation.result as BlockCertificationOperationResult | undefined;
@@ -363,7 +369,9 @@ export function BlockStudio() {
         blockers: result?.blockers ?? result?.checklist?.blockers,
         error: result?.outcome === 'draft_saved_with_blockers'
           ? 'The draft was saved. Resolve the certification blockers and try again.'
-          : undefined,
+          : result?.outcome === 'certified_unchanged_with_blockers'
+            ? 'The certified version is unchanged. Resolve these blockers to re-certify it.'
+            : undefined,
       });
       setSaveError(null);
     } else {
@@ -590,20 +598,37 @@ export function BlockStudio() {
     void loadBlockLineage(activeBlockName);
   }, [activeBlockName, loadBlockLineage]);
 
+  const historySourceFingerprint = state.blockStudioMetadata?.sourceFingerprint;
   const loadBlockHistory = useCallback(() => {
     const blockPath = state.activeBlockPath;
     if (!blockPath || historyLoaded) return;
+    const key = `${blockPath}\u0000${historySourceFingerprint ?? ''}`;
+    if (historyRequestRef.current.key === key) return; // this version is already loading
+    const seq = historyRequestRef.current.seq + 1;
+    historyRequestRef.current = { key, seq };
     const scopeEpoch = blockScopeEpochRef.current;
-    void api.getBlockHistory(blockPath).then((result) => {
+    const settle = (entries: typeof historyEntries, status: typeof historyStatus) => {
+      if (historyRequestRef.current.seq !== seq) return;
+      historyRequestRef.current = { key: '', seq };
       if (scopeEpoch !== blockScopeEpochRef.current || blockPath !== lastActiveBlockPathRef.current) return;
-      setHistoryEntries(result.entries);
+      setHistoryEntries(entries);
+      setHistoryStatus(status);
       setHistoryLoaded(true);
-    }).catch(() => {
-      if (scopeEpoch !== blockScopeEpochRef.current) return;
-      setHistoryEntries([]);
-      setHistoryLoaded(true);
-    });
-  }, [historyLoaded, state.activeBlockPath]);
+    };
+    void api.getBlockHistory(blockPath)
+      .then((result) => settle(result.entries, { status: result.status, message: result.message }))
+      .catch((error) => settle([], { status: 'error', message: error instanceof Error ? error.message : String(error) }));
+  }, [historyLoaded, historySourceFingerprint, state.activeBlockPath]);
+
+  // A saved block gets a new path or source fingerprint: drop the old history
+  // and load it again if the History tab is showing.
+  useEffect(() => {
+    historyRequestRef.current = { key: '', seq: historyRequestRef.current.seq + 1 };
+    setHistoryLoaded(false);
+  }, [state.activeBlockPath, historySourceFingerprint]);
+  useEffect(() => {
+    if (resultTab === 'history' && !historyLoaded) loadBlockHistory();
+  }, [historyLoaded, loadBlockHistory, resultTab]);
 
   const handleDraftChange = (draft: string) => {
     setRunError(null);
@@ -974,16 +999,29 @@ export function BlockStudio() {
         setEditorMode('source');
         return false;
       }
-      await persistBlockStudioDraft(sourceToSave);
+      const editingCertified = state.blockStudioMetadata.reviewStatus === 'certified';
+      const saved = await persistBlockStudioDraft(sourceToSave);
       setRecoveryError(null);
       setRecoveryScope(null);
       setRepairNotice(null);
       setRepairWarning(null);
+      // Edits to a certified block land in a draft beside it; say so, so the move to the draft is not a surprise.
+      if (editingCertified && /(^|\/)_drafts\//.test(saved.path)) {
+        setRepairNotice('Saved as a draft beside the certified block. The certified version stays in use until this draft is certified.');
+      }
       setResultTab('save');
       return true;
     } catch (err: any) {
       const msg = err?.message ?? 'Save failed';
-      setSaveError(msg.includes('409') || msg.includes('BLOCK_EXISTS') ? 'A block with this name already exists. Rename and try again.' : msg);
+      // The server re-validates: show its reason with the same recovery actions as the page's own check.
+      if (err?.code === 'BLOCK_VALIDATION_FAILED') {
+        setSaveError(`Draft not saved: ${msg}`);
+        setRecoveryError(msg);
+        setRecoveryScope('save');
+        setEditorMode('source');
+        return false;
+      }
+      setSaveError(err?.code === 'BLOCK_EXISTS' || err?.status === 409 ? 'A block with this name already exists in this folder. Rename it and try again.' : msg);
       return false;
     } finally {
       setSaving(false);
@@ -1055,9 +1093,11 @@ export function BlockStudio() {
       setCertificationOperationId(accepted.operation.id);
       certificationPathsRef.current = new Set([
         state.activeBlockPath,
-        accepted.draft.path,
+        accepted.draft?.path,
       ].filter((value): value is string => Boolean(value)));
-      dispatch({ type: 'BLOCK_CERTIFICATION_ACCEPTED', source: sourceToSave });
+      dispatch({ type: 'BLOCK_CERTIFICATION_ACCEPTED', source: sourceToSave, ...(accepted.draft ? { draft: accepted.draft } : {}) });
+      // A draft written beside a certified block shows in the sidebar straight away.
+      setBlockLibraryRefreshKey((current) => current + 1);
       setCertificationResult({
         pending: true,
       });
@@ -1065,9 +1105,14 @@ export function BlockStudio() {
       return true;
     } catch (err: any) {
       certificationPathsRef.current.clear();
-      const msg = err?.message ?? 'Save failed';
-      setSaveError(msg.includes('409') || msg.includes('BLOCK_EXISTS') ? 'A block with this name already exists. Rename and try again.' : msg);
-      setTimeout(() => setSaveError(null), 5000);
+      const msg = err?.message ?? 'Certification could not start';
+      setSaveError(
+        err?.code === 'SOURCE_CHANGED'
+          ? 'This block changed on disk after you opened it. Reopen it to certify the latest version.'
+          : err?.code === 'BLOCK_EXISTS'
+            ? 'A block with this name already exists in this folder. Rename it and try again.'
+            : msg,
+      );
       return false;
     } finally {
       mutationInFlightRef.current = false;
@@ -1087,6 +1132,18 @@ export function BlockStudio() {
       }
     });
   }, [state.blockStudioMetadata?.name, state.blockStudioMetadata?.owner, state.blockStudioDraft]);
+
+  // Cmd/Ctrl+S on this page runs this page's save, so the identity check,
+  // validation, the certified-to-draft rule and the sidebar refresh all apply.
+  const saveShortcutRef = useRef(handleSave);
+  saveShortcutRef.current = handleSave;
+  const saveShortcutEnabledRef = useRef(false);
+  saveShortcutEnabledRef.current = Boolean(state.blockStudioMetadata) && !saving;
+  useEffect(() => {
+    const onSaveShortcut = () => { if (saveShortcutEnabledRef.current) void saveShortcutRef.current(); };
+    window.addEventListener('dql:block-studio-save', onSaveShortcut);
+    return () => window.removeEventListener('dql:block-studio-save', onSaveShortcut);
+  }, []);
 
   const handleImportCandidateSelect = (candidate: BlockStudioImportCandidate) => {
     const candidatePath = candidate.savedPath ?? candidate.draftSave?.path ?? '';
@@ -1549,7 +1606,8 @@ export function BlockStudio() {
             />
           )}
           <div style={{ flex: 1 }} />
-          {state.activeBlockPath && (
+          {/* The block overview has its own Run and Delete; the toolbar shows them only while editing. */}
+          {state.activeBlockPath && editorMode !== 'detail' && (
             <TemplateButton
               label="Delete"
               Icon={Trash2}
@@ -1561,11 +1619,14 @@ export function BlockStudio() {
           <TemplateButton label="New block" Icon={Plus} onClick={beginNewWorkspace} />
           {hasActiveDraft && (
             <>
-              <TemplateButton
-                label="Ask AI"
-                Icon={Sparkles}
-                onClick={() => openAskAi({ kind: 'ask' })}
-              />
+              {/* A saved block gets one AI action, Modify with AI; Ask AI is for a block not saved yet. */}
+              {!state.activeBlockPath && (
+                <TemplateButton
+                  label="Ask AI"
+                  Icon={Sparkles}
+                  onClick={() => openAskAi({ kind: 'ask' })}
+                />
+              )}
               {/* Modify the block currently in the editor — the governed cascade in
                   edit mode (workspaceContext.mode='edit' + blockPath). */}
               {state.activeBlockPath && (
@@ -1575,7 +1636,7 @@ export function BlockStudio() {
                   onClick={() => openAskAi({ kind: 'edit', initialInput: `Modify this block${activeBlockName ? ` (${activeBlockName})` : ''}: ` })}
                 />
               )}
-              <TemplateButton label="Run" Icon={Play} onClick={() => void handleRun()} busy={running} />
+              {editorMode !== 'detail' && <TemplateButton label="Run" Icon={Play} onClick={() => void handleRun()} busy={running} />}
               <TemplateButton
                 label={saving ? 'Saving' : 'Save draft'}
                 Icon={CheckCircle2}
@@ -1926,7 +1987,14 @@ export function BlockStudio() {
             />
           )}
           {resultTab === 'history' && (
-            <HistoryPanel entries={historyEntries} t={t} />
+            <HistoryPanel
+              entries={historyEntries}
+              loaded={historyLoaded}
+              status={historyStatus.status}
+              message={historyStatus.message}
+              onOpenSourceControl={() => dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'git' })}
+              t={t}
+            />
           )}
           {resultTab === 'save' && (
             <div style={{ display: 'grid', gap: 12 }}>
@@ -2054,7 +2122,7 @@ export function BlockStudio() {
       )}
 
       {!aiDockOpen && !compactLayout && (
-        <button type="button" onClick={() => setAiDockOpen(true)} title="Open Block AI" style={{ position: 'absolute', right: 12, top: 58, width: 34, height: 34, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.accent, cursor: 'pointer', boxShadow: '0 6px 18px rgba(0, 0, 0, 0.12)' }}>
+        <button type="button" onClick={() => setAiDockOpen(true)} title="Open Block AI" aria-label="Open Block AI" style={{ position: 'absolute', right: 16, bottom: 16, zIndex: 5, width: 34, height: 34, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.accent, cursor: 'pointer', boxShadow: '0 6px 18px rgba(0, 0, 0, 0.12)' }}>
           <PanelRightOpen size={16} strokeWidth={2} />
         </button>
       )}
@@ -6069,13 +6137,49 @@ function TestsPanel({
 
 function HistoryPanel({
   entries,
+  loaded,
+  status,
+  message,
+  onOpenSourceControl,
   t,
 }: {
   entries: Array<{ hash: string; date: string; author: string; message: string }>;
+  loaded: boolean;
+  status: 'ok' | 'not_a_repo' | 'git_unavailable' | 'error';
+  message?: string;
+  onOpenSourceControl: () => void;
   t: Theme;
 }) {
+  if (!loaded) {
+    return <EmptyPanel message="Loading version history…" />;
+  }
   if (entries.length === 0) {
-    return <EmptyPanel message="No version history available. Commit changes to build history." />;
+    const text = status === 'not_a_repo'
+      ? 'This project is not a Git repository yet, so blocks have no version history. Set up Git from Source control.'
+      : status === 'git_unavailable'
+        ? (message ?? 'Git is not installed or is not on the PATH of the DQL server, so version history is unavailable.')
+        : status === 'error'
+          ? `Version history could not be loaded: ${message ?? 'unknown error'}`
+          : 'No commits include this block yet. Commit it from Source control to start its history.';
+    return (
+      <div style={{ padding: 16, display: 'grid', gap: 10, justifyItems: 'start' }}>
+        <div role={status === 'error' ? 'alert' : undefined} style={{ fontSize: 12, color: status === 'error' ? t.error : t.textMuted, fontFamily: t.font, lineHeight: 1.5 }}>
+          {text}
+        </div>
+        {status !== 'git_unavailable' && (
+          <button
+            type="button"
+            onClick={onOpenSourceControl}
+            style={{
+              border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.textPrimary,
+              borderRadius: 6, padding: '5px 10px', fontSize: 12, fontFamily: t.font, cursor: 'pointer',
+            }}
+          >
+            {status === 'not_a_repo' ? 'Set up Git in Source control' : 'Open Source control'}
+          </button>
+        )}
+      </div>
+    );
   }
 
   return (

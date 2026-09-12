@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 import {
   dirname,
   extname,
+  isAbsolute,
   join,
   normalize,
   relative,
@@ -17951,6 +17952,35 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       res.end(serializeJSON(await readGitRemote(projectRoot)));
       return;
     }
+    // POST /api/git/init — `git init` in the project root, only when the
+    // project is not already inside a repository.
+    if (req.method === 'POST' && path === '/api/git/init') {
+      try {
+        const result = await gitInitProject(projectRoot);
+        const status = result.ok ? 201 : result.code === 'already_a_repo' ? 409 : result.code === 'git_unavailable' ? 503 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, code: 'error', error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
+    // POST /api/git/remote { name?, url, replace? } — saves the remote address
+    // locally (`git remote add|set-url`). Never fetches or contacts the remote.
+    if (req.method === 'POST' && path === '/api/git/remote') {
+      try {
+        const body = (await readJSON(req)) as { name?: unknown; url?: unknown; replace?: unknown };
+        const result = await gitAddRemote(projectRoot, body ?? {});
+        const status = result.ok ? 200 : result.code === 'remote_exists' ? 409 : result.code === 'error' ? 500 : 400;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, code: 'error', error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
     if (req.method === 'GET' && path === '/api/git/governed-context') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON(await readGitGovernedContext(projectRoot)));
@@ -18436,21 +18466,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               try {
                 const source = readFileSync(filePath, 'utf-8');
                 const stat = statSync(filePath);
-                // Quick regex parse for key block fields
-                const nameMatch = /block\s+"([^"]+)"/.exec(source);
+                // Quick parse for key block fields. Each field is matched at the
+                // start of its own line, so `review_status = ...` or a word inside
+                // a description never stands in for the block's status or domain.
+                const nameMatch = /^\s*block\s+"([^"]+)"/m.exec(source);
                 // `domains/**/domain.dql` is a business-boundary declaration,
                 // not a reusable block. Only a real block declaration belongs
                 // in the Blocks library.
                 if (!nameMatch) continue;
-                const domainMatch = /domain\s*=\s*"([^"]+)"/.exec(source);
-                const statusMatch = /status\s*=\s*"([^"]+)"/.exec(source);
-                const ownerMatch = /owner\s*=\s*"([^"]+)"/.exec(source);
-                const descMatch = /description\s*=\s*"([^"]+)"/.exec(source);
-                const tagsMatch = /tags\s*=\s*\[([^\]]*)\]/.exec(source);
+                const domainMatch = /^\s*domain\s*=\s*"([^"]+)"/m.exec(source);
+                const statusMatch = /^\s*status\s*=\s*"([^"]+)"/m.exec(source);
+                const ownerMatch = /^\s*owner\s*=\s*"([^"]+)"/m.exec(source);
+                const descMatch = /^\s*description\s*=\s*"([^"]+)"/m.exec(source);
+                const tagsMatch = /^\s*tags\s*=\s*\[([^\]]*)\]/m.exec(source);
                 const parsedTags = tagsMatch
                   ? tagsMatch[1].split(',').map((tag) => tag.trim().replace(/^"|"$/g, '')).filter(Boolean)
                   : [];
-                const llmMatch = /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(source);
+                const llmMatch = /^\s*llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/m.exec(source);
                 blocks.push({
                   name: nameMatch?.[1] ?? entry.name.replace('.dql', ''),
                   domain: (domainMatch?.[1] ?? inferBlockStudioPathDomain(projectRoot, relPath)) || 'uncategorized',
@@ -18580,29 +18612,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     // ── Block version history (git log) ──────────────────────────────────
     if (req.method === 'GET' && path === '/api/blocks/history') {
+      // `{ entries, status: 'ok' | 'not_a_repo' | 'git_unavailable' | 'error', message? }`.
+      // git runs with an argument array (no shell) and the path must stay inside the project.
       try {
-        const blockPath = url.searchParams.get('path');
-        if (!blockPath) {
-          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'path parameter is required' }));
-          return;
-        }
-        const { execSync } = await import('node:child_process');
-        const gitLog = execSync(
-          `git log --format="%H|||%ai|||%an|||%s" -20 -- "${blockPath}"`,
-          { cwd: projectRoot, encoding: 'utf-8', timeout: 10000 },
-        ).trim();
-        const entries = gitLog
-          ? gitLog.split('\n').map((line) => {
-              const [hash, date, author, message] = line.split('|||');
-              return { hash, date, author, message };
-            })
-          : [];
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ entries }));
+        const history = await readBlockHistory(projectRoot, url.searchParams.get('path'));
+        res.writeHead(history.httpStatus, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(history.body));
       } catch (error) {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ entries: [] }));
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ entries: [], status: 'error', message: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
@@ -18630,13 +18648,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const body = readFileSync(absolutePath, 'utf-8');
         let commitSha: string | null = null;
         try {
-          const { execSync } = await import('node:child_process');
-          const sha = execSync(`git log -1 --format=%H -- "${blockPath}"`, {
-            cwd: projectRoot,
-            encoding: 'utf-8',
-            stdio: ['ignore', 'pipe', 'ignore'],
-            timeout: 5000,
-          }).trim();
+          // Arguments, never a shell string: the path comes from the request.
+          const logged = await execGit(projectRoot, ['--literal-pathspecs', 'log', '-1', '--format=%H', '--', relative(projectRoot, absolutePath)], { timeoutMs: 5000 });
+          const sha = logged.code === 0 ? logged.stdout.trim() : '';
           commitSha = sha.length > 0 ? sha : null;
         } catch {
           commitSha = null;
@@ -18852,8 +18866,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const existingId = operationIdempotency.get(idempotencyKey);
           const existing = existingId ? operationCoordinator.get(existingId) : null;
           if (existing) {
+            // The repeated request gets the same draft identity the first one did.
+            const scopedPath = existing.scope.startsWith('block:') ? existing.scope.slice('block:'.length) : undefined;
+            const scopedAbsolute = scopedPath ? safeJoin(projectRoot, scopedPath) : undefined;
+            const draft = scopedPath && scopedAbsolute && existsSync(scopedAbsolute)
+              ? openBlockStudioDocument(projectRoot, scopedPath, semanticLayer)
+              : undefined;
             res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(serializeJSON({ operation: existing, deduplicated: true }));
+            res.end(serializeJSON({ operation: existing, deduplicated: true, ...(draft ? { draft } : {}) }));
             return;
           }
         }
@@ -18884,7 +18904,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Block name is required.' }));
           return;
         }
-        const existingCanonicalDraft = Boolean(currentPath && !isDraftBlockPath(currentPath));
+        const existingCanonical = Boolean(currentPath && !isDraftBlockPath(currentPath));
+        // A certified block stays certified on disk until a new certification
+        // passes. Re-certifying the unchanged source checks it in place; edited
+        // source is checked as a separate draft beside it. Writing the draft over
+        // the certified file first demoted it whenever a gate failed.
+        const canonicalAbsolute = existingCanonical ? safeJoin(projectRoot, currentPath!) : undefined;
+        const canonicalOnDisk = canonicalAbsolute && existsSync(canonicalAbsolute) ? readFileSync(canonicalAbsolute, 'utf-8') : undefined;
+        const canonicalCertified = canonicalOnDisk !== undefined && /^\s*status\s*=\s*"certified"/m.test(canonicalOnDisk);
+        const unchangedCertified = canonicalCertified
+          && markBlockStudioSourceReusable(setBlockStudioStatusInSource(canonicalOnDisk!, 'draft')).trim() === draftSource.trim();
+        const existingCanonicalDraft = existingCanonical && !canonicalCertified;
         const stableSuffix = createHash('sha256')
           .update(currentPath ?? `${name}:${draftSource}`)
           .digest('hex')
@@ -18905,17 +18935,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // the canonical domain blocks directory. Reuse that identity for the
         // certification attempt. Creating a second `_drafts` artifact here
         // made a failed gate duplicate the block in the library.
-        const draftPath = existingCanonicalDraft
-          ? saveBlockStudioArtifacts(projectRoot, {
-              currentPath: currentPath!,
-              ...draftSaveOptions,
-            })
-          : saveBlockStudioDraftArtifacts(projectRoot, {
-              currentPath: currentPath && isDraftBlockPath(currentPath) ? currentPath : undefined,
-              ...draftSaveOptions,
-              stableSuffix,
-            });
-        const canonicalPath = existingCanonicalDraft ? draftPath : undefined;
+        const draftPath = unchangedCertified
+          ? currentPath!
+          : existingCanonicalDraft
+            ? saveBlockStudioArtifacts(projectRoot, {
+                currentPath: currentPath!,
+                ...draftSaveOptions,
+              })
+            : saveBlockStudioDraftArtifacts(projectRoot, {
+                currentPath: currentPath && isDraftBlockPath(currentPath)
+                  ? currentPath
+                  : canonicalCertified ? draftBesideCanonical(projectRoot, currentPath!).existingPath : undefined,
+                ...draftSaveOptions,
+                stableSuffix,
+              });
+        const canonicalPath = existingCanonicalDraft ? draftPath : canonicalCertified ? currentPath! : undefined;
         const operation = operationCoordinator.create({
           type: 'block_certification',
           scope: `block:${draftPath}`,
@@ -18945,10 +18979,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const blockers = Array.from(new Set(result.checklist.blockers));
           if (signal.aborted) throw Object.assign(new Error('Certification cancelled.'), { code: 'OPERATION_CANCELLED' });
           if (!result.certification.certified || blockers.length > 0) {
-            if (result.preview) writeBlockStudioRunSummary(projectRoot, draftPath, draftSource, result.preview.result);
+            if (result.preview && !unchangedCertified) writeBlockStudioRunSummary(projectRoot, draftPath, draftSource, result.preview.result);
             const openedDraft = openBlockStudioDocument(projectRoot, draftPath, semanticLayer);
             return {
-              outcome: 'draft_saved_with_blockers',
+              // Nothing was written for an unchanged certified block: it is still certified.
+              outcome: unchangedCertified ? 'certified_unchanged_with_blockers' : 'draft_saved_with_blockers',
               oldPath: currentPath ?? draftPath,
               draftPath,
               blockers,
@@ -20052,9 +20087,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const currentPath = typeof body.path === 'string' ? body.path : undefined;
+        // Saving never certifies, and never replaces a certified block. The
+        // certified status is kept only for the exact certified source; edits to
+        // a certified block are saved as its draft beside it, and the certified
+        // file stays in use until a new certification passes.
+        const certifiedStatus = /^\s*status\s*=\s*"certified"/m;
+        const canonicalAbsolute = currentPath && !isDraftBlockPath(currentPath) ? safeJoin(projectRoot, currentPath) : undefined;
+        const canonicalOnDisk = canonicalAbsolute && existsSync(canonicalAbsolute) ? readFileSync(canonicalAbsolute, 'utf-8') : undefined;
+        const canonicalCertified = canonicalOnDisk !== undefined && certifiedStatus.test(canonicalOnDisk);
+        const sameAsCertified = canonicalCertified
+          && markBlockStudioSourceReusable(setBlockStudioStatusInSource(canonicalOnDisk!, 'draft')).trim()
+            === markBlockStudioSourceReusable(setBlockStudioStatusInSource(source, 'draft')).trim();
+        const keepCertified = sameAsCertified && certifiedStatus.test(source);
+        const sourceToWrite = certifiedStatus.test(source) && !keepCertified
+          ? markBlockStudioSourceReusable(setBlockStudioStatusInSource(source, 'draft'))
+          : source;
+        const besideCertified = canonicalCertified && !keepCertified ? draftBesideCanonical(projectRoot, currentPath!) : undefined;
         const saveOptions = {
           currentPath,
-          source,
+          source: sourceToWrite,
           name: metadata.name,
           domain: metadata.domain,
           folderPath: metadata.folderPath,
@@ -20074,12 +20125,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               }
             : undefined,
         };
-        const savedPath = isDraftBlockPath(currentPath)
+        const savedPath = besideCertified
           ? saveBlockStudioDraftArtifacts(projectRoot, {
               ...saveOptions,
-              stableSuffix: metadata.candidateId,
+              currentPath: besideCertified.existingPath,
+              stableSuffix: besideCertified.stableSuffix,
             })
-          : saveBlockStudioArtifacts(projectRoot, saveOptions);
+          : isDraftBlockPath(currentPath)
+            ? saveBlockStudioDraftArtifacts(projectRoot, {
+                ...saveOptions,
+                stableSuffix: metadata.candidateId,
+              })
+            : saveBlockStudioArtifacts(projectRoot, saveOptions);
         const refreshOperation = scheduleProjectRefresh('block-studio-save');
         const payload = {
           ...openBlockStudioDocument(projectRoot, savedPath, semanticLayer),
@@ -20093,7 +20150,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         if (error instanceof Error && error.message === 'BLOCK_EXISTS') {
           res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'Block already exists' }));
+          res.end(serializeJSON({ error: 'A block with this name already exists in this folder. Rename it and try again.', code: 'BLOCK_EXISTS' }));
           return;
         }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -30655,11 +30712,26 @@ export function validateBlockStudioSource(
       const parser = new Parser(source, '<block-studio>');
       parser.parse();
     } catch (error) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'syntax',
-        message: error instanceof Error ? error.message : String(error),
-      });
+      // The parser collects each problem with its line and column; "Parse errors
+      // in <block-studio>" alone gave the author nothing to fix.
+      const parserDiagnostics = (error as { diagnostics?: Array<{ message?: string; span?: { start?: { line?: number; column?: number } } }> }).diagnostics ?? [];
+      if (parserDiagnostics.length > 0) {
+        for (const problem of parserDiagnostics.slice(0, 5)) {
+          const line = problem.span?.start?.line;
+          const column = problem.span?.start?.column;
+          diagnostics.push({
+            severity: 'error',
+            code: 'syntax',
+            message: `${line ? `Line ${line}${column ? `, column ${column}` : ''}: ` : ''}${problem.message ?? 'Syntax error'}`,
+          });
+        }
+      } else {
+        diagnostics.push({
+          severity: 'error',
+          code: 'syntax',
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   } else {
     const hasBlockHeader = /\bblock\s+"[^"]+"\s*\{/i.test(source);
@@ -31418,6 +31490,31 @@ export function deleteBlockStudioArtifacts(
   }
 
   return { path: normalizedPath, companionPath };
+}
+
+/**
+ * The draft that holds unpublished edits to a certified block: one per
+ * certified file, found again by its stable suffix, so repeated saves or
+ * certification attempts reuse it instead of adding `-2`, `-3` copies.
+ */
+export function draftBesideCanonical(projectRoot: string, canonicalPath: string): { stableSuffix: string; existingPath?: string } {
+  const stableSuffix = createHash('sha256').update(canonicalPath).digest('hex').slice(0, 16);
+  const found: string[] = [];
+  const visit = (dir: string, depth: number) => {
+    if (depth > 6 || !existsSync(dir)) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const child = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(child, depth + 1);
+        continue;
+      }
+      const relativePath = relative(projectRoot, child).replaceAll('\\', '/');
+      if (entry.name.endsWith(`-${stableSuffix}.dql`) && isDraftBlockPath(relativePath)) found.push(relativePath);
+    }
+  };
+  visit(join(projectRoot, 'domains'), 0);
+  visit(join(projectRoot, 'blocks'), 0);
+  return { stableSuffix, ...(found[0] ? { existingPath: found[0] } : {}) };
 }
 
 export function saveBlockStudioDraftArtifacts(
@@ -35938,17 +36035,249 @@ export interface GitStatusResult {
   error?: string;
 }
 
-async function execGit(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+async function execGit(
+  cwd: string,
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+): Promise<{ stdout: string; stderr: string; code: number; missing?: boolean }> {
   const { execFile } = await import('node:child_process');
   return new Promise((resolve) => {
-    execFile('git', args, { cwd, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile('git', args, {
+      cwd,
+      maxBuffer: 8 * 1024 * 1024,
+      ...(options.env ? { env: options.env } : {}),
+      ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}),
+    }, (err, stdout, stderr) => {
+      const missing = (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
       resolve({
         stdout: String(stdout ?? ''),
         stderr: String(stderr ?? ''),
         code: err ? ((err as NodeJS.ErrnoException).code ? 1 : (err as any).code ?? 1) : 0,
+        ...(missing ? { missing: true } : {}),
       });
     });
   });
+}
+
+/**
+ * Network git commands (push/pull) run from a background server with no
+ * terminal. Without this, a missing credential makes git wait forever for a
+ * username prompt nobody can see.
+ */
+function nonInteractiveGitEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+}
+
+const GIT_NETWORK_TIMEOUT_MS = 120_000;
+
+/** Remote used for pushes: `remote.pushDefault`, then `origin`, then the first configured remote. */
+async function resolveGitRemoteName(gitRoot: string): Promise<string | null> {
+  const listed = await execGit(gitRoot, ['remote']);
+  const remotes = listed.code === 0 ? listed.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+  const pushDefault = await execGit(gitRoot, ['config', '--get', 'remote.pushDefault']);
+  const preferred = pushDefault.code === 0 ? pushDefault.stdout.trim() : '';
+  if (preferred && remotes.includes(preferred)) return preferred;
+  if (remotes.includes('origin')) return 'origin';
+  return remotes[0] ?? null;
+}
+
+/**
+ * Accepts the remote shapes a person pastes from a Git host: `https://…`,
+ * `ssh://…`, scp-style `user@host:path`, or a local path (`/…`, `./…`, `../…`,
+ * `file://…`, `C:\…`). Rejects everything that could turn into command
+ * execution or leak a secret: git's `ext::`/`fd::` transports and other
+ * schemes, option-looking values, whitespace/control characters, and HTTPS
+ * URLs carrying a password or token (they would be stored in plain text in
+ * `.git/config` and shown in the UI).
+ */
+export function validateGitRemoteUrl(raw: unknown): { ok: true; url: string } | { ok: false; error: string } {
+  const url = typeof raw === 'string' ? raw.trim() : '';
+  const shapes = 'Use an HTTPS address (https://github.com/org/repo.git), an SSH address (git@github.com:org/repo.git), or a local folder path.';
+  if (!url) return { ok: false, error: `Enter a remote URL. ${shapes}` };
+  if (url.length > 2048) return { ok: false, error: 'The remote URL is too long.' };
+  if (/[\s\x00-\x1f\x7f]/.test(url)) return { ok: false, error: 'The remote URL cannot contain spaces or control characters.' };
+  if (url.startsWith('-')) return { ok: false, error: `That is not a remote URL. ${shapes}` };
+  if (/^(?:https|ssh):\/\//i.test(url)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return { ok: false, error: `That remote URL is not valid. ${shapes}` };
+    }
+    if (!parsed.hostname) return { ok: false, error: `The remote URL needs a host name. ${shapes}` };
+    if (parsed.password) {
+      return { ok: false, error: 'Remove the password or token from the URL. Use an SSH key or a Git credential helper instead, so the secret is not saved in the project.' };
+    }
+    if (!parsed.pathname || parsed.pathname === '/') return { ok: false, error: `The remote URL needs a repository path. ${shapes}` };
+    return { ok: true, url };
+  }
+  if (/^file:\/\//i.test(url)) return url.length > 'file://'.length ? { ok: true, url } : { ok: false, error: `The file URL needs a path. ${shapes}` };
+  // scp-like SSH: user@host:path (the user part keeps it distinct from a Windows drive path).
+  if (/^[A-Za-z0-9._~-]+@[A-Za-z0-9.-]+:(?!\/\/)[^\\]+$/.test(url)) return { ok: true, url };
+  if (url.startsWith('/') || url.startsWith('./') || url.startsWith('../') || /^[A-Za-z]:[\\/]/.test(url)) {
+    return { ok: true, url };
+  }
+  return { ok: false, error: `That is not a supported remote URL. ${shapes}` };
+}
+
+export function validateGitRemoteName(raw: unknown): { ok: true; name: string } | { ok: false; error: string } {
+  const name = typeof raw === 'string' && raw.trim() ? raw.trim() : 'origin';
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(name) || name.includes('..') || name.endsWith('.lock')) {
+    return { ok: false, error: 'Remote names may use letters, numbers, dots, dashes, and underscores (for example "origin").' };
+  }
+  return { ok: true, name };
+}
+
+/** Plain-language sentence for the git failures people hit when sending or getting changes. */
+export function friendlyGitRemoteError(raw: string): string {
+  const text = raw.trim();
+  if (!text) return 'Git could not complete the request.';
+  if (/no configured push destination|no such remote|No remote repository specified/i.test(text)) {
+    return 'This project has no Git remote yet. Add a remote URL, then try again.';
+  }
+  if (/Authentication failed|Permission denied \(publickey|could not read (?:Username|Password)|terminal prompts disabled|Invalid username or password|HTTP Basic: Access denied|The requested URL returned error: 40[13]/i.test(text)) {
+    return 'Git could not sign in to the remote. Set up an SSH key or a Git credential helper for this host, then try again.';
+  }
+  if (/Could not resolve host|Failed to connect|Connection (?:timed out|refused)|Network is unreachable|Operation timed out/i.test(text)) {
+    return 'Git could not connect to the remote host. Check your network connection and the remote URL.';
+  }
+  if (/does not appear to be a git repository|Repository not found|repository '.*' not found|Could not read from remote repository/i.test(text)) {
+    return 'Git could not find a repository at the remote URL, or you do not have access to it. Check the remote URL and your access.';
+  }
+  if (/\[rejected\]|non-fast-forward|fetch first|Updates were rejected/i.test(text)) {
+    return 'The remote has changes you do not have yet. Get updates first, then send your branch again.';
+  }
+  if (/Not possible to fast-forward|diverging branches|have diverged/i.test(text)) {
+    return 'Your branch and the remote have both changed. Resolve the divergence in a terminal (for example with git pull --rebase), then try again.';
+  }
+  if (/no tracking information|There is no tracking information/i.test(text)) {
+    return 'This branch is not linked to a remote branch yet. Send the branch first, then get updates.';
+  }
+  return text;
+}
+
+export type BlockHistoryStatus = 'ok' | 'not_a_repo' | 'git_unavailable' | 'error';
+
+export interface BlockHistoryResult {
+  entries: Array<{ hash: string; date: string; author: string; message: string }>;
+  status: BlockHistoryStatus;
+  message?: string;
+}
+
+/**
+ * The block path arrives from a query string. It must name a location inside
+ * the project and carry no shell or pathspec metacharacters. Git itself is
+ * invoked with an argument array and `--literal-pathspecs`, so this is a
+ * second, explicit boundary rather than the only one.
+ */
+export function resolveBlockHistoryPath(projectRoot: string, rawPath: unknown): { ok: true; relativePath: string } | { ok: false; error: string } {
+  const value = typeof rawPath === 'string' ? rawPath.trim() : '';
+  if (!value) return { ok: false, error: 'path parameter is required' };
+  if (/[\x00-\x1f\x7f`$;|&<>"'*?]/.test(value)) {
+    return { ok: false, error: 'The block path contains characters that are not allowed.' };
+  }
+  if (value.startsWith('-') || value.startsWith(':')) {
+    return { ok: false, error: 'The block path contains characters that are not allowed.' };
+  }
+  const root = resolve(projectRoot);
+  const absolute = resolve(root, value);
+  const rel = relative(root, absolute);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
+    return { ok: false, error: 'The block path must be inside the project.' };
+  }
+  return { ok: true, relativePath: rel.split(sep).join('/') };
+}
+
+export async function readBlockHistory(projectRoot: string, rawPath: unknown): Promise<{ httpStatus: number; body: BlockHistoryResult }> {
+  const resolved = resolveBlockHistoryPath(projectRoot, rawPath);
+  if (!resolved.ok) {
+    return { httpStatus: 400, body: { entries: [], status: 'error', message: resolved.error } };
+  }
+  const inside = await execGit(projectRoot, ['rev-parse', '--is-inside-work-tree']);
+  if (inside.missing) {
+    return { httpStatus: 200, body: { entries: [], status: 'git_unavailable', message: 'Git is not installed or is not on the PATH of the DQL server.' } };
+  }
+  if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
+    if (inside.code === 0 || /not a git repository/i.test(inside.stderr)) {
+      return { httpStatus: 200, body: { entries: [], status: 'not_a_repo', message: 'This project is not a Git repository yet.' } };
+    }
+    return { httpStatus: 200, body: { entries: [], status: 'error', message: gitErrorOutput(inside) || 'Git could not read this project.' } };
+  }
+  const sepChar = '\x1f';
+  const endChar = '\x1e';
+  const format = ['%H', '%aI', '%an', '%s'].join(sepChar) + endChar;
+  const log = await execGit(projectRoot, ['--literal-pathspecs', 'log', `--format=${format}`, '-20', '--', resolved.relativePath], { timeoutMs: 10_000 });
+  if (log.code !== 0) {
+    // A repository with no commits yet has no history for any file.
+    if (/does not have any commits yet|bad default revision|unknown revision/i.test(log.stderr)) {
+      return { httpStatus: 200, body: { entries: [], status: 'ok' } };
+    }
+    return { httpStatus: 200, body: { entries: [], status: 'error', message: gitErrorOutput(log) || 'Git could not read the block history.' } };
+  }
+  const entries: BlockHistoryResult['entries'] = [];
+  for (const record of log.stdout.split(endChar)) {
+    const trimmed = record.replace(/^\n/, '');
+    if (!trimmed) continue;
+    const [hash, date, author, message] = trimmed.split(sepChar);
+    if (hash) entries.push({ hash, date: date ?? '', author: author ?? '', message: message ?? '' });
+  }
+  return { httpStatus: 200, body: { entries, status: 'ok' } };
+}
+
+/** Initialize Git for a project that is not inside any repository yet. Never touches an existing repository. */
+export async function gitInitProject(projectRoot: string): Promise<{ ok: boolean; error?: string; code?: string; status?: GitStatusResult }> {
+  const version = await execGit(projectRoot, ['--version']);
+  if (version.missing || version.code !== 0) {
+    return { ok: false, code: 'git_unavailable', error: 'Git is not installed or is not on the PATH of the DQL server. Install Git, then try again.' };
+  }
+  const existingRoot = await resolveGitRoot(projectRoot);
+  if (existingRoot) {
+    return { ok: false, code: 'already_a_repo', error: `This project is already inside a Git repository (${existingRoot}).` };
+  }
+  const init = await execGit(projectRoot, ['init']);
+  if (init.code !== 0) return { ok: false, code: 'error', error: gitErrorOutput(init) || 'git init failed.' };
+  // Honor a configured init.defaultBranch; otherwise start on `main`, which the
+  // review flow treats as the base branch.
+  const defaultBranch = await execGit(projectRoot, ['config', '--get', 'init.defaultBranch']);
+  if (defaultBranch.code !== 0 || !defaultBranch.stdout.trim()) {
+    await execGit(projectRoot, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
+  }
+  try {
+    // Keep credentials, caches, and local run state out of the first commit.
+    ensureDqlGitignore(projectRoot);
+  } catch {
+    // Best effort; the repository is usable without it.
+  }
+  return { ok: true, status: await readGitStatus(projectRoot) };
+}
+
+/** Save a remote address in `.git/config`. Only `git remote add|set-url` runs; nothing contacts the remote. */
+export async function gitAddRemote(projectRoot: string, input: { name?: unknown; url?: unknown; replace?: unknown }): Promise<{
+  ok: boolean; error?: string; code?: string; name?: string; url?: string | null; replaced?: boolean;
+}> {
+  const gitRoot = await resolveGitRoot(projectRoot);
+  if (!gitRoot) return { ok: false, code: 'not_a_repo', error: 'This project is not a Git repository yet. Initialize Git first.' };
+  const name = validateGitRemoteName(input.name);
+  if (!name.ok) return { ok: false, code: 'invalid_name', error: name.error };
+  const url = validateGitRemoteUrl(input.url);
+  if (!url.ok) return { ok: false, code: 'invalid_url', error: url.error };
+  const existing = await execGit(gitRoot, ['remote', 'get-url', name.name]);
+  const exists = existing.code === 0;
+  if (exists && input.replace !== true) {
+    return {
+      ok: false,
+      code: 'remote_exists',
+      name: name.name,
+      url: existing.stdout.trim() || null,
+      error: `The remote "${name.name}" already points to ${existing.stdout.trim()}. Replace it to use a different URL.`,
+    };
+  }
+  const res = await execGit(gitRoot, exists
+    ? ['remote', 'set-url', name.name, url.url]
+    : ['remote', 'add', name.name, url.url]);
+  if (res.code !== 0) return { ok: false, code: 'error', error: gitErrorOutput(res) || 'Git could not save the remote.' };
+  const saved = await execGit(gitRoot, ['remote', 'get-url', name.name]);
+  return { ok: true, name: name.name, url: saved.code === 0 ? saved.stdout.trim() : url.url, replaced: exists };
 }
 
 async function resolveGitRoot(cwd: string): Promise<string | null> {
@@ -36251,21 +36580,23 @@ async function gitCommit(cwd: string, message: string, stageAll: boolean): Promi
   return { ok: true, hash: hashRes.code === 0 ? hashRes.stdout.trim() : undefined };
 }
 
-async function gitPush(cwd: string): Promise<{ ok: boolean; error?: string; output?: string }> {
+async function gitPush(cwd: string): Promise<{ ok: boolean; error?: string; output?: string; code?: string; detail?: string }> {
   const gitRoot = await resolveGitRoot(cwd);
-  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
+  if (!gitRoot) return { ok: false, code: 'not_a_repo', error: 'Not a git repository' };
+  const remote = await resolveGitRemoteName(gitRoot);
+  if (!remote) {
+    return { ok: false, code: 'no_remote', error: 'This project has no Git remote yet. Add a remote URL before sending changes.' };
+  }
   const branch = await execGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const upstream = await execGit(gitRoot, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
-  const remotes = await execGit(gitRoot, ['remote']);
-  const remote = remotes.stdout.split('\n').map((s) => s.trim()).find(Boolean) ?? 'origin';
   const branchName = branch.code === 0 ? branch.stdout.trim() : '';
   const args = upstream.code === 0 || !branchName || branchName === 'HEAD'
     ? ['push']
     : ['push', '-u', remote, branchName];
-  const res = await execGit(gitRoot, args);
-  return res.code === 0
-    ? { ok: true, output: gitErrorOutput(res) }
-    : { ok: false, error: gitErrorOutput(res) };
+  const res = await execGit(gitRoot, args, { env: nonInteractiveGitEnv(), timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+  if (res.code === 0) return { ok: true, output: gitErrorOutput(res) };
+  const detail = gitErrorOutput(res);
+  return { ok: false, code: 'push_failed', error: friendlyGitRemoteError(detail), ...(detail ? { detail } : {}) };
 }
 
 async function execGh(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -36387,16 +36718,19 @@ async function gitOpenReview(cwd: string, input: { title: string; body: string; 
   };
 }
 
-async function gitPull(cwd: string): Promise<{ ok: boolean; error?: string; output?: string }> {
+async function gitPull(cwd: string): Promise<{ ok: boolean; error?: string; output?: string; code?: string; detail?: string }> {
   const gitRoot = await resolveGitRoot(cwd);
-  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
+  if (!gitRoot) return { ok: false, code: 'not_a_repo', error: 'Not a git repository' };
+  if (!(await resolveGitRemoteName(gitRoot))) {
+    return { ok: false, code: 'no_remote', error: 'This project has no Git remote yet. Add a remote URL before getting updates.' };
+  }
   // `--ff-only` keeps the operation non-destructive: if the local branch has
   // diverged from upstream, we surface the error rather than auto-merging.
   // The user can resolve via the terminal or a future merge UI.
-  const res = await execGit(gitRoot, ['pull', '--ff-only']);
-  return res.code === 0
-    ? { ok: true, output: gitErrorOutput(res) }
-    : { ok: false, error: gitErrorOutput(res) };
+  const res = await execGit(gitRoot, ['pull', '--ff-only'], { env: nonInteractiveGitEnv(), timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+  if (res.code === 0) return { ok: true, output: gitErrorOutput(res) };
+  const detail = gitErrorOutput(res);
+  return { ok: false, code: 'pull_failed', error: friendlyGitRemoteError(detail), ...(detail ? { detail } : {}) };
 }
 
 async function readGitBranches(cwd: string): Promise<{ inRepo: boolean; current: string | null; branches: string[] }> {
@@ -36413,8 +36747,9 @@ async function readGitBranches(cwd: string): Promise<{ inRepo: boolean; current:
 async function readGitRemote(cwd: string): Promise<{ inRepo: boolean; url: string | null; name: string | null }> {
   const gitRoot = await resolveGitRoot(cwd);
   if (!gitRoot) return { inRepo: false, url: null, name: null };
-  const remoteName = await execGit(gitRoot, ['config', '--get', 'remote.pushDefault']);
-  const name = remoteName.code === 0 && remoteName.stdout.trim() ? remoteName.stdout.trim() : 'origin';
+  // Same resolution as push, so a remote added under another name is seen too.
+  const name = await resolveGitRemoteName(gitRoot);
+  if (!name) return { inRepo: true, url: null, name: null };
   const url = await execGit(gitRoot, ['remote', 'get-url', name]);
   return { inRepo: true, url: url.code === 0 ? url.stdout.trim() : null, name };
 }

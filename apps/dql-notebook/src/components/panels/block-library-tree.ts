@@ -4,6 +4,11 @@ export type BlockLibraryTreeNode =
   | { kind: 'folder'; name: string; path: string; children: BlockLibraryTreeNode[] }
   | { kind: 'block'; block: BlockEntry };
 
+/** A folder name as the reader sees it: the reserved `_drafts` folder reads "Drafts". */
+export function blockFolderLabel(name: string): string {
+  return name === '_drafts' ? 'Drafts' : name;
+}
+
 export function blockPathInsideDomain(blockPath: string, domain: string): string {
   const normalized = blockPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
   const domainFirst = normalized.match(/^domains\/[^/]+\/blocks\/(.+)$/);

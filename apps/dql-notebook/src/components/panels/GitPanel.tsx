@@ -53,6 +53,7 @@ export function GitPanel() {
   const [diffPath, setDiffPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -67,6 +68,10 @@ export function GitPanel() {
         setDiff(result.diff);
         setDiffReport(result.diffReport);
       }
+      setLoadError(null);
+    } catch (error) {
+      // A server or network failure is not "Not a git repository".
+      setLoadError(error instanceof Error ? error.message : String(error));
     } finally {
       setLoading(false);
       window.setTimeout(() => setRefreshing(false), 400);
@@ -84,6 +89,9 @@ export function GitPanel() {
     const id = window.setInterval(() => {
       void api.fetchGitStatus().then((next) => {
         setStatus((prev) => (statusEqual(prev, next) ? prev : next));
+        setLoadError(null);
+      }).catch((error) => {
+        setLoadError(error instanceof Error ? error.message : String(error));
       });
     }, STATUS_POLL_MS);
     return () => window.clearInterval(id);
@@ -121,14 +129,18 @@ export function GitPanel() {
 
   return (
     <PanelFrame title="Git" actions={actions} toolbar={toolbar} bodyPadding={12}>
-      {loading && !status && !log && <PanelEmpty title="Loading…" />}
+      {loading && !status && !log && !loadError && <PanelEmpty title="Loading…" />}
+
+      {loadError && (
+        <LoadErrorCard t={t} message={loadError} onRetry={() => void refresh()} />
+      )}
 
       {tab === 'status' && status && (
-        <StatusView status={status} t={t} />
+        <StatusView status={status} t={t} onInitialized={() => void refresh()} />
       )}
 
       {tab === 'log' && log && (
-        <LogView log={log} t={t} />
+        <LogView log={log} t={t} onInitialized={() => void refresh()} />
       )}
 
       {tab === 'diff' && (
@@ -158,7 +170,7 @@ function statusEqual(a: Status | null, b: Status): boolean {
 
 // ---------- Status View ----------
 
-function StatusView({ status, t }: { status: Status; t: Theme }) {
+function StatusView({ status, t, onInitialized }: { status: Status; t: Theme; onInitialized: () => void }) {
   const grouped = useMemo(() => {
     const map: Record<Group, Change[]> = {
       modified: [], added: [], deleted: [], renamed: [], untracked: [],
@@ -169,7 +181,7 @@ function StatusView({ status, t }: { status: Status; t: Theme }) {
   }, [status.changes]);
 
   if (!status.inRepo) {
-    return <NotARepoCard t={t} />;
+    return <NotARepoCard t={t} onInitialized={onInitialized} />;
   }
 
   return (
@@ -243,7 +255,20 @@ function CleanCard({ t }: { t: Theme }) {
   );
 }
 
-function NotARepoCard({ t }: { t: Theme }) {
+function NotARepoCard({ t, onInitialized }: { t: Theme; onInitialized: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const initialize = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.gitInit();
+      if (result.ok) onInitialized();
+      else setError(result.error ?? 'Git could not be initialized.');
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div
       style={{
@@ -252,9 +277,58 @@ function NotARepoCard({ t }: { t: Theme }) {
         border: `1px solid ${t.cellBorder}`,
         borderRadius: 7,
         color: t.textMuted, fontSize: 12, fontFamily: t.font,
+        display: 'flex', flexDirection: 'column', gap: 8,
       }}
     >
-      Not a git repository
+      <div style={{ color: t.textPrimary, fontWeight: 600 }}>Not a Git repository yet</div>
+      <div style={{ lineHeight: 1.45 }}>
+        Initialize Git to track changes to blocks, notebooks, and apps. Nothing is sent anywhere until you add a remote.
+      </div>
+      <button
+        type="button"
+        onClick={() => void initialize()}
+        disabled={busy}
+        style={{
+          alignSelf: 'flex-start',
+          background: t.accent, color: '#fff', border: `1px solid ${t.accent}`,
+          padding: '4px 10px', borderRadius: 4, fontSize: 11, fontWeight: 600,
+          cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.7 : 1, fontFamily: t.font,
+        }}
+      >
+        {busy ? 'Initializing…' : 'Initialize Git for this project'}
+      </button>
+      {error && <div role="alert" style={{ color: t.error, lineHeight: 1.45 }}>{error}</div>}
+    </div>
+  );
+}
+
+function LoadErrorCard({ t, message, onRetry }: { t: Theme; message: string; onRetry: () => void }) {
+  return (
+    <div
+      role="alert"
+      style={{
+        padding: '10px 12px', marginBottom: 12,
+        background: t.cellBg,
+        border: `1px solid ${t.error}55`,
+        borderLeft: `3px solid ${t.error}`,
+        borderRadius: 7,
+        fontSize: 12, fontFamily: t.font,
+        display: 'flex', flexDirection: 'column', gap: 6,
+      }}
+    >
+      <div style={{ color: t.textPrimary, fontWeight: 600 }}>Git status could not be loaded</div>
+      <div style={{ color: t.textMuted, lineHeight: 1.45, wordBreak: 'break-word' }}>{message}</div>
+      <button
+        type="button"
+        onClick={onRetry}
+        style={{
+          alignSelf: 'flex-start', background: 'transparent', color: t.textPrimary,
+          border: `1px solid ${t.btnBorder}`, padding: '3px 9px', borderRadius: 4,
+          fontSize: 11, cursor: 'pointer', fontFamily: t.font,
+        }}
+      >
+        Retry
+      </button>
     </div>
   );
 }
@@ -331,8 +405,8 @@ function ChangeRow({ change, t, color, divider }: { change: Change; t: Theme; co
 
 // ---------- Log View ----------
 
-function LogView({ log, t }: { log: LogResult; t: Theme }) {
-  if (!log.inRepo) return <NotARepoCard t={t} />;
+function LogView({ log, t, onInitialized }: { log: LogResult; t: Theme; onInitialized: () => void }) {
+  if (!log.inRepo) return <NotARepoCard t={t} onInitialized={onInitialized} />;
   if (log.commits.length === 0) {
     return (
       <div style={{

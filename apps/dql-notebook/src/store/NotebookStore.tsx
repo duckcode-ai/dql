@@ -415,6 +415,24 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       };
 
     case 'BLOCK_CERTIFICATION_ACCEPTED':
+      // The server wrote the attempt somewhere: the same file, or a draft beside
+      // a certified block. The editor continues on that file and its fingerprint,
+      // so the next Save or Certify is not rejected as "changed after it was opened".
+      if (action.draft) {
+        const draftFile: NotebookState['files'][number] = { name: `${action.draft.metadata.name}.dql`, path: action.draft.path, type: 'block', folder: 'blocks' };
+        return {
+          ...state,
+          files: state.files.some((file) => file.path === action.draft!.path) ? state.files : [...state.files, draftFile],
+          activeFile: draftFile,
+          activeBlockPath: action.draft.path,
+          blockStudioDraft: action.draft.source,
+          blockStudioDirty: false,
+          blockStudioPreview: null,
+          blockStudioLastRun: null,
+          blockStudioValidation: action.draft.validation,
+          blockStudioMetadata: action.draft.metadata,
+        };
+      }
       return {
         ...state,
         blockStudioDraft: action.source,

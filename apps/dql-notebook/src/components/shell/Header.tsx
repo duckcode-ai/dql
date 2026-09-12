@@ -201,45 +201,16 @@ export function Header() {
 
   const handleSave = useCallback(async () => {
     const runtime = notebookStoreApi.getState();
+    if (runtime.mainView === 'block_studio') {
+      // Block Studio owns its save: identity, validation, the certified-to-draft
+      // rule and the sidebar refresh. A second save path here skipped all of them.
+      window.dispatchEvent(new Event('dql:block-studio-save'));
+      return;
+    }
     if (!runtime.activeFile) return;
     dispatch({ type: 'SET_SAVING', saving: true });
     try {
-      if (runtime.mainView === 'block_studio') {
-        if (!runtime.blockStudioMetadata) return;
-        const payload = await api.saveBlockStudio({
-          path: runtime.activeBlockPath,
-          source: runtime.blockStudioDraft,
-          metadata: {
-            name: runtime.blockStudioMetadata.name,
-            domain: runtime.blockStudioMetadata.domain,
-            folderPath: runtime.blockStudioMetadata.folderPath,
-            description: runtime.blockStudioMetadata.description,
-            owner: runtime.blockStudioMetadata.owner,
-            tags: runtime.blockStudioMetadata.tags,
-          },
-        });
-        dispatch({
-          type: 'OPEN_BLOCK_STUDIO',
-          file: {
-            name: `${payload.metadata.name}.dql`,
-            path: payload.path,
-            type: 'block',
-            folder: 'blocks',
-          },
-          payload,
-        });
-        if (!runtime.files.some((file) => file.path === payload.path)) {
-          dispatch({
-            type: 'FILE_ADDED',
-            file: {
-              name: `${payload.metadata.name}.dql`,
-              path: payload.path,
-              type: 'block',
-              folder: 'blocks',
-            },
-          });
-        }
-      } else {
+      {
         const savedFile = runtime.activeFile;
         const savedCells = runtime.cells;
         const savedTitle = runtime.notebookTitle;

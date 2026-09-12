@@ -1530,10 +1530,10 @@ export type NotebookAction =
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }
   | { type: 'TOGGLE_DASHBOARD_MODE' }
   | { type: 'OPEN_BLOCK_STUDIO'; file: NotebookFile; payload: BlockStudioOpenPayload }
-  | { type: 'BLOCK_CERTIFICATION_ACCEPTED'; source: string }
+  | { type: 'BLOCK_CERTIFICATION_ACCEPTED'; source: string; draft?: BlockStudioOpenPayload }
   | {
       type: 'RECONCILE_BLOCK_CERTIFICATION';
-      outcome: 'certified' | 'draft_saved_with_blockers';
+      outcome: 'certified' | 'draft_saved_with_blockers' | 'certified_unchanged_with_blockers';
       oldPath: string;
       draftPath: string;
       newPath?: string;

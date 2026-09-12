@@ -13,11 +13,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   GitBranch, GitCommit, RefreshCw, ArrowUp, ArrowDown,
   Search, ChevronDown, X, Plus, Check, ExternalLink,
-  ShieldCheck, Sparkles, GitPullRequest,
+  ShieldCheck, Sparkles, GitPullRequest, Link2,
 } from 'lucide-react';
 import { useNotebookStore } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { api, type GitGovernedContextGroup } from '../../api/client';
+import { isNoRemoteFailure, remoteUrlInputProblem, REMOTE_URL_EXAMPLES } from './git-connect';
 
 type Status = Awaited<ReturnType<typeof api.fetchGitStatus>>;
 type RawChange = Status['changes'][number];
@@ -107,6 +108,12 @@ export function GitPage() {
   const [reviewUrl, setReviewUrl] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [governedContext, setGovernedContext] = useState<GovernedContext | null>(null);
+  // Connecting the project to Git from the UI: initialize, then add a remote.
+  const [initError, setInitError] = useState<string | null>(null);
+  const [remoteFormOpen, setRemoteFormOpen] = useState(false);
+  const [remoteUrlInput, setRemoteUrlInput] = useState('');
+  const [remoteFormError, setRemoteFormError] = useState<string | null>(null);
+  const remoteInputRef = useRef<HTMLInputElement>(null);
   // Redesigned guided flow (Source Control Redesign.dc.html): plain-language
   // diff view, share-rail phase, and the final description shown after share.
   const [diffView, setDiffView] = useState<'plain' | 'code'>('plain');
@@ -252,6 +259,59 @@ export function GitPage() {
     }
   }, [flash, refreshAll]);
 
+  const openRemoteForm = useCallback(() => {
+    setRemoteFormOpen(true);
+    window.setTimeout(() => remoteInputRef.current?.focus(), 0);
+  }, []);
+  /** Nothing can be sent without a remote: open the inline form instead of failing later. */
+  const requestRemote = useCallback((message = 'Add a Git remote before sending changes.') => {
+    setRemoteFormError(null);
+    openRemoteForm();
+    flash('err', message);
+  }, [flash, openRemoteForm]);
+  const onAddRemote = async () => {
+    const problem = remoteUrlInputProblem(remoteUrlInput);
+    if (problem) {
+      setRemoteFormError(problem);
+      return;
+    }
+    setRemoteFormError(null);
+    setBusy('remote');
+    try {
+      const res = await api.gitAddRemote({ url: remoteUrlInput.trim() });
+      if (!res.ok) {
+        setRemoteFormError(res.error ?? 'Git could not save the remote.');
+        return;
+      }
+      setRemoteUrlInput('');
+      setRemoteFormOpen(false);
+      flash('ok', 'Remote saved. DQL stored the address only; it connects the first time you send changes.');
+      await refreshAll();
+    } finally {
+      setBusy(null);
+    }
+  };
+  const onInitRepo = async () => {
+    setInitError(null);
+    setBusy('init');
+    try {
+      const res = await api.gitInit();
+      if (!res.ok) {
+        setInitError(res.error ?? 'Git could not be initialized.');
+        return;
+      }
+      flash('ok', 'Git is set up for this project. Add a remote when you are ready to share.');
+      await refreshAll();
+    } finally {
+      setBusy(null);
+    }
+  };
+  const pushOrAskForRemote = async (successMsg: string) => {
+    const res = await runOp('push', () => api.gitPush(), successMsg);
+    if (isNoRemoteFailure(res)) requestRemote(res.error);
+    return res;
+  };
+
   const onStage = (path: string) => runOp('stage', () => api.gitStage([path]));
   const onUnstage = (path: string) => runOp('unstage', () => api.gitUnstage([path]));
   const onDiscard = (path: string) => {
@@ -273,11 +333,13 @@ export function GitPage() {
   const onCommitAndPush = async () => {
     const msg = commitMsg.trim();
     if (!msg) return flash('err', 'Commit message required');
+    // Check before committing, so a commit is never left behind by a push that cannot happen.
+    if (!remote.url) return requestRemote('Add a Git remote before committing and pushing.');
     const stageAll = stagedFiles.length === 0;
     const c = await runOp('commit', () => api.gitCommit(msg, stageAll));
     if (!c.ok) return;
     setCommitMsg('');
-    await runOp('push', () => api.gitPush(), 'Pushed to remote');
+    await pushOrAskForRemote('Pushed to remote');
   };
   const onRequestReview = async () => {
     // After a share the composer is cleared — fall back to the shared message.
@@ -311,8 +373,16 @@ export function GitPage() {
     const result = await runOp('enable governed tracking', () => api.enableGitGovernedContextTracking());
     if (result.ok) flash('ok', 'Governed project source and Hint Graph files are now visible to source control.');
   };
-  const onPull = () => runOp('pull', () => api.gitPull(), 'Pulled from remote');
-  const onPush = () => runOp('push', () => api.gitPush(), 'Pushed to remote');
+  const onPull = () => {
+    if (!remote.url) return requestRemote('Add a Git remote before getting updates.');
+    void runOp('pull', () => api.gitPull(), 'Pulled from remote').then((res) => {
+      if (isNoRemoteFailure(res)) requestRemote(res.error);
+    });
+  };
+  const onPush = () => {
+    if (!remote.url) return requestRemote();
+    void pushOrAskForRemote('Pushed to remote');
+  };
 
   // ── Guided share-rail handlers (prototype: describe → share → review) ──────
   // "Write it for me from the changes": a deterministic plain-words summary
@@ -332,7 +402,7 @@ export function GitPage() {
     const msg = commitMsg.trim();
     if (!msg) return flash('err', 'Describe your change first');
     if (stagedFiles.length === 0) return flash('err', 'Include at least one change first');
-    if (!remote.url) return flash('err', 'Add a Git remote before sharing changes');
+    if (!remote.url) return requestRemote('Add a Git remote before sharing changes.');
     const count = stagedFiles.length;
     const base = reviewBaseBranch(branchInfo.current);
     if (!branchInfo.current || branchInfo.current === 'HEAD' || branchInfo.current === 'main' || branchInfo.current === 'master') {
@@ -342,7 +412,7 @@ export function GitPage() {
     }
     const committed = await runOp('commit', () => api.gitCommit(msg, false));
     if (!committed.ok) return;
-    const pushed = await runOp('push', () => api.gitPush(), 'Shared to your branch');
+    const pushed = await pushOrAskForRemote('Shared to your branch');
     if (pushed.ok) setSharedInfo({ count, message: msg, base });
     setCommitMsg('');
   };
@@ -383,7 +453,7 @@ export function GitPage() {
   }
 
   if (status && !status.inRepo) {
-    return <NotARepo t={t} />;
+    return <NotARepo t={t} onInit={() => void onInitRepo()} busy={busy === 'init'} error={initError} />;
   }
 
   return (
@@ -411,6 +481,21 @@ export function GitPage() {
         onCreateBranch={onCreateBranch}
         branchMenuRef={branchMenuRef}
       />
+
+      {!remote.url && (
+        <RemoteSetupBanner
+          t={t}
+          open={remoteFormOpen}
+          onOpen={openRemoteForm}
+          onClose={() => { setRemoteFormOpen(false); setRemoteFormError(null); }}
+          value={remoteUrlInput}
+          onChange={(value) => { setRemoteUrlInput(value); if (remoteFormError) setRemoteFormError(null); }}
+          onSubmit={() => void onAddRemote()}
+          error={remoteFormError}
+          busy={busy === 'remote'}
+          inputRef={remoteInputRef}
+        />
+      )}
 
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <FileTree
@@ -663,11 +748,18 @@ function TopBar(p: TopBarProps) {
         )}
       </div>
 
-      {p.remoteUrl && (
+      {p.remoteUrl ? (
         <>
           <span style={{ fontSize: 11, color: t.textMuted }}>·</span>
           <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis' }} title={p.remoteUrl}>
             {prettyRemote(p.remoteUrl)}
+          </span>
+        </>
+      ) : (
+        <>
+          <span style={{ fontSize: 11, color: t.textMuted }}>·</span>
+          <span style={{ fontSize: 11, color: t.textMuted }} title="No Git remote is configured. Changes stay on this computer.">
+            no remote
           </span>
         </>
       )}
@@ -1812,17 +1904,99 @@ function Toast({ t, kind, text }: { t: Theme; kind: 'ok' | 'err'; text: string }
   );
 }
 
-function NotARepo({ t }: { t: Theme }) {
+function NotARepo({ t, onInit, busy, error }: { t: Theme; onInit: () => void; busy: boolean; error: string | null }) {
   return (
     <div style={{
-      flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+      flex: 1, height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
       flexDirection: 'column', gap: 12, padding: 40, background: t.appBg,
     }}>
       <GitBranch size={36} strokeWidth={1.5} color={t.textMuted} style={{ opacity: 0.5 }} />
-      <div style={{ fontSize: 16, fontWeight: 600, color: t.textPrimary }}>Not a git repository</div>
-      <div style={{ fontSize: 13, color: t.textMuted, maxWidth: 420, textAlign: 'center' }}>
-        Initialize this folder with <code style={{ fontFamily: t.fontMono }}>git init</code> to start tracking changes.
+      <div style={{ fontSize: 16, fontWeight: 600, color: t.textPrimary }}>Not a Git repository yet</div>
+      <div style={{ fontSize: 13, color: t.textMuted, maxWidth: 440, textAlign: 'center', lineHeight: 1.5 }}>
+        Initialize Git to track changes to blocks, notebooks, and apps, see each block&apos;s version history, and share work for review. Nothing is sent anywhere until you add a remote.
       </div>
+      <button
+        type="button"
+        onClick={onInit}
+        disabled={busy}
+        style={{ ...topBtn(t, true), opacity: busy ? 0.7 : 1, cursor: busy ? 'default' : 'pointer' }}
+      >
+        <GitBranch size={12} strokeWidth={1.75} />
+        {busy ? 'Initializing…' : 'Initialize Git for this project'}
+      </button>
+      {error && (
+        <div role="alert" style={{ fontSize: 12, color: t.error, maxWidth: 440, textAlign: 'center', lineHeight: 1.5 }}>
+          {error}
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: t.textMuted }}>
+        Prefer the terminal? Run <code style={{ fontFamily: t.fontMono }}>git init</code> in the project folder, then refresh.
+      </div>
+    </div>
+  );
+}
+
+function RemoteSetupBanner({ t, open, onOpen, onClose, value, onChange, onSubmit, error, busy, inputRef }: {
+  t: Theme;
+  open: boolean;
+  onOpen: () => void;
+  onClose: () => void;
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  error: string | null;
+  busy: boolean;
+  inputRef: React.RefObject<HTMLInputElement>;
+}) {
+  return (
+    <div style={{ display: 'grid', gap: 8, padding: '9px 20px', background: t.sidebarBg, borderBottom: `1px solid ${t.headerBorder}`, flexShrink: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <Link2 size={13} strokeWidth={1.75} color={t.warning} />
+        <span style={{ fontSize: 12, fontWeight: 650, color: t.textPrimary }}>No Git remote yet</span>
+        <span style={{ fontSize: 11, color: t.textMuted }}>
+          Changes are saved on this computer only. Add the repository address from GitHub, GitLab, or your Git server to share them.
+        </span>
+        <div style={{ flex: 1 }} />
+        {!open && (
+          <button type="button" onClick={onOpen} style={miniBtn(t, 'primary')}>Add remote</button>
+        )}
+      </div>
+      {open && (
+        <form
+          onSubmit={(event) => { event.preventDefault(); onSubmit(); }}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}
+        >
+          <label htmlFor="dql-git-remote-url" style={{ fontSize: 11, color: t.textSecondary }}>Remote URL (origin)</label>
+          <input
+            id="dql-git-remote-url"
+            ref={inputRef}
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}
+            placeholder="https://github.com/org/repo.git"
+            autoComplete="off"
+            spellCheck={false}
+            aria-invalid={Boolean(error)}
+            aria-describedby="dql-git-remote-url-help"
+            style={{
+              flex: '1 1 320px', minWidth: 0, background: t.appBg, color: t.textPrimary,
+              border: `1px solid ${error ? t.error : t.cellBorder}`, borderRadius: 4,
+              padding: '5px 8px', fontSize: 12, fontFamily: t.fontMono, outline: 'none',
+            }}
+          />
+          <button type="submit" disabled={busy} style={{ ...miniBtn(t, 'primary'), opacity: busy ? 0.7 : 1 }}>
+            {busy ? 'Saving…' : 'Save remote'}
+          </button>
+          <button type="button" onClick={onClose} style={miniBtn(t)}>Cancel</button>
+          <div
+            id="dql-git-remote-url-help"
+            role={error ? 'alert' : undefined}
+            style={{ width: '100%', fontSize: 10.5, lineHeight: 1.5, color: error ? t.error : t.textMuted }}
+          >
+            {error ?? `Accepts ${REMOTE_URL_EXAMPLES}. DQL only saves the address; it does not connect until you send changes.`}
+          </div>
+        </form>
+      )}
     </div>
   );
 }

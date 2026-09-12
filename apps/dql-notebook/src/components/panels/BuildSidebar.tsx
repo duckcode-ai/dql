@@ -12,7 +12,7 @@ import { BlockStatusBadge } from '../blocks/BlockStatusBadge';
 import { SemanticTreeView } from './CatalogTree';
 import { blockDomains, filterBlocksForDomain } from './block-domain-filter';
 import { buildNotebookSemanticBlock } from './semantic-notebook-source';
-import { buildBlockLibraryTree, type BlockLibraryTreeNode } from './block-library-tree';
+import { blockFolderLabel, buildBlockLibraryTree, type BlockLibraryTreeNode } from './block-library-tree';
 import { buildFileLibraryTree, type FileLibraryTreeNode } from './file-library-tree';
 import { DomainScopeSelect } from './DomainScopeSelect';
 import { filterNotebookFiles, notebookDomains } from './notebook-sidebar';
@@ -747,6 +747,8 @@ function BlocksList({ t, search, domain, onDomainChange, onOpenBlock, onDeleteBl
   const { state, dispatch } = useNotebook();
   const [blocks, setBlocks] = useState<BlockEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const blockFileKey = state.files.filter((f) => f.type === 'block').map((f) => f.path).sort().join('|');
 
@@ -754,10 +756,15 @@ function BlocksList({ t, search, domain, onDomainChange, onOpenBlock, onDeleteBl
     let active = true;
     setLoading(true);
     api.getBlockLibrary()
-      .then((r) => { if (active) setBlocks(r.blocks); })
+      .then((r) => {
+        if (!active) return;
+        // A failed refresh keeps the list already shown instead of emptying it.
+        if (r.error) setLoadError(r.error);
+        else { setBlocks(r.blocks); setLoadError(null); }
+      })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [blockFileKey, refreshKey]);
+  }, [blockFileKey, refreshKey, retryKey]);
 
   const domains = blockDomains(blocks, state.authoredDomains);
   const selectedDomain = domains.includes(domain) ? domain : '';
@@ -780,16 +787,25 @@ function BlocksList({ t, search, domain, onDomainChange, onOpenBlock, onDeleteBl
     void api.openBlockStudio(block.path).then((payload) => dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload }));
   };
 
-  if (loading) return <EmptyNote text="Loading blocks…" t={t} />;
+  const draftCount = filtered.filter((block) => String(block.status ?? 'draft') !== 'certified').length;
+  const certifiedNames = new Set(blocks.filter((block) => block.status === 'certified').map((block) => block.name));
+  const retry = <button type="button" onClick={() => setRetryKey((current) => current + 1)} style={{ marginLeft: 10, border: 'none', background: 'transparent', color: t.accent, cursor: 'pointer', fontSize: 11.5, fontWeight: 650, padding: 0, fontFamily: t.font }}>Retry</button>;
+
+  // Keep the list on screen while it refreshes; only the first load shows a loading note.
+  if (loading && blocks.length === 0) return <EmptyNote text="Loading blocks…" t={t} />;
+  if (loadError && blocks.length === 0) {
+    return <div role="alert" style={{ padding: '14px 12px', fontSize: 12, color: t.textSecondary, lineHeight: 1.45 }}>Couldn't load blocks: {loadError}{retry}</div>;
+  }
   if (blocks.length === 0) return <EmptyNote text="No blocks yet." t={t} />;
   return <div>
+    {loadError ? <div role="status" style={{ padding: '6px 12px', fontSize: 11, color: t.warning }}>Showing the last list: {loadError}{retry}</div> : null}
     <DomainScopeSelect
       id="block-domain-filter"
       ariaLabel="Block domain"
       value={selectedDomain}
       options={domainOptions}
       onChange={(value) => onDomainChange?.(value)}
-      summary={<>{filtered.length} block{filtered.length === 1 ? '' : 's'} · {scopeLabel}</>}
+      summary={<>{filtered.length} block{filtered.length === 1 ? '' : 's'}{draftCount ? ` · ${draftCount} draft${draftCount === 1 ? '' : 's'}` : ''} · {scopeLabel}</>}
       t={t}
     />
     {filtered.length === 0
@@ -807,6 +823,7 @@ function BlocksList({ t, search, domain, onDomainChange, onOpenBlock, onDeleteBl
           })}
           onOpen={open}
           onDelete={onDeleteBlock}
+          certifiedNames={certifiedNames}
           t={t}
         />}
   </div>;
@@ -820,6 +837,7 @@ function BlockTree({
   onToggleFolder,
   onOpen,
   onDelete,
+  certifiedNames,
   t,
 }: {
   nodes: BlockLibraryTreeNode[];
@@ -829,13 +847,16 @@ function BlockTree({
   onToggleFolder: (path: string) => void;
   onOpen: (block: BlockEntry) => void;
   onDelete?: (block: BlockEntry) => void;
+  /** Names of certified blocks, so a draft of one reads as pending edits to it. */
+  certifiedNames?: Set<string>;
   t: Theme;
 }) {
   return (
     <>
       {nodes.map((node) => {
         if (node.kind === 'block') {
-          return <BlockRow key={node.block.path} block={node.block} depth={depth} t={t} onOpen={() => onOpen(node.block)} onDelete={onDelete ? () => onDelete(node.block) : undefined} />;
+          const editsCertified = node.block.status !== 'certified' && /(^|\/)_drafts\//.test(node.block.path) && Boolean(certifiedNames?.has(node.block.name));
+          return <BlockRow key={node.block.path} block={node.block} depth={depth} t={t} editsCertified={editsCertified} onOpen={() => onOpen(node.block)} onDelete={onDelete ? () => onDelete(node.block) : undefined} />;
         }
         const expanded = expandAll || expandedFolders.has(node.path);
         return (
@@ -848,10 +869,10 @@ function BlockTree({
             >
               {expanded ? <ChevronDown size={13} color={t.textMuted} /> : <ChevronRight size={13} color={t.textMuted} />}
               {expanded ? <FolderOpen size={14} color={t.accent} /> : <Folder size={14} color={t.textMuted} />}
-              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{node.name}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{blockFolderLabel(node.name)}</span>
               <span style={{ fontSize: 10, color: t.textMuted }}>{countTreeBlocks(node.children)}</span>
             </button>
-            {expanded ? <BlockTree nodes={node.children} depth={depth + 1} expandAll={expandAll} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onOpen={onOpen} onDelete={onDelete} t={t} /> : null}
+            {expanded ? <BlockTree nodes={node.children} depth={depth + 1} expandAll={expandAll} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onOpen={onOpen} onDelete={onDelete} certifiedNames={certifiedNames} t={t} /> : null}
           </React.Fragment>
         );
       })}
@@ -865,11 +886,17 @@ function countTreeBlocks(nodes: BlockLibraryTreeNode[]): number {
 
 // Prototype block row: blocks glyph · mono name over a meta line · status dot.
 // A single click opens the block's detail overview (description lives there).
-function BlockRow({ block, depth = 0, t, onOpen, onDelete }: { block: BlockEntry; depth?: number; t: Theme; onOpen: () => void; onDelete?: () => void }) {
+function BlockRow({ block, depth = 0, t, onOpen, onDelete, editsCertified = false }: { block: BlockEntry; depth?: number; t: Theme; onOpen: () => void; onDelete?: () => void; editsCertified?: boolean }) {
   const status = String(block.status ?? 'draft');
   const dot = STATUS_COLOR[status] ?? t.warning;
+  // Delete is a destructive action: it appears on hover or keyboard focus, not on every row.
+  const [active, setActive] = useState(false);
   return (
     <div
+      onMouseEnter={() => setActive(true)}
+      onMouseLeave={() => setActive(false)}
+      onFocus={() => setActive(true)}
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setActive(false); }}
       style={{
         display: 'flex', alignItems: 'center', gap: 8, width: '100%', boxSizing: 'border-box',
         padding: `7px 8px 7px ${10 + (depth * 16)}px`, border: 'none', borderRadius: 7, margin: '1px 0',
@@ -880,12 +907,12 @@ function BlockRow({ block, depth = 0, t, onOpen, onDelete }: { block: BlockEntry
         <Blocks size={14} color={t.textMuted} strokeWidth={1.75} style={{ flexShrink: 0 }} />
         <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
           <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{block.name}</span>
-          <span style={{ fontSize: 10.5, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[block.domain, status].filter(Boolean).join(' · ')}</span>
+          <span style={{ fontSize: 10.5, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[block.domain, editsCertified ? 'draft · edits to the certified block' : status].filter(Boolean).join(' · ')}</span>
         </span>
       </button>
       <span title={status} style={{ flexShrink: 0, width: 7, height: 7, borderRadius: 999, background: dot }} />
       {onDelete ? (
-        <button type="button" aria-label={`Delete ${block.name}`} title={`Delete ${block.name}`} onClick={onDelete} style={{ width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: 'none', borderRadius: 6, background: 'transparent', color: t.error, cursor: 'pointer' }}>
+        <button type="button" aria-label={`Delete ${block.name}`} title={`Delete ${block.name}`} onClick={onDelete} style={{ width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: 'none', borderRadius: 6, background: 'transparent', color: t.error, cursor: 'pointer', opacity: active ? 1 : 0, transition: 'opacity .12s ease' }}>
           <Trash2 size={13} />
         </button>
       ) : null}

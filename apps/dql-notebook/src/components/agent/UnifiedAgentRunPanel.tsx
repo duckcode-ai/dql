@@ -69,7 +69,7 @@ import {
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { controlStyle } from '../../themes/control-tokens';
-import { ThinkingModeControl } from './ThinkingModeControl';
+import { AskComposerOptions } from './AskComposerOptions';
 import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection, type AppBuildBriefEdits } from '../apps/AppBuildProposalPanel';
 import { ResultView } from '../output/ResultView';
@@ -343,7 +343,7 @@ export function UnifiedAgentRunPanel({
   const [thinkingMode, setThinkingMode] = useState<AgentThinkingMode>(() => readStoredThinkingMode());
   const [researchMode, setResearchMode] = useState(initialMode === 'research');
   const [researchResultRowsOptIn, setResearchResultRowsOptIn] = useState(false);
-  const [executionConnectionNames, setExecutionConnectionNames] = useState<string[]>([]);
+  // The connection Ask runs on: the notebook's own, else the project default. It is not a composer choice.
   const [executionConnectionName, setExecutionConnectionName] = useState<string>();
   const changeThinkingMode = useCallback((mode: AgentThinkingMode) => {
     setThinkingMode(mode);
@@ -409,7 +409,6 @@ export function UnifiedAgentRunPanel({
       .then((info) => {
         if (cancelled) return;
         const names = Object.keys(info.connections ?? {}).sort((left, right) => left.localeCompare(right));
-        setExecutionConnectionNames(names);
         setExecutionConnectionName(selectAgentExecutionConnection(
           names,
           info.default,
@@ -417,17 +416,18 @@ export function UnifiedAgentRunPanel({
         ));
       })
       .catch(() => {
-        if (!cancelled) {
-          setExecutionConnectionNames([]);
-          setExecutionConnectionName(undefined);
-        }
+        if (!cancelled) setExecutionConnectionName(undefined);
       });
     return () => { cancelled = true; };
   }, [contextualExecutionConnectionName]);
 
-  const changeExecutionConnection = useCallback((name: string) => {
-    setExecutionConnectionName(name);
-  }, []);
+  // The composer grows with what is typed, up to a few lines, and shrinks back after sending.
+  useEffect(() => {
+    const element = inputRef.current;
+    if (!element) return;
+    element.style.height = 'auto';
+    element.style.height = `${Math.min(element.scrollHeight, 200)}px`;
+  }, [input]);
 
   // ── Ask redesign (askLayout) state ────────────────────────────────────────
   // Which artifact is open in the right inspector, and its active tab. Null =
@@ -1131,24 +1131,21 @@ export function UnifiedAgentRunPanel({
                   ref={inputRef}
                   value={input}
                   onChange={(event) => { setInput(event.target.value); pendingModeRef.current = undefined; }}
-                  rows={2}
+                  rows={1}
                   placeholder={composerPlaceholder}
                   onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleSubmit(); } }}
-                  style={{ border: 'none', background: 'transparent', resize: 'none', outline: 'none', boxShadow: 'none', padding: '13px 15px 4px', fontSize: 13.5, lineHeight: 1.5, color: t.textPrimary, fontFamily: t.font }}
+                  style={{ border: 'none', background: 'transparent', resize: 'none', outline: 'none', boxShadow: 'none', padding: '14px 16px 4px', minHeight: 48, maxHeight: 200, overflowY: 'auto', fontSize: 14, lineHeight: 1.5, color: t.textPrimary, fontFamily: t.font }}
                 />
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px 10px 12px' }}>
-                  <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
-                  <ResearchModeControl checked={researchMode} onChange={changeResearchMode} t={t} />
-                  {researchMode ? <ResearchRowsConsent
-                    checked={researchResultRowsOptIn}
-                    onChange={setResearchResultRowsOptIn}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px 8px 8px' }}>
+                  <AskComposerOptions
                     t={t}
-                  /> : null}
-                  <AgentExecutionConnectionControl
-                    names={executionConnectionNames}
-                    value={executionConnectionName}
-                    onChange={changeExecutionConnection}
-                    t={t}
+                    thinkingMode={thinkingMode}
+                    onThinkingMode={changeThinkingMode}
+                    research={researchMode}
+                    onResearch={changeResearchMode}
+                    researchRows={researchResultRowsOptIn}
+                    onResearchRows={setResearchResultRowsOptIn}
+                    researchRowsTitle={RESEARCH_TOOL_ROWS_CONSENT_TITLE}
                   />
                   <div style={{ flex: 1 }} />
                   {running ? (
@@ -1307,21 +1304,17 @@ export function UnifiedAgentRunPanel({
             <span>{scopeHint}</span>
             {onClearScope ? <button type="button" onClick={onClearScope} aria-label="Clear modeling scope" title="Clear modeling scope" style={{ border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 2 }}><X size={12} /></button> : null}
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <AgentExecutionConnectionControl
-              names={executionConnectionNames}
-              value={executionConnectionName}
-              onChange={changeExecutionConnection}
-              t={t}
-            />
-            <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
-            <ResearchModeControl checked={researchMode} onChange={changeResearchMode} t={t} />
-            {researchMode ? <ResearchRowsConsent
-              checked={researchResultRowsOptIn}
-              onChange={setResearchResultRowsOptIn}
-              t={t}
-            /> : null}
-          </div>
+          <AskComposerOptions
+            t={t}
+            thinkingMode={thinkingMode}
+            onThinkingMode={changeThinkingMode}
+            research={researchMode}
+            onResearch={changeResearchMode}
+            researchRows={researchResultRowsOptIn}
+            onResearchRows={setResearchResultRowsOptIn}
+            researchRowsTitle={RESEARCH_TOOL_ROWS_CONSENT_TITLE}
+            align="end"
+          />
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
           <textarea
@@ -1532,127 +1525,6 @@ export function selectAgentExecutionConnection(
   if (preferredName && names.includes(preferredName)) return preferredName;
   if (defaultName && names.includes(defaultName)) return defaultName;
   return names[0];
-}
-
-function ResearchModeControl({
-  checked,
-  onChange,
-  t,
-}: {
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-  t: Theme;
-}): JSX.Element {
-  return (
-    <button
-      type="button"
-      aria-pressed={checked}
-      aria-label="Research mode"
-      title="Research mode plans a bounded investigation and synthesizes the surrounding business context. Thinking effort is separate."
-      onClick={() => onChange(!checked)}
-      style={{
-        minHeight: 30,
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 5,
-        padding: '0 8px',
-        border: checked ? '1px solid var(--accent)' : '1px solid var(--border-default)',
-        borderRadius: 8,
-        background: checked ? 'var(--accent-dim)' : 'var(--bg-2)',
-        color: checked ? 'var(--accent-fg)' : t.textMuted,
-        fontSize: 10.5,
-        cursor: 'pointer',
-      }}
-    >
-      <FileSearch size={13} /> Research
-    </button>
-  );
-}
-
-function ResearchRowsConsent({
-  checked,
-  onChange,
-  t,
-}: {
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-  t: Theme;
-}): JSX.Element {
-  return (
-    <label
-      title={RESEARCH_TOOL_ROWS_CONSENT_TITLE}
-      style={{
-        minHeight: 30,
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 5,
-        padding: '0 7px',
-        border: '1px solid var(--border-default)',
-        borderRadius: 8,
-        background: 'var(--bg-2)',
-        color: t.textMuted,
-        fontSize: 10.5,
-        cursor: 'pointer',
-      }}
-    >
-      <input
-        type="checkbox"
-        aria-label="Allow redacted local-analysis tool rows for this Research run"
-        checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
-      />
-      Research tool rows (this run)
-    </label>
-  );
-}
-
-function AgentExecutionConnectionControl({
-  names,
-  value,
-  onChange,
-  t,
-}: {
-  names: string[];
-  value?: string;
-  onChange: (name: string) => void;
-  t: Theme;
-}): JSX.Element | null {
-  if (names.length === 0 || !value) return null;
-  return (
-    <label
-      title="Database connection used for metadata, compilation, and execution in this conversation"
-      style={{
-        height: 30,
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 5,
-        padding: '0 7px',
-        border: '1px solid var(--border-default)',
-        borderRadius: 8,
-        background: 'var(--bg-2)',
-        color: t.textMuted,
-        fontSize: 11,
-      }}
-    >
-      <Database size={12} />
-      <select
-        aria-label="Ask AI database connection"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        style={{
-          maxWidth: 150,
-          border: 0,
-          outline: 0,
-          background: 'transparent',
-          color: t.textSecondary,
-          font: 'inherit',
-          cursor: names.length > 1 ? 'pointer' : 'default',
-        }}
-      >
-        {names.map((name) => <option key={name} value={name}>{name}</option>)}
-      </select>
-    </label>
-  );
 }
 
 function readStoredThinkingMode(): AgentThinkingMode {
