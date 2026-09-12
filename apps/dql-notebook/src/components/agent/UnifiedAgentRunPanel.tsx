@@ -3098,7 +3098,7 @@ function AskRunCard(props: AskRunCardProps) {
           ) : null}
           {primaryArtifact ? (
             <button type="button" className="dql-ask-ghost" onClick={() => openArtifact(primaryArtifact.id, hasAnalyticalInspectorContract(payloadOf(primaryArtifact)) || hasAskPipelineReceipt(run) || run.agentRunId ? 'how' : 'trust')} style={askGhostBtnStyle(t)}>
-              <ListTree size={12} /> How it was answered
+              <ListTree size={12} /> {researchArtifact && investigationReportOf(payloadOf(researchArtifact)) ? 'How it was researched' : 'How it was answered'}
             </button>
           ) : null}
         </div>
@@ -4743,7 +4743,7 @@ function AskInspector({
   });
   const activeTab = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
 
-  const badgeLabel = cancelled ? 'Cancelled' : blocked ? 'Blocked' : certified ? 'Certified' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'Governed' : 'AI-generated';
+  const badgeLabel = cancelled ? 'Cancelled' : blocked ? 'Blocked' : certified ? 'Certified' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'Governed' : investigationReport ? 'Review required' : 'AI-generated';
   const badgeColor = cancelled ? 'var(--text-tertiary)' : blocked ? 'var(--status-error)' : certified ? 'var(--status-success)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent)' : 'var(--status-warning)';
   const badgeBg = cancelled ? 'var(--bg-3)' : blocked ? 'var(--status-error-bg)' : certified ? 'var(--status-success-bg)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent-dim)' : 'var(--status-warning-bg)';
 
