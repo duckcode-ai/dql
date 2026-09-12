@@ -174,6 +174,35 @@ describe('an investigation of a change', () => {
     expect(report.headline.text).toBe('No Revenue was recorded for January 2023 or December 2022.');
   });
 
+  it('a period that starts before the data does is not measured, never summed from the part the data holds', async () => {
+    const script = scripted();
+    const { report } = await investigate(fromRun(reading({ time: { ref: TIME, grain: 'month', window: { start: '2024-06-01', end: '2024-09-01' } } })), script);
+    expect(report.frame.windows.prior.label).toBe('March 2024 to May 2024');
+    expect(Number(report.headline.current!.value)).toBe(30 * 100 + 31 * 100 + 31 * 100);
+    expect(report.headline.prior).toBeUndefined();
+    expect(report.headline.yearAgo).toBeUndefined();
+    expect(report.status).toBe('no_data');
+    expect(report.headline.text).toContain('March 2024 to May 2024 starts before the data does (the first month with data is June 2024)');
+
+    // A semantic engine that returns the months before the data as zero rows
+    // does not turn them into a measured zero.
+    const zeroFilled = scripted();
+    const plain = zeroFilled.runtime.runIntent;
+    zeroFilled.runtime.runIntent = async (intent, options) => {
+      const outcome = await plain(intent, options);
+      const monthly = intent.groupBy.some((group) => group.role === 'time' && group.grain === 'month');
+      if (outcome.kind !== 'answered' || !monthly) return outcome;
+      const column = outcome.result.columns[0]!;
+      const start = intent.time?.window?.start ?? '';
+      const filler = ['2024-03-01', '2024-04-01', '2024-05-01'].filter((day) => day >= start).map((day) => ({ [column]: day, value: 0 }));
+      return { ...outcome, result: { ...outcome.result, rows: [...filler, ...outcome.result.rows], rowCount: outcome.result.rowCount + filler.length } };
+    };
+    const filled = await investigate(fromRun(reading({ time: { ref: TIME, grain: 'month', window: { start: '2024-06-01', end: '2024-09-01' } } })), zeroFilled);
+    expect(filled.report.headline.prior).toBeUndefined();
+    expect(filled.report.headline.yearAgo).toBeUndefined();
+    expect(filled.report.headline.text).toContain('the first month with data is June 2024');
+  });
+
   it('stops at the statement budget: a measured headline keeps its figures, an unmeasured one is incomplete', async () => {
     const partial = await investigate(fromRun(august), scripted(), { maxStatements: 1 });
     expect(partial.receipt.budget).toMatchObject({ statementsUsed: 1, stoppedBy: 'budget' });

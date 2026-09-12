@@ -7,7 +7,7 @@
 import type { AnalyticalIntentV1, Grain, IntentMeasure, IntentPredicate } from '../../ask-pipeline/intent.js';
 import type { VocabularyEntry, VocabularyIndex } from '../../ask-pipeline/vocabulary.js';
 import type { InvestigationFrameV1, InvestigationMetric, InvestigationWindow } from './types.js';
-import { addDays, dayOf, formatDay, grainOfWindow, latestCompleteWindow, parseDay, priorWindow, windowOf, yearAgoWindow } from './windows.js';
+import { addDays, addGrains, bucketsIn, dayOf, formatDay, grainOfWindow, latestCompleteWindow, parseDay, priorWindow, startOfGrain, windowOf, yearAgoWindow } from './windows.js';
 
 export interface InvestigationFramePlan {
   reading: string;
@@ -15,9 +15,16 @@ export interface InvestigationFramePlan {
   metric: InvestigationMetric;
   timeRef: string;
   grain: Grain;
-  stated?: { current: { start: string; end: string }; prior?: { start: string; end: string }; expression?: string };
+  /**
+   * `trailing`: the reading covers several periods to show the way to the last
+   * one (a trend "through August 2025"); the change investigated is that last
+   * period against the one before.
+   */
+  stated?: { current: { start: string; end: string }; prior?: { start: string; end: string }; expression?: string; trailing?: true };
   baseFilters: IntentPredicate[];
   shape: 'change' | 'level';
+  /** What framing decided that a reader should know (a certified block measured through its governed metric). */
+  notes?: string[];
 }
 
 export type InvestigationFramePlanResult =
@@ -76,6 +83,53 @@ function metricOf(vocabulary: VocabularyIndex, measure: IntentMeasure): Investig
   return { ref, label, additivity: nonAdditive ? 'non_additive' : 'additive', ...(measure.aggregation ? { aggregation: measure.aggregation } : {}) };
 }
 
+/**
+ * A certified block is one query, not a metric: it cannot be split into
+ * periods. Research measures the governed metric with the block's definition
+ * (the same aggregate of the same column on the same relation), or, when no
+ * governed metric has it, that column itself on the AI-written lane. A name is
+ * never enough: "revenue" on another relation is a different number.
+ */
+function measureForBlock(vocabulary: VocabularyIndex, measure: IntentMeasure): { measure: IntentMeasure; lane?: 'ai'; note?: string } {
+  const block = vocabulary.get(measure.ref);
+  const source = block?.kind === 'block' ? block.contract?.measures.find((item) => item.sourceColumn && item.aggregate) : undefined;
+  if (!block || !source?.sourceColumn || !source.aggregate) return { measure };
+  const leaf = (value: string) => value.replace(/"/g, '').toLowerCase().split('.').pop() ?? '';
+  const column = leaf(source.sourceColumn);
+  const relations = new Set((block.contract?.relations ?? []).map(leaf));
+  const definition = (entry: VocabularyEntry) => {
+    const call = /^\s*([a-z_]+)\s*\(\s*([\w."]+)\s*\)\s*$/i.exec(entry.physical?.expr ?? entry.expr ?? '');
+    return {
+      aggregate: (call?.[1] ?? entry.physical?.aggregate ?? entry.aggregation ?? '').toLowerCase(),
+      reads: leaf(call?.[2] ?? entry.physical?.column ?? entry.physical?.expr ?? entry.expr ?? ''),
+    };
+  };
+  const same = vocabulary.entries.filter((entry) => {
+    if ((entry.kind !== 'metric' && entry.kind !== 'measure') || entry.inventory || entry.derived) return false;
+    if (entry.metricType && entry.metricType !== 'simple') return false;
+    const { aggregate, reads } = definition(entry);
+    return aggregate === source.aggregate && reads === column
+      && (!entry.physical?.relation || relations.size === 0 || relations.has(leaf(entry.physical.relation)));
+  });
+  const metrics = same.filter((entry) => entry.kind === 'metric');
+  const pool = metrics.length ? metrics : same;
+  const blockLabel = entryLabel(vocabulary, block.ref);
+  if (pool.length === 1) {
+    const governed = pool[0]!;
+    return {
+      measure: { ...measure, ref: governed.ref },
+      note: `The reading named the certified block ${blockLabel}, which cannot be split into periods; Research measures ${entryLabel(vocabulary, governed.ref)}, the governed metric with the same definition.`,
+    };
+  }
+  const relation = block.contract?.relations[0];
+  if (!relation) return { measure };
+  return {
+    measure: { ...measure, ref: `column:${relation}.${source.sourceColumn}`, aggregation: source.aggregate },
+    lane: 'ai',
+    note: `The reading named the certified block ${blockLabel}, which cannot be split into periods, and no governed metric has its definition; Research measures the ${source.aggregate} of ${source.sourceColumn} with SQL the AI writes from the tables.`,
+  };
+}
+
 function timeRefFor(vocabulary: VocabularyIndex, reading: AnalyticalIntentV1, measure: IntentMeasure, metricRef: string): string | undefined {
   const timeGroup = reading.groupBy.find((group) => group.role === 'time');
   const scoped = windowFromPredicates(vocabulary, measure.scope)?.ref ?? windowFromPredicates(vocabulary, reading.filters)?.ref;
@@ -102,7 +156,9 @@ export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; voc
       .map((entry) => entry.ref))].slice(0, 4);
     return { status: 'clarify', question: 'Research needs a measure to investigate. Which one should it look at?', options };
   }
-  const metric = metricOf(vocabulary, primary);
+  const measured = measureForBlock(vocabulary, primary);
+  const metric = metricOf(vocabulary, measured.measure);
+  const lane = measured.lane ?? input.lane;
   const timeRef = timeRefFor(vocabulary, reading, primary, metric.ref);
   if (!timeRef) return { status: 'not_investigable', reason: `Research compares periods, and no date field is known for ${metric.label}.` };
   const currentStated = comparison && base
@@ -113,6 +169,9 @@ export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; voc
   const priorStated = comparison && base ? windowFromPredicates(vocabulary, base.scope, timeRef) : undefined;
   const timeGroup = reading.groupBy.find((group) => group.role === 'time');
   const grain = reading.time?.grain ?? timeGroup?.grain ?? (currentStated ? grainOfWindow(currentStated) : undefined) ?? 'month';
+  const trailing = Boolean(currentStated && !changeMeasure && !priorStated
+    && (reading.expectedShape === 'trend' || timeGroup)
+    && (bucketsIn(currentStated, grain) ?? 0) > 1);
   // Every query keeps the reading's restrictions, and the measure's own scope
   // ("beverage revenue"), except the dates the periods replace.
   const keep = (predicate: IntentPredicate) => predicate.on !== 'aggregate' && !isTimeRef(vocabulary, predicate.ref, timeRef);
@@ -120,9 +179,10 @@ export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; voc
   return {
     status: 'planned',
     plan: {
-      reading: reading.reading, lane: input.lane, metric, timeRef, grain, baseFilters,
-      shape: changeMeasure || priorStated ? 'change' : 'level',
-      ...(currentStated ? { stated: { current: { start: currentStated.start, end: currentStated.end }, ...(priorStated ? { prior: { start: priorStated.start, end: priorStated.end } } : {}), ...(reading.time?.window?.expression ? { expression: reading.time.window.expression } : {}) } } : {}),
+      reading: reading.reading, lane, metric, timeRef, grain, baseFilters,
+      ...(measured.note ? { notes: [measured.note] } : {}),
+      shape: changeMeasure || priorStated || trailing ? 'change' : 'level',
+      ...(currentStated ? { stated: { current: { start: currentStated.start, end: currentStated.end }, ...(priorStated ? { prior: { start: priorStated.start, end: priorStated.end } } : {}), ...(reading.time?.window?.expression ? { expression: reading.time.window.expression } : {}), ...(trailing ? { trailing: true as const } : {}) } } : {}),
     },
   };
 }
@@ -143,6 +203,11 @@ export function investigationWindowsFor(plan: InvestigationFramePlan, input: { o
       current = latestCompleteWindow(input.observedThrough, grain);
       basis = 'shifted_to_data';
       notes.push(`The question asked about ${stated.label}, but the data runs through ${lastDataDay}, so this investigates ${current.label}, the latest complete ${grain}.`);
+    } else if (plan.stated.trailing) {
+      const start = startOfGrain(addDays(parseDay(stated.end)!, -1), grain);
+      current = windowOf(start, addGrains(start, grain, 1), grain);
+      basis = input.fromSourceRun ? 'source_run' : 'stated';
+      notes.push(`The reading covered ${stated.label}; Research compares its last ${grain}, ${current.label}, with the ${grain} before.`);
     } else {
       current = stated;
       basis = input.fromSourceRun ? 'source_run' : 'stated';
@@ -162,7 +227,7 @@ export function investigationWindowsFor(plan: InvestigationFramePlan, input: { o
     windows: { current, prior, yearAgo: yearAgoWindow(current, grain), yearAgoPrior: yearAgoWindow(prior, grain) },
     windowBasis: basis,
     ...(input.observedThrough ? { observedThrough: input.observedThrough } : {}),
-    notes,
+    notes: [...(plan.notes ?? []), ...notes],
   };
 }
 

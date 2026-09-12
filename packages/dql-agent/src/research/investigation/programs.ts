@@ -9,7 +9,7 @@ import type { InvestigationFramePlan } from './frame.js';
 import { bucketDayOf, decimalOf, investigationIntent, resultColumns, timeBucket, type InvestigationFrameCore } from './intents.js';
 import { runInvestigationQuery, type InvestigationRun } from './context.js';
 import type { InvestigationFrameV1, InvestigationWindow } from './types.js';
-import { addDays, addMonths, bucketsIn, daysIn, formatDay, parseDay } from './windows.js';
+import { addDays, addGrains, addMonths, bucketsIn, daysIn, formatDay, parseDay, windowLabel } from './windows.js';
 
 const isZero = (value: ExactDecimal | undefined) => value === undefined || value.coefficient === 0n;
 
@@ -82,6 +82,8 @@ export async function measureHeadline(run: InvestigationRun, frame: Investigatio
   const { windows, grain, metric } = frame;
   const figures: HeadlineFigures = { queryIds: [], aiSql: false, noData: false };
   const seen = new Set<WindowKey>();
+  /** Periods that start before the first bucket with data: their figures are unknown. */
+  const unknown = new Set<WindowKey>();
   const valueOf = (rows: Array<Record<string, unknown>>, columns: { value?: string; numerator?: string; denominator?: string }): ExactDecimal | undefined => {
     if (metric.ratio) {
       const numerator = sumDecimals(rows.map((row) => decimalOf(row[columns.numerator!])).filter((value): value is ExactDecimal => Boolean(value)));
@@ -113,15 +115,34 @@ export async function measureHeadline(run: InvestigationRun, frame: Investigatio
           const day = bucketDayOf(row[picked.columns.time!]);
           return day !== undefined && day >= window.start && day < window.end;
         });
+        // A semantic engine can return every bucket of the span, zero-filled:
+        // the data starts at the first bucket that holds a value.
+        const firstBucket = result.rows.rows
+          .filter((row) => rowHasValue(row, picked.columns))
+          .map((row) => bucketDayOf(row[picked.columns.time!]))
+          .filter((day): day is string => Boolean(day))
+          .sort()[0];
         for (const key of WINDOW_KEYS) {
-          const rows = inWindow(windows[key]);
-          // A period before the data starts is unknown, not zero; the two
-          // compared periods are zero when the series has data but not there.
+          const window = windows[key];
+          // A period that starts before the first bucket with data is covered
+          // in part or not at all: its figure is unknown, never the sum of the
+          // part the data happens to hold.
+          if (firstBucket && window.start < firstBucket) {
+            unknown.add(key);
+            if (key === 'current' || key === 'prior') {
+              const first = windowLabel({ start: firstBucket, end: formatDay(addGrains(parseDay(firstBucket)!, grain, 1)) }, grain);
+              figures.failure ??= `${window.label} starts before the data does (the first ${grain} with data is ${first})`;
+            }
+            continue;
+          }
+          const rows = inWindow(window);
+          // The two compared periods are zero when the series has data but
+          // not there; a year earlier with no rows is unknown.
           if (rows.length === 0 && (key === 'yearAgo' || key === 'yearAgoPrior' || metric.additivity !== 'additive')) continue;
           const value = valueOf(rows, picked.columns);
           if (value !== undefined) { figures[key] = value; seen.add(key); }
         }
-        if (inWindow(windows.current).length === 0 && inWindow(windows.prior).length === 0) figures.noData = true;
+        if (inWindow(windows.current).length === 0 && inWindow(windows.prior).length === 0 && !unknown.has('current') && !unknown.has('prior')) figures.noData = true;
       } else {
         figures.failure = picked.reason;
       }
@@ -138,7 +159,7 @@ export async function measureHeadline(run: InvestigationRun, frame: Investigatio
 
   // One period at a time, for windows the series could not settle.
   for (const key of WINDOW_KEYS) {
-    if (seen.has(key) || figures.noData) continue;
+    if (seen.has(key) || unknown.has(key) || figures.noData) continue;
     if ((key === 'yearAgo' || key === 'yearAgoPrior') && (!seen.has('current') || !seen.has('prior'))) continue;
     const window = windows[key];
     const result = await runInvestigationQuery(run, {

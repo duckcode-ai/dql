@@ -66,6 +66,21 @@ describe('framing an investigation from a reading', () => {
     expect(fromToday.notes).toHaveLength(1);
   });
 
+  it('a trend reading is investigated at its last period against the one before', () => {
+    const plan = planned(reading({ expectedShape: 'trend', time: { ref: TIME, window: { start: '2025-01-01', end: '2025-09-01', expression: 'through August 2025' } } }));
+    expect(plan).toMatchObject({ grain: 'month', shape: 'change', stated: { trailing: true } });
+    expect(frameNeedsFreshness(plan)).toBe(false);
+    const windows = investigationWindowsFor(plan, { now: new Date('2026-09-12T00:00:00Z') });
+    expect(windows.windows.current).toEqual({ start: '2025-08-01', end: '2025-09-01', label: 'August 2025' });
+    expect(windows.windows.prior.label).toBe('July 2025');
+    expect(windows.windows.yearAgo.label).toBe('August 2024');
+    expect(windows.notes.join(' ')).toContain('The reading covered January 2025 to August 2025; Research compares its last month, August 2025');
+
+    // One period of its own grain is investigated as stated.
+    const year = planned(reading({ expectedShape: 'trend', time: { ref: TIME, window: { start: '2025-01-01', end: '2026-01-01' } } }));
+    expect(year.stated?.trailing).toBeUndefined();
+  });
+
   it('a change between two scoped measures compares the periods each names', () => {
     const plan = planned(reading({
       time: { ref: TIME, grain: 'month' },
@@ -92,6 +107,31 @@ describe('framing an investigation from a reading', () => {
     const average = planned(reading({ measures: [{ ref: 'column:dev.orders.amount', aggregation: 'avg' }] }), 'ai');
     expect(average.metric).toMatchObject({ additivity: 'non_additive', aggregation: 'avg' });
     expect(average.lane).toBe('ai');
+  });
+
+  it('a certified block is measured through the governed metric with its definition, never one that shares a name', () => {
+    const contract = (sourceColumn: string) => ({
+      version: 1 as const, name: 'monthly_revenue', outputs: ['month', 'gross_revenue', 'order_count'],
+      measures: [{ output: 'gross_revenue', aggregate: 'sum' as const, sourceColumn }, { output: 'order_count', aggregate: 'count' as const }],
+      groupBy: ['month'], staticScope: [], allowedFilters: [], parameters: [], entities: ['order'], relations: ['dev.orders'], structural: true,
+    });
+    const withBlock = (sourceColumn: string) => buildVocabularyIndex({
+      metrics: [
+        { name: 'order_total', model: 'orders', aggregation: 'sum', type: 'simple', expr: 'order_total', physical: { relation: 'dev.orders', column: 'order_total', aggregate: 'sum' } },
+        // Same aggregate, different relation and meaning: never the block's number.
+        { name: 'revenue', model: 'order_items', aggregation: 'sum', type: 'simple', expr: 'revenue', physical: { relation: 'dev.order_items', column: 'revenue', aggregate: 'sum' } },
+      ],
+      dimensions: [{ name: 'ordered_at', model: 'orders', dataType: 'timestamp', isTime: true, timeGrains: ['day', 'month'] }],
+      blocks: [{ name: 'monthly_revenue', domain: 'commerce', certified: true, contract: contract(sourceColumn) }],
+    });
+    const blockReading = reading({ measures: [{ ref: 'block:commerce.monthly_revenue' }] });
+
+    const governed = planInvestigationFrame({ reading: blockReading, vocabulary: withBlock('order_total'), lane: 'governed' });
+    expect(governed).toMatchObject({ status: 'planned', plan: { lane: 'governed', metric: { ref: 'metric:orders.order_total', additivity: 'additive' } } });
+    if (governed.status === 'planned') expect(governed.plan.notes?.[0]).toContain('certified block monthly revenue, which cannot be split into periods');
+
+    const tables = planInvestigationFrame({ reading: blockReading, vocabulary: withBlock('order_cost'), lane: 'governed' });
+    expect(tables).toMatchObject({ status: 'planned', plan: { lane: 'ai', metric: { ref: 'column:dev.orders.order_cost', aggregation: 'sum', additivity: 'additive' } } });
   });
 
   it('asks for a measure when there is none, and declines what is not a change over time', () => {
