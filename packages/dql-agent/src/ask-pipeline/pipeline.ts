@@ -629,15 +629,50 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // schema. A question the tables do not hold is declined by the drafter and
   // stays an honest gap. A policy or domain-contract denial never reaches it,
   // and it runs only when AI-drafted SQL is enabled for the project.
-  const schemaLane = async (why: string, hint?: AnalyticalIntentV1, options: { onDecline?: 'gap' | 'fallthrough' } = {}): Promise<PipelineOutcome | undefined> => {
+  const schemaLane = async (why: string, hint?: AnalyticalIntentV1, options: { onDecline?: 'gap' | 'fallthrough'; caveats?: string[] } = {}): Promise<PipelineOutcome | undefined> => {
     if (!input.prepareDeps.draftSql || !(input.explorationOptIn || input.explorationAuto)) return undefined;
-    if (receipt.refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict' || refusal.code === 'join_requires_domain_contract')) return undefined;
+    // Only a security policy stops AI-written SQL; nothing about how tables join does.
+    if (receipt.refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict')) return undefined;
     const reading: AnalyticalIntentV1 = hint && hint.kind === 'analytics'
       ? hint
       : { version: 1, kind: 'analytics', reading: input.question, measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' } as AnalyticalIntentV1;
     let previous: { sql: string; error: string } | undefined;
     let lastFailure: Extract<Awaited<ReturnType<typeof executeCandidate>>, { ok: false }> | undefined;
-    step('schema', 'No governed answer: asking the tables directly', 'done', { detail: why });
+    step('schema', 'Asking the AI to write SQL from the tables', 'done', { detail: why });
+    type ExecutedOk = Extract<Awaited<ReturnType<typeof executeCandidate>>, { ok: true }>;
+    const answerWith = (candidate: PreparedCandidate, executed: ExecutedOk, runMs: number | undefined): PipelineOutcome => {
+      step('execute', `Ran the AI-drafted query: ${executed.result.rowCount} row${executed.result.rowCount === 1 ? '' : 's'}`, 'done', { ms: runMs });
+      receipt.intent = reading; receipt.reading = reading.reading;
+      receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: executed.result.rowCount, ms: Math.round(executed.result.executionTimeMs), proofs: executed.proofs };
+      timings.total = Math.round(now() - started);
+      const result: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(reading, executed.result, input.vocabulary) };
+      receipt.context = { ...receipt.context!, used: { joins: [], relations: [...new Set(candidate.relations ?? [])], tier: candidate.tier, ...(candidate.engine ? { engine: candidate.engine } : {}) } };
+      const tables = (candidate.relations ?? []).join(', ');
+      const applied = candidate.proof.find((line) => line.startsWith('applied on the data: '));
+      // Say why the governed tiers did not answer, from their own refusals: a
+      // governed metric that exists but cannot take this reading's filter is
+      // not the same as no metric at all, and the next question reads this.
+      const placeholder = new Set(['no_certified_block', 'exploration_not_opted_in', 'semantic_runtime_unavailable']);
+      const governedRefusal = ['relational', 'semantic', 'certified']
+        .map((tier) => receipt.refusals.find((refusal) => refusal.tier === tier && !placeholder.has(refusal.code)))
+        .find(Boolean);
+      const why = governedRefusal
+        ? `the governed ${governedRefusal.tier} tier could not answer it as read (${governedRefusal.message.replace(/[.\s]+$/, '').slice(0, 180)})`
+        : 'no certified block or semantic metric answers this';
+      // An authored semantic metric rebuilt in SQL says which engine did not
+      // run it and why, in the semantic tier's own words.
+      const rebuilt = [...new Set(reading.measures.flatMap((measure) => measure.change ? [] : measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref])
+        .map((ref) => input.vocabulary.get(ref)).filter((entry) => Boolean(entry?.engineOnly)).map((entry) => entry!.label ?? entry!.name))];
+      const engineRefusal = rebuilt.length ? receipt.refusals.find((refusal) => refusal.tier === 'semantic') : undefined;
+      const source = `the SQL was written by AI from the ${tables ? `schema of ${tables}` : 'available table schemas'}${applied ? `; it ${applied.replace(/^applied on the data: /, 'filters on ')}` : ''}`;
+      const caveat = rebuilt.length
+        ? `the semantic engine did not run ${rebuilt.join(', ')}${engineRefusal ? ` (${engineRefusal.message.replace(/[.\s]+$/, '').slice(0, 180)})` : ''}, so ${source}, rebuilding ${rebuilt.length === 1 ? 'that metric' : 'those metrics'} from ${rebuilt.length === 1 ? 'its' : 'their'} authored definition; review the SQL before relying on the numbers`
+        : `${why}, so ${source}; review the SQL before relying on the numbers`;
+      return { kind: 'answered', intent: reading, candidate, result, text: composeAnsweredText(reading, result, input.vocabulary, candidate.trust, { caveats: [...(options.caveats ?? []), caveat] }), receipt };
+    };
+    // The first statement ran and returned nothing: kept, so a redraft that
+    // fails or declines still ends in the honest empty answer.
+    let firstEmpty: { candidate: PreparedCandidate; executed: ExecutedOk; runMs: number | undefined } | undefined;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       if (remaining() < 12_000 || input.signal?.aborted) break;
       const draftStarted = now();
@@ -646,6 +681,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       const draftMs = timings[attempt === 1 ? 'schema_draft' : 'schema_redraft'];
       receipt.refusals.push(...drafted.refusals);
       receipt.tiers.push({ round: 97, tier: 'exploratory', outcome: drafted.candidates.length ? 'prepared' : 'refused', detail: drafted.refusals[0] ? `${drafted.refusals[0].code}: ${drafted.refusals[0].message.slice(0, 160)}` : `schema lane: ${why.slice(0, 160)}` });
+      if (firstEmpty && drafted.candidates.length === 0) return answerWith(firstEmpty.candidate, firstEmpty.executed, firstEmpty.runMs);
       const failedCheck = drafted.refusals.find((refusal) => refusal.code === 'exploration_check_failed');
       if (failedCheck) {
         step('schema', 'The drafted SQL failed a check, so it was not run', 'failed', { detail: failedCheck.message, ms: draftMs });
@@ -691,41 +727,26 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       mark(attempt === 1 ? 'schema_execute' : 'schema_reexecute', executeStarted);
       const runMs = timings[attempt === 1 ? 'schema_execute' : 'schema_reexecute'];
       if (executed.ok) {
-        step('execute', `Ran the AI-drafted query: ${executed.result.rowCount} row${executed.result.rowCount === 1 ? '' : 's'}`, 'done', { ms: runMs });
-        receipt.intent = reading; receipt.reading = reading.reading;
-        receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: executed.result.rowCount, ms: Math.round(executed.result.executionTimeMs), proofs: executed.proofs };
-        timings.total = Math.round(now() - started);
-        const result: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(reading, executed.result, input.vocabulary) };
-        receipt.context = { ...receipt.context!, used: { joins: [], relations: [...new Set(candidate.relations ?? [])], tier: candidate.tier, ...(candidate.engine ? { engine: candidate.engine } : {}) } };
-        const tables = (candidate.relations ?? []).join(', ');
-        const applied = candidate.proof.find((line) => line.startsWith('applied on the data: '));
-        // Say why the governed tiers did not answer, from their own refusals: a
-        // governed metric that exists but cannot take this reading's filter is
-        // not the same as no metric at all, and the next question reads this.
-        const placeholder = new Set(['no_certified_block', 'exploration_not_opted_in', 'semantic_runtime_unavailable']);
-        const governedRefusal = ['relational', 'semantic', 'certified']
-          .map((tier) => receipt.refusals.find((refusal) => refusal.tier === tier && !placeholder.has(refusal.code)))
-          .find(Boolean);
-        const why = governedRefusal
-          ? `the governed ${governedRefusal.tier} tier could not answer it as read (${governedRefusal.message.replace(/[.\s]+$/, '').slice(0, 180)})`
-          : 'no certified block or governed metric answers this';
-        // An authored semantic metric rebuilt in SQL says which engine did not
-        // run it and why, in the semantic tier's own words.
-        const rebuilt = [...new Set(reading.measures.flatMap((measure) => measure.change ? [] : measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref])
-          .map((ref) => input.vocabulary.get(ref)).filter((entry) => Boolean(entry?.engineOnly)).map((entry) => entry!.label ?? entry!.name))];
-        const engineRefusal = rebuilt.length ? receipt.refusals.find((refusal) => refusal.tier === 'semantic') : undefined;
-        const source = `the SQL was written by AI from the ${tables ? `schema of ${tables}` : 'available table schemas'}${applied ? `; it ${applied.replace(/^applied on the data: /, 'filters on ')}` : ''}`;
-        const caveat = rebuilt.length
-          ? `the semantic engine did not run ${rebuilt.join(', ')}${engineRefusal ? ` (${engineRefusal.message.replace(/[.\s]+$/, '').slice(0, 180)})` : ''}, so ${source}, rebuilding ${rebuilt.length === 1 ? 'that metric' : 'those metrics'} from ${rebuilt.length === 1 ? 'its' : 'their'} authored definition; review the SQL before relying on the numbers`
-          : `${why}, so ${source}; review the SQL before relying on the numbers`;
-        return { kind: 'answered', intent: reading, candidate, result, text: composeAnsweredText(reading, result, input.vocabulary, candidate.trust, { caveats: [caveat] }), receipt };
+        // AN EMPTY RESULT FROM AI-WRITTEN SQL IS REDRAFTED ONCE. The drafter
+        // guessed how a stated value is stored ("capital one" for "Capital
+        // One", 26 for 2026); nothing matching is a claim worth one more look.
+        const noRows = executed.result.rowCount === 0 || (executed.result.rows.length === 1 && Object.values(executed.result.rows[0] ?? {}).every((value) => value === null || value === undefined));
+        if (noRows && attempt === 1 && remaining() > 15_000) {
+          firstEmpty = { candidate, executed, runMs };
+          step('execute', 'The AI-drafted query returned no rows: redrafting once', 'missed', { ms: runMs });
+          previous = { sql: candidate.sql, error: 'the statement ran and returned no rows. Before concluding that nothing matches, check how each stated value is stored: compare text case-insensitively and allow a partial match, a two-digit year (26, FY26) may be stored as four digits (2026), and a status may be a flag rather than text. Change only how the restrictions are spelled, never what is measured.' };
+          continue;
+        }
+        return answerWith(candidate, executed, runMs);
       }
+      if (firstEmpty) return answerWith(firstEmpty.candidate, firstEmpty.executed, firstEmpty.runMs);
       receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: executed.code === 'execution_failed' } as unknown as PreparedRefusal);
       lastFailure = executed;
       step('execute', executed.code === 'execution_failed' ? (attempt === 1 ? 'The warehouse rejected the draft: correcting it once' : 'The warehouse rejected the corrected draft') : 'The drafted query was not accepted', 'failed', { detail: executed.message, ms: runMs });
       if (executed.code !== 'execution_failed') break;
       previous = { sql: candidate.sql, error: executed.message };
     }
+    if (firstEmpty) return answerWith(firstEmpty.candidate, firstEmpty.executed, firstEmpty.runMs);
     // Two warehouse rejections: the warehouse's own words are the answer, not
     // a modeling gap the drafted SQL never had.
     if (lastFailure?.code === 'execution_failed') {
@@ -800,13 +821,16 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     return { vocabulary, cards: [...cards.values()], note };
   };
 
-  // 1. Resolve.
+  // 1. Resolve. Only certified blocks and authored semantics are governed; a
+  // reading over anything else goes to AI-written SQL when it is available.
+  const aiSqlAvailable = Boolean(input.prepareDeps.draftSql && (input.explorationOptIn || input.explorationAuto));
   const resolveStarted = now();
   let resolution: IntentResolution = await resolveIntent({
     question: input.question, vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, priorAnswerSummary: input.priorAnswerSummary, clauseCoverage: input.clauseCoverage, budgetMs: remaining(), ...(input.selection ? { selection: input.selection } : {}),
     guidance: memberGuidance(input), cardBudget: input.cardBudget, providerOptions, now,
     renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
     maxAttempts: remaining() > 15_000 ? 2 : 1,
+    aiLane: aiSqlAvailable,
     onDispatch: (event) => { receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }); dispatchStep(event); },
     expand: expandForClauses,
   });
@@ -940,6 +964,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
   }
   let intent = resolution.intent;
+  const aiReading = resolution.status === 'resolved' && resolution.lane === 'ai';
   // THE RELATIONS THE READING NAMES ARE DESCRIBED BEFORE ANYTHING IS PREPARED.
   // Context assembly hydrates only the few relations whose words match the
   // question; the reading may still lean on another (the facts a metric is
@@ -988,7 +1013,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // EVERY LITERAL IS PROVEN AGAINST ITS FIELD BEFORE SQL: a relative period on
   // a date field becomes its dates, a partial date its window; a value no
   // field of that kind can take is asked back, never sent to the warehouse.
-  {
+  if (!aiReading) {
     const proven = proveLiterals(intent, input.vocabulary, new Date(now()));
     intent = proven.intent;
     if (proven.notes.length) receipt.grounding = [...(receipt.grounding ?? []), ...proven.notes];
@@ -1015,7 +1040,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   }
   // A name the reading leans on that the filters never carried is bound from
   // the warehouse before anything is prepared.
-  if (input.suggestMembers && remaining() > 8_000) {
+  if (!aiReading && input.suggestMembers && remaining() > 8_000) {
     try {
       const bound = await bindNamedSubject(intent, input.question, input.vocabulary, input.suggestMembers);
       if (bound.length) receipt.grounding = [...(receipt.grounding ?? []), ...bound];
@@ -1030,10 +1055,37 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     receipt.policies = policies.applied.map((effect) => ({ policyId: effect.policyId, field: effect.field, effect: effect.effect }));
     receipt.context = { ...receipt.context!, enforced: { policies: policies.applied, requiredFilters: policies.requiredFilters, gaps: policies.gaps } };
   }
-  if (policies.refusal) {
+  // A required filter the reading's refs cannot carry is checked on the AI's
+  // SQL itself (it must apply the filter); a question that contradicts a
+  // policy is denied on either lane.
+  if (policies.refusal && !(aiReading && policies.refusal.code === 'policy_filter_unbindable')) {
     receipt.refusals.push(policies.refusal);
     receipt.failure = { stage: 'prepare', reason: policies.refusal.code, message: policies.refusal.message };
     return { kind: 'gap', gap: 'denied', message: policies.refusal.message, nearest: [], text: composeGapText('denied', policies.refusal.message, [], false), receipt, intent, offerExploration: false };
+  }
+  // THE AI LANE. The reading is a hint: the drafter chooses the tables, the
+  // fields and the joins, the SQL is checked before it runs (stated values,
+  // required filters, a multiplying join, read-only), and the answer is
+  // review-required and says what it did. Nothing about which tables are
+  // "governed" is judged here, because nobody vouched for any of them.
+  if (aiReading) {
+    receipt.intent = intent; receipt.reading = intent.reading;
+    recordSelection(intent);
+    const operators = causalOperatorsIn(input.question);
+    if (operators.length > 0 && intent.measures.length === 0) {
+      const message = `Explaining why something happened or recommending what to do (${operators.join(', ')}) is not something Ask computes; Research can investigate the drivers`;
+      return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: composeGapText('unsupported', message, [], false), receipt, intent, offerExploration: false };
+    }
+    const open = [
+      ...intent.unresolved.filter((clause) => clause.material).map((clause) => clause.question ?? clause.clause),
+      ...(resolution.status === 'resolved' ? resolution.problems.map((problem) => problem.message) : []),
+    ];
+    const why = `no certified block or semantic metric answers this${open.length ? ` (${open.join('; ').slice(0, 400)})` : ''}`;
+    const judgment = operators.length > 0 ? [`${operators.map((word) => `"${word}"`).join(' and ')} ${operators.length === 1 ? 'is' : 'are'} not computed here: what follows is the measured comparison, not a recommendation and not a cause. Research can investigate the drivers`] : [];
+    const drafted = await schemaLane(why, intent, { caveats: judgment });
+    if (drafted) return drafted;
+    const message = open.length ? open.join('; ') : 'the AI could not write SQL that answers it from the tables it searched';
+    return { kind: 'gap', gap: 'not_modeled', message, nearest: [], text: `No query was run: ${message.replace(/[.\s]+$/, '')}.`, receipt, intent, offerExploration: false };
   }
   // Whatever produced this reading — the interpreter, a follow-up edit, the
   // host's own grounding — a single row may not carry several members' facts.
@@ -1090,49 +1142,6 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     tierSteps(prepared.attempts, timings[round === 0 ? 'prepare' : 'prepare_repair'], joinProvenForRetry ? 'with the proven join' : round > 0 ? 'second try' : '');
     joinProvenForRetry = false;
     if (prepared.chosen) { candidate = prepared.chosen; break; }
-    // A RELATIONSHIP NOBODY DECLARED MAY STILL HOLD. Before spending a
-    // dispatch on rewriting the question, ask the warehouse whether the key
-    // this reading needs is unique in the relation that carries the label and
-    // covers every row of the facts. A proof admits the join and the same
-    // reading is prepared again; no proof, and the refusal stands.
-    const needsJoin = prepared.refusals.find((refusal) => refusal.code === 'join_path_required' && refusal.relations);
-    if (needsJoin?.relations && input.prepareDeps.proveJoinPath && !provedJoin && remaining() > 8_000) {
-      provedJoin = true;
-      const proveStarted = now();
-      let proven: Awaited<ReturnType<NonNullable<PrepareDeps['proveJoinPath']>>>;
-      try { proven = await input.prepareDeps.proveJoinPath(needsJoin.relations[0], needsJoin.relations[1]); } catch { proven = undefined; }
-      mark('prove_join', proveStarted);
-      step('join', proven && !Array.isArray(proven) ? `Did not prove a join between ${needsJoin.relations[0]} and ${needsJoin.relations[1]}` : proven ? `Proved on the warehouse that ${needsJoin.relations[0]} joins ${needsJoin.relations[1]}` : `Could not prove a join between ${needsJoin.relations[0]} and ${needsJoin.relations[1]}`, proven && Array.isArray(proven) ? 'done' : 'missed', { ms: timings.prove_join, ...(proven && !Array.isArray(proven) ? { detail: proven.refusal.message } : {}) });
-      if (proven && !Array.isArray(proven)) {
-        // The host refused to probe: a domain boundary, or membership nobody
-        // can name. That is a decision, not a missing path — it ends the turn.
-        receipt.refusals.push(proven.refusal);
-        receipt.tiers.push({ round, tier: 'relational', outcome: 'refused', detail: `${proven.refusal.code}: ${proven.refusal.message.slice(0, 160)}` });
-        break;
-      }
-      if (Array.isArray(proven) && proven.length) {
-        const authority = proven[0]?.authority;
-        const keys = authority?.keys.map((key) => key.from === key.to ? key.from : `${key.from} = ${key.to}`).join(', ') ?? 'a shared key';
-        receipt.grounding = [...(receipt.grounding ?? []), `relationship: ${label(`relation:${needsJoin.relations[0]}`)} and ${label(`relation:${needsJoin.relations[1]}`)} are joined on ${keys} because the warehouse showed the key is unique in ${label(`relation:${needsJoin.relations[1]}`)} and every ${label(`relation:${needsJoin.relations[0]}`)} row has one; this join is not yet certified, and Domain Studio can certify it from this evidence`];
-        attempted.delete(cacheKey);
-        joinProvenForRetry = true;
-        round -= 1;
-        continue;
-      }
-    }
-    // A JOIN NOBODY GOVERNS IS NOT A REASON TO SHRINK THE QUESTION. The
-    // reading needs two relations together, no governed relationship joins
-    // them and the warehouse could not prove one. Asking the interpreter to
-    // "read the question over one relation" drops the restriction the other
-    // relation carries (the competitor, in the office run) and costs a
-    // dispatch; the full reading goes to the schema lane instead, which may
-    // join them and is checked before it runs. The shrinking repair remains
-    // only for a draft that declines.
-    const ungovernedJoin = prepared.refusals.find((refusal) => refusal.code === 'join_path_required');
-    if (ungovernedJoin && round === 0 && (input.explorationOptIn || input.explorationAuto) && input.prepareDeps.draftSql) {
-      const drafted = await schemaLane(`the reading needs ${ungovernedJoin.relations?.length ? ungovernedJoin.relations.join(' and ') : 'two relations'} together and no governed relationship joins them (${ungovernedJoin.message.slice(0, 200)})`, intent, { onDecline: 'fallthrough' });
-      if (drafted) return drafted;
-    }
     // One bounded repair: a repairable compile refusal goes back to the resolver with the engine's words.
     const repairable = prepared.refusals.find((refusal) => refusal.repairable);
     if (!repairable || round > 0 || remaining() < 12_000) break;
@@ -1140,7 +1149,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     resolution = await resolveIntent({
       coverageQuestion: input.question,
       question: `${input.question}\n\nThe previous interpretation could not be prepared. ${repairable.tier === 'certified' ? 'The certified block is not applicable: ' : 'The engine said: '}${repairable.message}. ${repairable.tier === 'certified' ? 'Express the analysis with metric, entity and dimension refs instead of the block.' : 'Choose refs the engine can bind.'}`,
-      vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage, ...(input.selection ? { selection: input.selection } : {}),
+      vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, guidance: input.guidance, cardBudget: input.cardBudget, providerOptions, now, maxAttempts: 1, clauseCoverage: input.clauseCoverage, aiLane: aiSqlAvailable, ...(input.selection ? { selection: input.selection } : {}),
       renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
       // The repair is held to the original question's obligations.
       ...(resolution.status === 'resolved' && resolution.ledger ? { ledger: resolution.ledger, ledgerRound: round + 1 } : {}),
@@ -1156,6 +1165,9 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       // ... unless a certified block is still standing as the answer of last
       // resort: serving what the team certified beats asking again.
       const fallbackWaiting = Boolean(prepared?.fallbacks?.[0] ?? firstPrepared?.fallbacks?.[0]);
+      // With AI-written SQL available, the question it came back with is for
+      // the drafter first, never a dead end in front of it.
+      if (resolution.status === 'clarify' && resolution.question && !fallbackWaiting && aiSqlAvailable) break;
       if (resolution.status === 'clarify' && resolution.question && !fallbackWaiting) {
         receipt.intent = resolution.intent;
         const options = resolution.options.map((ref) => ({ ref, label: label(ref), ...(input.vocabulary.get(ref)?.description ? { description: input.vocabulary.get(ref)!.description } : {}) }));
@@ -1175,7 +1187,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     // fallback have both come up empty does SQL get drafted from the schema —
     // never instead of a governed answer one re-ask away. A policy denial or a
     // domain-contract refusal never reaches it.
-    const denied = receipt.refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict' || refusal.code === 'join_requires_domain_contract');
+    const denied = receipt.refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict');
     if (!fallback && !denied && (input.explorationOptIn || input.explorationAuto)) {
       const drafted = await schemaLane(gapFromRefusals(receipt.refusals, intent, input.vocabulary).message, intent);
       if (drafted) return drafted;

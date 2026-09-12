@@ -157,16 +157,16 @@ describe('relational composition', () => {
 });
 
 describe('prepare order', () => {
-  it('a refused block falls to semantic, a semantic refusal falls to relational, and exploration needs an opt-in', async () => {
+  it('a refused block falls to semantic, and nothing governed after that: raw tables are for AI-written SQL', async () => {
     const result = await prepare({
       intent: intent({ measures: [{ ref: 'metric:order_item.revenue', scope: [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [], source: 'question' }] }], expectedShape: 'scalar' }),
       vocabulary, deps: { ...deps, compileSemantic: async () => { throw new Error('should not compile a scoped measure'); } },
     });
-    expect(result.attempts.map((attempt) => `${attempt.tier}:${attempt.outcome}`)).toEqual(['certified:refused', 'semantic:refused', 'relational:prepared']);
-    expect(result.chosen?.tier).toBe('relational');
+    expect(result.attempts.map((attempt) => `${attempt.tier}:${attempt.outcome}`)).toEqual(['certified:refused', 'semantic:refused', 'exploratory:refused']);
+    expect(result.chosen).toBeUndefined();
     const gap = await prepare({ intent: intent({ measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [{ ref: 'dimension:customers.customer_name', role: 'categorical' }], expectedShape: 'grouped' }), vocabulary, deps: { compileSemantic: async () => { throw new Error('Dimension customer_name is not reachable from order_item'); } } });
     expect(gap.chosen).toBeUndefined();
-    expect(gap.refusals.map((refusal) => refusal.code)).toEqual(['block_not_applicable', 'semantic_compile_failed', 'join_path_required', 'exploration_not_opted_in']);
+    expect(gap.refusals.map((refusal) => refusal.code)).toEqual(['block_not_applicable', 'semantic_compile_failed', 'exploration_not_opted_in']);
     expect(gap.refusals[1]!.message).toBe('Dimension customer_name is not reachable from order_item');
   });
 });

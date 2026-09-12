@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { extractBlockContract } from './block-contract.js';
 import { applyDerivedColumns, classifyWarehouseError, executeCandidate } from './execute.js';
 import { ANALYTICAL_INTENT_JSON_SCHEMA, describeIntent, intentExecutionFingerprint, intentRefs, parseIntent, unaccountedInheritedRefs, type AnalyticalIntentV1 } from './intent.js';
-import { applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, coverageStates, validateIntentRefs, facetStem, promoteSoleMeasureScope, timeAxesFor } from './resolve-intent.js';
+import { isGovernedEntry, readingLane, applyGovernedDefaults, applySelectedMeaning, auditLedger, bindExactNames, freezeSuperlativeShape, droppedChange, identityClauseWords, keepMembersApart, unmetFacets, preferGovernedDefinition, relativePeriodProblem, scopedColumnOf, buildIntentSystemPrompt, buildLedger, calendarBasisProblem, droppedGrain, droppedYears, proveClauseCoverage, proveTimeRoles, resolveIntent, widenedPopulation, unaccountedQuestionWords, uncoveredQuestionTerms, coverageStates, validateIntentRefs, facetStem, promoteSoleMeasureScope, timeAxesFor } from './resolve-intent.js';
 import { bindSemanticRequest } from './prepare/index.js';
 import { composeAnsweredText, describeResultColumns, formatValue } from './outcomes.js';
 import { applyMemberSelection, bindNamedSubject, memberOptionId, namesInQuestion, parseMemberOption, pinnedRefsFor, proveSubjectMatchesPopulation, runAskPipeline, unmetDisplayObligation } from './pipeline.js';
@@ -569,10 +569,10 @@ describe('a part the policy or a concept answered for is covered (item 6 of the 
 });
 
 describe('the ledger names the relations an execution read, joins or not (item 7 of the NBA validation)', () => {
-  it('a single-relation relational execution records its base relation under used.relations', async () => {
-    const vocabulary = buildVocabularyIndex({ ...jaffle, metrics: [{ name: 'order_total', model: 'orders', label: 'Order Total', aggregation: 'sum', physical: { relation: 'dev.orders', column: 'order_total', aggregate: 'sum' } }] });
-    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'x', measures: [{ ref: 'metric:orders.order_total' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
-    const outcome = await runAskPipeline({ question: 'total order value', vocabulary, provider, prepareDeps: { dialect: { quoteIdentifier: (name) => `"${name}"`, dateTrunc: (grain, expr) => `DATE_TRUNC('${grain}', ${expr})`, limitClause: (limit) => `LIMIT ${limit}` } }, clauseCoverage: false, executeDeps: { run: async () => ({ columns: ['order_total'], rows: [{ order_total: 5 }], rowCount: 1, executionTimeMs: 1 }) } });
+  it('an AI-written statement over one table records that table under used.relations and no join', async () => {
+    const vocabulary = buildVocabularyIndex({ relations: [{ schema: 'dev', name: 'orders', columnCompleteness: 'complete', columns: [{ name: 'order_total', dataType: 'NUMBER' }] }] });
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Total order value.', measures: [{ ref: 'column:dev.orders.order_total', aggregation: 'sum' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
+    const outcome = await runAskPipeline({ question: 'total order value', vocabulary, provider, explorationAuto: true, clauseCoverage: false, prepareDeps: { draftSql: async () => ({ sql: 'SELECT SUM(order_total) AS order_total FROM dev.orders', relations: ['dev.orders'], proof: [] }) }, executeDeps: { run: async () => ({ columns: ['order_total'], rows: [{ order_total: 5 }], rowCount: 1, executionTimeMs: 1 }) } });
     expect(outcome.kind).toBe('answered');
     expect(outcome.receipt.context?.used?.relations).toEqual(['dev.orders']);
     expect(outcome.receipt.context?.used?.joins).toEqual([]);
@@ -1428,7 +1428,7 @@ describe('a why/should question over the previous analysis is never answered as 
     const opinion = JSON.stringify({ version: 1, kind: 'conversation', reading: 'A judgment call', reply: 'Melissa Lopez stands out as the one to build around because she leads the ranking.', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
     const outcome = await runAskPipeline({
       question: 'Which of those players should we build our team around, and why?', vocabulary: composable, provider: scripted([opinion]), prior: ranking,
-      prepareDeps: { blockSql: () => undefined },
+      prepareDeps: { blockSql: () => undefined, compileSemantic: async () => ({ sql: 'SELECT player_name, SUM(points) FROM dev.season_facts GROUP BY 1 ORDER BY 2 DESC LIMIT 10', engine: 'native' }) },
       executeDeps: { run: async () => ({ columns: ['player', 'points'], rows: [{ player: 'Harden', points: 2888 }], rowCount: 1, executionTimeMs: 1 }) },
     });
     expect(outcome.kind).toBe('answered');
@@ -1484,13 +1484,14 @@ describe('an ungrounded member literal is disclosed as a text match', () => {
     relations: [
       { schema: 'dev', name: 'order_items', columns: [{ name: 'order_id', dataType: 'VARCHAR' }, { name: 'product_price', dataType: 'DOUBLE' }] },
       { schema: 'dev', name: 'orders', columns: [{ name: 'order_id', dataType: 'VARCHAR' }, { name: 'customer_id', dataType: 'VARCHAR' }] },
-      { schema: 'dev', name: 'customers', columns: [{ name: 'customer_id', dataType: 'VARCHAR' }, { name: 'customer_name', dataType: 'VARCHAR' }] },
+      { schema: 'dev', name: 'customers', columns: [{ name: 'customer_name', dataType: 'VARCHAR' }] },
     ],
   });
   const reply = JSON.stringify({ version: 1, kind: 'analytics', reading: "Stephen Curry's revenue", measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [{ ref: 'dimension:customers.customer_name', op: 'contains', values: ['Curry'], source: 'question' }], unresolved: [], provenance: { 'metric:order_item.revenue': 'q:revenue' }, expectedShape: 'scalar' });
   it('the answer says the predicate matched text, never that it identified one person', async () => {
     const joinPath = () => [{ relation: 'dev.orders', on: '"dev"."order_items"."order_id" = "dev"."orders"."order_id"' }, { relation: 'dev.customers', on: '"dev"."orders"."customer_id" = "dev"."customers"."customer_id"' }];
-    const outcome = await runAskPipeline({ question: "Show Curry's revenue", vocabulary, provider: scripted([reply]), prepareDeps: { joinPath }, executeDeps: { run: async () => ({ columns: ['revenue'], rows: [{ revenue: 12 }], rowCount: 1, executionTimeMs: 1 }) } });
+    void joinPath;
+    const outcome = await runAskPipeline({ question: "Show Curry's revenue", vocabulary, provider: scripted([reply]), prepareDeps: { compileSemantic: async () => ({ sql: "SELECT SUM(product_price) AS revenue FROM dev.order_items JOIN dev.orders USING (order_id) JOIN dev.customers USING (customer_id) WHERE customer_name LIKE '%Curry%'", engine: 'native' }) }, executeDeps: { run: async () => ({ columns: ['revenue'], rows: [{ revenue: 12 }], rowCount: 1, executionTimeMs: 1 }) } });
     if (outcome.kind !== 'answered') throw new Error(`${outcome.kind}: ${JSON.stringify(outcome.receipt.refusals.map((r) => `${r.tier}:${r.code}:${r.message.slice(0, 200)}`))} ${'text' in outcome ? outcome.text : ''}`);
     expect(outcome.text).toMatch(/matched by text containing "Curry"; that can cover several members/);
     expect(outcome.receipt.warehouse).toEqual({ attempts: 1, failures: 0, executions: 1 });
@@ -1504,7 +1505,7 @@ describe('a warehouse failure says which kind it was', () => {
   });
   const reply = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Total revenue', measures: [{ ref: 'metric:order_item.revenue' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
   const failing = async (message: string) => {
-    const outcome = await runAskPipeline({ question: 'total revenue', vocabulary, provider: scripted([reply]), prepareDeps: {}, executeDeps: { run: async () => { throw new Error(message); } } });
+    const outcome = await runAskPipeline({ question: 'total revenue', vocabulary, provider: scripted([reply]), prepareDeps: { compileSemantic: async () => ({ sql: 'SELECT SUM(product_price) AS revenue FROM dev.order_items', engine: 'native' }) }, executeDeps: { run: async () => { throw new Error(message); } } });
     if (outcome.kind !== 'failed') throw new Error(`expected a failure, got ${outcome.kind}`);
     return outcome;
   };
@@ -2013,7 +2014,7 @@ describe('an empty result names what emptied it', () => {
     });
     const runs: Array<{ sql: string; params: unknown[] }> = [];
     const outcome = await runAskPipeline({
-      question: `Stephen Curry points in fiscal year ${year}`, vocabulary, prepareDeps: {},
+      question: `Stephen Curry points in fiscal year ${year}`, vocabulary, prepareDeps: { compileSemantic: async (request) => ({ sql: `SELECT SUM(points) AS points_scored FROM dev.season_facts WHERE ${JSON.stringify(request.filters ?? [])}`, engine: 'native' }) },
       provider: { name: 'ollama', available: async () => true, generate: async () => reading },
       executeDeps: { run: async (sql, params) => {
         runs.push({ sql, params: params ?? [] });
@@ -2031,7 +2032,7 @@ describe('an empty result names what emptied it', () => {
     expect(outcome.kind).toBe('answered');
     if (outcome.kind !== 'answered') return;
     expect(runs).toHaveLength(2);
-    expect(runs[1]!.params).toContain(2026);
+    expect(runs[1]!.sql).toContain('2026');
     expect(outcome.intent.filters[1]!.values).toEqual([2026]);
     expect(outcome.receipt.grounding?.join(' ')).toMatch(/Fiscal year 26 matched nothing; a two-digit year was read as 2026/);
   });
@@ -2102,7 +2103,7 @@ describe('a name that reads several people is a question, not a sum', () => {
   const run = async (op: 'eq' | 'in', found: string[], rows: Array<Record<string, unknown>>) => {
     const runs: Array<{ sql: string; params: unknown[] }> = [];
     const outcome = await runAskPipeline({
-      question: "Show Curry's performance.", vocabulary, provider: provider(op), prepareDeps: {},
+      question: "Show Curry's performance.", vocabulary, provider: provider(op), prepareDeps: { compileSemantic: async (request) => ({ sql: `SELECT SUM(points) AS points_scored FROM dev.season_facts WHERE ${JSON.stringify(request.filters ?? [])}`, engine: 'native' }) },
       executeDeps: { run: async (sql, params) => {
         runs.push({ sql, params: params ?? [] });
         return runs.length === 1
@@ -2149,7 +2150,7 @@ describe('a name that reads several people is a question, not a sum', () => {
     expect(outcome.kind).toBe('answered');
     if (outcome.kind !== 'answered') return;
     expect(runs).toHaveLength(2);
-    expect(runs[1]!.params).toContain('Stephen Curry');
+    expect(runs[1]!.sql).toContain('Stephen Curry');
     expect(outcome.intent.filters[0]!.values).toEqual(['Stephen Curry']);
   });
 
@@ -2205,7 +2206,7 @@ describe('a name that reads several people is a question, not a sum', () => {
     }) };
     let executed = 0;
     const outcome = await runAskPipeline({
-      question: "Show Stephen Curry's performance.", vocabulary, provider: merging, prepareDeps: {},
+      question: "Show Stephen Curry's performance.", vocabulary, provider: merging, prepareDeps: { compileSemantic: async (request) => ({ sql: `SELECT SUM(points) AS points_scored FROM dev.season_facts WHERE ${JSON.stringify(request.filters ?? [])}`, engine: 'native' }) },
       executeDeps: { run: async () => { executed += 1; return { columns: ['points_scored'], rows: [{ points_scored: 3002 }], rowCount: 1, executionTimeMs: 1 }; } },
     });
     // The host separates them rather than refusing, so the rows are honest.
@@ -2322,12 +2323,12 @@ describe('the relations a reading names are described before it is prepared', ()
   const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => reading };
   const dialect = { quoteIdentifier: (name: string) => `"${name}"`, dateTrunc: (grain: string, expr: string) => `DATE_TRUNC('${grain}', ${expr})`, limitClause: (limit: number) => `LIMIT ${limit}` };
 
-  it('describes the partially documented facts, then reads the label from the same column there', async () => {
+  it('describes the partially documented facts before anything is prepared', async () => {
     const asked: string[][] = [];
     const statements: string[] = [];
     const outcome = await runAskPipeline({
       question: 'points by player', vocabulary: buildVocabularyIndex(source), provider, clauseCoverage: false,
-      prepareDeps: { dialect },
+      prepareDeps: { dialect, compileSemantic: async () => ({ sql: 'SELECT player_name, SUM(points) AS points_scored FROM dev.game_facts GROUP BY 1', engine: 'native' }) },
       describeRelations: async (relations) => {
         asked.push(relations);
         return relations.some((relation) => relation.endsWith('game_facts'))
@@ -2340,22 +2341,10 @@ describe('the relations a reading names are described before it is prepared', ()
     expect(asked).toEqual([['dev.game_facts']]);
     expect(outcome.kind).toBe('answered');
     if (outcome.kind !== 'answered') return;
-    expect(statements[0]).toContain('"dev"."game_facts"."player_name"');
-    expect(statements[0]).not.toContain('season_facts');
     expect(outcome.receipt.grounding?.join(' ')).toContain('discovery: described 1 relation the reading names (dev.game_facts)');
   });
 
-  it('without a warehouse description the same reading still refuses the join it cannot prove', async () => {
-    const outcome = await runAskPipeline({
-      question: 'points by player', vocabulary: buildVocabularyIndex(source), provider, clauseCoverage: false,
-      prepareDeps: { dialect }, explorationAuto: false,
-      executeDeps: { run: async () => { throw new Error('must not execute'); } },
-    });
-    expect(outcome.kind).not.toBe('answered');
-    expect(outcome.receipt.refusals.some((refusal) => refusal.code === 'join_path_required')).toBe(true);
-  });
-
-  it('a join no governed relationship covers sends the full reading to AI-drafted SQL, and the question is never shrunk', async () => {
+  it('a reading the semantic engine cannot run goes to AI-written SQL whole, in one reading, and the question is never shrunk', async () => {
     let dispatches = 0;
     const counting: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => { dispatches += 1; return reading; } };
     const drafts: Array<{ reading?: string; reason?: string }> = [];
@@ -2367,7 +2356,6 @@ describe('the relations a reading names are described before it is prepared', ()
     expect(dispatches).toBe(1);
     expect(drafts).toHaveLength(1);
     expect(drafts[0]!.reading).toBe('Points by player.');
-    expect(drafts[0]!.reason).toContain('no governed relationship joins them');
     expect(outcome.kind).toBe('answered');
     if (outcome.kind === 'answered') expect(outcome.candidate.tier).toBe('exploratory');
   });
@@ -2501,7 +2489,7 @@ describe('the schema lane: no certified or governed evidence, the AI writes SQL 
     });
     expect(asked).toHaveLength(1);
     expect(asked[0]!.reason).toContain('not in the vocabulary');
-    expect(asked[0]!.intent).toBeUndefined();
+    expect((asked[0]!.intent as { reading?: string } | undefined)?.reading).toBe('Order count by competitor.');
     expect(outcome.kind).toBe('answered');
     if (outcome.kind !== 'answered') return;
     expect(outcome.candidate.tier).toBe('exploratory');
@@ -2559,11 +2547,11 @@ describe('the schema lane: no certified or governed evidence, the AI writes SQL 
     expect(outcome.kind).toBe('answered');
   });
 
-  it('a reading that keeps naming a field the project does not hold asks the tables before offering the nearest spellings', async () => {
+  it('a reading that names a field the project does not hold is answered from the tables; a declined draft is an honest gap, not a spelling quiz', async () => {
     const nearMiss = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Order count.', measures: [{ ref: 'column:dev.nothere.order_id', aggregation: 'count' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
     const drafted = await runAskPipeline({
       question: 'how many orders involve a competitor', vocabulary, provider: say(nearMiss), clauseCoverage: false, explorationAuto: true,
-      prepareDeps: { dialect, draftSql: async (draft) => { expect(draft.reason).toContain('does not hold'); return { sql: 'SELECT COUNT(*) AS n FROM dev.orders', relations: ['dev.orders'], proof: [] }; } },
+      prepareDeps: { dialect, draftSql: async (draft) => { expect(draft.reason).toContain('not in the vocabulary'); return { sql: 'SELECT COUNT(*) AS n FROM dev.orders', relations: ['dev.orders'], proof: [] }; } },
       executeDeps: { run: async () => rows },
     });
     expect(drafted.kind).toBe('answered');
@@ -2572,7 +2560,7 @@ describe('the schema lane: no certified or governed evidence, the AI writes SQL 
       prepareDeps: { dialect, draftSql: async () => ({ declined: 'no competitor field.' }) },
       executeDeps: { run: async () => rows },
     });
-    expect(declined.kind).toBe('clarify');
+    expect(declined.kind).toBe('gap');
   });
 
   it('a question with nothing to choose between is answered from the tables when the drafter finds them', async () => {
@@ -2586,7 +2574,7 @@ describe('the schema lane: no certified or governed evidence, the AI writes SQL 
     if (outcome.kind === 'answered') expect(outcome.candidate.trust).toBe('review_required');
   });
 
-  it('the run tells its story in order: what it could not read, that it asked the tables, what it drafted and what ran', async () => {
+  it('the run tells its story in order: what it read, that it asked the AI to write SQL, what it drafted and what ran', async () => {
     const streamed: string[] = [];
     const outcome = await runAskPipeline({
       question: 'how many orders involve a competitor', vocabulary, provider: say(invalidReading), clauseCoverage: false, explorationAuto: true,
@@ -2599,16 +2587,16 @@ describe('the schema lane: no certified or governed evidence, the AI writes SQL 
     expect(story.map((entry) => entry.title)).toEqual(streamed);
     expect(story.map((entry) => entry.title)).toEqual([
       'Asked the AI to read the question',
-      'Asked the AI to correct its reading',
-      'Could not read the question into governed fields',
-      'No governed answer: asking the tables directly',
+      'Settled the reading',
+      'Asking the AI to write SQL from the tables',
       'Drafted SQL over dev.orders',
       'Ran the AI-drafted query: 1 row',
     ]);
-    expect(story[1]!.detail).toContain('because');
-    expect(story[1]!.detail).toContain('column:crm.competitor_deals.deal_key');
-    expect(story[4]!.detail).toBe('SELECT COUNT(*) AS n FROM dev.orders');
-    expect(story.map((entry) => entry.state)).toEqual(['done', 'done', 'missed', 'done', 'done', 'done']);
+    // A reading over tables nobody governs is not corrected: it goes to the drafter as it is.
+    expect(story[1]!.detail).toContain('Order count by competitor.');
+    expect(story[2]!.detail).toContain('column:crm.competitor_deals.deal_key');
+    expect(story[3]!.detail).toBe('SELECT COUNT(*) AS n FROM dev.orders');
+    expect(story.map((entry) => entry.state)).toEqual(['done', 'done', 'done', 'done', 'done']);
     expect(story.every((entry, index) => index === 0 || entry.at >= story[index - 1]!.at)).toBe(true);
   });
 
@@ -2718,30 +2706,7 @@ describe('the guards read the user, and a grouping must stand for the breakdown'
     expect(JSON.stringify(withoutOwnWords)).toContain('by one');
   });
 
-  it('an answer grouped by a stand-in field says what it stood in for', async () => {
-    const reading = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Opportunities by tags.', measures: [{ ref: 'column:salesloft.opportunities.OPPORTUNITY_ID', aggregation: 'count', alias: 'opportunities' }], groupBy: [{ ref: 'column:salesloft.opportunities.TAGS', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' });
-    const outcome = await runAskPipeline({
-      question: 'opportunities by sales region', vocabulary, provider: say(reading), explorationAuto: false,
-      prepareDeps: { dialect },
-      executeDeps: { run: async () => ({ columns: ['TAGS', 'opportunities'], rows: [{ TAGS: 'competitor:splunk', opportunities: 3 }], rowCount: 1, executionTimeMs: 1 }) },
-    });
-    expect(outcome.kind).toBe('answered');
-    expect(outcome.text).toContain('Nothing in this project is named "sales region"; the answer is broken down by TAGS in its place');
-  });
-
-  it('a trend with a limit orders by its period instead of being refused', async () => {
-    const reading = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount by month.', measures: [{ ref: 'column:sales.opportunity_enhanced.AMOUNT', aggregation: 'sum', alias: 'amount' }], groupBy: [{ ref: 'column:sales.opportunity_enhanced.CLOSE_DATE', role: 'time', grain: 'month' }], display: [], filters: [], limit: 10, unresolved: [], provenance: {}, expectedShape: 'trend' });
-    const statements: string[] = [];
-    const outcome = await runAskPipeline({
-      question: 'amount by month', vocabulary, provider: say(reading), clauseCoverage: false, explorationAuto: false,
-      prepareDeps: { dialect },
-      executeDeps: { run: async (sql) => { statements.push(sql); return { columns: ['month', 'amount'], rows: [{ month: '2025-03-01', amount: 5 }], rowCount: 1, executionTimeMs: 1 }; } },
-    });
-    expect(outcome.kind).toBe('answered');
-    expect(statements[0]).toMatch(/ORDER BY[\s\S]*LIMIT 10/);
-  });
-
-  it('an answer from drafted SQL says which governed tier refused and why, not that nothing governed exists', async () => {
+  it('an answer from drafted SQL over tables says no certified block or semantic metric answers it, never that a table was governed', async () => {
     const reading = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount by tags.', measures: [{ ref: 'column:sales.opportunity_enhanced.AMOUNT', aggregation: 'sum' }], groupBy: [{ ref: 'column:salesloft.opportunities.TAGS', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' });
     const outcome = await runAskPipeline({
       question: 'amount by tags', vocabulary, provider: say(reading), clauseCoverage: false, explorationAuto: true,
@@ -2749,7 +2714,76 @@ describe('the guards read the user, and a grouping must stand for the breakdown'
       executeDeps: { run: async () => ({ columns: ['TAGS', 'amount'], rows: [{ TAGS: 'x', amount: 1 }], rowCount: 1, executionTimeMs: 1 }) },
     });
     expect(outcome.kind).toBe('answered');
-    expect(outcome.text).toContain('the governed relational tier could not answer it as read');
-    expect(outcome.text).not.toContain('no certified block or governed metric answers this');
+    expect(outcome.text).toContain('no certified block or semantic metric answers this');
+    expect(outcome.text).not.toMatch(/governed relational|governed tables/);
+  });
+});
+
+describe('two governed sources: certified blocks and authored semantics; everything else is AI-written SQL', () => {
+  const source: VocabularySource = {
+    metrics: [{ name: 'revenue', model: 'orders', label: 'Revenue', aggregation: 'sum' }],
+    dimensions: [
+      { name: 'region', model: 'orders', label: 'Region', dataType: 'string' },
+      { name: 'TAGS', model: 'opportunities', label: 'Tags', dataType: 'string', inventory: true },
+    ],
+    relations: [{ schema: 'dev', name: 'orders', columnCompleteness: 'complete', columns: [{ name: 'amount', dataType: 'NUMBER' }, { name: 'status', dataType: 'VARCHAR' }] }],
+  };
+  const vocabulary = buildVocabularyIndex(source);
+  const reading = (measures: unknown[], groupBy: unknown[] = []) => parseIntent({ version: 1, kind: 'analytics', reading: 'x', measures, groupBy, display: [], filters: [], unresolved: [], provenance: {}, expectedShape: groupBy.length ? 'grouped' : 'scalar' }).intent!;
+
+  it('a reading is governed only when every ref is an authored semantic object; a dbt column inventory dimension is a column', () => {
+    expect(readingLane(reading([{ ref: 'metric:orders.revenue' }], [{ ref: 'dimension:orders.region', role: 'categorical' }]), vocabulary)).toBe('governed');
+    expect(readingLane(reading([{ ref: 'metric:orders.revenue' }], [{ ref: 'dimension:opportunities.TAGS', role: 'categorical' }]), vocabulary)).toBe('ai');
+    expect(readingLane(reading([{ ref: 'column:dev.orders.amount', aggregation: 'sum' }]), vocabulary)).toBe('ai');
+    expect(readingLane(reading([{ ref: 'metric:nowhere.nothing' }]), vocabulary)).toBe('ai');
+    expect(isGovernedEntry(vocabulary.get('dimension:opportunities.TAGS')!)).toBe(false);
+  });
+
+  it('a governed name that does not exist gets its one correction in a governed project; a column that does not exist goes to AI SQL at once', async () => {
+    const invented = JSON.stringify({ version: 1, kind: 'analytics', reading: 'invented', measures: [{ ref: 'metric:invented_mart.invented_total' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+    const corrected = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Revenue.', measures: [{ ref: 'metric:orders.revenue' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+    const governed = scripted([invented, corrected]);
+    const toGoverned = await resolveIntent({ question: 'revenue', vocabulary, provider: governed, aiLane: true, clauseCoverage: false });
+    expect(toGoverned.status).toBe('resolved');
+    expect(governed.calls).toHaveLength(2);
+    if (toGoverned.status === 'resolved') expect(toGoverned.lane).toBeUndefined();
+    const column = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount.', measures: [{ ref: 'column:dev.orders.nothere', aggregation: 'sum' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+    const tables = scripted([column, corrected]);
+    const toAi = await resolveIntent({ question: 'amount', vocabulary, provider: tables, aiLane: true, clauseCoverage: false });
+    expect(tables.calls).toHaveLength(1);
+    if (toAi.status === 'resolved') expect(toAi.lane).toBe('ai');
+  });
+
+  it('a reading over tables costs one reading and one draft: no correction rounds before AI-written SQL', async () => {
+    let dispatches = 0;
+    let drafts = 0;
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => { dispatches += 1; return JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount by status.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'sum' }], groupBy: [{ ref: 'column:dev.orders.nothere', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }); } };
+    const outcome = await runAskPipeline({
+      question: 'amount by status', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { draftSql: async () => { drafts += 1; return { sql: 'SELECT status, SUM(amount) AS amount FROM dev.orders GROUP BY status', relations: ['dev.orders'], proof: [] }; } },
+      executeDeps: { run: async () => ({ columns: ['status', 'amount'], rows: [{ status: 'open', amount: 3 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(dispatches).toBe(1);
+    expect(drafts).toBe(1);
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.candidate.trust).toBe('review_required');
+  });
+
+  it('AI-written SQL that returns no rows is redrafted once with how stated values may be stored; a redraft that still finds nothing answers honestly', async () => {
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount for Capital One.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'sum' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
+    const previous: Array<string | undefined> = [];
+    const run = (second: Array<Record<string, unknown>>) => runAskPipeline({
+      question: 'total amount for "capital one"', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { draftSql: async (draft) => { previous.push(draft.previous?.error); return draft.previous ? { sql: "SELECT SUM(amount) AS amount FROM dev.orders WHERE LOWER(status) LIKE '%capital one%'", relations: ['dev.orders'], proof: [] } : { sql: "SELECT SUM(amount) AS amount FROM dev.orders WHERE status = 'capital one'", relations: ['dev.orders'], proof: [] }; } },
+      executeDeps: { run: async (sql) => (sql.includes('LIKE') ? { columns: ['amount'], rows: second, rowCount: second.length, executionTimeMs: 1 } : { columns: ['amount'], rows: [{ amount: null }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    const found = await run([{ amount: 42 }]);
+    expect(previous[1]).toMatch(/returned no rows.*case-insensitively.*2026/);
+    expect(found.kind).toBe('answered');
+    if (found.kind === 'answered') expect(found.result.rows).toEqual([{ amount: 42 }]);
+    previous.length = 0;
+    const still = await run([]);
+    expect(previous).toHaveLength(2);
+    expect(still.kind).toBe('answered');
   });
 });

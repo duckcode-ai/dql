@@ -56,6 +56,12 @@ export interface VocabularyEntry {
   examples?: string[];
   /** The id the host's existing compilers know this object by (semantic runtime name, catalog key). */
   sourceId?: string;
+  /**
+   * Built from a dbt model's columns because the project authored no semantic
+   * layer (the dbt model inventory), not authored by anyone as semantics. Such
+   * an entry is a column under another name: never governed.
+   */
+  inventory?: boolean;
   /** For a metric or measure: the time dimension ref it aggregates over (its time role). */
   timeRef?: string;
   /** For a metric: simple, ratio, derived, cumulative, conversion. */
@@ -507,8 +513,8 @@ function renderConceptCard(entry: VocabularyEntry): string {
 export interface VocabularySource {
   metrics?: Array<{ name: string; model?: string; label?: string; description?: string; aggregation?: string; type?: string; expr?: string; sourceId?: string; aliases?: string[]; status?: string; timeGrains?: string[]; physical?: VocabularyEntry['physical']; aggTimeDimension?: string; displayFormat?: VocabularyEntry['displayFormat']; derived?: VocabularyEntry['derived']; engineOnly?: string }>;
   measures?: Array<{ name: string; model: string; label?: string; description?: string; aggregation?: string; expr?: string; sourceId?: string; physical?: VocabularyEntry['physical']; aggTimeDimension?: string; displayFormat?: VocabularyEntry['displayFormat'] }>;
-  dimensions?: Array<{ name: string; model: string; label?: string; description?: string; dataType?: string; isTime?: boolean; timeGrains?: string[]; sourceId?: string; aliases?: string[]; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
-  entities?: Array<{ name: string; model: string; type: string; label?: string; description?: string; sourceId?: string; reachableFrom?: string[]; physical?: VocabularyEntry['physical'] }>;
+  dimensions?: Array<{ name: string; model: string; label?: string; description?: string; dataType?: string; isTime?: boolean; timeGrains?: string[]; sourceId?: string; aliases?: string[]; reachableFrom?: string[]; physical?: VocabularyEntry['physical']; inventory?: boolean }>;
+  entities?: Array<{ name: string; model: string; type: string; label?: string; description?: string; sourceId?: string; reachableFrom?: string[]; physical?: VocabularyEntry['physical']; inventory?: boolean }>;
   models?: Array<{ name: string; label?: string; description?: string; relation?: string }>;
   blocks?: Array<{ name: string; domain?: string; description?: string; certified: boolean; status?: string; contract: BlockContractV1; examples?: string[]; tags?: string[]; sourceId?: string; sql?: string; sourcePath?: string }>;
   relations?: Array<{ database?: string; schema?: string; name: string; description?: string; columns: Array<{ name: string; dataType?: string; description?: string }>; /** Bounded dbt-manifest metadata used to choose a relation before its physical columns are hydrated. It never becomes individual vocabulary entries on its own. */ embeddedColumns?: Array<{ name: string; dataType?: string; description?: string }>; sourceId?: string; /** The domain whose entity binds this relation, when one does (physical ownership). */ domain?: string; /** Every domain with an entity bound to this relation — ownership is a set, never the first entity seen. */ domains?: string[]; /** What each column is computed from, by column name (lowercased), from the model's SQL. */ columnLineage?: Record<string, string[]>; /** Exact runtime/dbt identity shared by discovery, drafting, validation and execution. */ binding?: PhysicalRelationBindingV1; /** Manifest descriptions are partial unless a catalog/runtime observation proves otherwise. */ columnCompleteness?: PhysicalColumnCompleteness; observedAt?: string; truncated?: boolean }>;
@@ -670,6 +676,7 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       ...(dimension.timeGrains?.length ? { timeGrains: dimension.timeGrains } : {}),
       ...(dimension.reachableFrom?.length ? { joinReach: dimension.reachableFrom } : {}),
       ...(dimension.sourceId ? { sourceId: dimension.sourceId } : {}),
+      ...(dimension.inventory ? { inventory: true } : {}),
       ...(dimension.physical ? { physical: dimension.physical } : {}),
     });
   }
@@ -686,6 +693,7 @@ export function buildVocabularyIndex(source: VocabularySource): VocabularyIndex 
       entityType: entity.type,
       ...(entity.reachableFrom?.length ? { joinReach: entity.reachableFrom } : {}),
       ...(entity.sourceId ? { sourceId: entity.sourceId } : {}),
+      ...(entity.inventory ? { inventory: true } : {}),
       ...(entity.physical ? { physical: entity.physical } : {}),
     });
   }

@@ -1279,7 +1279,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       event('route.decided', 'semantic_answer'),
       event('executor.started', 'semantic_answer'),
     ]);
-    expect(querying.at(-1)).toMatchObject({ id: 'execute', label: 'Running the governed query', state: 'active' });
+    expect(querying.at(-1)).toMatchObject({ id: 'execute', label: 'Running the semantic query', state: 'active' });
     expect(querying.some((item) => /plan|validate/i.test(item.label))).toBe(false);
   });
 
@@ -2544,7 +2544,8 @@ describe('the story an Ask run tells while it works and keeps afterwards', () =>
     expect(askStoryActiveLabel([at('context', 'Searched the project: 19 tables')])).toBe('Asking the AI to read the question');
     expect(askStoryActiveLabel([at('read', 'Asked the AI to read the question')])).toBe('Checking the reading against the project');
     expect(askStoryActiveLabel([at('search', 'Fetched 4 fields the first reading had not seen')])).toBe('Asking the AI to read the question with those fields');
-    expect(askStoryActiveLabel([at('read', 'Settled the reading')])).toBe('Looking for a certified or governed answer');
+    expect(askStoryActiveLabel([at('read', 'Settled the reading')])).toBe('Looking for a certified block or semantic metric');
+    expect(askStoryActiveLabel([at('schema', 'Asking the AI to write SQL from the tables')])).toBe('Asking the AI to draft SQL from the tables');
     expect(askStoryActiveLabel([at('schema', 'No governed answer: asking the tables directly')])).toBe('Asking the AI to draft SQL from the tables');
     expect(askStoryActiveLabel([at('schema', 'Chose the tables dev.products, dev.supplies')])).toBe('Asking the AI to draft SQL from the tables');
     expect(askStoryActiveLabel([at('schema', 'Drafted SQL over dev.products')])).toBe('Running the drafted query');

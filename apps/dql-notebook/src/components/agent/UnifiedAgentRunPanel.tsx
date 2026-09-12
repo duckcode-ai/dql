@@ -1818,7 +1818,7 @@ function routeExecutionLabel(route: AgentRunRoute | undefined, events: AgentRunE
   if (events.some((event) => event.type === 'escalated')) return 'Expanding the evidence search';
   switch (route) {
     case 'certified_answer':
-    case 'semantic_answer': return 'Running the governed query';
+    case 'semantic_answer': return 'Running the semantic query';
     case 'generated_answer': return 'Building and running a grounded query';
     case 'research': return 'Researching the strongest evidence';
     case 'app_build': return 'Assembling the app from governed assets';
@@ -1940,14 +1940,15 @@ export function askStoryActiveLabel(steps: AskStoryStep[]): string {
   if (title === 'Asked the AI to read the question' || title === 'Asked the AI to correct its reading' || title.startsWith('Asked the AI to read the question again')) return 'Checking the reading against the project';
   if (title.startsWith('Fetched ')) return 'Asking the AI to read the question with those fields';
   if (title.startsWith('Searched every table for the missing field: found')) return 'Asking the AI to draft SQL with those tables';
-  if (last.phase === 'read') return 'Looking for a certified or governed answer';
-  if (title === 'No governed answer: asking the tables directly' || (last.phase === 'schema' && title.startsWith('Chose '))) return 'Asking the AI to draft SQL from the tables';
+  if (last.phase === 'read') return 'Looking for a certified block or semantic metric';
+  // The first title is what runs stored before the two-governed-sources change say.
+  if (title === 'Asking the AI to write SQL from the tables' || title === 'No governed answer: asking the tables directly' || (last.phase === 'schema' && title.startsWith('Chose '))) return 'Asking the AI to draft SQL from the tables';
   if (last.phase === 'schema' && /^(Re)?[Dd]rafted SQL/.test(title)) return 'Running the drafted query';
   if (last.phase === 'execute' && last.state === 'failed') return 'Asking the AI to correct the query';
   if (last.phase === 'tier' && last.state === 'done') return 'Running the query';
   if (last.phase === 'join') return 'Preparing the query again with the proven join';
   if (last.phase === 'execute') return 'Writing the answer';
-  return 'Looking for a certified or governed answer';
+  return 'Looking for a certified block or semantic metric';
 }
 
 export function formatStepDuration(ms: number | undefined): string {
@@ -5395,7 +5396,7 @@ export function trustExplainer(run: AgentRun): string | null {
   }
   if (run.trustState === 'certified') return 'Answered from a certified block.';
   if (run.route === 'dql_block_draft') return 'Prepared an ownerless review draft. Add it to Block Studio when you are ready to save it.';
-  if (run.trustState === 'governed') return 'Built from governed metrics and dimensions.';
+  if (run.trustState === 'governed') return 'Built from semantic metrics and dimensions.';
   if (run.trustState === 'grounded') return 'Ran cleanly against your data. Save it as a block when it is reusable.';
   if (isExploratoryDbtRun(run)) {
     const payloads = run.artifacts
@@ -7192,12 +7193,12 @@ const ASK_FAILURE_PRESENTATION: Record<string, { title: string; hint: string }> 
     hint: 'This is a defect in DQL. The detail below is what to report.',
   },
   modeling_gap: {
-    title: 'The governed model does not cover this question',
+    title: 'Nothing in this project answers this question',
     hint: 'No query ran. Add or review the missing metric, dimension, relationship, or allocation rule.',
   },
   no_data: {
     title: 'No matching data',
-    hint: 'The governed query ran and returned no rows for the requested period or filter. The data may end before it.',
+    hint: 'The query ran and returned no rows for the requested period or filter. The data may end before it.',
   },
   proof_integrity: {
     title: 'Not executed: exact semantic proof was not established',

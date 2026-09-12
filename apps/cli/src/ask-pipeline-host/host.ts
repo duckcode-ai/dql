@@ -610,6 +610,38 @@ export function joinsAnyRelation(candidate: string, anchors: string[], columnsOf
  * about that value; it is not a rule for every question in its scope. A hint
  * naming no value applies as retrieved.
  */
+/** A declared relationship two tables of an AI-written statement both carry the keys of. */
+export type PreferredJoin = { name: string; certified: boolean; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: string };
+
+/**
+ * PREFERRED JOINS FOR AI-WRITTEN SQL. A relationship the team declared in
+ * Domain Studio becomes a hint when two chosen tables carry its key columns.
+ * A certified one is preferred; a draft is named as not validated. Neither is
+ * a gate: the AI may join differently when the question needs it.
+ */
+export function preferredJoinHints(entries: VocabularyEntry[], relations: string[], columnsOf: (relation: string) => string[]): PreferredJoin[] {
+  const carries = (relation: string, name: string) => columnsOf(relation).some((column) => column.toLowerCase() === name.toLowerCase());
+  return entries
+    .filter((entry) => entry.kind === 'relationship' && Boolean(entry.relationship?.keys.length))
+    .flatMap((entry) => {
+      const keys = entry.relationship!.keys;
+      const from = relations.find((relation) => keys.every((key) => carries(relation, key.from)));
+      const to = relations.find((relation) => relation !== from && keys.every((key) => carries(relation, key.to)));
+      return from && to ? [{ name: entry.name, certified: entry.joinAuthority === 'certified', from, to, keys, ...(entry.relationship!.cardinality ? { cardinality: entry.relationship!.cardinality } : {}) }] : [];
+    })
+    .slice(0, 4);
+}
+
+export function preferredJoinLine(hint: PreferredJoin): string {
+  return `- preferred join (${hint.certified ? `certified in Domain Studio: ${hint.name}` : `declared, not validated: ${hint.name}`}): ${hint.keys.map((key) => `${hint.from}.${key.from} = ${hint.to}.${key.to}`).join(' AND ')}${hint.cardinality ? ` [${hint.cardinality}]` : ''}`;
+}
+
+/** Whether a statement joins on every key pair of a hint (either side of the equality). */
+export function joinHintUsed(sql: string, keys: PreferredJoin['keys']): boolean {
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return keys.every((key) => new RegExp(`\\b${escape(key.from)}\\b"?\\s*=\\s*[\\w."]*\\b${escape(key.to)}\\b|\\b${escape(key.to)}\\b"?\\s*=\\s*[\\w."]*\\b${escape(key.from)}\\b`, 'i').test(sql));
+}
+
 export function hintsForQuestion<T extends { title?: string; guidance?: string; lesson?: { rule?: string } }>(hints: T[], question: string): T[] {
   const asked = ` ${question.toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
   const mentioned = (value: string) => {
@@ -1541,62 +1573,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
           };
         },
       } : {}),
-      // Two governed join sources, in order: the semantic layer's entity
-      // joins, then the relationships the team declared in Domain Studio.
-      // Order of authority: the semantic layer, a certified relationship, then
-      // a proof this session gathered and has not yet outlived.
-      joinPath: (fromRelation, toRelation) => semanticJoinPath(fromRelation, toRelation) ?? declaredJoinPath(fromRelation, toRelation) ?? sessionProvenPath(fromRelation, toRelation),
-      unprovenJoinPath: (fromRelation, toRelation) => joinGraph.unproven(fromRelation, toRelation),
-      proveJoinPath: async (fromRelation, toRelation) => {
-        const executor = deps.executor as QueryExecutor & { executePositional?: QueryExecutor['executePositional'] };
-        if (!connection || typeof executor.executePositional !== 'function') return undefined;
-        // DOMAIN BOUNDARIES FIRST (A-003). Missing domain information never
-        // widens eligibility: an endpoint nobody modeled, or one bound to
-        // several domains, is a gap; endpoints in different domains need the
-        // governed interface chain and are never probed.
-        const fromDomains = joinGraph.domainsOf(fromRelation);
-        const toDomains = joinGraph.domainsOf(toRelation);
-        const decision = joinScopeDecision(fromRelation, toRelation, fromDomains, toDomains, joinGraph.hasDomains);
-        if ('refusal' in decision) return decision;
-        const scope = decision.scope;
-        const declaredEdge = joinGraph.declared(fromRelation, toRelation);
-        // A declared draft supplies the keys, direction and cardinality; an
-        // attribution or many-to-many declaration is never probed as if it
-        // were many-to-one. Without a draft, the probe runs fact -> label on a
-        // key whose name matches on both sides.
-        if (declaredEdge && (declaredEdge.cardinality === 'many_to_many' || declaredEdge.fanout === 'attribution_required' || declaredEdge.fanout === 'forbidden')) return undefined;
-        const columnsOf = (relation: string): string[] => currentVocabulary().entries.find((entry) => entry.kind === 'relation' && entry.ref.endsWith(relation))?.columns ?? [];
-        const keys = declaredEdge?.keys ?? (() => { const pair = sharedKeyPair(columnsOf(fromRelation), columnsOf(toRelation), toRelation); return pair ? [pair] : []; })();
-        if (keys.length === 0) return undefined;
-        const cardinality = (declaredEdge?.cardinality ?? 'many_to_one') as 'one_to_one' | 'one_to_many' | 'many_to_one' | 'many_to_many' | 'unknown';
-        if (cardinality === 'unknown') return undefined;
-        const manifestFingerprint = deps.getManifest().manifest?.dbtProvenance?.manifestFingerprint ?? deps.getManifest().snapshotId;
-        const cacheKey = `${fromRelation}->${toRelation}|${keys.map((key) => `${key.from}=${key.to}`).join(',')}|${cardinality}|${manifestFingerprint}`;
-        const now = Date.now();
-        const cached = provenJoinPath.get(cacheKey);
-        if (cached && cached.expiresAt > now && cached.generationToken === (await evidenceGenerationToken(connection))) return cached.steps;
-        try {
-          const evidence = await validateRelationshipOnWarehouse(
-            { fromRelation, toRelation, keys, cardinality, fanout: 'safe', keyTypes: catalogKeyTypes(deps.getManifest().manifest, { fromRelation, toRelation, keys }) },
-            async (sql) => executor.executePositional!(sql, [], connection, { maxRows: 1, ...(signal ? { signal } : {}) }).then((result) => ({ rows: result.rows as Array<Record<string, unknown>> })),
-            quotePhysical,
-          );
-          // Unique there, and covering every row here (Ask's own rule on top of
-          // the declared cardinality): anything else is not a relationship, it
-          // is a guess that would multiply or drop rows.
-          if (evidence.status !== 'passed' || evidence.unmatchedFrom !== 0) return undefined;
-          const ttlHours = relationshipEvidenceTtlHours();
-          const generationToken = await evidenceGenerationToken(connection);
-          const freshness = { checkedAt: evidence.checkedAt, expiresAt: new Date(now + ttlHours * 3_600_000).toISOString(), target: connectionKey(connection), ...(generationToken ? { generationToken } : {}) };
-          const authority: JoinAuthorityV1 = { version: 1, from: fromRelation, to: toRelation, keys, source: 'warehouse_proof', ...(declaredEdge ? { relationshipId: declaredEdge.id } : {}), authority: 'proven_default', scope, domains: { from: fromDomains, to: toDomains }, evidence, freshness, snapshotId: deps.getManifest().snapshotId };
-          const left = quoteRelation(fromRelation);
-          const right = quoteRelation(toRelation);
-          const steps: RelationalJoinStep[] = [{ relation: toRelation, on: keys.map((key) => `${left}.${quotePhysical(key.from)} = ${right}.${quotePhysical(key.to)}`).join(' AND '), authority }];
-          provenJoinPath.set(cacheKey, { steps, expiresAt: now + ttlHours * 3_600_000, generationToken });
-          writeRelationshipEvidence(deps.projectRoot, { fromRelation, toRelation, keys, cardinality, fanout: 'safe', ...(declaredEdge ? { relationshipId: declaredEdge.id } : {}), evidence, freshness, snapshotId: deps.getManifest().snapshotId });
-          return steps;
-        } catch { return undefined; }
-      },
+      // Joins over raw tables are the AI's to write (preferred joins are hints
+      // in its context); no tier here composes, proves or authorizes a join.
       dialect: { quoteIdentifier: (name) => dialect.quoteIdentifier(name), quotePhysical, qualifyRelation: quoteRelation, dateTrunc: (grain, expr) => dialect.dateTrunc(grain, expr), limitClause: (limit) => dialect.limitClause(limit) },
       blockSql: (ref) => currentVocabulary().get(ref)?.sql,
       prepareBlock: (ref, context) => prepareBlockForAsk(deps.projectRoot, currentVocabulary().get(ref), context, connection?.driver),
@@ -1718,13 +1696,15 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       };
       const readingRelations = [...new Set(refs.map(relationOf).filter((relation): relation is string => Boolean(relation)))];
       const reachesReading = (candidate: string) => joinsAnyRelation(candidate, readingRelations, sourceColumns);
+      // Tables that share a key with the reading's tables come first; the rest
+      // stay available. Whether a table is "right" is the AI's call, disclosed.
+      const rankByReach = (names: string[]): string[] => names.map((name, index) => ({ name, index, reach: reachesReading(name) ? 1 : 0 })).sort((left, right) => right.reach - left.reach || left.index - right.index).map((item) => item.name);
       const catalogPick = (text: string, exclude: string[], max: number, objectTypes: string[] = ['dbt_column', 'dbt_model', 'dbt_source', 'warehouse_table']): string[] => {
         if (!deps.searchCatalog || !text.trim()) return [];
         try {
-          // A table named like the question is not evidence it holds the answer:
-          // only tables that reach the reading's facts are kept.
+          // Tables that reach the reading's facts are ranked first.
           const hits = deps.searchCatalog(request, view.envelope, text, { objectTypes, limit: 40 });
-          return relationsFromCatalogHits(hits, view.source, exclude, 12).filter(reachesReading).slice(0, max);
+          return rankByReach(relationsFromCatalogHits(hits, view.source, exclude, 12)).slice(0, max);
         } catch { return []; }
       };
       const catalogPicked = catalogPick(`${question} ${open} ${contextText}`, relations, 3);
@@ -1734,9 +1714,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
           // THE ENVELOPE HOLDS: drafted SQL chooses among the relations this
           // request admits, not every relation in the project.
           const source = view.source ?? (await baseSourceFor(connection)).source;
-          for (const relation of relevantRelationsForQuestion(source, `${question} ${open} ${contextText}`, 5, { splitNames: true })) {
+          for (const relation of rankByReach(relevantRelationsForQuestion(source, `${question} ${open} ${contextText}`, 5, { splitNames: true }))) {
             if (relations.length >= 5) break;
-            if (!reachesReading(relation)) continue;
             if (!relations.some((known) => physicalRelationIdentity(known) === physicalRelationIdentity(relation))) relations.push(relation);
           }
         } catch { /* the relations named so far stand */ }
@@ -1781,7 +1760,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         .map((entry) => {
           // An authored semantic metric the engine did not run is rebuilt from
           // its definition as written, never re-invented from its name.
-          if (entry.engineOnly) return `- governed ${entry.kind} ${entry.label ?? entry.name} (semantic engine only: ${entry.engineOnly}; rebuild it exactly from this definition): ${entry.expr ?? 'as described'}${entry.timeRef ? `, time ${entry.timeRef}` : ''}${entry.description ? ` (${entry.description.slice(0, 300)})` : ''}`;
+          if (entry.engineOnly) return `- semantic ${entry.kind} ${entry.label ?? entry.name} (semantic engine only: ${entry.engineOnly}; rebuild it exactly from this definition): ${entry.expr ?? 'as described'}${entry.timeRef ? `, time ${entry.timeRef}` : ''}${entry.description ? ` (${entry.description.slice(0, 300)})` : ''}`;
           const physical = entry.physical;
           const definition = entry.derived
             ? `${entry.derived.expr} over ${entry.derived.inputs.map((input) => `${input.alias} = ${input.ref}`).join(', ')}`
@@ -1790,8 +1769,11 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
               : physical?.column
                 ? `${(physical.aggregate ?? entry.aggregation ?? 'sum').toUpperCase()}(${physical.column})`
                 : entry.expr ?? 'as described';
-          return `- governed ${entry.kind} ${entry.label ?? entry.name}: ${definition}${physical?.relation ? ` on ${physical.relation}` : ''}${entry.timeRef ? `, time ${entry.timeRef}` : ''}${entry.description ? ` (${entry.description.slice(0, 120)})` : ''}`;
+          return `- semantic ${entry.kind} ${entry.label ?? entry.name}: ${definition}${physical?.relation ? ` on ${physical.relation}` : ''}${entry.timeRef ? `, time ${entry.timeRef}` : ''}${entry.description ? ` (${entry.description.slice(0, 120)})` : ''}`;
         });
+      // PREFERRED JOINS: hints for how two of these tables join, never a gate.
+      const joinHints = preferredJoinHints(current.entries, relations, sourceColumns);
+      const joinLines = joinHints.map(preferredJoinLine);
       const contextLines = [
         ...(contextText ? [`- conversation so far: ${contextText.slice(0, 600)}`] : []),
         ...(prior?.intent.reading ? [`- previous reading: ${prior.intent.reading.slice(0, 300)}${prior.summary ? `; its answer: ${prior.summary.slice(0, 300)}` : ''}`] : []),
@@ -1799,6 +1781,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         ...(briefing ? [`- domain ${briefing.name}${briefing.description ? `: ${briefing.description.slice(0, 300)}` : ''}${briefing.caveats.length ? `; caveats: ${briefing.caveats.slice(0, 3).join('; ')}` : ''}${briefing.requiredFilters.length ? `; required filters: ${briefing.requiredFilters.slice(0, 3).join('; ')}` : ''}`] : []),
         ...termLines,
         ...metricLines,
+        ...joinLines,
         ...hintLines,
       ];
       const attemptDraft = async (note?: string): Promise<Awaited<ReturnType<NonNullable<PrepareDeps['draftSql']>>>> => {
@@ -1827,7 +1810,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         }
         const dialect = connection?.driver ?? 'duckdb';
         const messages: AgentMessage[] = [
-          { role: 'system', content: `You write exactly ONE read-only SQL statement for ${dialect} that answers the question from the tables below. No certified block or governed metric answers it, so you choose the tables, columns, joins and filters. Use ONLY the executable physical relations and columns listed below, spelled exactly as listed (including database and quoting where shown). Join two relations only on columns that exist in both. Apply every restriction the question states; when unsure how a text value is stored, match it case-insensitively; aggregate at the grain the question asks for; order and limit as it asks; never return more than 500 rows. No DDL or DML, no comments, no explanation. The CONTEXT lines are what the user and the project have said about this data (definitions, rules, where values are kept): follow them, and use a table or field the user names as named. A governed metric listed in CONTEXT is computed exactly as it is defined there. When no column is dedicated to a restriction the question states, apply it to the text, tag, category or custom field that most plausibly holds that value, matched case-insensitively (a partial match is allowed). Reply exactly NO_SQL: followed by one sentence naming what is missing only when no listed column could hold a measure or a restriction the question asks for, and never substitute a different measure for the one asked. Otherwise return the SQL only.` },
+          { role: 'system', content: `You write exactly ONE read-only SQL statement for ${dialect} that answers the question from the tables below. No certified block or semantic metric answers it, so you choose the tables, columns, joins and filters. Use ONLY the executable physical relations and columns listed below, spelled exactly as listed (including database and quoting where shown). Join two relations only on columns that exist in both. Apply every restriction the question states; when unsure how a text value is stored, match it case-insensitively; aggregate at the grain the question asks for; order and limit as it asks; never return more than 500 rows. No DDL or DML, no comments, no explanation. The CONTEXT lines are what the user and the project have said about this data (definitions, rules, where values are kept): follow them, and use a table or field the user names as named. A semantic metric listed in CONTEXT is computed exactly as it is defined there. A preferred join listed in CONTEXT is how those tables join unless the question needs another. When no column is dedicated to a restriction the question states, apply it to the text, tag, category or custom field that most plausibly holds that value, matched case-insensitively (a partial match is allowed). Reply exactly NO_SQL: followed by one sentence naming what is missing only when no listed column could hold a measure or a restriction the question asks for, and never substitute a different measure for the one asked. Otherwise return the SQL only.` },
           { role: 'user', content: `QUESTION: ${question}\n${reason ? `WHY NO GOVERNED ANSWER: ${reason.slice(0, 600)}\n` : ''}${intent ? `READING: ${intent.reading}\nINTENT: ${JSON.stringify({ measures: intent.measures, groupBy: intent.groupBy, display: intent.display, filters: intent.filters, time: intent.time ?? null, ordering: intent.ordering ?? null, limit: intent.limit ?? null })}\n` : ''}${contextLines.length ? `CONTEXT:\n${contextLines.join('\n')}\n` : ''}${note ? `NOTE: ${note}\n` : ''}${previous ? `PREVIOUS SQL (the warehouse rejected it; fix it):\n${previous.sql}\nWAREHOUSE ERROR: ${previous.error.slice(0, 600)}\n` : ''}RELATIONS AND COLUMNS:\n${cards.join('\n')}` },
         ];
         const draftStarted = Date.now();
@@ -1940,6 +1923,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
             ...(applied ? [`applied on the data: ${applied}`] : []),
             ...(stated.length ? [`stated values applied: ${stated.map((item) => item.value).join(', ')}`] : []),
             ...(required.length ? [`required filters present: ${required.map((item) => item.text).join(', ')}`] : []),
+            ...joinHints.filter((hint) => joinHintUsed(chosen.sql, hint.keys)).map((hint) => `joined as the ${hint.certified ? 'certified' : 'declared (not validated)'} relationship ${hint.name} says`),
           ],
         };
       };
@@ -1960,9 +1944,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
             for (const column of [...relation.columns, ...(relation.embeddedColumns ?? [])]) {
               if (column.dataType && !/char|text|string|variant|array|json|object/i.test(column.dataType)) continue;
               if (!allowed(name, column.name)) continue;
-              if (!reachesReading(name)) continue;
               const overlap = [...relevanceWords([column.name, column.description], true)].filter((word) => asked.has(word)).length;
-              candidates.push({ relation: name, column: column.name, rank: (chosen.has(physicalRelationIdentity(name)) ? 10 : 0) + overlap });
+              candidates.push({ relation: name, column: column.name, rank: (chosen.has(physicalRelationIdentity(name)) ? 10 : 0) + (reachesReading(name) ? 5 : 0) + overlap });
             }
           }
         }
@@ -2014,7 +1997,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         const source = view.source ?? (await baseSourceFor(connection)).source;
         // A missing FIELD is found by its column, not by a table's name.
         const fromCatalog = catalogPick(words.join(' '), relations, 3, ['dbt_column']);
-        wider = [...fromCatalog, ...relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, [...relations, ...fromCatalog], 6)].filter(reachesReading).slice(0, 3);
+        wider = rankByReach([...fromCatalog, ...relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, [...relations, ...fromCatalog], 6)]).slice(0, 3);
       } catch { wider = []; }
       if (wider.length > 0) {
         try {
@@ -2396,7 +2379,7 @@ export function gapPresentation(gap: Extract<PipelineOutcome, { kind: 'gap' }>['
     if (message && /no rows matched the restriction/.test(message)) return { title: 'No matching data under those filters', code: 'no_data' };
     return { title: 'No matching data for that period', code: 'no_data' };
   }
-  return { title: 'No governed answer', code: 'modeling_gap' };
+  return { title: 'No answer', code: 'modeling_gap' };
 }
 
 /**
@@ -2627,7 +2610,7 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
   // A certified block served as published for a question it cannot answer
   // with identity is evidence: governed trust, the block as its source.
   const blockAsEvidence = candidate.tier === 'certified' && !certified;
-  const route = certified ? { tier: 'certified_block', label: 'Certified block' } : blockAsEvidence ? { tier: 'certified_block', label: 'Certified block, served as evidence' } : reviewRequired ? { tier: 'generated_sql', label: 'AI-drafted SQL (review required)' } : candidate.tier === 'semantic' ? { tier: 'semantic_metric', label: 'Semantic metric' } : { tier: 'governed_relational', label: 'Governed relational program' };
+  const route = certified ? { tier: 'certified_block', label: 'Certified block' } : blockAsEvidence ? { tier: 'certified_block', label: 'Certified block, served as evidence' } : reviewRequired ? { tier: 'generated_sql', label: 'AI-drafted SQL (review required)' } : { tier: 'semantic_metric', label: 'Semantic metric' };
   const trustState = certified ? 'certified' : reviewRequired ? 'review_required' : 'governed';
   const payload = {
     kind: certified ? 'certified' : 'uncertified',
@@ -2653,16 +2636,16 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     ...common,
   };
   // An answer whose SQL the AI wrote from the schema is never headed as governed.
-  const artifact: AgentRunArtifact = { id: `${runId}:answer`, kind: 'answer', title: certified ? 'Certified answer' : candidate.tier === 'exploratory' ? 'AI-drafted answer' : 'Governed answer', trustState, payload };
+  const artifact: AgentRunArtifact = { id: `${runId}:answer`, kind: 'answer', title: certified ? 'Certified answer' : reviewRequired ? 'AI-drafted answer' : blockAsEvidence ? 'Certified block answer' : 'Semantic answer', trustState, payload };
   return withReceipt({
     summary: outcome.text, answer: outcome.text, status: 'completed', trustState,
-    stopReason: certified ? 'certified_answer_found' : 'governed_semantic_answer',
+    stopReason: certified ? 'certified_answer_found' : reviewRequired ? 'generated_review_required' : 'governed_semantic_answer',
     resolvedRoute: certified ? 'certified_answer' : candidate.tier === 'semantic' ? 'semantic_answer' : 'generated_answer',
     answerTier: route.tier, result: payload.result, artifacts: [artifact],
     evaluations: [
       ...contextEvaluation(receipt),
       { id: 'pipeline-interpretation', label: 'Interpretation', passed: true, severity: 'info', message: `Read as: ${outcome.intent.reading || 'the intent below'}` },
-      { id: 'pipeline-preparation', label: certified ? 'Certified entailment' : candidate.tier === 'semantic' ? 'Semantic compilation' : 'Governed composition', passed: true, severity: 'info', message: candidate.proof.join(' ') },
+      { id: 'pipeline-preparation', label: certified ? 'Certified entailment' : candidate.tier === 'semantic' ? 'Semantic compilation' : reviewRequired ? 'AI-drafted SQL checks' : 'Certified block', passed: true, severity: 'info', message: candidate.proof.join(' ') },
       ...(receipt.executed?.proofs ?? []).map((proof, index) => ({ id: `pipeline-execution-${index + 1}`, label: 'Execution proof', passed: true, severity: 'info' as const, message: proof })),
       // Words the reading does not use are never a passed check; the
       // evaluation carries no repair action, so it informs and does not loop.

@@ -718,7 +718,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       const column = timeExpression === undefined || timeExpression === '' ? name : isIdentifier(timeExpression) ? timeExpression : undefined;
       source.dimensions!.push({
         name, model: home.model, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: 'timestamp', isTime: true,
-        ...(dimension.granularities?.length ? { timeGrains: dimension.granularities } : {}), sourceId: `${home.model}.${dimension.name}`,
+        ...(dimension.granularities?.length ? { timeGrains: dimension.granularities } : {}), sourceId: `${home.model}.${dimension.name}`, ...(dimension.source?.objectType === 'dbt_column' ? { inventory: true } : {}),
         ...(reach.get(home.model)?.length ? { reachableFrom: reach.get(home.model) } : {}),
         ...(relation && column ? { physical: { relation, column } } : {}),
       });
@@ -734,7 +734,7 @@ export function buildVocabularySource(input: VocabularySourceInput): VocabularyS
       const column = expression === undefined || expression === '' ? name : isIdentifier(expression) ? expression : undefined;
       source.dimensions!.push({
         name, model: home.model, label: dimension.label, description: dimension.description || (relation && column ? columnDescriptions.get(`${relation}.${column}`) : undefined), dataType: dimension.type,
-        ...(dimension.isTimeDimension ? { isTime: true } : {}), sourceId: `${home.model}.${dimension.name}`,
+        ...(dimension.isTimeDimension ? { isTime: true } : {}), sourceId: `${home.model}.${dimension.name}`, ...(dimension.source?.objectType === 'dbt_column' ? { inventory: true } : {}),
         ...(reach.get(home.model)?.length ? { reachableFrom: reach.get(home.model) } : {}),
         ...(relation && column ? { physical: { relation, column } } : {}),
       });

@@ -4,7 +4,7 @@ import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeaila
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, createAgentRunBudget, parseIntent, physicalRelationBinding, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import { hintsForQuestion, joinsAnyRelation, sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
+import { preferredJoinHints, preferredJoinLine, joinHintUsed, hintsForQuestion, joinsAnyRelation, sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -526,7 +526,7 @@ describe('a gap is headed by what it is', () => {
     expect(gapPresentation('not_retrieved', 'no rows matched the restriction on is_drink_item').title).toBe('No matching data under those filters');
     expect(gapPresentation('not_retrieved', 'no rows fell inside the window 2030-01-01..2031-01-01').title).toBe('No matching data for that period');
     expect(gapPresentation('not_modeled').code).toBe('modeling_gap');
-    expect(gapPresentation('unsupported')).toEqual({ title: 'No governed answer', code: 'modeling_gap' });
+    expect(gapPresentation('unsupported')).toEqual({ title: 'No answer', code: 'modeling_gap' });
     expect(gapPresentation('denied').code).toBe('policy_blocked');
     expect(gapPresentation('ambiguous').code).toBe('ambiguous');
   });
@@ -1187,8 +1187,8 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
       request: { question: 'What was the lost amount to Splunk?', requestedMode: 'ask' } as AgentRunRequest,
       route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
     });
-    expect(prompts[0]).toContain('- governed metric Lost amount:');
-    expect(prompts[0]).toContain('A governed metric listed in CONTEXT is computed exactly as it is defined there.');
+    expect(prompts[0]).toContain('- semantic metric Lost amount:');
+    expect(prompts[0]).toContain('A semantic metric listed in CONTEXT is computed exactly as it is defined there.');
   });
 
   it('a follow-up to an AI-drafted answer hands the AI that statement to edit, with its tables', async () => {
@@ -1232,5 +1232,28 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
     expect(statements.every((sql) => sql.includes('information_schema'))).toBe(true);
     expect(result.status).not.toBe('completed');
     expect(JSON.stringify(result)).toContain('nothing in sales.opportunities records a lost deal count');
+  });
+});
+
+describe('preferred joins are hints for AI-written SQL, never gates', () => {
+  const entries = buildVocabularyIndex({ relationships: [
+    { id: 'order_to_customer', from: 'order', to: 'customer', keys: [{ from: 'customer_id', to: 'customer_id' }], cardinality: 'many_to_one', joinAuthority: 'certified' },
+    { id: 'return_to_order', from: 'return', to: 'order', keys: [{ from: 'order_id', to: 'order_id' }], joinAuthority: 'draft' },
+  ] }).entries;
+  const columns: Record<string, string[]> = { 'dev.orders': ['order_id', 'customer_id'], 'dev.customers': ['customer_id', 'name'], 'dev.returns': ['return_id', 'order_id'] };
+
+  it('a relationship whose keys two chosen tables carry is a preferred-join line; a draft says it is not validated', () => {
+    const hints = preferredJoinHints(entries, ['dev.orders', 'dev.customers', 'dev.returns'], (relation) => columns[relation] ?? []);
+    expect(hints.map(preferredJoinLine)).toEqual([
+      '- preferred join (certified in Domain Studio: order_to_customer): dev.orders.customer_id = dev.customers.customer_id [many_to_one]',
+      '- preferred join (declared, not validated: return_to_order): dev.orders.order_id = dev.returns.order_id',
+    ]);
+    expect(preferredJoinHints(entries, ['dev.orders'], (relation) => columns[relation] ?? [])).toEqual([]);
+  });
+
+  it('a statement that joins on the keys is disclosed; one that only selects the column is not', () => {
+    const keys = [{ from: 'customer_id', to: 'customer_id' }];
+    expect(joinHintUsed('SELECT c.name FROM dev.orders o JOIN dev.customers c ON c.customer_id = o.customer_id', keys)).toBe(true);
+    expect(joinHintUsed('SELECT customer_id FROM dev.orders', keys)).toBe(false);
   });
 });

@@ -28,6 +28,8 @@ import { normalizeVocabularyText, renderCard, suggestSameGrainColumns, suggestSa
  */
 
 export interface ResolveIntentInput {
+  /** AI-written SQL is available: a reading that is not over certified blocks or authored semantics returns at once with lane \`ai\`. */
+  aiLane?: boolean;
   /** The thread's compacted memory, rendered with the previous analysis. */
   conversation?: { summary?: string; pendingClarification?: string };
   /** Cards already rendered by the pipeline (with rank, pins and header); rendered here only when absent. */
@@ -104,11 +106,52 @@ export interface IntentLedger {
 export interface LedgerEntry { clause: string; kind?: string; disposition: 'discharged' | 'unresolved' | 'dropped' | 'restored'; by?: string; round: number }
 
 export type IntentResolution =
-  | { status: 'resolved'; intent: AnalyticalIntentV1; attempts: number; problems: IntentProblem[]; ledger?: IntentLedger; ledgerEntries?: LedgerEntry[] }
+  | { status: 'resolved'; intent: AnalyticalIntentV1; attempts: number; problems: IntentProblem[]; ledger?: IntentLedger; ledgerEntries?: LedgerEntry[]; /** `ai`: the reading is not over certified blocks or authored semantics, so AI-written SQL answers it. */ lane?: 'ai' }
   | { status: 'clarify'; intent: AnalyticalIntentV1; question: string; options: string[]; attempts: number; ledger?: IntentLedger; ledgerEntries?: LedgerEntry[]; /** The options are the host's nearest guesses for names the reading used that the project does not hold. */ unmatched?: IntentProblem[] }
   | { status: 'conversation'; intent: AnalyticalIntentV1; reply: string; attempts: number }
   | { status: 'definition'; intent: AnalyticalIntentV1; reply: string; attempts: number }
   | { status: 'failed'; reason: 'provider_error' | 'unparseable' | 'invalid'; detail: string; problems: IntentProblem[]; attempts: number; code?: string };
+
+/**
+ * TWO GOVERNED SOURCES. A certified block, or an object a team authored in a
+ * semantic layer (a metric, measure, dimension, entity or semantic model), is
+ * governed. A dbt column, a relation, or a dimension built from a dbt model's
+ * columns because no semantic layer exists is not: nobody vouched for it.
+ */
+export function isGovernedEntry(entry: VocabularyEntry): boolean {
+  if (entry.kind === 'block') return true;
+  if (entry.kind === 'metric' || entry.kind === 'measure' || entry.kind === 'dimension' || entry.kind === 'entity' || entry.kind === 'model') return !entry.inventory;
+  return false;
+}
+
+/**
+ * Which lane answers a reading: `governed` when every ref it uses is a
+ * certified block or an authored semantic object, `ai` when any ref is a
+ * column, a relation, an inventory dimension or something the project does
+ * not hold. A reading that names nothing yet stays governed, so a governed
+ * default can still supply its measure.
+ */
+export function readingLane(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): 'governed' | 'ai' {
+  const refs = intentRefs(intent);
+  if (refs.length === 0) return 'governed';
+  return refs.every((ref) => { const entry = vocabulary.resolve(ref); return Boolean(entry && isGovernedEntry(entry)); }) ? 'governed' : 'ai';
+}
+
+/**
+ * A reading that reached for governed vocabulary and missed earns its one
+ * correction, because a certified or semantic answer may be one re-ask away:
+ * a misspelt name with a governed suggestion, or a metric, measure, dimension,
+ * entity or block that does not exist in a project that has governed objects.
+ * A column or relation that does not exist goes straight to AI-written SQL.
+ */
+function correctsTowardSemantics(intent: AnalyticalIntentV1, problems: IntentProblem[], vocabulary: VocabularyIndex): boolean {
+  const invalid = problems.map((problem) => /^(.+?) is not in the vocabulary$/.exec(problem.message)?.[1]).filter((ref): ref is string => Boolean(ref));
+  if (invalid.length === 0 || invalid.length !== problems.length) return false;
+  const others = intentRefs(intent).filter((ref) => !invalid.includes(ref));
+  if (!others.every((ref) => { const entry = vocabulary.resolve(ref); return Boolean(entry && isGovernedEntry(entry)); })) return false;
+  const projectHasGoverned = vocabulary.entries.some((entry) => isGovernedEntry(entry));
+  return invalid.every((ref) => vocabulary.suggest(ref, 3).some((entry) => isGovernedEntry(entry)) || (projectHasGoverned && /^(metric|measure|dimension|entity|block):/i.test(ref)));
+}
 
 const MEASURE_KINDS: VocabularyKind[] = ['metric', 'measure', 'column', 'block'];
 const RATIO_KINDS: VocabularyKind[] = ['metric', 'measure', 'column'];
@@ -1961,6 +2004,18 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       }
     }
     const validation = validateIntentRefs(parsed.intent, input.vocabulary, input.selection ? undefined : input.prior, asked, { priorExecuted: input.priorExecuted });
+    // A READING OVER TABLES NOBODY GOVERNS IS ANSWERED BY AI-WRITTEN SQL. No
+    // correction rounds, no "which field" or "which period" questions about
+    // columns: the reading travels to the drafter as a hint, the drafter picks
+    // the tables and fields, and the answer says what it assumed. Only a
+    // reading one spelling away from authored semantics is corrected first.
+    // A question the reading itself asked between real alternatives stays a
+    // question: the drafter must not pick one of two meanings the user gave.
+    const choice = validation.intent.unresolved.some((clause) => clause.material && clause.kind !== 'unsupported' && clause.options.length >= 2);
+    if (input.aiLane && !choice && validation.intent.kind === 'analytics' && readingLane(validation.intent, input.vocabulary) === 'ai'
+      && !(attempts < maxAttempts && correctsTowardSemantics(validation.intent, validation.problems, input.vocabulary))) {
+      return { status: 'resolved', intent: validation.intent, attempts, problems: validation.problems, lane: 'ai', ...(ledger ? { ledger, ledgerEntries } : {}) };
+    }
     if (validation.followUpReplacement && attempts > 1 && input.prior) {
       const options = [...new Set([...input.prior.measures.map((measure) => measure.ref), ...validation.intent.measures.map((measure) => measure.ref)])];
       const label = (ref: string) => input.vocabulary.get(ref)?.label ?? input.vocabulary.get(ref)?.name ?? ref;
