@@ -136,6 +136,21 @@ describe('framing an investigation from a reading', () => {
 
   it('asks for a measure when there is none, and declines what is not a change over time', () => {
     expect(planInvestigationFrame({ reading: reading({ measures: [] }), vocabulary, lane: 'governed' }).status).toBe('clarify');
+    // A project with no metrics offers the numeric columns the question names, never a text or date column.
+    const raw = buildVocabularyIndex({
+      relations: [{ schema: 'sales', name: 'mart_arr', columnCompleteness: 'complete', columns: [
+        { name: 'arr', dataType: 'DOUBLE' }, { name: 'arr_month', dataType: 'DATE' }, { name: 'arr_band', dataType: 'VARCHAR' }, { name: 'crm_account_name', dataType: 'VARCHAR' },
+      ] }],
+    });
+    const why = planInvestigationFrame({
+      reading: reading({ reading: 'The question asks for an explanation of a change, which is not computable.', measures: [], time: undefined }),
+      question: 'Why did net ARR change in June 2025?', vocabulary: raw, lane: 'ai',
+    });
+    expect(why.status).toBe('clarify');
+    if (why.status === 'clarify') {
+      expect(why.options).toContain('column:sales.mart_arr.arr');
+      expect(why.options.some((ref) => /arr_month|arr_band/.test(ref))).toBe(false);
+    }
     expect(planInvestigationFrame({ reading: reading({ kind: 'conversation' } as Partial<AnalyticalIntentV1>), vocabulary, lane: 'governed' }).status).toBe('not_investigable');
     const timeless = buildVocabularyIndex({ metrics: [{ name: 'headcount', model: 'teams', aggregation: 'sum' }] });
     const result = planInvestigationFrame({ reading: reading({ measures: [{ ref: 'metric:teams.headcount' }], time: undefined }), vocabulary: timeless, lane: 'governed' });

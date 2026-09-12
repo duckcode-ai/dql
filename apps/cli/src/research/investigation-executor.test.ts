@@ -63,14 +63,15 @@ const august = {
 } as AnalyticalIntentV1;
 
 function fakeHost(options: { read?: PipelineOutcome; blocked?: AgentRouteExecutorResult } = {}) {
-  const calls = { reads: 0, intents: [] as AnalyticalIntentV1[] };
+  const calls = { reads: 0, intents: [] as AnalyticalIntentV1[], readOptions: [] as unknown[] };
   const scope = {
     route: 'research', contextMs: 12, hasConnection: true,
     contextSteps: [{ version: 1, phase: 'context', title: 'Searched the project', state: 'done', at: 1 }] as AskStoryStepV1[],
     vocabulary: () => vocabulary,
     semanticLayer: () => undefined,
-    read: async () => {
+    read: async (_question: string, readOptions?: unknown) => {
       calls.reads += 1;
+      calls.readOptions.push(readOptions);
       if (!options.read) throw new Error('an investigation started from an answer must not read the question again');
       return options.read;
     },
@@ -143,6 +144,8 @@ describe('Research runs an investigation on the Ask pipeline', () => {
     const { host, calls } = fakeHost({ read: readingOf(august) });
     const result = await createInvestigationExecutor({ host, loadRun: async () => undefined })(run({}).context);
     expect(calls.reads).toBe(1);
+    // A why-question is read for what can be measured, not declined as a cause.
+    expect(calls.readOptions[0]).toMatchObject({ guidance: expect.stringContaining('THIS QUESTION IS BEING INVESTIGATED BY RESEARCH') });
     expect(result.askPipelineReceipt?.dispatches).toHaveLength(1);
     expect(result.askPipelineReceipt?.investigation?.budget.aiCalls).toBe(1);
     expect(result.telemetry?.providerRoundTrips).toBe(1);

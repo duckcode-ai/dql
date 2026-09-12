@@ -54,7 +54,7 @@ export async function runInvestigation(input: {
     reading = outcome.intent;
     lane = outcome.lane;
   }
-  const planned = planInvestigationFrame({ reading, vocabulary: runtime.vocabulary(), lane });
+  const planned = planInvestigationFrame({ reading, vocabulary: runtime.vocabulary(), lane, question: input.question });
   const frameRecord = record('frame', 'frame', 'Framed the change to investigate');
   if (planned.status === 'clarify') {
     frameRecord.outcome = 'skipped'; frameRecord.reason = planned.question;

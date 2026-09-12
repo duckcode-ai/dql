@@ -1123,6 +1123,8 @@ interface AskRunState {
 export interface AskScopeRunOptions {
   deadlineMs?: number;
   onStep?(step: AskStoryStepV1): void;
+  /** An instruction for the reader, after the project's own guidance (Research reads a why-question for what it can measure). */
+  guidance?: string;
 }
 
 /**
@@ -2277,7 +2279,9 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         const onStep = runOptions.onStep ?? liveStep;
         const state = newRunState(onStep);
         const outcome = await runPipeline(state, {
-          question, stopAfter: 'reading', clauseCoverage: false, selection: undefined, memberSelection: undefined,
+          // A clarification the user picked for this question applies to its reading.
+          question, stopAfter: 'reading', clauseCoverage: false,
+          ...(runOptions.guidance ? { guidance: [deps.guidance?.(request), runOptions.guidance].filter(Boolean).join('\n\n') } : {}),
           explorationAuto: (runOptions.allowAiSql ?? true) && deps.autoExploration !== false,
           ...(runOptions.deadlineMs ? { deadlineMs: runOptions.deadlineMs } : {}),
           trace: undefined, onStep, onVocabularyUpdate: mergeVocabulary,

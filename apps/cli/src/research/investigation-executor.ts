@@ -25,6 +25,17 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import { toExecutorResult, type AskPipelineHost, type AskRequestScope } from '../ask-pipeline-host/host.js';
 
+/**
+ * What the reader is told when Research reads the question. Ask declines to
+ * compute a cause; Research investigates it, so the reading is what can be
+ * measured, never an empty reading because the question asks why.
+ */
+export const RESEARCH_READING_GUIDANCE = [
+  'THIS QUESTION IS BEING INVESTIGATED BY RESEARCH. Research compares the periods and looks for what drove the change itself, so a why, what-drove or what-changed question is never a reason to leave the measure out.',
+  'Read what can be measured: the measure the question names (a metric, or a numeric column with its aggregation when no metric declares it), the period it names as `time.window`, and the restrictions it states.',
+  'Put the causal words ("why", "what drove", "what changed") in `unresolved` with material=false and no options.',
+].join(' ');
+
 /** Held back at the end of the run for the report and persistence. */
 export const INVESTIGATION_FINALIZE_RESERVE_MS = 15_000;
 /** Without a run budget (tests, embeddings), the investigation's own soft deadline. */
@@ -87,7 +98,7 @@ export function createInvestigationExecutor(deps: InvestigationExecutorDeps): Ag
       question: request.question,
       source,
       runtime: {
-        read: async (question) => { reading = await scope.read(question); return reading; },
+        read: async (question) => { reading = await scope.read(question, { guidance: RESEARCH_READING_GUIDANCE }); return reading; },
         runIntent: (intent, { allowAiSql }) => scope.runIntent(intent, { allowAiSql, origin: 'research_program', deadlineMs: queryDeadlineMs(remainingMs()) }),
         vocabulary: () => scope.vocabulary(),
         remainingMs,

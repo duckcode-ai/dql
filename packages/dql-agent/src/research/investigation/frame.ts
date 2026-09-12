@@ -33,6 +33,7 @@ export type InvestigationFramePlanResult =
   | { status: 'not_investigable'; reason: string };
 
 const NON_ADDITIVE = new Set(['avg', 'median', 'count_distinct', 'min', 'max']);
+const NUMERIC_TYPE = /(int|decimal|float|double|numeric|number|real|money)/i;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 export function entryLabel(vocabulary: VocabularyIndex, ref: string, fallback?: string): string {
@@ -141,7 +142,7 @@ function timeRefFor(vocabulary: VocabularyIndex, reading: AnalyticalIntentV1, me
 }
 
 /** Frame the reading: what is measured, over which date field, at which grain, under which filters. */
-export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; vocabulary: VocabularyIndex; lane: 'governed' | 'ai' }): InvestigationFramePlanResult {
+export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; vocabulary: VocabularyIndex; lane: 'governed' | 'ai'; question?: string }): InvestigationFramePlanResult {
   const { reading, vocabulary } = input;
   if (reading.kind !== 'analytics') return { status: 'not_investigable', reason: 'Research investigates how a measure changed over time; this question is not a question about data.' };
   const byAlias = (alias: string) => reading.measures.find((measure) => measure.alias === alias);
@@ -150,10 +151,13 @@ export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; voc
   const comparison = changeMeasure ? byAlias(changeMeasure.change!.comparison) : undefined;
   const primary = comparison ?? reading.measures.find((measure) => !measure.change);
   if (!primary) {
-    const options = [...new Set(vocabulary.lookup(reading.reading, { limit: 8, minScore: 0.4 })
-      .map((hit) => hit.entry)
-      .filter((entry) => entry.kind === 'metric' || entry.kind === 'measure')
-      .map((entry) => entry.ref))].slice(0, 4);
+    // The choices come from the words of the question (a reading that found no
+    // measure may describe the question rather than restate it): governed
+    // metrics first, and numeric columns when the project declares none.
+    const hits = vocabulary.lookup([input.question, reading.reading].filter(Boolean).join(' '), { limit: 24, minScore: 0.35 }).map((hit) => hit.entry);
+    const governed = hits.filter((entry) => entry.kind === 'metric' || entry.kind === 'measure');
+    const numeric = hits.filter((entry) => (entry.kind === 'column' || entry.kind === 'dimension') && NUMERIC_TYPE.test(entry.dataType ?? ''));
+    const options = [...new Set([...governed, ...numeric].map((entry) => entry.ref))].slice(0, 4);
     return { status: 'clarify', question: 'Research needs a measure to investigate. Which one should it look at?', options };
   }
   const measured = measureForBlock(vocabulary, primary);

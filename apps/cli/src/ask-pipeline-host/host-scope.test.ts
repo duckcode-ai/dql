@@ -10,6 +10,7 @@ const DRAFTER = 'You write exactly ONE read-only SQL statement';
 function fixture(options: { reading?: () => string } = {}) {
   const statements: string[] = [];
   const draftPrompts: string[] = [];
+  const readPrompts: string[] = [];
   const purposes: string[] = [];
   const contextPacks = vi.fn(async () => undefined);
   const provider: AgentProvider = {
@@ -17,6 +18,7 @@ function fixture(options: { reading?: () => string } = {}) {
     generate: async (messages: AgentMessage[]) => {
       if (messages[0]!.content.startsWith(DRAFTER)) { draftPrompts.push(messages[1]!.content); return 'SELECT stage, SUM(amount) AS amount FROM sales.opportunities GROUP BY stage'; }
       if (messages[0]!.content === 'research select') return '{"dimensions":["d1"]}';
+      readPrompts.push(messages[0]!.content);
       return options.reading?.() ?? '{}';
     },
   };
@@ -38,7 +40,7 @@ function fixture(options: { reading?: () => string } = {}) {
     buildContextPack: contextPacks,
     dispatchOptions: (purpose) => { purposes.push(purpose); return { options: {}, settle: () => undefined }; },
   };
-  return { host: createAskPipelineHost(deps), statements, draftPrompts, purposes, contextPacks };
+  return { host: createAskPipelineHost(deps), statements, draftPrompts, readPrompts, purposes, contextPacks };
 }
 
 const context = (emit: (event: unknown) => void = () => undefined) => ({
@@ -96,6 +98,22 @@ describe('one request scope serves several pipeline runs', () => {
     expect(outcome).toMatchObject({ kind: 'reading', lane: 'ai' });
     expect(draftPrompts).toHaveLength(0);
     expect(statements.filter((sql) => !sql.includes('information_schema'))).toEqual([]);
+  });
+
+  it('a reading can carry the caller\'s guidance after the project\'s, and keeps a clarification the user picked', async () => {
+    let vocabulary: VocabularyIndex | undefined;
+    const { host, readPrompts } = fixture({ reading: () => JSON.stringify(amountByStage(vocabulary!)) });
+    const scoped = context();
+    const opened = await host.openScope(scoped);
+    if (!('scope' in opened)) throw new Error('the scope should open');
+    vocabulary = opened.scope.vocabulary();
+    scoped.request.selectedEvidenceId = refNamed(vocabulary, 'amount');
+    const outcome = await opened.scope.read('Why did the amount change by stage?', { guidance: 'THIS QUESTION IS BEING INVESTIGATED BY RESEARCH.' });
+    expect(outcome.kind).toBe('reading');
+    expect(readPrompts.at(-1)).toContain('PROJECT GUIDANCE\nTHIS QUESTION IS BEING INVESTIGATED BY RESEARCH.');
+    expect(readPrompts.at(-1)).toContain('THE MEANING IS ALREADY CHOSEN');
+    await opened.scope.read('Amount by stage.');
+    expect(readPrompts.at(-1)).not.toContain('BEING INVESTIGATED');
   });
 
   it('steps of a settled reading go to the caller, not the live stream; Research prompts run on the ledger', async () => {
