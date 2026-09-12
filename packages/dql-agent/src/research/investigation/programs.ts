@@ -188,13 +188,17 @@ export async function measureHeadline(run: InvestigationRun, frame: Investigatio
 
 export interface CoverageFigures { current?: number; prior?: number; queryIds: string[] }
 
-/** The share of each period's days that have data. */
-export async function checkCoverage(run: InvestigationRun, frame: InvestigationFrameV1): Promise<CoverageFigures> {
+/**
+ * The share of each period's days that have data. The check may draft SQL
+ * whenever the headline had to: a coverage figure from the same lane as the
+ * headline is the one that tells whether that headline is complete.
+ */
+export async function checkCoverage(run: InvestigationRun, frame: InvestigationFrameV1, options: { allowAiSql: boolean }): Promise<CoverageFigures> {
   const coverage: CoverageFigures = { queryIds: [] };
   if (frame.grain === 'day') return coverage;
   const { current, prior } = frame.windows;
   const result = await runInvestigationQuery(run, {
-    purpose: 'coverage', programId: 'coverage', allowAiSql: frame.lane === 'ai', label: `${frame.metric.label} by day across both periods`,
+    purpose: 'coverage', programId: 'coverage', allowAiSql: options.allowAiSql, label: `${frame.metric.label} by day across both periods`,
     intent: investigationIntent(frame, { reading: `${frame.metric.label} by day from ${prior.label} to ${current.label}.`, window: { start: prior.start, end: current.end }, timeGrain: 'day', groupBy: [timeBucket(frame, 'day')], shape: 'trend' }),
   });
   if (result.status === 'stopped') return coverage;

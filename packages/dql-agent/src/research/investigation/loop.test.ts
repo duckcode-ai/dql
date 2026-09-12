@@ -35,7 +35,7 @@ const receipt = (extra: Partial<PipelineReceipt> = {}): PipelineReceipt => ({
 } as PipelineReceipt);
 
 /** What the pipeline would return for a settled reading over DAYS. */
-function answer(intent: AnalyticalIntentV1): PipelineOutcome {
+function answer(intent: AnalyticalIntentV1, tier: 'semantic' | 'exploratory' = 'semantic'): PipelineOutcome {
   const window = intent.time?.window;
   const rows = DAYS.filter((row) => !window || (row.day >= window.start && row.day < window.end));
   const time = intent.groupBy.find((group) => group.role === 'time');
@@ -64,7 +64,7 @@ function answer(intent: AnalyticalIntentV1): PipelineOutcome {
   };
   return {
     kind: 'answered', intent, text: '', result,
-    candidate: { tier: 'semantic', trust: 'governed', sql: 'SELECT 1', proof: [] } as unknown as Extract<PipelineOutcome, { kind: 'answered' }>['candidate'],
+    candidate: { tier, trust: tier === 'exploratory' ? 'review_required' : 'governed', sql: 'SELECT 1', proof: [] } as unknown as Extract<PipelineOutcome, { kind: 'answered' }>['candidate'],
     receipt: receipt({ warehouse: { attempts: 1, failures: 0 }, dispatches: [] }),
   };
 }
@@ -78,8 +78,9 @@ const reading = (overrides: Partial<AnalyticalIntentV1> = {}): AnalyticalIntentV
 
 const august = reading({ reading: 'Revenue in August 2025.', time: { ref: TIME, grain: 'month', window: { start: '2025-08-01', end: '2025-09-01' } } });
 
-function scripted(options: { read?: PipelineOutcome; remainingMs?: number; signal?: AbortSignal; contextSources?: InvestigationContextSource[] } = {}) {
+function scripted(options: { read?: PipelineOutcome; remainingMs?: number; signal?: AbortSignal; contextSources?: InvestigationContextSource[]; tier?: 'semantic' | 'exploratory' } = {}) {
   const ran: AnalyticalIntentV1[] = [];
+  const allowed: boolean[] = [];
   const steps: AskStoryStepV1[] = [];
   let reads = 0;
   const runtime: InvestigationRuntime = {
@@ -88,14 +89,14 @@ function scripted(options: { read?: PipelineOutcome; remainingMs?: number; signa
       if (!options.read) throw new Error('an investigation started from an answer must not read the question again');
       return options.read;
     },
-    runIntent: async (intent) => { ran.push(intent); return answer(intent); },
+    runIntent: async (intent, runOptions) => { ran.push(intent); allowed.push(runOptions.allowAiSql); return answer(intent, options.tier); },
     vocabulary: () => vocabulary,
     remainingMs: () => options.remainingMs ?? 180_000,
     onStep: (step) => { steps.push(step); },
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.contextSources ? { contextSources: options.contextSources } : {}),
   };
-  return { runtime, ran, steps, reads: () => reads };
+  return { runtime, ran, allowed, steps, reads: () => reads };
 }
 
 const readingOutcome = (intent: AnalyticalIntentV1): PipelineOutcome => ({ kind: 'reading', intent, lane: 'governed', text: intent.reading, receipt: receipt({ dispatches: [{ purpose: 'intent:resolve', ms: 1 }] }) });
@@ -152,6 +153,17 @@ describe('an investigation of a change', () => {
     expect(report.caveats[0]!.text).toContain('65%');
     expect(report.confidence.level).toBe('low');
     expectVerified(report);
+  });
+
+  it('when a governed metric falls to AI-written SQL, the coverage check may draft SQL too, and the report says why confidence is low', async () => {
+    const script = scripted({ tier: 'exploratory' });
+    const { report, receipt: ledger } = await investigate(fromRun(august), script);
+    expect(report.frame.lane).toBe('governed');
+    expect(ledger.programs.find((program) => program.kind === 'coverage')?.outcome).toBe('done');
+    // headline, then coverage: the coverage query is allowed to draft because the headline had to.
+    expect(script.allowed).toEqual([true, true]);
+    expect(report.caveats.map((caveat) => caveat.code)).toEqual(['ai_sql', 'coverage_gap']);
+    expect(report.confidence).toMatchObject({ level: 'low', reasons: expect.arrayContaining(['the governed metric could not be computed, so AI-written SQL was used']) });
   });
 
   it('a share reads as a percent and changes in points', async () => {

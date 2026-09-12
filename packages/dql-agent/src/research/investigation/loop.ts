@@ -128,7 +128,7 @@ export async function runInvestigation(input: {
   if (!headline.noData && headline.current !== undefined) {
     const started = Date.now();
     const coverageRecord = record('coverage', 'coverage', 'Checked the data covers both periods');
-    coverage = await checkCoverage(run, frame);
+    coverage = await checkCoverage(run, frame, { allowAiSql: frame.lane === 'ai' || headline.aiSql });
     coverageRecord.queryIds = coverage.queryIds;
     coverageRecord.ms = Date.now() - started;
     if (coverage.current === undefined) coverageRecord.outcome = frame.grain === 'day' ? 'skipped' : 'failed';
