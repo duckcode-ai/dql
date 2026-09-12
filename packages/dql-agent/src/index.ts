@@ -682,19 +682,6 @@ export {
   renderGovernedRelationalAst,
   renderGovernedRelationalDqlArtifact,
 } from './governed-relational-compiler.js';
-export {
-  buildTypedResearchBranches,
-  gateResearchConclusion,
-  ResearchBudgetController,
-  ResearchBudgetExceededError,
-} from './research-governance.js';
-export type {
-  ResearchBudgetCounter,
-  ResearchConclusionGate,
-  ResearchObservation,
-  TypedResearchBranch,
-  TypedResearchBranchInput,
-} from './research-governance.js';
 export type {
   GovernedCompilationReceipt,
   GovernedAnalyticalGraphCompilationReceipt,
@@ -810,19 +797,6 @@ export {
   type ValueProbeCoverageV1,
 } from "./agentic/value-probe.js";
 export { renderContextValidationRefusalForUser } from "./answer-loop.js";
-export {
-  DEFAULT_RESEARCH_LIMITS,
-  applyFinding,
-  concludeResearch,
-  createResearchState,
-  nextHypothesis,
-  type Hypothesis,
-  type HypothesisFinding,
-  type HypothesisStatus,
-  type ResearchConclusion,
-  type ResearchLimits,
-  type ResearchState,
-} from "./agentic/research/hypothesis.js";
 export {
   composeBusinessExplanation,
   explainObject,
@@ -1980,7 +1954,6 @@ function stripUndefinedDeep(value: unknown): unknown {
   return out;
 }
 export { planResearchHypotheses, parseResearchHypotheses, hypothesesToSteps, type ResearchHypothesis, type ResearchAssets } from './agentic/research-agent.js';
-export { synthesizeResearchNarrative, type ResearchBranchOutcome } from './agentic/research/synthesis.js';
 export { narrationMaxTokensForFacts } from './analytical-result-facts.js';
 export { rerankCandidates, applyRerank, parseRerankReply, type RerankOutcome, type RerankCandidate } from './agentic/rerank.js';
 export {
@@ -2027,6 +2000,5 @@ export * from './research/investigation/index.js';
 export { generateStructured, extractFirstJsonObject, type StructuredReply } from './providers/structured-output.js';
 
 export * from './relationship-validation.js';
-export * from './agentic/research-assets.js';
 export * from './concept-draft.js';
 export { renderPhysicalIdentifier, renderPhysicalRelation } from './governed-relational-compiler.js';

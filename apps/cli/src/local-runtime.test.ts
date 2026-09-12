@@ -16,18 +16,12 @@ import {
   persistedAnalyticalGapWitness,
   analyticalFreshnessObservedThrough,
   analyticalFailedRunFromAgentRun,
-  allocateResearchBranchBudget,
-  buildResearchBranchRequirementProjection,
-  researchChildTelemetryForRoot,
   mergeRunScopedProviderDispatchEvidence,
   agentRunProviderDispatchBudgetForMode,
   RunScopedProviderDispatchEvidence,
   createProviderDispatchTrace,
   createLocalLiteralProbeCapabilityRegistryV1,
   preflightAskAnalyticalPlannerProvider,
-  awaitResearchBranchDeadline,
-  RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
-  RESEARCH_MAX_CONCURRENT_BRANCHES,
   boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
   dashboardSemanticFiltersForTile,
@@ -138,8 +132,6 @@ import {
   serializeJSON,
   staticResponseCacheControl,
   startLocalServer,
-  captureResearchLineageRootSnapshotV1,
-  researchLineageRootSnapshotIsCurrentV1,
   validateBlockStudioSource,
   validateConnectionForTest,
 } from './local-runtime.js';
@@ -152,7 +144,6 @@ import {
 import { getRunner } from './llm/index.js';
 import { resolveAgentFollowUpContext } from './llm/providers/provider-runner.js';
 import { CassetteStore, withCassette } from './commands/agent-eval-cassette.js';
-import { runResearchLineageProgramV1 } from './research-lineage-program.js';
 import { ClaudeOAuthProvider } from './providers/oauth/claude-oauth.js';
 import { setClaudeCredentials } from './providers/oauth/oauth-store.js';
 import { ClaudeCodeCliProvider } from './providers/subscription-cli.js';
@@ -208,7 +199,6 @@ import type {
   MetadataObject,
 } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
-import type { ResearchBranchReceiptV1 } from './local-runtime.js';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 import { addAskResultToAppBuildDraft, createAppPackage, createStoredAppBuildDraft } from './apps-api.js';
 
@@ -6460,318 +6450,7 @@ LIMIT \${top_n}
   });
 });
 
-describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
-  it('projects lookup, compare-time, and breakdown children from the complete root host tuple without authorizing planner labels', () => {
-    const rootRequirementSeed = {
-      ...buildAnalyticalRequirementSeedV1({
-        question: 'Research gross revenue and refunds for enterprise customers by acquisition channel each month in FY26, showing customer name, top 10',
-        requirements: {
-          version: 1,
-          measures: ['gross revenue', 'refunds'],
-          dimensions: ['acquisition channel'],
-          entityTerms: ['customer'],
-          entityDisplayTerms: ['customer name'],
-          memberTerms: ['enterprise'],
-          outputTerms: ['customer name', 'gross revenue', 'refunds'],
-          grain: 'aggregate',
-          ranking: {
-            metricTerms: ['gross revenue'],
-            entityTerms: ['customer'],
-            direction: 'top',
-            limit: 10,
-            defaultedLimit: false,
-          },
-          time: {
-            role: 'time_axis',
-            grain: 'month',
-            fiscalPeriod: 'FY26',
-            requiresDeclaredFiscalCalendar: true,
-          },
-        },
-      }),
-      queryIntent: {
-        measures: ['gross revenue', 'refunds'],
-        dimensions: ['acquisition channel', 'customer name'],
-        filters: [{ field: 'customer_segment', value: 'enterprise' }],
-        timeRange: 'FY26',
-        timeGrain: 'month',
-        order: 'desc' as const,
-        limit: 10,
-        fiscalCalendarId: 'calendar:fy26',
-        fiscalDateRoleId: 'date:booked_at',
-      },
-    };
-
-    const lookup = buildResearchBranchRequirementProjection({
-      action: { kind: 'lookup_metric', target: 'orders.net_revenue' },
-      rootRequirementSeed,
-    });
-    const compare = buildResearchBranchRequirementProjection({
-      action: { kind: 'compare_time', target: 'semantic:orders:ordered_at' },
-      rootRequirementSeed,
-    });
-    const breakdown = buildResearchBranchRequirementProjection({
-      action: { kind: 'breakdown', target: 'semantic:orders:customer_segment' },
-      rootRequirementSeed,
-    });
-    const lineage = buildResearchBranchRequirementProjection({
-      action: { kind: 'check_lineage', target: 'semantic:orders:gross_revenue' },
-      rootRequirementSeed,
-    });
-
-    expect(lookup).toMatchObject({
-      action: 'lookup_metric',
-      question: expect.stringContaining('net revenue'),
-      requirementSeed: {
-        requirements: {
-          measures: ['gross revenue', 'refunds'],
-          dimensions: ['acquisition channel'],
-          entityTerms: ['customer'],
-          entityDisplayTerms: ['customer name'],
-          memberTerms: ['enterprise'],
-          outputTerms: ['customer name', 'gross revenue', 'refunds'],
-          grain: 'aggregate',
-          ranking: expect.objectContaining({ metricTerms: ['gross revenue'], entityTerms: ['customer'], direction: 'top', limit: 10 }),
-          time: expect.objectContaining({ role: 'time_axis', grain: 'month', fiscalPeriod: 'FY26', requiresDeclaredFiscalCalendar: true }),
-        },
-        queryIntent: {
-          measures: ['gross revenue', 'refunds'],
-          dimensions: ['acquisition channel', 'customer name'],
-          filters: [{ field: 'customer_segment', value: 'enterprise' }],
-          timeRange: 'FY26',
-          timeGrain: 'month',
-          order: 'desc',
-          limit: 10,
-          fiscalCalendarId: 'calendar:fy26',
-          fiscalDateRoleId: 'date:booked_at',
-        },
-      },
-    });
-    expect(lookup.requirementSeed?.requirements.measures).not.toContain('net revenue');
-    expect(JSON.stringify(lookup)).not.toContain('selectedEvidenceId');
-    expect(lineage).toMatchObject({
-      action: 'check_lineage',
-      question: expect.stringContaining('Inspect gross revenue in the context of:'),
-      requirementSeed: {
-        requirements: {
-          measures: ['gross revenue', 'refunds'],
-          entityTerms: ['customer'],
-          entityDisplayTerms: ['customer name'],
-          memberTerms: ['enterprise'],
-          ranking: expect.objectContaining({ metricTerms: ['gross revenue'], entityTerms: ['customer'] }),
-        },
-        queryIntent: {
-          filters: [{ field: 'customer_segment', value: 'enterprise' }],
-          timeRange: 'FY26',
-          timeGrain: 'month',
-        },
-      },
-    });
-    expect(JSON.stringify(lineage)).not.toContain('selectedEvidenceId');
-    expect(compare).toMatchObject({
-      action: 'compare_time',
-      question: 'Compare gross revenue and refunds over time by ordered at for FY26',
-      requirementSeed: {
-        requirements: {
-          measures: ['gross revenue', 'refunds'],
-          dimensions: ['acquisition channel', 'ordered at'],
-          entityTerms: ['customer'],
-          entityDisplayTerms: ['customer name'],
-          memberTerms: ['enterprise'],
-          outputTerms: ['customer name', 'gross revenue', 'refunds'],
-          grain: 'aggregate',
-          ranking: expect.objectContaining({ metricTerms: ['gross revenue'], entityTerms: ['customer'], direction: 'top', limit: 10 }),
-          time: expect.objectContaining({ role: 'time_axis', grain: 'month', fiscalPeriod: 'FY26', requiresDeclaredFiscalCalendar: true }),
-        },
-        queryIntent: expect.objectContaining({
-          measures: ['gross revenue', 'refunds'],
-          dimensions: ['acquisition channel', 'customer name', 'ordered at'],
-          filters: [{ field: 'customer_segment', value: 'enterprise' }],
-          timeRange: 'FY26',
-          timeGrain: 'month',
-          fiscalCalendarId: 'calendar:fy26',
-          fiscalDateRoleId: 'date:booked_at',
-        }),
-      },
-    });
-    expect(breakdown).toMatchObject({
-      action: 'breakdown',
-      question: 'Show gross revenue and refunds by customer segment for FY26',
-      requirementSeed: {
-        requirements: {
-          measures: ['gross revenue', 'refunds'],
-          dimensions: ['acquisition channel', 'customer segment'],
-          entityTerms: ['customer'],
-          entityDisplayTerms: ['customer name'],
-          memberTerms: ['enterprise'],
-          outputTerms: ['customer name', 'gross revenue', 'refunds'],
-          grain: 'aggregate',
-          ranking: expect.objectContaining({ metricTerms: ['gross revenue'], entityTerms: ['customer'], direction: 'top', limit: 10 }),
-          time: expect.objectContaining({ role: 'time_axis', grain: 'month', fiscalPeriod: 'FY26', requiresDeclaredFiscalCalendar: true }),
-        },
-        queryIntent: expect.objectContaining({
-          measures: ['gross revenue', 'refunds'],
-          dimensions: ['acquisition channel', 'customer name', 'customer segment'],
-          filters: [{ field: 'customer_segment', value: 'enterprise' }],
-          timeRange: 'FY26',
-          timeGrain: 'month',
-          fiscalCalendarId: 'calendar:fy26',
-          fiscalDateRoleId: 'date:booked_at',
-        }),
-      },
-    });
-    expect(new Set([lookup.question, compare.question, breakdown.question]).size).toBe(3);
-  });
-
-  it('freezes the dql-manifest lineage graph at the Research root and rejects manifest drift before child traversal', () => {
-    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-lineage-root-freeze-'));
-    tempDirs.push(projectRoot);
-    copyResearchRuntimeFixture(projectRoot);
-    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
-    const manifestPath = join(projectRoot, 'dql-manifest.json');
-    cpSync(join(fixtureRoot, 'dql-manifest.json'), manifestPath);
-
-    const rootCapture = captureResearchLineageRootSnapshotV1(projectRoot, undefined);
-    expect(rootCapture.stableAtCapture).toBe(true);
-    expect(researchLineageRootSnapshotIsCurrentV1(rootCapture, projectRoot)).toBe(true);
-    const rootGraph = rootCapture.graph;
-    expect(rootGraph).toBeDefined();
-    if (!rootGraph) throw new Error('expected a root-captured lineage graph');
-    const incoming = vi.spyOn(rootGraph, 'getIncomingEdges');
-    const outgoing = vi.spyOn(rootGraph, 'getOutgoingEdges');
-
-    // This is the regression boundary: the root graph has already been
-    // captured, then the emitted DQL manifest changes before a child starts.
-    // Source-signature capture includes this file even though the normal
-    // project snapshot need not rebuild its manifest for every child.
-    writeFileSync(manifestPath, `${readFileSync(manifestPath, 'utf8')}\n`);
-    expect(researchLineageRootSnapshotIsCurrentV1(rootCapture, projectRoot)).toBe(false);
-
-    const result = runResearchLineageProgramV1({
-      graph: rootGraph,
-      graphFingerprint: rootCapture.graphFingerprint,
-      target: 'Revenue by Acquisition Channel',
-      expectedSnapshotId: 'research-root-snapshot',
-      currentSnapshotId: 'research-root-snapshot',
-      snapshotStale: !researchLineageRootSnapshotIsCurrentV1(rootCapture, projectRoot),
-    });
-    expect(result.receipt).toMatchObject({ status: 'stale', resolution: 'stale' });
-    expect(incoming).not.toHaveBeenCalled();
-    expect(outgoing).not.toHaveBeenCalled();
-  });
-
-  it('gives a five-branch Research plan a bounded concurrent-wave h1 window and preserves finalization time when h1 is slow', async () => {
-    // Mirrors the packaged five-hypothesis failure: after planning consumed
-    // ~16.5s, h1 must receive a realistic first-wave window rather than an
-    // unusably small serial share or the entire remaining root deadline.
-    const h1 = allocateResearchBranchBudget({
-      remainingMs: 103_450,
-      remainingBranches: 5,
-    });
-    expect(h1).toEqual({
-      version: 1,
-      remainingMs: 103_450,
-      finalizationReserveMs: RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
-      maxConcurrentBranches: RESEARCH_MAX_CONCURRENT_BRANCHES,
-      remainingWaves: 2,
-      branchBudgetMs: 44_225,
-    });
-
-    const controller = new AbortController();
-    const slowH1 = awaitResearchBranchDeadline(new Promise<void>(() => undefined), controller.signal);
-    controller.abort(new DOMException('The Research branch deadline elapsed.', 'TimeoutError'));
-    await expect(slowH1).rejects.toMatchObject({ name: 'TimeoutError' });
-
-    // The rest of the plan is never silently lost: when only the reserve is
-    // left, it is recorded as budget-exhausted and synthesis can still land.
-    expect(allocateResearchBranchBudget({
-      remainingMs: RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
-      remainingBranches: 4,
-    })).toEqual({
-      version: 1,
-      remainingMs: RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
-      finalizationReserveMs: RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
-      maxConcurrentBranches: RESEARCH_MAX_CONCURRENT_BRANCHES,
-      remainingWaves: 2,
-      stopReason: 'budget_exhausted',
-    });
-  });
-
-  it('propagates one failed frozen Research child SQL attempt into V2/V5/V6 without inventing result facts', () => {
-    // A physical child dispatch can fail before a connector returns a result
-    // receipt. The server-owned counter is therefore the root's execution
-    // authority; no fingerprint or result row may be invented to make the
-    // attempt visible.
-    const failedChild = {
-      id: 'research-child-failed-sql',
-      status: 'error',
-      resultPreview: {},
-      evidence: {
-        agentEvidence: {
-          runtimeCounters: {
-            providerRoundTrips: 0,
-            toolCalls: 0,
-            sqlExecutions: 1,
-            repairs: 0,
-          },
-          execution: { status: 'failed' },
-        },
-      },
-    } as unknown as import('@duckcodeailabs/dql-project').NotebookResearchRun;
-    const childTelemetry = researchChildTelemetryForRoot([failedChild]);
-    expect(childTelemetry).toMatchObject({ sqlExecutions: 1 });
-    expect(childTelemetry.egressReceipts).toBe(0);
-
-    const root = {
-      id: 'research-root-failed-sql',
-      question: 'Research gross revenue.',
-      requestedMode: 'research',
-      route: 'research',
-      status: 'needs_review',
-      trustState: 'review_required',
-      stopReason: 'human_review_required',
-      startedAt: '2026-08-28T00:00:00.000Z',
-      completedAt: '2026-08-28T00:00:01.000Z',
-      steps: [],
-      summary: 'One branch reached the warehouse but did not produce a result.',
-      artifacts: [{
-        id: 'research-root-artifact',
-        kind: 'research_run',
-        title: 'Research',
-        trustState: 'review_required',
-        payload: { researchRuns: [failedChild] },
-      }],
-      evaluations: [],
-      events: [],
-      nextActions: [],
-      repairAttempts: 0,
-      telemetry: childTelemetry,
-    } as unknown as AgentRun;
-    const merged = mergeRunScopedProviderDispatchEvidence(root, {
-      providerEgressReceipts: [],
-      providerRoundTrips: 0,
-      toolCalls: 0,
-      sqlExecutions: 0,
-      repairs: 0,
-      fallbackReason: 'none',
-    });
-
-    expect(merged.telemetry).toMatchObject({ sqlExecutions: 1 });
-    expect(merged.diagnosticReceiptV2).toMatchObject({
-      telemetry: expect.objectContaining({ sqlExecutions: 1 }),
-    });
-    expect(merged.diagnosticReceiptV5).toMatchObject({
-      state: { counters: { executionAttempts: 1 } },
-      summary: { executionAttempts: 1 },
-    });
-    expect(merged.diagnosticReceiptV5?.businessAnswer).toBeUndefined();
-    expect(merged.diagnosticReceiptV6).toMatchObject({
-      telemetry: expect.objectContaining({ sqlExecutions: 1 }),
-      execution: { attempts: 1 },
-      facts: { factCount: 0 },
-    });
-  });
-
+describe('Research provider dispatch ledger', () => {
   it('counts only one physical provider dispatch after two readiness preflights', async () => {
     // Readiness has trace value, but it is not an egress attempt. This mirrors
     // a packaged Ask run where two independent planner-readiness checks happen
@@ -6916,41 +6595,6 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       cliAvailable.mockRestore();
     }
   });
-
-  const copyResearchRuntimeFixture = (projectRoot: string) => {
-    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
-    cpSync(join(fixtureRoot, 'domains'), join(projectRoot, 'domains'), { recursive: true });
-    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
-    cpSync(join(fixtureRoot, 'dql.config.json'), join(projectRoot, 'dql.config.json'));
-    cpSync(join(fixtureRoot, 'dbt_project.yml'), join(projectRoot, 'dbt_project.yml'));
-    mkdirSync(join(projectRoot, '.dql', 'cache'), { recursive: true });
-    cpSync(join(fixtureRoot, '.dql', 'cache', 'agent-kg.sqlite'), join(projectRoot, '.dql', 'cache', 'agent-kg.sqlite'));
-  };
-
-  const partialResearchArtifact = (run: AgentRun | undefined) => run?.artifacts.find((artifact) =>
-    artifact.kind === 'research_run'
-      && artifact.trustState === 'blocked'
-      && (artifact.payload as { partial?: unknown } | undefined)?.partial === true,
-  );
-
-  const expectedPartialResearchBranchTrace = (
-    branch: { childRunId: string; spanId?: string },
-    receipts: Array<{ childRunId: string; evidenceKind?: string; lineageStatus?: string }>,
-    terminalReason: 'run_deadline' | 'cancelled',
-  ) => {
-    const receipt = receipts.find((candidate) => candidate.childRunId === branch.childRunId);
-    if (receipt?.evidenceKind === 'lineage_graph') {
-      // A direct structural child can complete before the root terminates. Its
-      // typed graph outcome—not the root cancellation—is the truthful span
-      // reason. This fixture intentionally proves the missing-target branch.
-      return expect.objectContaining({
-        spanId: branch.spanId,
-        name: 'research.lineage',
-        reasonCode: receipt.lineageStatus === 'missing' ? 'source_empty' : expect.any(String),
-      });
-    }
-    return expect.objectContaining({ spanId: branch.spanId, name: 'research.validate', reasonCode: terminalReason });
-  };
 });
 
 describe('AI provider settings', () => {

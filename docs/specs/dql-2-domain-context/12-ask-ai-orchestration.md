@@ -97,50 +97,35 @@ remain required (`AGT-054`, `OBS-017`, `E2E-025`).
   state consume that contract (`AGT-032`).
 - Compound questions are represented as a bounded task graph. Independent
   clauses may partially succeed, while failed clauses retain their typed gap
-  and evidence. Research records at most six receipt-backed branch entries,
-  followed by an explicit synthesis/stopping reason (`AGT-033`).
-- Each Research branch receives a fair share of the remaining run deadline
-  after reserving finalization time. A timed-out branch records a terminal
-  receipt and span; branches that cannot start within the remaining budget are
-  recorded as `budget_exhausted`. If the reserve remains, synthesis returns a
-  limited, receipt-grounded result rather than losing completed branch evidence
+  and evidence (`AGT-033`).
+- Research is an investigation of a change. It reads the question once (not at
+  all when "Research deeper" starts from a stored answer, whose settled reading
+  the server loads from its own run store; SQL or rows the client sends are
+  never read) and frames it deterministically: the metric (additive, ratio or
+  non-additive), its date field and grain, the filters every query keeps, and
+  the periods compared: the current period, the one before, and the same two a
+  year earlier. A relative period after the data ends moves to the latest
+  complete period and the report says so (`AGT-016`).
+- Every figure comes from a settled reading run through the Ask pipeline: the
+  same policies, tiers, proofs, row caps and receipts as an answer. Research
+  writes no SQL of its own. A metric without a governed definition runs on
+  AI-written SQL, and the report marks those figures review-required
+  (`AGT-016`, `AGT-040`).
+- The report is written from computed facts: every number in its text is a
+  fact, and the text passes the same check an AI narration must (no causal
+  claim, no unverified number). A partial period, a coverage gap, AI-written
+  SQL, or a run stopped by its budget, deadline or cancellation is a caveat
+  that caps confidence. Research results are always review-required
   (`AGT-016`, `AGT-033`).
-- If the root deadline or an explicit user cancellation interrupts an active
-  Research branch, the local runtime persists a redacted, blocked partial root
-  artifact before terminal run finalization. It preserves the root and child
-  IDs, branch receipt/ledger, and trace links for restart inspection; the
-  interrupted branch is typed `run_deadline` or `cancelled`, while an ordinary
-  child execution failure is typed `execution_failed`, never `completed`
-  (`AGT-033`, `OBS-005`, `OBS-012`).
-- `check_lineage` is a separate, zero-call structural Research program. It
-  resolves only one exact ID, exact name, or canonical qualified alias in the
-  frozen root snapshot, then traverses the already-local lineage graph with
-  fixed depth, path, node, and edge caps. An unqualified exact display-name
-  lookup is a cancellable, non-materializing bounded scan: it is accepted only
-  after the scan proves uniqueness, and an exhausted work/candidate cap is
-  typed `unavailable`, never a first-match selection. It never enters the analytical
-  router, provider, SQL compiler, warehouse, or repair path. Missing,
-  ambiguous, stale, truncated, and unavailable states are typed structural
-  outcomes, not query failures or a reason to fall through to a broader
-  search. A graph edge establishes dependency context only; it never supports
-  a causal business claim (`AGT-016`, `AGT-033`, `AGT-040`).
-- A qualified target is never widened to a bare leaf/display-name match in a
-  different model or domain. The root captures both the graph and a
-  `dql-manifest`-inclusive source signature; a changed signature makes each
-  later lineage child stale before traversal. One shared bounded traversal
-  budget owns its retained nodes, edges, terminal-route path count, predicates,
-  and structural fingerprint across both directions; upstream and downstream
-  routes draw from the same path allowance.
-- `ResearchEvidenceLedgerV3` adds a content-safe lineage-receipt entry beside
-  V1/V2 analytical-result entries. The lineage entry has bounded counts and
-  opaque fingerprints, but no SQL, rows, result fingerprint, provider payload,
-  graph labels, paths, or target text. Existing V1/V2 readers continue to
-  receive analytical-result entries only, so a graph walk cannot be mistaken
-  for a data execution (`AGT-033`, `OBS-012`).
-- A Research root containing any V3 lineage entry remains
-  `review_required`/`needs_review`, including when another child has a
-  successful analytical result. Structural evidence is never sufficient to
-  promote the root to `grounded`.
+- The statement budget (20 warehouse statements), the deadline (180 s hard,
+  150 s before no new query starts) and cancellation are checked before every
+  query; a run stopped early returns what it measured as an incomplete report
+  (`AGT-033`, `OBS-012`).
+- Context from outside the data (MCP servers, documents) enters through
+  `InvestigationContextSource`, asked after the frame and after the drivers.
+  Its items are shown as context and never used in a verdict.
+- Runs made by the earlier hypothesis Research keep their branch ledgers,
+  V5/V6 receipts and lineage evidence, and every reader of them stays in place.
 
 ## Trust and repair boundary
 
@@ -199,9 +184,8 @@ reparse the business question.
   default narration is facts-only; deterministic narration is labelled when no
   fact set exists. An unspecified ranking limit defaults to 10 and is retained
   in the typed frame for presentation.
-- `AGT-040`: Research uses the same runtime for each bounded child program and
-  labels fewer than three groundable branches as limited scope. Row presence is
-  not causal evidence.
+- `AGT-040`: Research runs every query of an investigation through the Ask
+  pipeline and keeps that query's receipt. Row presence is not causal evidence.
 - `API-015`: `AskAnalystStateV1` and the typed conversation delta persist with
   `AgentRunDiagnosticReceiptV5`; V1–V4 stay readable.
 - `OBS-015`: the default inspector story is What happened, Why, Impact, and
@@ -279,7 +263,7 @@ built-product verification pending**
 
 The Ask pipeline (`packages/dql-agent/src/ask-pipeline/`, host
 `apps/cli/src/ask-pipeline-host/`) supersedes the V2 tool kernel for every
-ordinary Ask turn and for every analytical Research hypothesis. One rule:
+ordinary Ask turn and for every query of a Research investigation. One rule:
 **the LLM interprets, the host proves.** After interpretation no code reads
 the question string again.
 

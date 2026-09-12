@@ -5,12 +5,9 @@ import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
 import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import {
-  attachAskTraceObserverV1,
   completeProviderHttpDispatch,
-  planResearchHypotheses,
   prepareProviderHttpDispatch,
   RESEARCH_ROW_EGRESS_POLICY,
-  type AgentProvider,
   type AgentRunRequest,
   type AskTraceObserverV1,
 } from '@duckcodeailabs/dql-agent';
@@ -18,7 +15,6 @@ import {
   agentRunProviderDispatchBudgetForMode,
   createRouterInterpretationProviderTrace,
   createProviderDispatchTrace,
-  createResearchHypothesisPlanningProvider,
   RunScopedProviderDispatchEvidence,
   startLocalServer,
 } from './local-runtime.js';
@@ -68,93 +64,6 @@ function providerAttempt(span: { start: Record<string, unknown>; finish?: Record
     attempt?: Record<string, unknown>;
   } | undefined;
   return payload?.attempt;
-}
-
-const RESEARCH_HYPOTHESIS_ASSETS = {
-  metrics: ['revenue'],
-  blocks: ['revenue_by_region'],
-  dimensions: ['region'],
-};
-
-const RESEARCH_HYPOTHESES = JSON.stringify({
-  hypotheses: [
-    {
-      statement: 'Revenue changed because the revenue metric moved.',
-      priorConfidence: 0.8,
-      target: 'revenue',
-      action: 'lookup_metric',
-      expectation: 'The revenue observation changed.',
-    },
-    {
-      statement: 'Revenue changed by region.',
-      priorConfidence: 0.6,
-      target: 'region',
-      action: 'breakdown',
-      expectation: 'One region accounts for the movement.',
-    },
-    {
-      statement: 'The certified revenue block limits the observation.',
-      priorConfidence: 0.4,
-      target: 'revenue_by_region',
-      action: 'lookup_block',
-      expectation: 'The block definition qualifies the result.',
-    },
-  ],
-});
-
-function tracedHypothesisProvider(input: {
-  onPhysicalSend?: () => void;
-  cancelAfterAdmission?: () => void;
-  failAfterAdmission?: boolean;
-} = {}): AgentProvider {
-  let attemptIndex = 0;
-  return {
-    name: 'ollama',
-    available: async () => true,
-    generate: async (messages, options) => {
-      const attempt = ++attemptIndex;
-      const dispatchOptions = options ?? {};
-      prepareProviderHttpDispatch({
-        provider: 'ollama',
-        operation: 'generate',
-        attemptIndex: attempt,
-        envelope: { messages },
-        options: dispatchOptions,
-      });
-      // An admission rejection above throws before this line. This counter is
-      // therefore the real transport boundary rather than merely an adapter
-      // invocation attempt.
-      input.onPhysicalSend?.();
-      input.cancelAfterAdmission?.();
-      if (dispatchOptions.signal?.aborted) {
-        const error = Object.assign(new Error('Research planner cancelled.'), { name: 'AbortError', code: 'ABORTED' });
-        completeProviderHttpDispatch({
-          provider: 'ollama', operation: 'generate', attemptIndex: attempt, options: dispatchOptions,
-        }, { outcome: 'cancelled', settlement: 'transport', error });
-        throw error;
-      }
-      if (input.failAfterAdmission) {
-        const error = Object.assign(new Error('HTTP 502'), { code: 'HTTP_502' });
-        completeProviderHttpDispatch({
-          provider: 'ollama', operation: 'generate', attemptIndex: attempt, options: dispatchOptions,
-        }, { outcome: 'error', settlement: 'transport', httpStatus: 502, error });
-        throw error;
-      }
-      completeProviderHttpDispatch({
-        provider: 'ollama', operation: 'generate', attemptIndex: attempt, options: dispatchOptions,
-      }, { outcome: 'ok', settlement: 'transport', httpStatus: 200 });
-      return RESEARCH_HYPOTHESES;
-    },
-  };
-}
-
-function researchPlannerRequest(signal?: AbortSignal): AgentRunRequest {
-  return {
-    runId: 'research-hypothesis-planner',
-    question: 'Investigate revenue drivers by region.',
-    requestedMode: 'research',
-    ...(signal ? { signal } : {}),
-  };
 }
 
 it('still narrates after generation has spent its whole budget', () => {
@@ -289,161 +198,6 @@ it('pairs an opted-in Research narration receipt with exactly one physical provi
     phase: 'narration', purpose: 'research_narration', admission: 'admitted',
   });
   expect(spans[0]?.finish).toMatchObject({ outcome: 'ok', reasonCode: 'completed' });
-});
-
-it('accounts the real Research hypothesis planner once, then denies a capped second plan before send', async () => {
-  const ledger = new RunScopedProviderDispatchEvidence(
-    agentRunProviderDispatchBudgetForMode('research'),
-    undefined,
-    RESEARCH_ROW_EGRESS_POLICY,
-  );
-  const { observer, spans } = providerTraceRecorder();
-  const request = attachAskTraceObserverV1(researchPlannerRequest(), observer);
-  let physicalSends = 0;
-  const provider = createResearchHypothesisPlanningProvider({
-    provider: tracedHypothesisProvider({ onPhysicalSend: () => { physicalSends += 1; } }),
-    request,
-    ledger,
-  });
-
-  // This invokes the actual planResearchHypotheses structured call rather
-  // than testing a hand-built provider trace in isolation.
-  const hypotheses = await planResearchHypotheses(
-    provider,
-    request.question,
-    RESEARCH_HYPOTHESIS_ASSETS,
-    { signal: request.signal },
-  );
-  expect(hypotheses).toHaveLength(3);
-  expect(physicalSends).toBe(1);
-  expect(ledger.snapshot().providerEgressReceipts).toEqual([
-    expect.objectContaining({ purpose: 'answer_generation', dispatchPhase: 'planning', resultRowCount: 0 }),
-  ]);
-  expect(spans).toHaveLength(1);
-  expect(providerAttempt(spans[0]!)).toMatchObject({
-    phase: 'planning', purpose: 'answer_generation', admission: 'admitted',
-  });
-  expect(spans[0]?.finish).toMatchObject({ outcome: 'ok', reasonCode: 'completed' });
-
-  // The root investigation plan is not a child Simple Ask planner call. One
-  // admitted child can still start its own initial plan on the shared twelve
-  // send ledger; the second *root* hypothesis plan remains denied below.
-  expect(() => ledger.observe({ ...dispatchEvent, attemptIndex: 2 }, {
-    purpose: 'answer_generation', dispatchPhase: 'planning', planningKind: 'initial', optIn: false,
-  })).not.toThrow();
-
-  // A second hypothesis planner call is not a hidden retry. The shared
-  // Research ledger denies it before the provider adapter may send another
-  // HTTP body; planResearchHypotheses intentionally falls back to `[]`.
-  await expect(planResearchHypotheses(
-    provider,
-    request.question,
-    RESEARCH_HYPOTHESIS_ASSETS,
-    { signal: request.signal },
-  )).resolves.toEqual([]);
-  expect(physicalSends).toBe(1);
-  // The transport itself never starts for this second, denied admission.
-  expect(ledger.snapshot().providerEgressReceipts).toHaveLength(2);
-  expect(spans).toHaveLength(2);
-  expect(providerAttempt(spans[1]!)).toMatchObject({
-    phase: 'planning', purpose: 'answer_generation', admission: 'denied', cause: 'dispatch_budget',
-  });
-  expect(spans[1]?.finish).toMatchObject({ outcome: 'denied', reasonCode: 'provider_failure' });
-});
-
-it('classifies Research hypothesis planner transport failure and inherited cancellation without duplicate sends', async () => {
-  const failingLedger = new RunScopedProviderDispatchEvidence(
-    agentRunProviderDispatchBudgetForMode('research'),
-    undefined,
-    RESEARCH_ROW_EGRESS_POLICY,
-  );
-  const failureTrace = providerTraceRecorder();
-  const failureRequest = attachAskTraceObserverV1(researchPlannerRequest(), failureTrace.observer);
-  const failingProvider = createResearchHypothesisPlanningProvider({
-    provider: tracedHypothesisProvider({ failAfterAdmission: true }),
-    request: failureRequest,
-    ledger: failingLedger,
-  });
-  await expect(planResearchHypotheses(
-    failingProvider,
-    failureRequest.question,
-    RESEARCH_HYPOTHESIS_ASSETS,
-    { signal: failureRequest.signal },
-  )).resolves.toEqual([]);
-  expect(failingLedger.snapshot().providerEgressReceipts).toHaveLength(1);
-  expect(failureTrace.spans).toHaveLength(1);
-  expect(providerAttempt(failureTrace.spans[0]!)).toMatchObject({
-    phase: 'planning', purpose: 'answer_generation', admission: 'admitted', cause: 'gateway', httpStatusClass: '5xx',
-  });
-  expect(failureTrace.spans[0]?.finish).toMatchObject({ outcome: 'error', reasonCode: 'provider_failure' });
-
-  const controller = new AbortController();
-  const cancellationLedger = new RunScopedProviderDispatchEvidence(
-    agentRunProviderDispatchBudgetForMode('research'),
-    undefined,
-    RESEARCH_ROW_EGRESS_POLICY,
-  );
-  const cancellationTrace = providerTraceRecorder();
-  const cancellationRequest = attachAskTraceObserverV1(researchPlannerRequest(controller.signal), cancellationTrace.observer);
-  let cancellationSends = 0;
-  const cancellingProvider = createResearchHypothesisPlanningProvider({
-    provider: tracedHypothesisProvider({
-      onPhysicalSend: () => { cancellationSends += 1; },
-      cancelAfterAdmission: () => controller.abort(new Error('cancelled by user')),
-    }),
-    request: cancellationRequest,
-    ledger: cancellationLedger,
-  });
-  await expect(planResearchHypotheses(
-    cancellingProvider,
-    cancellationRequest.question,
-    RESEARCH_HYPOTHESIS_ASSETS,
-    { signal: cancellationRequest.signal },
-  )).resolves.toEqual([]);
-  expect(cancellationSends).toBe(1);
-  expect(cancellationLedger.snapshot().providerEgressReceipts).toHaveLength(1);
-  expect(cancellationTrace.spans).toHaveLength(1);
-  expect(providerAttempt(cancellationTrace.spans[0]!)).toMatchObject({
-    phase: 'planning', purpose: 'answer_generation', admission: 'admitted', cause: 'cancelled',
-  });
-  expect(cancellationTrace.spans[0]?.finish).toMatchObject({ outcome: 'cancelled', reasonCode: 'cancelled' });
-});
-
-it.each([
-  [429, 'rate_limited', '4xx', true, 'wait_and_retry'],
-  [502, 'gateway', '5xx', true, 'retry_same_provider'],
-] as const)('records one typed provider attempt for HTTP %i without a synthetic duplicate', (
-  status,
-  cause,
-  httpStatusClass,
-  retryable,
-  safeAction,
-) => {
-  const { observer, spans } = providerTraceRecorder();
-  const trace = createProviderDispatchTrace({
-    observer,
-    phase: 'narration',
-    purpose: 'research_narration',
-    admit: (event) => event.envelope,
-  });
-  const options = { ...trace.options, model: 'research-narrator-test' };
-  prepareProviderHttpDispatch({
-    provider: 'ollama', operation: 'generate', attemptIndex: 1,
-    envelope: dispatchEvent.envelope, options,
-  });
-  completeProviderHttpDispatch({
-    provider: 'ollama', operation: 'generate', attemptIndex: 1, options,
-  }, { outcome: 'error', settlement: 'transport', httpStatus: status });
-  // The provider's outer promise rejects after transport completion. Its
-  // settle call must observe the existing boundary, not append a second one.
-  trace.settle('error', Object.assign(new Error(`HTTP ${status}`), { code: `HTTP_${status}` }));
-
-  expect(spans).toHaveLength(1);
-  expect(providerAttempt(spans[0]!)).toMatchObject({
-    phase: 'narration', purpose: 'research_narration', admission: 'admitted',
-    cause, httpStatusClass, retryable, safeAction,
-  });
-  expect(spans[0]?.finish).toMatchObject({ outcome: 'error', reasonCode: 'provider_failure' });
 });
 
 it('records a denied Research row-egress admission without a receipt or admitted trace attempt', () => {

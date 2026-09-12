@@ -82,27 +82,18 @@ physical attempt settles; an admission denial is `denied`, not a synthetic
 provider success. SQL authorization denial records `sql.authorize: denied` and
 does not create an execution-success stage after the fact.
 
-Research adds a root trace, receipt-linked child branches, validator/verdict
-events, and synthesis evidence. A branch has a typed verdict of `supported`,
-`contradicted`, `inconclusive`, `failed`, or `skipped`; rows or correlation do
-not by themselves prove causality.
+Research records one `diagnosticReceiptV9` whose `investigation` field holds
+the frame, each program (frame, freshness, headline, coverage, report) with its
+outcome, time and query IDs, the budget (statements used against the cap, AI
+calls, and why the run stopped, if it did), each context source's result, and
+one pipeline receipt per query with the AI replies left out. The run story adds
+the Research phases `frame`, `check`, `analyze`, `drill`, `verdict` and
+`report`. A report states comparisons and contributions, never a cause.
 
-`research.lineage` is a distinct content-safe, zero-call structural stage. Its
-payload may retain only a branch fingerprint, exact-resolution class, typed
-state, bounded upstream/downstream counts, caps, and truncation flag. It does
-not retain a target label, graph path, provider event, SQL, warehouse result,
-or causal conclusion. The concise Research inspector identifies such a branch
-as local structural evidence; the full trace keeps the typed stage for
-debugging without treating it as an analytical execution (`AGT-016`,
-`AGT-033`, `AGT-040`, `OBS-012`).
-
-The trace classifies a child as `stale` before traversal when the
-root-captured, `dql-manifest`-inclusive graph signature has changed. Qualified
-resolution is exact-authority-only; it does not reveal or select same-leaf
-objects from another model/domain. If a Research ledger contains lineage
-evidence beside an analytical result, the answer story remains
-`review_required`/`needs_review`, rather than presenting structural context as
-grounded data evidence.
+An investigation run gets no synthesized V5/V6 receipts. Runs made by the
+earlier hypothesis Research keep their branch verdicts, `research.lineage`
+stages and V5/V6 receipts, and their views stay readable (`AGT-016`,
+`AGT-033`, `OBS-012`).
 
 ## OBS-006 — provider diagnostics
 
