@@ -110,7 +110,7 @@ export interface AskPipelineHostDeps {
   /** The engine `compileSemantic` will use, known before preparation so the binder can speak its dialect. */
   semanticEngine?(): Promise<'native' | 'metricflow-cli' | 'dbt-cloud'>;
   /** Wrap one physical provider call in the run's dispatch ledger. */
-  dispatchOptions?(purpose: 'resolve' | 'correct' | 'repair' | 'draft', request: AgentRunRequest): { options: ProviderRunOptions; settle(outcome: 'ok' | 'error' | 'cancelled', error?: unknown): void };
+  dispatchOptions?(purpose: 'resolve' | 'correct' | 'repair' | 'draft' | 'research_select' | 'research_narrate', request: AgentRunRequest): { options: ProviderRunOptions; settle(outcome: 'ok' | 'error' | 'cancelled', error?: unknown): void };
   /** The executed intent of the last usable turn in this thread, when there is one. */
   /** The previous turn's typed reading. `executed: false` means it was blocked: its question stands, its result does not exist. */
   /**
@@ -1105,7 +1105,60 @@ export function normalizeExecutedRow(row: Record<string, unknown>): Record<strin
   return changed ? out : row;
 }
 
+type AskRouteContext = Parameters<AgentRouteExecutor>[0];
+type AskEmittedRoute = Parameters<AskRouteContext['emit']>[0]['route'];
+type AskPipelineRunInput = Parameters<typeof runAskPipeline>[0];
+
+/** What one pipeline run keeps for its own receipt: drafting calls, checks and host steps. */
+interface AskRunState {
+  draftDispatches: Array<{ purpose: string; ms: number; reply?: string; promptChars?: number; at?: number; attempt?: number; label?: 'draft' | 'redraft' | 'fix' | 'retry_empty' | 'widen'; outcome?: 'sql' | 'declined' | 'rejected' | 'error' }>;
+  // The checks drafted SQL was held to, recorded for the run views (the
+  // notes sent back to the model are built separately and never from these).
+  hostChecks: Array<{ id: 'stated_values' | 'required_filters' | 'join_fanout' | 'catalog_columns' | 'read_only'; label: string; passed: boolean; message: string; attempt: number }>;
+  checkRound: number;
+  steps: AskStoryStepV1[];
+  onStep(step: AskStoryStepV1): void;
+}
+
+export interface AskScopeRunOptions {
+  deadlineMs?: number;
+  onStep?(step: AskStoryStepV1): void;
+}
+
+/**
+ * ONE REQUEST'S CONTEXT, OPENED ONCE. Ask reads a question and answers it in
+ * one pipeline run. Research reads once and then runs several settled readings
+ * over the same connection, vocabulary, engine and caches, each with its own
+ * receipt.
+ */
+export interface AskRequestScope {
+  request: AgentRunRequest;
+  route: AskEmittedRoute;
+  contextMs: number;
+  /** What the project search found, for the caller's own story. */
+  contextSteps: AskStoryStepV1[];
+  vocabulary(): VocabularyIndex;
+  semanticLayer(): SemanticLayer | undefined;
+  hasConnection: boolean;
+  /** The proven, policed reading of a question; nothing is prepared or executed. */
+  read(question: string, options?: AskScopeRunOptions & { allowAiSql?: boolean }): Promise<PipelineOutcome>;
+  /** A settled reading through every later stage of the pipeline. */
+  runIntent(intent: AnalyticalIntentV1, options: AskScopeRunOptions & { allowAiSql: boolean; origin?: 'research_program' | 'source_run' }): Promise<PipelineOutcome>;
+  /** One provider call on the run's ledger, for Research's own small prompts. */
+  dispatch(purpose: 'research_select' | 'research_narrate', messages: AgentMessage[]): Promise<string>;
+}
+
+export interface AskPipelineHost {
+  execute: AgentRouteExecutor;
+  /** Open one request's context; a request without an AI model gets the blocked result instead. */
+  openScope(context: AskRouteContext, options?: { route?: AskEmittedRoute }): Promise<{ scope: AskRequestScope } | { blocked: AgentRouteExecutorResult }>;
+}
+
 export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): AgentRouteExecutor {
+  return createAskPipelineHost(deps).execute;
+}
+
+export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHost {
   let vocabularyCache: VocabularyCacheEntry | undefined;
   const preparationCache = new Map<string, PreparedCandidate>();
 
@@ -1583,18 +1636,22 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     };
   };
 
-  return async ({ runId, request, emit }) => {
+  const openRequest = async (
+    { runId, request, emit }: AskRouteContext,
+    options: { route?: AskEmittedRoute } = {},
+  ): Promise<{ blocked: AgentRouteExecutorResult } | { scope: AskRequestScope; answer: () => Promise<AgentRouteExecutorResult> }> => {
+    const route: AskEmittedRoute = options.route ?? 'generated_answer';
     const startedAt = Date.now();
     const provider = await deps.selectProvider(request);
     if (!provider) {
-      return failure(runId, 'No AI model is configured for this project, so the question could not be interpreted.', 'provider_error', startedAt);
+      return { blocked: failure(runId, 'No AI model is configured for this project, so the question could not be interpreted.', 'provider_error', startedAt) };
     }
     // Interpretation never needs a warehouse: a greeting, a definition, a
     // clarification or a modeling gap is answered without one. A missing
     // connection surfaces verbatim at the first execution instead.
     let connection: ConnectionConfig | undefined;
     let connectionError: unknown;
-    emit({ type: 'executor.started', message: 'Assembling the governed context for this question.', route: 'generated_answer' });
+    emit({ type: 'executor.started', message: 'Assembling the governed context for this question.', route });
     const contextStarted = Date.now();
     try {
       connection = await deps.resolveConnection(request);
@@ -1618,12 +1675,17 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     // THE RUN'S STORY. Steps the host takes (the search, the tables the
     // drafter chose) stream beside the pipeline's own and are kept on the
     // receipt in order, so a finished answer can replay how it was reached.
-    const hostSteps: AskStoryStepV1[] = [];
-    const hostStep = (entry: Omit<AskStoryStepV1, 'version' | 'at'>) => {
+    const liveStep = (step: AskStoryStepV1) => emit({ type: 'executor.started', message: step.title, route, payload: { askStep: step } });
+    const stepFor = (state: AskRunState) => (entry: Omit<AskStoryStepV1, 'version' | 'at'>) => {
       const full: AskStoryStepV1 = { version: 1, at: Date.now(), ...entry };
-      hostSteps.push(full);
-      emit({ type: 'executor.started', message: full.title, route: 'generated_answer', payload: { askStep: full } });
+      state.steps.push(full);
+      state.onStep(full);
     };
+    const newRunState = (onStep: (step: AskStoryStepV1) => void = liveStep): AskRunState => ({ draftDispatches: [], hostChecks: [], checkRound: 0, steps: [], onStep });
+    // Ask's one run shares the request's state: its story starts with the context step.
+    const requestState = newRunState();
+    const hostSteps = requestState.steps;
+    const hostStep = stepFor(requestState);
     {
       const counts = new Map<string, number>();
       for (const entry of vocabulary.entries) counts.set(entry.kind, (counts.get(entry.kind) ?? 0) + 1);
@@ -1638,14 +1700,9 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       ].filter(Boolean).join(', ');
       hostStep({ phase: 'context', title: `Searched the project: ${found || 'no governed objects in scope'}`, state: found ? 'done' : 'missed', ms: contextMs, ...(phaseSummary ? { detail: phaseSummary } : {}) });
     }
-    emit({ type: 'executor.started', message: `Context assembled in ${contextMs} ms: ${vocabulary.entries.length} governed objects${engine ? ` · semantic engine ${engine}` : ''}${phaseSummary ? ` (${phaseSummary})` : ''}.`, route: 'generated_answer' });
-    emit({ type: 'executor.started', message: prior ? 'Reading the question as an edit of the previous analysis.' : 'Reading the question against the governed vocabulary.', route: 'generated_answer' });
+    emit({ type: 'executor.started', message: `Context assembled in ${contextMs} ms: ${vocabulary.entries.length} governed objects${engine ? ` · semantic engine ${engine}` : ''}${phaseSummary ? ` (${phaseSummary})` : ''}.`, route });
+    emit({ type: 'executor.started', message: prior ? 'Reading the question as an edit of the previous analysis.' : 'Reading the question against the governed vocabulary.', route });
     const ledgered = withLedger(provider, deps, request);
-    const draftDispatches: Array<{ purpose: string; ms: number; reply?: string; promptChars?: number; at?: number; attempt?: number; label?: 'draft' | 'redraft' | 'fix' | 'retry_empty' | 'widen'; outcome?: 'sql' | 'declined' | 'rejected' | 'error' }> = [];
-    // The checks drafted SQL was held to, recorded for the run views (the
-    // notes sent back to the model are built separately and never from these).
-    const hostChecks: Array<{ id: 'stated_values' | 'required_filters' | 'join_fanout' | 'catalog_columns' | 'read_only'; label: string; passed: boolean; message: string; attempt: number }> = [];
-    let checkRound = 0;
     // ON-DEMAND DESCRIPTION: a relation the reading names whose columns the
     // bounded probe never reached is described now, for this one run.
     const describeRelations = async (relations: string[]) => {
@@ -1659,7 +1716,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     // THE LAST TIER'S DRAFT: one read-only statement from the reading and the
     // admitted relations and columns, validated against the catalog before
     // the tier may even consider it. Review-required by construction.
-    const draftSql: NonNullable<PrepareDeps['draftSql']> = async ({ question, intent, vocabulary: initial, reason, previous }) => {
+    const makeDraftSql = (state: AskRunState): NonNullable<PrepareDeps['draftSql']> => async ({ question, intent, vocabulary: initial, reason, previous }) => {
+      const hostStep = stepFor(state);
       let current = initial;
       const refs = intent ? [...intent.measures.flatMap((measure) => measure.derived ? [measure.derived.numerator, measure.derived.denominator] : [measure.ref]), ...intent.groupBy.map((group) => group.ref), ...intent.display, ...intent.filters.map((filter) => filter.ref), ...(intent.time?.ref ? [intent.time.ref] : [])] : [];
       const relationOf = (ref: string): string | undefined => {
@@ -1821,8 +1879,8 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         const draftStarted = Date.now();
         const trace = deps.dispatchOptions?.('draft', request);
         // What this call was for and what it returned, kept for the run views.
-        const dispatch: (typeof draftDispatches)[number] = {
-          purpose: 'intent:draft', ms: 0, attempt: draftDispatches.length + 1,
+        const dispatch: AskRunState['draftDispatches'][number] = {
+          purpose: 'intent:draft', ms: 0, attempt: state.draftDispatches.length + 1,
           label: label ?? (note ? 'fix' : undefined) ?? (previous ?(/^the statement ran and returned no rows/.test(previous.error) ? 'retry_empty' : 'redraft') : 'draft'),
         };
         let raw: string;
@@ -1842,7 +1900,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
             ms: Date.now() - draftStarted, at: Date.now(), promptChars: messages.reduce((sum, message) => sum + message.content.length, 0),
             ...(replied !== undefined ? { reply: replied.slice(0, 1500) } : failed !== undefined ? { reply: failed.slice(0, 300), outcome: 'error' as const } : {}),
           });
-          draftDispatches.push(dispatch);
+          state.draftDispatches.push(dispatch);
         }
         const declined = /^\s*NO_SQL\s*:?\s*([\s\S]*)$/i.exec(raw.trim());
         if (declined) { dispatch.outcome = 'declined'; return { declined: declined[1]!.trim() || 'the available tables do not hold what the question asks for' }; }
@@ -1920,10 +1978,10 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
           }
         }
         // The same verdicts, recorded as checks for the run views.
-        const attempt = ++checkRound;
+        const attempt = ++state.checkRound;
         const joinFailure = failures.find((message) => /repeats the key on both sides|across its join to/.test(message));
         const statedFailure = failures.find((message) => /from the question$/.test(message));
-        hostChecks.push(
+        state.hostChecks.push(
           { id: 'catalog_columns', label: 'Uses only tables and columns the project lists', passed: true, message: 'every table and column it reads was inspected', attempt },
           { id: 'stated_values', label: 'Applies every value the question states', passed: !statedFailure, message: statedFailure ?? (stated.length ? `applies ${stated.map((item) => item.value).join(', ')}` : 'the question states no specific values'), attempt },
           ...(required.length ? [{ id: 'required_filters' as const, label: 'Applies the required filters', passed: missingRequired.length === 0, message: missingRequired.length ? `does not apply ${missingRequired.map((item) => item.text).join(', ')}` : `applies ${required.map((item) => item.text).join(', ')}`, attempt }] : []),
@@ -1937,7 +1995,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         // a table nobody inspected) gets the same one correction a failed check
         // gets, with the reason, before anything is given up.
         if (drafted && 'error' in drafted && /^the drafted SQL /.test(drafted.error)) {
-          hostChecks.push({ id: 'catalog_columns', label: 'Uses only tables and columns the project lists', passed: false, message: drafted.error, attempt: ++checkRound });
+          state.hostChecks.push({ id: 'catalog_columns', label: 'Uses only tables and columns the project lists', passed: false, message: drafted.error, attempt: ++state.checkRound });
           hostStep({ phase: 'schema', title: 'The drafted SQL named something the tables do not have: asking the AI to fix it', state: 'failed', detail: drafted.error });
           const retried = await attemptDraft(`The previous statement was rejected before running: ${drafted.error}. Use only the columns listed under each relation, spelled as listed, and join only on columns both relations list.`);
           if (!retried || !('sql' in retried)) return retried;
@@ -2060,13 +2118,15 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       if (second && 'declined' in second) return { declined: `${second.declined.replace(/[.\s]+$/, '')} (searched ${relations.join(', ')})` };
       return finalize(second);
     };
-    const outcome = await runAskPipeline({
+    // THE PIPELINE AS ASK RUNS IT. A caller running a settled reading (Research)
+    // overrides only what differs: the reading, the lane and where steps go.
+    const runPipeline = (state: AskRunState, overrides: Partial<AskPipelineRunInput> = {}) => runAskPipeline({
       question: request.question,
-      vocabulary,
+      vocabulary: currentVocabulary(),
       provider: ledgered,
       describeRelations,
       explorationAuto: deps.autoExploration !== false,
-      prepareDeps: { ...prepareDeps(connection ?? { driver: 'duckdb' } as ConnectionConfig, currentVocabulary, engine, request.signal), draftSql },
+      prepareDeps: { ...prepareDeps(connection ?? { driver: 'duckdb' } as ConnectionConfig, currentVocabulary, engine, request.signal), draftSql: makeDraftSql(state) },
       executeDeps: {
         maxRows: deps.maxRows ?? 500,
         ...(request.signal ? { signal: request.signal } : {}),
@@ -2188,40 +2248,108 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       preparationCache,
       cacheScope: `${deps.getManifest().snapshotId}|${connection ? connectionKey(connection) : 'none'}|${vocabulary.fingerprint}`,
       ...(deps.buildIdentity ? { build: deps.buildIdentity() } : {}),
-      trace: (event) => emit({ type: 'executor.started', message: `${event.stage}${typeof event.detail === 'number' ? ` ${event.detail} ms` : ''}`, route: 'generated_answer' }),
-      onStep: (entry) => emit({ type: 'executor.started', message: entry.title, route: 'generated_answer', payload: { askStep: entry } }),
+      trace: (event) => emit({ type: 'executor.started', message: `${event.stage}${typeof event.detail === 'number' ? ` ${event.detail} ms` : ''}`, route }),
+      onStep: (entry) => emit({ type: 'executor.started', message: entry.title, route, payload: { askStep: entry } }),
+      ...overrides,
     });
     // How long the context took to assemble, beside the stages the pipeline
     // timed itself: the receipt is the only place a latency claim can be read from.
-    if ('receipt' in outcome && outcome.receipt) {
-      outcome.receipt.timings.context = contextMs;
-      outcome.receipt.story = [...hostSteps, ...(outcome.receipt.story ?? [])].sort((left, right) => left.at - right.at);
-      outcome.receipt.dispatches.push(...draftDispatches);
-      if (hostChecks.length) outcome.receipt.checks = [...(outcome.receipt.checks ?? []), ...hostChecks];
+    const keepRunEvidence = (outcome: PipelineOutcome, state: AskRunState, withContext: boolean) => {
+      if (!('receipt' in outcome) || !outcome.receipt) return;
+      if (withContext) outcome.receipt.timings.context = contextMs;
+      outcome.receipt.story = [...state.steps, ...(outcome.receipt.story ?? [])].sort((left, right) => left.at - right.at);
+      outcome.receipt.dispatches.push(...state.draftDispatches);
+      if (state.hostChecks.length) outcome.receipt.checks = [...(outcome.receipt.checks ?? []), ...state.hostChecks];
       outcome.receipt.physicalBindings = runtimeSchemaForVocabulary(currentVocabulary()).map((table) => ({ relation: table.relation, completeness: table.columnCompleteness ?? 'partial', columns: table.columns.length, targetFingerprint: connection ? fingerprintText(connectionKey(connection)) : undefined }));
-    }
-    // A ref the interpreter named that the whole inventory holds but this
-    // envelope does not is OUT OF SCOPE, not "does not exist": the reader is
-    // told which domain owns it and what admits it — never its data.
-    if (outcome.kind === 'failed' && outcome.stage === 'resolve' && outcome.receipt.failure?.reason === 'invalid' && outcome.receipt.failure.problems?.length) {
-      const explained = explainOutOfScope(outcome.receipt.failure.problems, await baseIndexFor(connection), view.envelope);
-      if (explained) {
-        outcome.message = explained.message;
-        outcome.text = `This could not be completed while reading the question: ${explained.message}`;
-        outcome.receipt.failure = { ...outcome.receipt.failure, reason: 'out_of_scope', message: explained.message };
-        outcome.receipt.outOfScope = explained.refs;
+    };
+    // Settled readings run side by side each extend the request vocabulary;
+    // neither may drop the relations the other described.
+    const mergeVocabulary = (next: VocabularyIndex) => {
+      const kept = requestVocabulary.entries.filter((entry) => !next.get(entry.ref));
+      requestVocabulary = kept.length ? next.withEntries(kept) : next;
+    };
+    const scope: AskRequestScope = {
+      request, route, contextMs, contextSteps: hostSteps,
+      vocabulary: currentVocabulary,
+      semanticLayer: () => deps.getSemanticLayer(),
+      hasConnection: Boolean(connection),
+      read: async (question, runOptions = {}) => {
+        const onStep = runOptions.onStep ?? liveStep;
+        const state = newRunState(onStep);
+        const outcome = await runPipeline(state, {
+          question, stopAfter: 'reading', clauseCoverage: false, selection: undefined, memberSelection: undefined,
+          explorationAuto: (runOptions.allowAiSql ?? true) && deps.autoExploration !== false,
+          ...(runOptions.deadlineMs ? { deadlineMs: runOptions.deadlineMs } : {}),
+          trace: undefined, onStep, onVocabularyUpdate: mergeVocabulary,
+        });
+        keepRunEvidence(outcome, state, false);
+        return outcome;
+      },
+      runIntent: async (intent, runOptions) => {
+        const onStep = runOptions.onStep ?? (() => undefined);
+        const state = newRunState(onStep);
+        const outcome = await runPipeline(state, {
+          question: intent.reading, resolvedIntent: { intent, origin: runOptions.origin ?? 'research_program' },
+          prior: undefined, priorExecuted: undefined, priorAnswerSummary: undefined, selection: undefined, memberSelection: undefined, conversation: undefined,
+          explorationOptIn: false, explorationAuto: runOptions.allowAiSql && deps.autoExploration !== false, clauseCoverage: false,
+          ...(runOptions.deadlineMs ? { deadlineMs: runOptions.deadlineMs } : {}),
+          trace: undefined, onStep, onVocabularyUpdate: mergeVocabulary,
+        });
+        keepRunEvidence(outcome, state, false);
+        return outcome;
+      },
+      dispatch: async (purpose, messages) => {
+        const trace = deps.dispatchOptions?.(purpose, request);
+        try {
+          if (request.signal?.aborted) throw new Error('the request was cancelled before the AI call started');
+          const text = await provider.generate(messages, { temperature: 0, ...(trace?.options ?? {}), ...(request.signal ? { signal: request.signal } : {}) });
+          trace?.settle('ok');
+          return text;
+        } catch (error) {
+          trace?.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
+          throw error;
+        }
+      },
+    };
+    const answer = async (): Promise<AgentRouteExecutorResult> => {
+      const outcome = await runPipeline(requestState);
+      keepRunEvidence(outcome, requestState, true);
+      // A ref the interpreter named that the whole inventory holds but this
+      // envelope does not is OUT OF SCOPE, not "does not exist": the reader is
+      // told which domain owns it and what admits it — never its data.
+      if (outcome.kind === 'failed' && outcome.stage === 'resolve' && outcome.receipt.failure?.reason === 'invalid' && outcome.receipt.failure.problems?.length) {
+        const explained = explainOutOfScope(outcome.receipt.failure.problems, await baseIndexFor(connection), view.envelope);
+        if (explained) {
+          outcome.message = explained.message;
+          outcome.text = `This could not be completed while reading the question: ${explained.message}`;
+          outcome.receipt.failure = { ...outcome.receipt.failure, reason: 'out_of_scope', message: explained.message };
+          outcome.receipt.outOfScope = explained.refs;
+        }
       }
-    }
-    // The same for a gap: a clause the reading could not place may name an
-    // object another domain owns; the gap says so beside what it already says.
-    if (outcome.kind === 'gap' && (outcome.gap === 'not_modeled' || outcome.gap === 'ambiguous' || outcome.gap === 'not_retrieved')) {
-      const explained = explainOutOfScopeWords(`${request.question} ${outcome.message}`, await baseIndexFor(connection), currentVocabulary(), view.envelope);
-      if (explained) {
-        outcome.text = `${outcome.text} ${explained.message}`;
-        outcome.receipt.outOfScope = explained.refs;
+      // The same for a gap: a clause the reading could not place may name an
+      // object another domain owns; the gap says so beside what it already says.
+      if (outcome.kind === 'gap' && (outcome.gap === 'not_modeled' || outcome.gap === 'ambiguous' || outcome.gap === 'not_retrieved')) {
+        const explained = explainOutOfScopeWords(`${request.question} ${outcome.message}`, await baseIndexFor(connection), currentVocabulary(), view.envelope);
+        if (explained) {
+          outcome.text = `${outcome.text} ${explained.message}`;
+          outcome.receipt.outOfScope = explained.refs;
+        }
       }
-    }
-    return toExecutorResult(runId, outcome, startedAt);
+      return toExecutorResult(runId, outcome, startedAt);
+    };
+    return { scope, answer };
+  };
+
+  const execute: AgentRouteExecutor = async (context) => {
+    const opened = await openRequest(context);
+    return 'blocked' in opened ? opened.blocked : opened.answer();
+  };
+  return {
+    execute,
+    openScope: async (context, options) => {
+      const opened = await openRequest(context, options);
+      return 'blocked' in opened ? opened : { scope: opened.scope };
+    },
   };
 }
 
