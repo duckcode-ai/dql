@@ -1,6 +1,7 @@
 import type { AnalyticalIntentV1, IntentPredicate } from '../intent.js';
 import type { VocabularyEntry, VocabularyIndex } from '../vocabulary.js';
 import type { PrepareDeps, PreparedCandidate, PreparedRefusal, SemanticCompileRequest } from './types.js';
+import { semanticAnswerArtifact } from './dql-artifacts.js';
 
 /**
  * SEMANTIC: bind the intent to the governed metric layer and compile.
@@ -390,6 +391,8 @@ export async function prepareSemantic(intent: AnalyticalIntentV1, vocabulary: Vo
         candidates: [{
           tier: 'semantic', trust: 'governed', sql: compiled.sql, engine: compiled.engine,
           semanticProgram: program,
+          // One semantic block over every metric the periods read.
+          artifact: semanticAnswerArtifact({ ...program.branches[0]!.request, metrics: [...new Set(program.branches.flatMap((branch) => branch.request.metrics))] }, intent.reading, compiled.sql),
           ...(programBound.derived ? { derived: programBound.derived } : {}),
           ...(programBound.changes ? { changes: programBound.changes } : {}),
           compileRequest: programBound.program,
@@ -416,7 +419,7 @@ export async function prepareSemantic(intent: AnalyticalIntentV1, vocabulary: Vo
         tier: 'semantic', trust: 'governed', sql: compiled.sql, engine: compiled.engine,
         ...(compiled.columns ? { columns: compiled.columns } : {}),
         ...(compiled.fanoutProbeSql ? { fanoutProbeSql: compiled.fanoutProbeSql } : {}),
-        ...(compiled.artifact !== undefined ? { artifact: compiled.artifact } : {}),
+        artifact: compiled.artifact !== undefined ? compiled.artifact : semanticAnswerArtifact(bound.request, intent.reading, compiled.sql),
         ...(bound.derived ? { derived: bound.derived } : {}),
         ...(bound.changes ? { changes: bound.changes } : {}),
         compileRequest: bound.request,

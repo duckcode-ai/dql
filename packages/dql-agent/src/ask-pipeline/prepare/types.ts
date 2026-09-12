@@ -15,7 +15,7 @@ export type PrepareTier = 'certified' | 'semantic' | 'relational' | 'exploratory
 export type PrepareTrust = 'certified' | 'governed' | 'review_required';
 
 export type PreparedBlock =
-  | { sql: string; params: unknown[]; parameters: Array<{ name: string; position: number; value: unknown; source: string }>; outputs?: string[] }
+  | { sql: string; params: unknown[]; parameters: Array<{ name: string; position: number; value: unknown; source: string }>; outputs?: string[]; /** The block's DQL declaration, shown as the DQL the answer ran. */ source?: string; sourcePath?: string }
   | { error: string; unresolved?: string[] };
 
 export interface PreparedCandidate {

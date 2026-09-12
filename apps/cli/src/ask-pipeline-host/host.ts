@@ -2435,6 +2435,8 @@ export function prepareBlockForAsk(projectRoot: string, entry: VocabularyEntry |
     params,
     parameters: specs.map((spec, index) => ({ name: spec.name, position: spec.position, value: params[index], source: sources.get(spec.name) ?? 'default' })),
     ...(entry.contract?.outputs?.length ? { outputs: entry.contract.outputs } : {}),
+    source,
+    sourcePath: entry.sourcePath,
   };
 }
 

@@ -298,6 +298,11 @@ describe('a certified block runs through the prepared-block contract', () => {
     expect(prepared.candidates[0]!.params).toEqual([2016, 2017, 10]);
     expect(prepared.candidates[0]!.proof.join(' ')).toMatch(/parameters bound: season_start = 2016 \(default\)/);
   });
+  it('the answer carries the certified block as the DQL it ran, with the compiled SQL beside it', () => {
+    const source = 'block "beverage_by_customer_id" {\n  type = "custom"\n  status = "certified"\n  query = """SELECT customer_id FROM dev.order_items"""\n}';
+    const prepared = prepareCertified(keyed, vocabulary, { ...deps, prepareBlock: () => ({ sql: 'SELECT customer_id FROM dev.order_items', params: [], parameters: [], source, sourcePath: 'blocks/beverage_by_customer_id.dql' }) });
+    expect(prepared.candidates[0]!.artifact).toEqual({ kind: 'certified_block', name: 'beverage_by_customer_id', source, sourcePath: 'blocks/beverage_by_customer_id.dql', persistence: 'saved', trustState: 'certified', compiledSql: 'SELECT customer_id FROM dev.order_items' });
+  });
   it('unbound parameters refuse before SQL; a raw block with template parameters is never executed', () => {
     const unbound = prepareCertified(keyed, vocabulary, { ...deps, prepareBlock: () => ({ error: 'it still needs values for region', unresolved: ['region'] }) });
     expect(unbound.candidates).toEqual([]);

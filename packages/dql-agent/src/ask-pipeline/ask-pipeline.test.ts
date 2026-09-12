@@ -2758,6 +2758,37 @@ describe('two governed sources: certified blocks and authored semantics; everyth
     if (toAi.status === 'resolved') expect(toAi.lane).toBe('ai');
   });
 
+  it('an answer carries the DQL it ran: a semantic block for a semantic answer, a draft SQL block for AI-written SQL', async () => {
+    const reading = (measures: unknown[], groupBy: unknown[]) => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Revenue by region.', measures, groupBy, display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' });
+    const semantic = await runAskPipeline({
+      question: 'revenue by region', vocabulary, clauseCoverage: false, explorationAuto: true,
+      provider: { name: 'ollama', available: async () => true, generate: async () => reading([{ ref: 'metric:orders.revenue' }], [{ ref: 'dimension:orders.region', role: 'categorical' }]) },
+      prepareDeps: { compileSemantic: async () => ({ sql: 'SELECT region, SUM(revenue) AS revenue FROM orders GROUP BY region', engine: 'native' }) },
+      executeDeps: { run: async () => ({ columns: ['region', 'revenue'], rows: [{ region: 'east', revenue: 3 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(semantic.kind).toBe('answered');
+    if (semantic.kind !== 'answered') return;
+    const block = semantic.candidate.artifact as { kind: string; source: string; trustState: string; compiledSql: string };
+    expect(block.kind).toBe('semantic_block');
+    expect(block.source).toContain('revenue');
+    expect(block.source).toContain('region');
+    expect(block.trustState).toBe('governed');
+    expect(block.compiledSql).toContain('GROUP BY region');
+    const drafted = await runAskPipeline({
+      question: 'amount by status', vocabulary, clauseCoverage: false, explorationAuto: true,
+      provider: { name: 'ollama', available: async () => true, generate: async () => reading([{ ref: 'column:dev.orders.amount', aggregation: 'sum' }], [{ ref: 'column:dev.orders.status', role: 'categorical' }]) },
+      prepareDeps: { draftSql: async () => ({ sql: 'SELECT status, SUM(amount) AS amount FROM dev.orders GROUP BY status', relations: ['dev.orders'], proof: [] }) },
+      executeDeps: { run: async () => ({ columns: ['status', 'amount'], rows: [{ status: 'open', amount: 3 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(drafted.kind).toBe('answered');
+    if (drafted.kind !== 'answered') return;
+    const sqlBlock = drafted.candidate.artifact as { kind: string; source: string; trustState: string };
+    expect(sqlBlock.kind).toBe('sql_block');
+    expect(sqlBlock.trustState).toBe('review_required');
+    expect(sqlBlock.source).toContain('status = "draft"');
+    expect(sqlBlock.source).toContain('SUM(amount)');
+  });
+
   it('a local file path in an engine message never reaches the SQL drafter', async () => {
     const reasons: string[] = [];
     const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Revenue by region.', measures: [{ ref: 'metric:orders.revenue' }], groupBy: [{ ref: 'dimension:orders.region', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }) };

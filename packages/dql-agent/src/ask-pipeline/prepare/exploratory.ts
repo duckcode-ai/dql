@@ -1,4 +1,5 @@
 import type { AnalyticalIntentV1 } from '../intent.js';
+import { sqlAnswerArtifact } from './dql-artifacts.js';
 import type { VocabularyIndex } from '../vocabulary.js';
 import type { PrepareDeps, PreparedCandidate, PreparedRefusal } from './types.js';
 
@@ -81,6 +82,7 @@ export async function prepareExploratory(
   return {
     candidates: [{
       tier: 'exploratory', trust: 'review_required', sql,
+      artifact: sqlAnswerArtifact(sql, intent?.reading ?? question),
       ...(drafted.relations.length ? { relations: drafted.relations } : {}),
       proof: [
         `AI-drafted SQL over ${drafted.relations.length ? drafted.relations.join(', ') : 'the admitted relations'}: no certified block and no governed metric or composition answered this reading, so the statement was written from the schema and the reading, validated against the catalog (only admitted relations and columns, one read-only statement) and is review-required — read it before you rely on it`,
