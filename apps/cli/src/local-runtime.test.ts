@@ -1066,7 +1066,7 @@ describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
     expect(agentRunDeadlineMs({
       question: 'investigate why revenue declined and identify the drivers',
       requestedMode: 'research',
-    })).toBe(120_000);
+    })).toBe(180_000);
     expect(agentRunDeadlineMs({
       question: 'analyze revenue',
       requestedMode: 'ask',
@@ -1116,7 +1116,7 @@ describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
       { question: 'investigate revenue drivers', requestedMode: 'research' },
       {} as NodeJS.ProcessEnv,
       'codex',
-    )).toBe(120_000);
+    )).toBe(180_000);
     expect(agentRunDeadlineMs(
       { question: 'total revenue?', requestedMode: 'ask' },
       {} as NodeJS.ProcessEnv,
@@ -11451,14 +11451,14 @@ describe('configured Skills folder API', () => {
 });
 
 describe('agentRunDeadlineMs env overrides (Slice 1)', () => {
-  it('keeps the 45s/120s normative defaults', () => {
+  it('keeps the 45s/180s normative defaults', () => {
     expect(agentRunDeadlineMs({ question: 'total revenue' }, {})).toBe(45_000);
-    expect(agentRunDeadlineMs({ question: 'total revenue', requestedMode: 'research' }, {})).toBe(120_000);
+    expect(agentRunDeadlineMs({ question: 'total revenue', requestedMode: 'research' }, {})).toBe(180_000);
   });
 
   it('keeps normative ceilings despite legacy env overrides', () => {
     expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '180000' })).toBe(45_000);
-    expect(agentRunDeadlineMs({ question: 'x', requestedMode: 'research' }, { DQL_AGENT_RESEARCH_DEADLINE_MS: '420000' })).toBe(120_000);
+    expect(agentRunDeadlineMs({ question: 'x', requestedMode: 'research' }, { DQL_AGENT_RESEARCH_DEADLINE_MS: '420000' })).toBe(180_000);
     expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '1' })).toBe(45_000);
     expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '99999999' })).toBe(45_000);
     expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: 'not-a-number' })).toBe(45_000);

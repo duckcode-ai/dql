@@ -2,6 +2,7 @@ import { describeIntent, type AnalyticalIntentV1 } from './intent.js';
 import type { ExecutedRows, ResultColumnMeta, WarehouseFailure } from './execute.js';
 import type { PreparedCandidate, PreparedRefusal } from './prepare/types.js';
 import type { VocabularyIndex } from './vocabulary.js';
+import type { InvestigationReceiptV1 } from '../research/investigation/types.js';
 
 /**
  * THE FOUR WAYS A TURN ENDS, and the words for each.
@@ -70,6 +71,8 @@ export interface PipelineReceipt {
   policies?: Array<{ policyId: string; field: string; effect: string }>;
   /** What the run did, in order, in the reader's words: what was searched, what each tier found or missed, what ran. */
   story?: AskStoryStepV1[];
+  /** A Research run's investigation: its frame, programs, budget and one pipeline receipt per query. */
+  investigation?: InvestigationReceiptV1;
 }
 
 /**

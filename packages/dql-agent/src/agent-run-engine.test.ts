@@ -3762,15 +3762,15 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.events.at(-1)?.type).toBe('run.failed');
   });
 
-  it('applies one 45s/120s hard deadline with deterministic route soft targets', async () => {
+  it('applies one 45s/180s hard deadline with deterministic route soft targets', async () => {
     expect(agentRequestDeadlineMs('ask')).toBe(45_000);
-    expect(agentRequestDeadlineMs('research')).toBe(120_000);
+    expect(agentRequestDeadlineMs('research')).toBe(180_000);
     expect(agentRouteDeadlineMs('certified_answer')).toBe(5_000);
     expect(agentRouteDeadlineMs('semantic_answer')).toBe(5_000);
     // Generation may take a real tool round (look something up, then use it)
     // rather than a single blind shot, so its discovery window covers that.
     expect(agentRouteDeadlineMs('generated_answer')).toBe(30_000);
-    expect(agentRouteDeadlineMs('research')).toBe(120_000);
+    expect(agentRouteDeadlineMs('research')).toBe(180_000);
     const observed: number[] = [];
     const controller = new AbortController();
     controller.abort(new DOMException('route deadline', 'TimeoutError'));
@@ -3890,8 +3890,8 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.artifacts).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'a1' })]));
   });
 
-  it('stops new Research branches at 90s while retaining a validated partial executor result', async () => {
-    let nowMs = 89_000;
+  it('stops new Research queries at 150s while retaining a validated partial executor result', async () => {
+    let nowMs = 149_000;
     const budget = createAgentRunBudget({
       requestedMode: 'research', startedAtMs: 0, nowMs: () => nowMs,
       timeoutSignal: () => new AbortController().signal,
@@ -3903,7 +3903,7 @@ describe("AgentRunEngine — conversation route", () => {
       planner: fixedRoutePlanner('research'),
       executors: { research: () => {
         calls += 1;
-        nowMs = 91_000;
+        nowMs = 151_000;
         return { answer: 'Validated partial finding.', artifacts: [{ id: 'partial', kind: 'research_run', title: 'Partial', trustState: 'review_required', payload: { limitations: ['branch budget ended'] } }] };
       } },
     });

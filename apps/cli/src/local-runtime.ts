@@ -1644,7 +1644,7 @@ function sanitizeClientConversationContext(
 }
 
 const AGENT_LOOKUP_DEADLINE_MS = 45_000;
-const AGENT_RESEARCH_DEADLINE_MS = 120_000;
+const AGENT_RESEARCH_DEADLINE_MS = 180_000;
 
 /**
  * PERF-002: one wall-clock budget follows the request through routing, provider
@@ -3476,7 +3476,11 @@ export function agentRunProviderDispatchBudgetForMode(
 ): AgentRunProviderDispatchBudget {
   if (requestedMode === 'research') {
     return {
-      total: 12,
+      // An investigation reads the question once and may draft SQL for each
+      // query it runs when the metric has no governed definition: the frame,
+      // freshness, headline and coverage drafts, one dimension selection and
+      // one consented narration all fit inside sixteen sends.
+      total: 16,
       classification: 1,
       // A bounded Research root may plan up to six independently routed
       // hypothesis children. The root investigation plan has its own one-send
@@ -3493,14 +3497,13 @@ export function agentRunProviderDispatchBudgetForMode(
       // At most the remaining calls may be provider tools/generation. Together
       // with root/child planning, narration and repair, `total` remains the
       // hard ceiling.
-      generationGroup: 9,
+      generationGroup: 13,
       narration: 1,
       repair: 1,
-      // Each hypothesis is an ordinary Ask through the pipeline: one
-      // interpreter read per child, bounded corrections after it. These share
-      // the twelve-send ceiling with the root plan and narration.
+      // Each pipeline reading is one interpreter read; every drafted statement
+      // is a follow-up. These share the sixteen-send ceiling with narration.
       agentControl: 6,
-      toolFollowup: 5,
+      toolFollowup: 12,
     };
   }
   return {
@@ -4262,12 +4265,15 @@ export function mergeRunScopedProviderDispatchEvidence(
       ? { repairCapabilityFingerprint: run.diagnosticReceiptV2.repairCapabilityFingerprint }
       : {}),
   };
-  const diagnosticReceiptV5 = run.requestedMode === 'research'
+  // An investigation carries its own receipt (V9 with `investigation`); only
+  // the older hypothesis Research gets the synthesized V5/V6 root receipts.
+  const legacyResearchReceipts = run.requestedMode === 'research' && !run.diagnosticReceiptV9?.investigation;
+  const diagnosticReceiptV5 = legacyResearchReceipts
     ? run.diagnosticReceiptV5
       ? synchronizeResearchRuntimeReceiptV5(run.diagnosticReceiptV5, telemetry)
       : researchRootRuntimeReceiptV5(run, telemetry)
     : run.diagnosticReceiptV5;
-  const diagnosticReceiptV6 = run.requestedMode === 'research'
+  const diagnosticReceiptV6 = legacyResearchReceipts
     ? run.diagnosticReceiptV6
       ? synchronizeResearchRuntimeReceiptV6(run.diagnosticReceiptV6, telemetry, diagnosticReceiptV5)
       : researchRootRuntimeReceiptV6(run, telemetry, diagnosticReceiptV5)
@@ -6066,19 +6072,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
     },
     dispatchOptions: (purpose, request) => {
+      // Research words its summary from computed facts only with the run's
+      // consent: that call is narration on the ledger, never a drafting turn.
+      const narrate = purpose === 'research_narrate';
+      const dispatchPhase = purpose === 'resolve' ? 'agent_control' as const : narrate ? 'narration' as const : 'tool_followup' as const;
+      const egressPurpose = narrate ? 'research_narration' as const : 'answer_generation' as const;
       const trace = createProviderDispatchTrace({
         observer: askTraceObserverForV1(request),
-        phase: purpose === 'resolve' ? 'agent_control' : 'tool_followup',
-        purpose: 'answer_generation',
+        phase: dispatchPhase,
+        purpose: egressPurpose,
         admit: (event) => {
           const ledger = agentRunProviderEvidenceContext.getStore();
           if (ledger) {
             // Drafting one SQL statement is a short call: it is bounded by its own
             // size, not by how long the question took to read.
-            return ledger.observe(event, { purpose: 'answer_generation', dispatchPhase: purpose === 'resolve' ? 'agent_control' : 'tool_followup', optIn: false, ...(purpose === 'draft' ? { expectedMs: 30_000 } : {}) });
+            return ledger.observe(event, { purpose: egressPurpose, dispatchPhase, optIn: narrate && request.researchResultRowsOptIn === true, ...(purpose === 'draft' || purpose === 'research_select' ? { expectedMs: 30_000 } : {}) });
           }
           const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
-          assertProviderPayloadAllowed(envelope, { allowResultRows: false, maxResultRows: 0, purpose: 'answer_generation' });
+          assertProviderPayloadAllowed(envelope, { allowResultRows: false, maxResultRows: 0, purpose: egressPurpose });
           return envelope;
         },
       });

@@ -962,13 +962,14 @@ export function agentRouteDeadlineMs(route: AgentRunRoute): number | undefined {
   // Subscription-CLI providers cost roughly 10-15s per dispatch, so a window
   // under ~30s silently reduces the loop back to a single blind attempt.
   if (route === 'generated_answer') return 30_000;
-  if (route === 'research') return 120_000;
+  if (route === 'research') return 180_000;
   return undefined;
 }
 
 /** Default request-ingress deadlines. */
 const DEFAULT_ASK_DEADLINE_MS = 45_000;
-const DEFAULT_RESEARCH_DEADLINE_MS = 120_000;
+/** An investigation runs a dozen or more governed queries, some drafted by the AI, so Research gets three minutes. */
+const DEFAULT_RESEARCH_DEADLINE_MS = 180_000;
 /** Ceiling on any override, so a typo cannot hang a run indefinitely. */
 const MAX_DEADLINE_MS = 600_000;
 
@@ -1037,20 +1038,20 @@ export function createAgentRunBudget(input: {
   const elapsedMs = () => Math.max(0, nowMs() - startedAtMs);
   const remainingMs = () => Math.max(0, hardDeadlineMs - elapsedMs());
   const softTargetMs = (route: AgentRunRoute): number => {
-    const base = mode === 'research' ? 90_000 : (agentRouteDeadlineMs(route) ?? 15_000);
+    const base = mode === 'research' ? 150_000 : (agentRouteDeadlineMs(route) ?? 15_000);
     // Scaled with the hard deadline: a soft target that stayed fixed while the
     // ceiling moved would stop new work long before the run was actually out of
     // time, which is the same dead end by a different route.
     return Math.min(base * scale, hardDeadlineMs);
   };
   // Narration must still be reachable after a full generation window, and must
-  // leave the hard deadline (45s ask / 120s research) room to land.
+  // leave the hard deadline (45s ask / 180s research) room to land.
   // The floor's slice comes off the END of the run: the analyst's soft target
   // and the narration window both stop short of it, so neither can spend the
   // time the host needs to answer when they did not.
   const hostFloorReserveMs = mode === 'research' ? 15_000 : 8_000;
   const narrationSoftTargetMs = () => Math.min(
-    (mode === 'research' ? 100_000 : 38_000) * scale,
+    (mode === 'research' ? 160_000 : 38_000) * scale,
     Math.max(hardDeadlineMs - hostFloorReserveMs, Math.floor(hardDeadlineMs / 2)),
   );
   return Object.freeze({
@@ -4002,7 +4003,7 @@ function softBoundaryResult(
     stopReason: 'needs_clarification',
     summary: `The ${seconds}-second discovery target elapsed before an analytical plan was frozen. No new provider, tool, or retrieval branch was started.`,
     answer: budget.mode === 'research'
-      ? 'Research stopped starting new branches at 90 seconds. Refine the question or retry; any already validated partial findings remain available.'
+      ? `Research stopped starting new queries at ${seconds} seconds. Refine the question or retry; any already validated partial findings remain available.`
       : 'The discovery window ended before DQL could freeze an exact analytical plan. Refine the metric or grain, or retry the same bounded question.',
     artifacts: [],
     evaluations: [],

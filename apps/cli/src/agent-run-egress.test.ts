@@ -642,7 +642,7 @@ it('keeps legacy category classification distinct from candidate-ID meaning reso
   expect(run.snapshot().providerEgressReceipts).toHaveLength(1);
 });
 
-it('caps explicit Research at twelve physical sends with no thirteenth receipt', () => {
+it('caps explicit Research at sixteen physical sends with no seventeenth receipt', () => {
   const run = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('research'));
   run.observe(dispatchEvent, {
     purpose: 'answer_generation', dispatchPhase: 'meaning_resolution', optIn: false,
@@ -650,23 +650,23 @@ it('caps explicit Research at twelve physical sends with no thirteenth receipt',
   run.observe({ ...dispatchEvent, attemptIndex: 1 }, {
     purpose: 'answer_generation', dispatchPhase: 'planning', optIn: false,
   });
-  for (let attemptIndex = 1; attemptIndex <= 8; attemptIndex += 1) {
+  for (let attemptIndex = 1; attemptIndex <= 12; attemptIndex += 1) {
     run.observe({ ...dispatchEvent, attemptIndex }, {
       purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
     });
   }
-  run.observe({ ...dispatchEvent, attemptIndex: 10 }, {
+  run.observe({ ...dispatchEvent, attemptIndex: 14 }, {
     purpose: 'research_narration', dispatchPhase: 'narration', optIn: false,
   });
-  run.observe({ ...dispatchEvent, attemptIndex: 11 }, {
+  run.observe({ ...dispatchEvent, attemptIndex: 15 }, {
     purpose: 'repair_sql', dispatchPhase: 'repair', optIn: false,
   });
 
-  expect(run.snapshot().providerEgressReceipts).toHaveLength(12);
-  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 12 }, {
+  expect(run.snapshot().providerEgressReceipts).toHaveLength(16);
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 16 }, {
     purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
   })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
-  expect(run.snapshot().providerEgressReceipts).toHaveLength(12);
+  expect(run.snapshot().providerEgressReceipts).toHaveLength(16);
 });
 
 it('isolates dispatch receipts across concurrent HTTP AgentRuns', async () => {
