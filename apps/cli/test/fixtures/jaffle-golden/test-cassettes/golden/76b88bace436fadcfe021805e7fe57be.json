@@ -1,0 +1,23 @@
+{
+  "key": "76b88bace436fadcfe021805e7fe57be",
+  "operation": "generate",
+  "text": "NO_SQL: No churn metric or region dimension exists anywhere in the listed relations and columns.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:41:09.050Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "76b88bace436fadcfe021805e7fe57be135954ca39893a7f38934daed13a3e4e",
+    "postCanonicalHash": "76b88bace436fadcfe021805e7fe57be135954ca39893a7f38934daed13a3e4e",
+    "appliedRuleClasses": []
+  }
+}

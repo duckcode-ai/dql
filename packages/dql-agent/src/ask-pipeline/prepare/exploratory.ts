@@ -48,7 +48,11 @@ export async function prepareExploratory(
   const engineNote = engineOwned.length > 0
     ? `${[...new Set(engineOwned.map((entry) => entry!.label ?? entry!.name))].join(', ')} ${engineOwned.length === 1 ? 'is an authored semantic metric' : 'are authored semantic metrics'} (${[...new Set(engineOwned.map((entry) => entry!.engineOnly))].join('; ')}) that the semantic engine did not run here: rebuild ${engineOwned.length === 1 ? 'it' : 'them'} exactly from the definition in CONTEXT, and reply NO_SQL when the listed tables cannot express that definition`
     : undefined;
-  const reason = [context.reason, engineNote].filter(Boolean).join('; ') || undefined;
+  // An engine's message can carry a local file path (where a manifest was
+  // looked for); a path on this machine never goes to the AI provider, and a
+  // prompt that changes with a temp folder is not the same question twice.
+  const withoutPaths = (text: string | undefined) => text?.replace(/(?:[A-Za-z]:)?(?:\/|\\)(?:[\w.@+~-]+(?:\/|\\))+[\w.@+~-]*/g, '<path>');
+  const reason = [withoutPaths(context.reason), engineNote].filter(Boolean).join('; ') || undefined;
   if (!deps.draftSql) {
     return { candidates: [], refusals: [{ tier: 'exploratory', code: 'exploration_unavailable', message: 'no SQL drafting provider is configured for review-required exploration', repairable: false }] };
   }

@@ -1,0 +1,23 @@
+{
+  "key": "322f78eacdffc523d5d3d41a36f88ca8",
+  "operation": "generate",
+  "text": "```sql\nSELECT\n  p.product_id,\n  p.product_name,\n  c.customer_type,\n  SUM(oi.product_price) AS beverage_revenue\nFROM \"jaffle_shop\".\"dev\".\"order_items\" oi\nJOIN \"jaffle_shop\".\"dev\".\"products\" p\n  ON oi.product_id = p.product_id\nJOIN \"jaffle_shop\".\"dev\".\"orders\" o\n  ON oi.order_id = o.order_id\nJOIN \"jaffle_shop\".\"dev\".\"customers\" c\n  ON o.customer_id = c.customer_id\nWHERE p.is_drink_item = true\nGROUP BY p.product_id, p.product_name, c.customer_type\nORDER BY beverage_revenue DESC\nLIMIT 500\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T02:05:36.593Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "322f78eacdffc523d5d3d41a36f88ca8a6b161bff320c7478d9123968fe6c5a1",
+    "postCanonicalHash": "322f78eacdffc523d5d3d41a36f88ca8a6b161bff320c7478d9123968fe6c5a1",
+    "appliedRuleClasses": []
+  }
+}

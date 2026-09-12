@@ -1,0 +1,23 @@
+{
+  "key": "0535fec9d0988f1141f7d9f54544bf03",
+  "operation": "generate",
+  "text": "```sql\nSELECT\n  c.customer_id,\n  c.customer_name,\n  SUM(CASE WHEN p.is_drink_item THEN oi.product_price ELSE 0 END) AS beverage_revenue,\n  COUNT(DISTINCT CASE WHEN o.is_drink_order THEN o.order_id END) AS beverage_orders,\n  COUNT(DISTINCT CASE WHEN p.is_drink_item THEN p.product_id END) AS beverage_product_types\nFROM \"jaffle_shop\".\"dev\".\"order_items\" oi\nJOIN \"jaffle_shop\".\"dev\".\"orders\" o ON oi.order_id = o.order_id\nJOIN \"jaffle_shop\".\"dev\".\"products\" p ON oi.product_id = p.product_id\nJOIN \"jaffle_shop\".\"dev\".\"customers\" c ON o.customer_id = c.customer_id\nGROUP BY c.customer_id, c.customer_name\nORDER BY beverage_revenue DESC\nLIMIT 10;\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:58:55.171Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "0535fec9d0988f1141f7d9f54544bf03deb94c69f3ddec7bc42d1d0a077ffbba",
+    "postCanonicalHash": "0535fec9d0988f1141f7d9f54544bf03deb94c69f3ddec7bc42d1d0a077ffbba",
+    "appliedRuleClasses": []
+  }
+}

@@ -3561,12 +3561,6 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     return predictDispatchMs(this.observedDispatchDurations);
   }
 
-  /** True when the remaining wall clock cannot fit another provider call. */
-  private cannotFitAnotherDispatch(): boolean {
-    if (!this.runBudget) return false;
-    return this.runBudget.remainingMs() < this.expectedDispatchMs() + DISPATCH_SETTLE_MARGIN_MS;
-  }
-
   /**
    * The run budget's own clock when there is one, so dispatch cost is measured
    * against the same timeline the deadline is enforced on (and stays injectable
@@ -3613,6 +3607,12 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
       retryOfAttemptIndex?: number;
       /** Server-owned subtype for root Research or the Ask planner. */
       planningKind?: 'initial' | 'targeted_revision' | 'research_hypothesis';
+      /**
+       * A caller's own bound on how long this call takes. Drafting one SQL
+       * statement takes seconds even when reading the question took a minute;
+       * judging it by the slowest reading turned a fast draft away.
+       */
+      expectedMs?: number;
     },
   ): Record<string, unknown> {
     const isInterpretationPhase = context.dispatchPhase === 'classification'
@@ -3627,9 +3627,10 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     // with nothing. Stopping here lets the caller answer from what it has.
     // Narration is exempt: it is the step that produces the answer, and it is
     // separately bounded by its own soft target below.
-    if (context.dispatchPhase !== 'narration' && this.cannotFitAnotherDispatch()) {
+    const expectedMs = context.expectedMs !== undefined ? Math.min(context.expectedMs, this.expectedDispatchMs()) : this.expectedDispatchMs();
+    if (context.dispatchPhase !== 'narration' && this.runBudget && this.runBudget.remainingMs() < expectedMs + DISPATCH_SETTLE_MARGIN_MS) {
       throw Object.assign(new Error(
-        `Only ${Math.round((this.runBudget?.remainingMs() ?? 0) / 1_000)}s of the run deadline remain, which is not enough for another ~${Math.round(this.expectedDispatchMs() / 1_000)}s provider call. Answering from what has already been gathered.`,
+        `Only ${Math.round((this.runBudget?.remainingMs() ?? 0) / 1_000)}s of the run deadline remain, which is not enough for another ~${Math.round(expectedMs / 1_000)}s provider call. Answering from what has already been gathered.`,
       ), { code: 'RUN_DEADLINE_INSUFFICIENT' });
     }
     if (context.dispatchPhase === 'narration') {
@@ -6071,7 +6072,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         admit: (event) => {
           const ledger = agentRunProviderEvidenceContext.getStore();
           if (ledger) {
-            return ledger.observe(event, { purpose: 'answer_generation', dispatchPhase: purpose === 'resolve' ? 'agent_control' : 'tool_followup', optIn: false });
+            // Drafting one SQL statement is a short call: it is bounded by its own
+            // size, not by how long the question took to read.
+            return ledger.observe(event, { purpose: 'answer_generation', dispatchPhase: purpose === 'resolve' ? 'agent_control' : 'tool_followup', optIn: false, ...(purpose === 'draft' ? { expectedMs: 30_000 } : {}) });
           }
           const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
           assertProviderPayloadAllowed(envelope, { allowResultRows: false, maxResultRows: 0, purpose: 'answer_generation' });

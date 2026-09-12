@@ -1,0 +1,23 @@
+{
+  "key": "51602295e141abe55bfdba8d3af9fee2",
+  "operation": "generate",
+  "text": "NO_SQL: There is no column linking order_items (or products) to customers (no customer_id/orders table available), so beverage revenue cannot be broken down by customer_type.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T02:05:30.142Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "51602295e141abe55bfdba8d3af9fee2e7757fb6cb3391033f68a506a7bc704b",
+    "postCanonicalHash": "51602295e141abe55bfdba8d3af9fee2e7757fb6cb3391033f68a506a7bc704b",
+    "appliedRuleClasses": []
+  }
+}

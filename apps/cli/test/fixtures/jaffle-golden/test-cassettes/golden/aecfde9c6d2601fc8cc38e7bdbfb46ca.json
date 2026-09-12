@@ -1,0 +1,23 @@
+{
+  "key": "aecfde9c6d2601fc8cc38e7bdbfb46ca",
+  "operation": "generate",
+  "text": "NO_SQL: order_items has no customer_id (and no orders table is listed) to join to dev.customers, so beverage revenue cannot be broken out by customer_type.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:47:07.105Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "aecfde9c6d2601fc8cc38e7bdbfb46ca67ec1cb63d3c2a0d7ea49efb0f57edb1",
+    "postCanonicalHash": "aecfde9c6d2601fc8cc38e7bdbfb46ca67ec1cb63d3c2a0d7ea49efb0f57edb1",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "43de2792529d6011489cad45485afa1b",
+  "operation": "generate",
+  "text": "```sql\nWITH order_agg AS (\n  SELECT customer_id, order_id, is_drink_order\n  FROM \"jaffle_shop\".\"dev\".\"orders\"\n),\nitem_agg AS (\n  SELECT oi.order_id, oi.product_id, oi.product_price, p.is_drink_item\n  FROM \"jaffle_shop\".\"dev\".\"order_items\" oi\n  JOIN \"jaffle_shop\".\"dev\".\"products\" p ON oi.product_id = p.product_id\n)\nSELECT\n  c.customer_id,\n  c.customer_name,\n  SUM(CASE WHEN ia.is_drink_item THEN ia.product_price ELSE 0 END) AS beverage_revenue,\n  COUNT(DISTINCT CASE WHEN oa.is_drink_order THEN oa.order_id END) AS beverage_orders,\n  COUNT(DISTINCT CASE WHEN ia.is_drink_item THEN ia.product_id END) AS beverage_product_types\nFROM \"jaffle_shop\".\"dev\".\"customers\" c\nJOIN order_agg oa ON oa.customer_id = c.customer_id\nJOIN item_agg ia ON ia.order_id = oa.order_id\nGROUP BY c.customer_id, c.customer_name\nORDER BY beverage_revenue DESC\nLIMIT 10;\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T02:06:01.662Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "43de2792529d6011489cad45485afa1b3700b0744a682f1398145bfe78a06a72",
+    "postCanonicalHash": "43de2792529d6011489cad45485afa1b3700b0744a682f1398145bfe78a06a72",
+    "appliedRuleClasses": []
+  }
+}

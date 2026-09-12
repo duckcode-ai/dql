@@ -1,0 +1,23 @@
+{
+  "key": "f22db95fa9619be7a9db8d5f22da4dfb",
+  "operation": "generate",
+  "text": "```sql\nWITH orders_2025 AS (\n  SELECT order_id, order_cost\n  FROM \"jaffle_shop\".\"dev\".\"orders\"\n  WHERE ordered_at >= '2025-01-01' AND ordered_at < '2026-01-01'\n),\nrevenue_2025 AS (\n  SELECT oi.order_id, SUM(oi.product_price) AS revenue\n  FROM \"jaffle_shop\".\"dev\".\"order_items\" oi\n  WHERE oi.ordered_at >= '2025-01-01' AND oi.ordered_at < '2026-01-01'\n  GROUP BY oi.order_id\n)\nSELECT\n  SUM(r.revenue) - SUM(o.order_cost) AS gross_profit_2025,\n  (SUM(r.revenue) - SUM(o.order_cost)) / SUM(r.revenue) AS gross_margin_pct_2025\nFROM orders_2025 o\nJOIN revenue_2025 r ON o.order_id = r.order_id;\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T02:13:11.018Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "f22db95fa9619be7a9db8d5f22da4dfb6187abd6362a204e1e82fde2db5fdced",
+    "postCanonicalHash": "f22db95fa9619be7a9db8d5f22da4dfb6187abd6362a204e1e82fde2db5fdced",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "da6594e507aa8153bd0b663ccbd34936",
+  "operation": "generate",
+  "text": "```sql\nSELECT customer_id, customer_name, lifetime_spend\nFROM \"jaffle_shop\".\"dev\".\"customers\"\nORDER BY lifetime_spend DESC\nLIMIT 10\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:38:28.348Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "da6594e507aa8153bd0b663ccbd3493603504019f6821c4f68bf4b5bc8bf29f2",
+    "postCanonicalHash": "da6594e507aa8153bd0b663ccbd3493603504019f6821c4f68bf4b5bc8bf29f2",
+    "appliedRuleClasses": []
+  }
+}

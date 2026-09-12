@@ -1,0 +1,23 @@
+{
+  "key": "ab048c5465831caf542ca906a2cc0191",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Food product revenue (excluding tax) broken down by location.\",\"measures\":[{\"ref\":\"column:dev.order_items.product_price\",\"aggregation\":\"sum\",\"scope\":[{\"ref\":\"dimension:order_item.is_food_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"}],\"alias\":\"food_revenue\"}],\"groupBy\":[{\"ref\":\"entity:locations.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.order_items.product_price\":\"q:food revenue\",\"dimension:order_item.is_food_item\":\"q:food revenue\",\"entity:locations.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"},\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:42:23.232Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "ab048c5465831caf542ca906a2cc01917a5ff78d596d2740d4ea91fb1953c09b",
+    "postCanonicalHash": "ab048c5465831caf542ca906a2cc01917a5ff78d596d2740d4ea91fb1953c09b",
+    "appliedRuleClasses": []
+  }
+}

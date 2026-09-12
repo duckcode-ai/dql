@@ -1,0 +1,23 @@
+{
+  "key": "8f4774e82ce74097101b08934d78e90f",
+  "operation": "generate",
+  "text": "NO_SQL: This project models commerce data, not weather information.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:41:21.540Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "8f4774e82ce74097101b08934d78e90fbcea58d15de6a9777852f1523c1c8149",
+    "postCanonicalHash": "8f4774e82ce74097101b08934d78e90fbcea58d15de6a9777852f1523c1c8149",
+    "appliedRuleClasses": []
+  }
+}

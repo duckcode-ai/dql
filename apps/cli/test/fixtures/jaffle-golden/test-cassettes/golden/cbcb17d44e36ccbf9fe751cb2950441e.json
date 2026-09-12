@@ -1,0 +1,23 @@
+{
+  "key": "cbcb17d44e36ccbf9fe751cb2950441e",
+  "operation": "generate",
+  "text": "SELECT SUM(\"lifetime_spend_pretax\") / SUM(\"count_lifetime_orders\") AS average_order_value FROM \"jaffle_shop\".\"dev\".\"customers\"",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:57:36.604Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "cbcb17d44e36ccbf9fe751cb2950441e9e6cf0e4ed14bb7ee83eb4633fb8f61d",
+    "postCanonicalHash": "cbcb17d44e36ccbf9fe751cb2950441e9e6cf0e4ed14bb7ee83eb4633fb8f61d",
+    "appliedRuleClasses": []
+  }
+}

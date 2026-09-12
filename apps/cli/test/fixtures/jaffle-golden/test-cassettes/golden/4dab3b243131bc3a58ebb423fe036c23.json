@@ -1,0 +1,26 @@
+{
+  "key": "4dab3b243131bc3a58ebb423fe036c23",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"For customer Ryan Byrd, show total order revenue and beverage revenue, both measures.\",\"measures\":[{\"ref\":\"metric:orders.order_total\",\"alias\":\"total_revenue\"},{\"ref\":\"metric:order_item.drink_revenue\",\"alias\":\"beverage_revenue\"}],\"groupBy\":[],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:total revenue\",\"metric:order_item.drink_revenue\":\"q:beverage revenue\",\"dimension:customers.customer_name\":\"q:Ryan byrd\",\"entity:customers.customer\":\"removed:previous ranking dropped for a single named customer\",\"metric:orders.drink_orders\":\"removed:not asked for beverage order count here\",\"column:dev.products.product_id\":\"removed:not asked for beverage product variety here\",\"dimension:order_item.is_drink_item\":\"removed:was only used as scope for beverage_product_types count-distinct, which is not asked for here\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T02:00:27.321Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 5,
+    "messageRoles": [
+      "system",
+      "user",
+      "user",
+      "assistant",
+      "user"
+    ],
+    "preCanonicalHash": "4dab3b243131bc3a58ebb423fe036c23bc8448c43c59ee7f58a7535e3fb8a47b",
+    "postCanonicalHash": "4dab3b243131bc3a58ebb423fe036c23bc8448c43c59ee7f58a7535e3fb8a47b",
+    "appliedRuleClasses": []
+  }
+}

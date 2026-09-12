@@ -1,0 +1,23 @@
+{
+  "key": "42aaa44d5e902d41b3cd21651275fc30",
+  "operation": "generate",
+  "text": "```sql\nSELECT p.product_id, p.product_name, SUM(s.supply_cost) AS supply_cost\nFROM \"jaffle_shop\".\"dev\".\"supplies\" s\nJOIN \"jaffle_shop\".\"dev\".\"products\" p ON s.product_id = p.product_id\nGROUP BY p.product_id, p.product_name\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:41:02.117Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "42aaa44d5e902d41b3cd21651275fc30a5fc25bd129e1cb3ee92e9c305aff067",
+    "postCanonicalHash": "42aaa44d5e902d41b3cd21651275fc30a5fc25bd129e1cb3ee92e9c305aff067",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "ebf547d3643e29a88e6ccd4b2828c74f",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by their gross lifetime spend, highest first.\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"metric:customers.lifetime_spend\",\"direction\":\"desc\"},\"limit\":10,\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:top customers\",\"entity:customers.customer\":\"q:customers\",\"dimension:customers.customer_name\":\"q:customers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:38:23.269Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "ebf547d3643e29a88e6ccd4b2828c74fd866b97101792fc8e451e4ea2c482795",
+    "postCanonicalHash": "ebf547d3643e29a88e6ccd4b2828c74fd866b97101792fc8e451e4ea2c482795",
+    "appliedRuleClasses": []
+  }
+}

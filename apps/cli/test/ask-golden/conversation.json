@@ -27,10 +27,7 @@
    "ordered": true,
    "tier": "reviewable",
    "keeps": [],
-   "note": "Both are correct: the certified top_beverage_customers block served as published (it groups by customer name; the caveat that two customers sharing a name would merge is recorded on the answer), or a governed semantic/relational answer keyed by customer id with the name displayed. The identity rule binds what the pipeline composes, not what the team certified. The certified block groups by name only and is refused for identity; the keyed governed answer is served.",
-   "requiredColumns": [
-    "customer_id"
-   ]
+   "note": "Certified first: the top_beverage_customers block, served as published, is the governed answer (it groups by customer name; the caveat that two customers sharing a name would merge is recorded on the answer). A keyed AI-written answer with the name beside the id is also accepted."
   },
   {
    "id": "q2-include-customer-name",

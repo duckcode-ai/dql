@@ -1,0 +1,24 @@
+{
+  "key": "72413ba8f1b821a42846a4b27fe5b224",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Confirming the beverage-category scope: show the top customers by beverage revenue using the certified beverage-customer ranking (name, beverage revenue, beverage order count, beverage product variety).\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:bevereage catogery\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:59:19.488Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "72413ba8f1b821a42846a4b27fe5b224eb8e207b956eaebc2b0ea2bb1135010b",
+    "postCanonicalHash": "72413ba8f1b821a42846a4b27fe5b224eb8e207b956eaebc2b0ea2bb1135010b",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "07ee0c3e337eee3046b02bdcfcf23492",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count the number of distinct orders placed by each customer.\",\"measures\":[{\"ref\":\"column:dev.orders.order_id\",\"aggregation\":\"count_distinct\",\"alias\":\"order_count\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"column:dev.orders.order_id\":\"q:orders\",\"entity:orders.customer\":\"q:each customer\",\"dimension:customers.customer_name\":\"q:customer\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:39:26.445Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "07ee0c3e337eee3046b02bdcfcf234927c85bf06523987dc1024369aeb739c0e",
+    "postCanonicalHash": "07ee0c3e337eee3046b02bdcfcf234927c85bf06523987dc1024369aeb739c0e",
+    "appliedRuleClasses": []
+  }
+}

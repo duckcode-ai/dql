@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aggregatesRows, appliedConditions, joinKeyPairs, missingRequiredFilters, missingStatedValues, requiredFilterFromText, statedValues, withRowGuard } from './sql-checks.js';
+import { aggregatesRows, appliedConditions, joinKeyPairs, missingRequiredFilters, missingStatedValues, requiredFilterFromText, statedValues, withRowGuard, aggregatesColumnOf } from './sql-checks.js';
 
 describe('the checks an AI-drafted statement passes before it runs', () => {
   const office = 'Lost opportunities count ,Lost Amount by month for fiscal year FY26 and competitor involved is Splunk';
@@ -39,7 +39,7 @@ describe('the checks an AI-drafted statement passes before it runs', () => {
 
   it('resolves join keys through aliases and leaves CTEs out', () => {
     expect(joinKeyPairs('SELECT COUNT(*) FROM sales.opportunities o JOIN crm.deal_notes AS d ON d.deal_ref = o.deal_ref')).toEqual([
-      { left: { relation: 'crm.deal_notes', column: 'deal_ref' }, right: { relation: 'sales.opportunities', column: 'deal_ref' } },
+      { left: { relation: 'crm.deal_notes', column: 'deal_ref', qualifier: 'd' }, right: { relation: 'sales.opportunities', column: 'deal_ref', qualifier: 'o' } },
     ]);
     expect(joinKeyPairs('WITH lost AS (SELECT * FROM sales.opportunities) SELECT COUNT(*) FROM lost l JOIN crm.deal_notes d ON d.deal_ref = l.deal_ref')).toEqual([]);
   });
@@ -49,5 +49,13 @@ describe('the checks an AI-drafted statement passes before it runs', () => {
     expect(withRowGuard('SELECT a FROM t LIMIT 10', 501)).toBe('SELECT a FROM t LIMIT 10');
     expect(aggregatesRows('SELECT COUNT(*) FROM t')).toBe(true);
     expect(aggregatesRows('SELECT a FROM t')).toBe(false);
+  });
+
+  it('a column of the one side summed across a join that repeats its key is found; a distinct count and the many side are not', () => {
+    const sql = 'SELECT SUM(oi.product_price) - SUM(o.order_cost) AS profit FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id';
+    expect(joinKeyPairs(sql)[0]).toMatchObject({ left: { relation: 'dev.order_items', column: 'order_id', qualifier: 'oi' }, right: { relation: 'dev.orders', column: 'order_id', qualifier: 'o' } });
+    expect(aggregatesColumnOf(sql, 'o')).toBe(true);
+    expect(aggregatesColumnOf('SELECT COUNT(DISTINCT o.order_id) FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id', 'o')).toBe(false);
+    expect(aggregatesColumnOf('SELECT SUM(oi.product_price) FROM dev.order_items oi JOIN dev.orders o ON oi.order_id = o.order_id', 'o')).toBe(false);
   });
 });

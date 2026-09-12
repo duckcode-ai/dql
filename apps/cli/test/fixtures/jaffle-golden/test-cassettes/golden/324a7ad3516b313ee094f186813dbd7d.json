@@ -1,0 +1,23 @@
+{
+  "key": "324a7ad3516b313ee094f186813dbd7d",
+  "operation": "generate",
+  "text": "```sql\nSELECT\n  strftime('%Y-%m', oi.ordered_at) AS month,\n  SUM(oi.product_price) AS revenue,\n  SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) / NULLIF(SUM(oi.product_price), 0) AS drink_revenue_pct\nFROM \"jaffle_shop\".\"dev\".\"order_items\" oi\nGROUP BY strftime('%Y-%m', oi.ordered_at)\nORDER BY month\nLIMIT 500;\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T02:13:32.520Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "324a7ad3516b313ee094f186813dbd7d39b25faba0a112abcf42a733f2dfb10a",
+    "postCanonicalHash": "324a7ad3516b313ee094f186813dbd7d39b25faba0a112abcf42a733f2dfb10a",
+    "appliedRuleClasses": []
+  }
+}

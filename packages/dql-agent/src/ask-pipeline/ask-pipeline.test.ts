@@ -2758,6 +2758,52 @@ describe('two governed sources: certified blocks and authored semantics; everyth
     if (toAi.status === 'resolved') expect(toAi.lane).toBe('ai');
   });
 
+  it('a local file path in an engine message never reaches the SQL drafter', async () => {
+    const reasons: string[] = [];
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Revenue by region.', measures: [{ ref: 'metric:orders.revenue' }], groupBy: [{ ref: 'dimension:orders.region', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }) };
+    await runAskPipeline({
+      question: 'revenue by region', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: {
+        compileSemantic: async () => { throw new Error('MetricFlow is installed but /var/folders/cs/T/dql-ask-golden-Sr3Yye/target/semantic_manifest.json was not found'); },
+        draftSql: async (draft) => { reasons.push(draft.reason ?? ''); return { sql: 'SELECT status AS region, SUM(amount) AS revenue FROM dev.orders GROUP BY status', relations: ['dev.orders'], proof: [] }; },
+      },
+      executeDeps: { run: async () => ({ columns: ['region', 'revenue'], rows: [{ region: 'east', revenue: 3 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(reasons[0]).toContain('MetricFlow is installed but <path> was not found');
+    expect(reasons[0]).not.toContain('/var/folders');
+  });
+
+  it('a percent the AI-written SQL already multiplied by 100 is shown as points, not multiplied again', async () => {
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Growth from July to August.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'sum', alias: 'july' }, { ref: 'column:dev.orders.amount', aggregation: 'sum', alias: 'august' }, { ref: 'change:growth', alias: 'growth_pct', change: { base: 'july', comparison: 'august', as: 'percent' } }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
+    const outcome = await runAskPipeline({
+      question: 'growth from July to August', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { draftSql: async () => ({ sql: 'SELECT 1489 AS july, 1609 AS august, (1609 - 1489) * 100.0 / 1489 AS growth_pct FROM dev.orders', relations: ['dev.orders'], proof: [] }) },
+      executeDeps: { run: async () => ({ columns: ['july', 'august', 'growth_pct'], rows: [{ july: 1489, august: 1609, growth_pct: 8.06 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind !== 'answered') return;
+    expect(outcome.result.columnsMeta?.find((meta) => meta.name === 'growth_pct')).toMatchObject({ kind: 'percent', unit: 'percentage_points' });
+    expect(outcome.text).not.toContain('806');
+  });
+
+  it('a governed reading the semantic engine cannot compile goes to AI SQL without a repair re-ask', async () => {
+    let dispatches = 0;
+    let drafts = 0;
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => { dispatches += 1; return JSON.stringify({ version: 1, kind: 'analytics', reading: 'Revenue by region.', measures: [{ ref: 'metric:orders.revenue' }], groupBy: [{ ref: 'dimension:orders.region', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }); } };
+    const outcome = await runAskPipeline({
+      question: 'revenue by region', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: {
+        compileSemantic: async () => { throw new Error('Dimension region not found for metric revenue'); },
+        draftSql: async () => { drafts += 1; return { sql: 'SELECT status AS region, SUM(amount) AS revenue FROM dev.orders GROUP BY status', relations: ['dev.orders'], proof: [] }; },
+      },
+      executeDeps: { run: async () => ({ columns: ['region', 'revenue'], rows: [{ region: 'east', revenue: 3 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(dispatches).toBe(1);
+    expect(drafts).toBe(1);
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.candidate.trust).toBe('review_required');
+  });
+
   it('a reading over tables costs one reading and one draft: no correction rounds before AI-written SQL', async () => {
     let dispatches = 0;
     let drafts = 0;

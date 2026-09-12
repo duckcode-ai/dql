@@ -645,7 +645,13 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       receipt.intent = reading; receipt.reading = reading.reading;
       receipt.executed = { tier: candidate.tier, sqlFingerprint: fingerprintSql(candidate.sql), rowCount: executed.result.rowCount, ms: Math.round(executed.result.executionTimeMs), proofs: executed.proofs };
       timings.total = Math.round(now() - started);
-      const result: ExecutedRows = { ...executed.result, columnsMeta: describeResultColumns(reading, executed.result, input.vocabulary) };
+      // The AI wrote the arithmetic: a statement that multiplies by 100 hands
+      // back percentage points, so a percent column is not multiplied again
+      // (8.06 growth is 8.06 pp, not 806%).
+      const inPoints = /\*\s*100(?:\.0*)?(?![\d.])|(?<![\d.])100(?:\.0*)?\s*\*/.test(candidate.sql);
+      const columnsMeta = describeResultColumns(reading, executed.result, input.vocabulary)
+        .map((meta) => (inPoints && meta.kind === 'percent' && meta.unit === 'fraction' ? { ...meta, unit: 'percentage_points' as const } : meta));
+      const result: ExecutedRows = { ...executed.result, columnsMeta };
       receipt.context = { ...receipt.context!, used: { joins: [], relations: [...new Set(candidate.relations ?? [])], tier: candidate.tier, ...(candidate.engine ? { engine: candidate.engine } : {}) } };
       const tables = (candidate.relations ?? []).join(', ');
       const applied = candidate.proof.find((line) => line.startsWith('applied on the data: '));
@@ -1190,7 +1196,10 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     joinProvenForRetry = false;
     if (prepared.chosen) { candidate = prepared.chosen; break; }
     // One bounded repair: a repairable compile refusal goes back to the resolver with the engine's words.
-    const repairable = prepared.refusals.find((refusal) => refusal.repairable);
+    // With AI-written SQL available, a reading the semantic engine could not
+    // compile goes to AI SQL instead of spending a dispatch re-reading it; a
+    // certified block that does not apply is still re-read into metrics.
+    const repairable = prepared.refusals.find((refusal) => refusal.repairable && !(aiSqlAvailable && refusal.tier === 'semantic'));
     if (!repairable || round > 0 || remaining() < 12_000) break;
     const repairStarted = now();
     resolution = await resolveIntent({
@@ -1223,6 +1232,16 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       break;
     }
     intent = resolution.intent;
+    // A repaired reading is grounded again: an identity a name carries (two
+    // customers named Jordan Lee) must hold for the reading that runs, and a
+    // note written about the first reading must not describe the second.
+    if (input.groundLiterals) {
+      try {
+        const grounded = await input.groundLiterals(intent);
+        intent = grounded.intent;
+        receipt.grounding = [...(receipt.grounding ?? []).filter((note) => !note.startsWith('identity:')), ...grounded.notes];
+      } catch { receipt.grounding = (receipt.grounding ?? []).filter((note) => !note.startsWith('identity:')); }
+    }
     receipt.intent = intent;
   }
   // The answer of last resort: a certified block refused only for label-only

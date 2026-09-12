@@ -132,7 +132,7 @@ export function appliedConditions(sql: string, maxChars = 400): string | undefin
   return joined.length > maxChars ? `${joined.slice(0, maxChars - 1)}…` : joined;
 }
 
-export interface JoinKeyPair { left: { relation: string; column: string }; right: { relation: string; column: string } }
+export interface JoinKeyPair { left: { relation: string; column: string; qualifier?: string }; right: { relation: string; column: string; qualifier?: string } }
 
 const RELATION_TOKEN = String.raw`((?:"[^"]+"|[A-Za-z_$][\w$]*)(?:\.(?:"[^"]+"|[A-Za-z_$][\w$]*)){0,2})`;
 const NOT_ALIAS = new Set(['on', 'where', 'join', 'left', 'right', 'inner', 'outer', 'full', 'cross', 'group', 'order', 'limit', 'using', 'natural', 'union', 'having', 'qualify', 'lateral']);
@@ -154,9 +154,19 @@ export function joinKeyPairs(sql: string): JoinKeyPair[] {
     const right = aliases.get(match[3]!.replace(/"/g, '').toLowerCase());
     if (!left || !right) continue;
     if (ctes.has(left.replace(/"/g, '').toLowerCase()) || ctes.has(right.replace(/"/g, '').toLowerCase())) continue;
-    pairs.push({ left: { relation: left, column: match[2]! }, right: { relation: right, column: match[4]! } });
+    pairs.push({ left: { relation: left, column: match[2]!, qualifier: match[1]!.replace(/"/g, '') }, right: { relation: right, column: match[4]!, qualifier: match[3]!.replace(/"/g, '') } });
   }
   return pairs;
+}
+
+/**
+ * Whether a statement sums, averages or counts (not distinct) a column of the
+ * relation a qualifier names. Across a join that repeats the key on the other
+ * side, such a total counts each of that relation's rows once per match.
+ */
+export function aggregatesColumnOf(sql: string, qualifier: string): boolean {
+  const name = qualifier.replace(/"/g, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b(sum|avg|count)\\s*\\(\\s*(?!distinct\\b)[^)]*\\b"?${name}"?\\s*\\.`, 'i').test(sql);
 }
 
 /** Whether a statement aggregates rows, where a join that repeats keys on both sides counts a row more than once. */

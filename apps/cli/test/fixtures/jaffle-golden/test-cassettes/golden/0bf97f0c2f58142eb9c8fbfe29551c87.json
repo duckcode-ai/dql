@@ -1,0 +1,24 @@
+{
+  "key": "0bf97f0c2f58142eb9c8fbfe29551c87",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top customers by beverage revenue, ranked highest first, with the customer's name displayed alongside their identity key, plus beverage order count and beverage product variety as before.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\",\"alias\":\"beverage_revenue\"},{\"ref\":\"metric:orders.drink_orders\",\"alias\":\"beverage_orders\"},{\"ref\":\"entity:order_item.product\",\"aggregation\":\"count_distinct\",\"alias\":\"beverage_product_types\",\"scope\":[{\"ref\":\"dimension:order_item.is_drink_item\",\"op\":\"is_true\",\"values\":[],\"source\":\"inherited\"}]}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:order_item.drink_revenue\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.drink_revenue\":\"inherited\",\"metric:orders.drink_orders\":\"inherited\",\"entity:order_item.product\":\"inherited\",\"dimension:order_item.is_drink_item\":\"inherited\",\"entity:customers.customer\":\"q:include the customer name\",\"dimension:customers.customer_name\":\"q:include the customer name in the results\",\"block:commerce.top_beverage_customers\":\"removed:switched to explicit metrics and dimensions so the customer name/key can be added as an explicit display alongside a proper identity key\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:48:40.020Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "0bf97f0c2f58142eb9c8fbfe29551c872d4f8c1f1c91086649a0ce6cc4da502c",
+    "postCanonicalHash": "0bf97f0c2f58142eb9c8fbfe29551c872d4f8c1f1c91086649a0ce6cc4da502c",
+    "appliedRuleClasses": []
+  }
+}

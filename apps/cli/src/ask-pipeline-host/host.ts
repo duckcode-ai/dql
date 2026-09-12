@@ -56,6 +56,7 @@ import {
   aggregatesRows,
   appliedConditions,
   joinKeyPairs,
+  aggregatesColumnOf,
   missingRequiredFilters,
   missingStatedValues,
   requiredFilterFromText,
@@ -1886,7 +1887,18 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
             const repeats = async (side: { relation: string; column: string }) => {
               try { return await probeOne(`SELECT ${side.column} FROM ${side.relation} GROUP BY ${side.column} HAVING COUNT(*) > 1`); } catch { return false; }
             };
-            if (await repeats(pair.left) && await repeats(pair.right)) failures.push(`its join of ${pair.left.relation} and ${pair.right.relation} on ${pair.left.column} = ${pair.right.column} repeats the key on both sides, so totals would count rows more than once`);
+            const leftRepeats = await repeats(pair.left);
+            const rightRepeats = await repeats(pair.right);
+            if (leftRepeats && rightRepeats) failures.push(`its join of ${pair.left.relation} and ${pair.right.relation} on ${pair.left.column} = ${pair.right.column} repeats the key on both sides, so totals would count rows more than once`);
+            else if (leftRepeats !== rightRepeats) {
+              // ONE ROW PER KEY ON ONE SIDE, SEVERAL ON THE OTHER: a total of the
+              // one side's columns (an order's cost) is counted once per matching
+              // row of the other (each order item). It is aggregated at its own
+              // grain before the join, or the number is wrong.
+              const one = leftRepeats ? pair.right : pair.left;
+              const many = leftRepeats ? pair.left : pair.right;
+              if (one.qualifier && aggregatesColumnOf(sql, one.qualifier)) failures.push(`it aggregates columns of ${one.relation} (one row per ${one.column}) across its join to ${many.relation}, which has several rows per ${many.column}, so those totals count each ${one.relation} row once per ${many.relation} row; aggregate ${one.relation} at its own grain (a subquery or CTE) before joining`);
+            }
           }
         }
         return failures;

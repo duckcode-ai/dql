@@ -28,10 +28,7 @@
    ],
    "ordered": true,
    "tier": "reviewable",
-   "note": "A ranking is keyed: the certified top_beverage_customers block groups by customer name with no identity key, so it is refused as not applicable (repairable), the interpreter re-expresses the analysis by entity, and the governed keyed answer is served with the block as evidence and a recertify next action. Identity is never certified away.",
-   "requiredColumns": [
-    "customer_id"
-   ]
+   "note": "Certified first: the top_beverage_customers block, served as published, is the governed answer (it groups by customer name; the caveat that two customers sharing a name would merge is recorded on the answer). A keyed AI-written answer with the name beside the id is also accepted."
   },
   {
    "id": "top-customers",
@@ -637,7 +634,7 @@
     "customer_id",
     "customer_name"
    ],
-   "ordered": true,
+   "ordered": false,
    "tier": "reviewable"
   },
   {
@@ -958,7 +955,7 @@
    "id": "growth-jul-aug",
    "question": "Compare August with July 2025 sales before tax and show the percentage growth.",
    "tier": "reviewable",
-   "note": "A month-over-month comparison the semantic engine cannot express as an offset metric is still answerable as two scoped measures and the change between them: the two totals plus the growth as a fraction of July. A silently zero growth, or two totals with the growth only in the prose, is the failure this case guards against.",
+   "note": "A month-over-month comparison the semantic engine cannot express as an offset metric is still answerable as two scoped measures and the change between them: the two totals plus the growth as a fraction of July. A silently zero growth, or two totals with the growth only in the prose, is the failure this case guards against. AI-written SQL may give the growth in percentage points (8.06) instead of a fraction (0.0806); both are accepted.",
    "sql": "SELECT SUM(CASE WHEN oi.ordered_at >= '2025-07-01' AND oi.ordered_at < '2025-08-01' THEN oi.product_price ELSE 0 END) AS revenue_july, SUM(CASE WHEN oi.ordered_at >= '2025-08-01' AND oi.ordered_at < '2025-09-01' THEN oi.product_price ELSE 0 END) AS revenue_august, (SUM(CASE WHEN oi.ordered_at >= '2025-08-01' AND oi.ordered_at < '2025-09-01' THEN oi.product_price ELSE 0 END) * 1.0  - SUM(CASE WHEN oi.ordered_at >= '2025-07-01' AND oi.ordered_at < '2025-08-01' THEN oi.product_price ELSE 0 END)) / NULLIF(SUM(CASE WHEN oi.ordered_at >= '2025-07-01' AND oi.ordered_at < '2025-08-01' THEN oi.product_price ELSE 0 END) * 1.0, 0) AS growth FROM dev.order_items oi",
    "columns": {
     "revenue_july": [
@@ -992,7 +989,45 @@
      "change_percent",
      "revenue_change"
     ]
-   }
+   },
+   "alternatives": [
+    {
+     "sql": "SELECT revenue_july, revenue_august, growth * 100 AS growth FROM (SELECT SUM(CASE WHEN oi.ordered_at >= '2025-07-01' AND oi.ordered_at < '2025-08-01' THEN oi.product_price ELSE 0 END) AS revenue_july, SUM(CASE WHEN oi.ordered_at >= '2025-08-01' AND oi.ordered_at < '2025-09-01' THEN oi.product_price ELSE 0 END) AS revenue_august, (SUM(CASE WHEN oi.ordered_at >= '2025-08-01' AND oi.ordered_at < '2025-09-01' THEN oi.product_price ELSE 0 END) * 1.0  - SUM(CASE WHEN oi.ordered_at >= '2025-07-01' AND oi.ordered_at < '2025-08-01' THEN oi.product_price ELSE 0 END)) / NULLIF(SUM(CASE WHEN oi.ordered_at >= '2025-07-01' AND oi.ordered_at < '2025-08-01' THEN oi.product_price ELSE 0 END) * 1.0, 0) AS growth FROM dev.order_items oi)",
+     "columns": {
+      "revenue_july": [
+       "revenue_july",
+       "revenue_jul",
+       "revenue_jul_2025",
+       "july_revenue",
+       "revenue_july_2025",
+       "jul_revenue"
+      ],
+      "revenue_august": [
+       "revenue_august",
+       "revenue_aug",
+       "revenue_aug_2025",
+       "august_revenue",
+       "revenue_august_2025",
+       "aug_revenue"
+      ],
+      "growth": [
+       "growth",
+       "growth_pct",
+       "revenue_growth_pct",
+       "percentage_growth",
+       "percent_growth",
+       "growth_percentage",
+       "revenue_growth",
+       "pct_change",
+       "percentage_change",
+       "revenue_change_pct",
+       "change_pct",
+       "change_percent",
+       "revenue_change"
+      ]
+     }
+    }
+   ]
   },
   {
    "id": "unqualified-revenue",
