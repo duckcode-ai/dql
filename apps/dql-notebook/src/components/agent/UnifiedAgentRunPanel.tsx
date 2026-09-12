@@ -82,6 +82,9 @@ import { useNotebook } from '../../store/NotebookStore';
 import { buildConversationContext } from './agentConversationContext';
 import { explainAskRun, explanationForTrace, isAskPipelineReceipt, type RunExplanation } from './ask-run-explanation';
 import { AskRunChecks, AskRunDataUsed, AskRunFlow } from './AskRunFlow';
+import { InvestigationFlow } from './InvestigationFlow';
+import { InvestigationReport } from './InvestigationReport';
+import { explainInvestigation, investigationActiveLabel, investigationReportOf, isInvestigationReceipt } from './investigation-view';
 import type { AgentConversationDqlArtifact } from '../../llm/types';
 import { addAskResultFilter, askArtifactStateKey, askResultFilterCandidates } from '../../utils/ask-runtime-parameters';
 
@@ -1348,7 +1351,7 @@ export function UnifiedAgentRunPanel({
   );
 }
 
-const DEFAULT_EMPTY_HINT = 'Ask a question — every answer is grounded in your certified metrics and dbt lineage. Use Research deeper on any answer for a slower investigation.';
+const DEFAULT_EMPTY_HINT = 'Ask a question — every answer is grounded in your certified metrics and dbt lineage. Use Research deeper on any answer to investigate what changed.';
 const EXAMPLE_PROMPTS: ExamplePrompt[] = [
   { label: 'What is total revenue?', prompt: 'What is total revenue?' },
   { label: 'Why is revenue down by region?', prompt: 'Why is revenue down by region?' },
@@ -1509,7 +1512,7 @@ function findActiveAgentRun(threadId?: string): PendingAgentRun | undefined {
 
 const THINKING_MODE_STORAGE_KEY = 'dql.agent.thinkingMode';
 /** Visible consent copy mirrors the provider egress boundary exactly. */
-export const RESEARCH_TOOL_ROWS_CONSENT_TITLE = 'One-run consent: during explicit Research, enables up to 20 redacted result rows for Research narration and up to 200 redacted local-analysis tool rows. Ordinary Ask—and Research without this selection—keeps result rows local.';
+export const RESEARCH_TOOL_ROWS_CONSENT_TITLE = 'One-run consent: during explicit Research, lets the AI word the summary from the figures the investigation computed, never result rows. Every number it writes is checked against those figures; without this, the summary is written from the figures directly. Ordinary Ask keeps result rows local.';
 /** The browser may request row egress only for the Research run currently being submitted. */
 export function researchResultRowsOptInForRun(
   requestedMode: AgentRunRequestedMode,
@@ -1811,6 +1814,8 @@ export function retainLiveAgentEvents(events: AgentRunEvent[], tail = 8): AgentR
 export function askStoryActiveLabel(steps: AskStoryStep[]): string {
   const last = steps[steps.length - 1];
   if (!last) return 'Searching the project';
+  const researching = investigationActiveLabel(last);
+  if (researching) return researching;
   const title = last.title;
   if (last.phase === 'context') return 'Asking the AI to read the question';
   if (title === 'Asked the AI to read the question' || title === 'Asked the AI to correct its reading' || title.startsWith('Asked the AI to read the question again')) return 'Checking the reading against the project';
@@ -2420,8 +2425,17 @@ export function askInspectorTabsForState(input: {
   /** The run carries the Ask pipeline's record: the step-by-step flow, data used and checks replace the older sections. */
   pipeline?: boolean;
   hasChecks?: boolean;
+  /** The run is a Research investigation: its programs replace the step-by-step flow. */
+  investigation?: boolean;
 }): Array<{ id: AskInspectorTab; label: string }> {
   const tabs: Array<{ id: AskInspectorTab; label: string }> = [];
+  if (input.investigation) {
+    tabs.push({ id: 'how', label: 'How it was researched' });
+    if (input.hasDql) tabs.push({ id: 'dql', label: 'DQL' });
+    if (input.hasSql) tabs.push({ id: 'sql', label: 'SQL' });
+    tabs.push({ id: 'trust', label: 'Trust & steps' });
+    return tabs;
+  }
   if (input.pipeline) {
     tabs.push({ id: 'how', label: 'How it answered' });
     if (input.hasDql) tabs.push({ id: 'dql', label: 'DQL' });
@@ -3754,6 +3768,8 @@ function useAskRunExplanation(run: AgentRun, payload: Record<string, unknown>): 
     return () => { active = false; };
   }, [savedRunId]);
   return useMemo(() => {
+    // An investigation's root receipt is not one answer: its programs explain it instead.
+    if (receipt && isInvestigationReceipt(receipt)) return { unavailable: false };
     if (receipt) return { explanation: explainAskRun({ receipt, payload, evaluations: run.evaluations, status: run.status }), unavailable: false };
     if (savedRunId && fetched?.runId === savedRunId) return { explanation: fetched.explanation, unavailable: !fetched.explanation };
     return { unavailable: false };
@@ -4708,6 +4724,12 @@ function AskInspector({
   const explanation = runExplanation.explanation;
   const { dispatch } = useNotebook();
   const traceRunId = run.agentRunId ?? (run.traceReference ? run.id : undefined);
+  // A Research investigation explains itself program by program.
+  const investigationReport = useMemo(() => (artifact.kind === 'research_run' ? investigationReportOf(payload) : undefined), [artifact.kind, payload]);
+  const investigationExplanation = useMemo(
+    () => (investigationReport ? explainInvestigation({ receipt: run.diagnosticReceiptV9, report: investigationReport }) : undefined),
+    [investigationReport, run.diagnosticReceiptV9],
+  );
 
   const tabs = askInspectorTabsForState({
     analytical: Boolean(analytical),
@@ -4717,6 +4739,7 @@ function AskInspector({
     hasLineage: lineage.length > 0,
     pipeline: Boolean(explanation),
     hasChecks: Boolean(explanation?.checks.length),
+    investigation: Boolean(investigationExplanation),
   });
   const activeTab = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
 
@@ -4764,7 +4787,13 @@ function AskInspector({
 
       {/* Body */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px 20px' }}>
-        {activeTab === 'how' && explanation ? (
+        {activeTab === 'how' && investigationExplanation ? (
+          <InvestigationFlow
+            explanation={investigationExplanation}
+            t={t}
+            onOpenTrace={traceRunId ? () => dispatch({ type: 'OPEN_ASK_TRACE', runId: traceRunId }) : undefined}
+          />
+        ) : activeTab === 'how' && explanation ? (
           <AskRunFlow
             explanation={explanation}
             t={t}
@@ -5765,6 +5794,30 @@ function ArtifactView({
   // Two-phase app build: the proposal card owns the confirm flow (toggles + Create).
   if (artifact.kind === 'app_proposal') {
     return <AppProposalArtifact artifact={artifact} payload={payload} t={t} onOpenApp={onOpenApp} />;
+  }
+  // A Research investigation renders as its report; runs of the earlier
+  // hypothesis Research keep the plan and verdict view below.
+  const investigation = artifact.kind === 'research_run' ? investigationReportOf(payload) : undefined;
+  if (investigation) {
+    const trendSql = typeof payload.sql === 'string' && payload.sql.trim() ? payload.sql : undefined;
+    return (
+      <div style={artifactStyle(t)}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <ArtifactIcon kind={artifact.kind} />
+          <div style={{ fontSize: 12, fontWeight: 800, color: t.textPrimary, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {cleanPresentationText(artifact.title)}
+          </div>
+        </div>
+        <InvestigationReport report={investigation} t={t} themeMode={themeMode} />
+        {trendSql && onInsertSql ? (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button type="button" onClick={() => onInsertSql(trendSql, artifact.title, { question: sourceQuestion, sourceRunId })} style={smallButtonStyle(t)}>
+              Insert the trend query as SQL
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
   }
   const resultData = extractResult(payload);
   const dqlArtifact = resolveArtifactDqlView(payload);

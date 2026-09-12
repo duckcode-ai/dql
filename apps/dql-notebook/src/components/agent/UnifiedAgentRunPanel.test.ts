@@ -264,14 +264,15 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     })).toBe('block');
   });
 
-  it('describes Research tool-row consent separately from ordinary Ask narration rows', () => {
+  it('describes Research summary consent separately from ordinary Ask narration rows', () => {
     expect(researchResultRowsOptInForRun('ask', true)).toBe(false);
     expect(researchResultRowsOptInForRun('auto', true)).toBe(false);
     expect(researchResultRowsOptInForRun('research', false)).toBe(false);
     expect(researchResultRowsOptInForRun('research', true)).toBe(true);
-    expect(researchToolRowsConsentTitle).toContain('20 redacted result rows for Research narration');
-    expect(researchToolRowsConsentTitle).toContain('200 redacted local-analysis tool rows');
-    expect(researchToolRowsConsentTitle).toContain('Ordinary Ask—and Research without this selection—keeps result rows local');
+    expect(researchToolRowsConsentTitle).toContain('word the summary from the figures the investigation computed, never result rows');
+    expect(researchToolRowsConsentTitle).toContain('checked against those figures');
+    expect(researchToolRowsConsentTitle).not.toContain('200');
+    expect(researchToolRowsConsentTitle).toContain('Ordinary Ask keeps result rows local');
   });
 
   it('labels a legacy category classifier without presenting it as meaning resolution', () => {

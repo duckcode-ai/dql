@@ -82,7 +82,7 @@ export function AskComposerOptions({ t, thinkingMode, onThinkingMode, research, 
         className="dql-ask-ghost"
         aria-label="Research mode"
         aria-pressed={research}
-        title={research ? 'Research is on: plans a bounded investigation with business context' : 'Research: plan a bounded investigation with business context'}
+        title={research ? 'Research is on: investigates what changed, with the query behind every figure (up to 3 minutes)' : 'Research: investigate what changed, with the query behind every figure'}
         onClick={() => onResearch(!research)}
         style={{ ...iconButtonStyle(t, research), ...(research ? { width: 'auto', padding: '0 9px', gap: 5 } : {}) }}
       >
@@ -124,7 +124,7 @@ export function AskComposerOptions({ t, thinkingMode, onThinkingMode, research, 
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary }}>Research mode</div>
-              <div style={{ marginTop: 2, fontSize: 11.5, lineHeight: 1.45, color: t.textMuted }}>Plans a bounded investigation and brings in the surrounding business context.</div>
+              <div style={{ marginTop: 2, fontSize: 11.5, lineHeight: 1.45, color: t.textMuted }}>Compares the period you ask about with the one before and a year earlier, checks the data covers both, and reports the change with the query behind every figure. Takes up to 3 minutes.</div>
             </div>
             <button
               type="button"
@@ -141,12 +141,12 @@ export function AskComposerOptions({ t, thinkingMode, onThinkingMode, research, 
             <label title={researchRowsTitle} style={{ display: 'flex', alignItems: 'flex-start', gap: 7, marginTop: 10, fontSize: 11.5, lineHeight: 1.45, color: t.textSecondary, cursor: 'pointer' }}>
               <input
                 type="checkbox"
-                aria-label="Allow redacted local-analysis tool rows for this Research run"
+                aria-label="Let the AI word the Research summary from the computed figures for this run"
                 checked={researchRows}
                 onChange={(event) => onResearchRows(event.target.checked)}
                 style={{ marginTop: 2 }}
               />
-              Let Research tools read redacted result rows for this run
+              Let the AI word the summary from the computed figures
             </label>
           ) : null}
         </div>

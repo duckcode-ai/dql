@@ -49,6 +49,7 @@ describe('the Ask composer controls', () => {
     expect(closed).toContain('role="switch"');
     expect(closed).not.toContain('redacted result rows');
     const researching = renderToStaticMarkup(createElement(AskComposerOptions, { ...base, research: true, defaultOpen: true }));
-    expect(researching).toContain('Let Research tools read redacted result rows for this run');
+    expect(researching).toContain('Let the AI word the summary from the computed figures');
+    expect(researching).toContain('Takes up to 3 minutes');
   });
 });
