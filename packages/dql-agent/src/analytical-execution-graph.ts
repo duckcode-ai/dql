@@ -857,6 +857,32 @@ export function subtractDecimal(left: ExactDecimal, right: ExactDecimal): ExactD
   });
 }
 
+export function addDecimal(left: ExactDecimal, right: ExactDecimal): ExactDecimal {
+  const scale = Math.max(left.scale, right.scale);
+  return normalizeDecimal({
+    coefficient:
+      left.coefficient * pow10(scale - left.scale) +
+      right.coefficient * pow10(scale - right.scale),
+    scale,
+  });
+}
+
+export function negateDecimal(value: ExactDecimal): ExactDecimal {
+  return { coefficient: -value.coefficient, scale: value.scale };
+}
+
+export function absDecimal(value: ExactDecimal): ExactDecimal {
+  return value.coefficient < 0n ? negateDecimal(value) : value;
+}
+
+export function multiplyDecimal(left: ExactDecimal, right: ExactDecimal): ExactDecimal {
+  return normalizeDecimal({ coefficient: left.coefficient * right.coefficient, scale: left.scale + right.scale });
+}
+
+export function sumDecimals(values: ExactDecimal[]): ExactDecimal {
+  return values.reduce((total, value) => addDecimal(total, value), { coefficient: 0n, scale: 0 });
+}
+
 export function compareDecimal(left: ExactDecimal, right: ExactDecimal): number {
   const scale = Math.max(left.scale, right.scale);
   const leftValue = left.coefficient * pow10(scale - left.scale);

@@ -2023,6 +2023,7 @@ export type { SemanticFanoutProbeFailureCodeV1, SemanticFanoutProbeResultV1 } fr
 
 // Ask pipeline (intent → prepare → execute): the interpreter-first runtime.
 export * from './ask-pipeline/index.js';
+export * from './research/investigation/index.js';
 export { generateStructured, extractFirstJsonObject, type StructuredReply } from './providers/structured-output.js';
 
 export * from './relationship-validation.js';

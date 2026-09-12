@@ -80,7 +80,11 @@ export interface PipelineReceipt {
  */
 export interface AskStoryStepV1 {
   version: 1;
-  phase: 'context' | 'read' | 'search' | 'tier' | 'join' | 'schema' | 'execute';
+  /** Ask phases, then Research's: framing the change, checking the data, analysing it, drilling in, weighing the evidence, writing the report. */
+  phase: 'context' | 'read' | 'search' | 'tier' | 'join' | 'schema' | 'execute' | 'frame' | 'check' | 'analyze' | 'drill' | 'verdict' | 'report';
+  /** Research: the program this step belongs to, and the query it ran. */
+  programId?: string;
+  queryId?: string;
   title: string;
   detail?: string;
   state: 'done' | 'missed' | 'failed';
