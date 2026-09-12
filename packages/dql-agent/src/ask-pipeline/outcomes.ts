@@ -116,7 +116,9 @@ export type PipelineOutcome =
   | { kind: 'clarify'; intent: AnalyticalIntentV1; question: string; options: Array<{ ref: string; label: string; description?: string }>; text: string; receipt: PipelineReceipt }
   | { kind: 'conversation' | 'definition'; reply: string; text: string; receipt: PipelineReceipt; intent?: AnalyticalIntentV1 }
   | { kind: 'gap'; gap: GapKind; message: string; nearest: string[]; text: string; receipt: PipelineReceipt; intent?: AnalyticalIntentV1; offerExploration: boolean }
-  | { kind: 'failed'; stage: 'resolve' | 'prepare' | 'execute'; message: string; text: string; receipt: PipelineReceipt; intent?: AnalyticalIntentV1 };
+  | { kind: 'failed'; stage: 'resolve' | 'prepare' | 'execute'; message: string; text: string; receipt: PipelineReceipt; intent?: AnalyticalIntentV1 }
+  /** Only with `stopAfter: 'reading'`: the proven, policed reading, before anything is prepared. */
+  | { kind: 'reading'; intent: AnalyticalIntentV1; lane: 'governed' | 'ai'; text: string; receipt: PipelineReceipt };
 
 export function labelFor(vocabulary: VocabularyIndex): (ref: string) => string {
   return (ref) => {

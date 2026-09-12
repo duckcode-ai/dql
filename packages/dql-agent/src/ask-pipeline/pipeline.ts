@@ -7,7 +7,7 @@ import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal
 import { applySkillPolicies } from './policies.js';
 import { proveLiterals } from './literal-proof.js';
 import { prepareExploratory } from './prepare/exploratory.js';
-import { keepMembersApart, normalizeEffectiveIntent, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn, predictiveOperatorsIn, readingLane } from './resolve-intent.js';
+import { keepMembersApart, normalizeEffectiveIntent, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn, predictiveOperatorsIn, readingLane, validateIntentRefs } from './resolve-intent.js';
 import { buildVocabularyIndex, renderCard, type RenderedCards, type VocabularyDomainHeader, type VocabularyEntry, type VocabularyIndex } from './vocabulary.js';
 import { mergePhysicalRelationBinding, physicalRelationIdentity, physicalRelationText, samePhysicalRelation } from './physical-binding.js';
 
@@ -119,6 +119,16 @@ export interface RunAskPipelineInput {
   };
   /** The thread's compacted memory: what was settled earlier, and a clarification still pending. */
   conversation?: { summary?: string; pendingClarification?: string };
+  /**
+   * A reading settled elsewhere: an intent Research built for one of its
+   * programs, or the reading of an answer the user asked to investigate. No AI
+   * reads the question and no repair re-reads it; the refs are validated as a
+   * reading's are, and every later stage (literal proofs, grounding, policies,
+   * tiers, execution) runs unchanged.
+   */
+  resolvedIntent?: { intent: AnalyticalIntentV1; origin: 'research_program' | 'source_run' };
+  /** `reading`: stop once the reading is proven and policed; nothing is prepared, drafted or executed. */
+  stopAfter?: 'reading';
 }
 
 const fingerprintSql = (sql: string) => `sha256:${createHash('sha256').update(sql).digest('hex').slice(0, 24)}`;
@@ -480,7 +490,22 @@ export function mergeDiscoveredRelations(
   return vocabulary.withEntries(extra);
 }
 
+/** A reading settled elsewhere, held to the same ref validation as a reading the AI wrote. */
+function settledResolution(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): IntentResolution {
+  if (intent.kind !== 'analytics') {
+    return { status: 'failed', reason: 'invalid', detail: 'a settled reading must be an analytical reading', problems: [], attempts: 0 };
+  }
+  const validation = validateIntentRefs(intent, vocabulary);
+  if (validation.problems.length > 0) {
+    return { status: 'failed', reason: 'invalid', detail: validation.problems.map((problem) => problem.message).join('; '), problems: validation.problems, attempts: 0 };
+  }
+  return { status: 'resolved', intent: validation.intent, attempts: 0, problems: [] };
+}
+
 export async function runAskPipeline(input: RunAskPipelineInput): Promise<PipelineOutcome> {
+  // A settled reading stands in for the question wherever later stages quote it.
+  const settled = input.resolvedIntent;
+  if (settled) input = { ...input, question: settled.intent.reading || input.question };
   const now = input.now ?? (() => Date.now());
   const started = now();
   const deadline = input.deadlineMs ? started + input.deadlineMs : undefined;
@@ -630,6 +655,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // stays an honest gap. A policy or domain-contract denial never reaches it,
   // and it runs only when AI-drafted SQL is enabled for the project.
   const schemaLane = async (why: string, hint?: AnalyticalIntentV1, options: { onDecline?: 'gap' | 'fallthrough'; caveats?: string[]; draftQuestion?: string } = {}): Promise<PipelineOutcome | undefined> => {
+    if (input.stopAfter === 'reading') return undefined;
     if (!input.prepareDeps.draftSql || !(input.explorationOptIn || input.explorationAuto)) return undefined;
     // Only a security policy stops AI-written SQL; nothing about how tables join does.
     if (receipt.refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict')) return undefined;
@@ -856,7 +882,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // reading over anything else goes to AI-written SQL when it is available.
   const aiSqlAvailable = Boolean(input.prepareDeps.draftSql && (input.explorationOptIn || input.explorationAuto));
   const resolveStarted = now();
-  let resolution: IntentResolution = await resolveIntent({
+  let resolution: IntentResolution = settled ? settledResolution(settled.intent, input.vocabulary) : await resolveIntent({
     question: input.question, vocabulary: input.vocabulary, provider: input.provider, prior: input.prior, priorExecuted: input.priorExecuted, priorAnswerSummary: input.priorAnswerSummary, clauseCoverage: input.clauseCoverage, budgetMs: remaining(), ...(input.selection ? { selection: input.selection } : {}),
     guidance: memberGuidance(input), cardBudget: input.cardBudget, providerOptions, now,
     renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
@@ -866,7 +892,10 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     expand: expandForClauses,
   });
   mark('resolve', resolveStarted);
-  {
+  if (settled) {
+    receipt.reuse = 'interpretation';
+    step('read', resolution.status === 'failed' ? 'The settled reading named things that do not exist' : 'Used the settled reading', resolution.status === 'failed' ? 'failed' : 'done', { detail: resolution.status === 'failed' ? resolution.detail : settled.intent.reading });
+  } else {
     const calls = receipt.dispatches.filter((dispatch) => dispatch.purpose.startsWith('intent:')).length;
     const callsNote = `${calls} AI call${calls === 1 ? '' : 's'}`;
     if (resolution.status === 'resolved' || resolution.status === 'clarify') {
@@ -888,7 +917,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // A question that could not be read into the governed vocabulary is still a
   // question about these tables. The model itself failing (timeout, quota,
   // authentication) is not: it could not draft either.
-  if (resolution.status === 'failed' && (resolution.reason === 'invalid' || resolution.reason === 'unparseable')) {
+  if (!settled && resolution.status === 'failed' && (resolution.reason === 'invalid' || resolution.reason === 'unparseable')) {
     const drafted = await schemaLane(`the question could not be read into the governed vocabulary (${resolution.detail.slice(0, 300)})`);
     if (drafted) return drafted;
   }
@@ -915,8 +944,9 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // A FORECAST IS NOT A MEASUREMENT, on any lane short of a fully governed
   // reading: nothing is drafted as a proxy for what will happen.
   {
-    const predictive = predictiveOperatorsIn(input.question);
-    const governedReading = intentRefs(resolution.intent).length > 0 && readingLane(resolution.intent, input.vocabulary) === 'governed';
+    // A settled reading has no question wording to hold it to.
+    const predictive = settled ? [] : predictiveOperatorsIn(input.question);
+    const governedReading =intentRefs(resolution.intent).length > 0 && readingLane(resolution.intent, input.vocabulary) === 'governed';
     if (predictive.length > 0 && !governedReading) {
       const message = `Predicting what will happen (${predictive.join(', ')}) is not something Ask computes from the data; it reports what the data recorded. Research can investigate the history behind it`;
       return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: composeGapText('unsupported', message, [], false), receipt, intent: resolution.intent, offerExploration: false };
@@ -1083,7 +1113,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   }
   // A name the reading leans on that the filters never carried is bound from
   // the warehouse before anything is prepared.
-  if (!aiReading && input.suggestMembers && remaining() > 8_000) {
+  if (!settled && !aiReading && input.suggestMembers && remaining() > 8_000) {
     try {
       const bound = await bindNamedSubject(intent, input.question, input.vocabulary, input.suggestMembers);
       if (bound.length) receipt.grounding = [...(receipt.grounding ?? []), ...bound];
@@ -1106,6 +1136,12 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     receipt.failure = { stage: 'prepare', reason: policies.refusal.code, message: policies.refusal.message };
     return { kind: 'gap', gap: 'denied', message: policies.refusal.message, nearest: [], text: composeGapText('denied', policies.refusal.message, [], false), receipt, intent, offerExploration: false };
   }
+  // THE READING ALONE. Research frames an investigation from the proven,
+  // policed reading and runs its own programs; nothing is prepared here.
+  if (input.stopAfter === 'reading') {
+    receipt.intent = intent; receipt.reading = intent.reading;
+    return { kind: 'reading', intent, lane: aiReading ? 'ai' : 'governed', text: intent.reading, receipt };
+  }
   // THE AI LANE. The reading is a hint: the drafter chooses the tables, the
   // fields and the joins, the SQL is checked before it runs (stated values,
   // required filters, a multiplying join, read-only), and the answer is
@@ -1117,12 +1153,12 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     // A FORECAST IS NOT A MEASUREMENT. "Who is most likely to get injured next
     // season" has no measured part; answering it with a proxy (top scorers)
     // would be a substitute measure. It is an unsupported gap, nothing runs.
-    const predictive = predictiveOperatorsIn(input.question);
+    const predictive = settled ? [] : predictiveOperatorsIn(input.question);
     if (predictive.length > 0) {
       const message = `Predicting what will happen (${predictive.join(', ')}) is not something Ask computes from the data; it reports what the data recorded. Research can investigate the history behind it`;
       return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: composeGapText('unsupported', message, [], false), receipt, intent, offerExploration: false };
     }
-    const operators = causalOperatorsIn(input.question);
+    const operators = settled ? [] : causalOperatorsIn(input.question);
     if (operators.length > 0 && intent.measures.length === 0) {
       const message = `Explaining why something happened or recommending what to do (${operators.join(', ')}) is not something Ask computes; Research can investigate the drivers`;
       return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: composeGapText('unsupported', message, [], false), receipt, intent, offerExploration: false };
@@ -1154,7 +1190,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   receipt.intent = intent;
   receipt.reading = intent.reading;
   recordSelection(intent);
-  const uncovered = uncoveredQuestionTerms(input.question, intent, input.vocabulary);
+  const uncovered = settled ? [] : uncoveredQuestionTerms(input.question, intent, input.vocabulary);
   if (uncovered.length) { receipt.uncovered = uncovered; receipt.coverage = coverageStates(input.question, uncovered); }
 
   // 2. Prepare (with cache and one bounded repair).
@@ -1200,7 +1236,8 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     // compile goes to AI SQL instead of spending a dispatch re-reading it; a
     // certified block that does not apply is still re-read into metrics.
     const repairable = prepared.refusals.find((refusal) => refusal.repairable && !(aiSqlAvailable && refusal.tier === 'semantic'));
-    if (!repairable || round > 0 || remaining() < 12_000) break;
+    // A settled reading is never re-read: its caller chose it.
+    if (!repairable || round > 0 || remaining() < 12_000 || settled) break;
     const repairStarted = now();
     resolution = await resolveIntent({
       coverageQuestion: input.question,
@@ -1465,7 +1502,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   if (judgmentCaveat) caveats.unshift(judgmentCaveat);
   // A part the POLICY answered for is answered: the required filters the
   // host applied are part of the reading, not context it lacks.
-  const facets = unmetFacets(input.question, intent, input.vocabulary, { policyTexts: [...(receipt.context?.enforced?.requiredFilters ?? []), ...(receipt.policies ?? []).map((policy) => policy.effect ?? '')] });
+  const facets = settled ? [] : unmetFacets(input.question, intent, input.vocabulary, { policyTexts: [...(receipt.context?.enforced?.requiredFilters ?? []), ...(receipt.policies ?? []).map((policy) => policy.effect ?? '')] });
   if (facets.length > 0) {
     const message = `this answer carries nothing for ${facets.map((facet) => `"${facet}"`).join(', ')}: no governed metric or dimension of this project is named for ${facets.length === 1 ? 'it' : 'them'}`;
     receipt.unmet = [...(receipt.unmet ?? []), { obligation: 'coverage', message }];
