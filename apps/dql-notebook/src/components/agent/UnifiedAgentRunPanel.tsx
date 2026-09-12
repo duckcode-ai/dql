@@ -2496,7 +2496,7 @@ export function askArtifactMeta(artifact: AgentRunArtifact, payload: Record<stri
   parts.push(kindLabel);
   const rowCount = result?.rowCount ?? result?.rows?.length;
   if (typeof rowCount === 'number') parts.push(`${rowCount} row${rowCount === 1 ? '' : 's'}`);
-  if (typeof result?.executionTime === 'number') {
+  if (typeof result?.executionTime === 'number' && result.executionTime > 0) {
     parts.push(result.executionTime >= 1000
       ? `${(result.executionTime / 1000).toFixed(1)}s`
       : `${result.executionTime.toFixed(result.executionTime < 10 ? 1 : 0)}ms`);
@@ -2512,7 +2512,10 @@ export function askArtifactMeta(artifact: AgentRunArtifact, payload: Record<stri
           : compilationFailure === 'generic'
             ? 'compilation failed'
             : 'blocked'
-        : 'AI-generated';
+        // An investigation's figures can come from governed metrics; the report stays review-required.
+        : artifact.kind === 'research_run' && investigationReportOf(payload)
+          ? 'review required'
+          : 'AI-generated';
   parts.push(provenance);
   return parts.join(' · ');
 }
@@ -2908,7 +2911,9 @@ function AskRunCard(props: AskRunCardProps) {
       ? 'Needs clarification'
       : certified
         ? 'Certified answer'
-        : 'AI-generated answer';
+        : run.artifacts.some((artifact) => artifact.kind === 'research_run' && investigationReportOf(payloadOf(artifact)))
+          ? 'Research report'
+          : 'AI-generated answer';
   // The card supplies its own headline, so the body wants the most SPECIFIC text
   // available: the producer's own message beats the canned per-code headline,
   // which is the same sentence for everything unclassified.
