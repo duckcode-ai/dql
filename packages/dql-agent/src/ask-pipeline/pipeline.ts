@@ -862,7 +862,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
     maxAttempts: remaining() > 15_000 ? 2 : 1,
     aiLane: aiSqlAvailable,
-    onDispatch: (event) => { receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }); dispatchStep(event); },
+    onDispatch: (event) => { receipt.dispatches.push({ purpose: `intent:${event.purpose}`, ms: event.ms, reply: event.raw.slice(0, 1500), at: Date.now(), attempt: event.attempt, label: event.purpose === 'resolve' ? 'read' : 'correct', ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }); dispatchStep(event); },
     expand: expandForClauses,
   });
   mark('resolve', resolveStarted);
@@ -1209,7 +1209,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
       renderedCards, ...(input.conversation ? { conversation: input.conversation } : {}),
       // The repair is held to the original question's obligations.
       ...(resolution.status === 'resolved' && resolution.ledger ? { ledger: resolution.ledger, ledgerRound: round + 1 } : {}),
-      onDispatch: (event) => { receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500), ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }); dispatchStep(event, true); },
+      onDispatch: (event) => { receipt.dispatches.push({ purpose: 'intent:repair', ms: event.ms, reply: event.raw.slice(0, 1500), at: Date.now(), attempt: event.attempt, label: 'reread', ...(event.promptChars !== undefined ? { promptChars: event.promptChars } : {}) }); dispatchStep(event, true); },
     });
     mark('resolve_repair', repairStarted);
     recordLedger(resolution);

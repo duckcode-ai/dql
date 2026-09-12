@@ -20,8 +20,17 @@ export interface PipelineReceipt {
   vocabularyFingerprint: string;
   intent?: AnalyticalIntentV1;
   reading?: string;
-  dispatches: Array<{ purpose: string; ms: number; reply?: string; /** The size of what was sent, so a prompt budget is a measured number. */ promptChars?: number }>;
+  dispatches: Array<{
+    purpose: string; ms: number; reply?: string;
+    /** The size of what was sent, so a prompt budget is a measured number. */ promptChars?: number;
+    /** When the call finished (epoch ms), so AI calls sit in order beside the story. */ at?: number;
+    /** 1-based attempt within its reading or drafting. */ attempt?: number;
+    /** What the call was for, in the words the run views use. */ label?: 'read' | 'correct' | 'reread' | 'draft' | 'redraft' | 'fix' | 'retry_empty' | 'widen';
+    /** What a drafting call returned. */ outcome?: 'sql' | 'declined' | 'rejected' | 'error';
+  }>;
   candidates: Array<{ tier: string; trust: string; proof: string[]; sqlFingerprint?: string; engine?: string }>;
+  /** The checks an AI-written statement was held to before it ran: one entry per check per draft. */
+  checks?: Array<{ id: 'stated_values' | 'required_filters' | 'join_fanout' | 'catalog_columns' | 'read_only'; label: string; passed: boolean; message: string; attempt: number }>;
   refusals: PreparedRefusal[];
   /** Tier attempts per preparation round, in order. */
   tiers: Array<{ round: number; tier: string; outcome: string; detail?: string }>;

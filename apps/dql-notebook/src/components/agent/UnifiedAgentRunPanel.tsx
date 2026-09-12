@@ -80,6 +80,8 @@ export { deriveResultChartConfig } from '../output/ResultView';
 import type { QueryResult, AppSummary, CellChartConfig, Cell, BlockParameterDefinition, ExecutionTarget } from '../../store/types';
 import { useNotebook } from '../../store/NotebookStore';
 import { buildConversationContext } from './agentConversationContext';
+import { explainAskRun, explanationForTrace, isAskPipelineReceipt, type RunExplanation } from './ask-run-explanation';
+import { AskRunChecks, AskRunDataUsed, AskRunFlow } from './AskRunFlow';
 import type { AgentConversationDqlArtifact } from '../../llm/types';
 import { addAskResultFilter, askArtifactStateKey, askResultFilterCandidates } from '../../utils/ask-runtime-parameters';
 
@@ -1793,6 +1795,8 @@ function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
     events: [],
     nextActions: [],
     repairAttempts: 0,
+    // The saved run this turn came from, so "How it was answered" can read its record back.
+    ...(turn.agentRunId ? { agentRunId: turn.agentRunId } : {}),
   };
 }
 
@@ -2527,7 +2531,7 @@ function RunCard({
 // api call and handoff keeps working.
 // ══════════════════════════════════════════════════════════════════════════
 
-export type AskInspectorTab = 'how' | 'dql' | 'sql' | 'lineage' | 'trust';
+export type AskInspectorTab = 'how' | 'dql' | 'sql' | 'data' | 'checks' | 'lineage' | 'trust';
 
 /**
  * Failed analytical runs keep the complete research scaffold visible even when
@@ -2541,8 +2545,19 @@ export function askInspectorTabsForState(input: {
   hasDql: boolean;
   hasSql: boolean;
   hasLineage: boolean;
+  /** The run carries the Ask pipeline's record: the step-by-step flow, data used and checks replace the older sections. */
+  pipeline?: boolean;
+  hasChecks?: boolean;
 }): Array<{ id: AskInspectorTab; label: string }> {
   const tabs: Array<{ id: AskInspectorTab; label: string }> = [];
+  if (input.pipeline) {
+    tabs.push({ id: 'how', label: 'How it answered' });
+    if (input.hasDql) tabs.push({ id: 'dql', label: 'DQL' });
+    if (input.hasSql) tabs.push({ id: 'sql', label: 'SQL' });
+    tabs.push({ id: 'data', label: 'Data used' });
+    if (input.hasChecks) tabs.push({ id: 'checks', label: 'Checks' });
+    return tabs;
+  }
   if (input.analytical) tabs.push({ id: 'how', label: 'How it answered' });
   if (input.hasDql || (input.analytical && input.blocked)) tabs.push({ id: 'dql', label: 'DQL' });
   if (input.hasSql || (input.analytical && input.blocked)) tabs.push({ id: 'sql', label: 'SQL' });
@@ -2779,8 +2794,20 @@ function lineageEntriesFromRun(run: AgentRun): AskLineageEntry[] {
   return entries.slice(0, 24);
 }
 
+/** The Ask pipeline's record for a run: on the run itself, or on one of its answer payloads. */
+export function askPipelineReceiptOf(run: Pick<AgentRun, 'diagnosticReceiptV9' | 'artifacts'>): Record<string, unknown> | undefined {
+  if (isAskPipelineReceipt(run.diagnosticReceiptV9)) return run.diagnosticReceiptV9;
+  const onPayload = (run.artifacts ?? []).map((artifact) => payloadOf(artifact).askPipeline).find(isAskPipelineReceipt);
+  return onPayload as Record<string, unknown> | undefined;
+}
+
+export function hasAskPipelineReceipt(run: Pick<AgentRun, 'diagnosticReceiptV9' | 'artifacts'>): boolean {
+  return Boolean(askPipelineReceiptOf(run));
+}
+
 export function preferredAskInspectorTab(run: AgentRun, artifact: AgentRunArtifact): AskInspectorTab {
   const payload = payloadOf(artifact);
+  if (hasAskPipelineReceipt(run)) return 'how';
   if (run.diagnosticReceiptV8?.mode === 'authoritative_v2' || hasAnalyticalInspectorContract(payload)) return 'how';
   if ((answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload))?.source) return 'dql';
   if (answerSqlFromRun(run) ?? (typeof payload.sql === 'string' ? payload.sql : undefined)) return 'sql';
@@ -3058,7 +3085,7 @@ function AskRunCard(props: AskRunCardProps) {
             <FileSearch size={11} color={researchVerdicts.limitedScope ? t.warning : t.accent} /> {researchVerdicts.compactLabel}
           </button>
         ) : !blocked && !cancelled && primaryArtifact && passedChecks > 0 ? (
-          <button type="button" onClick={() => openArtifact(primaryArtifact.id, 'trust')} style={{ fontSize: 11, color: t.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <button type="button" onClick={() => openArtifact(primaryArtifact.id, hasAskPipelineReceipt(run) ? 'checks' : 'trust')} style={{ fontSize: 11, color: t.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             <Check size={11} color={t.success} /> {passedChecks} check{passedChecks === 1 ? '' : 's'} passed
           </button>
         ) : null}
@@ -3184,7 +3211,7 @@ function AskRunCard(props: AskRunCardProps) {
             </button>
           ) : null}
           {primaryArtifact ? (
-            <button type="button" className="dql-ask-ghost" onClick={() => openArtifact(primaryArtifact.id, hasAnalyticalInspectorContract(payloadOf(primaryArtifact)) ? 'how' : 'trust')} style={askGhostBtnStyle(t)}>
+            <button type="button" className="dql-ask-ghost" onClick={() => openArtifact(primaryArtifact.id, hasAnalyticalInspectorContract(payloadOf(primaryArtifact)) || hasAskPipelineReceipt(run) || run.agentRunId ? 'how' : 'trust')} style={askGhostBtnStyle(t)}>
               <ListTree size={12} /> How it was answered
             </button>
           ) : null}
@@ -3837,6 +3864,30 @@ type CanonicalPerformanceTraceState =
  * state is discarded with the inspector.  Until it arrives, do not briefly
  * show stale legacy counters for a trace-backed run.
  */
+/**
+ * The step-by-step explanation of an Ask pipeline run: from the run's own
+ * record, or — for a run rebuilt from a saved thread turn — read back from the
+ * saved run's trace. `unavailable` when a saved run has no record any more.
+ */
+function useAskRunExplanation(run: AgentRun, payload: Record<string, unknown>): { explanation?: RunExplanation; unavailable: boolean } {
+  const receipt = askPipelineReceiptOf(run);
+  const savedRunId = receipt ? undefined : run.agentRunId;
+  const [fetched, setFetched] = useState<{ runId: string; explanation?: RunExplanation }>();
+  useEffect(() => {
+    if (!savedRunId) return undefined;
+    let active = true;
+    void api.getAskTraceByRun(savedRunId)
+      .then((trace) => { if (active) setFetched({ runId: savedRunId, explanation: explanationForTrace(trace) }); })
+      .catch(() => { if (active) setFetched({ runId: savedRunId }); });
+    return () => { active = false; };
+  }, [savedRunId]);
+  return useMemo(() => {
+    if (receipt) return { explanation: explainAskRun({ receipt, payload, evaluations: run.evaluations, status: run.status }), unavailable: false };
+    if (savedRunId && fetched?.runId === savedRunId) return { explanation: fetched.explanation, unavailable: !fetched.explanation };
+    return { unavailable: false };
+  }, [receipt, payload, run.evaluations, run.status, savedRunId, fetched]);
+}
+
 function useCanonicalPerformanceTrace(run: AgentRun): CanonicalPerformanceTraceState {
   const traceId = run.traceReference?.traceId;
   const recordingStatus = run.traceReference?.recordingStatus;
@@ -4780,6 +4831,11 @@ function AskInspector({
   // duplicate it, but it still deserves the compact authoritative story.
   const analytical = analyticalInspectorContract(payload)
     ?? (run.diagnosticReceiptV8?.mode === 'authoritative_v2' ? {} : undefined);
+  // An Ask pipeline run explains itself step by step from its own record.
+  const runExplanation = useAskRunExplanation(run, payload);
+  const explanation = runExplanation.explanation;
+  const { dispatch } = useNotebook();
+  const traceRunId = run.agentRunId ?? (run.traceReference ? run.id : undefined);
 
   const tabs = askInspectorTabsForState({
     analytical: Boolean(analytical),
@@ -4787,6 +4843,8 @@ function AskInspector({
     hasDql: Boolean(dqlArtifact?.source),
     hasSql: Boolean(sql),
     hasLineage: lineage.length > 0,
+    pipeline: Boolean(explanation),
+    hasChecks: Boolean(explanation?.checks.length),
   });
   const activeTab = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
 
@@ -4834,7 +4892,14 @@ function AskInspector({
 
       {/* Body */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px 20px' }}>
-        {activeTab === 'how' && analytical ? (
+        {activeTab === 'how' && explanation ? (
+          <AskRunFlow
+            explanation={explanation}
+            t={t}
+            onOpenTab={onChangeTab}
+            onOpenTrace={traceRunId ? () => dispatch({ type: 'OPEN_ASK_TRACE', runId: traceRunId }) : undefined}
+          />
+        ) : activeTab === 'how' && analytical ? (
           <AnalyticalHowAnswered
             run={run}
             contract={analytical}
@@ -4919,6 +4984,8 @@ function AskInspector({
             <InspectorEmpty t={t}>Compilation stopped before SQL was produced. The DQL, plan, trust evidence, and failure steps are still retained.</InspectorEmpty>
           )
         ) : null}
+        {activeTab === 'data' && explanation ? <AskRunDataUsed data={explanation.dataUsed} t={t} /> : null}
+        {activeTab === 'checks' && explanation ? <AskRunChecks checks={explanation.checks} t={t} /> : null}
         {activeTab === 'lineage' ? (
           <div style={{ display: 'grid', gap: 8 }}>
             <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.5 }}>Governed semantic objects and physical sources used to produce this result.</div>
@@ -4935,6 +5002,7 @@ function AskInspector({
         ) : null}
         {activeTab === 'trust' ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {runExplanation.unavailable ? <InspectorEmpty t={t}>The step-by-step record for this answer is no longer kept.</InspectorEmpty> : null}
             {trustNote ? (
               <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 12px', borderRadius: 8, background: certified ? 'var(--status-success-bg)' : 'var(--status-warning-bg)', border: `1px solid ${certified ? 'var(--status-success-border)' : 'var(--status-warning-border)'}` }}>
                 {certified ? <ShieldCheck size={13} color="var(--status-success)" style={{ flexShrink: 0, marginTop: 1 }} /> : <ShieldAlert size={13} color="var(--status-warning)" style={{ flexShrink: 0, marginTop: 1 }} />}

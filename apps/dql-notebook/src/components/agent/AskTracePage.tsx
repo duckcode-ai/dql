@@ -37,6 +37,8 @@ import {
 } from '../../api/client';
 import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
+import { explanationForTrace } from './ask-run-explanation';
+import { AskRunDecisionView, AskRunTraceSummary } from './AskRunDecisionView';
 
 type TraceTab = 'tree' | 'graph' | 'timeline';
 type TraceSelection = { kind: 'span'; spanId: string } | { kind: 'candidates' };
@@ -214,6 +216,8 @@ export function AskTracePage({ runId }: { runId: string }): JSX.Element {
   if (!trace) return <TraceFailure t={t} message="No local trace data is available for this Ask run." onBack={goBack} onRetry={() => window.location.reload()} />;
   const researchFocus = requestedFocus === 'research' ? researchFocusSpanForTrace(trace) : undefined;
   const lineageStory = lineageResearchStoryForSpan(researchFocus);
+  // An Ask pipeline run is explained as a decision flow; the recorded events stay below as an advanced view.
+  const pipelineExplanation = explanationForTrace(trace);
 
   return (
     <main style={{ flex: 1, minWidth: 0, overflow: 'auto', background: t.appBg, color: t.textPrimary, fontFamily: t.font }}>
@@ -233,14 +237,15 @@ export function AskTracePage({ runId }: { runId: string }): JSX.Element {
           </div>
         ) : null}
         <TraceDecisionStory trace={trace} t={t} onSelectSpan={selectIncidentSpan} />
+        {pipelineExplanation ? <AskRunDecisionView trace={trace} explanation={pipelineExplanation} t={t} isNarrow={isNarrow} /> : null}
         <details style={{ marginTop: 14 }}>
           <summary style={{ cursor: 'pointer', color: t.textSecondary, fontSize: 13, fontWeight: 750, padding: '8px 0' }}>
-            Advanced evidence
+            {pipelineExplanation ? 'Recorded events (advanced)' : 'Advanced evidence'}
           </summary>
           <div style={{ marginTop: 8 }}>
         {trace.runtimeReceiptV8 ? <V2AdvancedDecisionEvidence receipt={trace.runtimeReceiptV8} t={t} /> : null}
-        <TraceTabs selected={tab} onSelect={setTab} t={t} />
-        {tab === 'graph' ? (
+        <TraceTabs selected={tab} onSelect={setTab} t={t} hideGraph={Boolean(pipelineExplanation)} />
+        {tab === 'graph' && !pipelineExplanation ? (
           <div id="ask-trace-panel-graph" role="tabpanel" aria-labelledby="ask-trace-tab-graph" style={traceSplitLayout(isNarrow)}>
             <TraceGraph trace={trace} t={t} selection={selection} onSelect={(spanId) => setSelection({ kind: 'span', spanId })} />
             <TraceDetail
@@ -359,7 +364,9 @@ function TraceHeader({ trace, t, onRefresh }: { trace: AskTraceDataV1; t: Theme;
         {envelope.droppedRecordCount > 0 ? <span role="status">· {envelope.droppedRecordCount} bounded records omitted</span> : null}
       </div>
       <div style={{ marginTop: 9, fontSize: 11, color: t.textMuted, lineHeight: 1.45 }}>
-        This local trace contains typed execution evidence only. Prompts, SQL text, result rows, provider responses, credentials, and file paths are not retained.
+        {trace.runtimeReceiptV9
+          ? 'This local trace keeps the run record: what each AI call was for, how long it took and its reply, the checks, the SQL that ran and a sample of its rows. Full prompts, credentials and file paths are not kept.'
+          : 'This local trace contains typed execution evidence only. Prompts, SQL text, result rows, provider responses, credentials, and file paths are not retained.'}
       </div>
     </header>
   );
@@ -369,12 +376,14 @@ function askRuntimeModeLabel(mode: NonNullable<AskTraceDataV1['runtimeMode']>): 
   return mode === 'pipeline_v3' ? 'Ask pipeline runtime' : 'Authoritative V2 runtime';
 }
 
-function TraceTabs({ selected, onSelect, t }: { selected: TraceTab; onSelect: (tab: TraceTab) => void; t: Theme }): JSX.Element {
+function TraceTabs({ selected, onSelect, t, hideGraph = false }: { selected: TraceTab; onSelect: (tab: TraceTab) => void; t: Theme; hideGraph?: boolean }): JSX.Element {
+  // A pipeline run's decision flow above replaces the span graph.
   const tabs: Array<{ id: TraceTab; label: string }> = [
     { id: 'tree', label: 'Trace Tree' },
-    { id: 'graph', label: 'Agent Graph' },
+    ...(hideGraph ? [] : [{ id: 'graph' as const, label: 'Agent Graph' }]),
     { id: 'timeline', label: 'Timeline' },
   ];
+  if (hideGraph && selected === 'graph') selected = 'tree';
   return (
     <div role="tablist" aria-label="Ask trace views" style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${t.cellBorder}`, marginBottom: 14, overflowX: 'auto' }}>
       {tabs.map((tab) => {
@@ -840,6 +849,8 @@ function V2AdvancedDecisionEvidence({
 
 /** The default top-to-bottom story for V4 runs. Old traces remain readable. */
 export function TraceDecisionStory({ trace, t, onSelectSpan: _onSelectSpan }: { trace: AskTraceDataV1; t: Theme; onSelectSpan: (spanId: string) => void }): JSX.Element {
+  const pipeline = explanationForTrace(trace);
+  if (pipeline) return <AskRunTraceSummary explanation={pipeline} t={t} />;
   const runtimeV8 = trace.runtimeReceiptV8;
   if (runtimeV8?.mode === 'authoritative_v2') {
     const terminal = runtimeV8.terminalOutcome;
@@ -1871,24 +1882,35 @@ function DetailGrid({ t, rows }: { t: Theme; rows: Array<[string, string]> }): J
 }
 
 function FragmentRow({ label, value, t }: { label: string; value: string; t: Theme }): JSX.Element {
-  return <><dt style={{ color: t.textMuted }}>{label}</dt><dd style={{ margin: 0, color: t.textSecondary, wordBreak: 'break-word' }}>{value}</dd></>;
+  return <><dt style={{ color: t.textMuted }}>{label}</dt><dd style={{ margin: 0, color: t.textSecondary, wordBreak: 'break-word', minWidth: 0 }}>
+    {value.includes('\n')
+      ? <pre style={{ margin: 0, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: t.fontMono, fontSize: 11, lineHeight: 1.45 }}>{value}</pre>
+      : value}
+  </dd></>;
 }
 
 function detailRows(payload: AskTraceSpanV1['payload']): Array<[string, string]> {
   const rows: Array<[string, string]> = [];
   for (const [key, value] of Object.entries(payload)) {
     if (key === 'kind' || value === undefined) continue;
-    rows.push([labelForKey(key), safeDisplay(value)]);
+    rows.push([labelForKey(key), traceValueDisplay(value)]);
   }
   return rows;
 }
 
-function safeDisplay(value: unknown): string {
+/** A recorded value as the reader can see it: lists and objects as indented JSON, cut at about 2,000 characters. */
+export function traceValueDisplay(value: unknown, limit = 2_000): string {
   if (value === null) return 'None';
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
-  if (Array.isArray(value)) return value.length ? `${value.length} recorded identifiers` : 'None';
-  if (typeof value === 'object') return `${Object.keys(value as Record<string, unknown>).length} recorded fields`;
-  return 'Not recorded';
+  if (Array.isArray(value) && value.length === 0) return 'None';
+  if (typeof value !== 'object') return 'Not recorded';
+  let text: string;
+  try {
+    text = JSON.stringify(value, null, 2);
+  } catch {
+    return 'Not recorded';
+  }
+  return text.length > limit ? `${text.slice(0, limit)}\n… ${text.length - limit} more characters` : text;
 }
 
 function humanize(value: string): string { return value.replace(/_/g, ' '); }

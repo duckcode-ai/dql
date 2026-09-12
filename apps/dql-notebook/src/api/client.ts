@@ -1601,6 +1601,22 @@ export interface AskTraceEnvelopeV1 {
   parentRunId?: string;
 }
 
+export interface AskTraceAnswerV1 {
+  sql?: string;
+  sqlParams?: unknown[];
+  dqlArtifact?: { kind?: string; name?: string; source?: string; metrics?: string[]; dimensions?: string[] };
+  columns?: Array<string | { name: string }>;
+  rowsSample?: Array<Record<string, unknown> | unknown[]>;
+  rowCount?: number;
+  evaluations?: Array<{ id?: string; label?: string; passed?: boolean; message?: string }>;
+  status?: string;
+  gap?: { kind?: string; message?: string };
+  executionError?: string;
+  failedStage?: string;
+  certifiedBlockRef?: string;
+  proof?: string[];
+}
+
 export interface AskTraceDataV1 {
   envelope: AskTraceEnvelopeV1;
   spans: AskTraceSpanV1[];
@@ -1617,6 +1633,8 @@ export interface AskTraceDataV1 {
   runtimeReceiptV8?: AgentRunDiagnosticReceiptV8;
   /** The Ask pipeline's receipt (`diagnosticReceiptV9` on the run), when the run carries one. */
   runtimeReceiptV9?: Record<string, unknown>;
+  /** The answer a pipeline trace explains, read from the saved run: SQL, DQL, a row sample and how the turn ended. */
+  runtimeAnswerV1?: AskTraceAnswerV1;
   /** Server-owned Ask rollout mode joined from the durable run; old traces omit it. */
   runtimeMode?: 'authoritative_v2' | 'pipeline_v3';
 }
@@ -1697,6 +1715,8 @@ export interface AgentRun {
   telemetry?: AgentRunTelemetryV1;
   /** OBS-001: compact local trace reference; trace detail is never embedded here. */
   traceReference?: AgentRunTraceReferenceV1;
+  /** A run rebuilt from a thread turn: the saved run it came from, so its record can still be read. */
+  agentRunId?: string;
   repairCapability?: AnalyticalRepairCapabilityV1;
   providerEgressReceipts?: ProviderEgressReceiptV1[];
   derivation?: {

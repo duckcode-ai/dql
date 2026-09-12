@@ -958,6 +958,14 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
     ]);
     expect(result.status).toBe('completed');
     expect(result.answer).toContain("it filters on LOWER(stage) = 'closed lost' AND LOWER(competitor) = 'splunk'");
+    // The run keeps what each drafting call was for and what it returned, and
+    // the checks as verdicts: a failed stated-value check, then a passing one.
+    const drafts = (result.askPipelineReceipt?.dispatches ?? []).filter((dispatch) => dispatch.purpose === 'intent:draft');
+    expect(drafts.map((dispatch) => [dispatch.label, dispatch.outcome])).toEqual([['draft', 'sql'], ['fix', 'sql']]);
+    expect(drafts[1]!.reply).toContain("LOWER(competitor) = 'splunk'");
+    const stated = (result.askPipelineReceipt?.checks ?? []).filter((check) => check.id === 'stated_values');
+    expect(stated.map((check) => [check.attempt, check.passed])).toEqual([[1, false], [2, true]]);
+    expect(stated[0]!.message).toContain('"Splunk"');
   });
 
   it('a statement rejected for a column the table does not have is corrected once, with the reason', async () => {
@@ -1033,6 +1041,9 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
     expect(prompts[1]).toContain('NOTE: A first draft over sales.opportunities found no field for this');
     expect(result.status).toBe('completed');
     expect(result.askPipelineReceipt?.story?.some((entry) => entry.title === 'Searched every table for the missing field: found crm.deal_notes')).toBe(true);
+    // The second call looked again with more tables; it did not fix a failed check.
+    const drafts = (result.askPipelineReceipt?.dispatches ?? []).filter((dispatch) => dispatch.purpose === 'intent:draft');
+    expect(drafts.map((dispatch) => [dispatch.label, dispatch.outcome])).toEqual([['draft', 'declined'], ['widen', 'sql']]);
   });
 
   it('what the user said in the conversation chooses tables and reaches the draft', async () => {

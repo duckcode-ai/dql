@@ -2835,6 +2835,17 @@ describe('two governed sources: certified blocks and authored semantics; everyth
     if (outcome.kind === 'answered') expect(outcome.candidate.trust).toBe('review_required');
   });
 
+  it('each AI call is recorded with when it finished, which attempt it was and what it was for', async () => {
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'sum' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
+    const outcome = await runAskPipeline({
+      question: 'total amount', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { draftSql: async () => ({ sql: 'SELECT SUM(amount) AS amount FROM dev.orders', relations: ['dev.orders'], proof: [] }) },
+      executeDeps: { run: async () => ({ columns: ['amount'], rows: [{ amount: 3 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(outcome.receipt.dispatches[0]).toMatchObject({ purpose: 'intent:resolve', attempt: 1, label: 'read' });
+    expect(typeof outcome.receipt.dispatches[0]!.at).toBe('number');
+  });
+
   it('a reading over tables costs one reading and one draft: no correction rounds before AI-written SQL', async () => {
     let dispatches = 0;
     let drafts = 0;

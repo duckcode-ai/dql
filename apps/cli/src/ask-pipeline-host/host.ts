@@ -1641,7 +1641,11 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
     emit({ type: 'executor.started', message: `Context assembled in ${contextMs} ms: ${vocabulary.entries.length} governed objects${engine ? ` · semantic engine ${engine}` : ''}${phaseSummary ? ` (${phaseSummary})` : ''}.`, route: 'generated_answer' });
     emit({ type: 'executor.started', message: prior ? 'Reading the question as an edit of the previous analysis.' : 'Reading the question against the governed vocabulary.', route: 'generated_answer' });
     const ledgered = withLedger(provider, deps, request);
-    const draftDispatches: Array<{ purpose: string; ms: number; reply?: string; promptChars?: number }> = [];
+    const draftDispatches: Array<{ purpose: string; ms: number; reply?: string; promptChars?: number; at?: number; attempt?: number; label?: 'draft' | 'redraft' | 'fix' | 'retry_empty' | 'widen'; outcome?: 'sql' | 'declined' | 'rejected' | 'error' }> = [];
+    // The checks drafted SQL was held to, recorded for the run views (the
+    // notes sent back to the model are built separately and never from these).
+    const hostChecks: Array<{ id: 'stated_values' | 'required_filters' | 'join_fanout' | 'catalog_columns' | 'read_only'; label: string; passed: boolean; message: string; attempt: number }> = [];
+    let checkRound = 0;
     // ON-DEMAND DESCRIPTION: a relation the reading names whose columns the
     // bounded probe never reached is described now, for this one run.
     const describeRelations = async (relations: string[]) => {
@@ -1785,7 +1789,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         ...joinLines,
         ...hintLines,
       ];
-      const attemptDraft = async (note?: string): Promise<Awaited<ReturnType<NonNullable<PrepareDeps['draftSql']>>>> => {
+      const attemptDraft = async (note?: string, label?: 'fix' | 'widen'): Promise<Awaited<ReturnType<NonNullable<PrepareDeps['draftSql']>>>> => {
         const unresolvedPhysical = current.entries
           .filter((entry) => entry.kind === 'relation' && relations.some((relation) => {
             const physical = entryPhysicalRelation(entry);
@@ -1816,22 +1820,36 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         ];
         const draftStarted = Date.now();
         const trace = deps.dispatchOptions?.('draft', request);
+        // What this call was for and what it returned, kept for the run views.
+        const dispatch: (typeof draftDispatches)[number] = {
+          purpose: 'intent:draft', ms: 0, attempt: draftDispatches.length + 1,
+          label: label ?? (note ? 'fix' : undefined) ?? (previous ?(/^the statement ran and returned no rows/.test(previous.error) ? 'retry_empty' : 'redraft') : 'draft'),
+        };
         let raw: string;
+        let replied: string | undefined;
+        let failed: string | undefined;
         try {
           if (request.signal?.aborted) throw new Error('the request was cancelled before SQL drafting started');
           raw = await provider.generate(messages, { temperature: 0, ...(trace?.options ?? {}), ...(request.signal ? { signal: request.signal } : {}) });
+          replied = raw;
           trace?.settle('ok');
         } catch (error) {
+          failed = error instanceof Error ? error.message : String(error);
           trace?.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
           throw error;
         } finally {
-          draftDispatches.push({ purpose: 'intent:draft', ms: Date.now() - draftStarted, promptChars: messages.reduce((sum, message) => sum + message.content.length, 0) });
+          Object.assign(dispatch, {
+            ms: Date.now() - draftStarted, at: Date.now(), promptChars: messages.reduce((sum, message) => sum + message.content.length, 0),
+            ...(replied !== undefined ? { reply: replied.slice(0, 1500) } : failed !== undefined ? { reply: failed.slice(0, 300), outcome: 'error' as const } : {}),
+          });
+          draftDispatches.push(dispatch);
         }
         const declined = /^\s*NO_SQL\s*:?\s*([\s\S]*)$/i.exec(raw.trim());
-        if (declined) return { declined: declined[1]!.trim() || 'the available tables do not hold what the question asks for' };
+        if (declined) { dispatch.outcome = 'declined'; return { declined: declined[1]!.trim() || 'the available tables do not hold what the question asks for' }; }
         const fenced = /```(?:sql)?\s*([\s\S]*?)```/i.exec(raw);
         const sql = (fenced ? fenced[1]! : raw).trim();
-        if (!sql) return { error: 'the provider returned no SQL' };
+        if (!sql) { dispatch.outcome = 'error'; return { error: 'the provider returned no SQL' }; }
+        dispatch.outcome = 'sql';
         const runtimeSchema = runtimeSchemaForVocabulary(current)
           .filter((table) => relations.some((relation) => physicalRelationIdentity(relation) === physicalRelationIdentity(table.relation)));
         const validation = validateSqlAgainstLocalContext(sql, view.pack, {
@@ -1901,6 +1919,16 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
             }
           }
         }
+        // The same verdicts, recorded as checks for the run views.
+        const attempt = ++checkRound;
+        const joinFailure = failures.find((message) => /repeats the key on both sides|across its join to/.test(message));
+        const statedFailure = failures.find((message) => /from the question$/.test(message));
+        hostChecks.push(
+          { id: 'catalog_columns', label: 'Uses only tables and columns the project lists', passed: true, message: 'every table and column it reads was inspected', attempt },
+          { id: 'stated_values', label: 'Applies every value the question states', passed: !statedFailure, message: statedFailure ?? (stated.length ? `applies ${stated.map((item) => item.value).join(', ')}` : 'the question states no specific values'), attempt },
+          ...(required.length ? [{ id: 'required_filters' as const, label: 'Applies the required filters', passed: missingRequired.length === 0, message: missingRequired.length ? `does not apply ${missingRequired.map((item) => item.text).join(', ')}` : `applies ${required.map((item) => item.text).join(', ')}`, attempt }] : []),
+          { id: 'join_fanout', label: 'Joins do not count rows more than once', passed: !joinFailure, message: joinFailure ?? 'no join multiplies the rows it totals', attempt },
+        );
         return failures;
       };
       type Drafted = Awaited<ReturnType<typeof attemptDraft>>;
@@ -1909,6 +1937,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
         // a table nobody inspected) gets the same one correction a failed check
         // gets, with the reason, before anything is given up.
         if (drafted && 'error' in drafted && /^the drafted SQL /.test(drafted.error)) {
+          hostChecks.push({ id: 'catalog_columns', label: 'Uses only tables and columns the project lists', passed: false, message: drafted.error, attempt: ++checkRound });
           hostStep({ phase: 'schema', title: 'The drafted SQL named something the tables do not have: asking the AI to fix it', state: 'failed', detail: drafted.error });
           const retried = await attemptDraft(`The previous statement was rejected before running: ${drafted.error}. Use only the columns listed under each relation, spelled as listed, and join only on columns both relations list.`);
           if (!retried || !('sql' in retried)) return retried;
@@ -2027,7 +2056,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       }
       relations = [...relations, ...wider];
       hostStep({ phase: 'search', title: `Searched every table for the missing field: found ${wider.join(', ')}`, state: 'done', detail: `looked for ${words.slice(0, 4).join(', ')}; the first draft over ${shown.join(', ')} found none` });
-      const second = await attemptDraft(`A first draft over ${shown.join(', ')} found no field for this ("${first.declined.slice(0, 240)}"). The tables ${wider.join(', ')} have columns named for it and were added; use them, joining on a key both tables carry.`);
+      const second = await attemptDraft(`A first draft over ${shown.join(', ')} found no field for this ("${first.declined.slice(0, 240)}"). The tables ${wider.join(', ')} have columns named for it and were added; use them, joining on a key both tables carry.`, 'widen');
       if (second && 'declined' in second) return { declined: `${second.declined.replace(/[.\s]+$/, '')} (searched ${relations.join(', ')})` };
       return finalize(second);
     };
@@ -2168,6 +2197,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       outcome.receipt.timings.context = contextMs;
       outcome.receipt.story = [...hostSteps, ...(outcome.receipt.story ?? [])].sort((left, right) => left.at - right.at);
       outcome.receipt.dispatches.push(...draftDispatches);
+      if (hostChecks.length) outcome.receipt.checks = [...(outcome.receipt.checks ?? []), ...hostChecks];
       outcome.receipt.physicalBindings = runtimeSchemaForVocabulary(currentVocabulary()).map((table) => ({ relation: table.relation, completeness: table.columnCompleteness ?? 'partial', columns: table.columns.length, targetFingerprint: connection ? fingerprintText(connectionKey(connection)) : undefined }));
     }
     // A ref the interpreter named that the whole inventory holds but this
