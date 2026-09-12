@@ -2769,6 +2769,20 @@ describe('two governed sources: certified blocks and authored semantics; everyth
     if (outcome.kind === 'answered') expect(outcome.candidate.trust).toBe('review_required');
   });
 
+  it('a count of zero from AI-written SQL is looked at again once: FY26 written as 26 against a field that stores 2026', async () => {
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Lost opportunities in FY26.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'count' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
+    const previous: Array<string | undefined> = [];
+    const outcome = await runAskPipeline({
+      question: 'lost opportunities in FY26', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { draftSql: async (draft) => { previous.push(draft.previous?.error); return { sql: draft.previous ? 'SELECT COUNT(*) AS n FROM dev.orders WHERE fiscal_year = 2026' : 'SELECT COUNT(*) AS n FROM dev.orders WHERE fiscal_year = 26', relations: ['dev.orders'], proof: [] }; } },
+      executeDeps: { run: async (sql) => ({ columns: ['n'], rows: [{ n: sql.includes('2026') ? 6 : 0 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(previous).toHaveLength(2);
+    expect(previous[1]).toMatch(/only zeros.*2026/);
+    expect(outcome.kind).toBe('answered');
+    if (outcome.kind === 'answered') expect(outcome.result.rows).toEqual([{ n: 6 }]);
+  });
+
   it('AI-written SQL that returns no rows is redrafted once with how stated values may be stored; a redraft that still finds nothing answers honestly', async () => {
     const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount for Capital One.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'sum' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
     const previous: Array<string | undefined> = [];

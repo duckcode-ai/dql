@@ -74,7 +74,11 @@ export function missingStatedValues(sql: string, stated: StatedValue[]): StatedV
     // it spans, which begin in the previous calendar year for most calendars.
     const digits = item.value.replace(/^FY/i, '');
     const full = digits.length === 2 ? Number(`20${digits}`) : Number(digits);
-    return ![`fy${digits}`, String(full), String(full - 1), `'${digits}'`].some((token) => lower.includes(token.toLowerCase()));
+    // A fiscal-year field compared to the two digits the question used
+    // (FISCAL_YEAR = 26) applies it; whether the data stores 26 or 2026 is
+    // for the rows to say, not for this text check to guess.
+    const onFiscalField = new RegExp(`\\b\\w*(?:fiscal|fy)\\w*"?\\s*(?:=|in\\s*\\()\\s*'?${digits}'?\\b`, 'i').test(sql);
+    return !onFiscalField && ![`fy${digits}`, String(full), String(full - 1), `'${digits}'`].some((token) => lower.includes(token.toLowerCase()));
   });
 }
 

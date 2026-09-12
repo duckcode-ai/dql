@@ -1,0 +1,23 @@
+{
+  "key": "fb4310aba971548851e762b8bac40c52",
+  "operation": "generate",
+  "text": "NO_SQL: No column in any listed table represents a sales region, so the win rate against Splunk cannot be broken down by that dimension.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T00:59:39.662Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "fb4310aba971548851e762b8bac40c52fa3a024c188cd88a1d50d5b4114d4660",
+    "postCanonicalHash": "fb4310aba971548851e762b8bac40c52fa3a024c188cd88a1d50d5b4114d4660",
+    "appliedRuleClasses": []
+  }
+}

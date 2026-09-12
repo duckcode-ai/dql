@@ -730,11 +730,16 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         // AN EMPTY RESULT FROM AI-WRITTEN SQL IS REDRAFTED ONCE. The drafter
         // guessed how a stated value is stored ("capital one" for "Capital
         // One", 26 for 2026); nothing matching is a claim worth one more look.
-        const noRows = executed.result.rowCount === 0 || (executed.result.rows.length === 1 && Object.values(executed.result.rows[0] ?? {}).every((value) => value === null || value === undefined));
+        // A COUNT over no matching rows is one row of 0, not an empty result,
+        // so a single row of nothing but zeros and nulls is looked at again
+        // too; a real zero comes back the same and is answered.
+        const cells = executed.result.rows.length === 1 ? Object.values(executed.result.rows[0] ?? {}) : [];
+        const nothing = (value: unknown) => value === null || value === undefined || value === 0 || value === 0n || value === '0';
+        const noRows = executed.result.rowCount === 0 || (cells.length > 0 && cells.every(nothing));
         if (noRows && attempt === 1 && remaining() > 15_000) {
           firstEmpty = { candidate, executed, runMs };
-          step('execute', 'The AI-drafted query returned no rows: redrafting once', 'missed', { ms: runMs });
-          previous = { sql: candidate.sql, error: 'the statement ran and returned no rows. Before concluding that nothing matches, check how each stated value is stored: compare text case-insensitively and allow a partial match, a two-digit year (26, FY26) may be stored as four digits (2026), and a status may be a flag rather than text. Change only how the restrictions are spelled, never what is measured.' };
+          step('execute', 'The AI-drafted query found nothing (no rows, or only zeros): redrafting once', 'missed', { ms: runMs });
+          previous = { sql: candidate.sql, error: 'the statement ran and returned no rows, or only zeros. Before concluding that nothing matches, check how each stated value is stored: compare text case-insensitively and allow a partial match, a two-digit year (26, FY26) may be stored as four digits (2026), and a status may be a flag rather than text. Change only how the restrictions are spelled, never what is measured.' };
           continue;
         }
         return answerWith(candidate, executed, runMs);

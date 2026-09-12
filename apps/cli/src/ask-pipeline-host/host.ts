@@ -1878,7 +1878,7 @@ export function createAskPipelineRouteExecutor(deps: AskPipelineHostDeps): Agent
       const failedChecks = async (sql: string): Promise<string[]> => {
         const failures: string[] = [];
         const missing = missingStatedValues(sql, stated);
-        if (missing.length) failures.push(`it does not apply ${missing.map((item) => `"${item.value}"`).join(', ')} from the question`);
+        if (missing.length) failures.push(`it does not apply ${missing.map((item) => item.kind === 'fiscal_year' ? `"${item.value}" (fiscal year ${item.value.replace(/^FY/i, '').length === 2 ? `20${item.value.replace(/^FY/i, '')}` : item.value.replace(/^FY/i, '')}: restrict a fiscal-year field, or the dates that fiscal year spans)` : `"${item.value}"`).join(', ')} from the question`);
         const missingRequired = missingRequiredFilters(sql, required);
         if (missingRequired.length) failures.push(`it does not apply the required filter ${missingRequired.map((item) => item.text).join(', ')}`);
         if (aggregatesRows(sql)) {

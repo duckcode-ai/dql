@@ -105,7 +105,8 @@ function findColumn(actualColumns: string[], candidates: string[]): string | und
   if (carried) return carried;
   // A period the question named may be spelled into the alias (`gross_profit_2025`,
   // `revenue_2025_q1`): the name is the same column; the values are still compared.
-  const unperiod = (column: string) => norm(column.toLowerCase().replace(/_(19|20)\d{2}(_(q[1-4]|\d{2}))?$/, ''));
+  // A period the AI spelled into its own column name (revenue_2025, lost_count_fy26) is not a different column.
+  const unperiod = (column: string) => norm(column.toLowerCase().replace(/_(?:(19|20)\d{2}|fy(?:\d{4}|\d{2}))(_(q[1-4]|\d{2}))?$/, ''));
   const periodMatch = actualColumns.find((column) => wanted.includes(unperiod(column)));
   if (periodMatch) return periodMatch;
   // An aggregate spelled into the alias (`fg3m_total`, `orders_count`, `revenue_sum`) is the same column; the values are still compared.

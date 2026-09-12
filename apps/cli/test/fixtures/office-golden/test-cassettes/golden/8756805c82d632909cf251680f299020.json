@@ -1,9 +1,9 @@
 {
   "key": "8756805c82d632909cf251680f299020",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count of opportunities that are closed and not won (lost) in fiscal year FY26.\",\"measures\":[{\"ref\":\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\",\"aggregation\":\"count\",\"scope\":[{\"ref\":\"dimension:opportunity_enhanced.IS_CLOSED\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"},{\"ref\":\"dimension:opportunity_enhanced.IS_WON\",\"op\":\"is_false\",\"values\":[false],\"source\":\"question\"}],\"alias\":\"lost_opportunities\"}],\"groupBy\":[],\"display\":[],\"filters\":[{\"ref\":\"dimension:opportunity_enhanced.FISCAL_YEAR\",\"op\":\"eq\",\"values\":[\"2026\"],\"source\":\"question\"}],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\":\"q:opportunities\",\"dimension:opportunity_enhanced.IS_CLOSED\":\"q:lose (closed and not won)\",\"dimension:opportunity_enhanced.IS_WON\":\"q:lose (closed and not won)\",\"dimension:opportunity_enhanced.FISCAL_YEAR\":\"q:fiscal year FY26\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count the number of opportunities that were lost (closed and not won) in fiscal year FY26.\",\"measures\":[{\"ref\":\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\",\"aggregation\":\"count\",\"scope\":[{\"ref\":\"dimension:opportunity_enhanced.IS_CLOSED\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"},{\"ref\":\"dimension:opportunity_enhanced.IS_WON\",\"op\":\"is_false\",\"values\":[false],\"source\":\"question\"},{\"ref\":\"dimension:opportunity_enhanced.FISCAL_YEAR\",\"op\":\"eq\",\"values\":[2026],\"source\":\"question\"}],\"alias\":\"lost_opportunities_fy26\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\":\"q:opportunities\",\"dimension:opportunity_enhanced.IS_CLOSED\":\"q:lost\",\"dimension:opportunity_enhanced.IS_WON\":\"q:lose\",\"dimension:opportunity_enhanced.FISCAL_YEAR\":\"q:fiscal year FY26\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-11T23:44:16.006Z",
+  "recordedAt": "2026-09-12T00:58:10.787Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

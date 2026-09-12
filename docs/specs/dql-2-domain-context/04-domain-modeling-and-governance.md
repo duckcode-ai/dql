@@ -59,6 +59,30 @@ Automatic generated joins require all of the following (`REL-002`):
 Unknown/many-to-many/attribution-required edges may remain visible but cause a
 clarification or refusal. A dbt DAG edge never supplies join proof (`REL-001`).
 
+### Ask answers over raw tables (amendment A-004, 2026-09-11)
+
+Owner direction: **certified blocks and semantic models are governed; dbt
+models, columns, joins and SQL over them are AI free-form.** DQL does not judge
+whether a raw table or a join is "right", because nobody vouched for it.
+
+- Ask's cascade is certified block → semantic layer → AI-written SQL. There is
+  no governed tier over raw tables; an answer whose SQL the AI wrote is always
+  review-required and says so, whatever relationships it used.
+- A reading is governed only when every ref is a certified block or an object
+  authored in a semantic layer. A dimension a provider built from dbt model
+  columns because no semantic layer exists is a column.
+- Declared relationships are **hints** for AI-written SQL: a certified one is
+  offered as the preferred join, a draft as "declared, not validated", and the
+  answer discloses a relationship it joined on. They never admit, prove or
+  refuse a join in Ask.
+- Only security policy stops AI-written SQL (a question that contradicts a
+  required filter; a required filter the drafted statement leaves out). Domain
+  boundaries choose which tables the drafter sees first; they are not a join
+  gate in Ask.
+- REL-002, amendment A-003 and REL-005 below continue to govern Domain Studio:
+  validation, evidence, certification and the conditions under which a
+  relationship is certified. They no longer gate Ask answers.
+
 ### Join authority (amendment A-003, 2026-09-09)
 
 A generated join has exactly one of three authorities, recorded on every
