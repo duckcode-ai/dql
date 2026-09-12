@@ -1,9 +1,9 @@
 {
   "key": "40c3c9ea1efa25dbdd11dafa8653c82b",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top five players by total points summed across calendar years 2016 and 2017, along with their games played.\",\"measures\":[{\"ref\":\"block:nba.top_players_by_total_points\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"limit\":5,\"unresolved\":[],\"provenance\":{\"block:nba.top_players_by_total_points\":\"q:top five players by total points in calendar years 2016 and 2017 combined\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top 5 players by total points summed across calendar years 2016 and 2017, with games played shown.\",\"measures\":[{\"ref\":\"block:nba.top_players_by_total_points\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"limit\":5,\"unresolved\":[],\"provenance\":{\"block:nba.top_players_by_total_points\":\"q:top five players by total points in calendar years 2016 and 2017 combined\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-11T15:37:38.053Z",
+  "recordedAt": "2026-09-12T01:33:16.294Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

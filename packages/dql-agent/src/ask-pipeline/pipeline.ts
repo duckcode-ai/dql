@@ -7,7 +7,7 @@ import { prepare, type PrepareDeps, type PreparedCandidate, type PreparedRefusal
 import { applySkillPolicies } from './policies.js';
 import { proveLiterals } from './literal-proof.js';
 import { prepareExploratory } from './prepare/exploratory.js';
-import { keepMembersApart, normalizeEffectiveIntent, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn } from './resolve-intent.js';
+import { keepMembersApart, normalizeEffectiveIntent, resolveIntent, uncoveredQuestionTerms, coverageStates, unmetFacets, type IntentResolution, causalOperatorsIn, predictiveOperatorsIn, readingLane } from './resolve-intent.js';
 import { buildVocabularyIndex, renderCard, type RenderedCards, type VocabularyDomainHeader, type VocabularyEntry, type VocabularyIndex } from './vocabulary.js';
 import { mergePhysicalRelationBinding, physicalRelationIdentity, physicalRelationText, samePhysicalRelation } from './physical-binding.js';
 
@@ -629,7 +629,7 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   // schema. A question the tables do not hold is declined by the drafter and
   // stays an honest gap. A policy or domain-contract denial never reaches it,
   // and it runs only when AI-drafted SQL is enabled for the project.
-  const schemaLane = async (why: string, hint?: AnalyticalIntentV1, options: { onDecline?: 'gap' | 'fallthrough'; caveats?: string[] } = {}): Promise<PipelineOutcome | undefined> => {
+  const schemaLane = async (why: string, hint?: AnalyticalIntentV1, options: { onDecline?: 'gap' | 'fallthrough'; caveats?: string[]; draftQuestion?: string } = {}): Promise<PipelineOutcome | undefined> => {
     if (!input.prepareDeps.draftSql || !(input.explorationOptIn || input.explorationAuto)) return undefined;
     // Only a security policy stops AI-written SQL; nothing about how tables join does.
     if (receipt.refusals.some((refusal) => refusal.code === 'policy_filter_unbindable' || refusal.code === 'policy_conflict')) return undefined;
@@ -673,15 +673,34 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     // The first statement ran and returned nothing: kept, so a redraft that
     // fails or declines still ends in the honest empty answer.
     let firstEmpty: { candidate: PreparedCandidate; executed: ExecutedOk; runMs: number | undefined } | undefined;
+    // No rows at all (or one row of nothing but nulls) after a second look is
+    // an honest "no matching data", never an empty table; a row of zeros is a
+    // real count of nothing and is answered.
+    const noRowsAtAll = (executed: ExecutedOk) => executed.result.rowCount === 0 || (executed.result.rows.length === 1 && Object.values(executed.result.rows[0] ?? {}).every((value) => value === null || value === undefined));
+    const emptyGap = (): PipelineOutcome => {
+      const message = `the query ran twice, spelling the restrictions two ways, and found no rows for "${reading.reading.replace(/[.\s]+$/, '')}"`;
+      receipt.intent = reading; receipt.reading = reading.reading;
+      step('schema', 'The tables hold no rows for this', 'missed', { detail: message });
+      return { kind: 'gap', gap: 'not_retrieved', message, nearest: [], text: `No matching data: ${message}.`, receipt, intent: reading, offerExploration: false };
+    };
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       if (remaining() < 12_000 || input.signal?.aborted) break;
       const draftStarted = now();
-      const drafted = await prepareExploratory(hint && hint.kind === 'analytics' ? hint : undefined, input.vocabulary, input.prepareDeps, input.question, { reason: why, ...(previous ? { previous } : {}) });
+      const drafted = await prepareExploratory(hint && hint.kind === 'analytics' ? hint : undefined, input.vocabulary, input.prepareDeps, options.draftQuestion ?? input.question, { reason: why, ...(previous ? { previous } : {}) });
       mark(attempt === 1 ? 'schema_draft' : 'schema_redraft', draftStarted);
       const draftMs = timings[attempt === 1 ? 'schema_draft' : 'schema_redraft'];
       receipt.refusals.push(...drafted.refusals);
       receipt.tiers.push({ round: 97, tier: 'exploratory', outcome: drafted.candidates.length ? 'prepared' : 'refused', detail: drafted.refusals[0] ? `${drafted.refusals[0].code}: ${drafted.refusals[0].message.slice(0, 160)}` : `schema lane: ${why.slice(0, 160)}` });
-      if (firstEmpty && drafted.candidates.length === 0) return answerWith(firstEmpty.candidate, firstEmpty.executed, firstEmpty.runMs);
+      // The redraft looked at what the tables hold and says why nothing
+      // matches (the data ends in 2017, no such player): that is the answer.
+      const declinedAgain = firstEmpty ? drafted.refusals.find((refusal) => refusal.code === 'exploration_declined') : undefined;
+      if (firstEmpty && declinedAgain) {
+        const message = `the query ran and found nothing: ${declinedAgain.message.replace(/[.\s]+$/, '')}`;
+        receipt.intent = reading; receipt.reading = reading.reading;
+        step('schema', 'The tables hold nothing for this', 'missed', { detail: declinedAgain.message });
+        return { kind: 'gap', gap: 'not_retrieved', message, nearest: [], text: `No matching data: ${message}.`, receipt, intent: reading, offerExploration: false };
+      }
+      if (firstEmpty && drafted.candidates.length === 0) return noRowsAtAll(firstEmpty.executed) ? emptyGap() : answerWith(firstEmpty.candidate, firstEmpty.executed, firstEmpty.runMs);
       const failedCheck = drafted.refusals.find((refusal) => refusal.code === 'exploration_check_failed');
       if (failedCheck) {
         step('schema', 'The drafted SQL failed a check, so it was not run', 'failed', { detail: failedCheck.message, ms: draftMs });
@@ -742,16 +761,17 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
           previous = { sql: candidate.sql, error: 'the statement ran and returned no rows, or only zeros. Before concluding that nothing matches, check how each stated value is stored: compare text case-insensitively and allow a partial match, a two-digit year (26, FY26) may be stored as four digits (2026), and a status may be a flag rather than text. Change only how the restrictions are spelled, never what is measured.' };
           continue;
         }
+        if (firstEmpty && noRowsAtAll(executed)) return emptyGap();
         return answerWith(candidate, executed, runMs);
       }
-      if (firstEmpty) return answerWith(firstEmpty.candidate, firstEmpty.executed, firstEmpty.runMs);
+      if (firstEmpty) return noRowsAtAll(firstEmpty.executed) ? emptyGap() : answerWith(firstEmpty.candidate, firstEmpty.executed, firstEmpty.runMs);
       receipt.refusals.push({ tier: candidate.tier, code: executed.code, message: executed.message, repairable: executed.code === 'execution_failed' } as unknown as PreparedRefusal);
       lastFailure = executed;
       step('execute', executed.code === 'execution_failed' ? (attempt === 1 ? 'The warehouse rejected the draft: correcting it once' : 'The warehouse rejected the corrected draft') : 'The drafted query was not accepted', 'failed', { detail: executed.message, ms: runMs });
       if (executed.code !== 'execution_failed') break;
       previous = { sql: candidate.sql, error: executed.message };
     }
-    if (firstEmpty) return answerWith(firstEmpty.candidate, firstEmpty.executed, firstEmpty.runMs);
+    if (firstEmpty) return noRowsAtAll(firstEmpty.executed) ? emptyGap() : answerWith(firstEmpty.candidate, firstEmpty.executed, firstEmpty.runMs);
     // Two warehouse rejections: the warehouse's own words are the answer, not
     // a modeling gap the drafted SQL never had.
     if (lastFailure?.code === 'execution_failed') {
@@ -886,6 +906,16 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   }
   receipt.intent = resolution.intent;
   receipt.reading = resolution.intent.reading;
+  // A FORECAST IS NOT A MEASUREMENT, on any lane short of a fully governed
+  // reading: nothing is drafted as a proxy for what will happen.
+  {
+    const predictive = predictiveOperatorsIn(input.question);
+    const governedReading = intentRefs(resolution.intent).length > 0 && readingLane(resolution.intent, input.vocabulary) === 'governed';
+    if (predictive.length > 0 && !governedReading) {
+      const message = `Predicting what will happen (${predictive.join(', ')}) is not something Ask computes from the data; it reports what the data recorded. Research can investigate the history behind it`;
+      return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: composeGapText('unsupported', message, [], false), receipt, intent: resolution.intent, offerExploration: false };
+    }
+  }
   // A DESCRIPTION IS NOT A RECOMMENDATION, AND REFUSING ONE SHOULD NOT WITHHOLD
   // THE OTHER. "Which of these should we build around, and why?" carries a
   // reading this project can measure and a judgment it cannot compute. Naming
@@ -969,7 +999,9 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     return { kind: 'clarify', intent: resolution.intent, question: resolution.question, options, text: resolution.question, receipt };
   }
   let intent = resolution.intent;
-  const aiReading = resolution.status === 'resolved' && resolution.lane === 'ai';
+  // The lane follows the final reading: a judgment question over the previous
+  // analysis reaches here through a clarification, not the resolver's return.
+  const aiReading = resolution.status === 'resolved' && (resolution.lane === 'ai' || (aiSqlAvailable && readingLane(resolution.intent, input.vocabulary) === 'ai'));
   // THE RELATIONS THE READING NAMES ARE DESCRIBED BEFORE ANYTHING IS PREPARED.
   // Context assembly hydrates only the few relations whose words match the
   // question; the reading may still lean on another (the facts a metric is
@@ -1076,6 +1108,14 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   if (aiReading) {
     receipt.intent = intent; receipt.reading = intent.reading;
     recordSelection(intent);
+    // A FORECAST IS NOT A MEASUREMENT. "Who is most likely to get injured next
+    // season" has no measured part; answering it with a proxy (top scorers)
+    // would be a substitute measure. It is an unsupported gap, nothing runs.
+    const predictive = predictiveOperatorsIn(input.question);
+    if (predictive.length > 0) {
+      const message = `Predicting what will happen (${predictive.join(', ')}) is not something Ask computes from the data; it reports what the data recorded. Research can investigate the history behind it`;
+      return { kind: 'gap', gap: 'unsupported', message, nearest: [], text: composeGapText('unsupported', message, [], false), receipt, intent, offerExploration: false };
+    }
     const operators = causalOperatorsIn(input.question);
     if (operators.length > 0 && intent.measures.length === 0) {
       const message = `Explaining why something happened or recommending what to do (${operators.join(', ')}) is not something Ask computes; Research can investigate the drivers`;
@@ -1087,7 +1127,9 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
     ];
     const why = `no certified block or semantic metric answers this${open.length ? ` (${open.join('; ').slice(0, 400)})` : ''}`;
     const judgment = operators.length > 0 ? [`${operators.map((word) => `"${word}"`).join(' and ')} ${operators.length === 1 ? 'is' : 'are'} not computed here: what follows is the measured comparison, not a recommendation and not a cause. Research can investigate the drivers`] : [];
-    const drafted = await schemaLane(why, intent, { caveats: judgment });
+    // A judgment question drafts only its measured comparison: the drafter is
+    // given the reading, never the "should we" wording it would decline.
+    const drafted = await schemaLane(why, intent, { caveats: judgment, ...(operators.length > 0 ? { draftQuestion: intent.reading } : {}) });
     if (drafted) return drafted;
     const message = open.length ? open.join('; ') : 'the AI could not write SQL that answers it from the tables it searched';
     return { kind: 'gap', gap: 'not_modeled', message, nearest: [], text: `No query was run: ${message.replace(/[.\s]+$/, '')}.`, receipt, intent, offerExploration: false };

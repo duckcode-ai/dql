@@ -1,0 +1,23 @@
+{
+  "key": "a4fe90ec7bbba20e860189e4bfa12ab3",
+  "operation": "generate",
+  "text": "NO_SQL: No player named \"Totally Imaginary Person\" (or matching text) exists in the available player data.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:29:15.769Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "a4fe90ec7bbba20e860189e4bfa12ab35c99edb2fb96c22b6003141efc1376a3",
+    "postCanonicalHash": "a4fe90ec7bbba20e860189e4bfa12ab35c99edb2fb96c22b6003141efc1376a3",
+    "appliedRuleClasses": []
+  }
+}

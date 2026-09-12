@@ -1,0 +1,23 @@
+{
+  "key": "476fec975e220c21b1c277fedc1f7839",
+  "operation": "generate",
+  "text": "NO_SQL: This asks for a subjective recommendation, not a data measure or restriction that any listed column can answer.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:35:51.642Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "476fec975e220c21b1c277fedc1f78396a68589ea4a6c5ba1d8d46e699c40501",
+    "postCanonicalHash": "476fec975e220c21b1c277fedc1f78396a68589ea4a6c5ba1d8d46e699c40501",
+    "appliedRuleClasses": []
+  }
+}

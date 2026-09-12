@@ -1,0 +1,23 @@
+{
+  "key": "2dc5981ffdb778ee881f8b8a37c0fac9",
+  "operation": "generate",
+  "text": "```sql\nSELECT\n  player_id,\n  player_name,\n  SUM(fgm) * 1.0 / SUM(fga) AS fg_pct,\n  SUM(fga) AS fga_total\nFROM \"nba_golden\".\"dev\".\"player_game_stats\"\nWHERE game_date >= '2017-01-01' AND game_date < '2018-01-01'\nGROUP BY player_id, player_name\nHAVING SUM(fga) >= 100\nORDER BY fg_pct DESC\nLIMIT 10;\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:31:44.352Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "2dc5981ffdb778ee881f8b8a37c0fac992202b8445836d967ee2111cb2193d9c",
+    "postCanonicalHash": "2dc5981ffdb778ee881f8b8a37c0fac992202b8445836d967ee2111cb2193d9c",
+    "appliedRuleClasses": []
+  }
+}

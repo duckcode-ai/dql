@@ -133,7 +133,10 @@ export function isGovernedEntry(entry: VocabularyEntry): boolean {
  */
 export function readingLane(intent: AnalyticalIntentV1, vocabulary: VocabularyIndex): 'governed' | 'ai' {
   const refs = intentRefs(intent);
-  if (refs.length === 0) return 'governed';
+  // Nothing named yet stays governed (a governed default may supply the
+  // measure), unless the reading already says the question is something no
+  // governed object models: then only the tables can answer it.
+  if (refs.length === 0) return intent.unresolved.some((clause) => clause.material && clause.options.length === 0 && clause.kind !== 'unsupported') ? 'ai' : 'governed';
   return refs.every((ref) => { const entry = vocabulary.resolve(ref); return Boolean(entry && isGovernedEntry(entry)); }) ? 'governed' : 'ai';
 }
 
@@ -1390,6 +1393,14 @@ export function proveTimeRoles(intent: AnalyticalIntentV1, vocabulary: Vocabular
 
 const CAUSAL_OPERATORS = ['why', 'because', 'driver', 'drivers', 'reason', 'reasons', 'invest', 'investment', 'recommend', 'recommendation', 'recommendations', 'should', 'decide', 'decision', 'forecast', 'predict', 'prediction', 'projection'];
 
+const PREDICTIVE_PHRASES = [/\blikely to\b/, /\blikelihood\b/, /\bprobability of\b/, /\bchances? (?:of|to|that)\b/, /\bnext (?:season|year|quarter|month|week|game)\b/, /\bgoing to (?!be (?:the )?(?:top|best))\w+/, /\bwill (?:get|be|win|lose|score|churn|leave|buy)\b/];
+
+/** The forecast phrases a question carries ("most likely to", "next season", "will churn"). */
+export function predictiveOperatorsIn(question: string): string[] {
+  const text = normalizeVocabularyText(question);
+  return PREDICTIVE_PHRASES.map((pattern) => pattern.exec(text)?.[0]).filter((phrase): phrase is string => Boolean(phrase));
+}
+
 /** The causal or decision words a question carries (why, drivers, should, invest...). */
 export function causalOperatorsIn(question: string): string[] {
   const words = normalizeVocabularyText(question).split(' ').filter(Boolean);
@@ -1950,7 +1961,9 @@ export async function resolveIntent(input: ResolveIntentInput): Promise<IntentRe
       const operators = causalOperatorsIn(asked);
       if (input.prior && operators.length > 0) {
         const question = `Explaining why something happened or recommending what to do (${operators.join(', ')}) is not something Ask computes from governed data; Research can investigate the drivers.`;
-        const intent: AnalyticalIntentV1 = { ...input.prior, reading: parsed.intent.reading, unresolved: [{ clause: operators.join(', '), options: [], material: true, kind: 'unsupported', question }] };
+        // The measurable part is the previous analysis, so its reading stays:
+        // the interpreter's sentence about a judgment is not a reading of data.
+        const intent: AnalyticalIntentV1 = { ...input.prior, reading: input.prior.reading, unresolved: [{ clause: operators.join(', '), options: [], material: true, kind: 'unsupported', question }] };
         return { status: 'clarify', intent, question, options: [], attempts };
       }
       return { status: 'conversation', intent: parsed.intent, reply: parsed.intent.reply ?? parsed.intent.reading, attempts };

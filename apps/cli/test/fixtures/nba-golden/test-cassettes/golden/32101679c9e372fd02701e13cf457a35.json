@@ -1,0 +1,23 @@
+{
+  "key": "32101679c9e372fd02701e13cf457a35",
+  "operation": "generate",
+  "text": "NO_SQL: This project only tracks game and player box-score statistics; it holds no ticket sales or revenue data.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:29:55.502Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "32101679c9e372fd02701e13cf457a35b1f99d97cd9494ac41d53aa93cfedd29",
+    "postCanonicalHash": "32101679c9e372fd02701e13cf457a35b1f99d97cd9494ac41d53aa93cfedd29",
+    "appliedRuleClasses": []
+  }
+}

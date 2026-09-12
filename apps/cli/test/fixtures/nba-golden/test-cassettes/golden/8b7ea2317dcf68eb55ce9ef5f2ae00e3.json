@@ -1,0 +1,23 @@
+{
+  "key": "8b7ea2317dcf68eb55ce9ef5f2ae00e3",
+  "operation": "generate",
+  "text": "SELECT player_id, player_name, SUM(pts) AS total_points\nFROM \"nba_golden\".\"dev\".\"player_game_stats\"\nWHERE LOWER(player_name) LIKE '%totally imaginary person%'\n  AND game_date >= '2017-01-01' AND game_date < '2018-01-01'\nGROUP BY player_id, player_name;",
+  "providerName": "claude",
+  "recordedAt": "2026-09-12T01:29:10.676Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "8b7ea2317dcf68eb55ce9ef5f2ae00e3fb14d28aa9c018dd897730c5a3ce95c4",
+    "postCanonicalHash": "8b7ea2317dcf68eb55ce9ef5f2ae00e3fb14d28aa9c018dd897730c5a3ce95c4",
+    "appliedRuleClasses": []
+  }
+}

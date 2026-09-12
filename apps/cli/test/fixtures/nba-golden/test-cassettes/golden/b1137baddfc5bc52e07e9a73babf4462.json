@@ -1,9 +1,9 @@
 {
   "key": "b1137baddfc5bc52e07e9a73babf4462",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by total points scored in games from the 2016-17 season (season code 2016) and return the top five.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"dimension:player_game_stats.season\",\"op\":\"eq\",\"values\":[2016],\"source\":\"question\"}],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":5,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:top five scorers\",\"dimension:player_game_stats.player_id\":\"q:top five scorers\",\"dimension:player_game_stats.player_name\":\"q:top five scorers\",\"dimension:player_game_stats.season\":\"q:2016-17 NBA season\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Ranking players by total points scored (sum of pts) in games from the 2016-17 season (season code 2016), top 5.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"dimension:player_game_stats.season\",\"op\":\"eq\",\"values\":[\"2016\"],\"source\":\"question\"}],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":5,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:top scorers\",\"dimension:player_game_stats.season\":\"q:2016-17 NBA season\",\"dimension:player_game_stats.player_id\":\"q:top scorers\",\"dimension:player_game_stats.player_name\":\"q:top scorers\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-11T15:30:14.357Z",
+  "recordedAt": "2026-09-12T01:27:12.417Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

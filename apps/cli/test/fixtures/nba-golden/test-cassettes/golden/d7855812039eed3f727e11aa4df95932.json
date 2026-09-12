@@ -1,9 +1,9 @@
 {
   "key": "d7855812039eed3f727e11aa4df95932",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total points scored by all players, broken down by month, for games played during calendar year 2017.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.game_date\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"calendar 2017\"}},\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.pts\":\"q:scoring totals\",\"dimension:player_game_stats.game_date\":\"q:monthly ... during calendar 2017\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total points scored by players, broken down by calendar month for 2017.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.game_date\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:scoring totals\",\"dimension:player_game_stats.game_date\":\"q:monthly ... during calendar 2017\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-11T15:30:32.359Z",
+  "recordedAt": "2026-09-12T01:27:36.211Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

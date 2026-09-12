@@ -2736,6 +2736,10 @@ describe('two governed sources: certified blocks and authored semantics; everyth
     expect(readingLane(reading([{ ref: 'metric:orders.revenue' }], [{ ref: 'dimension:opportunities.TAGS', role: 'categorical' }]), vocabulary)).toBe('ai');
     expect(readingLane(reading([{ ref: 'column:dev.orders.amount', aggregation: 'sum' }]), vocabulary)).toBe('ai');
     expect(readingLane(reading([{ ref: 'metric:nowhere.nothing' }]), vocabulary)).toBe('ai');
+    // Nothing named yet: governed, unless the reading says nothing governed models it.
+    const bare = { version: 1, kind: 'analytics', reading: 'x', measures: [], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' } as unknown as AnalyticalIntentV1;
+    expect(readingLane(bare, vocabulary)).toBe('governed');
+    expect(readingLane({ ...bare, unresolved: [{ clause: 'double-doubles', options: [], material: true }] }, vocabulary)).toBe('ai');
     expect(isGovernedEntry(vocabulary.get('dimension:opportunities.TAGS')!)).toBe(false);
   });
 
@@ -2769,6 +2773,47 @@ describe('two governed sources: certified blocks and authored semantics; everyth
     if (outcome.kind === 'answered') expect(outcome.candidate.trust).toBe('review_required');
   });
 
+  it('a redraft that looks at the tables and finds nothing for an empty result is an honest no-data gap in its own words', async () => {
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount in 2030.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'sum' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
+    const outcome = await runAskPipeline({
+      question: 'amount in 2030', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { draftSql: async (draft) => (draft.previous ? { declined: 'the orders only cover 2016 and 2017, so nothing exists for 2030.' } : { sql: "SELECT SUM(amount) AS amount FROM dev.orders WHERE ordered_at >= '2030-01-01'", relations: ['dev.orders'], proof: [] }) },
+      executeDeps: { run: async () => ({ columns: ['amount'], rows: [{ amount: null }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(outcome.kind).toBe('gap');
+    if (outcome.kind === 'gap') {
+      expect(outcome.gap).toBe('not_retrieved');
+      expect(outcome.text).toContain('only cover 2016 and 2017');
+    }
+  });
+
+  it('a forecast is an unsupported gap, never answered with a proxy measure', async () => {
+    let drafts = 0;
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Closest proxy: amount by status.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'sum' }], groupBy: [{ ref: 'column:dev.orders.status', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }) };
+    const outcome = await runAskPipeline({
+      question: 'Which customers are most likely to churn next quarter?', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { draftSql: async () => { drafts += 1; return { sql: 'SELECT 1', relations: [], proof: [] }; } },
+      executeDeps: { run: async () => { throw new Error('nothing runs'); } },
+    });
+    expect(drafts).toBe(0);
+    expect(outcome.kind).toBe('gap');
+    if (outcome.kind === 'gap') expect(outcome.gap).toBe('unsupported');
+  });
+
+  it('a judgment question drafts its measured comparison from the reading and says the judgment is not computed', async () => {
+    const asked: string[] = [];
+    const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount by status.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'sum' }], groupBy: [{ ref: 'column:dev.orders.status', role: 'categorical' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' }) };
+    const outcome = await runAskPipeline({
+      question: 'Which status should we focus on, and why?', vocabulary, provider, clauseCoverage: false, explorationAuto: true,
+      prepareDeps: { draftSql: async (draft) => { asked.push(draft.question); return { sql: 'SELECT status, SUM(amount) AS amount FROM dev.orders GROUP BY status', relations: ['dev.orders'], proof: [] }; } },
+      executeDeps: { run: async () => ({ columns: ['status', 'amount'], rows: [{ status: 'open', amount: 3 }], rowCount: 1, executionTimeMs: 1 }) },
+    });
+    expect(asked[0]).toBe('Amount by status.');
+    expect(outcome.kind).toBe('answered');
+    expect(outcome.text).toMatch(/not computed here/);
+    expect(outcome.text).toMatch(/Research can investigate/);
+  });
+
   it('a count of zero from AI-written SQL is looked at again once: FY26 written as 26 against a field that stores 2026', async () => {
     const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Lost opportunities in FY26.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'count' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
     const previous: Array<string | undefined> = [];
@@ -2783,7 +2828,7 @@ describe('two governed sources: certified blocks and authored semantics; everyth
     if (outcome.kind === 'answered') expect(outcome.result.rows).toEqual([{ n: 6 }]);
   });
 
-  it('AI-written SQL that returns no rows is redrafted once with how stated values may be stored; a redraft that still finds nothing answers honestly', async () => {
+  it('AI-written SQL that returns no rows is redrafted once with how stated values may be stored; a redraft that still finds nothing is an honest no-data gap', async () => {
     const provider: AgentProvider = { name: 'ollama', available: async () => true, generate: async () => JSON.stringify({ version: 1, kind: 'analytics', reading: 'Amount for Capital One.', measures: [{ ref: 'column:dev.orders.amount', aggregation: 'sum' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' }) };
     const previous: Array<string | undefined> = [];
     const run = (second: Array<Record<string, unknown>>) => runAskPipeline({
@@ -2798,6 +2843,7 @@ describe('two governed sources: certified blocks and authored semantics; everyth
     previous.length = 0;
     const still = await run([]);
     expect(previous).toHaveLength(2);
-    expect(still.kind).toBe('answered');
+    expect(still.kind).toBe('gap');
+    if (still.kind === 'gap') expect(still.gap).toBe('not_retrieved');
   });
 });

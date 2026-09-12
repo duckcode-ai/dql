@@ -91,17 +91,59 @@
     "month"
    ],
    "tier": "reviewable",
-   "note": "A monthly grain over calendar 2017: every month of the window is a row, and a month with no games is zero, not absent."
+   "note": "A monthly grain over calendar 2017. The reference lists every month with a month without games as zero; AI-written SQL may list only the months that had games, which is the same series without the empty months.",
+   "alternatives": [
+    {
+     "sql": "SELECT strftime('%Y-%m-01', game_date) AS month, SUM(pts) AS total_points FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY 1 ORDER BY 1",
+     "columns": {
+      "month": [
+       "month",
+       "game_date",
+       "game_date__month",
+       "metric_time__month",
+       "game_month"
+      ],
+      "total_points": [
+       "total_points",
+       "points",
+       "pts",
+       "total_pts",
+       "sum_pts",
+       "scoring"
+      ]
+     }
+    },
+    {
+     "sql": "SELECT strftime('%Y-%m', game_date) AS month, SUM(pts) AS total_points FROM dev.player_game_stats WHERE CAST(strftime('%Y', game_date) AS INTEGER) = 2017 GROUP BY 1 ORDER BY 1",
+     "columns": {
+      "month": [
+       "month",
+       "game_date",
+       "game_date__month",
+       "metric_time__month",
+       "game_month"
+      ],
+      "total_points": [
+       "total_points",
+       "points",
+       "pts",
+       "total_pts",
+       "sum_pts",
+       "scoring"
+      ]
+     }
+    }
+   ]
   },
   {
    "id": "nb15-double-doubles",
    "question": "Which players recorded the most double-doubles in 2017?",
-   "tier": "none",
-   "outcome": "gap",
-   "note": "Double-doubles are a per-game classification nothing models; the answer is a named gap with zero SQL, never the top-scorers block as the closest measure.",
-   "forbids": {
-    "sql": true
-   }
+   "tier": "reviewable",
+   "outcome": "answered_with_caveat",
+   "saysAll": [
+    "double-double"
+   ],
+   "note": "Nothing models a double-double; AI-written SQL computes the standard definition (two of points, rebounds, assists, steals, blocks at 10 or more in one game) and the reading says so. It never serves the top-scorers block as the closest measure."
   },
   {
    "id": "nb22-2030",

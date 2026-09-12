@@ -68,7 +68,13 @@ export function missingStatedValues(sql: string, stated: StatedValue[]): StatedV
   const lower = sql.toLowerCase();
   return stated.filter((item) => {
     if (item.kind === 'text') return !item.value.toLowerCase().split(/\s+/).filter((word) => word.length > 1).every((word) => lower.includes(word));
-    if (item.kind === 'year') return !lower.includes(item.value);
+    if (item.kind === 'year') {
+      if (lower.includes(item.value)) return false;
+      // A range that spans the year applies it ('2016-01-01' .. '2018-01-01').
+      const year = Number(item.value);
+      const dates = [...sql.matchAll(/'(\d{4})-(\d{2})-(\d{2})/g)].map((match) => Number(match[1]) * 10000 + Number(match[2]) * 100 + Number(match[3]));
+      return !(dates.some((date) => date <= year * 10000 + 101) && dates.some((date) => date >= year * 10000 + 1231));
+    }
     if (item.kind === 'quarter') return !(lower.includes(item.value.toLowerCase()) || /\bquarter\b/.test(lower));
     // A fiscal year may be stored as FY26, 26, 2026, or as the calendar dates
     // it spans, which begin in the previous calendar year for most calendars.

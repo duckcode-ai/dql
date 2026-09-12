@@ -15,6 +15,9 @@ describe('the checks an AI-drafted statement passes before it runs', () => {
     const stated = statedValues(office);
     expect(missingStatedValues("SELECT COUNT(*) FROM opp WHERE fiscal_year = 2026", stated)).toEqual([{ value: 'Splunk', kind: 'text' }]);
     expect(missingStatedValues("SELECT COUNT(*) FROM opp WHERE fiscal_year = 2026 AND tags ILIKE '%splunk%'", stated)).toEqual([]);
+    // A date range that spans a stated year applies it, like the year itself.
+    expect(missingStatedValues("SELECT SUM(pts) FROM stats WHERE game_date >= '2016-01-01' AND game_date < '2018-01-01'", [{ value: '2016', kind: 'year' }, { value: '2017', kind: 'year' }])).toEqual([]);
+    expect(missingStatedValues("SELECT SUM(pts) FROM stats WHERE game_date >= '2016-01-01' AND game_date <= '2016-12-31'", [{ value: '2017', kind: 'year' }])).toEqual([{ value: '2017', kind: 'year' }]);
     // The two digits the question used, on a fiscal-year field, apply it; the rows decide how it is stored.
     expect(missingStatedValues("SELECT COUNT(*) FROM opp oe WHERE oe.FISCAL_YEAR = 26 AND LOWER(tags) LIKE '%splunk%'", stated)).toEqual([]);
     expect(missingStatedValues("SELECT COUNT(*) FROM opp WHERE amount = 26 AND LOWER(tags) LIKE '%splunk%'", stated)).toEqual([{ value: 'FY26', kind: 'fiscal_year' }]);
