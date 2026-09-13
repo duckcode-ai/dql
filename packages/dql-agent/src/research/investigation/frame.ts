@@ -5,6 +5,7 @@
  * day the data runs through.
  */
 import type { AnalyticalIntentV1, Grain, IntentMeasure, IntentPredicate } from '../../ask-pipeline/intent.js';
+import { fieldIdentity } from '../../ask-pipeline/policies.js';
 import type { VocabularyEntry, VocabularyIndex } from '../../ask-pipeline/vocabulary.js';
 import type { InvestigationFrameV1, InvestigationMetric, InvestigationWindow } from './types.js';
 import { addDays, addGrains, bucketsIn, dayOf, formatDay, grainOfWindow, latestCompleteWindow, parseDay, priorWindow, startOfGrain, windowOf, yearAgoWindow } from './windows.js';
@@ -202,6 +203,31 @@ function periodAxisFor(
   };
 }
 
+/**
+ * A filter the reading wrote on a raw column is the governed dimension of the
+ * metric's model that reads the same column: one raw column in a reading keeps
+ * the semantic layer from compiling any of Research's queries and sends every
+ * figure to SQL the AI writes. The same filter written twice is kept once.
+ */
+function governedFilters(vocabulary: VocabularyIndex, metricRef: string, filters: IntentPredicate[]): IntentPredicate[] {
+  const model = (vocabulary.get(metricRef) ?? vocabulary.resolve(metricRef))?.model;
+  const governed = (predicate: IntentPredicate): IntentPredicate => {
+    if (!model || !predicate.ref.startsWith('column:')) return predicate;
+    const field = fieldIdentity(predicate.ref, vocabulary);
+    const dimension = vocabulary.entries.find((entry) => entry.kind === 'dimension' && !entry.inventory && entry.physical?.column
+      && (entry.model === model || Boolean(entry.joinReach?.includes(model)))
+      && fieldIdentity(entry.ref, vocabulary) === field);
+    return dimension ? { ...predicate, ref: dimension.ref } : predicate;
+  };
+  const seen = new Set<string>();
+  return filters.map(governed).filter((predicate) => {
+    const key = JSON.stringify([predicate.ref, predicate.op, predicate.values, predicate.on ?? '']);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /** Frame the reading: what is measured, over which date field, at which grain, under which filters. */
 export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; vocabulary: VocabularyIndex; lane: 'governed' | 'ai'; question?: string }): InvestigationFramePlanResult {
   const { reading, vocabulary } = input;
@@ -234,7 +260,7 @@ export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; voc
       status: 'planned',
       plan: {
         reading: reading.reading, lane, metric, timeRef: axis.ref, grain: 'year',
-        baseFilters: [...reading.filters.filter(keepOffAxis), ...(primary.scope ?? []).filter(keepOffAxis)],
+        baseFilters: governedFilters(vocabulary, metric.ref, [...reading.filters, ...(primary.scope ?? [])]).filter(keepOffAxis),
         shape: changeMeasure || axis.prior !== undefined ? 'change' : 'level',
         periodAxis: axis,
         ...(measured.note ? { notes: [measured.note] } : {}),
@@ -255,7 +281,7 @@ export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; voc
   // Every query keeps the reading's restrictions, and the measure's own scope
   // ("beverage revenue"), except the dates the periods replace.
   const keep = (predicate: IntentPredicate) => predicate.on !== 'aggregate' && !isTimeRef(vocabulary, predicate.ref, timeRef);
-  const baseFilters = [...reading.filters.filter(keep), ...(primary.scope ?? []).filter(keep)];
+  const baseFilters = governedFilters(vocabulary, metric.ref, [...reading.filters, ...(primary.scope ?? [])]).filter(keep);
   return {
     status: 'planned',
     plan: {

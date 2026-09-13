@@ -189,6 +189,54 @@ describe('framing an investigation from a reading', () => {
     expect(latest.notes.join(' ')).toContain('the latest season in the data, 2022');
   });
 
+  it('a filter on a raw column is the governed dimension over that column, and a filter written twice is kept once', () => {
+    const PLAYER = 'dimension:local_player_season_facts.player';
+    const seasons = buildVocabularyIndex({
+      metrics: [{ name: 'total_points', model: 'local_player_season_facts', label: 'Total points', aggregation: 'sum' }],
+      dimensions: [
+        { name: 'player', model: 'local_player_season_facts', label: 'Player', dataType: 'string', physical: { relation: 'TRANSFORMED.local_player_season_facts', column: 'player_name' } },
+        { name: 'season', model: 'local_player_season_facts', label: 'Source season', dataType: 'number', physical: { relation: 'TRANSFORMED.local_player_season_facts', column: 'season' } },
+      ],
+      relations: [
+        { schema: 'TRANSFORMED', name: 'local_player_season_facts', columns: [{ name: 'player_name', dataType: 'varchar' }, { name: 'season', dataType: 'integer' }] },
+        { schema: 'TRANSFORMED', name: 'local_player_game_facts', columns: [{ name: 'player_name', dataType: 'varchar' }] },
+      ],
+    });
+    const column = seasons.entries.find((entry) => entry.kind === 'column' && entry.ref.includes('local_player_season_facts.player_name'))!.ref;
+    const otherTable = seasons.entries.find((entry) => entry.kind === 'column' && entry.ref.includes('local_player_game_facts.player_name'))!.ref;
+    const lebron = ['LeBron James'];
+    // The reading the live NBA run produced: the player twice, once as the raw column.
+    const result = planInvestigationFrame({
+      vocabulary: seasons, lane: 'governed',
+      reading: {
+        version: 1, kind: 'analytics', reading: "LeBron James's total points in the 2017 season.",
+        measures: [{ ref: 'metric:local_player_season_facts.total_points' }], groupBy: [], display: [],
+        filters: [
+          { ref: column, op: 'eq', values: lebron, source: 'question' },
+          { ref: PLAYER, op: 'eq', values: lebron, source: 'question' },
+          { ref: 'dimension:local_player_season_facts.season', op: 'eq', values: [2017], source: 'question' },
+        ],
+        expectedShape: 'scalar', unresolved: [], provenance: {},
+      } as AnalyticalIntentV1,
+    });
+    if (result.status !== 'planned') throw new Error(`expected a plan, got ${result.status}`);
+    expect(result.plan.baseFilters).toEqual([{ ref: PLAYER, op: 'eq', values: lebron, source: 'question' }]);
+    expect(result.plan.periodAxis).toMatchObject({ current: 2017 });
+
+    // A column of another table is not that dimension's column: it stays as written.
+    const other = planInvestigationFrame({
+      vocabulary: seasons, lane: 'governed',
+      reading: {
+        version: 1, kind: 'analytics', reading: 'Total points in the 2017 season.',
+        measures: [{ ref: 'metric:local_player_season_facts.total_points' }], groupBy: [], display: [],
+        filters: [{ ref: otherTable, op: 'eq', values: lebron, source: 'question' }, { ref: 'dimension:local_player_season_facts.season', op: 'eq', values: [2017], source: 'question' }],
+        expectedShape: 'scalar', unresolved: [], provenance: {},
+      } as AnalyticalIntentV1,
+    });
+    if (other.status !== 'planned') throw new Error(`expected a plan, got ${other.status}`);
+    expect(other.plan.baseFilters.map((filter) => filter.ref)).toEqual([otherTable]);
+  });
+
   it('asks for a measure when there is none, and declines what is not a change over time', () => {
     expect(planInvestigationFrame({ reading: reading({ measures: [] }), vocabulary, lane: 'governed' }).status).toBe('clarify');
     // A project with no metrics offers the numeric columns the question names, never a text or date column.
