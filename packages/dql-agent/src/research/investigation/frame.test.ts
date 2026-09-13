@@ -95,6 +95,26 @@ describe('framing an investigation from a reading', () => {
     expect(investigationWindowsFor(plan, { now: new Date() }).windows.prior.label).toBe('July 2025');
   });
 
+  it('a period written as a token on the date field ("2025-06") is the period the question named', () => {
+    const token = (value: string) => [{ ref: TIME, op: 'eq', values: [value], source: 'question' }] as IntentPredicate[];
+    const plan = planned(reading({
+      time: { ref: TIME, window: { start: '2025-05-01', end: '2025-07-01', expression: 'May 2025 vs June 2025' } },
+      measures: [
+        { ref: REVENUE, alias: 'prior_month', scope: token('2025-05') },
+        { ref: REVENUE, alias: 'june_2025', scope: token('2025-06') },
+        { ref: 'change:june-may', alias: 'change', change: { base: 'prior_month', comparison: 'june_2025', as: 'absolute' } },
+      ] as AnalyticalIntentV1['measures'],
+    }));
+    expect(plan.stated).toMatchObject({ current: { start: '2025-06-01', end: '2025-07-01' }, prior: { start: '2025-05-01', end: '2025-06-01' } });
+    expect(frameNeedsFreshness(plan)).toBe(false);
+    const windows = investigationWindowsFor(plan, { now: new Date('2026-09-12T00:00:00Z') });
+    expect([windows.windows.current.label, windows.windows.prior.label]).toEqual(['June 2025', 'May 2025']);
+
+    const quarter = planned(reading({ time: { ref: TIME }, filters: token('2025-Q2') }));
+    expect(quarter.stated?.current).toEqual({ start: '2025-04-01', end: '2025-07-01' });
+    expect(quarter.baseFilters).toEqual([]);
+  });
+
   it('every query keeps the reading\'s restrictions except the dates the periods replace', () => {
     const region = { ref: 'dimension:orders.region', op: 'eq', values: ['West'] } as IntentPredicate;
     const plan = planned(reading({ filters: [region, ...between('2025-01-01', '2026-01-01')] }));

@@ -44,13 +44,30 @@ export function entryLabel(vocabulary: VocabularyIndex, ref: string, fallback?: 
 
 const isTimeRef = (vocabulary: VocabularyIndex, ref: string, timeRef?: string) => ref === timeRef || Boolean(vocabulary.get(ref)?.roles.includes('time'));
 
+const PERIOD_TOKEN = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?|-Q([1-4]))?$/i;
+
+/** A partial date the reader wrote for a whole period: "2025", "2025-06", "2025-Q2", "2025-06-15". */
+function periodOfToken(value: unknown): { start: string; end: string } | undefined {
+  const text = String(value ?? '').trim().replace(/[T ]00:00:00(?:\.0+)?(?:Z|\+00:00)?$/, '');
+  const match = PERIOD_TOKEN.exec(text);
+  if (!match) return undefined;
+  const grain: Grain = match[3] ? 'day' : match[4] ? 'quarter' : match[2] ? 'month' : 'year';
+  const month = match[4] ? (Number(match[4]) - 1) * 3 + 1 : Number(match[2] ?? 1);
+  const start = parseDay(`${match[1]}-${String(month).padStart(2, '0')}-${match[3] ?? '01'}`);
+  return start ? { start: formatDay(start), end: formatDay(addGrains(start, grain, 1)) } : undefined;
+}
+
 function windowFromPredicates(vocabulary: VocabularyIndex, predicates: IntentPredicate[] | undefined, timeRef?: string): { start: string; end: string; ref: string } | undefined {
   const onTime = (predicates ?? []).filter((predicate) => isTimeRef(vocabulary, predicate.ref, timeRef));
   const from = onTime.find((predicate) => predicate.op === 'gte');
   const to = onTime.find((predicate) => predicate.op === 'lt');
   const start = from ? String(from.values[0]).slice(0, 10) : '';
   const end = to ? String(to.values[0]).slice(0, 10) : '';
-  return ISO_DAY.test(start) && ISO_DAY.test(end) && end > start ? { start, end, ref: from!.ref } : undefined;
+  if (ISO_DAY.test(start) && ISO_DAY.test(end) && end > start) return { start, end, ref: from!.ref };
+  // The reader may name the period as one token on the date field ("June 2025" as "2025-06").
+  const equal = onTime.find((predicate) => predicate.op === 'eq' && predicate.values.length === 1);
+  const period = equal ? periodOfToken(equal.values[0]) : undefined;
+  return period ? { ...period, ref: equal!.ref } : undefined;
 }
 
 /** A ratio's parts from a derived metric written `a / b` over two named inputs. */

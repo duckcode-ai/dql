@@ -65,6 +65,10 @@ export async function runInvestigation(input: {
     return { kind: 'not_investigable', reason: planned.reason, receipt };
   }
   const { plan } = planned;
+  step('frame', `Framed the change in ${plan.metric.label}`, 'done', {
+    programId: 'frame',
+    ...(frameNeedsFreshness(plan) ? { detail: 'Checking how far the data runs before choosing the periods.' } : {}),
+  });
 
   // 2. How far the data runs, when the periods depend on it.
   let observedThrough: string | undefined;

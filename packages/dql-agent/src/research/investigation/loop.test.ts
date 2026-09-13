@@ -35,9 +35,9 @@ const receipt = (extra: Partial<PipelineReceipt> = {}): PipelineReceipt => ({
 } as PipelineReceipt);
 
 /** What the pipeline would return for a settled reading over DAYS. */
-function answer(intent: AnalyticalIntentV1, tier: 'semantic' | 'exploratory' = 'semantic'): PipelineOutcome {
+function answer(intent: AnalyticalIntentV1, tier: 'semantic' | 'exploratory' = 'semantic', data: typeof DAYS = DAYS): PipelineOutcome {
   const window = intent.time?.window;
-  const rows = DAYS.filter((row) => !window || (row.day >= window.start && row.day < window.end));
+  const rows = data.filter((row) => !window || (row.day >= window.start && row.day < window.end));
   const time = intent.groupBy.find((group) => group.role === 'time');
   if (!time && rows.length === 0) {
     return { kind: 'gap', gap: 'not_retrieved', message: 'no rows matched', nearest: [], text: '', offerExploration: false, intent, receipt: receipt({ warehouse: { attempts: 1, failures: 0 }, executed: { tier: 'semantic', sqlFingerprint: 'x', rowCount: 0, ms: 1, proofs: [] } }) };
@@ -78,7 +78,7 @@ const reading = (overrides: Partial<AnalyticalIntentV1> = {}): AnalyticalIntentV
 
 const august = reading({ reading: 'Revenue in August 2025.', time: { ref: TIME, grain: 'month', window: { start: '2025-08-01', end: '2025-09-01' } } });
 
-function scripted(options: { read?: PipelineOutcome; remainingMs?: number; signal?: AbortSignal; contextSources?: InvestigationContextSource[]; tier?: 'semantic' | 'exploratory' } = {}) {
+function scripted(options: { read?: PipelineOutcome; remainingMs?: number; signal?: AbortSignal; contextSources?: InvestigationContextSource[]; tier?: 'semantic' | 'exploratory'; data?: typeof DAYS } = {}) {
   const ran: AnalyticalIntentV1[] = [];
   const allowed: boolean[] = [];
   const steps: AskStoryStepV1[] = [];
@@ -89,7 +89,7 @@ function scripted(options: { read?: PipelineOutcome; remainingMs?: number; signa
       if (!options.read) throw new Error('an investigation started from an answer must not read the question again');
       return options.read;
     },
-    runIntent: async (intent, runOptions) => { ran.push(intent); allowed.push(runOptions.allowAiSql); return answer(intent, options.tier); },
+    runIntent: async (intent, runOptions) => { ran.push(intent); allowed.push(runOptions.allowAiSql); return answer(intent, options.tier, options.data); },
     vocabulary: () => vocabulary,
     remainingMs: () => options.remainingMs ?? 180_000,
     onStep: (step) => { steps.push(step); },
@@ -164,6 +164,16 @@ describe('an investigation of a change', () => {
     expect(script.allowed).toEqual([true, true]);
     expect(report.caveats.map((caveat) => caveat.code)).toEqual(['ai_sql', 'coverage_gap']);
     expect(report.confidence).toMatchObject({ level: 'low', reasons: expect.arrayContaining(['the governed metric could not be computed, so AI-written SQL was used']) });
+  });
+
+  it('data stamped once a month (every row on the 1st) counts its last month as complete', async () => {
+    const stamped = Array.from({ length: 15 }, (_, index) => ({ day: new Date(Date.UTC(2024, 5 + index, 1)).toISOString().slice(0, 10), revenue: 1000 + index * 10, food: 500 }));
+    const script = scripted({ read: readingOutcome(reading()), data: stamped });
+    const { report } = await investigate({ kind: 'question' }, script);
+    expect(report.frame).toMatchObject({ observedThrough: '2025-09-01', windowBasis: 'shifted_to_data' });
+    expect(report.frame.windows.current.label).toBe('August 2025');
+    expect(Number(report.headline.current!.value)).toBe(1000 + 14 * 10);
+    expect(Number(report.headline.prior!.value)).toBe(1000 + 13 * 10);
   });
 
   it('a share reads as a percent and changes in points', async () => {

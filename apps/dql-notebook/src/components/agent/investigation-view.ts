@@ -248,7 +248,9 @@ export function explainInvestigation(input: { receipt: unknown; report?: Investi
 export function investigationActiveLabel(last: { phase: string; title: string; state: string } | undefined): string | undefined {
   if (!last) return undefined;
   switch (last.phase) {
-    case 'frame': return last.title.startsWith('Comparing') ? 'Measuring the change' : 'Framing the change to investigate';
+    case 'frame': return last.title.startsWith('Comparing') ? 'Measuring the change'
+      : last.title.startsWith('Framed the change') ? 'Checking how far the data runs'
+      : 'Framing the change to investigate';
     case 'check': return last.title.startsWith('The data runs') || last.title.startsWith('Could not read how far') ? 'Framing the periods to compare' : 'Writing the report';
     case 'analyze': return 'Checking the data covers both periods';
     case 'drill': return 'Looking one level deeper';

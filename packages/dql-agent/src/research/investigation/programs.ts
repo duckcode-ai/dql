@@ -27,15 +27,18 @@ export async function observeFreshness(run: InvestigationRun, plan: Investigatio
   const vocabulary = run.runtime.vocabulary();
   const allowAiSql = plan.lane === 'ai';
   const queryIds: string[] = [];
-  const lastDay = (rows: { columns: string[]; rows: Array<Record<string, unknown>>; columnsMeta?: ResultColumnMeta[] }): string | undefined => {
+  const daysWithData = (rows: { columns: string[]; rows: Array<Record<string, unknown>>; columnsMeta?: ResultColumnMeta[] }): string[] => {
     const picked = resultColumns(rows, core, vocabulary, { time: true });
-    if (!picked.ok) return undefined;
-    let last: string | undefined;
-    for (const row of rows.rows) {
-      const day = bucketDayOf(row[picked.columns.time!]);
-      if (day && rowHasValue(row, picked.columns) && (!last || day > last)) last = day;
-    }
-    return last;
+    if (!picked.ok) return [];
+    const days = rows.rows
+      .filter((row) => rowHasValue(row, picked.columns))
+      .map((row) => bucketDayOf(row[picked.columns.time!]))
+      .filter((day): day is string => Boolean(day));
+    return [...new Set(days)].sort();
+  };
+  const lastDay = (rows: Parameters<typeof daysWithData>[0]): string | undefined => {
+    const days = daysWithData(rows);
+    return days[days.length - 1];
   };
   const monthly = await runInvestigationQuery(run, {
     purpose: 'freshness', programId: 'freshness', allowAiSql, label: `${plan.metric.label} by month, to find where the data ends`,
@@ -47,12 +50,18 @@ export async function observeFreshness(run: InvestigationRun, plan: Investigatio
   if (!lastMonth) return { queryIds };
   const monthStart = parseDay(lastMonth)!;
   const monthEnd = formatDay(addMonths(monthStart, 1));
+  // The days of the last two months with data: a table stamped once a month
+  // (every row dated on the 1st) shows only first days, and its last month is
+  // complete, not one day old.
+  const spanStart = formatDay(addMonths(monthStart, -1));
   const daily = await runInvestigationQuery(run, {
-    purpose: 'freshness', programId: 'freshness', allowAiSql, label: `${plan.metric.label} by day in the last month with data`,
-    intent: investigationIntent(core, { reading: `${plan.metric.label} by day from ${lastMonth} to ${monthEnd}.`, window: { start: lastMonth, end: monthEnd }, timeGrain: 'day', groupBy: [timeBucket(core, 'day')], shape: 'trend' }),
+    purpose: 'freshness', programId: 'freshness', allowAiSql, label: `${plan.metric.label} by day in the last two months with data`,
+    intent: investigationIntent(core, { reading: `${plan.metric.label} by day from ${spanStart} to ${monthEnd}.`, window: { start: spanStart, end: monthEnd }, timeGrain: 'day', groupBy: [timeBucket(core, 'day')], shape: 'trend' }),
   });
   if (daily.status === 'answered' || daily.status === 'no_rows' || daily.status === 'unanswered') queryIds.push(daily.id);
-  const last = daily.status === 'answered' ? lastDay(daily.rows) : undefined;
+  const days = daily.status === 'answered' ? daysWithData(daily.rows) : [];
+  if (days.length > 0 && days.every((day) => day.endsWith('-01'))) return { observedThrough: monthEnd, queryIds };
+  const last = days[days.length - 1];
   return last ? { observedThrough: formatDay(addDays(parseDay(last)!, 1)), queryIds } : { observedThrough: lastMonth, approximate: true, queryIds };
 }
 

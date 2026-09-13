@@ -101,6 +101,7 @@ describe('the investigation view model', () => {
 
   it('names what Research is doing from its last step', () => {
     expect(view.investigationActiveLabel({ phase: 'frame', title: 'Framed', state: 'done' })).toBe('Framing the change to investigate');
+    expect(view.investigationActiveLabel({ phase: 'frame', title: 'Framed the change in net arr', state: 'done' })).toBe('Checking how far the data runs');
     expect(view.investigationActiveLabel({ phase: 'analyze', title: 'Measured', state: 'done' })).toBe('Checking the data covers both periods');
     expect(view.investigationActiveLabel({ phase: 'read', title: 'Read', state: 'done' })).toBeUndefined();
   });
