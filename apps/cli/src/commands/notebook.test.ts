@@ -3,7 +3,28 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { resolveAskAgentRuntimeMode } from '../local-runtime.js';
-import { resolveNotebookConnection, startProjectRuntime } from './notebook.js';
+import { networkAccessUrls, resolveNotebookConnection, startProjectRuntime, withAccessToken } from './notebook.js';
+
+describe('network access links', () => {
+  const interfaces = {
+    lo0: [{ address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4' as const, mac: '00:00:00:00:00:00', internal: true, cidr: '127.0.0.1/8' }],
+    en0: [
+      { address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6' as const, mac: 'aa:bb:cc:dd:ee:ff', internal: false, cidr: 'fe80::1/64', scopeid: 4 },
+      { address: '10.0.0.31', netmask: '255.255.255.0', family: 'IPv4' as const, mac: 'aa:bb:cc:dd:ee:ff', internal: false, cidr: '10.0.0.31/24' },
+    ],
+  };
+
+  it('a server on every interface prints one link per network address, carrying the token in the fragment', () => {
+    expect(networkAccessUrls({ host: '0.0.0.0', port: 3630, token: 'abc123def456', interfaces }))
+      .toEqual(['http://10.0.0.31:3630/#dql_token=abc123def456']);
+    expect(networkAccessUrls({ host: '192.168.1.20', port: 3474, interfaces })).toEqual(['http://192.168.1.20:3474']);
+    expect(withAccessToken('http://127.0.0.1:3630', 'abc123def456')).toBe('http://127.0.0.1:3630/#dql_token=abc123def456');
+  });
+
+  it('a loopback server prints no network links', () => {
+    expect(networkAccessUrls({ host: '127.0.0.1', port: 3474, token: 'abc123def456', interfaces })).toEqual([]);
+  });
+});
 
 describe('resolveNotebookConnection', () => {
   it('does not invent a DuckDB/file fallback when no default connection is configured', () => {

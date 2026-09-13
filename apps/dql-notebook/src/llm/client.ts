@@ -1,3 +1,4 @@
+import { authorizedFetch } from '../api/server-auth';
 import type { AgentConversationContext, AgentTurn, ChatTurn, ProviderId } from './types';
 
 export interface RunAgentOptions {
@@ -13,7 +14,7 @@ export interface RunAgentOptions {
  * Resolves when the server closes the stream; rejects on HTTP error.
  */
 export async function runAgent(opts: RunAgentOptions, onTurn: (turn: AgentTurn) => void): Promise<void> {
-  const res = await fetch('/api/llm/run', {
+  const res = await authorizedFetch('/api/llm/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify({

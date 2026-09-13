@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-quer
 import { ThemeProvider, TooltipProvider } from '@duckcodeailabs/dql-ui';
 import { NotebookProvider, useNotebookStore } from './store/NotebookStore';
 import { AppShell } from './components/shell/AppShell';
+import { ServerAccessGate } from './components/shell/ServerAccessGate';
 import { themes } from './themes/notebook-theme';
 import { api } from './api/client';
 import { useHotReload } from './hooks/useHotReload';
@@ -103,6 +104,7 @@ function AppInner() {
     <ThemeProvider theme={themeMode} applyGlobal>
       <TooltipProvider delayDuration={200} skipDelayDuration={400}>
         <AppShell />
+        <ServerAccessGate />
       </TooltipProvider>
     </ThemeProvider>
   );

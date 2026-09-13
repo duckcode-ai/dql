@@ -3,6 +3,7 @@ import type {
   CompletionResult,
   CompletionSource,
 } from "@codemirror/autocomplete";
+import { authorizedFetch } from "../api/server-auth";
 
 type RankedCompletion = {
   type: string;
@@ -30,7 +31,7 @@ async function ranked(
   if (existing && existing.expiresAt > Date.now()) return existing.items;
   const params = new URLSearchParams({ kind, q: query, limit: "60" });
   if (relation) params.set("relation", relation);
-  const response = await fetch(
+  const response = await authorizedFetch(
     `${window.location.origin}/api/editor/completions?${params}`,
   );
   if (!response.ok) return [];

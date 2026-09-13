@@ -1,6 +1,7 @@
 import type { Completion, CompletionContext, CompletionResult, CompletionSource } from '@codemirror/autocomplete';
 import { EditorView } from '@codemirror/view';
 import { api } from '../api/client';
+import { authorizedFetch } from '../api/server-auth';
 
 type SemanticCompletionItem = {
   type: 'metric' | 'dimension';
@@ -34,7 +35,7 @@ async function loadSemanticCompletions(
   const cached = completionCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached.items;
   const params = new URLSearchParams({ kind: type, q: query, limit: "50" });
-  const response = await fetch(
+  const response = await authorizedFetch(
     `${window.location.origin}/api/editor/completions?${params.toString()}`,
   );
   if (!response.ok) {

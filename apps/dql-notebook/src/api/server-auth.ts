@@ -45,6 +45,53 @@ export function withServerAuthorization(headers?: HeadersInit): Headers {
   return resolved;
 }
 
+/** Whether this tab holds a LAN access token (from its link or pasted in). */
+export function hasServerToken(): boolean {
+  return Boolean(serverToken);
+}
+
+/**
+ * The token in what a reader pastes: the full access link (`…#dql_token=…`)
+ * or the token alone. A link without the token names no token.
+ */
+export function serverTokenFromAccessInput(input: string): string | undefined {
+  const text = input.trim();
+  const tokenAt = text.indexOf(`${SERVER_TOKEN_FRAGMENT_KEY}=`);
+  if (tokenAt >= 0) return serverTokenFromHash(text.slice(tokenAt));
+  return /^[\w.~-]{8,}$/.test(text) ? text : undefined;
+}
+
+/** Keep a pasted token for this tab; the page reloads to use it. */
+export function rememberServerToken(token: string): void {
+  window.sessionStorage.setItem(SERVER_TOKEN_SESSION_KEY, token);
+}
+
+export const SERVER_AUTH_REQUIRED_EVENT = 'dql:server-auth-required';
+let serverAuthRejected = false;
+
+/**
+ * A LAN server refuses every API call without its token. Without this the
+ * page loads and then waits forever: a tab opened without the full access
+ * link (a new tab, a bookmark, a link a chat app shortened) has no token.
+ */
+export function reportServerAuthRejected(status: number): boolean {
+  if (status !== 401) return false;
+  serverAuthRejected = true;
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(SERVER_AUTH_REQUIRED_EVENT));
+  return true;
+}
+
+export function wasServerAuthRejected(): boolean {
+  return serverAuthRejected;
+}
+
+/** `fetch` for a same-origin DQL API path, with the tab's token. */
+export async function authorizedFetch(input: string, init?: RequestInit): Promise<Response> {
+  const response = await fetch(input, { ...init, headers: withServerAuthorization(init?.headers) });
+  reportServerAuthRejected(response.status);
+  return response;
+}
+
 export interface ServerEventFrame {
   event: string;
   data: string;
@@ -65,6 +112,7 @@ export async function streamServerEvents(
     cache: 'no-store',
     signal,
   });
+  reportServerAuthRejected(response.status);
   if (!response.ok) throw new Error(`Event stream failed with HTTP ${response.status}.`);
   if (!response.body) throw new Error('Event stream response did not include a body.');
 

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
+import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
@@ -74,6 +75,33 @@ export async function startProjectRuntime(
   };
 }
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+/** The token as a URL fragment: the browser keeps it and never sends it to the server. */
+export const withAccessToken = (url: string, token: string | undefined) =>
+  (token ? `${url.replace(/\/$/, '')}/#dql_token=${encodeURIComponent(token)}` : url);
+
+/**
+ * The links another device opens to reach a server bound beyond loopback: one
+ * per network address when bound on every interface, each carrying the access
+ * token a shared server requires.
+ */
+export function networkAccessUrls(input: {
+  host: string;
+  port: number;
+  token?: string;
+  interfaces?: NodeJS.Dict<NetworkInterfaceInfo[]>;
+}): string[] {
+  if (LOOPBACK_HOSTS.has(input.host)) return [];
+  const hosts = input.host === '0.0.0.0' || input.host === '::'
+    ? Object.values(input.interfaces ?? networkInterfaces())
+      .flatMap((addresses) => addresses ?? [])
+      .filter((address) => address.family === 'IPv4' && !address.internal)
+      .map((address) => address.address)
+    : [input.host];
+  return [...new Set(hosts)].map((host) => withAccessToken(`http://${host}:${input.port}`, input.token));
+}
+
 export async function runNotebook(targetArg: string | null, flags: CLIFlags): Promise<void> {
   const baseDir = resolve(targetArg ?? '.');
   const projectRoot = findProjectRoot(baseDir);
@@ -99,8 +127,20 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
   const shouldOpen = (flags.open ?? config.preview?.open ?? true) && host === '127.0.0.1';
   maybeOpenBrowser(url, shouldOpen);
 
-  console.log(`\n  ✓ Notebook ready: ${url}`);
-  if (host !== '127.0.0.1') {
+  // A server bound beyond loopback answers only a browser holding its token,
+  // this machine's included: print links that carry it.
+  const token = LOOPBACK_HOSTS.has(host) ? undefined : process.env.DQL_SERVER_TOKEN;
+  console.log(`\n  ✓ Notebook ready: ${withAccessToken(url, token)}`);
+  const networkUrls = networkAccessUrls({ host, port, ...(token ? { token } : {}) });
+  if (networkUrls.length > 0) {
+    const allowed = new Set((process.env.DQL_ALLOWED_ORIGINS ?? '').split(',').map((origin) => origin.trim().replace(/\/$/, '')).filter(Boolean));
+    console.log(`    Bound on ${host}:${port}. From another device, open the full link (it carries the access token):`);
+    for (const link of networkUrls) {
+      const origin = new URL(link).origin;
+      console.log(`      ${link}${allowed.has(origin) ? '' : `  (add ${origin} to DQL_ALLOWED_ORIGINS, or browsers there are refused)`}`);
+    }
+    console.log('    A new browser tab needs the full link again, or the token pasted when the page asks for it.');
+  } else if (host !== '127.0.0.1') {
     console.log(`    Bound on ${host}:${port} — open the URL above from your host.`);
   }
   console.log('    Press Ctrl+C to stop.');

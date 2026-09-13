@@ -67,7 +67,7 @@ import type {
   SkillPathSettings,
   Domain,
 } from '../store/types';
-import { withServerAuthorization } from './server-auth';
+import { reportServerAuthRejected, withServerAuthorization } from './server-auth';
 
 const EMPTY_PLAN = {
   totals: { modelsScanned: 0, businessModels: 0, plumbingExcluded: 0, metricsFound: 0 },
@@ -3344,6 +3344,7 @@ async function requestUncached<T>(path: string, options?: RequestInit): Promise<
     throw new Error(`Unable to reach the local DQL notebook server. Check that it is still running, then retry.${detail}`);
   }
   if (!res.ok) {
+    reportServerAuthRejected(res.status);
     const text = await res.text().catch(() => '');
     throw formatRequestError(res, text);
   }
