@@ -25,6 +25,8 @@ export interface InvestigationFramePlan {
   shape: 'change' | 'level';
   /** What framing decided that a reader should know (a certified block measured through its governed metric). */
   notes?: string[];
+  /** A numeric period field (a season, a year) used because no date field is known, with the values the reading named. */
+  periodAxis?: { ref: string; name: string; current?: number; prior?: number };
 }
 
 export type InvestigationFramePlanResult =
@@ -35,11 +37,18 @@ export type InvestigationFramePlanResult =
 const NON_ADDITIVE = new Set(['avg', 'median', 'count_distinct', 'min', 'max']);
 const NUMERIC_TYPE = /(int|decimal|float|double|numeric|number|real|money)/i;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const PERIOD_FIELD = /(^|_)(season|year|fiscal_year|fy)$/i;
 
 export function entryLabel(vocabulary: VocabularyIndex, ref: string, fallback?: string): string {
   const entry = vocabulary.get(ref);
   const name = entry?.label ?? entry?.name ?? fallback ?? ref.replace(/^[a-z_]+:/i, '').split('.').pop() ?? ref;
   return name.replace(/_/g, ' ');
+}
+
+/** A value that names a year-like period (2017, "2017"), or undefined. */
+export function yearOfPeriodValue(value: unknown): number | undefined {
+  const number = typeof value === 'number' ? value : typeof value === 'string' && /^\s*\d{4}(\.0+)?\s*$/.test(value) ? Number(value) : Number.NaN;
+  return Number.isInteger(number) && number >= 1900 && number <= 2100 ? number : undefined;
 }
 
 const isTimeRef = (vocabulary: VocabularyIndex, ref: string, timeRef?: string) => ref === timeRef || Boolean(vocabulary.get(ref)?.roles.includes('time'));
@@ -158,6 +167,41 @@ function timeRefFor(vocabulary: VocabularyIndex, reading: AnalyticalIntentV1, me
   return reading.time?.ref ?? timeGroup?.ref ?? scoped ?? entry?.timeRef ?? sameModel;
 }
 
+/**
+ * A numeric period field when no date field is known: a season or a year the
+ * reading restricts ("season = 2017"), compares (two scoped measures), groups
+ * by, or that the metric's own model carries.
+ */
+function periodAxisFor(
+  vocabulary: VocabularyIndex,
+  reading: AnalyticalIntentV1,
+  primary: IntentMeasure,
+  metricRef: string,
+  change?: { comparison: IntentMeasure; base: IntentMeasure },
+): InvestigationFramePlan['periodAxis'] | undefined {
+  const nameOf = (ref: string) => vocabulary.get(ref)?.name ?? ref.split('.').pop() ?? ref;
+  const isPeriodField = (ref: string) => !isTimeRef(vocabulary, ref) && PERIOD_FIELD.test(nameOf(ref));
+  const valueIn = (predicates: IntentPredicate[] | undefined) => {
+    const predicate = (predicates ?? []).find((item) => item.op === 'eq' && item.values.length === 1 && isPeriodField(item.ref) && yearOfPeriodValue(item.values[0]) !== undefined);
+    return predicate ? { ref: predicate.ref, value: yearOfPeriodValue(predicate.values[0])! } : undefined;
+  };
+  const current = change ? valueIn(change.comparison.scope) : valueIn(primary.scope) ?? valueIn(reading.filters);
+  const prior = change ? valueIn(change.base.scope) : undefined;
+  const grouped = reading.groupBy.find((group) => isPeriodField(group.ref));
+  const model = vocabulary.get(metricRef)?.model;
+  const onModel = model
+    ? vocabulary.entries.find((entry) => (entry.kind === 'dimension' || entry.kind === 'column') && entry.model === model && isPeriodField(entry.ref))?.ref
+    : undefined;
+  const ref = current?.ref ?? prior?.ref ?? grouped?.ref ?? onModel;
+  if (!ref) return undefined;
+  return {
+    ref,
+    name: nameOf(ref).replace(/_/g, ' '),
+    ...(current ? { current: current.value } : {}),
+    ...(prior ? { prior: prior.value } : {}),
+  };
+}
+
 /** Frame the reading: what is measured, over which date field, at which grain, under which filters. */
 export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; vocabulary: VocabularyIndex; lane: 'governed' | 'ai'; question?: string }): InvestigationFramePlanResult {
   const { reading, vocabulary } = input;
@@ -181,7 +225,22 @@ export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; voc
   const metric = metricOf(vocabulary, measured.measure);
   const lane = measured.lane ?? input.lane;
   const timeRef = timeRefFor(vocabulary, reading, primary, metric.ref);
-  if (!timeRef) return { status: 'not_investigable', reason: `Research compares periods, and no date field is known for ${metric.label}.` };
+  if (!timeRef) {
+    // No date field, but a season or a year: the periods are its values.
+    const axis = periodAxisFor(vocabulary, reading, primary, metric.ref, comparison && base ? { comparison, base } : undefined);
+    if (!axis) return { status: 'not_investigable', reason: `Research compares periods, and no date field is known for ${metric.label}.` };
+    const keepOffAxis = (predicate: IntentPredicate) => predicate.on !== 'aggregate' && predicate.ref !== axis.ref;
+    return {
+      status: 'planned',
+      plan: {
+        reading: reading.reading, lane, metric, timeRef: axis.ref, grain: 'year',
+        baseFilters: [...reading.filters.filter(keepOffAxis), ...(primary.scope ?? []).filter(keepOffAxis)],
+        shape: changeMeasure || axis.prior !== undefined ? 'change' : 'level',
+        periodAxis: axis,
+        ...(measured.note ? { notes: [measured.note] } : {}),
+      },
+    };
+  }
   const currentStated = comparison && base
     ? windowFromPredicates(vocabulary, comparison.scope, timeRef)
     : (reading.time?.window && ISO_DAY.test(reading.time.window.start.slice(0, 10)) && ISO_DAY.test(reading.time.window.end.slice(0, 10))
@@ -211,7 +270,8 @@ export function planInvestigationFrame(input: { reading: AnalyticalIntentV1; voc
 const RELATIVE_WORDS = /\b(last|this|previous|prior|past|recent|current|latest|ytd|mtd|qtd|yesterday|today|ago)\b/i;
 
 /** The periods to compare, from what the question stated and what the data covers. */
-export function investigationWindowsFor(plan: InvestigationFramePlan, input: { observedThrough?: string; now: Date; fromSourceRun?: boolean }): Pick<InvestigationFrameV1, 'windows' | 'windowBasis' | 'observedThrough' | 'notes'> {
+export function investigationWindowsFor(plan: InvestigationFramePlan, input: { observedThrough?: string; observedValue?: number; now: Date; fromSourceRun?: boolean }): Pick<InvestigationFrameV1, 'windows' | 'windowBasis' | 'observedThrough' | 'notes'> {
+  if (plan.periodAxis) return periodValueWindows(plan, plan.periodAxis, input);
   const { grain } = plan;
   const notes: string[] = [];
   let current: InvestigationWindow;
@@ -252,7 +312,39 @@ export function investigationWindowsFor(plan: InvestigationFramePlan, input: { o
   };
 }
 
+/** Seasons (or years) as periods: the one named, or the latest with data, against the one before. */
+function periodValueWindows(
+  plan: InvestigationFramePlan,
+  axis: NonNullable<InvestigationFramePlan['periodAxis']>,
+  input: { observedValue?: number; now: Date; fromSourceRun?: boolean },
+): Pick<InvestigationFrameV1, 'windows' | 'windowBasis' | 'notes'> {
+  const notes: string[] = [];
+  let current: number;
+  let basis: InvestigationFrameV1['windowBasis'];
+  if (axis.current !== undefined) {
+    current = axis.current;
+    basis = input.fromSourceRun ? 'source_run' : 'stated';
+  } else if (input.observedValue !== undefined) {
+    current = input.observedValue;
+    basis = 'latest_complete';
+    notes.push(`The question names no ${axis.name}, so Research compares the latest ${axis.name} in the data, ${current}, which may still be in progress.`);
+  } else {
+    current = dayOf(input.now).year - 1;
+    basis = 'latest_complete';
+    notes.push(`The latest ${axis.name} in the data could not be read, so Research compares ${current}.`);
+  }
+  const prior = axis.prior ?? current - 1;
+  const period = (value: number): InvestigationWindow => ({ start: String(value), end: String(value + 1), label: `${value} ${axis.name}` });
+  // One season earlier is the season before: the report compares it once.
+  return {
+    windows: { current: period(current), prior: period(prior), yearAgo: period(prior), yearAgoPrior: period(prior - 1) },
+    windowBasis: basis,
+    notes: [...(plan.notes ?? []), ...notes],
+  };
+}
+
 /** Whether the frame needs to know how far the data runs before its windows can be set. */
 export function frameNeedsFreshness(plan: InvestigationFramePlan): boolean {
+  if (plan.periodAxis) return plan.periodAxis.current === undefined;
   return !plan.stated || Boolean(plan.stated.expression && RELATIVE_WORDS.test(plan.stated.expression) && !/\b\d{4}\b/.test(plan.stated.expression));
 }

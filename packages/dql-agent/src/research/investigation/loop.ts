@@ -9,7 +9,7 @@ import type { AskStoryStepV1 } from '../../ask-pipeline/outcomes.js';
 import { readingLane } from '../../ask-pipeline/resolve-intent.js';
 import { investigationStopReason, recordReadingCalls, type InvestigationRun } from './context.js';
 import { frameNeedsFreshness, investigationWindowsFor, planInvestigationFrame } from './frame.js';
-import { checkCoverage, measureHeadline, observeFreshness } from './programs.js';
+import { checkCoverage, measureHeadline, observeFreshness, observeLatestPeriodValue } from './programs.js';
 import { buildInvestigationReport } from './report.js';
 import { lastDayBefore } from './windows.js';
 import type {
@@ -72,8 +72,20 @@ export async function runInvestigation(input: {
 
   // 2. How far the data runs, when the periods depend on it.
   let observedThrough: string | undefined;
+  let observedValue: number | undefined;
   let freshnessApproximate = false;
-  if (frameNeedsFreshness(plan)) {
+  if (frameNeedsFreshness(plan) && plan.periodAxis) {
+    const axis = plan.periodAxis;
+    const started = Date.now();
+    const freshnessRecord = record('freshness', 'freshness', `Found the latest ${axis.name} with data`);
+    const latest = await observeLatestPeriodValue(run, plan);
+    freshnessRecord.queryIds = latest.queryIds;
+    freshnessRecord.ms = Date.now() - started;
+    observedValue = latest.observedValue;
+    if (observedValue === undefined) freshnessRecord.outcome = 'failed';
+    step('check', observedValue !== undefined ? `The latest ${axis.name} with data is ${observedValue}` : `Could not read the latest ${axis.name} with data`, observedValue !== undefined ? 'done' : 'missed', { ms: freshnessRecord.ms, programId: 'freshness' });
+  }
+  if (frameNeedsFreshness(plan) && !plan.periodAxis) {
     const started = Date.now();
     const freshnessRecord = record('freshness', 'freshness', 'Checked how far the data runs');
     const fresh = await observeFreshness(run, plan);
@@ -84,22 +96,26 @@ export async function runInvestigation(input: {
     if (!observedThrough) freshnessRecord.outcome = 'failed';
     step('check', observedThrough ? `The data runs through ${lastDayBefore(observedThrough)}` : 'Could not read how far the data runs', observedThrough ? 'done' : 'missed', { ms: freshnessRecord.ms, programId: 'freshness' });
   }
-  const windows = investigationWindowsFor(plan, { ...(observedThrough ? { observedThrough } : {}), now: (input.now ?? (() => new Date()))(), fromSourceRun: input.source.kind === 'run' });
+  const windows = investigationWindowsFor(plan, { ...(observedThrough ? { observedThrough } : {}), ...(observedValue !== undefined ? { observedValue } : {}), now: (input.now ?? (() => new Date()))(), fromSourceRun: input.source.kind === 'run' });
   const frame: InvestigationFrameV1 = {
     version: 1, question: input.question, reading: plan.reading,
     source: input.source.kind === 'run' ? { kind: 'run', runId: input.source.runId } : { kind: 'question' },
     metric: plan.metric, timeRef: plan.timeRef, grain: plan.grain, baseFilters: plan.baseFilters, shape: plan.shape, lane: plan.lane,
+    ...(plan.periodAxis ? { periodAxis: { ref: plan.periodAxis.ref, name: plan.periodAxis.name } } : {}),
     ...windows,
   };
   receipt.frame = frame;
   frameRecord.ms = Date.now() - frameStarted;
   step('frame', `Comparing ${frame.metric.label} in ${frame.windows.current.label} with ${frame.windows.prior.label}`, 'done', {
-    detail: `and with ${frame.windows.yearAgo.label}${frame.baseFilters.length ? `; keeping the question's ${frame.baseFilters.length === 1 ? 'filter' : 'filters'}` : ''}`,
+    detail: [
+      frame.windows.yearAgo.start !== frame.windows.prior.start ? `and with ${frame.windows.yearAgo.label}` : '',
+      frame.baseFilters.length ? `keeping the question's ${frame.baseFilters.length === 1 ? 'filter' : 'filters'}` : '',
+    ].filter(Boolean).join('; ') || undefined,
     programId: 'frame',
   });
   const caveats: InvestigationCaveatV1[] = [];
   if (frame.windowBasis === 'shifted_to_data') caveats.push({ code: 'shifted_to_data', text: 'The periods were moved to the latest complete data.' });
-  if (frameNeedsFreshness(plan) && !observedThrough) caveats.push({ code: 'freshness_unknown', text: 'How far the data runs could not be read, so the latest complete period may still be filling in.' });
+  if (frameNeedsFreshness(plan) && !plan.periodAxis && !observedThrough) caveats.push({ code: 'freshness_unknown', text: 'How far the data runs could not be read, so the latest complete period may still be filling in.' });
   if (freshnessApproximate) caveats.push({ code: 'freshness_unknown', text: 'Only the last month with data could be read, not its last day, so that month was treated as incomplete.' });
 
   const context: InvestigationContextItemV1[] = [];
@@ -129,7 +145,7 @@ export async function runInvestigation(input: {
 
   // 4. Whether both periods are covered by data.
   let coverage;
-  if (!headline.noData && headline.current !== undefined) {
+  if (!headline.noData && headline.current !== undefined && !frame.periodAxis) {
     const started = Date.now();
     const coverageRecord = record('coverage', 'coverage', 'Checked the data covers both periods');
     coverage = await checkCoverage(run, frame, { allowAiSql: frame.lane === 'ai' || headline.aiSql });

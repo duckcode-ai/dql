@@ -5,16 +5,29 @@
  */
 import type { ResultColumnMeta } from '../../ask-pipeline/execute.js';
 import { divideDecimal, parseExactDecimal, sumDecimals, type ExactDecimal } from '../../analytical-execution-graph.js';
-import type { InvestigationFramePlan } from './frame.js';
-import { bucketDayOf, decimalOf, investigationIntent, resultColumns, timeBucket, type InvestigationFrameCore } from './intents.js';
+import { yearOfPeriodValue, type InvestigationFramePlan } from './frame.js';
+import { bucketDayOf, decimalOf, investigationIntent, periodValueIntent, resultColumns, timeBucket, type InvestigationFrameCore } from './intents.js';
 import { runInvestigationQuery, type InvestigationRun } from './context.js';
-import type { InvestigationFrameV1, InvestigationWindow } from './types.js';
+import type { InvestigationFrameV1, InvestigationMetric, InvestigationWindow } from './types.js';
 import { addDays, addGrains, addMonths, bucketsIn, daysIn, formatDay, parseDay, windowLabel } from './windows.js';
 
 const isZero = (value: ExactDecimal | undefined) => value === undefined || value.coefficient === 0n;
 
 const rowHasValue = (row: Record<string, unknown>, columns: { value?: string; denominator?: string }): boolean =>
   columns.denominator ? !isZero(decimalOf(row[columns.denominator])) : !isZero(decimalOf(row[columns.value!]));
+
+/** The metric over some rows: a sum, a ratio of sums, or the one value of a non-additive metric. */
+function figureOf(metric: InvestigationMetric, rows: Array<Record<string, unknown>>, columns: { value?: string; numerator?: string; denominator?: string }): ExactDecimal | undefined {
+  if (metric.ratio) {
+    const numerator = sumDecimals(rows.map((row) => decimalOf(row[columns.numerator!])).filter((value): value is ExactDecimal => Boolean(value)));
+    const denominator = sumDecimals(rows.map((row) => decimalOf(row[columns.denominator!])).filter((value): value is ExactDecimal => Boolean(value)));
+    const ratio = divideDecimal(numerator, denominator, 12);
+    return ratio === undefined ? undefined : parseExactDecimal(ratio);
+  }
+  const values = rows.map((row) => decimalOf(row[columns.value!])).filter((value): value is ExactDecimal => Boolean(value));
+  if (metric.additivity === 'non_additive') return values.length === 1 ? values[0] : undefined;
+  return sumDecimals(values);
+}
 
 /**
  * The exclusive day after the last day the metric has data, from a monthly
@@ -65,6 +78,25 @@ export async function observeFreshness(run: InvestigationRun, plan: Investigatio
   return last ? { observedThrough: formatDay(addDays(parseDay(last)!, 1)), queryIds } : { observedThrough: lastMonth, approximate: true, queryIds };
 }
 
+/** The latest season (or year) the metric has data for, from one query grouped by that field. */
+export async function observeLatestPeriodValue(run: InvestigationRun, plan: InvestigationFramePlan): Promise<{ observedValue?: number; queryIds: string[] }> {
+  const axis = plan.periodAxis!;
+  const core = { metric: plan.metric, timeRef: plan.timeRef, grain: plan.grain, baseFilters: plan.baseFilters, periodAxis: axis };
+  const result = await runInvestigationQuery(run, {
+    purpose: 'freshness', programId: 'freshness', allowAiSql: plan.lane === 'ai', label: `${plan.metric.label} by ${axis.name}, to find the latest ${axis.name}`,
+    intent: periodValueIntent(core, { reading: `${plan.metric.label} by ${axis.name}.`, grouped: true, shape: 'grouped' }),
+  });
+  const queryIds = result.status === 'stopped' ? [] : [result.id];
+  if (result.status !== 'answered') return { queryIds };
+  const picked = resultColumns(result.rows, core, run.runtime.vocabulary(), { dimensionRef: axis.ref });
+  if (!picked.ok) return { queryIds };
+  const values = result.rows.rows
+    .filter((row) => rowHasValue(row, picked.columns))
+    .map((row) => yearOfPeriodValue(row[picked.columns.dimension!]))
+    .filter((value): value is number => value !== undefined);
+  return values.length ? { observedValue: Math.max(...values), queryIds } : { queryIds };
+}
+
 export interface HeadlineFigures {
   current?: ExactDecimal;
   prior?: ExactDecimal;
@@ -87,23 +119,13 @@ const WINDOW_KEYS: WindowKey[] = ['current', 'prior', 'yearAgo', 'yearAgoPrior']
 
 /** The metric in the current period, the one before, and the same two a year earlier. */
 export async function measureHeadline(run: InvestigationRun, frame: InvestigationFrameV1): Promise<HeadlineFigures> {
+  if (frame.periodAxis) return measureHeadlineBySeason(run, frame, frame.periodAxis);
   const vocabulary = run.runtime.vocabulary();
   const { windows, grain, metric } = frame;
   const figures: HeadlineFigures = { queryIds: [], aiSql: false, noData: false };
   const seen = new Set<WindowKey>();
   /** Periods that start before the first bucket with data: their figures are unknown. */
   const unknown = new Set<WindowKey>();
-  const valueOf = (rows: Array<Record<string, unknown>>, columns: { value?: string; numerator?: string; denominator?: string }): ExactDecimal | undefined => {
-    if (metric.ratio) {
-      const numerator = sumDecimals(rows.map((row) => decimalOf(row[columns.numerator!])).filter((value): value is ExactDecimal => Boolean(value)));
-      const denominator = sumDecimals(rows.map((row) => decimalOf(row[columns.denominator!])).filter((value): value is ExactDecimal => Boolean(value)));
-      const ratio = divideDecimal(numerator, denominator, 12);
-      return ratio === undefined ? undefined : parseExactDecimal(ratio);
-    }
-    const values = rows.map((row) => decimalOf(row[columns.value!])).filter((value): value is ExactDecimal => Boolean(value));
-    if (metric.additivity === 'non_additive') return values.length === 1 ? values[0] : undefined;
-    return sumDecimals(values);
-  };
 
   const bucketed = WINDOW_KEYS.every((key) => bucketsIn(windows[key], grain));
   if (bucketed) {
@@ -148,7 +170,7 @@ export async function measureHeadline(run: InvestigationRun, frame: Investigatio
           // The two compared periods are zero when the series has data but
           // not there; a year earlier with no rows is unknown.
           if (rows.length === 0 && (key === 'yearAgo' || key === 'yearAgoPrior' || metric.additivity !== 'additive')) continue;
-          const value = valueOf(rows, picked.columns);
+          const value = figureOf(metric, rows, picked.columns);
           if (value !== undefined) { figures[key] = value; seen.add(key); }
         }
         if (inWindow(windows.current).length === 0 && inWindow(windows.prior).length === 0 && !unknown.has('current') && !unknown.has('prior')) figures.noData = true;
@@ -182,7 +204,7 @@ export async function measureHeadline(run: InvestigationRun, frame: Investigatio
       const picked = resultColumns(result.rows, frame, vocabulary);
       if (!picked.ok) { figures.failure ??= picked.reason; continue; }
       figures.valueMeta ??= picked.columns.valueMeta;
-      const value = valueOf(result.rows.rows, picked.columns);
+      const value = figureOf(metric, result.rows.rows, picked.columns);
       if (value !== undefined) { figures[key] = value; seen.add(key); }
     } else if (result.status === 'no_rows') {
       if ((key === 'current' || key === 'prior') && metric.additivity === 'additive') { figures[key] = { coefficient: 0n, scale: 0 }; seen.add(key); }
@@ -195,6 +217,45 @@ export async function measureHeadline(run: InvestigationRun, frame: Investigatio
   return figures;
 }
 
+/**
+ * The metric by season (or year), one query over the seasons compared. A
+ * season the data does not hold is unknown, never zero: a season that has not
+ * happened yet is not a season with no points.
+ */
+async function measureHeadlineBySeason(run: InvestigationRun, frame: InvestigationFrameV1, axis: { ref: string; name: string }): Promise<HeadlineFigures> {
+  const { windows, metric } = frame;
+  const figures: HeadlineFigures = { queryIds: [], aiSql: false, noData: false };
+  const from = Number(windows.yearAgoPrior.start);
+  const to = Number(windows.current.end);
+  const result = await runInvestigationQuery(run, {
+    purpose: 'headline', programId: 'headline', allowAiSql: true,
+    label: `${metric.label} by ${axis.name} from ${windows.yearAgoPrior.label} to ${windows.current.label}`,
+    intent: periodValueIntent({ ...frame, periodAxis: axis }, { reading: `${metric.label} by ${axis.name} from ${from} to ${to - 1}.`, from, to, grouped: true, shape: 'grouped' }),
+  });
+  if (result.status === 'stopped') { figures.stopped = true; return figures; }
+  figures.queryIds.push(result.id);
+  if (result.status === 'no_rows') { figures.noData = true; return figures; }
+  if (result.status === 'unanswered') { figures.failure = result.message; return figures; }
+  figures.aiSql = result.aiSql;
+  const picked = resultColumns(result.rows, frame, run.runtime.vocabulary(), { dimensionRef: axis.ref });
+  if (!picked.ok) { figures.failure = picked.reason; return figures; }
+  figures.valueMeta = picked.columns.valueMeta;
+  const seasonOf = (row: Record<string, unknown>) => yearOfPeriodValue(row[picked.columns.dimension!]);
+  const ordered = [...result.rows.rows].sort((left, right) => (seasonOf(left) ?? 0) - (seasonOf(right) ?? 0));
+  figures.series = { columns: result.rows.columns, rows: ordered, ...(result.rows.columnsMeta ? { columnsMeta: result.rows.columnsMeta } : {}) };
+  for (const key of WINDOW_KEYS) {
+    const rows = result.rows.rows.filter((row) => seasonOf(row) === Number(windows[key].start));
+    if (rows.length === 0) continue;
+    const value = figureOf(metric, rows, picked.columns);
+    if (value !== undefined) figures[key] = value;
+  }
+  if (figures.current === undefined && figures.prior === undefined) figures.noData = true;
+  else if (figures.current === undefined || figures.prior === undefined) {
+    figures.failure = `the data holds no ${metric.label} for ${(figures.current === undefined ? windows.current : windows.prior).label}`;
+  }
+  return figures;
+}
+
 export interface CoverageFigures { current?: number; prior?: number; queryIds: string[] }
 
 /**
@@ -204,7 +265,8 @@ export interface CoverageFigures { current?: number; prior?: number; queryIds: s
  */
 export async function checkCoverage(run: InvestigationRun, frame: InvestigationFrameV1, options: { allowAiSql: boolean }): Promise<CoverageFigures> {
   const coverage: CoverageFigures = { queryIds: [] };
-  if (frame.grain === 'day') return coverage;
+  // A season has no days to count.
+  if (frame.grain === 'day' || frame.periodAxis) return coverage;
   const { current, prior } = frame.windows;
   const result = await runInvestigationQuery(run, {
     purpose: 'coverage', programId: 'coverage', allowAiSql: options.allowAiSql, label: `${frame.metric.label} by day across both periods`,

@@ -154,6 +154,41 @@ describe('framing an investigation from a reading', () => {
     expect(tables).toMatchObject({ status: 'planned', plan: { lane: 'ai', metric: { ref: 'column:dev.orders.order_cost', aggregation: 'sum', additivity: 'additive' } } });
   });
 
+  it('a numeric season is the period when no date field is known', () => {
+    const SEASON = 'dimension:local_player_season_facts.season';
+    const seasons = buildVocabularyIndex({
+      metrics: [{ name: 'total_points', model: 'local_player_season_facts', label: 'Total points', aggregation: 'sum' }],
+      dimensions: [
+        { name: 'season', model: 'local_player_season_facts', label: 'Source season', dataType: 'number' },
+        { name: 'player_name', model: 'local_player_season_facts', label: 'Player', dataType: 'string' },
+      ],
+    });
+    const ranking = {
+      version: 1, kind: 'analytics', reading: 'Rank players by total points in season 2017.',
+      measures: [{ ref: 'metric:local_player_season_facts.total_points' }],
+      groupBy: [{ ref: 'dimension:local_player_season_facts.player_name', role: 'categorical' }], display: [],
+      filters: [{ ref: SEASON, op: 'eq', values: [2017], source: 'question' }],
+      expectedShape: 'ranking', unresolved: [], provenance: {},
+    } as AnalyticalIntentV1;
+    const result = planInvestigationFrame({ reading: ranking, vocabulary: seasons, lane: 'governed' });
+    if (result.status !== 'planned') throw new Error(`expected a plan, got ${result.status}`);
+    expect(result.plan).toMatchObject({ timeRef: SEASON, grain: 'year', periodAxis: { ref: SEASON, name: 'season', current: 2017 }, baseFilters: [] });
+    expect(frameNeedsFreshness(result.plan)).toBe(false);
+    const windows = investigationWindowsFor(result.plan, { now: new Date('2026-09-12T00:00:00Z') });
+    expect(windows.windows.current).toEqual({ start: '2017', end: '2018', label: '2017 season' });
+    expect(windows.windows.prior.label).toBe('2016 season');
+    expect(windows.windows.yearAgo.start).toBe(windows.windows.prior.start);
+
+    // No season named: the latest season in the data, with a note.
+    const unnamed = planInvestigationFrame({ reading: { ...ranking, filters: [] }, vocabulary: seasons, lane: 'governed' });
+    if (unnamed.status !== 'planned') throw new Error(`expected a plan, got ${unnamed.status}`);
+    expect(unnamed.plan.periodAxis).toEqual({ ref: SEASON, name: 'season' });
+    expect(frameNeedsFreshness(unnamed.plan)).toBe(true);
+    const latest = investigationWindowsFor(unnamed.plan, { observedValue: 2022, now: new Date('2026-09-12T00:00:00Z') });
+    expect(latest).toMatchObject({ windowBasis: 'latest_complete', windows: { current: { label: '2022 season' }, prior: { label: '2021 season' } } });
+    expect(latest.notes.join(' ')).toContain('the latest season in the data, 2022');
+  });
+
   it('asks for a measure when there is none, and declines what is not a change over time', () => {
     expect(planInvestigationFrame({ reading: reading({ measures: [] }), vocabulary, lane: 'governed' }).status).toBe('clarify');
     // A project with no metrics offers the numeric columns the question names, never a text or date column.

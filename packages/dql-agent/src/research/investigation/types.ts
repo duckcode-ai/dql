@@ -47,6 +47,12 @@ export interface InvestigationFrameV1 {
   /** `ai`: the metric is not a certified block or authored semantics, so its figures come from AI-written SQL. */
   lane: 'governed' | 'ai';
   notes: string[];
+  /**
+   * When the period is a numeric field (a season, a fiscal year) because no
+   * date field is known: each window's start and end are its values ("2017",
+   * "2018"), and `timeRef` is that field.
+   */
+  periodAxis?: { ref: string; name: string };
 }
 
 /** An exact decimal and how it reads. */

@@ -4,6 +4,8 @@ import type { AskStoryStepV1, PipelineOutcome, PipelineReceipt } from '../../ask
 import { buildVocabularyIndex } from '../../ask-pipeline/vocabulary.js';
 import { verifyAskNarration } from '../../ask-result-narration.js';
 import { runInvestigation } from './loop.js';
+import { buildInvestigationReport } from './report.js';
+import { parseExactDecimal } from '../../analytical-execution-graph.js';
 import type { InvestigationContextSource, InvestigationFrameSource, InvestigationLimits, InvestigationOutcome, InvestigationReportV1, InvestigationRuntime } from './types.js';
 
 const TIME = 'dimension:orders.ordered_at';
@@ -113,6 +115,73 @@ const expectVerified = (report: InvestigationReportV1) => {
   expect(verification, report.text).toMatchObject({ ok: true });
 };
 
+describe('an investigation over a numeric season', () => {
+  const SEASON = 'dimension:local_player_season_facts.season';
+  const POINTS = 'metric:local_player_season_facts.total_points';
+  const seasonVocabulary = buildVocabularyIndex({
+    metrics: [{ name: 'total_points', model: 'local_player_season_facts', label: 'Total points', aggregation: 'sum' }],
+    dimensions: [{ name: 'season', model: 'local_player_season_facts', label: 'Source season', dataType: 'number' }],
+  });
+  // LeBron James's total points by season in the NBA local database.
+  const SEASONS = [{ season: 2014, points: 2407 }, { season: 2015, points: 2494 }, { season: 2016, points: 2585 }, { season: 2017, points: 3016 }];
+  const seasonRuntime = (options: { read?: PipelineOutcome } = {}) => {
+    const ran: AnalyticalIntentV1[] = [];
+    const runtime: InvestigationRuntime = {
+      read: async () => { if (!options.read) throw new Error('an investigation started from an answer must not read the question again'); return options.read; },
+      runIntent: async (intent) => {
+        ran.push(intent);
+        const bound = (op: string) => intent.filters.find((filter) => filter.ref === SEASON && filter.op === op)?.values[0] as number | undefined;
+        const from = bound('gte');
+        const to = bound('lt');
+        const rows = SEASONS.filter((row) => (from === undefined || row.season >= from) && (to === undefined || row.season < to));
+        const grouped = intent.groupBy.some((group) => group.ref === SEASON);
+        const result = grouped
+          ? { columns: ['season', 'total_points'], rows: rows.map((row) => ({ season: row.season, total_points: row.points })), rowCount: rows.length, executionTimeMs: 1, columnsMeta: [{ name: 'season', kind: 'number' as const, ref: SEASON }, { name: 'total_points', kind: 'number' as const, ref: POINTS }] }
+          : { columns: ['total_points'], rows: [{ total_points: rows.reduce((sum, row) => sum + row.points, 0) }], rowCount: 1, executionTimeMs: 1, columnsMeta: [{ name: 'total_points', kind: 'number' as const, ref: POINTS }] };
+        return {
+          kind: 'answered', intent, text: '', result,
+          candidate: { tier: 'semantic', trust: 'governed', sql: 'SELECT 1', proof: [] } as unknown as Extract<PipelineOutcome, { kind: 'answered' }>['candidate'],
+          receipt: receipt({ warehouse: { attempts: 1, failures: 0 } }),
+        };
+      },
+      vocabulary: () => seasonVocabulary,
+      remainingMs: () => 180_000,
+      onStep: () => undefined,
+    };
+    return { runtime, ran };
+  };
+  const seasonReading = (filters: AnalyticalIntentV1['filters']) => ({
+    version: 1, kind: 'analytics', reading: 'Total points in season 2017.', measures: [{ ref: POINTS }], groupBy: [], display: [],
+    filters, expectedShape: 'scalar', unresolved: [], provenance: {},
+  } as AnalyticalIntentV1);
+
+  it('compares the season named with the season before, once, from one grouped query', async () => {
+    const script = seasonRuntime();
+    const outcome = await runInvestigation({
+      question: 'Research deeper', source: { kind: 'run', runId: 'run-a1', intent: seasonReading([{ ref: SEASON, op: 'eq', values: [2017], source: 'question' }]) }, runtime: script.runtime,
+    });
+    if (outcome.kind !== 'report') throw new Error(`expected a report, got ${outcome.kind}`);
+    expect(outcome.report.headline.text).toBe('Total points rose 431 (16.7%) in 2017 season compared with 2016 season: 3016 against 2585.');
+    expect(outcome.report.headline.yearAgo).toBeUndefined();
+    expect(outcome.report.frame.periodAxis).toEqual({ ref: SEASON, name: 'season' });
+    expect(outcome.receipt.programs.map((program) => program.kind)).toEqual(['frame', 'headline', 'report']);
+    expect(outcome.receipt.budget.statementsUsed).toBe(1);
+    expect(script.ran[0]!.filters).toEqual([{ ref: SEASON, op: 'gte', values: [2015], source: 'inherited' }, { ref: SEASON, op: 'lt', values: [2018], source: 'inherited' }]);
+    expectVerified(outcome.report);
+  });
+
+  it('without a season named, it compares the latest season in the data', async () => {
+    const script = seasonRuntime({ read: readingOutcome(seasonReading([])) });
+    const outcome = await runInvestigation({ question: 'Why did total points change?', source: { kind: 'question' }, runtime: script.runtime });
+    if (outcome.kind !== 'report') throw new Error(`expected a report, got ${outcome.kind}`);
+    expect([outcome.report.frame.windows.current.label, outcome.report.frame.windows.prior.label]).toEqual(['2017 season', '2016 season']);
+    expect(outcome.report.frame.notes.join(' ')).toContain('the latest season in the data, 2017');
+    expect(outcome.receipt.programs.map((program) => program.kind)).toEqual(['frame', 'freshness', 'headline', 'report']);
+    expect(outcome.receipt.budget.statementsUsed).toBe(2);
+    expectVerified(outcome.report);
+  });
+});
+
 describe('an investigation of a change', () => {
   it('reads the question once, finds where the data ends, moves "last month" to the latest complete month and measures it exactly', async () => {
     const script = scripted({ read: readingOutcome(reading()) });
@@ -174,6 +243,23 @@ describe('an investigation of a change', () => {
     expect(report.frame.windows.current.label).toBe('August 2025');
     expect(Number(report.headline.current!.value)).toBe(1000 + 14 * 10);
     expect(Number(report.headline.prior!.value)).toBe(1000 + 13 * 10);
+  });
+
+  it('at a yearly grain the year before is compared once, not again as "a year earlier"', () => {
+    const year = (start: number) => ({ start: `${start}-01-01`, end: `${start + 1}-01-01`, label: String(start) });
+    const report = buildInvestigationReport({
+      question: "Why did LeBron James's total points change in 2017?",
+      frame: {
+        version: 1, question: '', reading: '', source: { kind: 'question' }, metric: { ref: 'metric:points_scored', label: 'Points scored', additivity: 'additive' },
+        timeRef: 'dimension:games.game_date', grain: 'year', baseFilters: [], shape: 'change', lane: 'governed', notes: [], windowBasis: 'stated',
+        windows: { current: year(2017), prior: year(2016), yearAgo: year(2016), yearAgoPrior: year(2015) },
+      },
+      headline: { current: parseExactDecimal('2820')!, prior: parseExactDecimal('2511')!, yearAgo: parseExactDecimal('2511')!, queryIds: ['q1'], aiSql: false, noData: false },
+      caveats: [], queries: [], context: [],
+    });
+    expect(report.headline.text).toBe('Points scored rose 309 (12.3%) in 2017 compared with 2016: 2820 against 2511.');
+    expect(report.headline.yearAgo).toBeUndefined();
+    expectVerified(report);
   });
 
   it('a share reads as a percent and changes in points', async () => {

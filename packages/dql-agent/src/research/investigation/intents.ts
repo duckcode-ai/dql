@@ -50,6 +50,34 @@ export function investigationIntent(frame: InvestigationFrameCore, input: {
 
 export const timeBucket = (frame: InvestigationFrameCore, grain: Grain = frame.grain): IntentGroupBy => ({ ref: frame.timeRef, role: 'time', grain });
 
+/**
+ * A reading over a numeric period field (a season): the periods are a range of
+ * its values, `from` inclusive and `to` exclusive, and a series groups by it.
+ */
+export function periodValueIntent(frame: InvestigationFrameCore & { periodAxis: { ref: string } }, input: {
+  reading: string;
+  from?: number;
+  to?: number;
+  grouped: boolean;
+  shape: IntentShape;
+}): AnalyticalIntentV1 {
+  const { ref } = frame.periodAxis;
+  return {
+    version: 1, kind: 'analytics', reading: input.reading,
+    measures: metricMeasures(frame),
+    groupBy: input.grouped ? [{ ref, role: 'categorical' }] : [],
+    display: [],
+    filters: [
+      ...frame.baseFilters,
+      ...(input.from !== undefined ? [{ ref, op: 'gte' as const, values: [input.from], source: 'inherited' as const }] : []),
+      ...(input.to !== undefined ? [{ ref, op: 'lt' as const, values: [input.to], source: 'inherited' as const }] : []),
+    ],
+    expectedShape: input.shape,
+    unresolved: [],
+    provenance: {},
+  };
+}
+
 export interface ResultColumns { value?: string; numerator?: string; denominator?: string; time?: string; dimension?: string; valueMeta?: ResultColumnMeta }
 
 const nameOf = (vocabulary: VocabularyIndex, ref: string) => (vocabulary.get(ref)?.name ?? ref.replace(/^[a-z_]+:/i, '').split('.').pop() ?? ref).toLowerCase();

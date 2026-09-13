@@ -42,6 +42,8 @@ export function buildInvestigationReport(input: {
   const { frame, headline } = input;
   const { current: currentWindow, prior: priorWindow, yearAgo: yearAgoWindow } = frame.windows;
   const label = frame.metric.label;
+  // At a yearly grain the period before IS the same period a year earlier: compare once.
+  const yearAgo = yearAgoWindow.start === priorWindow.start ? undefined : headline.yearAgo;
   const facts: AskNarrationFactV1[] = [];
   const caveats = [...input.caveats];
   const reasons: string[] = [];
@@ -55,7 +57,7 @@ export function buildInvestigationReport(input: {
   // A ratio whose every figure is a fraction (a share, a rate) reads as a
   // percent and changes in points; any other ratio (revenue per order) reads
   // as a number and changes in percent.
-  const measuredValues = [headline.current, headline.prior, headline.yearAgo].filter((value): value is ExactDecimal => value !== undefined);
+  const measuredValues = [headline.current, headline.prior, yearAgo].filter((value): value is ExactDecimal => value !== undefined);
   const percentLike = Boolean(frame.metric.ratio) && !headline.valueMeta && measuredValues.length > 0
     && measuredValues.every((value) => numberOf(value) >= 0 && numberOf(value) <= 1);
   const meta = headline.valueMeta ?? (percentLike ? PERCENT_META : undefined);
@@ -64,12 +66,12 @@ export function buildInvestigationReport(input: {
   const incomplete = !measured && !headline.noData && !headline.failure && Boolean(input.stoppedBy);
   const noData = !incomplete && (headline.noData || !measured);
   const delta = measured ? subtractDecimal(headline.current!, headline.prior!) : undefined;
-  const yoyDelta = headline.current !== undefined && headline.yearAgo !== undefined ? subtractDecimal(headline.current, headline.yearAgo) : undefined;
+  const yoyDelta = headline.current !== undefined && yearAgo !== undefined ? subtractDecimal(headline.current, yearAgo) : undefined;
   const pointsOf = (value: ExactDecimal | undefined) => (value && percentLike ? Number((numberOf(value) * 100).toFixed(1)) : undefined);
   const points = pointsOf(delta);
   const yoyPoints = pointsOf(yoyDelta);
   const pct = delta && !percentLike ? pctOf(delta, headline.prior) : undefined;
-  const yoyPct = yoyDelta && !percentLike ? pctOf(yoyDelta, headline.yearAgo) : undefined;
+  const yoyPct = yoyDelta && !percentLike ? pctOf(yoyDelta, yearAgo) : undefined;
   const material = delta !== undefined && (
     percentLike ? Math.abs(points!) >= MATERIAL_CHANGE_POINTS || (yoyPoints !== undefined && Math.abs(yoyPoints) >= MATERIAL_CHANGE_POINTS)
       : pct === undefined ? delta.coefficient !== 0n
@@ -92,8 +94,8 @@ export function buildInvestigationReport(input: {
     text = verdict === 'change'
       ? `${capitalize(label)} ${direction} ${magnitude(delta!)}${percentWords(pct, false)} in ${currentWindow.label} compared with ${priorWindow.label}: ${format(headline.current!)} against ${format(headline.prior!)}.`
       : `${capitalize(label)} was steady in ${currentWindow.label}: ${format(headline.current!)} against ${format(headline.prior!)} in ${priorWindow.label}${percentWords(pct, true)}.`;
-    if (yoyDelta && headline.yearAgo !== undefined) {
-      text += ` Compared with ${yearAgoWindow.label} (${format(headline.yearAgo)}), it was ${yoyDelta.coefficient < 0n ? 'down' : 'up'} ${magnitude(yoyDelta)}${percentWords(yoyPct, false)}.`;
+    if (yoyDelta && yearAgo !== undefined) {
+      text += ` Compared with ${yearAgoWindow.label} (${format(yearAgo)}), it was ${yoyDelta.coefficient < 0n ? 'down' : 'up'} ${magnitude(yoyDelta)}${percentWords(yoyPct, false)}.`;
     }
   }
 
@@ -111,7 +113,7 @@ export function buildInvestigationReport(input: {
     values: {
       ...figure('current', headline.current),
       ...figure('prior', headline.prior),
-      ...figure('yearAgo', headline.yearAgo),
+      ...figure('yearAgo', yearAgo),
       ...signedAndAbsolute('delta', delta && numberOf(delta)),
       ...signedAndAbsolute('yoyDelta', yoyDelta && numberOf(yoyDelta)),
       ...signedAndAbsolute('pct', pct === undefined ? undefined : Number(pct)),
@@ -165,7 +167,7 @@ export function buildInvestigationReport(input: {
       ...(headline.prior !== undefined ? { prior: investigationNumber(headline.prior, meta) } : {}),
       ...(delta ? { delta: investigationNumber(delta, meta) } : {}),
       ...(pct ? { pct } : {}),
-      ...(headline.yearAgo !== undefined ? { yearAgo: investigationNumber(headline.yearAgo, meta) } : {}),
+      ...(yearAgo !== undefined ? { yearAgo: investigationNumber(yearAgo, meta) } : {}),
       ...(yoyDelta ? { yoyDelta: investigationNumber(yoyDelta, meta) } : {}),
       ...(yoyPct ? { yoyPct } : {}),
       verdict,
