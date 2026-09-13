@@ -1,6 +1,7 @@
 import type { AnalyticalIntentV1, IntentPredicate } from '../intent.js';
 import { physicalRelationIdentity, physicalRelationText, samePhysicalRelation } from '../physical-binding.js';
 import { suggestSameGrainColumns, suggestSameRelationFields, type VocabularyEntry, type VocabularyIndex } from '../vocabulary.js';
+import { relationalAnswerArtifact } from './dql-artifacts.js';
 import type { PrepareDeps, PreparedCandidate, PreparedRefusal, RelationalJoinStep, SqlDialectLike } from './types.js';
 
 /**
@@ -714,9 +715,11 @@ export function composeRelational(intent: AnalyticalIntentV1, vocabulary: Vocabu
       if (measure.kind === 'derived') proof.push(`${measure.alias} = ${measure.expr}, with ${measure.inputs!.map((input) => `${input.alias} = ${labelOf(vocabulary, input.measure)} on ${input.measure.relation}`).join(', ')}, evaluated after each input is aggregated on its own relation`);
     }
   }
+  const artifact = relationalAnswerArtifact(sql, params, intent.reading);
   return {
     candidate: {
       tier: 'relational', trust: 'governed', sql, params,
+      ...(artifact ? { artifact } : {}),
       columns: [...columns.map((column) => column.alias), ...visible.map((measure) => measure.alias)],
       proof, ...(tieProbe ? { tieProbe } : {}), ...(usedJoins.length ? { joins: usedJoins } : {}),
       relations: [...new Set([...islandOrder.map((islandKey) => islandKey.replace(/#overall$/, '')), ...usedJoins.map((step) => step.relation)])],

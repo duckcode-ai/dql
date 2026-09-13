@@ -8,6 +8,7 @@ import { bindSemanticRequest, composeRelational, entails, prepare } from './inde
 import { scopeFormulaAggregates } from './relational.js';
 import { resolveTie } from '../execute.js';
 import { prepareCertified } from './certified.js';
+import { inlineSqlParams } from './dql-artifacts.js';
 import type { PrepareDeps } from './types.js';
 
 const source: VocabularySource = {
@@ -149,6 +150,18 @@ describe('relational composition', () => {
     expect(composed.refusal?.message).toMatch(/names no time dimension/);
     const bound = composeRelational(intent({ measures: [{ ref: 'metric:order_item.revenue' }], expectedShape: 'scalar', time: { ref: 'dimension:order_item.ordered_at', window: { start: '2031-01-01', end: '2032-01-01' } } }), vocabulary, deps);
     expect(bound.candidate?.params).toEqual(['2031-01-01', '2032-01-01']);
+  });
+  it('a governed composition carries its DQL: the statement with its bound values written in', () => {
+    const bound = composeRelational(intent({ measures: [{ ref: 'metric:order_item.revenue' }], expectedShape: 'scalar', time: { ref: 'dimension:order_item.ordered_at', window: { start: '2031-01-01', end: '2032-01-01' } } }), vocabulary, deps);
+    const artifact = bound.candidate?.artifact as { kind: string; trustState: string; source: string; compiledSql: string } | undefined;
+    expect(artifact).toMatchObject({ kind: 'sql_block', trustState: 'governed', persistence: 'transient', compiledSql: bound.candidate!.sql });
+    expect(artifact!.source).toContain("'2031-01-01'");
+    expect(artifact!.source).toContain("'2032-01-01'");
+    expect(artifact!.source).not.toContain('?');
+    // A ? inside a literal or identifier is text; a count that disagrees writes no block.
+    expect(inlineSqlParams(`SELECT 'why?' AS "q?" FROM t WHERE a = ? AND b = ?`, ["O'Neal", 3])).toBe(`SELECT 'why?' AS "q?" FROM t WHERE a = 'O''Neal' AND b = 3`);
+    expect(inlineSqlParams('SELECT 1 WHERE a = ?', [])).toBeUndefined();
+    expect(inlineSqlParams('SELECT 1', ['extra'])).toBeUndefined();
   });
   it('refuses when no governed join path reaches a relation', () => {
     const composed = composeRelational(intent({ measures: [{ ref: 'metric:orders.order_total' }], groupBy: [{ ref: 'dimension:order_item.is_drink_item', role: 'categorical' }], expectedShape: 'grouped' }), vocabulary, { ...deps, joinPath: () => undefined });

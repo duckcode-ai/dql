@@ -38,18 +38,73 @@ export function semanticAnswerArtifact(request: SemanticCompileRequest, reading:
   } as DqlArtifactReference;
 }
 
+const blockName = (reading: string, fallback: string) =>
+  (reading.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || fallback).replace(/^(\d)/, 'q_$1');
+
+const sqlBlockSource = (name: string, reading: string, sql: string) => [
+  `block "${name}" {`,
+  '  type = "custom"',
+  '  status = "draft"',
+  `  description = "${reading.replace(/"/g, "'").slice(0, 200)}"`,
+  '  query = """',
+  ...sql.split('\n').map((line) => `    ${line}`),
+  '  """',
+  '}',
+].join('\n');
+
 /** An AI-written statement as a draft DQL block: review-required until a person certifies it. */
 export function sqlAnswerArtifact(sql: string, reading: string): DqlArtifactReference {
-  const name = (reading.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || 'ai_drafted_answer').replace(/^(\d)/, 'q_$1');
-  const source = [
-    `block "${name}" {`,
-    '  type = "custom"',
-    '  status = "draft"',
-    `  description = "${reading.replace(/"/g, "'").slice(0, 200)}"`,
-    '  query = """',
-    ...sql.split('\n').map((line) => `    ${line}`),
-    '  """',
-    '}',
-  ].join('\n');
-  return { kind: 'sql_block', name, source, persistence: 'transient', trustState: 'review_required', compiledSql: sql };
+  const name = blockName(reading, 'ai_drafted_answer');
+  return { kind: 'sql_block', name, source: sqlBlockSource(name, reading, sql), persistence: 'transient', trustState: 'review_required', compiledSql: sql };
+}
+
+function sqlLiteral(value: unknown): string {
+  if (value === null || value === undefined) return 'NULL';
+  if (typeof value === 'number' || typeof value === 'bigint') return String(value);
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+  const text = value instanceof Date ? value.toISOString() : String(value);
+  return `'${text.replace(/'/g, "''")}'`;
+}
+
+/**
+ * The statement with each `?` replaced by its bound value, in order, so the
+ * block runs by itself. A `?` inside a quoted literal or identifier is text,
+ * not a placeholder. Undefined when the placeholders and values disagree.
+ */
+export function inlineSqlParams(sql: string, params: readonly unknown[]): string | undefined {
+  let out = '';
+  let next = 0;
+  let quote: string | undefined;
+  for (let at = 0; at < sql.length; at += 1) {
+    const char = sql[at]!;
+    if (quote) {
+      out += char;
+      if (char === quote) {
+        // A doubled quote is an escaped quote inside the literal.
+        if (sql[at + 1] === quote) { out += quote; at += 1; } else quote = undefined;
+      }
+    } else if (char === "'" || char === '"') {
+      quote = char;
+      out += char;
+    } else if (char === '?') {
+      if (next >= params.length) return undefined;
+      out += sqlLiteral(params[next]);
+      next += 1;
+    } else {
+      out += char;
+    }
+  }
+  return next === params.length ? out : undefined;
+}
+
+/**
+ * A governed composition as DQL: the statement composed from governed metrics
+ * and dimensions along governed join paths, with its bound values written in.
+ * Governed, like the answer; saving it makes a draft a person certifies.
+ */
+export function relationalAnswerArtifact(sql: string, params: readonly unknown[], reading: string): DqlArtifactReference | undefined {
+  const query = inlineSqlParams(sql, params);
+  if (query === undefined) return undefined;
+  const name = blockName(reading, 'governed_answer');
+  return { kind: 'sql_block', name, source: sqlBlockSource(name, reading, query), persistence: 'transient', trustState: 'governed', compiledSql: sql };
 }
