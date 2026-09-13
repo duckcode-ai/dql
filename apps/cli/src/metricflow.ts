@@ -506,7 +506,7 @@ export async function compileMetricFlowQuery(request: MetricFlowQueryRequest): P
     );
   }
   if (result.status !== 0) {
-    throw new Error(`MetricFlow compile failed (${result.status}): ${stderr || stdout || 'no output'}`);
+    throw new Error(`MetricFlow compile failed (${result.status}): ${composeMetricFlowFailure(stdout, stderr)}`);
   }
 
   const sql = extractCompiledSql(stdout);
@@ -684,6 +684,75 @@ function buildWhereClauses(filters: NonNullable<MetricFlowQueryRequest['filters'
         return [];
     }
   });
+}
+
+const METRICFLOW_FAILURE_MAX_CHARS = 2_000;
+
+/** Lines MetricFlow prints around a failure that are never the reason for it. */
+const METRICFLOW_NOISE_LINES = [
+  /A new version of the MetricFlow CLI is available/i,
+  /Please update to version\b/i,
+  /pip install --upgrade dbt-metricflow/i,
+  /^If you think you found a bug/i,
+  /github\.com\/dbt-labs\/metricflow\/issues/i,
+  /^(?:Log File::|Artifact Path:|Artifact Modified Time:)/,
+  /^ERROR:root:Logging exception handled by the CLI exception handler/,
+  /^Traceback \(most recent call last\):/,
+  /^(?:During handling of the above exception|The above exception was the direct cause)/,
+  /^\s*[~^]+\s*$/,
+];
+
+const METRICFLOW_FAILURE_LINE = /^ERROR\b|\b(?:not found|unable to|could not|cannot|does not (?:exactly )?match|no such|invalid)\b|(?:Error|Exception):\s/i;
+
+function cleanMetricFlowOutput(output: string): string[] {
+  const lines: string[] = [];
+  let inFrame = false;
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    // A traceback frame is `  File "…"` followed by its more-indented source line.
+    if (/^\s+File "/.test(line)) { inFrame = true; continue; }
+    if (inFrame && /^\s{4,}\S/.test(line)) continue;
+    inFrame = false;
+    if (METRICFLOW_NOISE_LINES.some((pattern) => pattern.test(line))) continue;
+    if (!line && (lines.length === 0 || !lines[lines.length - 1])) continue;
+    lines.push(line);
+  }
+  while (lines.length > 0 && !lines[lines.length - 1]) lines.pop();
+  return lines;
+}
+
+/** The first run of non-blank lines after `<label>:`, on one line. */
+function metricFlowParagraph(text: string, label: string): string | undefined {
+  const match = new RegExp(`${label}:[ \\t]*\\n?\\s*(\\S[^\\n]*(?:\\n[ \\t]*\\S[^\\n]*)*)`).exec(text);
+  return match?.[1]?.replace(/\s+/g, ' ').trim() || undefined;
+}
+
+/**
+ * The part of a failed `mf` run's output that says why it failed.
+ *
+ * MetricFlow writes its version-update banner ahead of the error, on the same
+ * stream, and readers downstream keep only the first line — so a verbatim dump
+ * reported "A new version of the MetricFlow CLI is available" as the reason a
+ * reading did not compile. The banner and boilerplate are dropped, the output
+ * starts at the first line that describes the failure (stdout, where `mf`
+ * prints handled errors, before stderr tracebacks), and a resolver error leads
+ * with its own message and query input.
+ */
+export function composeMetricFlowFailure(stdout: string, stderr: string): string {
+  const out = cleanMetricFlowOutput(stdout);
+  const err = cleanMetricFlowOutput(stderr);
+  const failureAt = (lines: string[]) => lines.findIndex((line) => METRICFLOW_FAILURE_LINE.test(line.trim()));
+  const section = failureAt(out) >= 0
+    ? out.slice(failureAt(out))
+    : failureAt(err) >= 0
+      ? err.slice(failureAt(err))
+      : out.length > 0 ? out : err;
+  if (section.length === 0) return 'no output';
+  const body = section.join('\n');
+  const message = metricFlowParagraph(body, 'Message');
+  const input = message ? metricFlowParagraph(body, 'Query Input') : undefined;
+  const text = message ? `${message}${input ? ` Query input: ${input}.` : ''}\n${body}` : body;
+  return text.length > METRICFLOW_FAILURE_MAX_CHARS ? `${text.slice(0, METRICFLOW_FAILURE_MAX_CHARS - 1)}…` : text;
 }
 
 function extractCompiledSql(output: string): string {
