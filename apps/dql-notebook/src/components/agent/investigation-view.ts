@@ -230,6 +230,11 @@ export interface InvestigationProgramStep {
   outcome: InvestigationProgramOutcome;
   ms?: number;
   reason?: string;
+  /** For a breakdown, drill or year-earlier check: the dimension it is about. */
+  dimension?: string;
+  /** For a drill: the breakdown it went into. */
+  parentId?: string;
+  verdict?: string;
   queries: Array<{ id: string; label: string; purpose: string; outcome: string; tier?: string; explanation?: RunExplanation }>;
 }
 
@@ -270,6 +275,9 @@ export function explainInvestigation(input: { receipt: unknown; report?: Investi
       outcome: outcome && OUTCOMES.includes(outcome) ? outcome : 'done',
       ...(num(program.ms) !== undefined ? { ms: num(program.ms) } : {}),
       ...(str(program.reason) ? { reason: str(program.reason) } : {}),
+      ...(str(program.dimension) ? { dimension: str(program.dimension) } : {}),
+      ...(str(program.parentId) ? { parentId: str(program.parentId) } : {}),
+      ...(str(program.verdict) ? { verdict: str(program.verdict) } : {}),
       queries: strings(program.queryIds).map((id) => {
         const query = reportQueries.get(id);
         const receipt = receipts.get(id);

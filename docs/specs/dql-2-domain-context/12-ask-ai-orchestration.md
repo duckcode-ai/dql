@@ -117,9 +117,42 @@ remain required (`AGT-054`, `OBS-017`, `E2E-025`).
   SQL, or a run stopped by its budget, deadline or cancellation is a caveat
   that caps confidence. Research results are always review-required
   (`AGT-016`, `AGT-033`).
-- The statement budget (20 warehouse statements), the deadline (180 s hard,
-  150 s before no new query starts) and cancellation are checked before every
-  query; a run stopped early returns what it measured as an incomplete report
+- Where the change came from: the change is broken down by up to six ranked
+  dimensions (four for a metric read from the tables), one reading each, up to
+  three at a time. The pool is the semantic layer's compatible dimensions, the
+  vocabulary's join reach, or the categorical columns of the relations the
+  headline read; the time or season field, dimensions the question fixes, the
+  metric's own column, number-typed dimensions and inventory copies of governed
+  dimensions are never candidates. Ranking is fixed (named in the question,
+  preferred by a skill, named by business guidance, on the metric's model,
+  documented, a category over a name); with more candidates than the cap, one AI
+  call may choose, and its choice is accepted only as listed ids. A dimension the
+  metric cannot be grouped by (no join path, a join that multiplies its rows) is
+  not expressible, gives its place to the next one, and the other dimensions of
+  the same model are not queried (`AGT-016`).
+- Each breakdown gives every member its change, its signed share of the change,
+  its share of the prior period and the excess of one over the other, and
+  reconciles against the headline. Verdicts are fixed: a supported driver made at
+  least 30% of the change and 15 points more than its size; a dimension explains
+  the change with a supported member or its top three making 60% with one 10
+  points beyond its size; it is ruled out when it reconciles and no member moved
+  10 points beyond its size; members churning more than three times the change,
+  or more than 50 members, are inconclusive. A ratio's change splits exactly into
+  mix and rate. The top supported member (40% or more) is drilled into by the
+  next two dimensions and checked over the same periods a year earlier; a
+  headline matching the same change a year earlier within 5 points is seasonal.
+  Confidence starts high and each limit caps it with its reason (`AGT-016`).
+- The report states the strongest drivers, one drill finding and one offset in
+  contribution language, names what was ruled out, inconclusive and not broken
+  down, and keeps its text within the narration check. With the reader's opt-in
+  for the run, the AI words the summary from the facts (never rows) through one
+  ledgered call, and the wording is used only when every number in it is a fact.
+  Ask offers "Investigate the drivers" when it declines a why-question; Auto
+  never runs Research (`AGT-016`).
+- The statement budget (20 warehouse statements, a query in flight holding its
+  place), the deadline (180 s hard, 150 s before no new query starts) and
+  cancellation are checked before every query; a run stopped early returns what
+  it measured as an incomplete report and says what it did not break down
   (`AGT-033`, `OBS-012`).
 - Context from outside the data (MCP servers, documents) enters through
   `InvestigationContextSource`, asked after the frame and after the drivers.

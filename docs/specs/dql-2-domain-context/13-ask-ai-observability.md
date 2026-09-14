@@ -83,12 +83,24 @@ provider success. SQL authorization denial records `sql.authorize: denied` and
 does not create an execution-success stage after the fact.
 
 Research records one `diagnosticReceiptV9` whose `investigation` field holds
-the frame, each program (frame, freshness, headline, coverage, report) with its
-outcome, time and query IDs, the budget (statements used against the cap, AI
-calls, and why the run stopped, if it did), each context source's result, and
-one pipeline receipt per query with the AI replies left out. The run story adds
-the Research phases `frame`, `check`, `analyze`, `drill`, `verdict` and
-`report`. A report states comparisons and contributions, never a cause.
+the frame, each program (frame, freshness, headline, coverage, one contribution
+per dimension broken down, drills with the breakdown they went into as
+`parentId`, the year-earlier check, report) with its outcome, verdict, time and
+query IDs, the budget (statements used against the cap, AI calls, and why the
+run stopped, if it did), each context source's result, and one pipeline receipt
+per query with the AI replies left out. The report's `breakdowns` record each
+measured breakdown's verdict, whether its members reconcile with the change, the
+residual and the member count; the run's evaluations include
+`investigation-reconciliation`. The run story adds the Research phases `frame`,
+`check`, `analyze`, `drill`, `verdict` and `report`. A report states comparisons
+and contributions, never a cause.
+
+The trace page draws an investigation as a branching flow: the frame and the
+headline in a line, the breakdowns side by side, a drill after its breakdown,
+the year-earlier check after the breakdown of its member, and the report where
+every branch ends; each step opens into its queries and each query into how it
+ran. MCP `answer_question` returns a compact `investigation` (headline, drivers
+with shares, ruled out, not broken down, caveats, confidence), figures only.
 
 An investigation run gets no synthesized V5/V6 receipts. Runs made by the
 earlier hypothesis Research keep their branch verdicts, `research.lineage`

@@ -39,6 +39,8 @@ import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { explanationForTrace } from './ask-run-explanation';
 import { AskRunDecisionView, AskRunTraceSummary } from './AskRunDecisionView';
+import { InvestigationDecisionView } from './InvestigationDecisionView';
+import { explainInvestigation, isInvestigationReceipt } from './investigation-view';
 
 type TraceTab = 'tree' | 'graph' | 'timeline';
 type TraceSelection = { kind: 'span'; spanId: string } | { kind: 'candidates' };
@@ -218,6 +220,9 @@ export function AskTracePage({ runId }: { runId: string }): JSX.Element {
   const lineageStory = lineageResearchStoryForSpan(researchFocus);
   // An Ask pipeline run is explained as a decision flow; the recorded events stay below as an advanced view.
   const pipelineExplanation = explanationForTrace(trace);
+  // A Research run is explained as its investigation: the programs as a branching flow.
+  const researchReceipt = (trace as { runtimeReceiptV9?: unknown }).runtimeReceiptV9;
+  const investigationExplanation = isInvestigationReceipt(researchReceipt) ? explainInvestigation({ receipt: researchReceipt }) : undefined;
 
   return (
     <main style={{ flex: 1, minWidth: 0, overflow: 'auto', background: t.appBg, color: t.textPrimary, fontFamily: t.font }}>
@@ -237,6 +242,7 @@ export function AskTracePage({ runId }: { runId: string }): JSX.Element {
           </div>
         ) : null}
         <TraceDecisionStory trace={trace} t={t} onSelectSpan={selectIncidentSpan} />
+        {investigationExplanation ? <InvestigationDecisionView explanation={investigationExplanation} t={t} isNarrow={isNarrow} /> : null}
         {pipelineExplanation ? <AskRunDecisionView trace={trace} explanation={pipelineExplanation} t={t} isNarrow={isNarrow} /> : null}
         <details style={{ marginTop: 14 }}>
           <summary style={{ cursor: 'pointer', color: t.textSecondary, fontSize: 13, fontWeight: 750, padding: '8px 0' }}>

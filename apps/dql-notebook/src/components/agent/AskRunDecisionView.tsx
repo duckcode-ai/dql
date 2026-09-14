@@ -45,7 +45,7 @@ export function AskRunTraceSummary({ explanation, t }: { explanation: RunExplana
   );
 }
 
-type DecisionNodeData = { node: DecisionNode; t: Theme };
+export type DecisionNodeData = { node: DecisionNode; t: Theme };
 
 function DecisionFlowNode({ data, selected }: NodeProps): JSX.Element {
   const { node, t } = data as DecisionNodeData;
@@ -68,6 +68,8 @@ function DecisionFlowNode({ data, selected }: NodeProps): JSX.Element {
 }
 
 const nodeTypes = { decision: DecisionFlowNode };
+/** The decision node renderer, shared with the Research investigation flow. */
+export const decisionNodeTypes = nodeTypes;
 
 const detailLabel = (t: Theme): React.CSSProperties => ({ fontSize: 10.5, fontWeight: 700, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', margin: '14px 0 6px' });
 const detailCode = (t: Theme): React.CSSProperties => ({ margin: 0, maxHeight: 260, overflow: 'auto', border: `1px solid ${t.cellBorder}`, background: t.editorBg, color: t.textPrimary, borderRadius: 7, padding: 9, fontSize: 11, lineHeight: 1.45, fontFamily: t.fontMono, whiteSpace: 'pre-wrap', wordBreak: 'break-word' });
