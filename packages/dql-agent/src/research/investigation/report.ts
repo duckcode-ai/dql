@@ -24,6 +24,12 @@ const numberOf = (value: ExactDecimal) => Number(formatDecimal(value));
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const PERCENT_META: ResultColumnMeta = { name: 'value', kind: 'percent', unit: 'fraction' };
 const LEVEL_RANK = { high: 0, medium: 1, low: 2 } as const;
+/** Drivers and offsets a dimension keeps in the report. */
+const MAX_DRIVERS_PER_DIMENSION = 5;
+const MAX_OFFSETS_PER_DIMENSION = 3;
+/** The findings the text states, strongest first: the report's table carries the rest. */
+const TEXT_FINDINGS = { driver: 3, drill: 1, offset: 1 } as const;
+const listWords = (items: string[]) => (items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`);
 
 const NOT_INVESTIGATED_WORDS: Record<NotInvestigatedReason, string> = {
   budget: 'the query budget ran out',
@@ -164,25 +170,34 @@ export function buildInvestigationReport(input: {
   const driverText: string[] = [];
   let mixRate: InvestigationReportV1['mixRate'];
   if (drivers && measured) {
+    const findingSentences: Array<{ kind: keyof typeof TEXT_FINDINGS; weight: number; sentence: string }> = [];
+    const ruledOutNames: string[] = [];
+    const inconclusiveNames: string[] = [];
     for (const item of [...drivers.analysed, ...drivers.drilled]) {
       const { dimension, outcome, verdict: dimensionVerdict, parent } = item;
-      const within = parent ? ` within ${parent.row.label}` : '';
+      const within = parent ? ` within ${parent.dimension.label}: ${parent.row.label}` : '';
       if (dimensionVerdict.verdict === 'ruled_out') {
         const sentence = `By ${dimension.label}${within}, the change was spread in line with each member's size.`;
         ruledOut.push({ dimension, maxExcess: String(dimensionVerdict.maxExcess ?? 0), text: sentence, queryIds: outcome.queryIds });
-        driverText.push(sentence);
+        if (!parent) ruledOutNames.push(dimension.label);
         continue;
       }
       if (dimensionVerdict.verdict === 'inconclusive') {
         const reason = dimensionVerdict.reason ?? 'no member stood out';
         inconclusive.push({ dimension, reason, queryIds: outcome.queryIds });
         facts.push({ factId: `f-inconclusive-${inconclusive.length}`, kind: 'investigation_dimension', details: { dimension: dimension.label, reason, queryIds: outcome.queryIds.join(',') } });
-        driverText.push(`By ${dimension.label}${within}, the breakdown was inconclusive: ${reason}.`);
+        if (!parent) inconclusiveNames.push(dimension.label);
         continue;
       }
-      for (const member of dimensionVerdict.members) {
+      // The strongest members of a dimension: a table of every small mover says nothing more.
+      const shown = [
+        ...dimensionVerdict.members.filter((member) => member.verdict !== 'offset').slice(0, MAX_DRIVERS_PER_DIMENSION),
+        ...dimensionVerdict.members.filter((member) => member.verdict === 'offset').slice(0, MAX_OFFSETS_PER_DIMENSION),
+      ];
+      for (const member of shown) {
         const { row } = member;
         if (!row.share || !row.delta || row.current === undefined || row.prior === undefined) continue;
+        const offset = member.verdict === 'offset';
         const factId = `f-driver-${driverRows.length + 1}`;
         const whole = parent?.row.share ? globalShare(row.share, parent.row.share) : undefined;
         driverRows.push({
@@ -213,21 +228,32 @@ export function buildInvestigationReport(input: {
           },
           details: { dimension: dimension.label, member: row.label, ...(parent ? { within: parent.row.label } : {}), queryIds: outcome.queryIds.join(',') },
         });
+        const said = (sentence: string) => {
+          findingSentences.push({ kind: offset ? 'offset' : parent ? 'drill' : 'driver', weight: Math.abs(numberOf(whole ?? row.share!)), sentence });
+        };
         const share = `${Math.abs(percentNumber(row.share)).toFixed(1)}%`;
-        const subject = `${row.label} in ${dimension.label}`;
-        if (member.verdict === 'offset') {
-          driverText.push(`${capitalize(subject)}${within} moved the other way, from ${format(row.prior)} to ${format(row.current)}, offsetting ${share} of the change.`);
+        const subject = `${dimension.label}: ${row.label}`;
+        if (offset) {
+          said(`${capitalize(subject)}${within} moved the other way, from ${format(row.prior)} to ${format(row.current)}, offsetting ${share} of the change.`);
         } else if (parent && whole) {
-          driverText.push(`Within ${parent.row.label}, ${subject} accounted for ${share} of its change, ${Math.abs(percentNumber(whole)).toFixed(1)}% of the whole change.`);
+          said(`Within ${parent.dimension.label}: ${parent.row.label}, ${subject} accounted for ${share} of its change, ${Math.abs(percentNumber(whole)).toFixed(1)}% of the whole change.`);
         } else if (row.status === 'new') {
-          driverText.push(`${capitalize(subject)} is new in ${currentWindow.label} (${format(row.current)}) and accounted for ${share} of the change.`);
+          said(`${capitalize(subject)} is new in ${currentWindow.label} (${format(row.current)}) and accounted for ${share} of the change.`);
         } else if (row.status === 'gone') {
-          driverText.push(`${capitalize(subject)} had ${format(row.prior)} in ${priorWindow.label} and nothing in ${currentWindow.label}, ${share} of the change.`);
+          said(`${capitalize(subject)} had ${format(row.prior)} in ${priorWindow.label} and nothing in ${currentWindow.label}, ${share} of the change.`);
         } else {
-          driverText.push(`${capitalize(subject)} accounted for ${share} of the change, from ${format(row.prior)} to ${format(row.current)}, though it was ${row.priorWeight ? `${percentNumber(row.priorWeight).toFixed(1)}%` : 'part'} of ${label} in ${priorWindow.label}.`);
+          said(`${capitalize(subject)} accounted for ${share} of the change, from ${format(row.prior)} to ${format(row.current)}, though it was ${row.priorWeight ? `${percentNumber(row.priorWeight).toFixed(1)}%` : 'part'} of ${label} in ${priorWindow.label}.`);
         }
       }
     }
+    const strongest = (kind: keyof typeof TEXT_FINDINGS) => findingSentences
+      .filter((item) => item.kind === kind)
+      .sort((left, right) => right.weight - left.weight)
+      .slice(0, TEXT_FINDINGS[kind])
+      .map((item) => item.sentence);
+    driverText.push(...strongest('driver'), ...strongest('drill'), ...strongest('offset'));
+    if (ruledOutNames.length) driverText.push(`By ${listWords(ruledOutNames)}, the change was spread in line with each member's size.`);
+    if (inconclusiveNames.length) driverText.push(`By ${listWords(inconclusiveNames)}, the breakdown was inconclusive.`);
     if (drivers.mixRate) {
       const { split, dimension } = drivers.mixRate;
       mixRate = { mix: investigationNumber(split.mix, meta), rate: investigationNumber(split.rate, meta), queryIds: drivers.mixRate.queryIds };
@@ -250,7 +276,10 @@ export function buildInvestigationReport(input: {
     }
     const byReason = new Map<NotInvestigatedReason, string[]>();
     for (const entry of notInvestigated) byReason.set(entry.reason, [...(byReason.get(entry.reason) ?? []), entry.dimension!.label]);
-    for (const [reason, labels] of byReason) driverText.push(`Not broken down by ${labels.join(', ')}: ${NOT_INVESTIGATED_WORDS[reason]}.`);
+    for (const [reason, labels] of byReason) {
+      const names = [...new Set(labels)];
+      driverText.push(`Not broken down by ${names.length > 4 ? `${names.slice(0, 4).join(', ')} and others` : names.join(', ')}: ${NOT_INVESTIGATED_WORDS[reason]}.`);
+    }
 
     for (const item of [...drivers.analysed, ...drivers.drilled]) {
       const { table } = item.outcome;

@@ -47,6 +47,13 @@ describe('verdicts on members and dimensions', () => {
     expect(dimensionVerdict(contributionTable({ additivity: 'non_additive', members: [member('a', 10, 12)], totalPrior: d(10), totalCurrent: d(12) })).reason).toMatch(/does not add up/);
   });
 
+  it('members churning far more than the total changed, or too many members, are inconclusive rather than drivers', () => {
+    const churn = dimensionVerdict(table([member('a', 500, 900), member('b', 500, 110)]));
+    expect(churn).toMatchObject({ verdict: 'inconclusive', reason: "members moved 79.0 times as much as the total changed, in offsetting directions, so no member's share of the change is meaningful", members: [] });
+    const many = dimensionVerdict(table(Array.from({ length: 51 }, (_, index) => member(`m${index}`, 10, index === 0 ? 5 : 10))));
+    expect(many.reason).toBe("51 members is too many for one member's share of the change to stand out");
+  });
+
   it('a drilled member’s share of the whole change is its local share times its parent’s', () => {
     expect(formatDecimal(globalShare(d(0.5), d(0.8)))).toBe('0.4');
   });

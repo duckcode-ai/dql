@@ -18,7 +18,16 @@ export type ContributionOutcome =
   | { status: 'truncated' | 'failed' | 'not_expressible' | 'stopped'; dimension: InvestigationDimensionRef; reason: string; queryIds: string[] };
 
 /** The pipeline's words when a metric cannot be grouped by a field. */
-const NOT_EXPRESSIBLE = /join path|could not compose|not compatible|cannot be combined|join_path_required|not reachable|no governed join/i;
+const NOT_EXPRESSIBLE = /join path|could not compose|not compatible|cannot be combined|join_path_required|not reachable|no governed join|multiplies fact rows|would be inflated|fan-?out/i;
+
+const TRUE_VALUES = new Set(['true', '1', 'yes', 't', 'y']);
+const FALSE_VALUES = new Set(['false', '0', 'no', 'f', 'n']);
+
+/** A boolean member reads as yes or no, never as 1 or false. */
+function booleanLabel(value: unknown): string {
+  const text = String(value).trim().toLowerCase();
+  return TRUE_VALUES.has(text) ? 'yes' : FALSE_VALUES.has(text) ? 'no' : memberLabel(value);
+}
 
 type Row = Record<string, unknown>;
 
@@ -35,6 +44,7 @@ export async function measureContribution(run: InvestigationRun, frame: Investig
   const split: IntentGroupBy = { ref: dimension.ref, role: 'categorical' };
   const label = `${metric.label} by ${dimension.label} in ${current.label} and ${prior.label}`;
   const vocabulary = run.runtime.vocabulary();
+  const labelOf = vocabulary.get(dimension.ref)?.roles.includes('boolean') ? booleanLabel : memberLabel;
   const queryIds: string[] = [];
   const members = new Map<string, Sliced>();
   let aiSql = false;
@@ -116,7 +126,7 @@ export async function measureContribution(run: InvestigationRun, frame: Investig
   const entries = [...members.entries()];
   if (metric.ratio) {
     const ratioMembers = entries.map(([key, member]) => ({
-      key, label: memberLabel(member.value),
+      key, label: labelOf(member.value),
       ...(member.current.length ? { currentNumerator: sum(member.current, picked.numerator), currentDenominator: sum(member.current, picked.denominator) } : {}),
       ...(member.prior.length ? { priorNumerator: sum(member.prior, picked.numerator), priorDenominator: sum(member.prior, picked.denominator) } : {}),
     }));
@@ -127,7 +137,7 @@ export async function measureContribution(run: InvestigationRun, frame: Investig
       totalPrior: mixRate?.priorRatio ?? input.totals.prior,
       members: entries.map(([key, member]) => {
         const row = mixRate?.members.find((item) => item.key === key);
-        return { key, value: member.value, label: memberLabel(member.value), ...(row?.currentRatio ? { current: row.currentRatio } : {}), ...(row?.priorRatio ? { prior: row.priorRatio } : {}) };
+        return { key, value: member.value, label: labelOf(member.value), ...(row?.currentRatio ? { current: row.currentRatio } : {}), ...(row?.priorRatio ? { prior: row.priorRatio } : {}) };
       }),
     });
     return { status: 'measured', dimension, table, ...(mixRate ? { mixRate } : {}), queryIds, aiSql };
@@ -142,7 +152,7 @@ export async function measureContribution(run: InvestigationRun, frame: Investig
     members: entries.map(([key, member]) => {
       const currentValue = member.current.length ? figure(member.current) : undefined;
       const priorValue = member.prior.length ? figure(member.prior) : undefined;
-      return { key, value: member.value, label: memberLabel(member.value), ...(currentValue ? { current: currentValue } : {}), ...(priorValue ? { prior: priorValue } : {}) };
+      return { key, value: member.value, label: labelOf(member.value), ...(currentValue ? { current: currentValue } : {}), ...(priorValue ? { prior: priorValue } : {}) };
     }),
   });
   return { status: 'measured', dimension, table, queryIds, aiSql };

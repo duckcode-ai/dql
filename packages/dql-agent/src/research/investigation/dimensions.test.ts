@@ -37,8 +37,8 @@ describe('choosing the dimensions to break a change down by', () => {
   it('governed dimensions the metric reaches, ranked by the question, skills, guidance, home model and documentation', () => {
     const { candidates, excluded } = candidateDimensions({ vocabulary, frame: frame(), question: 'Why did revenue drop by category?', cap: 6 });
     expect(candidates.map((candidate) => candidate.ref)).toEqual([CATEGORY, LOCATION, 'dimension:orders.is_food', 'dimension:orders.order_status']);
-    expect(candidates[0]).toMatchObject({ score: 7, reasons: ['named in the question', 'named by business guidance', "on the metric's own model", 'documented'], source: 'join_reach' });
-    expect(candidates[1]).toMatchObject({ score: 2, reasons: ['preferred by a skill'] });
+    expect(candidates[0]).toMatchObject({ score: 8, reasons: ['named in the question', 'named by business guidance', "on the metric's own model", 'documented', 'a category'], source: 'join_reach' });
+    expect(candidates[1]).toMatchObject({ score: 3, reasons: ['preferred by a skill', 'a category'] });
     // Not reachable (customer type), a number (order total): not candidates. The
     // time axis, and an inventory copy of a governed dimension, are excluded with a reason.
     expect(excluded).toEqual([
@@ -68,6 +68,22 @@ describe('choosing the dimensions to break a change down by', () => {
       ['column:main.payments.method', 'relation_columns'],
     ]);
     expect(excluded).toEqual([{ ref: 'column:main.payments.paid_at', label: 'paid_at'.replace(/_/g, ' '), reason: 'time_axis' }]);
+  });
+
+  it('a name ranks below a category; a dimension typed as a number, or over the column the metric sums, is never split by', () => {
+    const named = buildVocabularyIndex({
+      metrics: [{ name: 'revenue', model: 'orders', label: 'Revenue', aggregation: 'sum', physical: { relation: 'dev.orders', expr: '"dev"."orders"."order_total"', aggregate: 'sum' } }],
+      dimensions: [
+        { name: 'customer_name', model: 'orders', label: 'Customer name', dataType: 'string', description: 'Who ordered' },
+        { name: 'channel', model: 'orders', label: 'Channel', dataType: 'string' },
+        { name: 'order_amount', model: 'orders', dataType: 'double' },
+        { name: 'order_total_dim', model: 'orders', dataType: 'categorical', physical: { relation: 'dev.orders', column: 'order_total' } },
+      ],
+    });
+    const { candidates, excluded } = candidateDimensions({ vocabulary: named, frame: frame(), question: 'Why did revenue drop?', cap: 6 });
+    expect(candidates.map((candidate) => candidate.ref)).toEqual(['dimension:orders.channel', 'dimension:orders.customer_name']);
+    expect(candidates[1]!.reasons).toContain('a name, often with many members');
+    expect(excluded).toContainEqual({ ref: 'dimension:orders.order_total_dim', label: 'order total dim', reason: 'metric_column' });
   });
 
   it('beyond the cap, dimensions wait; with little time left, the cap is smaller', () => {

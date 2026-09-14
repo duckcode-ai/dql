@@ -33,6 +33,8 @@ export interface ExcludedDimensionV1 {
 
 /** Roles a change can be split by: members, not keys, dates or numbers. */
 const SPLITTABLE = new Set(['categorical', 'text', 'boolean', 'label']);
+/** A dimension typed as a number is an amount, whatever role its name gives it. */
+const NUMERIC_TYPE = /^(int|integer|bigint|smallint|decimal|numeric|number|double|float|real)/i;
 
 const labelOf = (entry: VocabularyEntry) => (entry.label ?? entry.name).replace(/_/g, ' ');
 const padded = (text: string) => ` ${text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `;
@@ -64,6 +66,11 @@ export function candidateDimensions(input: {
   const fixed = new Set(frame.baseFilters.filter((filter) => filter.op === 'eq' && filter.values.length === 1 && filter.on !== 'aggregate').map((filter) => identity(filter.ref)));
   const axes = new Set([frame.timeRef, frame.periodAxis?.ref].filter((ref): ref is string => Boolean(ref)).map(identity));
   const metricFields = new Set([frame.metric.ref, frame.metric.ratio?.numeratorRef, frame.metric.ratio?.denominatorRef].filter((ref): ref is string => Boolean(ref)).map(identity));
+  // A dimension over the column the metric sums (order_total_dim over order_total) splits the metric by its own amounts.
+  const leaf = (expression: string | undefined) => expression?.replace(/"/g, '').split('.').pop()?.trim().toLowerCase();
+  const metricColumn = metric?.physical?.relation ? leaf(metric.physical.column ?? metric.physical.expr) : undefined;
+  const readsMetricColumn = (entry: VocabularyEntry) => Boolean(metricColumn && entry.physical?.column && metric?.physical?.relation
+    && leaf(entry.physical.column) === metricColumn && samePhysicalRelation(entry.physical.relation, metric.physical.relation));
 
   type Pooled = { entry: VocabularyEntry; source: CandidateDimensionV1['source'] };
   let pool: Pooled[];
@@ -95,7 +102,8 @@ export function candidateDimensions(input: {
     const exclude = (reason: ExcludedDimensionV1['reason']) => excluded.push({ ref: entry.ref, label: labelOf(entry), reason });
     if (axes.has(field)) { exclude('time_axis'); continue; }
     if (!entry.roles.some((role) => SPLITTABLE.has(role))) continue;
-    if (metricFields.has(field)) { exclude('metric_column'); continue; }
+    if (NUMERIC_TYPE.test(entry.dataType ?? '') && !entry.roles.includes('boolean')) continue;
+    if (metricFields.has(field) || readsMetricColumn(entry)) { exclude('metric_column'); continue; }
     if (fixed.has(field)) { exclude('fixed_by_filter'); continue; }
     if (entry.inventory && governedFields.has(field) ) { exclude('governed_alternative'); continue; }
     if (seen.has(field)) continue;
@@ -116,6 +124,9 @@ export function candidateDimensions(input: {
     const home = columns ? metric?.physical?.relation !== undefined && samePhysicalRelation(entry.physical?.relation, metric.physical.relation) : entry.model === model;
     if (home) { score += 1; reasons.push("on the metric's own model"); }
     if (entry.description) { score += 1; reasons.push('documented'); }
+    // A category splits a change into a few members; a name splits it into many small ones.
+    if (entry.roles.some((role) => role === 'categorical' || role === 'text' || role === 'boolean')) { score += 1; reasons.push('a category'); }
+    if (entry.roles.includes('label')) { score -= 1; reasons.push('a name, often with many members'); }
     return { ref: entry.ref, label: labelOf(entry), ...(entry.description ? { description: entry.description } : {}), score, reasons, source };
   });
   ranked.sort((left, right) => right.score - left.score || left.label.localeCompare(right.label));

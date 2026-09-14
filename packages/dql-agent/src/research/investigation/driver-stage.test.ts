@@ -114,7 +114,7 @@ describe('where the change came from', () => {
     ]);
     expect(report.ruledOut.map((entry) => entry.text)).toEqual([
       "By Location, the change was spread in line with each member's size.",
-      "By Location within beverage, the change was spread in line with each member's size.",
+      "By Location within Category: beverage, the change was spread in line with each member's size.",
     ]);
     expect(ledger.programs.map((program) => [program.kind, program.verdict ?? null])).toEqual([
       ['frame', null], ['headline', null], ['coverage', null],
@@ -122,7 +122,7 @@ describe('where the change came from', () => {
     ]);
     expect(ledger.programs.find((program) => program.kind === 'drill')).toMatchObject({ id: `drill:beverage:${LOCATION}`, parentId: `contribution:${CATEGORY}` });
     expect(ledger.budget.statementsUsed).toBe(6);
-    expect(report.text).toContain('Beverage in Category accounted for 100.0% of the change, from 300.00 to 150.00, though it was 30.0% of Revenue in July 2025.');
+    expect(report.text).toContain('Category: beverage accounted for 100.0% of the change, from 300.00 to 150.00, though it was 30.0% of Revenue in July 2025.');
     expect(report.confidence).toEqual({ level: 'high', reasons: [] });
     expect(report.notInvestigated).toEqual([]);
     expectVerified(report);
@@ -144,9 +144,41 @@ describe('where the change came from', () => {
     expectVerified(report);
   });
 
-  it('an AI reply that names a dimension not on the list is ignored, and the ranked dimensions are analysed', async () => {
-    const { receipt: ledger } = await investigate({ vocabulary: wideVocabulary, selectDimensions: async () => '{"dimensions": ["dimension:orders.made_up"]}' });
-    expect(ledger.programs.filter((program) => program.kind === 'contribution').map((program) => program.dimension)).toHaveLength(6);
+  it('an AI reply that names a dimension not on the list is ignored; a dimension the metric cannot be grouped by does not use up a place', async () => {
+    const { report, receipt: ledger } = await investigate({ vocabulary: wideVocabulary, selectDimensions: async () => '{"dimensions": ["dimension:orders.made_up"]}' });
+    // Category and location are measured; the five others cannot be grouped by, so every ranked dimension is tried.
+    expect(ledger.programs.filter((program) => program.kind === 'contribution').map((program) => program.dimension)).toHaveLength(7);
+    expect(report.notInvestigated.filter((entry) => entry.reason === 'not_expressible')).toHaveLength(5);
+    expect(report.notInvestigated.some((entry) => entry.reason === 'not_started')).toBe(false);
+  });
+
+  it("once a model's join multiplies the metric's rows, its other dimensions are not queried", async () => {
+    const itemVocabulary = buildVocabularyIndex({
+      ...baseSource,
+      dimensions: [
+        ...baseSource.dimensions,
+        { name: 'product', model: 'order_items', label: 'Product', dataType: 'string', reachableFrom: ['orders'], description: 'What was ordered' },
+        { name: 'size', model: 'order_items', label: 'Size', dataType: 'string', reachableFrom: ['orders'], description: 'Cup size' },
+      ],
+    });
+    const ran: AnalyticalIntentV1[] = [];
+    const runtime: InvestigationRuntime = {
+      read: async () => { throw new Error('not read'); },
+      runIntent: async (intent) => {
+        ran.push(intent);
+        const itemLevel = intent.groupBy.some((group) => group.ref.startsWith('dimension:order_items.'));
+        if (itemLevel) return { kind: 'gap', gap: 'not_modeled', message: 'the join multiplies fact rows (2088 base rows became 2910); the aggregate would be inflated, so nothing was executed', nearest: [], text: '', offerExploration: false, intent, receipt: receipt() } as PipelineOutcome;
+        return answer(intent);
+      },
+      vocabulary: () => itemVocabulary,
+      remainingMs: () => 180_000,
+      onStep: () => undefined,
+    };
+    const outcome = await runInvestigation({ question: 'Why did revenue drop in August 2025?', source: { kind: 'run', runId: 'run-1', intent: august }, runtime, now: () => new Date('2026-09-13T12:00:00Z') });
+    if (outcome.kind !== 'report') throw new Error(outcome.kind);
+    const itemQueries = ran.filter((intent) => intent.groupBy.some((group) => group.ref.startsWith('dimension:order_items.')));
+    expect(itemQueries).toHaveLength(1);
+    expect(outcome.report.notInvestigated.filter((entry) => entry.reason === 'not_expressible').map((entry) => entry.dimension?.label).sort()).toEqual(['Product', 'Size']);
   });
 
   it('out of statements after one breakdown, it reports what was not broken down and why, at lower confidence', async () => {

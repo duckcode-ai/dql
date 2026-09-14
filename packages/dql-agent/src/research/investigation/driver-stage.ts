@@ -50,6 +50,9 @@ const VERDICT_WORDS: { [verdict in DimensionVerdictV1['verdict']]: string } = {
   inconclusive: 'no clear concentration',
 };
 
+/** The pipeline's words when a join would multiply the rows a metric totals. */
+const FAN_OUT = /multiplies fact rows|would be inflated|fan-?out/i;
+
 const filterValue = (value: unknown): string | number | boolean | undefined =>
   (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? value : undefined);
 
@@ -81,10 +84,6 @@ export async function investigateDrivers(run: InvestigationRun, frame: Investiga
       // The ranked order stands.
     }
     host.step('analyze', findings.selection === 'ai' ? `Chose ${chosen.length} of ${everyone.length} dimensions to break the change down by` : `Kept the ${chosen.length} highest-ranked of ${everyone.length} dimensions`, 'done', { ms: Date.now() - started, programId: 'dimensions' });
-  }
-  const chosenRefs = new Set(chosen.map((candidate) => candidate.ref));
-  for (const candidate of everyone) {
-    if (!chosenRefs.has(candidate.ref)) findings.notInvestigated.push({ dimension: { ref: candidate.ref, label: candidate.label }, reason: 'not_started', detail: 'beyond the number of dimensions one investigation analyses', queryIds: [] });
   }
 
   const allowAiSql = frame.lane === 'ai' || headline.aiSql;
@@ -119,15 +118,41 @@ export async function investigateDrivers(run: InvestigationRun, frame: Investiga
     return { dimension, outcome, verdict, ...(parent ? { parent } : {}) };
   };
 
+  // The chosen dimensions first, then the rest in rank order: a chosen dimension
+  // the metric cannot be grouped by does not use up its place, so the next
+  // ranked one takes it. As many are analysed as were chosen.
   const totals = { current: headline.current, prior: headline.prior };
-  for (const candidate of chosen) {
+  const chosenRefs = new Set(chosen.map((candidate) => candidate.ref));
+  const order = [...chosen, ...everyone.filter((candidate) => !chosenRefs.has(candidate.ref))];
+  const attempted = new Set<string>();
+  // A model whose join multiplies the metric's rows multiplies them for every
+  // one of its dimensions: after the first refusal, the rest are not queried.
+  const fannedOut = new Map<string, string>();
+  const modelOf = (ref: string) => vocabulary.get(ref)?.model;
+  let places = 0;
+  for (const candidate of order) {
+    if (places >= chosen.length) break;
     const dimension = { ref: candidate.ref, label: candidate.label };
+    attempted.add(candidate.ref);
+    const model = modelOf(candidate.ref);
+    const known = model ? fannedOut.get(model) : undefined;
+    if (known) {
+      findings.notInvestigated.push({ dimension, reason: 'not_expressible', detail: known, queryIds: [] });
+      continue;
+    }
     const analysed = await analyse(dimension, frame, totals);
+    const refusal = analysed ? undefined : findings.notInvestigated.find((entry) => entry.dimension.ref === candidate.ref && entry.reason === 'not_expressible');
+    if (model && refusal?.detail && FAN_OUT.test(refusal.detail)) fannedOut.set(model, refusal.detail);
+    const vacated = !analysed && findings.notInvestigated.some((entry) => entry.dimension.ref === candidate.ref && (entry.reason === 'not_expressible' || entry.reason === 'truncated_members'));
+    if (!vacated) places += 1;
     if (!analysed) continue;
     findings.analysed.push(analysed);
     if (frame.metric.ratio && analysed.outcome.mixRate && !findings.mixRate) {
       findings.mixRate = { dimension, split: analysed.outcome.mixRate, queryIds: analysed.outcome.queryIds };
     }
+  }
+  for (const candidate of everyone) {
+    if (!attempted.has(candidate.ref)) findings.notInvestigated.push({ dimension: { ref: candidate.ref, label: candidate.label }, reason: 'not_started', detail: 'beyond the number of dimensions one investigation analyses', queryIds: [] });
   }
 
   // One level down: the top supported member, by the next dimensions.
@@ -136,7 +161,8 @@ export async function investigateDrivers(run: InvestigationRun, frame: Investiga
   const value = target ? filterValue(target.value) : undefined;
   if (!parent || !target || value === undefined || target.current === undefined || target.prior === undefined || investigationStopReason(run)) return findings;
   const inMember = { ...frame, baseFilters: [...frame.baseFilters, { ref: parent.dimension.ref, op: 'eq' as const, values: [value], source: 'inherited' as const }] };
-  for (const candidate of chosen.filter((item) => item.ref !== parent.dimension.ref).slice(0, 2)) {
+  const measuredRefs = new Set(findings.analysed.map((item) => item.dimension.ref));
+  for (const candidate of order.filter((item) => item.ref !== parent.dimension.ref && measuredRefs.has(item.ref)).slice(0, 2)) {
     if (investigationStopReason(run)) break;
     const drilled = await analyse({ ref: candidate.ref, label: candidate.label }, inMember, { current: target.current, prior: target.prior }, { dimension: parent.dimension, row: target });
     if (drilled) findings.drilled.push(drilled);
@@ -146,13 +172,14 @@ export async function investigateDrivers(run: InvestigationRun, frame: Investiga
   const { yearAgo, yearAgoPrior } = frame.windows;
   if (frame.periodAxis || frame.metric.additivity !== 'additive' || yearAgo.start === frame.windows.prior.start || !bucketsIn(yearAgo, frame.grain) || !bucketsIn(yearAgoPrior, frame.grain) || investigationStopReason(run)) return findings;
   const started = Date.now();
-  const program = host.record('seasonality', 'seasonality', `Checked ${target.label} a year earlier`);
+  const member = `${parent.dimension.label}: ${target.label}`;
+  const program = host.record('seasonality', 'seasonality', `Checked ${member} a year earlier`);
   program.dimension = parent.dimension.ref;
   const span = { start: yearAgoPrior.start < yearAgo.start ? yearAgoPrior.start : yearAgo.start, end: yearAgoPrior.end > yearAgo.end ? yearAgoPrior.end : yearAgo.end };
   const result = await runInvestigationQuery(run, {
     purpose: 'seasonality', programId: 'seasonality', allowAiSql,
-    label: `${frame.metric.label} for ${target.label} in ${yearAgoPrior.label} and ${yearAgo.label}`,
-    intent: investigationIntent(inMember, { reading: `${frame.metric.label} for ${target.label} by ${frame.grain} from ${yearAgoPrior.label} to ${yearAgo.label}.`, window: span, groupBy: [timeBucket(inMember)], shape: 'trend' }),
+    label: `${frame.metric.label} for ${member} in ${yearAgoPrior.label} and ${yearAgo.label}`,
+    intent: investigationIntent(inMember, { reading: `${frame.metric.label} for ${member} by ${frame.grain} from ${yearAgoPrior.label} to ${yearAgo.label}.`, window: span, groupBy: [timeBucket(inMember)], shape: 'trend' }),
   });
   program.ms = Date.now() - started;
   if (result.status === 'stopped') { program.outcome = 'not_reached'; return findings; }
@@ -168,7 +195,7 @@ export async function investigateDrivers(run: InvestigationRun, frame: Investiga
     return values.length ? sumDecimals(values) : undefined;
   };
   const check = seasonalityCheck({ current: target.current, prior: target.prior, yearAgo: inWindow(yearAgo), yearAgoPrior: inWindow(yearAgoPrior) });
-  findings.memberSeasonality = { dimension: parent.dimension, member: target.label, check, queryIds: [result.id] };
-  host.step('verdict', check.seasonal ? `${target.label} moved the same way a year earlier` : `${target.label} did not move the same way a year earlier`, 'done', { ms: program.ms, programId: 'seasonality' });
+  findings.memberSeasonality = { dimension: parent.dimension, member, check, queryIds: [result.id] };
+  host.step('verdict', check.seasonal ? `${member} moved the same way a year earlier` : `${member} did not move the same way a year earlier`, 'done', { ms: program.ms, programId: 'seasonality' });
   return findings;
 }

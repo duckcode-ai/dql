@@ -27,6 +27,10 @@ export const VERDICT_THRESHOLDS = {
   seasonalPoints: 5,
   /** Only a supported member with at least this share is drilled into. */
   drillShare: 0.4,
+  /** Members moving more than this many times the total change, in offsetting directions, have no meaningful shares. */
+  maxChurn: 3,
+  /** A dimension with more members than this is too fine for one member to stand out. */
+  maxMembers: 50,
 } as const;
 
 const number = (value: ExactDecimal | undefined) => (value === undefined ? undefined : Number(formatDecimal(value)));
@@ -58,6 +62,14 @@ export function dimensionVerdict(table: ContributionTableV1): DimensionVerdictV1
   if (table.offsetting) return { verdict: 'inconclusive', reason: 'the total did not change while members moved in offsetting directions', members: [] };
   if (!table.reconciles) {
     return { verdict: 'inconclusive', reason: `the members add up to ${formatDecimal(table.membersChange!)} of a change of ${formatDecimal(table.change)}, so their shares are not reliable`, members: [] };
+  }
+  if (table.rows.length > VERDICT_THRESHOLDS.maxMembers) {
+    return { verdict: 'inconclusive', reason: `${table.rows.length} members is too many for one member's share of the change to stand out`, members: [] };
+  }
+  const gross = table.rows.reduce((sum, row) => sum + Math.abs(number(row.delta) ?? 0), 0);
+  const net = Math.abs(number(table.change) ?? 0);
+  if (net > 0 && gross > VERDICT_THRESHOLDS.maxChurn * net) {
+    return { verdict: 'inconclusive', reason: `members moved ${(gross / net).toFixed(1)} times as much as the total changed, in offsetting directions, so no member's share of the change is meaningful`, members: [] };
   }
   const members = table.rows.flatMap((row) => {
     const verdict = memberVerdict(row, table);
