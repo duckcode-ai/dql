@@ -103,6 +103,8 @@ export function createInvestigationExecutor(deps: InvestigationExecutorDeps): Ag
         vocabulary: () => scope.vocabulary(),
         remainingMs,
         onStep,
+        compatibleDimensionRefs: (metricRef) => compatibleDimensionRefs(scope, metricRef),
+        selectDimensions: (prompt) => scope.dispatch('research_select', [{ role: 'user', content: prompt }]),
         ...(request.signal ? { signal: request.signal } : {}),
         ...(deps.contextSources?.length ? { contextSources: deps.contextSources } : {}),
       },
@@ -138,6 +140,34 @@ export function createInvestigationExecutor(deps: InvestigationExecutorDeps): Ag
     }
     return reportResult({ runId, report: outcome.report, receipt, telemetry, routeReason: routeDecision?.reason });
   };
+}
+
+/**
+ * The dimensions the semantic layer can group a governed metric by, as
+ * vocabulary refs. Undefined when there is no semantic layer or the metric is
+ * not one of its metrics: the vocabulary's join reach decides instead.
+ */
+export function compatibleDimensionRefs(scope: Pick<AskRequestScope, 'semanticLayer' | 'vocabulary'>, metricRef: string): string[] | undefined {
+  const layer = scope.semanticLayer();
+  const vocabulary = scope.vocabulary();
+  const metric = vocabulary.get(metricRef) ?? vocabulary.resolve(metricRef);
+  if (!layer || !metric || metric.kind !== 'metric') return undefined;
+  let explained: ReturnType<NonNullable<typeof layer>['explainCompatibleDimensions']>;
+  try {
+    explained = layer.explainCompatibleDimensions([metric.sourceId ?? metric.name]);
+  } catch {
+    return undefined;
+  }
+  if (explained.incompatible.some((item) => item.reason === 'metric_unresolved')) return undefined;
+  // A vocabulary dimension's source id is `<semantic model or table>.<name>`.
+  const bySource = new Map(vocabulary.entries.filter((entry) => entry.kind === 'dimension' && entry.sourceId).map((entry) => [entry.sourceId!, entry.ref]));
+  const refs = explained.compatible
+    .map((definition) => {
+      const home = definition.cube ?? definition.table?.split('.').pop();
+      return home ? bySource.get(`${home}.${definition.name}`) : undefined;
+    })
+    .filter((ref): ref is string => Boolean(ref));
+  return refs.length ? [...new Set(refs)] : undefined;
 }
 
 async function frameSource(deps: InvestigationExecutorDeps, request: AgentRunRequest, onStep: (step: AskStoryStepV1) => void): Promise<InvestigationFrameSource> {
@@ -255,6 +285,9 @@ function reportResult(input: {
   const nextActions: AgentRunNextAction[] = [
     ...(report.status === 'incomplete' || receipt.investigation?.budget.stoppedBy ? [{ id: 'continue-investigation', label: 'Run the investigation again', route: 'research' as const }] : []),
     ...(report.status === 'no_data' ? [{ id: 'investigate-latest-period', label: 'Investigate the latest complete period', route: 'research' as const }] : []),
+    ...(report.notInvestigated.some((entry) => entry.reason === 'budget' || entry.reason === 'deadline' || entry.reason === 'not_started')
+      ? [{ id: 'investigate-remaining-dimensions', label: 'Investigate the remaining dimensions', route: 'research' as const }]
+      : []),
     ...(caveat('coverage_gap') ? [{ id: 'review-data-coverage', label: 'Review data coverage', route: 'generated_answer' as const }] : []),
     ...(headlineQuery?.sql ? [
       { id: 'create-block', label: 'Save the trend as a block', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const },

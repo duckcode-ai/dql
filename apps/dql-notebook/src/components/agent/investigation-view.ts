@@ -35,6 +35,23 @@ export interface InvestigationQueryView {
   result?: { columns: string[]; rows: Rec[]; rowCount: number; columnsMeta?: Rec[] };
 }
 
+export interface InvestigationDriverView {
+  /** Dimension and member at each level, outermost first. */
+  path: Array<{ dimension: string; member: string }>;
+  current: InvestigationFigure;
+  prior: InvestigationFigure;
+  delta: InvestigationFigure;
+  /** Signed fraction of the change (1 = all of it). */
+  share?: number;
+  /** For a drilled member: fraction of the whole change. */
+  globalShare?: number;
+  excess?: number;
+  status: 'both' | 'new' | 'gone';
+  role: 'driver' | 'offset';
+  verdict: 'supported' | 'partial' | 'offset';
+  queryIds: string[];
+}
+
 export interface InvestigationReportView {
   question: string;
   status: 'answered' | 'no_data' | 'incomplete';
@@ -58,9 +75,45 @@ export interface InvestigationReportView {
   caveats: Array<{ code: string; text: string; queryIds: string[] }>;
   confidence: { level: InvestigationConfidence; reasons: string[] };
   trend?: { columns: string[]; rows: Rec[]; columnsMeta?: Rec[] };
+  drivers: InvestigationDriverView[];
+  ruledOut: Array<{ dimension: string; text: string; queryIds: string[] }>;
+  inconclusive: Array<{ dimension: string; reason: string; queryIds: string[] }>;
+  notInvestigated: Array<{ dimension?: string; reason: string }>;
+  mixRate?: { mix: InvestigationFigure; rate: InvestigationFigure; queryIds: string[] };
   queries: InvestigationQueryView[];
   text: string;
 }
+
+const fraction = (value: unknown): number | undefined => {
+  const number = typeof value === 'string' && value.trim() ? Number(value) : typeof value === 'number' ? value : Number.NaN;
+  return Number.isFinite(number) ? number : undefined;
+};
+
+const DRIVER_VERDICTS = ['supported', 'partial', 'offset'] as const;
+
+function driverView(value: unknown): InvestigationDriverView | undefined {
+  const driver = rec(value);
+  const current = figure(driver?.current);
+  const prior = figure(driver?.prior);
+  const delta = figure(driver?.delta);
+  const verdict = str(driver?.verdict) as InvestigationDriverView['verdict'] | undefined;
+  if (!driver || !current || !prior || !delta || !verdict || !DRIVER_VERDICTS.includes(verdict)) return undefined;
+  const status = str(driver.status);
+  return {
+    path: arr(driver.path).map(rec).filter((step): step is Rec => Boolean(step))
+      .map((step) => ({ dimension: str(rec(step.dimension)?.label) ?? 'Dimension', member: str(rec(step.member)?.label) ?? '(not set)' })),
+    current, prior, delta,
+    ...(fraction(driver.share) !== undefined ? { share: fraction(driver.share) } : {}),
+    ...(fraction(driver.globalShare) !== undefined ? { globalShare: fraction(driver.globalShare) } : {}),
+    ...(fraction(driver.excess) !== undefined ? { excess: fraction(driver.excess) } : {}),
+    status: status === 'new' || status === 'gone' ? status : 'both',
+    role: driver.role === 'offset' ? 'offset' : 'driver',
+    verdict,
+    queryIds: strings(driver.queryIds),
+  };
+}
+
+const dimensionLabel = (entry: Rec) => str(rec(entry.dimension)?.label);
 
 const figure = (value: unknown): InvestigationFigure | undefined => {
   const record = rec(value);
@@ -144,6 +197,16 @@ export function investigationReportOf(payload: unknown): InvestigationReportView
         ...(Array.isArray(trend.columnsMeta) ? { columnsMeta: arr(trend.columnsMeta).map(rec).filter((meta): meta is Rec => Boolean(meta)) } : {}),
       },
     } : {}),
+    drivers: arr(report.drivers).map(driverView).filter((driver): driver is InvestigationDriverView => Boolean(driver)),
+    ruledOut: arr(report.ruledOut).map(rec).filter((entry): entry is Rec => Boolean(entry && str(entry.text)))
+      .map((entry) => ({ dimension: dimensionLabel(entry) ?? 'A dimension', text: str(entry.text)!, queryIds: strings(entry.queryIds) })),
+    inconclusive: arr(report.inconclusive).map(rec).filter((entry): entry is Rec => Boolean(entry))
+      .map((entry) => ({ dimension: dimensionLabel(entry) ?? 'A dimension', reason: str(entry.reason) ?? 'no clear concentration', queryIds: strings(entry.queryIds) })),
+    notInvestigated: arr(report.notInvestigated).map(rec).filter((entry): entry is Rec => Boolean(entry))
+      .map((entry) => ({ ...(dimensionLabel(entry) ? { dimension: dimensionLabel(entry) } : {}), reason: str(entry.reason) ?? 'not_started' })),
+    ...(figure(rec(report.mixRate)?.mix) && figure(rec(report.mixRate)?.rate)
+      ? { mixRate: { mix: figure(rec(report.mixRate)!.mix)!, rate: figure(rec(report.mixRate)!.rate)!, queryIds: strings(rec(report.mixRate)!.queryIds) } }
+      : {}),
     queries: arr(report.queries).map(queryView).filter((query): query is InvestigationQueryView => Boolean(query)),
     text: str(report.text) ?? str(headline.text) ?? '',
   };
@@ -251,8 +314,10 @@ export function investigationActiveLabel(last: { phase: string; title: string; s
     case 'frame': return last.title.startsWith('Comparing') ? 'Measuring the change'
       : last.title.startsWith('Framed the change') ? 'Checking how far the data runs'
       : 'Framing the change to investigate';
-    case 'check': return last.title.startsWith('The data runs') || last.title.startsWith('Could not read how far') ? 'Framing the periods to compare' : 'Writing the report';
-    case 'analyze': return 'Checking the data covers both periods';
+    case 'check': return last.title.startsWith('The data runs') || last.title.startsWith('Could not read how far') || last.title.startsWith('The latest') ? 'Framing the periods to compare'
+      : last.title.startsWith('Data covers') ? 'Breaking the change down'
+      : 'Writing the report';
+    case 'analyze': return /^(Broke|Chose|Kept|Could not break)/.test(last.title) ? 'Breaking the change down' : 'Checking the data covers both periods';
     case 'drill': return 'Looking one level deeper';
     case 'verdict': return 'Writing the report';
     case 'report': return 'Finishing';

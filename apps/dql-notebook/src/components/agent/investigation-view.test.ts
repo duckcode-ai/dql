@@ -99,7 +99,50 @@ describe('the investigation view model', () => {
     expect(view.explainInvestigation({ receipt: queryReceipt })).toBeUndefined();
   });
 
+  it('reads the drivers, what was ruled out, what was inconclusive and what was not broken down', () => {
+    const withDrivers = {
+      kind: 'investigation',
+      investigation: {
+        ...payload.investigation,
+        drivers: [
+          {
+            path: [{ dimension: { ref: 'dimension:orders.category', label: 'Category' }, member: { value: 'beverage', label: 'beverage' } }],
+            current: { value: '150', formatted: '150.00' }, prior: { value: '300', formatted: '300.00' }, delta: { value: '-150', formatted: '-150.00' },
+            share: '1', excess: '0.7', status: 'both', role: 'driver', verdict: 'supported', factIds: ['f-driver-1'], queryIds: ['q3'],
+          },
+          { path: [], current: { value: '1', formatted: '1' }, prior: { value: '1', formatted: '1' }, delta: { value: '0', formatted: '0' }, verdict: 'made_up' },
+        ],
+        ruledOut: [{ dimension: { ref: 'dimension:orders.location', label: 'Location' }, maxExcess: '0', text: "By Location, the change was spread in line with each member's size.", queryIds: ['q4'] }],
+        inconclusive: [{ dimension: { ref: 'dimension:orders.channel', label: 'Channel' }, reason: 'no member moved far enough beyond its size to stand out', queryIds: ['q5'] }],
+        notInvestigated: [{ dimension: { ref: 'dimension:orders.brand', label: 'Brand' }, reason: 'budget' }],
+      },
+    };
+    const report = view.investigationReportOf(withDrivers)!;
+    expect(report.drivers).toEqual([{
+      path: [{ dimension: 'Category', member: 'beverage' }],
+      current: { value: '150', formatted: '150.00' }, prior: { value: '300', formatted: '300.00' }, delta: { value: '-150', formatted: '-150.00' },
+      share: 1, excess: 0.7, status: 'both', role: 'driver', verdict: 'supported', queryIds: ['q3'],
+    }]);
+    expect(report.ruledOut).toEqual([{ dimension: 'Location', text: "By Location, the change was spread in line with each member's size.", queryIds: ['q4'] }]);
+    expect(report.notInvestigated).toEqual([{ dimension: 'Brand', reason: 'budget' }]);
+    // A report from before drivers existed reads with none.
+    expect(view.investigationReportOf(payload)!.drivers).toEqual([]);
+
+    const html = renderToStaticMarkup(createElement(reportModule.InvestigationReport, { report: { ...report, trend: undefined }, t, themeMode: 'light' }));
+    expect(html).toContain('Where the change came from');
+    expect(html).toContain('Category: beverage');
+    expect(html).toContain('Supported');
+    expect(html).toContain('300.00 → 150.00');
+    expect(html).toContain('100.0%');
+    expect(html).toContain('Ruled out · </span>By Location');
+    expect(html).toContain('Inconclusive · </span>Channel: no member moved far enough beyond its size to stand out');
+    expect(html).toContain('Not broken down: Brand (query budget ran out)');
+  });
+
   it('names what Research is doing from its last step', () => {
+    expect(view.investigationActiveLabel({ phase: 'check', title: 'Data covers 100% of the days in August 2025 and 100% in July 2025', state: 'done' })).toBe('Breaking the change down');
+    expect(view.investigationActiveLabel({ phase: 'analyze', title: 'Broke the change down by Category: the change is concentrated in some members', state: 'done' })).toBe('Breaking the change down');
+    expect(view.investigationActiveLabel({ phase: 'drill', title: 'Broke beverage by Location down', state: 'done' })).toBe('Looking one level deeper');
     expect(view.investigationActiveLabel({ phase: 'frame', title: 'Framed', state: 'done' })).toBe('Framing the change to investigate');
     expect(view.investigationActiveLabel({ phase: 'frame', title: 'Framed the change in net arr', state: 'done' })).toBe('Checking how far the data runs');
     expect(view.investigationActiveLabel({ phase: 'analyze', title: 'Measured', state: 'done' })).toBe('Checking the data covers both periods');

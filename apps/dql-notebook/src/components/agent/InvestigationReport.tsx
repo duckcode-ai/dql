@@ -7,7 +7,7 @@ import type React from 'react';
 import type { QueryResult } from '../../store/types';
 import type { Theme, ThemeMode } from '../../themes/notebook-theme';
 import { ResultView } from '../output/ResultView';
-import type { InvestigationConfidence, InvestigationReportView, InvestigationVerdict } from './investigation-view';
+import type { InvestigationConfidence, InvestigationDriverView, InvestigationReportView, InvestigationVerdict } from './investigation-view';
 
 export const INVESTIGATION_VERDICT_WORDS: Record<InvestigationVerdict, string> = {
   change: 'Changed',
@@ -15,6 +15,22 @@ export const INVESTIGATION_VERDICT_WORDS: Record<InvestigationVerdict, string> =
   seasonal: 'Seasonal',
   no_data: 'No data',
   incomplete: 'Stopped early',
+};
+
+export const DRIVER_VERDICT_WORDS: Record<InvestigationDriverView['verdict'], string> = {
+  supported: 'Supported',
+  partial: 'Partial',
+  offset: 'Offset',
+};
+
+const NOT_INVESTIGATED_WORDS: Record<string, string> = {
+  budget: 'query budget ran out',
+  deadline: 'time ran out',
+  cancelled: 'stopped',
+  truncated_members: 'too many members',
+  not_expressible: 'cannot be grouped by',
+  failed: 'query failed',
+  not_started: 'beyond the dimensions analysed',
 };
 
 export const INVESTIGATION_CONFIDENCE_WORDS: Record<InvestigationConfidence, string> = {
@@ -82,6 +98,61 @@ export function InvestigationReport({ report, t, themeMode, onOpenQuery }: {
 
       {trend ? (
         <ResultView result={trend} themeMode={themeMode} t={t} embedded tabLabels={{ chart: 'Trend', table: 'Table' }} contentMaxHeight={220} />
+      ) : null}
+
+      {report.drivers.length ? (
+        <div role="table" aria-label="Where the change came from" style={{ display: 'grid', gap: 5, minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 650, color: t.textSecondary }}>Where the change came from</div>
+          {report.drivers.map((driver, index) => {
+            const share = driver.share !== undefined ? Math.abs(driver.globalShare ?? driver.share) : undefined;
+            const barColor = driver.role === 'offset' ? t.textMuted : falling ? t.error : t.success;
+            const verdictColor = driver.verdict === 'supported' ? t.accent : driver.verdict === 'partial' ? t.warning : t.textSecondary;
+            const path = driver.path.map((step) => `${step.dimension}: ${step.member}`).join(' › ');
+            return (
+              <div key={`${path}-${index}`} role="row" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.5fr) minmax(0, 1fr) minmax(90px, 1fr)', gap: 8, alignItems: 'center', fontSize: 11.5 }}>
+                <span role="cell" style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                  <span title={path} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.textPrimary }}>{path}</span>
+                  <span style={pill(verdictColor, t)}>{DRIVER_VERDICT_WORDS[driver.verdict]}</span>
+                  {driver.status !== 'both' ? <span style={{ fontSize: 10.5, color: t.textMuted }}>{driver.status}</span> : null}
+                </span>
+                <span role="cell" style={{ fontVariantNumeric: 'tabular-nums', color: t.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {driver.prior.formatted} → {driver.current.formatted}
+                </span>
+                <span role="cell" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span aria-hidden="true" style={{ flex: 1, height: 6, borderRadius: 3, background: 'var(--bg-2)', overflow: 'hidden' }}>
+                    <span style={{ display: 'block', width: `${Math.min(100, (share ?? 0) * 100)}%`, height: '100%', background: barColor }} />
+                  </span>
+                  <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 46, textAlign: 'right', color: t.textPrimary }}>
+                    {share !== undefined ? `${(share * 100).toFixed(1)}%` : '—'}
+                  </span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {report.mixRate || report.ruledOut.length || report.inconclusive.length || report.notInvestigated.length ? (
+        <ul aria-label="The other breakdowns" style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 4 }}>
+          {report.mixRate ? (
+            <li style={{ fontSize: 11.5, color: t.textSecondary }}>Mix {report.mixRate.mix.formatted} · rate {report.mixRate.rate.formatted}</li>
+          ) : null}
+          {report.ruledOut.map((entry, index) => (
+            <li key={`ruled-out-${index}`} style={{ fontSize: 11.5, lineHeight: 1.45, color: t.textSecondary }}>
+              <span style={{ fontWeight: 650 }}>Ruled out · </span>{entry.text}
+            </li>
+          ))}
+          {report.inconclusive.map((entry, index) => (
+            <li key={`inconclusive-${index}`} style={{ fontSize: 11.5, lineHeight: 1.45, color: t.textSecondary }}>
+              <span style={{ fontWeight: 650 }}>Inconclusive · </span>{entry.dimension}: {entry.reason}
+            </li>
+          ))}
+          {report.notInvestigated.length ? (
+            <li style={{ fontSize: 11.5, lineHeight: 1.45, color: t.textMuted }}>
+              Not broken down: {report.notInvestigated.map((entry) => `${entry.dimension ?? 'a dimension'} (${NOT_INVESTIGATED_WORDS[entry.reason] ?? entry.reason})`).join(', ')}
+            </li>
+          ) : null}
+        </ul>
       ) : null}
 
       {report.caveats.length ? (

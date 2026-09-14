@@ -955,7 +955,7 @@ export function UnifiedAgentRunPanel({
       });
       return;
     }
-    if (action.id === 'research-deeper') {
+    if (action.id === 'research-deeper' || action.id === 'investigate-drivers') {
       void submit(run.question, 'research', undefined, undefined, run);
       return;
     }

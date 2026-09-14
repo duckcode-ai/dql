@@ -2764,7 +2764,10 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     return withReceipt({ summary: outcome.question, answer: outcome.question, status: 'needs_clarification', trustState: 'not_applicable', stopReason: 'needs_clarification', resolvedRoute: 'clarify', answerRefusalCode: 'ambiguous', clarificationOptions, artifacts: [{ id: `${runId}:clarify`, kind: 'answer', title: 'One question before running this', trustState: 'not_applicable', payload: { kind: 'no_answer', text: outcome.question, answer: outcome.question, ...common } }], evaluations: [], nextActions: [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }], telemetry });
   }
   if (outcome.kind === 'gap') {
+    // A why-question Ask declined is the question Research investigates.
+    const asksWhy = (outcome.intent?.unresolved ?? []).some((clause) => clause.kind === 'unsupported' && /\b(why|drivers?|reasons?|because)\b/i.test(clause.clause));
     const nextActions: AgentRunNextAction[] = [
+      ...(asksWhy ? [{ id: 'investigate-drivers', label: 'Investigate the drivers', route: 'research' as const }] : []),
       ...(receipt.outOfScope?.length ? [{ id: 'widen-scope', label: 'Ask with a purpose that imports it, or declare the import in Domain Studio', route: 'modeling_draft' as const }] : []),
       { id: 'review-metadata-gap', label: 'Review what the project models', route: 'blocked' },
       ...(outcome.offerExploration ? [{ id: 'explore-review-required', label: 'Explore the physical tables (review-required)', route: 'generated_answer' as const }] : []),

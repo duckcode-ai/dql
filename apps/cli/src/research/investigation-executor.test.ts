@@ -10,8 +10,8 @@ import {
   type PipelineOutcome,
   type PipelineReceipt,
 } from '@duckcodeailabs/dql-agent';
-import type { AskPipelineHost, AskRequestScope } from '../ask-pipeline-host/host.js';
-import { createInvestigationExecutor, investigationSourceIntent } from './investigation-executor.js';
+import { toExecutorResult, type AskPipelineHost, type AskRequestScope } from '../ask-pipeline-host/host.js';
+import { compatibleDimensionRefs, createInvestigationExecutor, investigationSourceIntent } from './investigation-executor.js';
 
 const TIME = 'dimension:orders.ordered_at';
 const REVENUE = 'metric:orders.revenue';
@@ -179,6 +179,40 @@ describe('Research runs an investigation on the Ask pipeline', () => {
     const blocked: AgentRouteExecutorResult = { status: 'blocked', answer: 'No AI model is configured.' };
     const result = await createInvestigationExecutor({ host: fakeHost({ blocked }).host, loadRun: async () => undefined })(run({}).context);
     expect(result).toBe(blocked);
+  });
+
+  it('an Ask that declined a why-question offers "Investigate the drivers"; any other gap does not', () => {
+    const gap = (clause: string): PipelineOutcome => ({
+      kind: 'gap', gap: 'not_modeled', message: 'unsupported', nearest: [], text: 'Explaining why is something Research investigates.', offerExploration: false,
+      intent: { ...august, unresolved: [{ clause, options: [], material: true, kind: 'unsupported', question: 'Research can investigate the drivers.' }] } as AnalyticalIntentV1,
+      receipt: receipt(),
+    } as PipelineOutcome);
+    const why = toExecutorResult('run-why', gap('why'), Date.now());
+    expect(why.nextActions?.[0]).toEqual({ id: 'investigate-drivers', label: 'Investigate the drivers', route: 'research' });
+    const recommend = toExecutorResult('run-should', gap('should, invest'), Date.now());
+    expect(recommend.nextActions?.map((action) => action.id)).not.toContain('investigate-drivers');
+  });
+
+  it("the semantic layer's compatible dimensions become vocabulary refs; without a layer, the vocabulary's join reach decides", () => {
+    const semantic = buildVocabularyIndex({
+      metrics: [{ name: 'revenue', model: 'orders', label: 'Revenue', aggregation: 'sum', sourceId: 'revenue' }],
+      dimensions: [
+        { name: 'category', model: 'orders', dataType: 'string', sourceId: 'orders.category' },
+        { name: 'region', model: 'customers', dataType: 'string', sourceId: 'customers.region' },
+      ],
+    });
+    const asked: string[][] = [];
+    const layer = {
+      explainCompatibleDimensions: (names: string[]) => {
+        asked.push(names);
+        return { compatible: [{ name: 'category', cube: 'orders' }, { name: 'region', table: 'analytics.customers' }, { name: 'not_in_vocabulary', cube: 'orders' }], incompatible: [] };
+      },
+    };
+    expect(compatibleDimensionRefs({ semanticLayer: () => layer as never, vocabulary: () => semantic }, 'metric:orders.revenue')).toEqual(['dimension:orders.category', 'dimension:customers.region']);
+    expect(asked).toEqual([['revenue']]);
+    expect(compatibleDimensionRefs({ semanticLayer: () => undefined, vocabulary: () => semantic }, 'metric:orders.revenue')).toBeUndefined();
+    const unknownMetric = { explainCompatibleDimensions: () => ({ compatible: [], incompatible: [{ name: 'revenue', reason: 'metric_unresolved' }] }) };
+    expect(compatibleDimensionRefs({ semanticLayer: () => unknownMetric as never, vocabulary: () => semantic }, 'metric:orders.revenue')).toBeUndefined();
   });
 
   it('the starting reading is the stored answer\'s own, or its receipt\'s', () => {
