@@ -21,6 +21,42 @@ afterEach(() => {
 });
 
 describe('answerQuestion (governed answer via runtime proxy)', () => {
+  it('a Research run carries its investigation, compact: headline, drivers with shares, ruled out, caveats, confidence', async () => {
+    mockFetchOnce(201, {
+      run: {
+        question: 'Why did revenue drop in August 2025?', route: 'research', status: 'needs_review', trustState: 'review_required',
+        answer: 'Revenue fell 150.00 (15.0%) in August 2025 compared with July 2025.',
+        artifacts: [{
+          kind: 'research_run', trustState: 'review_required',
+          payload: {
+            kind: 'investigation',
+            investigation: {
+              headline: { text: 'Revenue fell 150.00 (15.0%) in August 2025 compared with July 2025.', verdict: 'change' },
+              drivers: [{ path: [{ dimension: { label: 'Category' }, member: { label: 'beverage' } }], prior: { value: '300' }, current: { value: '150' }, share: '1', verdict: 'supported', queries: [{ rows: [] }] }],
+              ruledOut: [{ dimension: { label: 'Location' } }],
+              notInvestigated: [{ dimension: { label: 'Brand' }, reason: 'budget' }],
+              caveats: [{ code: 'partial_period', text: 'The data runs only through 2025-08-20.' }],
+              confidence: { level: 'medium', reasons: ['the current period is not complete'] },
+            },
+          },
+        }],
+        nextActions: [],
+      },
+    });
+    const out = await answerQuestion(ctxStub(), { question: 'Why did revenue drop in August 2025?', requestedMode: 'research' });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect((out as { investigation?: unknown }).investigation).toEqual({
+      headline: 'Revenue fell 150.00 (15.0%) in August 2025 compared with July 2025.',
+      verdict: 'change',
+      drivers: [{ path: 'Category: beverage', prior: '300', current: '150', share: '1', verdict: 'supported' }],
+      ruledOut: ['Location'],
+      notInvestigated: [{ dimension: 'Brand', reason: 'budget' }],
+      caveats: ['The data runs only through 2025-08-20.'],
+      confidence: { level: 'medium', reasons: ['the current period is not complete'] },
+    });
+  });
+
   it('maps a governed AgentRun into a compact result with sql/rows/trust/dqlArtifact', async () => {
     mockFetchOnce(201, {
       run: {

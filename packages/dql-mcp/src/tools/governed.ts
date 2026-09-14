@@ -64,9 +64,46 @@ interface AgentRunLike {
 }
 
 /** Reshape a runtime AgentRun into a compact, agent-friendly governed result. */
+type InvestigationLike = {
+  headline?: { text?: string; verdict?: string };
+  drivers?: Array<{ path?: Array<{ dimension?: { label?: string }; member?: { label?: string } }>; prior?: { value?: string }; current?: { value?: string }; share?: string; verdict?: string }>;
+  ruledOut?: Array<{ dimension?: { label?: string } }>;
+  notInvestigated?: Array<{ dimension?: { label?: string }; reason?: string }>;
+  caveats?: Array<{ text?: string }>;
+  confidence?: { level?: string; reasons?: string[] };
+};
+
+/**
+ * A Research investigation, compact: the headline, the drivers with their
+ * share of the change, what was ruled out and not broken down, the caveats and
+ * the confidence. Figures only; the rows stay in the run.
+ */
+function investigationSummary(run: AgentRunLike) {
+  const research = (run.artifacts ?? []).find((artifact) => artifact?.kind === 'research_run');
+  const payload = research?.payload as { kind?: string; investigation?: InvestigationLike } | undefined;
+  const investigation = payload?.kind === 'investigation' ? payload.investigation : undefined;
+  if (!investigation) return undefined;
+  return {
+    headline: investigation.headline?.text,
+    verdict: investigation.headline?.verdict,
+    drivers: (investigation.drivers ?? []).slice(0, 10).map((driver) => ({
+      path: (driver.path ?? []).map((step) => `${step.dimension?.label ?? 'dimension'}: ${step.member?.label ?? ''}`).join(' › '),
+      prior: driver.prior?.value,
+      current: driver.current?.value,
+      share: driver.share,
+      verdict: driver.verdict,
+    })),
+    ruledOut: (investigation.ruledOut ?? []).map((entry) => entry.dimension?.label).filter(Boolean),
+    notInvestigated: (investigation.notInvestigated ?? []).map((entry) => ({ dimension: entry.dimension?.label, reason: entry.reason })),
+    caveats: (investigation.caveats ?? []).map((caveat) => caveat.text).filter(Boolean),
+    confidence: investigation.confidence,
+  };
+}
+
 function mapRun(run: AgentRunLike) {
   const primary = (run.artifacts ?? [])[0];
   const p = (primary?.kind === 'answer' ? primary.payload : undefined) as AgentAnswerPayload | undefined;
+  const investigation = investigationSummary(run);
   return {
     ok: true as const,
     question: run.question,
@@ -96,6 +133,7 @@ function mapRun(run: AgentRunLike) {
     // The context ledger (CTX-010): envelope, what was admitted, rendered,
     // selected, enforced and used — ids and counts, never rows.
     ...(run.diagnosticReceiptV9?.context ? { context: run.diagnosticReceiptV9.context } : {}),
+    ...(investigation ? { investigation } : {}),
     trustNote:
       'Report trustState verbatim and never upgrade it. A review-required answer is generated/semantic-layer backed and must be reviewed before it is trusted as certified.',
   };
