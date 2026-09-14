@@ -27,6 +27,8 @@ interface Sliced { value: unknown; current: Row[]; prior: Row[] }
 export async function measureContribution(run: InvestigationRun, frame: InvestigationFrameV1, dimension: InvestigationDimensionRef, input: {
   totals: { current: ExactDecimal; prior: ExactDecimal };
   allowAiSql: boolean;
+  /** The program the queries belong to (a drill files them under the drill). */
+  programId?: string;
 }): Promise<ContributionOutcome> {
   const { windows, metric, grain } = frame;
   const { current, prior } = windows;
@@ -52,7 +54,7 @@ export async function measureContribution(run: InvestigationRun, frame: Investig
 
   /** One query; `period` places each row in a period, or drops it. */
   const read = async (intent: Parameters<typeof runInvestigationQuery>[1]['intent'], options: { time: boolean }, period: (row: Row, picked: ResultColumns) => 'current' | 'prior' | undefined): Promise<ContributionOutcome | undefined> => {
-    const result = await runInvestigationQuery(run, { purpose: 'contribution', programId: `contribution:${dimension.ref}`, allowAiSql: input.allowAiSql, label, intent });
+    const result = await runInvestigationQuery(run, { purpose: input.programId?.startsWith('drill:') ? 'drill' : 'contribution', programId: input.programId ?? `contribution:${dimension.ref}`, allowAiSql: input.allowAiSql, label, intent });
     if (result.status === 'stopped') return { status: 'stopped', dimension, reason: result.reason, queryIds };
     queryIds.push(result.id);
     if (result.status === 'no_rows') return undefined;

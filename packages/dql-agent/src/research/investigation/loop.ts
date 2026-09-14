@@ -8,6 +8,7 @@ import type { AnalyticalIntentV1 } from '../../ask-pipeline/intent.js';
 import type { AskStoryStepV1 } from '../../ask-pipeline/outcomes.js';
 import { readingLane } from '../../ask-pipeline/resolve-intent.js';
 import { investigationStopReason, recordReadingCalls, type InvestigationRun } from './context.js';
+import { investigateDrivers } from './driver-stage.js';
 import { frameNeedsFreshness, investigationWindowsFor, planInvestigationFrame } from './frame.js';
 import { checkCoverage, measureHeadline, observeFreshness, observeLatestPeriodValue } from './programs.js';
 import { buildInvestigationReport } from './report.js';
@@ -155,9 +156,12 @@ export async function runInvestigation(input: {
     else step('check', `Data covers ${Math.round(coverage.current * 100)}% of the days in ${frame.windows.current.label} and ${Math.round((coverage.prior ?? 0) * 100)}% in ${frame.windows.prior.label}`, 'done', { ms: coverageRecord.ms, programId: 'coverage' });
   }
 
+  // 5. Where the change came from.
+  const drivers = await investigateDrivers(run, frame, headline, { record, step });
+
   await gather('after_drivers');
   const report = buildInvestigationReport({
-    question: input.question, frame, headline, ...(coverage ? { coverage } : {}), caveats, queries: run.queries, context,
+    question: input.question, frame, headline, ...(coverage ? { coverage } : {}), ...(drivers ? { drivers } : {}), caveats, queries: run.queries, context,
     ...(receipt.budget.stoppedBy ? { stoppedBy: receipt.budget.stoppedBy } : {}),
   });
   record('report', 'report', 'Wrote the report');

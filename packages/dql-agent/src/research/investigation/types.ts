@@ -129,6 +129,8 @@ export interface InvestigationReportV1 {
   };
   drivers: InvestigationDriverV1[];
   mixRate?: { mix: InvestigationNumber; rate: InvestigationNumber; queryIds: string[] };
+  /** The same change from the period before, a year earlier (`pct` now, `yearAgoPct` then). */
+  seasonality?: { seasonal: boolean; pct?: string; yearAgoPct?: string };
   ruledOut: Array<{ dimension: InvestigationDimensionRef; maxExcess: string; text: string; queryIds: string[] }>;
   inconclusive: Array<{ dimension: InvestigationDimensionRef; reason: string; queryIds: string[] }>;
   notInvestigated: Array<{ dimension?: InvestigationDimensionRef; reason: 'budget' | 'deadline' | 'cancelled' | 'truncated_members' | 'not_expressible' | 'failed' | 'not_started'; detail?: string }>;
@@ -195,6 +197,10 @@ export interface InvestigationRuntime {
   signal?: AbortSignal;
   onStep(step: AskStoryStepV1): void;
   contextSources?: InvestigationContextSource[];
+  /** Dimension refs the semantic layer says the metric can be grouped by, when the host has a semantic layer. */
+  compatibleDimensionRefs?(metricRef: string): string[] | undefined;
+  /** One small AI call choosing dimensions from a ranked list; the reply is validated against the list, never trusted. */
+  selectDimensions?(prompt: string): Promise<string>;
 }
 
 export interface InvestigationLimits {
