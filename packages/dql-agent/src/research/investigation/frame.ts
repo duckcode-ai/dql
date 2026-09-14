@@ -107,7 +107,9 @@ function metricOf(vocabulary: VocabularyIndex, measure: IntentMeasure): Investig
   const ratio = ratioOfEntry(entry);
   if (ratio) return { ref, label, additivity: 'ratio', ratio };
   const aggregation = measure.aggregation ?? (entry?.aggregation as IntentMeasure['aggregation'] | undefined);
-  const nonAdditive = NON_ADDITIVE.has(aggregation ?? '') || entry?.metricType === 'ratio';
+  // Only a simple aggregate adds up across members: a derived, cumulative,
+  // conversion or ratio metric (a growth rate, a running total) does not.
+  const nonAdditive = NON_ADDITIVE.has(aggregation ?? '') || Boolean(entry?.metricType && entry.metricType !== 'simple');
   return { ref, label, additivity: nonAdditive ? 'non_additive' : 'additive', ...(measure.aggregation ? { aggregation: measure.aggregation } : {}) };
 }
 

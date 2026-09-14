@@ -36,6 +36,7 @@ import { toExecutorResult, type AskPipelineHost, type AskRequestScope } from '..
 export const RESEARCH_READING_GUIDANCE = [
   'THIS QUESTION IS BEING INVESTIGATED BY RESEARCH. Research compares the periods and looks for what drove the change itself, so a why, what-drove or what-changed question is never a reason to leave the measure out.',
   'Read what can be measured: the measure the question names (a metric, or a numeric column with its aggregation when no metric declares it), the period it names as `time.window`, and the restrictions it states.',
+  'Name the LEVEL the question asks about (revenue, orders, points scored), never a metric that is itself a change, a growth rate or a running total (revenue_growth_mom, cumulative_revenue): Research compares the periods itself, so a growth metric would be compared as if it were a level.',
   'Put the causal words ("why", "what drove", "what changed") in `unresolved` with material=false and no options.',
 ].join(' ');
 

@@ -237,6 +237,25 @@ describe('framing an investigation from a reading', () => {
     expect(other.plan.baseFilters.map((filter) => filter.ref)).toEqual([otherTable]);
   });
 
+  it('a metric that is itself a growth or running total does not add up across members', () => {
+    const derived = buildVocabularyIndex({
+      metrics: [
+        { name: 'revenue', model: 'orders', label: 'Revenue', aggregation: 'sum', type: 'simple' },
+        { name: 'revenue_growth_mom', model: 'orders', label: 'Revenue Growth % M/M', type: 'derived' },
+        { name: 'cumulative_revenue', model: 'orders', label: 'Cumulative revenue', type: 'cumulative' },
+      ],
+      dimensions: [{ name: 'ordered_at', model: 'orders', dataType: 'timestamp', isTime: true, timeGrains: ['day', 'month'] }],
+    });
+    const additivityOf = (ref: string) => {
+      const result = planInvestigationFrame({ vocabulary: derived, lane: 'governed', reading: { ...reading(), measures: [{ ref }] } });
+      if (result.status !== 'planned') throw new Error(`expected a plan, got ${result.status}`);
+      return result.plan.metric.additivity;
+    };
+    expect(additivityOf('metric:orders.revenue')).toBe('additive');
+    expect(additivityOf('metric:orders.revenue_growth_mom')).toBe('non_additive');
+    expect(additivityOf('metric:orders.cumulative_revenue')).toBe('non_additive');
+  });
+
   it('asks for a measure when there is none, and declines what is not a change over time', () => {
     expect(planInvestigationFrame({ reading: reading({ measures: [] }), vocabulary, lane: 'governed' }).status).toBe('clarify');
     // A project with no metrics offers the numeric columns the question names, never a text or date column.
