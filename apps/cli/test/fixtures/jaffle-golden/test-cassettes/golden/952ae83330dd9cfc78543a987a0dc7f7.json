@@ -1,0 +1,23 @@
+{
+  "key": "952ae83330dd9cfc78543a987a0dc7f7",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Compare product revenue in August 2025 against the prior month (July 2025) and the change between them, to support investigating what drove the change.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:order_item.ordered_at\",\"op\":\"eq\",\"values\":[\"2025-08\"],\"source\":\"question\"}],\"alias\":\"revenue_aug_2025\"},{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:order_item.ordered_at\",\"op\":\"eq\",\"values\":[\"2025-07\"],\"source\":\"question\"}],\"alias\":\"revenue_jul_2025\"},{\"change\":{\"base\":\"revenue_jul_2025\",\"comparison\":\"revenue_aug_2025\",\"as\":\"absolute\"},\"alias\":\"revenue_change\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"comparison\",\"unresolved\":[{\"clause\":\"why did revenue change (causal explanation)\",\"options\":[],\"material\":false}],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"dimension:order_item.ordered_at\":\"q:August 2025\"},\"population\":\"matching\"}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-14T14:23:18.928Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "952ae83330dd9cfc78543a987a0dc7f77dff74d0ed72b793c2b7830dadd22905",
+    "postCanonicalHash": "952ae83330dd9cfc78543a987a0dc7f77dff74d0ed72b793c2b7830dadd22905",
+    "appliedRuleClasses": []
+  }
+}

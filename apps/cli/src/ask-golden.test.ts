@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Server } from 'node:http';
+import { verifyAskNarration } from '@duckcodeailabs/dql-agent';
 import { startLocalServer, type AskAgentRuntimeMode } from './local-runtime.js';
 import { createSeededSqliteExecutor, type GoldenSeed, type SeededSqliteExecutor } from './testkit/seeded-sqlite-executor.js';
 
@@ -406,31 +407,53 @@ describe('golden harness', () => {
     }, 240_000);
   });
 
-  // Research on the pipeline: the root plans hypotheses, every analytical
-  // branch is an ordinary bounded Ask through the interpreter and the host's
-  // tiers, and the dossier reads their sql/result artifacts. At least one
-  // branch must execute with rows; the root may end completed or reviewable.
-  describe.skipIf(!LIVE || FIXTURE !== 'jaffle-golden' || (ONLY.size > 0 && !ONLY.has('research-beverage-drivers')))('research', () => {
-    it('research-beverage-drivers executes hypothesis branches through the pipeline', async () => {
+  // Research on the pipeline: the question is read once, the change is measured
+  // and broken down by governed dimensions, and every figure the report states
+  // is checked here against SQL on the same seed the server queried.
+  const RESEARCH_CASE = 'investigation-revenue-drop';
+  const RESEARCH_QUESTION = 'why did revenue change in August 2025?';
+  describe.skipIf(FIXTURE !== 'jaffle-golden' || (ONLY.size > 0 && !ONLY.has(RESEARCH_CASE)))('research', () => {
+    it(`${RESEARCH_CASE} measures the change and breaks it down on governed queries`, async () => {
       const response = await fetch(`${harness!.base}/api/agent-runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: 'why is beverage revenue so high? investigate the drivers by product and by customer type', requestedMode: 'research' }),
+        body: JSON.stringify({ question: RESEARCH_QUESTION, requestedMode: 'research' }),
       });
       const payload = await response.json() as { run: any; error?: unknown };
       expect(response.status, JSON.stringify(payload).slice(0, 400)).toBe(201);
       const run = payload.run;
-      const receipts: Array<{ state: string; verdict: string; stopReason: string; evidenceKind?: string; failure?: string }> = (run.artifacts ?? [])
-        .map((artifact: any) => artifact?.payload?.researchBranchReceipts)
-        .find((value: unknown) => Array.isArray(value)) ?? [];
-      const detail = JSON.stringify({ status: run.status, trust: run.trustState, stop: run.stopReason, summary: run.summary, receipts }, null, 0).slice(0, 1500);
-      record('research', { id: 'research-beverage-drivers', question: 'why is beverage revenue so high? investigate the drivers by product and by customer type' } as GoldenCase, {
-        pass: ['completed', 'needs_review'].includes(run.status) && receipts.some((receipt) => receipt.state === 'completed' && receipt.evidenceKind === 'analytical_result'),
-        reasons: [], observed: { route: run.route, status: run.status, trust: run.trustState, stop: run.stopReason, text: run.answer ?? run.summary, receipts } as any,
+      const report = (run.artifacts ?? []).find((artifact: any) => artifact?.kind === 'research_run')?.payload?.investigation;
+      const ledger = run.diagnosticReceiptV9?.investigation;
+      const detail = JSON.stringify({ status: run.status, trust: run.trustState, stop: run.stopReason, answer: run.answer, programs: ledger?.programs?.map((program: any) => [program.kind, program.dimension, program.outcome, program.verdict]), budget: ledger?.budget }, null, 0).slice(0, 2_000);
+
+      // The oracle: revenue in each period, from the seed the server queried.
+      const period = (from: string, to: string) => Number(executor!.query(
+        `SELECT SUM(CASE WHEN ordered_at >= '${from}' AND ordered_at < '${to}' THEN product_price ELSE 0 END) AS revenue FROM dev.order_items`,
+      )[0]!.revenue);
+      const august = period('2025-08-01', '2025-09-01');
+      const july = period('2025-07-01', '2025-08-01');
+      const breakdowns = (ledger?.programs ?? []).filter((program: any) => program.kind === 'contribution');
+      const governed = (report?.queries ?? []).filter((query: any) => query.outcome === 'answered').every((query: any) => ['certified', 'semantic', 'relational'].includes(query.tier));
+      const narration = report ? verifyAskNarration({ text: report.text, factSet: report.facts }) : { ok: false, failures: ['no report'], unverified: [] };
+      const reasons: string[] = [];
+      if (!report) reasons.push('the run carries no investigation report');
+      if (report && Math.abs(Number(report.headline?.current?.value) - august) > 0.011) reasons.push(`August ${report.headline?.current?.value} is not ${august}`);
+      if (report && Math.abs(Number(report.headline?.prior?.value) - july) > 0.011) reasons.push(`July ${report.headline?.prior?.value} is not ${july}`);
+      if (breakdowns.length === 0) reasons.push('the change was not broken down by any dimension');
+      if (!governed) reasons.push('a breakdown answered outside the governed tiers');
+      if (!narration.ok) reasons.push(`the report text is not verified: ${narration.failures.join(', ')}`);
+      if (run.trustState !== 'review_required') reasons.push(`trust ${run.trustState} is not review_required`);
+
+      record('research', { id: RESEARCH_CASE, question: RESEARCH_QUESTION } as GoldenCase, {
+        pass: reasons.length === 0,
+        reasons,
+        observed: {
+          route: run.route, status: run.status, trust: run.trustState, text: run.answer ?? run.summary,
+          headline: report?.headline?.text, drivers: (report?.drivers ?? []).map((driver: any) => `${driver.path.map((step: any) => `${step.dimension.label}: ${step.member.label}`).join(' › ')} ${driver.share} ${driver.verdict}`),
+          budget: ledger?.budget,
+        } as any,
       } as Verdict);
-      expect(['completed', 'needs_review'], detail).toContain(run.status);
-      expect(receipts.length, detail).toBeGreaterThan(0);
-      expect(receipts.some((receipt) => receipt.state === 'completed' && receipt.evidenceKind === 'analytical_result'), detail).toBe(true);
+      expect(reasons, detail).toEqual([]);
     }, 300_000);
   });
 
