@@ -60,12 +60,14 @@ export function periodValueIntent(frame: InvestigationFrameCore & { periodAxis: 
   to?: number;
   grouped: boolean;
   shape: IntentShape;
+  /** Groupings beside the period field (a dimension a contribution splits by). */
+  groupBy?: IntentGroupBy[];
 }): AnalyticalIntentV1 {
   const { ref } = frame.periodAxis;
   return {
     version: 1, kind: 'analytics', reading: input.reading,
     measures: metricMeasures(frame),
-    groupBy: input.grouped ? [{ ref, role: 'categorical' }] : [],
+    groupBy: [...(input.groupBy ?? []), ...(input.grouped ? [{ ref, role: 'categorical' as const }] : [])],
     display: [],
     filters: [
       ...frame.baseFilters,
