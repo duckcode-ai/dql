@@ -71,6 +71,8 @@ export interface InvestigationQueryV1 {
   trust?: string;
   sql?: string;
   dqlArtifact?: unknown;
+  /** The relations the answering statement read. */
+  relations?: string[];
   result?: { columns: string[]; rows: Array<Record<string, unknown>>; rowCount: number; columnsMeta?: ResultColumnMeta[]; truncated?: boolean };
   /** Why a query did not answer, in the pipeline's words. */
   message?: string;

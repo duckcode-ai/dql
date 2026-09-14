@@ -81,6 +81,7 @@ export async function runInvestigationQuery(run: InvestigationRun, input: {
     ...(answered ? {
       tier: answered.candidate.tier, trust: answered.candidate.trust, sql: answered.candidate.sql,
       ...(answered.candidate.artifact !== undefined ? { dqlArtifact: answered.candidate.artifact } : {}),
+      ...(answered.candidate.relations?.length ? { relations: answered.candidate.relations } : {}),
       result: {
         columns: answered.result.columns, rows: answered.result.rows.slice(0, 100), rowCount: answered.result.rowCount,
         ...(answered.result.columnsMeta ? { columnsMeta: answered.result.columnsMeta } : {}),
