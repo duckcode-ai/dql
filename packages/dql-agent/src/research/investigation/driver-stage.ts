@@ -50,6 +50,9 @@ const VERDICT_WORDS: { [verdict in DimensionVerdictV1['verdict']]: string } = {
   inconclusive: 'no clear concentration',
 };
 
+/** Breakdowns running at once. */
+export const BREAKDOWN_CONCURRENCY = 3;
+
 /** The pipeline's words when a join would multiply the rows a metric totals. */
 const FAN_OUT = /multiplies fact rows|would be inflated|fan-?out/i;
 
@@ -129,26 +132,52 @@ export async function investigateDrivers(run: InvestigationRun, frame: Investiga
   // one of its dimensions: after the first refusal, the rest are not queried.
   const fannedOut = new Map<string, string>();
   const modelOf = (ref: string) => vocabulary.get(ref)?.model;
+  // Up to three breakdowns run at once; a place is held while a breakdown runs
+  // and given back when the metric turns out not to be groupable by it.
+  const results = new Map<string, AnalysedDimensionV1>();
+  const running = new Set<Promise<void>>();
+  let next = 0;
   let places = 0;
-  for (const candidate of order) {
-    if (places >= chosen.length) break;
+  let holding = 0;
+  const start = (candidate: CandidateDimensionV1) => {
     const dimension = { ref: candidate.ref, label: candidate.label };
+    const model = modelOf(candidate.ref);
+    holding += 1;
+    const task = (async () => {
+      const analysed = await analyse(dimension, frame, totals);
+      const refusal = analysed ? undefined : findings.notInvestigated.find((entry) => entry.dimension.ref === candidate.ref && entry.reason === 'not_expressible');
+      if (model && refusal?.detail && FAN_OUT.test(refusal.detail)) fannedOut.set(model, refusal.detail);
+      const vacated = !analysed && findings.notInvestigated.some((entry) => entry.dimension.ref === candidate.ref && (entry.reason === 'not_expressible' || entry.reason === 'truncated_members'));
+      holding -= 1;
+      if (!vacated) places += 1;
+      if (analysed) results.set(candidate.ref, analysed);
+    })();
+    const tracked: Promise<void> = task.finally(() => { running.delete(tracked); });
+    running.add(tracked);
+  };
+  while (next < order.length && places < chosen.length) {
+    if (places + holding >= chosen.length || running.size >= BREAKDOWN_CONCURRENCY) {
+      await Promise.race(running);
+      continue;
+    }
+    const candidate = order[next++]!;
     attempted.add(candidate.ref);
     const model = modelOf(candidate.ref);
     const known = model ? fannedOut.get(model) : undefined;
     if (known) {
-      findings.notInvestigated.push({ dimension, reason: 'not_expressible', detail: known, queryIds: [] });
+      findings.notInvestigated.push({ dimension: { ref: candidate.ref, label: candidate.label }, reason: 'not_expressible', detail: known, queryIds: [] });
       continue;
     }
-    const analysed = await analyse(dimension, frame, totals);
-    const refusal = analysed ? undefined : findings.notInvestigated.find((entry) => entry.dimension.ref === candidate.ref && entry.reason === 'not_expressible');
-    if (model && refusal?.detail && FAN_OUT.test(refusal.detail)) fannedOut.set(model, refusal.detail);
-    const vacated = !analysed && findings.notInvestigated.some((entry) => entry.dimension.ref === candidate.ref && (entry.reason === 'not_expressible' || entry.reason === 'truncated_members'));
-    if (!vacated) places += 1;
+    start(candidate);
+  }
+  await Promise.all(running);
+  // In rank order, whatever order they finished in.
+  for (const candidate of order) {
+    const analysed = results.get(candidate.ref);
     if (!analysed) continue;
     findings.analysed.push(analysed);
     if (frame.metric.ratio && analysed.outcome.mixRate && !findings.mixRate) {
-      findings.mixRate = { dimension, split: analysed.outcome.mixRate, queryIds: analysed.outcome.queryIds };
+      findings.mixRate = { dimension: analysed.dimension, split: analysed.outcome.mixRate, queryIds: analysed.outcome.queryIds };
     }
   }
   for (const candidate of everyone) {

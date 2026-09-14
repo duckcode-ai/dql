@@ -125,7 +125,42 @@ describe('where the change came from', () => {
     expect(report.text).toContain('Category: beverage accounted for 100.0% of the change, from 300.00 to 150.00, though it was 30.0% of Revenue in July 2025.');
     expect(report.confidence).toEqual({ level: 'high', reasons: [] });
     expect(report.notInvestigated).toEqual([]);
+    expect(report.breakdowns?.map((entry) => [entry.dimension.label, entry.within?.member ?? null, entry.verdict, entry.reconciles, entry.members])).toEqual([
+      ['Category', null, 'explains', true, 2],
+      ['Location', null, 'ruled_out', true, 2],
+      ['Location', 'beverage', 'ruled_out', true, 2],
+    ]);
     expectVerified(report);
+  });
+
+  it('runs up to three breakdowns at once, keeps them in rank order, and never goes over the statement budget', async () => {
+    let active = 0;
+    let most = 0;
+    const ran: string[] = [];
+    const runtime: InvestigationRuntime = {
+      read: async () => { throw new Error('not read'); },
+      runIntent: async (intent) => {
+        active += 1;
+        most = Math.max(most, active);
+        const breakdown = intent.groupBy.find((group) => group.role !== 'time');
+        if (breakdown) ran.push(breakdown.ref);
+        // The later-ranked dimension answers first.
+        await new Promise((resolve) => setTimeout(resolve, breakdown?.ref === CATEGORY ? 15 : 2));
+        active -= 1;
+        return answer(intent);
+      },
+      vocabulary: () => wideVocabulary,
+      remainingMs: () => 180_000,
+      onStep: () => undefined,
+    };
+    const outcome = await runInvestigation({ question: 'Why did revenue drop in August 2025?', source: { kind: 'run', runId: 'run-1', intent: august }, runtime, now: () => new Date('2026-09-13T12:00:00Z') });
+    if (outcome.kind !== 'report') throw new Error(outcome.kind);
+    expect(most).toBe(3);
+    expect(outcome.report.breakdowns?.filter((entry) => !entry.within).map((entry) => entry.dimension.label)).toEqual(['Category', 'Location']);
+    expect(outcome.report.drivers[0]!.path[0]!.member.label).toBe('beverage');
+
+    const tight = await investigate({ vocabulary: wideVocabulary, limits: { maxStatements: 4 } });
+    expect(tight.receipt.budget.statementsUsed).toBeLessThanOrEqual(4);
   });
 
   it('with more dimensions than one investigation analyses, an AI chooses from the ranked list and the rest are not started', async () => {

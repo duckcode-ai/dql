@@ -15,6 +15,8 @@ export interface InvestigationRun {
   queries: InvestigationQueryV1[];
   receipt: InvestigationReceiptV1;
   caveats: InvestigationCaveatV1[];
+  /** Queries started and not yet settled: each holds a place in the statement budget. */
+  inFlight?: number;
 }
 
 export type InvestigationQueryResult =
@@ -25,7 +27,7 @@ export type InvestigationQueryResult =
 
 export function investigationStopReason(run: InvestigationRun): 'cancelled' | 'deadline' | 'budget' | undefined {
   if (run.runtime.signal?.aborted) return 'cancelled';
-  if (run.receipt.budget.statementsUsed >= run.limits.maxStatements) return 'budget';
+  if (run.receipt.budget.statementsUsed + (run.inFlight ?? 0) >= run.limits.maxStatements) return 'budget';
   if (run.runtime.remainingMs() < run.limits.minRemainingMs) return 'deadline';
   return undefined;
 }
@@ -53,6 +55,7 @@ export async function runInvestigationQuery(run: InvestigationRun, input: {
   }
   const id = `q${run.queries.length + 1}`;
   let outcome: PipelineOutcome;
+  run.inFlight = (run.inFlight ?? 0) + 1;
   try {
     outcome = await run.runtime.runIntent(input.intent, { allowAiSql: input.allowAiSql });
   } catch (error) {
@@ -63,6 +66,8 @@ export async function runInvestigationQuery(run: InvestigationRun, input: {
     const message = error instanceof Error ? error.message : String(error);
     run.queries.push({ id, purpose: input.purpose, label: input.label, programId: input.programId, intent: input.intent, outcome: 'failed', message, receiptIndex: -1 });
     return { status: 'unanswered', id, message };
+  } finally {
+    run.inFlight = Math.max(0, (run.inFlight ?? 1) - 1);
   }
   run.receipt.queries.push({ id, programId: input.programId, receipt: withoutReplies(outcome.receipt) });
   run.receipt.budget.statementsUsed += outcome.receipt.warehouse?.attempts ?? (outcome.kind === 'answered' ? 1 : 0);

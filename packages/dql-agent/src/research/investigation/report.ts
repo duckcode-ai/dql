@@ -339,6 +339,18 @@ export function buildInvestigationReport(input: {
     reasons.push(...limits.reasons);
   }
 
+  const breakdowns: NonNullable<InvestigationReportV1['breakdowns']> = drivers && measured
+    ? [...drivers.analysed, ...drivers.drilled].map((item) => ({
+      dimension: item.dimension,
+      ...(item.parent ? { within: { dimension: item.parent.dimension, member: item.parent.row.label } } : {}),
+      verdict: item.verdict.verdict,
+      ...(item.outcome.table.additive ? { reconciles: item.outcome.table.reconciles } : {}),
+      ...(item.outcome.table.residual ? { residual: formatDecimal(item.outcome.table.residual) } : {}),
+      members: item.outcome.table.rows.length,
+      queryIds: item.outcome.queryIds,
+    }))
+    : [];
+
   const notes = [...frame.notes, ...caveats.map((caveat) => caveat.text)];
   const headlineText = text;
   if (driverText.length) text = `${text}\n\n${driverText.join(' ')}`;
@@ -368,6 +380,7 @@ export function buildInvestigationReport(input: {
     },
     drivers: driverRows,
     ...(mixRate ? { mixRate } : {}),
+    ...(breakdowns.length ? { breakdowns } : {}),
     ...(seasonality ? { seasonality } : {}),
     ruledOut,
     inconclusive,

@@ -129,6 +129,18 @@ export interface InvestigationReportV1 {
   };
   drivers: InvestigationDriverV1[];
   mixRate?: { mix: InvestigationNumber; rate: InvestigationNumber; queryIds: string[] };
+  /** Every breakdown that was measured: its verdict and whether its members add up to the change. */
+  breakdowns?: Array<{
+    dimension: InvestigationDimensionRef;
+    /** A drilled breakdown: the member it is inside. */
+    within?: { dimension: InvestigationDimensionRef; member: string };
+    verdict: 'explains' | 'ruled_out' | 'inconclusive';
+    /** Absent for a metric that does not add up across members. */
+    reconciles?: boolean;
+    residual?: string;
+    members: number;
+    queryIds: string[];
+  }>;
   /** The same change from the period before, a year earlier (`pct` now, `yearAgoPct` then). */
   seasonality?: { seasonal: boolean; pct?: string; yearAgoPct?: string };
   ruledOut: Array<{ dimension: InvestigationDimensionRef; maxExcess: string; text: string; queryIds: string[] }>;
