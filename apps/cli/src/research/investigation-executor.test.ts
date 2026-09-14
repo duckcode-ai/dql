@@ -62,8 +62,8 @@ const august = {
   time: { ref: TIME, grain: 'month', window: { start: '2025-08-01', end: '2025-09-01' } },
 } as AnalyticalIntentV1;
 
-function fakeHost(options: { read?: PipelineOutcome; blocked?: AgentRouteExecutorResult } = {}) {
-  const calls = { reads: 0, intents: [] as AnalyticalIntentV1[], readOptions: [] as unknown[] };
+function fakeHost(options: { read?: PipelineOutcome; blocked?: AgentRouteExecutorResult; dispatch?: (purpose: string, messages: Array<{ role: string; content: string }>) => Promise<string> } = {}) {
+  const calls = { reads: 0, intents: [] as AnalyticalIntentV1[], readOptions: [] as unknown[], dispatches: [] as Array<{ purpose: string; messages: Array<{ role: string; content: string }> }> };
   const scope = {
     route: 'research', contextMs: 12, hasConnection: true,
     contextSteps: [{ version: 1, phase: 'context', title: 'Searched the project', state: 'done', at: 1 }] as AskStoryStepV1[],
@@ -76,7 +76,10 @@ function fakeHost(options: { read?: PipelineOutcome; blocked?: AgentRouteExecuto
       return options.read;
     },
     runIntent: async (intent: AnalyticalIntentV1) => { calls.intents.push(intent); return answer(intent); },
-    dispatch: async () => '',
+    dispatch: async (purpose: string, messages: Array<{ role: string; content: string }>) => {
+      calls.dispatches.push({ purpose, messages });
+      return options.dispatch ? options.dispatch(purpose, messages) : '';
+    },
   } as unknown as AskRequestScope;
   const host: Pick<AskPipelineHost, 'openScope'> = { openScope: async () => (options.blocked ? { blocked: options.blocked } : { scope }) };
   return { host, calls };
@@ -179,6 +182,31 @@ describe('Research runs an investigation on the Ask pipeline', () => {
     const blocked: AgentRouteExecutorResult = { status: 'blocked', answer: 'No AI model is configured.' };
     const result = await createInvestigationExecutor({ host: fakeHost({ blocked }).host, loadRun: async () => undefined })(run({}).context);
     expect(result).toBe(blocked);
+  });
+
+  it('the AI words the summary only for a reader who opted in, and only when every number in its wording is a computed figure', async () => {
+    const source = { workspaceContext: { researchSource: { runId: 'run-source' } } };
+    const loadRun = async (id: string) => (id === 'run-source' ? storedRun() : undefined);
+
+    const quiet = fakeHost();
+    const plain = await createInvestigationExecutor({ host: quiet.host, loadRun })(run(source).context);
+    expect(quiet.calls.dispatches).toHaveLength(0);
+    expect(reportOf(plain).narration).toBeUndefined();
+
+    const faithful = fakeHost({ dispatch: async () => 'Revenue fell 930.00 (30.0%) in August 2025 compared with July 2025: 2170.00 against 3100.00.' });
+    const worded = await createInvestigationExecutor({ host: faithful.host, loadRun })(run({ ...source, researchResultRowsOptIn: true } as Partial<AgentRunRequest>).context);
+    expect(faithful.calls.dispatches.map((call) => call.purpose)).toEqual(['research_narrate']);
+    // The AI is given the computed facts, never the rows.
+    expect(faithful.calls.dispatches[0]!.messages[1]!.content).toContain('Facts computed by the host');
+    expect(reportOf(worded).narration).toEqual({ text: 'Revenue fell 930.00 (30.0%) in August 2025 compared with July 2025: 2170.00 against 3100.00.', verified: true });
+    expect(worded.answer?.startsWith('Revenue fell 930.00 (30.0%) in August 2025 compared with July 2025: 2170.00 against 3100.00.')).toBe(true);
+    expect(worded.askPipelineReceipt?.investigation?.budget.aiCalls).toBe(1);
+
+    const inventive = fakeHost({ dispatch: async () => 'Revenue fell 999.00 in August 2025 because of the weather.' });
+    const refused = await createInvestigationExecutor({ host: inventive.host, loadRun })(run({ ...source, researchResultRowsOptIn: true } as Partial<AgentRunRequest>).context);
+    expect(reportOf(refused).narration).toBeUndefined();
+    expect(refused.answer).toBe(reportOf(refused).text);
+    expect(refused.askPipelineReceipt?.story?.map((step) => step.title)).toContain('Kept the summary written from the figures');
   });
 
   it('an Ask that declined a why-question offers "Investigate the drivers"; any other gap does not', () => {

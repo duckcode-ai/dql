@@ -10,6 +10,7 @@ import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import type { AppAnalysisHandoff, AppResearchSeed, CreateInvestigationResult } from './app-research-types';
 import { formatVariableEntryValue } from './app-variables';
 import { StructuredAnswerText } from '../agent/AgentAnswerCard';
+import { DriverChart } from '../agent/DriverChart';
 
 /**
  * The App analysis (Research) surface: the investigation list, the report it
@@ -488,7 +489,7 @@ export function ResearchPanel({
                   {selectedReport.drivers.length ? (
                     <div>
                       <h3>{selectedReport.intent === 'anomaly_investigation' ? 'Exception view' : selectedReport.intent === 'entity_drilldown' ? 'Entity view' : 'Driver view'}</h3>
-                      <ResearchDriverChart drivers={selectedReport.drivers} />
+                      <DriverChart drivers={selectedReport.drivers} />
                     </div>
                   ) : null}
                 </section>
@@ -1003,41 +1004,6 @@ function normalizeResearchReportSections(value: LocalAppInvestigation['reportSec
       bullets: Array.isArray(section.bullets) ? section.bullets.filter(Boolean).slice(0, 8) : undefined,
       evidenceRefs: Array.isArray(section.evidenceRefs) ? section.evidenceRefs.filter(Boolean).slice(0, 8) : undefined,
     }));
-}
-
-function ResearchDriverChart({ drivers }: { drivers: Array<{ title: string; value: string; explanation: string }> }) {
-  if (!drivers.length) {
-    return <p className="dql-app-report-muted">No ranked drivers are available yet. Refresh the report after adding a clearer metric, time grain, or comparison group.</p>;
-  }
-  const rows = drivers.slice(0, 6).map((driver) => ({
-    ...driver,
-    numericValue: Math.abs(numberFromReportValue(driver.value)),
-  }));
-  const maxValue = Math.max(...rows.map((row) => row.numericValue), 0);
-  return (
-    <div className="dql-app-report-driver-chart" aria-label="Report driver chart">
-      {rows.map((driver, index) => {
-        const width = maxValue > 0 ? Math.max(8, Math.round((driver.numericValue / maxValue) * 100)) : 28;
-        return (
-          <div key={`${driver.title}-${index}`} className="dql-app-report-driver-bar">
-            <div>
-              <b>{driver.title}</b>
-              <span>{driver.value}</span>
-            </div>
-            <i style={{ '--driver-width': `${width}%` } as CSSProperties} />
-            <p>{driver.explanation}</p>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function numberFromReportValue(value: string): number {
-  const match = value.replace(/,/g, '').match(/-?\+?\d+(?:\.\d+)?/);
-  if (!match) return 0;
-  const number = Number(match[0].replace(/^\+/, ''));
-  return Number.isFinite(number) ? number : 0;
 }
 
 function ResearchEvidence({

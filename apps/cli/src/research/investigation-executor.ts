@@ -6,7 +6,10 @@
  * story, and a pipeline receipt per query.
  */
 import {
+  ASK_NARRATION_SYSTEM_PROMPT,
+  renderAskNarrationBrief,
   runInvestigation,
+  verifyAskNarration,
   type AgentRouteExecutor,
   type AgentRouteExecutorResult,
   type AgentRun,
@@ -40,6 +43,37 @@ export const RESEARCH_READING_GUIDANCE = [
 export const INVESTIGATION_FINALIZE_RESERVE_MS = 15_000;
 /** Without a run budget (tests, embeddings), the investigation's own soft deadline. */
 export const INVESTIGATION_SOFT_DEADLINE_MS = 150_000;
+/** The AI is asked to word the summary only with at least this much time left. */
+export const NARRATION_MIN_REMAINING_MS = 30_000;
+
+/**
+ * The AI's wording of the summary, asked only when the reader opted in for
+ * this run. It sees the computed facts, never rows, and its text is used only
+ * when every number in it is one of those facts; otherwise the summary written
+ * from the figures stands. There is no second try.
+ */
+async function narrateInvestigation(scope: Pick<AskRequestScope, 'dispatch'>, question: string, report: InvestigationReportV1, onStep: (step: AskStoryStepV1) => void): Promise<{ text: string; verified: true } | undefined> {
+  const started = Date.now();
+  let reply: string;
+  try {
+    reply = await scope.dispatch('research_narrate', [
+      { role: 'system', content: ASK_NARRATION_SYSTEM_PROMPT },
+      { role: 'user', content: renderAskNarrationBrief({ question, factSet: report.facts }) },
+    ]);
+  } catch (error) {
+    onStep({ version: 1, phase: 'report', title: 'Kept the summary written from the figures', state: 'missed', at: Date.now(), ms: Date.now() - started, detail: `The AI wording could not be requested: ${error instanceof Error ? error.message : String(error)}`.slice(0, 600) });
+    return undefined;
+  }
+  const text = reply.trim();
+  const verification = verifyAskNarration({ text, factSet: report.facts });
+  if (!verification.ok) {
+    const why = [...verification.failures, ...(verification.unverified.length ? [`numbers not in the figures: ${verification.unverified.join(', ')}`] : [])].join('; ');
+    onStep({ version: 1, phase: 'report', title: 'Kept the summary written from the figures', state: 'missed', at: Date.now(), ms: Date.now() - started, detail: `The AI wording was not used (${why}).` });
+    return undefined;
+  }
+  onStep({ version: 1, phase: 'report', title: 'The AI worded the summary; every number in it was checked', state: 'done', at: Date.now(), ms: Date.now() - started });
+  return { text, verified: true };
+}
 
 export interface InvestigationExecutorDeps {
   host: Pick<AskPipelineHost, 'openScope'>;
@@ -110,6 +144,13 @@ export function createInvestigationExecutor(deps: InvestigationExecutorDeps): Ag
       },
       ...(deps.now ? { now: deps.now } : {}),
     });
+
+    const optedIn = (request as { researchResultRowsOptIn?: boolean }).researchResultRowsOptIn === true;
+    if (outcome.kind === 'report' && optedIn && outcome.report.status === 'answered' && remainingMs() > NARRATION_MIN_REMAINING_MS) {
+      outcome.receipt.budget.aiCalls += 1;
+      const narration = await narrateInvestigation(scope, request.question, outcome.report, onStep);
+      if (narration) outcome.report.narration = narration;
+    }
 
     const frameIntent = source.kind === 'run' ? source.intent : reading?.kind === 'reading' ? reading.intent : undefined;
     const receipt = investigationRootReceipt({ scope, reading, outcome, steps, startedAt, ...(frameIntent ? { intent: frameIntent } : {}) });
@@ -259,6 +300,14 @@ function reportResult(input: {
 }): AgentRouteExecutorResult {
   const { runId, report, receipt, telemetry } = input;
   const { headlineQuery, table } = periodTable(report);
+  // The breakdown behind the strongest driver is the reading a follow-up, a block or a SQL cell builds on.
+  const driverQuery = report.drivers[0]
+    ? report.queries.find((query) => query.id === report.drivers[0]!.queryIds[0] && query.outcome === 'answered')
+    : undefined;
+  const basisQuery = driverQuery ?? headlineQuery;
+  const unreconciled = (report.breakdowns ?? []).filter((entry) => entry.reconciles === false);
+  const notes = [...report.frame.notes, ...report.caveats.map((caveat) => caveat.text)].join(' ');
+  const answer = report.narration ? (notes ? `${report.narration.text}\n\n${notes}` : report.narration.text) : report.text;
   const metric = report.frame.metric.label;
   const caveat = (code: string) => report.caveats.find((entry) => entry.code === code);
   const governedQueries = report.queries.filter((query) => query.outcome === 'answered' && (query.tier === 'certified' || query.tier === 'semantic'));
@@ -280,6 +329,12 @@ function reportResult(input: {
         : report.status === 'no_data' ? 'The periods compared have no data.' : 'The investigation stopped before the headline was measured.',
     },
     { id: 'investigation-coverage', label: 'Data coverage', passed: !coverageNote, severity: coverageNote ? 'warning' : 'info', message: coverageNote?.text ?? 'Both periods are covered by data.' },
+    ...(report.breakdowns?.length ? [{
+      id: 'investigation-reconciliation', label: 'Breakdowns add up', passed: unreconciled.length === 0, severity: unreconciled.length ? 'warning' as const : 'info' as const,
+      message: unreconciled.length
+        ? `${unreconciled.map((entry) => entry.dimension.label).join(', ')} ${unreconciled.length === 1 ? 'does' : 'do'} not add up to the change, so ${unreconciled.length === 1 ? 'its' : 'their'} shares are not reliable.`
+        : `Every breakdown adds up to the change (${report.breakdowns.length} measured).`,
+    }] : []),
     { id: 'investigation-confidence', label: 'Confidence', passed: level !== 'low', severity: level === 'low' ? 'warning' : 'info', message: `${capitalize(level)} confidence${reasons.length ? `: ${reasons.join('; ')}` : ''}.` },
   ];
   const nextActions: AgentRunNextAction[] = [
@@ -289,9 +344,9 @@ function reportResult(input: {
       ? [{ id: 'investigate-remaining-dimensions', label: 'Investigate the remaining dimensions', route: 'research' as const }]
       : []),
     ...(caveat('coverage_gap') ? [{ id: 'review-data-coverage', label: 'Review data coverage', route: 'generated_answer' as const }] : []),
-    ...(headlineQuery?.sql ? [
-      { id: 'create-block', label: 'Save the trend as a block', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const },
-      { id: 'insert-sql', label: 'Open the trend query as SQL', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const },
+    ...(basisQuery?.sql ? [
+      { id: 'create-block', label: driverQuery ? 'Save the driver breakdown as a block' : 'Save the trend as a block', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const },
+      { id: 'insert-sql', label: driverQuery ? 'Open the driver breakdown as SQL' : 'Open the trend query as SQL', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const },
     ] : []),
     ...(report.frame.lane === 'ai' ? [{ id: 'model-metric', label: 'Model this metric', route: 'modeling_draft' as const }] : []),
   ];
@@ -304,21 +359,21 @@ function reportResult(input: {
       kind: 'investigation',
       investigation: report,
       text: report.text,
-      answer: report.text,
+      answer,
       certification: 'review_required',
       reviewStatus: 'review_required',
       result: table,
-      // The trend the headline came from is the reading a follow-up builds on.
-      ...(headlineQuery ? {
-        askIntentV1: headlineQuery.intent,
-        ...(headlineQuery.sql ? { sql: headlineQuery.sql } : {}),
-        ...(headlineQuery.dqlArtifact !== undefined ? { dqlArtifact: headlineQuery.dqlArtifact } : {}),
+      // The strongest driver's breakdown, or the trend the headline came from, is the reading a follow-up builds on.
+      ...(basisQuery ? {
+        askIntentV1: basisQuery.intent,
+        ...(basisQuery.sql ? { sql: basisQuery.sql } : {}),
+        ...(basisQuery.dqlArtifact !== undefined ? { dqlArtifact: basisQuery.dqlArtifact } : {}),
       } : {}),
     },
   };
   return {
     summary: report.headline.text,
-    answer: report.text,
+    answer,
     status: 'needs_review',
     trustState: 'review_required',
     stopReason: 'human_review_required',

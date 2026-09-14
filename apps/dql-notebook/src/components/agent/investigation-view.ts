@@ -80,6 +80,8 @@ export interface InvestigationReportView {
   inconclusive: Array<{ dimension: string; reason: string; queryIds: string[] }>;
   notInvestigated: Array<{ dimension?: string; reason: string }>;
   mixRate?: { mix: InvestigationFigure; rate: InvestigationFigure; queryIds: string[] };
+  /** The AI's wording of the summary, only when every number in it was checked against the figures. */
+  narration?: string;
   queries: InvestigationQueryView[];
   text: string;
 }
@@ -207,6 +209,7 @@ export function investigationReportOf(payload: unknown): InvestigationReportView
     ...(figure(rec(report.mixRate)?.mix) && figure(rec(report.mixRate)?.rate)
       ? { mixRate: { mix: figure(rec(report.mixRate)!.mix)!, rate: figure(rec(report.mixRate)!.rate)!, queryIds: strings(rec(report.mixRate)!.queryIds) } }
       : {}),
+    ...(rec(report.narration)?.verified === true && str(rec(report.narration)?.text) ? { narration: str(rec(report.narration)?.text) } : {}),
     queries: arr(report.queries).map(queryView).filter((query): query is InvestigationQueryView => Boolean(query)),
     text: str(report.text) ?? str(headline.text) ?? '',
   };

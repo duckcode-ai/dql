@@ -1,12 +1,14 @@
 /**
  * A Research investigation, as a report: whether the metric changed, the
- * figures for each period, how sure the investigation is and why, what limits
- * the figures, and the queries every figure came from.
+ * figures for each period, where the change came from, how sure the
+ * investigation is and why, what limits the figures, and the queries every
+ * figure came from.
  */
 import type React from 'react';
 import type { QueryResult } from '../../store/types';
 import type { Theme, ThemeMode } from '../../themes/notebook-theme';
 import { ResultView } from '../output/ResultView';
+import { DriverChart } from './DriverChart';
 import type { InvestigationConfidence, InvestigationDriverView, InvestigationReportView, InvestigationVerdict } from './investigation-view';
 
 export const INVESTIGATION_VERDICT_WORDS: Record<InvestigationVerdict, string> = {
@@ -55,6 +57,16 @@ function Figure({ label, value, t, tone, emphasis }: { label: string; value: str
 
 const signedPercent = (pct: string | undefined) => (pct === undefined ? '' : ` (${Number(pct) > 0 ? '+' : ''}${pct}%)`);
 
+/** A driver as a bar: where it is, its verdict, its share of the change, and how it moved. */
+export function driverChartItem(driver: InvestigationDriverView) {
+  const share = driver.share !== undefined ? Math.abs(driver.globalShare ?? driver.share) : undefined;
+  return {
+    title: `${driver.path.map((step) => `${step.dimension}: ${step.member}`).join(' › ')} · ${DRIVER_VERDICT_WORDS[driver.verdict]}${driver.status !== 'both' ? ` · ${driver.status}` : ''}`,
+    value: share !== undefined ? `${(share * 100).toFixed(1)}% of the change` : driver.delta.formatted,
+    explanation: `${driver.prior.formatted} → ${driver.current.formatted}${driver.role === 'offset' ? ', moving the other way' : ''}`,
+  };
+}
+
 export function InvestigationReport({ report, t, themeMode, onOpenQuery }: {
   report: InvestigationReportView;
   t: Theme;
@@ -87,6 +99,13 @@ export function InvestigationReport({ report, t, themeMode, onOpenQuery }: {
         </span>
       </div>
 
+      {report.narration ? (
+        <div style={{ display: 'grid', gap: 3 }}>
+          <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.5, color: t.textPrimary }}>{report.narration}</p>
+          <span style={{ fontSize: 10.5, color: t.textMuted }}>Worded by the AI from the computed figures; every number was checked against them.</span>
+        </div>
+      ) : null}
+
       {headline.current || headline.prior ? (
         <div role="group" aria-label={`${headline.metricLabel} by period`} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(118px, 1fr))', gap: 8 }}>
           {headline.current ? <Figure label={periods.current} value={headline.current.formatted} t={t} emphasis /> : null}
@@ -101,34 +120,9 @@ export function InvestigationReport({ report, t, themeMode, onOpenQuery }: {
       ) : null}
 
       {report.drivers.length ? (
-        <div role="table" aria-label="Where the change came from" style={{ display: 'grid', gap: 5, minWidth: 0 }}>
+        <div aria-label="Where the change came from" style={{ display: 'grid', gap: 8, minWidth: 0 }}>
           <div style={{ fontSize: 11, fontWeight: 650, color: t.textSecondary }}>Where the change came from</div>
-          {report.drivers.map((driver, index) => {
-            const share = driver.share !== undefined ? Math.abs(driver.globalShare ?? driver.share) : undefined;
-            const barColor = driver.role === 'offset' ? t.textMuted : falling ? t.error : t.success;
-            const verdictColor = driver.verdict === 'supported' ? t.accent : driver.verdict === 'partial' ? t.warning : t.textSecondary;
-            const path = driver.path.map((step) => `${step.dimension}: ${step.member}`).join(' › ');
-            return (
-              <div key={`${path}-${index}`} role="row" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.5fr) minmax(0, 1fr) minmax(90px, 1fr)', gap: 8, alignItems: 'center', fontSize: 11.5 }}>
-                <span role="cell" style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
-                  <span title={path} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.textPrimary }}>{path}</span>
-                  <span style={pill(verdictColor, t)}>{DRIVER_VERDICT_WORDS[driver.verdict]}</span>
-                  {driver.status !== 'both' ? <span style={{ fontSize: 10.5, color: t.textMuted }}>{driver.status}</span> : null}
-                </span>
-                <span role="cell" style={{ fontVariantNumeric: 'tabular-nums', color: t.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {driver.prior.formatted} → {driver.current.formatted}
-                </span>
-                <span role="cell" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span aria-hidden="true" style={{ flex: 1, height: 6, borderRadius: 3, background: 'var(--bg-2)', overflow: 'hidden' }}>
-                    <span style={{ display: 'block', width: `${Math.min(100, (share ?? 0) * 100)}%`, height: '100%', background: barColor }} />
-                  </span>
-                  <span style={{ fontVariantNumeric: 'tabular-nums', minWidth: 46, textAlign: 'right', color: t.textPrimary }}>
-                    {share !== undefined ? `${(share * 100).toFixed(1)}%` : '—'}
-                  </span>
-                </span>
-              </div>
-            );
-          })}
+          <DriverChart drivers={report.drivers.map(driverChartItem)} emptyMessage="" />
         </div>
       ) : null}
 
@@ -149,7 +143,7 @@ export function InvestigationReport({ report, t, themeMode, onOpenQuery }: {
           ))}
           {report.notInvestigated.length ? (
             <li style={{ fontSize: 11.5, lineHeight: 1.45, color: t.textMuted }}>
-              Not broken down: {report.notInvestigated.map((entry) => `${entry.dimension ?? 'a dimension'} (${NOT_INVESTIGATED_WORDS[entry.reason] ?? entry.reason})`).join(', ')}
+              Not broken down: {[...new Map(report.notInvestigated.map((entry) => [`${entry.dimension}:${entry.reason}`, entry])).values()].map((entry) => `${entry.dimension ?? 'a dimension'} (${NOT_INVESTIGATED_WORDS[entry.reason] ?? entry.reason})`).join(', ')}
             </li>
           ) : null}
         </ul>

@@ -115,6 +115,7 @@ describe('the investigation view model', () => {
         ruledOut: [{ dimension: { ref: 'dimension:orders.location', label: 'Location' }, maxExcess: '0', text: "By Location, the change was spread in line with each member's size.", queryIds: ['q4'] }],
         inconclusive: [{ dimension: { ref: 'dimension:orders.channel', label: 'Channel' }, reason: 'no member moved far enough beyond its size to stand out', queryIds: ['q5'] }],
         notInvestigated: [{ dimension: { ref: 'dimension:orders.brand', label: 'Brand' }, reason: 'budget' }],
+        narration: { text: 'Revenue fell 930.00 in August 2025, most of it in beverage.', verified: true },
       },
     };
     const report = view.investigationReportOf(withDrivers)!;
@@ -137,6 +138,10 @@ describe('the investigation view model', () => {
     expect(html).toContain('Ruled out · </span>By Location');
     expect(html).toContain('Inconclusive · </span>Channel: no member moved far enough beyond its size to stand out');
     expect(html).toContain('Not broken down: Brand (query budget ran out)');
+    expect(html).toContain('Revenue fell 930.00 in August 2025, most of it in beverage.');
+    expect(html).toContain('every number was checked against them');
+    // A wording that was not verified is never shown.
+    expect(view.investigationReportOf({ ...withDrivers, investigation: { ...withDrivers.investigation, narration: { text: 'Unchecked words', verified: false } } })!.narration).toBeUndefined();
   });
 
   it('names what Research is doing from its last step', () => {
