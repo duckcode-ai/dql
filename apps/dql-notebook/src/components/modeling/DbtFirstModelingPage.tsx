@@ -1002,7 +1002,7 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
           status: entityStatus,
           owner: owner || undefined,
           grain: grain || undefined,
-          keys: csv(keys),
+          keys: csv(keys).length > 0 ? csv(keys) : keysFromGrain(grain, selectedDbtDetail),
         },
       };
     if (editor.kind === 'contract')
@@ -1154,7 +1154,7 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
                   <Input value={grain} onChange={setGrain} t={t} placeholder="Use dbt meta.dql by default" />
                 </Field>
                 <Field label="Key overrides (optional)">
-                  <Input value={keys} onChange={setKeys} t={t} placeholder="customer_id, order_id" />
+                  <Input value={keys} onChange={setKeys} t={t} placeholder="Empty: the grain's columns" />
                 </Field>
               </div>
               <div style={twoColumns}>
@@ -2248,6 +2248,13 @@ function Td({ children }: { children: React.ReactNode }) {
     </td>
   );
 }
+/** A grain written as the model's column names ("team_id, season") names its key columns too. */
+function keysFromGrain(grain: string, detail: DbtNodeAuthoringDetail | null): string[] {
+  const columns = new Set((detail?.columns ?? []).map((column) => column.name.toLowerCase()));
+  const parts = csv(grain);
+  return parts.length > 0 && parts.every((part) => columns.has(part.toLowerCase())) ? parts : [];
+}
+
 function csv(value: string): string[] {
   return value
     .split(',')

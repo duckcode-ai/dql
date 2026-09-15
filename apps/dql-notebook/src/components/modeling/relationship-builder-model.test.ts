@@ -104,9 +104,18 @@ describe('what blocks a save', () => {
     expect(relationshipSaveBlockers({ ...base, level: 'validated', evidence: evidence(), evidenceSignature: signature })).toEqual([]);
   });
 
-  it('needs both grains to certify and names the model that is missing one', () => {
-    const blockers = relationshipSaveBlockers({ ...base, level: 'certified', evidence: evidence(), evidenceSignature: signature, fromGrain: 'order_id' });
-    expect(blockers).toEqual(["Certifying needs to know what one row of Customer means (its grain). Set it in the model's settings first."]);
-    expect(relationshipSaveBlockers({ ...base, level: 'certified', evidence: evidence(), evidenceSignature: signature, fromGrain: 'order_id', toGrain: 'customer_id' })).toEqual([]);
+  it('needs both grains and key columns to certify and names the model that is missing them', () => {
+    const passed = { ...base, level: 'certified' as const, evidence: evidence(), evidenceSignature: signature };
+    expect(relationshipSaveBlockers({ ...passed, fromGrain: 'order_id', fromKeys: ['order_id'] })).toEqual(["Certifying needs the grain and key columns of Customer: what one row means and which columns identify it. Set them in the model's settings first."]);
+    // A grain alone does not certify: the certificate records the key columns too (NBA: keys: [] read as stale).
+    expect(relationshipSaveBlockers({ ...passed, fromGrain: 'order_id', toGrain: 'customer_id', fromKeys: ['order_id'], toKeys: [] })[0]).toContain('of Customer');
+    expect(relationshipSaveBlockers({ ...passed, fromGrain: 'order_id', toGrain: 'customer_id', fromKeys: ['order_id'], toKeys: ['customer_id'] })).toEqual([]);
+  });
+
+  it('says a certificate without grain and keys is why a checked relationship needs a recheck', () => {
+    const certifiedWithoutKeys = relationshipStatusView({ status: 'certified', automaticJoinAllowed: false, validation: evidence() });
+    expect(certifiedWithoutKeys.label).toBe('Needs recheck');
+    expect(certifiedWithoutKeys.meaning).toContain('without the grain and key columns');
+    expect(relationshipStatusView({ status: 'certified', automaticJoinAllowed: false, validation: evidence({ status: 'failed' }), certificationFingerprint: 'c' }).meaning).toContain('warehouse check');
   });
 });

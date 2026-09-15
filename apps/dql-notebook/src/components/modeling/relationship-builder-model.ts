@@ -68,12 +68,14 @@ export interface RelationshipStatusView {
 }
 
 /** The one badge a relationship shows everywhere: canvas edge, legend, inspector, popover. */
-export function relationshipStatusView(relationship: Pick<ManifestModelRelationship, 'status' | 'automaticJoinAllowed' | 'validation'>): RelationshipStatusView {
+export function relationshipStatusView(relationship: Pick<ManifestModelRelationship, 'status' | 'automaticJoinAllowed' | 'validation'> & Partial<Pick<ManifestModelRelationship, 'certificationFingerprint'>>): RelationshipStatusView {
   if (relationship.status === 'deprecated') return { level: 'retired', label: 'Retired', meaning: 'Ask ignores this relationship.', color: 'var(--text-tertiary)' };
   if (relationship.status === 'certified') {
-    return relationship.automaticJoinAllowed
-      ? { level: 'certified', label: 'Certified', meaning: 'Ask must join these models on exactly these keys.', color: '#2e9b63' }
-      : { level: 'stale', label: 'Needs recheck', meaning: 'Certified, but its warehouse check is missing, stale or failed. Ask treats it as a hint until it is checked again.', color: '#d47822' };
+    if (relationship.automaticJoinAllowed) return { level: 'certified', label: 'Certified', meaning: 'Ask must join these models on exactly these keys.', color: '#2e9b63' };
+    const meaning = relationship.validation?.status === 'passed' && !relationship.certificationFingerprint
+      ? 'Certified without the grain and key columns of both models, so Ask treats it as a hint. Set them in each model\'s settings, then certify it again.'
+      : 'Certified, but its warehouse check is missing, stale or failed, or a model\'s grain or keys changed. Ask treats it as a hint until it is checked again.';
+    return { level: 'stale', label: 'Needs recheck', meaning, color: '#d47822' };
   }
   if (relationship.validation?.status === 'passed') return { level: 'validated', label: 'Validated', meaning: 'Checked safe to join. Ask prefers it when it writes SQL.', color: '#5b73d6' };
   return { level: 'draft', label: 'Draft', meaning: 'Not checked in the warehouse. Ask sees it as a hint only.', color: '#9a6b2f' };
@@ -113,6 +115,8 @@ export function relationshipSaveBlockers(input: {
   toName: string;
   fromGrain?: string;
   toGrain?: string;
+  fromKeys?: string[];
+  toKeys?: string[];
 }): string[] {
   const blockers: string[] = [];
   if (!input.keysComplete) blockers.push('Choose the matching column on both sides.');
@@ -121,8 +125,13 @@ export function relationshipSaveBlockers(input: {
     else if (input.evidence.status !== 'passed') blockers.push('The warehouse check did not pass, so this can only be saved as a draft.');
   }
   if (input.level === 'certified') {
-    const missing = [!input.fromGrain ? input.fromName : null, !input.toGrain ? input.toName : null].filter(Boolean);
-    if (missing.length) blockers.push(`Certifying needs to know what one row of ${missing.join(' and ')} means (its grain). Set it in the model's settings first.`);
+    // Certification records both models' grain and key columns so a later dbt
+    // change is detected; without them the certificate cannot bind Ask.
+    const missing = [
+      !input.fromGrain || !input.fromKeys?.length ? input.fromName : null,
+      !input.toGrain || !input.toKeys?.length ? input.toName : null,
+    ].filter(Boolean);
+    if (missing.length) blockers.push(`Certifying needs the grain and key columns of ${missing.join(' and ')}: what one row means and which columns identify it. Set them in the model's settings first.`);
   }
   return blockers;
 }

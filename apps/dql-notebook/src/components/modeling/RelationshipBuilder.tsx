@@ -252,6 +252,8 @@ export function RelationshipBuilder({ data, relationship, draft, selectedDomain,
     toName,
     fromGrain: fromEntity?.grain,
     toGrain: toEntity?.grain,
+    fromKeys: fromEntity?.keys,
+    toKeys: toEntity?.keys,
   });
   if (!from || !to) blockers.unshift('Choose both models.');
   if (!id) blockers.push('The relationship needs an id.');
