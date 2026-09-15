@@ -4743,6 +4743,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
   };
   const dbtNodeDetailCache = new Map<string, DbtNodeAuthoringDetail | undefined>();
+  /**
+   * A dbt model's authoring detail, with columns completed from the warehouse
+   * when dbt documents none or only some of them. Cached per snapshot; without
+   * a connection, or when the lookup fails, dbt's own columns are used.
+   */
+  const nodeDetailWithColumns = async (snapshotId: string, uniqueId: string): Promise<DbtNodeAuthoringDetail | undefined> => {
+    const cacheKey = `${snapshotId}:${uniqueId}`;
+    if (dbtNodeDetailCache.has(cacheKey)) return dbtNodeDetailCache.get(cacheKey);
+    const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+    let detail = dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined;
+    const sql = detail?.relation ? buildNamedRelationProbeSql([detail.relation], 1) : null;
+    if (detail && sql) {
+      try {
+        const activeConnection = await resolveExecutionConnection({});
+        const result = await executor.executeQuery(sql, [], {}, activeConnection);
+        detail = mergeWarehouseColumns(detail, result.rows as Array<Record<string, unknown>>);
+      } catch {
+        // No warehouse to ask: the builder still offers the columns dbt documents.
+      }
+    }
+    dbtNodeDetailCache.set(cacheKey, detail);
+    return detail;
+  };
   const onboardingJobs = new Map<string, DbtPreparationJob>();
   const metricFlowInstaller = new ManagedMetricFlowInstaller(projectRoot);
   const projectSnapshot = () => {
@@ -11283,14 +11306,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'GET' && path.startsWith('/api/modeling/dbt-first/nodes/')) {
       const requestId = apiRequestId('modeling-node');
-      const dbtManifestPath = resolveDbtManifestPath(projectRoot);
       const uniqueId = decodeURIComponent(path.slice('/api/modeling/dbt-first/nodes/'.length));
       const snapshot = projectSnapshot();
-      const cacheKey = `${snapshot.snapshotId}:${uniqueId}`;
-      if (!dbtNodeDetailCache.has(cacheKey)) {
-        dbtNodeDetailCache.set(cacheKey, dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined);
-      }
-      const detail = dbtNodeDetailCache.get(cacheKey);
+      const detail = await nodeDetailWithColumns(snapshot.snapshotId, uniqueId);
       if (!detail) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DBT_NODE_NOT_FOUND', message: `dbt node not found: ${uniqueId}`, recoverable: false })));
@@ -11415,12 +11433,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const body = await readJSON(req) as { uniqueIds?: unknown };
       const uniqueIds = Array.isArray(body.uniqueIds) ? body.uniqueIds.filter((value): value is string => typeof value === 'string').slice(0, 100) : [];
       const snapshot = projectSnapshot();
-      const dbtManifestPath = resolveDbtManifestPath(projectRoot);
-      const details = uniqueIds.map((uniqueId) => {
-        const cacheKey = `${snapshot.snapshotId}:${uniqueId}`;
-        if (!dbtNodeDetailCache.has(cacheKey)) dbtNodeDetailCache.set(cacheKey, dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined);
-        return dbtNodeDetailCache.get(cacheKey);
-      }).filter(Boolean);
+      const details = (await Promise.all(uniqueIds.map((uniqueId) => nodeDetailWithColumns(snapshot.snapshotId, uniqueId)))).filter(Boolean);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ requestId, details, snapshotId: snapshot.snapshotId }));
       return;
@@ -11810,11 +11823,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const { fromRelation, toRelation, fromUniqueId, toUniqueId } = relationshipRelations(snapshot.manifest, url.searchParams.get('from') ?? '', url.searchParams.get('to') ?? '');
         const dbtManifestPath = resolveDbtManifestPath(projectRoot);
-        const columnsOf = (uniqueId: string): string[] => {
-          const cacheKey = `${snapshot.snapshotId}:${uniqueId}`;
-          if (!dbtNodeDetailCache.has(cacheKey)) dbtNodeDetailCache.set(cacheKey, dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined);
-          return dbtNodeDetailCache.get(cacheKey)?.columns.map((column) => column.name) ?? [];
-        };
+        const [fromDetail, toDetail] = await Promise.all([nodeDetailWithColumns(snapshot.snapshotId, fromUniqueId), nodeDetailWithColumns(snapshot.snapshotId, toUniqueId)]);
+        const columnsOf = (uniqueId: string): string[] => (uniqueId === fromUniqueId ? fromDetail : toDetail)?.columns.map((column) => column.name) ?? [];
         const dbtTests = dbtRelationshipTestEdges(snapshot.snapshotId, dbtManifestPath)
           .filter((edge) => edge.fromColumn !== 'unknown' && edge.toColumn !== 'unknown')
           .filter((edge) => (edge.fromDbtUniqueId === fromUniqueId && edge.toDbtUniqueId === toUniqueId) || (edge.fromDbtUniqueId === toUniqueId && edge.toDbtUniqueId === fromUniqueId))
@@ -37005,6 +37015,42 @@ const RUNTIME_SCHEMA_SEARCH_STOPWORDS = new Set([
  * execution target. Tokens are reduced to safe identifier characters before
  * interpolation, so user text cannot become SQL syntax.
  */
+/**
+ * A dbt model's columns completed from the warehouse.
+ *
+ * dbt only knows the columns a project documented, or all of them after
+ * `dbt docs generate` writes catalog.json. Without that, a model can show no
+ * columns at all and the relationship builder cannot offer a key. The
+ * warehouse's own `information_schema` rows fill the gap: documented columns
+ * keep their dbt descriptions and tests, the rest are added in table order.
+ */
+export function mergeWarehouseColumns(
+  detail: DbtNodeAuthoringDetail,
+  rows: Array<Record<string, unknown>>,
+): DbtNodeAuthoringDetail {
+  const table = detail.relation?.replace(/["`\[\]]/g, '').split('.').filter(Boolean).at(-1)?.toLowerCase();
+  if (!table) return detail;
+  const value = (row: Record<string, unknown>, key: string): string | undefined => {
+    const found = row[key] ?? row[key.toUpperCase()];
+    return typeof found === 'string' && found ? found : undefined;
+  };
+  const known = new Map(detail.columns.map((column) => [column.name.toLowerCase(), column]));
+  const columns: DbtNodeAuthoringDetail['columns'] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const name = value(row, 'column_name');
+    if (!name || value(row, 'table_name')?.toLowerCase() !== table || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    const documented = known.get(name.toLowerCase());
+    columns.push(documented ? { ...documented, type: documented.type ?? value(row, 'data_type') } : { name, type: value(row, 'data_type'), tests: [] });
+  }
+  // A documented column the warehouse did not return stays: dbt may describe a column the query could not see.
+  for (const column of detail.columns) if (!seen.has(column.name.toLowerCase())) columns.push(column);
+  return columns.length > detail.columns.length || columns.some((column, index) => column.type !== detail.columns[index]?.type)
+    ? { ...detail, columns }
+    : detail;
+}
+
 /**
  * Point-lookup of NAMED relations in `information_schema.columns`.
  *

@@ -284,6 +284,7 @@ export function RelationshipBuilder({ data, relationship, draft, selectedDomain,
     return { value: recordKey, label: entity.businessName || entity.localId || entity.id, description: `${entity.domain} · ${node?.relation ?? node?.name ?? entity.dbtUniqueId}`, keywords: [entity.qualifiedId, entity.businessContext ?? ''] };
   }), [entities, data.dbtProvenance.nodes]);
   const columnsOf = (recordKey: string) => details[entities[recordKey]?.dbtUniqueId ?? '']?.columns ?? [];
+  const columnsLoaded = (recordKey: string) => Boolean(details[entities[recordKey]?.dbtUniqueId ?? '']);
   const areas = Object.values(data.modeling.areas).filter((area) => area.domain === domain);
   const evidenceIsCurrent = Boolean(evidence && evidenceSignature === currentSignature);
 
@@ -323,9 +324,9 @@ export function RelationshipBuilder({ data, relationship, draft, selectedDomain,
           <div style={{ fontSize: 11, fontWeight: 700 }}>Matched on</div>
           {keys.map((key, index) => (
             <div key={index} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 18px minmax(0, 1fr) 30px', gap: 7, alignItems: 'center' }}>
-              <ColumnSelect label={`${fromName} column ${index + 1}`} modelName={fromName} value={key.from} columns={columnsOf(from)} disabled={!from} onChange={(value) => updateKey(index, 'from', value)} t={t} />
+              <ColumnSelect label={`${fromName} column ${index + 1}`} modelName={fromName} value={key.from} columns={columnsOf(from)} loaded={columnsLoaded(from)} disabled={!from} onChange={(value) => updateKey(index, 'from', value)} t={t} />
               <span aria-hidden="true" style={{ textAlign: 'center', color: t.textMuted }}>=</span>
-              <ColumnSelect label={`${toName} column ${index + 1}`} modelName={toName} value={key.to} columns={columnsOf(to)} disabled={!to} onChange={(value) => updateKey(index, 'to', value)} t={t} />
+              <ColumnSelect label={`${toName} column ${index + 1}`} modelName={toName} value={key.to} columns={columnsOf(to)} loaded={columnsLoaded(to)} disabled={!to} onChange={(value) => updateKey(index, 'to', value)} t={t} />
               <button type="button" aria-label={`Remove column pair ${index + 1}`} title="Remove" disabled={keys.length === 1} onClick={() => { setKeysTouched(true); setKeys((current) => current.filter((_, keyIndex) => keyIndex !== index)); }} style={iconButtonStyle(t)}><XCircle size={14} /></button>
             </div>
           ))}
@@ -455,13 +456,13 @@ export function RelationshipBuilder({ data, relationship, draft, selectedDomain,
   );
 }
 
-function ColumnSelect({ label, modelName, value, columns, disabled, onChange, t }: { label: string; modelName: string; value: string; columns: Array<{ name: string; type?: string }>; disabled: boolean; onChange: (value: string) => void; t: Theme }) {
+function ColumnSelect({ label, modelName, value, columns, loaded, disabled, onChange, t }: { label: string; modelName: string; value: string; columns: Array<{ name: string; type?: string }>; loaded: boolean; disabled: boolean; onChange: (value: string) => void; t: Theme }) {
   const names = columns.map((column) => column.name);
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', alignItems: 'center', border: `1px solid ${t.headerBorder}`, borderRadius: 6, background: t.cellBg, overflow: 'hidden', opacity: disabled ? 0.6 : 1 }}>
       <span style={{ padding: '0 7px', fontSize: 10.5, color: t.textMuted, fontFamily: t.fontMono, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{modelName}.</span>
       <select aria-label={label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} style={{ ...inputStyle(t), border: 'none', borderRadius: 0, fontFamily: t.fontMono }}>
-        <option value="">{columns.length ? 'column…' : 'loading columns…'}</option>
+        <option value="">{columns.length ? 'column…' : loaded ? 'no columns found' : 'loading columns…'}</option>
         {value && !names.includes(value) ? <option value={value}>{value}</option> : null}
         {columns.map((column) => <option key={column.name} value={column.name}>{column.name}{column.type ? `  (${column.type.toLowerCase()})` : ''}</option>)}
       </select>

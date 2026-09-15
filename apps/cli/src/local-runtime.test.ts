@@ -11006,6 +11006,29 @@ describe('domains API (spec 17, part B)', () => {
     expect(impact).toMatchObject({ terms: 1, concepts: 0, certifiedBlocks: 1, relationships: [] });
   });
 
+  it('completes a dbt model\'s columns from the warehouse when dbt documents none or only some', async () => {
+    const { mergeWarehouseColumns } = await import('./local-runtime.js');
+    const detail = {
+      uniqueId: 'model.nba.local_team_season_facts', name: 'local_team_season_facts', resourceType: 'model' as const,
+      relation: 'nba_analysis.TRANSFORMED.local_team_season_facts', tests: [],
+      columns: [{ name: 'team_id', description: 'Team key', tests: ['not_null'] }],
+    };
+    const rows = [
+      { TABLE_SCHEMA: 'TRANSFORMED', TABLE_NAME: 'local_team_season_facts', COLUMN_NAME: 'team_id', DATA_TYPE: 'BIGINT' },
+      { table_schema: 'TRANSFORMED', table_name: 'local_team_season_facts', column_name: 'season', data_type: 'BIGINT' },
+      { table_schema: 'TRANSFORMED', table_name: 'local_team_season_facts', column_name: 'wins', data_type: 'BIGINT' },
+      { table_schema: 'OTHER', table_name: 'dim_teams_cleansed', column_name: 'team_nickname', data_type: 'VARCHAR' },
+    ];
+    expect(mergeWarehouseColumns(detail, rows).columns).toEqual([
+      { name: 'team_id', description: 'Team key', tests: ['not_null'], type: 'BIGINT' },
+      { name: 'season', type: 'BIGINT', tests: [] },
+      { name: 'wins', type: 'BIGINT', tests: [] },
+    ]);
+    // Nothing to add: the same detail comes back.
+    expect(mergeWarehouseColumns(detail, [])).toBe(detail);
+    expect(mergeWarehouseColumns({ ...detail, relation: undefined }, rows).columns).toHaveLength(1);
+  });
+
   it('keeps a native DQL semantic layer when the dbt project defines no semantic models or metrics', async () => {
     const { resolveProjectSemanticConfig } = await import('./local-runtime.js');
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-semantic-provider-'));
