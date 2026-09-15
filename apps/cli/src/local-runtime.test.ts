@@ -10981,6 +10981,31 @@ describe('domains API (spec 17, part B)', () => {
     expect(parseDomainInput({ id: 'Finance' })?.name).toBe('Finance');
   });
 
+  it('says what Ask will do for a domain: skills that apply, required filters, imports and counts', async () => {
+    const { askImpactFor } = await import('./local-runtime.js');
+    const manifest = {
+      blocks: { a: { name: 'a', status: 'certified', domain: 'Commerce' }, b: { name: 'b', status: 'draft', domain: 'commerce' } },
+      terms: { Revenue: { name: 'Revenue', filePath: 'terms/revenue.dql', domain: 'commerce' } },
+      modeling: {
+        packages: { commerce: { id: 'commerce', filePath: 'domains/commerce/domain.dql', exports: [] } },
+        areas: {}, entities: {}, relationships: {}, concepts: {},
+        interfaces: { exports: {}, imports: { i: { id: 'customer_import', qualifiedId: 'commerce::import::customer_import', domain: 'commerce', exportRef: 'growth.customer@1', purpose: 'revenue reporting', status: 'draft' } } },
+      },
+    } as never;
+    const impact = askImpactFor(manifest, [
+      { id: 'beverage', domain: 'commerce', triggers: ['drink'], requiredFilters: ["status = 'completed'"], analyticalPolicy: { timeRole: 'order_date', completenessPolicy: 'latest_complete' }, status: 'active' },
+      { id: 'core-only', domain: 'commerce', modelAreaRefs: ['core'], triggers: ['x'], status: 'active' },
+      { id: 'silent', domain: 'commerce', status: 'active' },
+      { id: 'sql-conventions', status: 'active', vocabulary: { gmv: 'metric:gmv' } },
+      { id: 'finance-rule', domain: 'finance', triggers: ['arr'], requiredFilters: ['is_test = false'], status: 'active' },
+    ], 'commerce', 'commerce::model_area::revenue');
+    expect(impact.skills.map((skill) => [skill.id, skill.scope, skill.findable])).toEqual([['beverage', 'domain', true], ['silent', 'domain', false], ['sql-conventions', 'project', true]]);
+    expect(impact.skills[0]!.policy).toEqual(['periods are measured on order_date', 'uses the latest complete period']);
+    expect(impact.requiredFilters).toEqual([{ text: "status = 'completed'", skill: 'beverage' }]);
+    expect(impact.imports).toEqual([{ id: 'commerce::import::customer_import', exportRef: 'growth.customer@1', purpose: 'revenue reporting', status: 'draft', usable: false }]);
+    expect(impact).toMatchObject({ terms: 1, concepts: 0, certifiedBlocks: 1, relationships: [] });
+  });
+
   it('parses a term body and places a new term in its domain package terms folder', async () => {
     const { parseTermInput, termDirectoryFor } = await import('./local-runtime.js');
     const { writeDomainDeclaration } = await import('@duckcodeailabs/dql-core');

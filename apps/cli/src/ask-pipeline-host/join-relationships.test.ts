@@ -1,0 +1,68 @@
+import { describe, expect, it } from 'vitest';
+import { joinKeyPairs } from '@duckcodeailabs/dql-agent';
+import { certifiedJoinViolations, classifySqlJoins, joinableRelations, ledgerJoins, sameRelation, type ModelingRelationshipEdge } from './join-relationships.js';
+
+const certified: ModelingRelationshipEdge = {
+  relationshipId: 'commerce::relationship::orders_to_customers', name: 'orders_to_customers',
+  fromRelation: 'dev.orders', toRelation: 'dev.customers', keys: [{ from: 'customer_id', to: 'customer_id' }], level: 'certified', cardinality: 'many_to_one',
+};
+const draft: ModelingRelationshipEdge = {
+  relationshipId: 'commerce::relationship::items_to_products', name: 'items_to_products',
+  fromRelation: 'dev.order_items', toRelation: 'dev.products', keys: [{ from: 'product_id', to: 'product_id' }], level: 'draft', cardinality: 'many_to_one',
+};
+
+const uses = (sql: string, edges = [certified, draft]) => classifySqlJoins(joinKeyPairs(sql), edges);
+
+describe('AI-written joins against Modeling relationships', () => {
+  it('matches relation spellings on schema and table', () => {
+    expect(sameRelation('"jaffle"."dev"."orders"', 'dev.orders')).toBe(true);
+    expect(sameRelation('orders', 'dev.orders')).toBe(true);
+    expect(sameRelation('prod.orders', 'dev.orders')).toBe(false);
+  });
+
+  it('passes a join on the certified keys, written in either direction', () => {
+    const sql = 'SELECT c.customer_name, SUM(o.order_total) FROM dev.customers c JOIN dev.orders o ON c.customer_id = o.customer_id GROUP BY 1';
+    const joined = uses(sql);
+    expect(joined).toHaveLength(1);
+    expect(joined[0]).toMatchObject({ matchesRelationship: true, relationship: { name: 'orders_to_customers' } });
+    expect(certifiedJoinViolations(sql, joined)).toEqual([]);
+    expect(ledgerJoins(joined)).toEqual([{ source: 'dql_relationship', relationshipId: certified.relationshipId, name: 'orders_to_customers', authority: 'certified', relations: ['dev.customers', 'dev.orders'], keys: [{ from: 'customer_id', to: 'customer_id' }] }]);
+  });
+
+  it('refuses a certified pair of tables joined on other keys, naming the keys to use', () => {
+    const sql = 'SELECT COUNT(*) FROM dev.orders o JOIN dev.customers c ON o.order_id = c.customer_id';
+    const joined = uses(sql);
+    const violations = certifiedJoinViolations(sql, joined);
+    expect(violations).toEqual(['it joins dev.orders and dev.customers on dev.orders.order_id = dev.customers.customer_id, but the certified relationship orders_to_customers joins them on dev.orders.customer_id = dev.customers.customer_id; join on exactly those keys']);
+    expect(ledgerJoins(joined)[0]).toMatchObject({ source: 'ai_sql', authority: 'none', name: 'orders_to_customers' });
+  });
+
+  it('holds a multi-key certified relationship to all of its keys', () => {
+    const edge: ModelingRelationshipEdge = { ...certified, keys: [{ from: 'customer_id', to: 'customer_id' }, { from: 'region', to: 'region' }] };
+    const partial = 'SELECT 1 FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id';
+    expect(certifiedJoinViolations(partial, uses(partial, [edge]))).toHaveLength(1);
+    const full = 'SELECT 1 FROM dev.orders o JOIN dev.customers c ON o.customer_id = c.customer_id AND o.region = c.region';
+    expect(certifiedJoinViolations(full, uses(full, [edge]))).toEqual([]);
+  });
+
+  it('reaches the one side of validated and certified relationships only', () => {
+    const validated: ModelingRelationshipEdge = { ...draft, relationshipId: 'v', name: 'v', level: 'validated' };
+    const customersToOrders: ModelingRelationshipEdge = { ...certified, fromRelation: 'dev.customers', toRelation: 'dev.orders', cardinality: 'one_to_many', keys: [{ from: 'customer_id', to: 'customer_id' }] };
+    expect(joinableRelations([certified, draft], ['dev.orders'])).toEqual(['dev.customers']);
+    expect(joinableRelations([customersToOrders], ['dev.orders'])).toEqual(['dev.customers']);
+    // A draft is not reached; the many side of a relationship is never reached.
+    expect(joinableRelations([draft], ['dev.order_items'])).toEqual([]);
+    expect(joinableRelations([certified], ['dev.customers'])).toEqual([]);
+    expect(joinableRelations([validated], ['order_items'])).toEqual(['dev.products']);
+  });
+
+  it('never gates a draft relationship or a join nobody declared, but records both', () => {
+    const sql = 'SELECT p.product_name, SUM(i.product_price) FROM dev.order_items i JOIN dev.products p ON i.product_id = p.product_id JOIN dev.locations l ON i.location_id = l.location_id GROUP BY 1';
+    const joined = uses(sql);
+    expect(certifiedJoinViolations(sql, joined)).toEqual([]);
+    expect(ledgerJoins(joined)).toEqual([
+      { source: 'dql_relationship', relationshipId: draft.relationshipId, name: 'items_to_products', authority: 'draft', relations: ['dev.order_items', 'dev.products'], keys: [{ from: 'product_id', to: 'product_id' }] },
+      { source: 'ai_sql', authority: 'none', relations: ['dev.order_items', 'dev.locations'], keys: [{ from: 'location_id', to: 'location_id' }] },
+    ]);
+  });
+});

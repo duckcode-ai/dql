@@ -27,6 +27,7 @@ import {
   type PipelineReceipt,
 } from '@duckcodeailabs/dql-agent';
 import { toExecutorResult, type AskPipelineHost, type AskRequestScope } from '../ask-pipeline-host/host.js';
+import { joinableRelations, modelingRelationshipEdges } from '../ask-pipeline-host/join-relationships.js';
 
 /**
  * What the reader is told when Research reads the question. Ask declines to
@@ -139,6 +140,7 @@ export function createInvestigationExecutor(deps: InvestigationExecutorDeps): Ag
         remainingMs,
         onStep,
         compatibleDimensionRefs: (metricRef) => compatibleDimensionRefs(scope, metricRef),
+        joinableRelations: (relations) => joinableRelations(modelingRelationshipEdges(scope.manifest()), relations),
         selectDimensions: (prompt) => scope.dispatch('research_select', [{ role: 'user', content: prompt }]),
         ...(request.signal ? { signal: request.signal } : {}),
         ...(deps.contextSources?.length ? { contextSources: deps.contextSources } : {}),

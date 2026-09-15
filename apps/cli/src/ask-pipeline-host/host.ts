@@ -70,6 +70,7 @@ import {
   type RuntimeSchemaTable,
 } from '@duckcodeailabs/dql-agent';
 import { buildProjectVocabulary, buildVocabularySource, embeddedManifestRelations, normalizeRelationName, type VocabularySourceInput } from './vocabulary-source.js';
+import { certifiedJoinViolations, classifySqlJoins, ledgerJoins, modelingRelationshipEdges, type LedgerJoin } from './join-relationships.js';
 
 /**
  * THE ASK PIPELINE HOST.
@@ -1114,7 +1115,9 @@ interface AskRunState {
   draftDispatches: Array<{ purpose: string; ms: number; reply?: string; promptChars?: number; at?: number; attempt?: number; label?: 'draft' | 'redraft' | 'fix' | 'retry_empty' | 'widen'; outcome?: 'sql' | 'declined' | 'rejected' | 'error' }>;
   // The checks drafted SQL was held to, recorded for the run views (the
   // notes sent back to the model are built separately and never from these).
-  hostChecks: Array<{ id: 'stated_values' | 'required_filters' | 'join_fanout' | 'catalog_columns' | 'read_only'; label: string; passed: boolean; message: string; attempt: number }>;
+  hostChecks: Array<{ id: 'stated_values' | 'required_filters' | 'join_fanout' | 'certified_joins' | 'catalog_columns' | 'read_only'; label: string; passed: boolean; message: string; attempt: number }>;
+  /** The joins the last checked AI-written statement made, each with the Modeling relationship behind it (or none). */
+  hostJoins?: LedgerJoin[];
   checkRound: number;
   steps: AskStoryStepV1[];
   onStep(step: AskStoryStepV1): void;
@@ -1141,6 +1144,8 @@ export interface AskRequestScope {
   contextSteps: AskStoryStepV1[];
   vocabulary(): VocabularyIndex;
   semanticLayer(): SemanticLayer | undefined;
+  /** The compiled project manifest the request was opened against. */
+  manifest(): DQLManifest | undefined;
   hasConnection: boolean;
   /** The proven, policed reading of a question; nothing is prepared or executed. */
   read(question: string, options?: AskScopeRunOptions & { allowAiSql?: boolean }): Promise<PipelineOutcome>;
@@ -1648,6 +1653,8 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
     if (!provider) {
       return { blocked: failure(runId, 'No AI model is configured for this project, so the question could not be interpreted.', 'provider_error', startedAt) };
     }
+    const scopeMessage = askScopeProblem(deps.getManifest().manifest, request.workspaceContext, deps.getManifest().snapshotId);
+    if (scopeMessage) return { blocked: scopeFailure(runId, scopeMessage, startedAt) };
     // Interpretation never needs a warehouse: a greeting, a definition, a
     // clarification or a modeling gap is answered without one. A missing
     // connection surfaces verbatim at the first execution instead.
@@ -1946,6 +1953,9 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         ...(view.pack?.domainBriefing?.requiredFilters ?? []),
       ])];
       const required = requiredTexts.map((text) => requiredFilterFromText(text)).filter((item): item is NonNullable<typeof item> => Boolean(item));
+      // The relationships on the Modeling map, as edges between the warehouse
+      // relations a statement names.
+      const relationshipEdges = modelingRelationshipEdges(deps.getManifest().manifest);
       const probeOne = async (sql: string): Promise<boolean> => {
         if (!connection) return false;
         const options = { maxRows: 1, ...(request.signal ? { signal: request.signal } : {}), ...(request.runBudget ? { deadlineMs: Math.min(8_000, request.runBudget.remainingMs()) } : {}) };
@@ -1960,6 +1970,15 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         if (missing.length) failures.push(`it does not apply ${missing.map((item) => item.kind === 'fiscal_year' ? `"${item.value}" (fiscal year ${item.value.replace(/^FY/i, '').length === 2 ? `20${item.value.replace(/^FY/i, '')}` : item.value.replace(/^FY/i, '')}: restrict a fiscal-year field, or the dates that fiscal year spans)` : `"${item.value}"`).join(', ')} from the question`);
         const missingRequired = missingRequiredFilters(sql, required);
         if (missingRequired.length) failures.push(`it does not apply the required filter ${missingRequired.map((item) => item.text).join(', ')}`);
+        // CERTIFIED RELATIONSHIPS BIND AI-WRITTEN JOINS. Two tables a person
+        // certified a relationship between are joined on exactly its keys; a
+        // draft or validated relationship stays a hint, and every join is
+        // recorded with the relationship behind it.
+        const joinUses = classifySqlJoins(joinKeyPairs(sql), relationshipEdges);
+        const certifiedFailures = certifiedJoinViolations(sql, joinUses);
+        failures.push(...certifiedFailures);
+        state.hostJoins = ledgerJoins(joinUses);
+        const certifiedUses = joinUses.filter((use) => use.relationship?.level === 'certified');
         if (aggregatesRows(sql)) {
           for (const pair of joinKeyPairs(sql).slice(0, 3)) {
             const repeats = async (side: { relation: string; column: string }) => {
@@ -1988,6 +2007,8 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
           { id: 'stated_values', label: 'Applies every value the question states', passed: !statedFailure, message: statedFailure ?? (stated.length ? `applies ${stated.map((item) => item.value).join(', ')}` : 'the question states no specific values'), attempt },
           ...(required.length ? [{ id: 'required_filters' as const, label: 'Applies the required filters', passed: missingRequired.length === 0, message: missingRequired.length ? `does not apply ${missingRequired.map((item) => item.text).join(', ')}` : `applies ${required.map((item) => item.text).join(', ')}`, attempt }] : []),
           { id: 'join_fanout', label: 'Joins do not count rows more than once', passed: !joinFailure, message: joinFailure ?? 'no join multiplies the rows it totals', attempt },
+          // Only a statement that joins certified tables carries this check.
+          ...(certifiedUses.length ? [{ id: 'certified_joins' as const, label: 'Joins certified tables on their certified keys', passed: certifiedFailures.length === 0, message: certifiedFailures[0] ?? `joins on the keys of ${certifiedUses.map((use) => use.relationship!.name).join(', ')}`, attempt }] : []),
         );
         return failures;
       };
@@ -2262,6 +2283,10 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       outcome.receipt.story = [...state.steps, ...(outcome.receipt.story ?? [])].sort((left, right) => left.at - right.at);
       outcome.receipt.dispatches.push(...state.draftDispatches);
       if (state.hostChecks.length) outcome.receipt.checks = [...(outcome.receipt.checks ?? []), ...state.hostChecks];
+      // The joins an AI-written answer made, each with the relationship it followed.
+      if (outcome.kind === 'answered' && outcome.candidate.tier === 'exploratory' && state.hostJoins?.length && outcome.receipt.context?.used && outcome.receipt.context.used.joins.length === 0) {
+        outcome.receipt.context.used.joins = state.hostJoins;
+      }
       outcome.receipt.physicalBindings = runtimeSchemaForVocabulary(currentVocabulary()).map((table) => ({ relation: table.relation, completeness: table.columnCompleteness ?? 'partial', columns: table.columns.length, targetFingerprint: connection ? fingerprintText(connectionKey(connection)) : undefined }));
     };
     // Settled readings run side by side each extend the request vocabulary;
@@ -2272,6 +2297,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
     };
     const scope: AskRequestScope = {
       request, route, contextMs, contextSteps: hostSteps,
+      manifest: () => deps.getManifest().manifest,
       vocabulary: currentVocabulary,
       semanticLayer: () => deps.getSemanticLayer(),
       hasConnection: Boolean(connection),
@@ -2318,6 +2344,11 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
     const answer = async (): Promise<AgentRouteExecutorResult> => {
       const outcome = await runPipeline(requestState);
       keepRunEvidence(outcome, requestState, true);
+      // An unscoped question whose context all came from one domain: Ask offers
+      // to scope to it, and never narrows on that guess by itself.
+      if ('receipt' in outcome && outcome.receipt?.context && !view.envelope.activeDomain && view.pack?.domainBriefing?.domainId) {
+        outcome.receipt.context.suggestedDomain = view.pack.domainBriefing.domainId;
+      }
       // A ref the interpreter named that the whole inventory holds but this
       // envelope does not is OUT OF SCOPE, not "does not exist": the reader is
       // told which domain owns it and what admits it — never its data.
@@ -2387,6 +2418,38 @@ function withLedger(provider: AgentProvider, deps: AskPipelineHostDeps, request:
 }
 
 const sha = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
+
+/**
+ * A saved Ask scope that names a domain, subject area or skill the project no
+ * longer has. Answering unscoped under a "Scoped to X" chip misleads, so the
+ * run stops and says what to clear. Undefined when the scope resolves or is empty.
+ */
+export function askScopeProblem(manifest: DQLManifest | undefined, workspaceContext: unknown, snapshotId = ''): string | undefined {
+  const scope = askScopeFromWorkspace(workspaceContext);
+  if (!manifest || (!scope.domain && !scope.modelAreaId && !scope.skillRefs?.length)) return undefined;
+  try {
+    resolveDomainContextEnvelope({ manifest, activeDomain: scope.domain ?? null, purpose: scope.purpose, modelAreaId: scope.modelAreaId, skillRefs: scope.skillRefs, source: scope.domain ? 'explicit_ui' : 'inferred', snapshotId });
+    return undefined;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/^Unknown domain:/.test(message)) return `Ask is scoped to the domain "${scope.domain}", which no longer exists. Clear the scope or pick another domain, then ask again.`;
+    if (/model area/i.test(message)) return `Ask is scoped to a subject area that no longer exists${scope.domain ? ` in ${scope.domain}` : ''}. Clear the scope or pick another subject area, then ask again.`;
+    if (/skill/i.test(message)) return 'Ask is pinned to a skill that no longer exists. Clear the scope, then ask again.';
+    return undefined;
+  }
+}
+
+function scopeFailure(runId: string, message: string, startedAt: number): AgentRouteExecutorResult {
+  const result = failure(runId, message, 'execution_error', startedAt);
+  const receipt = result.askPipelineReceipt as PipelineReceipt;
+  receipt.story = [{ version: 1, phase: 'read', title: 'The Ask scope no longer exists', detail: message, state: 'failed', at: Date.now() }];
+  return {
+    ...result,
+    answerRefusalCode: 'modeling_gap',
+    artifacts: (result.artifacts ?? []).map((artifact) => ({ ...artifact, title: 'The Ask scope no longer exists' })),
+    nextActions: [{ id: 'clear-scope', label: 'Clear the Ask scope', route: 'generated_answer' }],
+  };
+}
 
 function failure(runId: string, message: string, code: 'provider_error' | 'execution_error', startedAt: number): AgentRouteExecutorResult {
   // Even a run that stops before reading the question tells the reader where
@@ -2731,6 +2794,7 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     const asksWhy = (outcome.intent?.unresolved ?? []).some((clause) => clause.kind === 'unsupported' && /\b(why|drivers?|reasons?|because)\b/i.test(clause.clause));
     const nextActions: AgentRunNextAction[] = [
       ...(asksWhy ? [{ id: 'investigate-drivers', label: 'Investigate the drivers', route: 'research' as const }] : []),
+      ...(outcome.receipt.context?.suggestedDomain ? [{ id: 'scope-to-domain', label: `Scope Ask to ${outcome.receipt.context.suggestedDomain}`, route: 'generated_answer' as const }] : []),
       ...(receipt.outOfScope?.length ? [{ id: 'widen-scope', label: 'Ask with a purpose that imports it, or declare the import in Domain Studio', route: 'modeling_draft' as const }] : []),
       { id: 'review-metadata-gap', label: 'Review what the project models', route: 'blocked' },
       ...(outcome.offerExploration ? [{ id: 'explore-review-required', label: 'Explore the physical tables (review-required)', route: 'generated_answer' as const }] : []),
@@ -2777,8 +2841,11 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
     proof: [...candidate.proof, ...(receipt.executed?.proofs ?? [])],
     ...common,
   };
+  // A join the AI wrote with no relationship behind it can be saved as one.
+  const undeclaredJoin = (receipt.context?.used?.joins ?? []).find((join) => join.authority === 'none' && join.relations?.length === 2 && (join.keys?.length ?? 0) > 0);
+  const tableName = (relation: string) => relation.replace(/"/g, '').split('.').pop() ?? relation;
   // An answer whose SQL the AI wrote from the schema is never headed as governed.
-  const artifact: AgentRunArtifact = { id: `${runId}:answer`, kind: 'answer', title: certified ? 'Certified answer' : reviewRequired ? 'AI-drafted answer' : blockAsEvidence ? 'Certified block answer' : 'Semantic answer', trustState, payload };
+  const artifact: AgentRunArtifact ={ id: `${runId}:answer`, kind: 'answer', title: certified ? 'Certified answer' : reviewRequired ? 'AI-drafted answer' : blockAsEvidence ? 'Certified block answer' : 'Semantic answer', trustState, payload };
   return withReceipt({
     summary: outcome.text, answer: outcome.text, status: 'completed', trustState,
     stopReason: certified ? 'certified_answer_found' : reviewRequired ? 'generated_review_required' : 'governed_semantic_answer',
@@ -2813,6 +2880,8 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
         { id: 'draft-concept', label: 'Draft a business concept for this identity', route: 'modeling_draft' as const },
       ] : []),
       ...(receipt.refusals.some((refusal) => refusal.tier === 'certified' && /no identity key/.test(refusal.message)) || (candidate.tier === 'certified' && candidate.proof.some((line) => /no identity key/.test(line))) ? [{ id: 'recertify-with-key', label: 'Recertify this block with the entity key', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const }] : []),
+      ...(receipt.context?.suggestedDomain ? [{ id: 'scope-to-domain', label: `Scope Ask to ${receipt.context.suggestedDomain}`, route: 'generated_answer' as const }] : []),
+      ...(undeclaredJoin ? [{ id: 'create-relationship', label: `Save the ${undeclaredJoin.relations!.map(tableName).join(' → ')} join as a relationship`, route: 'modeling_draft' as const }] : []),
       { id: 'create-block', label: 'Save as block', route: 'dql_block_draft', artifactKind: 'dql_block_draft' }, { id: 'research-gap', label: 'Research deeper', route: 'research' },
     ],
     telemetry,

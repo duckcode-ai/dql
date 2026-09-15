@@ -1,4 +1,4 @@
-# Domain Studio UI
+# Modeling UI
 
 ## Information architecture
 
@@ -7,123 +7,138 @@ The global rail remains:
 ```text
 Insights   Apps · Ask
 Build      Notebooks · Blocks · Lineage
-Govern     Domains · Source control
+Govern     Modeling · Ask observability · Source control · Settings
 ```
 
-Domains opens a focused Domain Workspace. OSS deliberately avoids asking a new
-user to navigate internal governance objects. The workspace presents the
-parent-first Domain Package tree and five task-level destinations:
+**Modeling** opens one page (`UI-032`). There is no second navigation rail and
+no separate Governed context page: Notebooks, Blocks and Apps already live in
+the app rail, and the page used to repeat them. The header holds:
+
+- the **Domain** picker (parent-first, `All domains` first), **New domain** and
+  **Domain settings** (the domain form: name, parent, description, covers, in
+  scope, out of scope, primary terms, owners, source systems, tags, delete);
+- the **Subject area** picker (`Whole domain` first) and **New subject area**,
+  shown on the Map and Skills tabs, where it filters;
+- **What Ask will do**, **Ask about <domain>**, Import YAML and Recompile.
+
+The tabs are one per thing Ask reads, plus where the domain is used:
 
 ```text
-Models · Skills · Blocks · Notebooks · Apps
+Map · Terms & concepts · Skills · Blocks · Used by
 ```
 
-Models is the primary data-context destination. It begins with an Area selector
-(`All domain` plus focused Model Areas), a business/data view switch, and
-compact actions to add a dbt model, connect a relationship, create an Area,
-auto-layout, fit, and inspect. Skills is the parallel instruction/context
-editor. Blocks lists the selected domain's canonical block sources. Notebooks
-and Apps show the global products that own or use the selected domain. Selecting
-a card opens the exact source in Block Studio, the Notebook editor, or the App
-viewer; it does not create a domain-local copy. Global Apps/Ask/Notebooks
-behavior and canonical root storage remain unchanged (`PRD-001`, `UI-001`).
+- **Map** — the model canvas (below).
+- **Terms & concepts** — business words. A term teaches Ask a word ("sales"
+  means the Revenue metric) with its rules and caveats; it saves straight to
+  `domains/<domain>/terms/<slug>.dql` (or `terms/` when project-wide) through
+  `/api/terms`, and a metric link must name a governed metric. A concept names
+  one business thing stored in several models; it binds models, so it goes
+  through the reviewed proposal like every modeling change.
+- **Skills** — the domain's skills and, below them, the project-wide skills every
+  domain inherits. With no domain chosen it lists every skill.
+- **Blocks** — the selected domain's canonical block sources.
+- **Used by** — global Notebooks and Apps that own or use the domain. Selecting
+  one opens the exact source; it never creates a domain-local copy
+  (`PRD-001`, `UI-001`). Old `domainSection=notebooks|apps` links land here.
 
-Terms, business views, join proofs, contracts, interfaces, evaluations, dbt
-scope, and Knowledge 360 are not separate Domain navigation destinations. Their
-compiled evidence remains available to retrieval, validation, Models
-inspectors, Block Studio, Source Control, and other task-specific surfaces.
-Historical deep links to those removed sections normalize to Models.
+One vocabulary is used everywhere: Domain, Subject area, Model, Relationship,
+Term, Concept, Skill. Join proofs, contracts, interfaces, evaluations, dbt scope
+and Knowledge 360 are not tabs; their evidence stays in retrieval, validation,
+the inspectors and "What Ask will do". Unknown sections normalize to Map.
 
-The Domain selector presents nested Domain Packages parent-first. Domain and
-Area selection round-trip through `domain`, `modelArea`, and `domainSection`
-URL parameters. The same Area selector is available in Model and Skills, new
-Skills created there inherit the Area, and “Ask” carries the qualified Area ID
-into a visible, removable Ask scope (`UI-006`).
+Domain, subject area, section and selection round-trip through `domain`,
+`modelArea`, `domainSection` and `domainObject` URL parameters and a mirrored
+local location. "Ask about <domain>" carries the domain and qualified subject
+area into a visible, removable Ask scope (`UI-006`).
 
 Long-running Ask and Research turns progressively explain the active governed
-work instead of showing generic loading copy. After the initial wait, the UI
-states that DQL is checking certified blocks, semantic metrics, domain
-modeling, and dbt metadata. If generation or research continues, it explains
-that reusable relationship modeling and semantic metrics shorten future
-analysis, while a reviewed result can be saved as a block and explicitly
-certified to reduce repeated AI work and token usage. This guidance is shown
-only for materially long or repaired/deep turns and never implies that saving a
-draft certifies it (`UI-003`).
+work instead of showing generic loading copy (`UI-003`).
 
-## Domain Model canvas
+## Map
 
 The canvas is the unified analytical model from
 `04-domain-modeling-and-governance.md`.
 
-- one compact toolbar row uses accessible icons with tooltips and keyboard
-  equivalents for add/bind, connect, layout, column density, fit, undo, and
-  inspector toggle;
-- entity width/height adapts to content, with manual resize and remembered
-  layout; handles and constraint icons remain inside the visible hit area;
-- nodes move freely; auto layout respects node dimensions and avoids inspector
-  overlap; fit accounts for the open/closed inspector;
-- dragging a column handle to another column creates a draft relationship;
-- clicking a node or edge opens the right inspector; relationship information
-  is not a separate top-level tab;
-- the inspector is resizable and closable, remembers user preference, traps no
-  canvas shortcuts, and restores focus correctly;
-- node cards show business context, dbt relation/grain, domain/lifecycle, and
-  PK/unique/not-null/foreign-key signals with accessible labels;
-- edges show cardinality, key mapping, safety/attribution state, lifecycle, and
-  cross-domain/export state without labels covering nodes.
-- Business view is the default: business name/context, concepts, role, grain,
-  and relationship meaning lead the interaction. Data view exposes the dbt
-  relation, columns, tests, keys, and column-to-column relationship handles.
-- First-run guidance creates an Area (name, business question, example
-  questions, and optional boundary entities), then adds dbt-backed entities.
+- one compact toolbar row: add/bind a model, connect, layout, column density,
+  fit, legend, AI dock, export and inspector toggle;
+- nodes move and resize freely with remembered layout; fit accounts for the
+  inspector;
+- dragging a column handle to another column opens the relationship builder
+  with both models and columns filled in; "+ Add a related model" binds the new
+  model and then opens the relationship to it;
+- edges take the colour of their status, the same one the legend and inspector
+  name: Certified, Validated, Draft, Needs recheck, Retired;
+- Business view is the default; Data view exposes relations, columns, tests and
+  column handles.
+
+## Relationship builder
+
+A relationship reads as a sentence (`UI-033`):
+
+> Each **Order** belongs to one **Customer**, matched on
+> Order.customer_id = Customer.customer_id.
+
+- Every column picker is labelled with its model, so the two sides of a key
+  cannot be confused. Swap flips the models, keys and direction.
+- Key suggestions come first from dbt `relationships` tests between the two
+  models (either direction), then from naming (`customer_id` → `id` on
+  customers, when the other side has no `customer_id`), then from shared
+  identifier names.
+- Choosing the columns runs the **warehouse check** automatically: one statement
+  measures rows, matched and unmatched rows, empty keys and the most rows per key
+  on each side. The cardinality the data shows is proposed (fanout follows:
+  every join except many-to-many keeps each row once) and the evidence is written
+  for that proposal. Choosing another cardinality re-runs the check for it; a
+  check for other keys, cardinality or fanout is never saved as evidence.
+- The person chooses what Ask may do with it: **Draft** (a hint only),
+  **Validated** (checked safe to join; preferred when Ask writes SQL) or
+  **Certified** (Ask must join these models on exactly these keys). A level that
+  cannot be saved says why — no check, a failed check, or a model without a
+  grain for certification — and nothing is silently downgraded.
+- Name, description, subject area, join types, roles, optionality, aggregation
+  sources, imports, attribution block, evidence expiry, owner and Retire are
+  under "More details". Ids are short and unique (`orders_to_customers`,
+  `orders_to_customers_2`).
+- Escape closes an open picker before the dialog, and closing with unsaved input
+  asks first. Saving opens the reviewed proposal, which names the level the
+  relationship is saved at.
 
 ## Inspectors and editing
 
-Node inspector sections: business context, concepts, analytical role, dbt
-identity, grain/keys, dbt columns, provenance, dependencies, and source.
-Relationship inspector sections: meaning, endpoint/key mapping, cardinality,
-fanout, evidence, validation, lifecycle, owner, interface/export, staleness, and
-lineage. The default view is concise; advanced fields are progressively
-disclosed.
+Model inspector: business context, concepts, analytical role, dbt identity,
+grain/keys, columns, provenance and source. Relationship inspector: the
+sentence, the status badge and what it means for Ask, the keys named by model,
+the warehouse check in plain sentences, then details. dbt-owned fields are
+read-only; editing them opens a guarded dbt source patch. DQL-owned changes
+preview and write domain source (`UI-002`).
 
-dbt-owned fields are read-only. Edit opens a source patch preview against the
-actual dbt SQL/YAML with fingerprint guard. DQL-owned changes preview and write
-Domain Package source. No canvas action writes copied dbt metadata (`UI-002`).
+## What Ask will do
 
-## Agent context
+For the selected domain (and subject area) a drawer lists, from the same sources
+Ask reads (`SKILL-007`):
 
-Models and Skills are the user-facing Domain context. Agent retrieval may also
-consume current dbt metadata, semantic context, certified assets, relationship
-proof, and evaluation state from the compiled snapshot, but those sources do
-not require separate Domain tabs. Domain skills clearly differ from global
-workflow skills and preserve domain-qualified identity.
-
-## Readiness
-
-Join proofs, contracts, interfaces, and evaluations remain validation and
-retrieval evidence. Surface a relevant problem in the Models inspector or in
-the task that needs action; do not expose standalone empty governance tables in
-Domain navigation.
-
-## Related Products
-
-Related Products is derived from `ProductDomainContext` and manifest lineage.
-It shows global Notebooks/Apps that own or use this domain and highlights
-missing required exports or unscoped legacy products.
+- required filters that are always applied, with the skill that requires them;
+- the skills that can guide answers, when each is used (its trigger words or
+  vocabulary, or "never" when it has neither) and its enforced rules; then the
+  project-wide skills;
+- relationships grouped as joins Ask must use, prefers, treats as hints, or that
+  need a recheck;
+- data shared by other domains and the purpose it is approved for;
+- counts of terms, concepts and certified blocks.
 
 ## Theme and accessibility contract
 
 Preserve `<html data-theme="paper|white|obsidian">`, the shared semantic token
 vocabulary, `dql-theme`, and its storage event listener. New components use
 semantic tokens only. All icon-only controls require labels/tooltips, canvas
-actions have keyboard alternatives, focus is visible, and safety is never
-communicated by color alone.
+actions have keyboard alternatives, focus is visible, and status is never
+communicated by colour alone (every badge carries its word).
 
 ## UI acceptance
 
 Browser acceptance starts the built CLI with `dql notebook` against the
-dedicated fixture. Tests cover the five-section sidebar, exact Block/Notebook/App
-routing, removed-section deep-link fallback, inspector toggle/resize, free
-movement, auto-fit, column-to-column drag, compact relationship editing, source
-preview, related products, theme changes, and a Cloud embed-contract check.
-Vite-only screenshots are insufficient.
+dedicated fixture. It covers the single header and tab bar, Used by routing and
+old-link fallback, Domain settings, Terms & concepts create/edit, the
+relationship builder (suggestion, automatic check, proposed cardinality, level
+blockers, discard guard), the inspector, "What Ask will do", theme changes and a
+Cloud embed-contract check. Vite-only screenshots are insufficient.

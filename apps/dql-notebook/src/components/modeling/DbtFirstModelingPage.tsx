@@ -12,6 +12,7 @@ import { DomainSettingsDrawer, type DomainSettingsMode } from '../domains/Domain
 import { authoredDomainOptions } from '../domains/authored-domain-options';
 import { TermsAndConceptsPanel } from './TermsAndConceptsPanel';
 import { RelationshipBuilder } from './RelationshipBuilder';
+import { AskImpactDrawer } from './AskImpactDrawer';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingViewMode, type RelationshipDraft } from './DomainModelingCanvas';
 import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
 import { ContextProposalReviewDrawer } from './ContextProposalReviewDrawer';
@@ -20,7 +21,7 @@ import { DOMAIN_STUDIO_LOCATION_KEY, DOMAIN_STUDIO_NAVIGATION, domainEntityRecor
 import { domainStudioUnavailableState, type DomainStudioUnavailableState } from './domain-studio-readiness';
 import type { ModelingSearchOption } from './modeling-search';
 import { Modal, SearchPicker, iconButtonStyle, inputStyle, linkButton } from './modeling-controls';
-import { RELATIONSHIP_LEGEND, relationshipProfileLines, relationshipSentence, relationshipStatusView } from './relationship-builder-model';
+import { RELATIONSHIP_LEGEND, relationshipDraftFromJoin, relationshipProfileLines, relationshipSentence, relationshipStatusView } from './relationship-builder-model';
 
 type Theme = (typeof themes)['dark'];
 type Tab = DomainStudioSection;
@@ -48,6 +49,7 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
   const [loading, setLoading] = useState(true);
   const [unavailable, setUnavailable] = useState<DomainStudioUnavailableState | null>(null);
   const [domainSettings, setDomainSettings] = useState<DomainSettingsMode | null>(null);
+  const [impactOpen, setImpactOpen] = useState(false);
   const initialLocation = useMemo(() => {
     const location = readDomainStudioLocation();
     return initialSection ? { ...location, section: initialSection } : location;
@@ -176,6 +178,31 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
       setTab(next.impact.skillChanges > 0 && next.impact.modelingChanges === 0 ? 'skills' : 'diagram');
     }).catch(() => undefined);
   }, []);
+
+  // "Save this join as a relationship" from an answer: open the builder with
+  // the two models and keys the AI used, or say which table to add first.
+  const [relationshipHandoff, setRelationshipHandoff] = useState<{ relations: string[]; keys: Array<{ from: string; to: string }> } | null>(() => {
+    try {
+      const raw = window.sessionStorage.getItem('dql-relationship-draft-handoff');
+      if (!raw) return null;
+      window.sessionStorage.removeItem('dql-relationship-draft-handoff');
+      const parsed = JSON.parse(raw) as { relations?: unknown; keys?: unknown };
+      if (!Array.isArray(parsed.relations) || parsed.relations.length !== 2) return null;
+      const keys = Array.isArray(parsed.keys) ? parsed.keys.filter((key): key is { from: string; to: string } => typeof key?.from === 'string' && typeof key?.to === 'string') : [];
+      return { relations: parsed.relations.map(String), keys };
+    } catch {
+      return null;
+    }
+  });
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!data || !relationshipHandoff) return;
+    const { draft, missing } = relationshipDraftFromJoin(relationshipHandoff, data.modeling.entities, data.dbtProvenance.nodes);
+    setRelationshipHandoff(null);
+    setTab('diagram');
+    if (draft) setEditor({ kind: 'relationship', draft });
+    else setNotice(`${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} not on the map yet. Add ${missing.length === 1 ? 'it' : 'them'} with Add models, then connect the two models.`);
+  }, [data, relationshipHandoff]);
 
   const ghostView = useMemo(
     () => applyGhostProposal(data?.modeling ?? { entities: {}, relationships: {} } as DbtFirstModelingResponse['modeling'], ghostProposal),
@@ -357,6 +384,11 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
         ) : null}
         <div style={{ display: 'flex', gap: 7, marginLeft: 'auto' }}>
           {selectedDomain && (
+            <Button t={t} onClick={() => setImpactOpen(true)}>
+              <ShieldCheck size={14} /> What Ask will do
+            </Button>
+          )}
+          {selectedDomain && (
             <Button t={t} onClick={() => openAsk()}>
               <MessageCircle size={14} /> Ask about {authoredLabels.get(selectedDomain) ?? selectedDomain}
             </Button>
@@ -390,6 +422,13 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
           {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
         </button>}
       </nav>
+      {notice ? (
+        <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: 'var(--accent-dim)', fontSize: 11.5, color: t.textPrimary }}>
+          <span style={{ flex: 1 }}>{notice}</span>
+          <Button t={t} onClick={() => { setNotice(null); setStartDrawer('models'); }}>Add models</Button>
+          <IconButton t={t} title="Dismiss" onClick={() => setNotice(null)}><XCircle size={14} /></IconButton>
+        </div>
+      ) : null}
 
       <div
         style={{
@@ -547,6 +586,9 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
         </aside>}
       </div>
 
+      {impactOpen && selectedDomain ? (
+        <AskImpactDrawer domain={selectedDomain} area={selectedArea?.qualifiedId} areaName={selectedArea?.name} t={t} onClose={() => setImpactOpen(false)} />
+      ) : null}
       {domainSettings ? (
         <DomainSettingsDrawer
           mode={domainSettings}

@@ -104,7 +104,12 @@ export function AppShell() {
   useEffect(() => {
     const openProposal = () => dispatch({ type: 'SET_MAIN_VIEW', view: 'modeling' });
     window.addEventListener('dql:open-context-proposal', openProposal);
-    return () => window.removeEventListener('dql:open-context-proposal', openProposal);
+    // "Save this join as a relationship" from an answer opens the builder on the Modeling page.
+    window.addEventListener('dql:open-relationship-draft', openProposal);
+    return () => {
+      window.removeEventListener('dql:open-context-proposal', openProposal);
+      window.removeEventListener('dql:open-relationship-draft', openProposal);
+    };
   }, [dispatch]);
 
   // Domain/model/section query parameters are valid deep-link state only while

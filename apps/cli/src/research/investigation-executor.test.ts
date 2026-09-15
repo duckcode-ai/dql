@@ -69,6 +69,7 @@ function fakeHost(options: { read?: PipelineOutcome; blocked?: AgentRouteExecuto
     contextSteps: [{ version: 1, phase: 'context', title: 'Searched the project', state: 'done', at: 1 }] as AskStoryStepV1[],
     vocabulary: () => vocabulary,
     semanticLayer: () => undefined,
+    manifest: () => undefined,
     read: async (_question: string, readOptions?: unknown) => {
       calls.reads += 1;
       calls.readOptions.push(readOptions);

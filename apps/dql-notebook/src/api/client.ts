@@ -351,6 +351,28 @@ export interface BusinessTerm {
 
 export type BusinessTermInput = Omit<BusinessTerm, 'filePath'>;
 
+/** A domain Ask can be scoped to, with its subject areas and the purposes its imports are approved for. */
+export interface AskScopeOption {
+  id: string;
+  label: string;
+  parent?: string;
+  areas: Array<{ id: string; name: string }>;
+  purposes: string[];
+}
+
+/** What Ask will do for questions scoped to a domain (and subject area). */
+export interface AskImpactResponse {
+  domain: string;
+  area?: string;
+  skills: Array<{ id: string; description?: string; scope: 'domain' | 'project'; triggers: string[]; vocabularyCount: number; requiredFilters: string[]; policy: string[]; status: string; findable: boolean }>;
+  requiredFilters: Array<{ text: string; skill: string }>;
+  relationships: Array<{ name: string; from: string; to: string; keys: string; level: 'certified' | 'validated' | 'draft' | 'stale' }>;
+  imports: Array<{ id: string; exportRef: string; purpose: string; status: string; usable: boolean }>;
+  terms: number;
+  concepts: number;
+  certifiedBlocks: number;
+}
+
 /** A warehouse profile of a join before its cardinality is chosen. */
 export interface RelationshipProfileResponse {
   proposed: { cardinality: ManifestModelRelationship['cardinality']; fanout: ManifestModelRelationship['fanout'] };
@@ -7788,6 +7810,16 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ domain }),
     });
+  },
+
+  /** Domains, subject areas and purposes Ask can be scoped to. → GET /api/ask/scopes */
+  async getAskScopes(): Promise<{ domains: AskScopeOption[] }> {
+    return request<{ domains: AskScopeOption[] }>('/api/ask/scopes');
+  },
+
+  /** What Ask will use and enforce for a domain or subject area. → GET /api/modeling/ask-impact */
+  async getAskImpact(domain: string, area?: string | null): Promise<AskImpactResponse> {
+    return request<AskImpactResponse>(`/api/modeling/ask-impact?domain=${encodeURIComponent(domain)}${area ? `&area=${encodeURIComponent(area)}` : ''}`);
   },
 
   /** Business terms Ask maps words through. → GET /api/terms */

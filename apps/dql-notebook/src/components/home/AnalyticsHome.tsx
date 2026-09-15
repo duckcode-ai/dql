@@ -9,6 +9,7 @@ import {
 import { makeCell, useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import type { Cell } from '../../store/types';
 import { initialDomainScope, persistDomainScope, type DomainScope } from './domain-scope';
+import { AskScopePicker } from './AskScopePicker';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { focusInsertedNotebookCell } from '../../utils/notebook-cell-focus';
 import { askLocationHref, askThreadIdFromLocation } from './ask-location';
@@ -1109,6 +1110,8 @@ export function AnalyticsHome() {
             askLayout
             scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.modelAreaId ? ` · ${domainContext.modelAreaId.split('::').at(-1)?.replace(/_/g, ' ')}` : ''}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
             onClearScope={domainContext ? () => { setDomainContext(undefined); persistDomainScope(undefined); } : undefined}
+            scopeControl={<AskScopePicker scope={domainContext} onChange={(next) => { setDomainContext(next); persistDomainScope(next); }} t={t} />}
+            onScopeChange={(next) => { setDomainContext(next); persistDomainScope(next); }}
             workspaceContext={domainContext}
             audience="stakeholder"
             initialMode="auto"

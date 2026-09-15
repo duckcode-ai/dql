@@ -127,6 +127,43 @@ export function relationshipSaveBlockers(input: {
   return blockers;
 }
 
+const relationKey = (relation: string) => relation.replace(/["`\[\]]/g, '').toLowerCase().split('.').filter(Boolean).slice(-2);
+
+/** The model on the map that reads a warehouse relation, matched on schema and table (a bare table matches on the table). */
+export function entityForRelation(
+  entities: Record<string, { dbtUniqueId: string }>,
+  nodes: Record<string, { relation?: string } | undefined>,
+  relation: string,
+): string | undefined {
+  const wanted = relationKey(relation);
+  const matches = Object.entries(entities).filter(([, entity]) => {
+    const actual = relationKey(nodes[entity.dbtUniqueId]?.relation ?? '');
+    if (!actual.length || !wanted.length) return false;
+    if (actual.length === 2 && wanted.length === 2) return actual[0] === wanted[0] && actual[1] === wanted[1];
+    return actual.at(-1) === wanted.at(-1);
+  });
+  return matches.length === 1 ? matches[0]![0] : undefined;
+}
+
+/**
+ * A join an answer made, as a relationship draft: the two models on the map
+ * and the first key pair. Relations nobody put on the map are named so the
+ * page can say what to add first.
+ */
+export function relationshipDraftFromJoin(
+  join: { relations: string[]; keys: Array<{ from: string; to: string }> },
+  entities: Record<string, { dbtUniqueId: string }>,
+  nodes: Record<string, { relation?: string } | undefined>,
+): { draft?: { from: string; to: string; fromColumn?: string; toColumn?: string }; missing: string[] } {
+  const [fromRelation = '', toRelation = ''] = join.relations;
+  const from = entityForRelation(entities, nodes, fromRelation);
+  const to = entityForRelation(entities, nodes, toRelation);
+  const missing = [!from ? fromRelation : '', !to ? toRelation : ''].filter(Boolean);
+  if (!from || !to) return { missing };
+  const key = join.keys[0];
+  return { draft: { from, to, ...(key ? { fromColumn: key.from, toColumn: key.to } : {}) }, missing: [] };
+}
+
 function percentMatched(matched: number, total: number): string {
   if (total <= 0) return '0';
   const ratio = matched / total;

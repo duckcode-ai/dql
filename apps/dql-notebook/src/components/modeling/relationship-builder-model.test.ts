@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  entityForRelation,
+  relationshipDraftFromJoin,
   fanoutForCardinality,
   levelOfRelationship,
   lifecycleForLevel,
@@ -66,6 +68,23 @@ describe('relationship status and ids', () => {
     expect(nextRelationshipLocalId('orders', 'customers', [])).toBe('orders_to_customers');
     expect(nextRelationshipLocalId('orders', 'customers', ['orders_to_customers'])).toBe('orders_to_customers_2');
     expect(nextRelationshipLocalId('Stg Orders', 'customers', ['stg_orders_to_customers', 'stg_orders_to_customers_2'])).toBe('stg_orders_to_customers_3');
+  });
+});
+
+describe('a join from an answer becomes a relationship draft', () => {
+  const entities = { 'commerce::entity::orders': { dbtUniqueId: 'model.shop.orders' }, 'commerce::entity::customers': { dbtUniqueId: 'model.shop.customers' } };
+  const nodes = { 'model.shop.orders': { relation: '"jaffle"."dev"."orders"' }, 'model.shop.customers': { relation: 'dev.customers' }, 'model.shop.locations': { relation: 'dev.locations' } };
+
+  it('maps both relations to models on the map, with the first key pair', () => {
+    expect(relationshipDraftFromJoin({ relations: ['dev.orders', 'customers'], keys: [{ from: 'customer_id', to: 'customer_id' }] }, entities, nodes)).toEqual({
+      draft: { from: 'commerce::entity::orders', to: 'commerce::entity::customers', fromColumn: 'customer_id', toColumn: 'customer_id' },
+      missing: [],
+    });
+  });
+
+  it('names the relation that is not on the map yet', () => {
+    expect(relationshipDraftFromJoin({ relations: ['dev.orders', 'dev.locations'], keys: [] }, entities, nodes)).toEqual({ missing: ['dev.locations'] });
+    expect(entityForRelation(entities, nodes, 'prod.orders')).toBeUndefined();
   });
 });
 

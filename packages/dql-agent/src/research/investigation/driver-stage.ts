@@ -63,7 +63,12 @@ export async function investigateDrivers(run: InvestigationRun, frame: Investiga
   if (headline.current === undefined || headline.prior === undefined || headline.noData) return undefined;
   const { runtime } = run;
   const vocabulary = runtime.vocabulary();
-  const relations = [...new Set(run.queries.filter((query) => query.purpose === 'headline' && query.outcome === 'answered').flatMap((query) => query.relations ?? []))];
+  const headlineRelations = [...new Set(run.queries.filter((query) => query.purpose === 'headline' && query.outcome === 'answered').flatMap((query) => query.relations ?? []))];
+  // A metric read from the tables can also be split by the columns of a table
+  // its relations join to through a relationship someone checked.
+  let reached: string[] = [];
+  if (headlineRelations.length) { try { reached = runtime.joinableRelations?.(headlineRelations) ?? []; } catch { reached = []; } }
+  const relations = [...headlineRelations, ...reached];
   let compatibleRefs: string[] | undefined;
   try { compatibleRefs = runtime.compatibleDimensionRefs?.(frame.metric.ratio?.numeratorRef ?? frame.metric.ref); } catch { compatibleRefs = undefined; }
   const cap = dimensionCap(frame, runtime.remainingMs());

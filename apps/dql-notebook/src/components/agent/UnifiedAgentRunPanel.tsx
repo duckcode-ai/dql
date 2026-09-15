@@ -80,7 +80,8 @@ export { deriveResultChartConfig } from '../output/ResultView';
 import type { QueryResult, AppSummary, CellChartConfig, Cell, BlockParameterDefinition, ExecutionTarget } from '../../store/types';
 import { useNotebook } from '../../store/NotebookStore';
 import { buildConversationContext } from './agentConversationContext';
-import { explainAskRun, explanationForTrace, isAskPipelineReceipt, type RunExplanation } from './ask-run-explanation';
+import { describeJoin, explainAskRun, explanationForTrace, isAskPipelineReceipt, type RunExplanation } from './ask-run-explanation';
+import { runContextLine, runContextSummary } from './run-context-summary';
 import { AskRunChecks, AskRunDataUsed, AskRunFlow } from './AskRunFlow';
 import { InvestigationFlow } from './InvestigationFlow';
 import { InvestigationReport } from './InvestigationReport';
@@ -193,6 +194,10 @@ interface UnifiedAgentRunPanelProps {
   themeMode: ThemeMode;
   title?: string;
   scopeHint?: string;
+  /** A control that replaces the scope chip above the composer (Ask home's scope picker). */
+  scopeControl?: React.ReactNode;
+  /** Change the Ask scope from an answer ("Scope Ask to Commerce", "Clear scope"). */
+  onScopeChange?: (scope: { domain: string; modelAreaId?: string; purpose?: string } | undefined) => void;
   /** Surface-specific composer guidance for authoring modes. */
   composerPlaceholder?: string;
   onClearScope?: () => void;
@@ -298,6 +303,8 @@ export function UnifiedAgentRunPanel({
   scopeHint = 'Auto routes to answer, research, SQL, block, or app',
   composerPlaceholder = 'Ask anything about your data…',
   onClearScope,
+  scopeControl,
+  onScopeChange,
   examplePrompts,
   emptyHint,
   notebookPath,
@@ -955,6 +962,32 @@ export function UnifiedAgentRunPanel({
       });
       return;
     }
+    if (action.id === 'scope-to-domain' || action.id === 'clear-scope') {
+      // Scope Ask to the domain the answer came from, or clear a scope that no
+      // longer exists; the question waits in the box to be asked again.
+      const suggested = runContextSummary(askPipelineReceiptOf(run)).suggestedDomain;
+      if (action.id === 'scope-to-domain' && !suggested) {
+        setError('This answer did not name a domain to scope to.');
+        return;
+      }
+      onScopeChange?.(action.id === 'scope-to-domain' ? { domain: suggested! } : undefined);
+      setInput(run.question);
+      requestAnimationFrame(() => inputRef.current?.focus());
+      return;
+    }
+    if (action.id === 'create-relationship') {
+      // The join the AI wrote goes to the relationship builder, filled in.
+      const used = recordOf(recordOf(askPipelineReceiptOf(run)?.context)?.used);
+      const join = (Array.isArray(used?.joins) ? used.joins : []).map(recordOf)
+        .find((item) => item?.authority === 'none' && Array.isArray(item.relations) && item.relations.length === 2);
+      if (!join) {
+        setError('This answer did not record the join to save.');
+        return;
+      }
+      try { window.sessionStorage.setItem('dql-relationship-draft-handoff', JSON.stringify({ relations: join.relations, keys: Array.isArray(join.keys) ? join.keys : [] })); } catch { /* best effort */ }
+      window.dispatchEvent(new CustomEvent('dql:open-relationship-draft'));
+      return;
+    }
     if (action.id === 'research-deeper' || action.id === 'investigate-drivers') {
       void submit(run.question, 'research', undefined, undefined, run);
       return;
@@ -1123,7 +1156,7 @@ export function UnifiedAgentRunPanel({
 
             <div style={{ width: 'min(720px, 100% - 48px)', margin: 'auto auto 0', padding: '10px 0 16px', position: 'sticky', bottom: 0, background: 'linear-gradient(to top, var(--bg-canvas) 82%, transparent)' }}>
               {error ? <div style={{ color: t.error, fontSize: 12, marginBottom: 8 }}>{error}</div> : null}
-              {onClearScope ? (
+              {scopeControl ? <div style={{ marginBottom: 7 }}>{scopeControl}</div> : onClearScope ? (
                 <div style={{ width: 'fit-content', maxWidth: '100%', marginBottom: 7, padding: '4px 7px 4px 9px', border: '1px solid var(--border-default)', borderRadius: 999, background: 'var(--bg-2)', color: t.textMuted, fontSize: 10.5, display: 'flex', alignItems: 'center', gap: 5 }}>
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{scopeHint}</span>
                   <button type="button" onClick={onClearScope} aria-label="Clear modeling scope" title="Clear modeling scope" style={{ border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 1 }}><X size={12} /></button>
@@ -1304,8 +1337,8 @@ export function UnifiedAgentRunPanel({
       <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <div style={{ fontSize: 11, color: t.textMuted, flex: 1, minWidth: 180, display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span>{scopeHint}</span>
-            {onClearScope ? <button type="button" onClick={onClearScope} aria-label="Clear modeling scope" title="Clear modeling scope" style={{ border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 2 }}><X size={12} /></button> : null}
+            {scopeControl ?? <span>{scopeHint}</span>}
+            {!scopeControl && onClearScope ? <button type="button" onClick={onClearScope} aria-label="Clear modeling scope" title="Clear modeling scope" style={{ border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 2 }}><X size={12} /></button> : null}
           </div>
           <AskComposerOptions
             t={t}
@@ -2254,6 +2287,7 @@ function RunCard({
           <span>{trustNote}</span>
         </div>
       ) : null}
+      <RunContextNote run={run} t={t} />
 
       {(isLlmPlan || multiStep || run.repairAttempts > 0) ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -2684,6 +2718,13 @@ function lineageEntriesFromRun(run: AgentRun): AskLineageEntry[] {
 }
 
 /** The Ask pipeline's record for a run: on the run itself, or on one of its answer payloads. */
+/** The domain, skills and enforced filters that shaped an answer, in one quiet line. */
+function RunContextNote({ run, t }: { run: Pick<AgentRun, 'diagnosticReceiptV9' | 'artifacts'>; t: Theme }) {
+  const line = runContextLine(runContextSummary(askPipelineReceiptOf(run)));
+  if (!line) return null;
+  return <div data-testid="run-context-note" style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.45 }}>{line}</div>;
+}
+
 export function askPipelineReceiptOf(run: Pick<AgentRun, 'diagnosticReceiptV9' | 'artifacts'>): Record<string, unknown> | undefined {
   if (isAskPipelineReceipt(run.diagnosticReceiptV9)) return run.diagnosticReceiptV9;
   const onPayload = (run.artifacts ?? []).map((artifact) => payloadOf(artifact).askPipeline).find(isAskPipelineReceipt);
@@ -3579,7 +3620,9 @@ function contextRows(context: Record<string, unknown> | undefined): Array<[strin
   const isRecorded = (policy: Record<string, unknown>) => /^recorded\b|\bnot (yet )?applied\b|^skipped\b/i.test(String(policy.effect ?? ''));
   const policies = list(enforced?.policies).filter((policy) => !isRecorded(policy)).map(describePolicy);
   const recorded = list(enforced?.policies).filter(isRecorded).map(describePolicy);
-  const joins = list(used?.joins).map((join) => `${String(join.relationshipId ?? join.source ?? '')} (${String(join.authority ?? '')}${join.scope ? `, ${String(join.scope)}` : ''})`);
+  const joins = list(used?.joins).map((join) => (Array.isArray(join.relations) && join.relations.length === 2
+    ? describeJoin(join)
+    : `${String(join.relationshipId ?? join.source ?? '')} (${String(join.authority ?? '')}${join.scope ? `, ${String(join.scope)}` : ''})`));
   return [
     ['Skills applied', skills.join(', ') || none],
     ['Hints applied', hints.join(', ') || none],
@@ -4915,6 +4958,7 @@ function AskInspector({
                 <span style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5 }}>{trustNote}</span>
               </div>
             ) : null}
+            <RunContextNote run={run} t={t} />
             {evidence.length > 0 ? (
               <div>
                 <div style={{ fontSize: 11, fontWeight: 700, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Evidence</div>

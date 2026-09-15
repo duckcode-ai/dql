@@ -211,6 +211,8 @@ export interface InvestigationRuntime {
   contextSources?: InvestigationContextSource[];
   /** Dimension refs the semantic layer says the metric can be grouped by, when the host has a semantic layer. */
   compatibleDimensionRefs?(metricRef: string): string[] | undefined;
+  /** Relations the headline's relations reach through a validated or certified relationship, without multiplying their rows. */
+  joinableRelations?(relations: string[]): string[];
   /** One small AI call choosing dimensions from a ranked list; the reply is validated against the list, never trusted. */
   selectDimensions?(prompt: string): Promise<string>;
 }

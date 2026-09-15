@@ -73,8 +73,11 @@ whether a raw table or a join is "right", because nobody vouched for it.
   columns because no semantic layer exists is a column.
 - Declared relationships are **hints** for AI-written SQL: a certified one is
   offered as the preferred join, a draft as "declared, not validated", and the
-  answer discloses a relationship it joined on. They never admit, prove or
-  refuse a join in Ask.
+  answer discloses a relationship it joined on. They never admit or prove a
+  join in Ask. **Amended by A-005 (2026-09-15):** a certified relationship's
+  keys bind a statement that joins its two tables — other keys get one repair,
+  then a refusal (`REL-006`) — and every AI-written join is recorded with the
+  relationship it followed, or none.
 - Only security policy stops AI-written SQL (a question that contradicts a
   required filter; a required filter the drafted statement leaves out). Domain
   boundaries choose which tables the drafter sees first; they are not a join

@@ -31,7 +31,7 @@ export interface PipelineReceipt {
   }>;
   candidates: Array<{ tier: string; trust: string; proof: string[]; sqlFingerprint?: string; engine?: string }>;
   /** The checks an AI-written statement was held to before it ran: one entry per check per draft. */
-  checks?: Array<{ id: 'stated_values' | 'required_filters' | 'join_fanout' | 'catalog_columns' | 'read_only'; label: string; passed: boolean; message: string; attempt: number }>;
+  checks?: Array<{ id: 'stated_values' | 'required_filters' | 'join_fanout' | 'certified_joins' | 'catalog_columns' | 'read_only'; label: string; passed: boolean; message: string; attempt: number }>;
   refusals: PreparedRefusal[];
   /** Tier attempts per preparation round, in order. */
   tiers: Array<{ round: number; tier: string; outcome: string; detail?: string }>;
@@ -108,7 +108,14 @@ export interface ContextLedgerV1 {
   rendered?: { byKind: Record<string, number>; charsByKind: Record<string, number>; totalChars: number; truncated: Array<{ kind: string; shown: number; total: number }>; skills: string[]; hints: string[] };
   selected?: { refs: string[]; byKind: Record<string, number>; unrendered: string[] };
   enforced?: { policies: Array<{ policyId: string; field: string; effect: string }>; requiredFilters: string[]; gaps: string[] };
-  used?: { joins: Array<{ source: string; relationshipId?: string; authority: string; scope?: string }>; relations: string[]; tier?: string; engine?: string };
+  /** An unscoped question whose context all came from one domain: the domain Ask offers to scope to. Never applied on its own. */
+  suggestedDomain?: string;
+  /**
+   * What the answer used. A join an AI-written statement made also names its
+   * two relations, its keys and the Modeling relationship it followed
+   * (`authority` certified | validated | draft | stale), or `none`.
+   */
+  used?: { joins: Array<{ source: string; relationshipId?: string; name?: string; authority: string; scope?: string; relations?: string[]; keys?: Array<{ from: string; to: string }> }>; relations: string[]; tier?: string; engine?: string };
 }
 
 /**

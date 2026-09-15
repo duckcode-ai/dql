@@ -205,6 +205,34 @@ Nothing is written until the proposal is committed.
 "Model Area" is presented as "subject area" in the UI; the `model_area`
 identifier and every persisted qualified ID are unchanged (`DOM-003`).
 
+### A-005 — Modeling relationships and scope bind Ask (amends `04`, `05`, `12`; 2026-09-15)
+
+Owner direction: one Modeling place, one vocabulary, and modeling that changes
+what Ask does — without re-opening the A-004 decision that joins over tables
+are the AI's to write.
+
+- **Certified keys bind AI-written joins** (`REL-006`). When a drafted
+  statement joins two tables a certified relationship connects, it must join
+  them on exactly the certified keys; otherwise it gets the one repair every
+  failed check gets and is refused if the repair still differs. Validated and
+  draft relationships stay hints. The governed relational tier stays off.
+- **Every join is recorded.** An AI-written answer's receipt names each join's
+  two relations, its keys and the relationship it followed (certified,
+  validated, draft, stale) or `none`; an undeclared join offers "Save the X → Y
+  join as a relationship", which opens the builder filled in.
+- **Scope is visible, never silent** (`CTX-011`). A saved Ask scope whose
+  domain, subject area or pinned skill no longer exists stops the run with a
+  plain message and "Clear the Ask scope"; it is never answered unscoped under a
+  "Scoped to X" chip. An unscoped question whose context all came from one
+  domain offers "Scope Ask to X" and never narrows on that guess by itself.
+- **Author what Ask enforces** (`SKILL-007`). The skill form edits required
+  filters and the enforced policy fields (date for periods, completeness,
+  ranking period) and warns when a skill has no trigger words or vocabulary,
+  because such a skill is never selected. Calendar, timezone and comparison
+  alignment stay recorded-only and are not offered in the form.
+- **Removed:** the Governed context page, the inner Modeling rail, and the
+  "Validated by Ask" banner — nothing wrote that evidence since A-004.
+
 ## OSS and Cloud boundary
 
 DQL OSS includes the complete accuracy loop for one primary dbt project:

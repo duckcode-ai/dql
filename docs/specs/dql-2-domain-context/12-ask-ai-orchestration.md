@@ -326,7 +326,12 @@ the question string again.
    binds model-scoped names and keeps the compiler's verbatim message.
    Relational composes aggregate islands per fact grain over the semantic
    layer's entity joins and the relationships declared in Domain Studio
-   (deprecated relationships never join). Exploration is an explicit one-run
+   (deprecated relationships never join). Since A-004 the relational tier is
+   off and joins over tables are the AI's to write; since A-005 a certified
+   relationship's keys bind a drafted statement that joins its two tables
+   (check `certified_joins`: one repair, then refusal), and every AI-written
+   join is recorded in `context.used.joins` with its relations, keys and the
+   relationship it followed. Exploration is an explicit one-run
    opt-in and never automatic; a policy denial is terminal. The highest
    trust that prepared is frozen as the executable; an execution proof
    failure (a silently dropped filter, fan-out) falls through to the next

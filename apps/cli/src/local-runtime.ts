@@ -578,6 +578,7 @@ import {
   parseSemanticDimensionSelection,
 } from './semantic-runtime.js';
 import { createAskPipelineHost, type AskSemanticCompileContext } from './ask-pipeline-host/host.js';
+import { modelingRelationshipEdges } from './ask-pipeline-host/join-relationships.js';
 import { createInvestigationExecutor } from './research/investigation-executor.js';
 import type { AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import {
@@ -13559,6 +13560,53 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // ── Ask scope — the domains, subject areas and approved purposes a
+    //    question can be scoped to, for the picker in the question box. ────
+    if (req.method === 'GET' && path === '/api/ask/scopes') {
+      try {
+        const manifest = projectSnapshot().manifest;
+        const modeling = manifest.modeling;
+        const domains = Object.values(modeling?.packages ?? {})
+          .map((pkg) => ({
+            id: pkg.id,
+            label: manifest.domains?.[pkg.id]?.name ?? pkg.id,
+            ...(pkg.parent ? { parent: pkg.parent } : {}),
+            areas: Object.values(modeling?.areas ?? {}).filter((area) => area.domain === pkg.id).map((area) => ({ id: area.qualifiedId, name: area.name })).sort((a, b) => a.name.localeCompare(b.name)),
+            purposes: [...new Set(Object.values(modeling?.interfaces?.imports ?? {}).filter((item) => item.domain === pkg.id && item.purpose).map((item) => item.purpose))].sort(),
+          }))
+          .sort((a, b) => a.label.localeCompare(b.label));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ domains }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── What Ask will do for a domain (and subject area): the skills and
+    //    required filters that apply, the relationships by what Ask may do
+    //    with them, and the imports that need a purpose. ──────────────────
+    if (req.method === 'GET' && path === '/api/modeling/ask-impact') {
+      try {
+        const domain = url.searchParams.get('domain') ?? '';
+        const area = url.searchParams.get('area') ?? '';
+        const manifest = projectSnapshot().manifest;
+        const modeling = manifest.modeling;
+        if (!domain || !modeling?.packages?.[domain]) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `The domain "${domain}" does not exist.` }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(askImpactFor(manifest, loadSkills(projectRoot).skills, domain, area || undefined)));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     // ── Business terms — the words Ask maps to governed definitions. Direct
     //    save like skills: a term carries no join or certification authority,
     //    and Git history is its review. ─────────────────────────────────────
@@ -22859,6 +22907,62 @@ export function parseDomainInput(raw: unknown, fallbackId?: string): DomainInput
     semanticDomains: asStrings(domain.semanticDomains),
     semanticTags: asStrings(domain.semanticTags),
     sourcePath: typeof domain.sourcePath === 'string' ? domain.sourcePath : undefined,
+  };
+}
+
+const COMPLETENESS_TEXT: Record<string, string> = { latest_complete: 'uses the latest complete period', closed_period: 'uses closed periods only', partial_current: 'includes the current period so far' };
+
+/**
+ * What Ask will use and enforce for questions scoped to a domain (and subject
+ * area), from the same skills, relationships and interfaces it reads.
+ */
+export function askImpactFor(manifest: DQLManifest, skills: Array<{ id: string; qualifiedId?: string; description?: string; domain?: string; domains?: string[]; modelAreaRefs?: string[]; status?: string; triggers?: string[]; vocabulary?: Record<string, string>; requiredFilters?: string[]; analyticalPolicy?: { timeRole?: string; completenessPolicy?: string; defaultRankingPeriod?: string } }>, domain: string, area?: string) {
+  const modeling = manifest.modeling;
+  const leaf = (value: string) => value.split('::').pop()!.toLowerCase();
+  const inArea = (refs: string[] | undefined) => !area || !refs?.length || refs.some((ref) => leaf(ref) === leaf(area));
+  const applies = skills.flatMap((skill) => {
+    const owned = skill.domain === domain || Boolean(skill.domains?.includes(domain));
+    const projectWide = !skill.domain && !(skill.domains?.length);
+    if ((!owned && !projectWide) || (owned && !inArea(skill.modelAreaRefs))) return [];
+    const policy = skill.analyticalPolicy ?? {};
+    return [{
+      id: skill.id,
+      ...(skill.description ? { description: skill.description } : {}),
+      scope: owned ? 'domain' as const : 'project' as const,
+      triggers: skill.triggers ?? [],
+      vocabularyCount: Object.keys(skill.vocabulary ?? {}).length,
+      requiredFilters: (skill.requiredFilters ?? []).filter(Boolean),
+      policy: [
+        policy.timeRole ? `periods are measured on ${policy.timeRole}` : '',
+        policy.completenessPolicy ? COMPLETENESS_TEXT[policy.completenessPolicy] ?? policy.completenessPolicy : '',
+        policy.defaultRankingPeriod ? `rankings use the ${policy.defaultRankingPeriod} period` : '',
+      ].filter(Boolean),
+      status: skill.status ?? 'active',
+      findable: (skill.triggers ?? []).length > 0 || Object.keys(skill.vocabulary ?? {}).length > 0,
+    }];
+  }).sort((a, b) => (a.scope === b.scope ? a.id.localeCompare(b.id) : a.scope === 'domain' ? -1 : 1));
+  const areaRecord = area ? modeling?.areas?.[area] ?? Object.values(modeling?.areas ?? {}).find((candidate) => candidate.qualifiedId === area) : undefined;
+  const entityName = (ref: string) => modeling?.entities?.[ref]?.businessName || modeling?.entities?.[ref]?.localId || ref.split('::').pop() || ref;
+  const edges = new Map(modelingRelationshipEdges(manifest).map((edge) => [edge.relationshipId, edge]));
+  const relationships = Object.values(modeling?.relationships ?? {}).flatMap((relationship) => {
+    const edge = edges.get(relationship.qualifiedId ?? relationship.id);
+    if (!edge) return [];
+    const owner = relationship.ownerDomain ?? relationship.qualifiedId.split('::')[0];
+    const touches = owner === domain || modeling?.entities?.[relationship.from]?.domain === domain || modeling?.entities?.[relationship.to]?.domain === domain;
+    if (!touches || (areaRecord && !areaRecord.relationshipIds.includes(relationship.qualifiedId))) return [];
+    return [{ name: relationship.localId, from: entityName(relationship.from), to: entityName(relationship.to), keys: relationship.keys.map((key) => `${key.from} = ${key.to}`).join(' and '), level: edge.level }];
+  });
+  const sameDomain = (value: string | undefined) => Boolean(value) && value!.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_') === domain.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return {
+    domain,
+    ...(area ? { area } : {}),
+    skills: applies,
+    requiredFilters: applies.filter((skill) => skill.status === 'active').flatMap((skill) => skill.requiredFilters.map((text) => ({ text, skill: skill.id }))),
+    relationships,
+    imports: Object.values(modeling?.interfaces?.imports ?? {}).filter((item) => item.domain === domain).map((item) => ({ id: item.qualifiedId ?? item.id, exportRef: item.exportRef, purpose: item.purpose, status: item.status, usable: item.status === 'certified' })),
+    terms: Object.values(manifest.terms ?? {}).filter((term) => sameDomain(term.domain)).length,
+    concepts: Object.values(modeling?.concepts ?? {}).filter((concept) => concept.domain === domain).length,
+    certifiedBlocks: Object.values(manifest.blocks ?? {}).filter((block) => block.status === 'certified' && sameDomain(block.domain)).length,
   };
 }
 

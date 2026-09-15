@@ -561,6 +561,15 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
   const set = useCallback(<K extends keyof Skill>(key: K, value: Skill[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }));
   }, []);
+  // A policy field left empty is removed, so an untouched skill saves no policy at all.
+  const setPolicy = useCallback(<K extends keyof NonNullable<Skill['analyticalPolicy']>>(key: K, value: NonNullable<Skill['analyticalPolicy']>[K] | undefined) => {
+    setDraft((prev) => {
+      const next = { ...(prev.analyticalPolicy ?? {}), [key]: value };
+      if (value === undefined || value === '') delete next[key];
+      return { ...prev, analyticalPolicy: Object.keys(next).length ? next : undefined };
+    });
+  }, []);
+  const findable = (draft.triggers ?? []).length > 0 || Object.keys(draft.vocabulary ?? {}).length > 0;
 
   const onNameChange = (value: string) => {
     setName(value);
@@ -722,6 +731,11 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
             <label style={formLabelCol}>
               <span style={formLabelText(t)}>Apply when the question mentions</span>
               <ChipInput t={t} values={draft.triggers ?? []} onChange={(next) => set('triggers', next)} placeholder="Add phrase, press Enter" />
+              {!findable ? (
+                <span role="note" style={{ fontSize: 10.5, color: 'var(--status-warning)', lineHeight: 1.45 }}>
+                  Ask uses a skill only when a question contains one of its trigger words or vocabulary. Add at least one, or this skill is never used.
+                </span>
+              ) : null}
             </label>
             <label style={formLabelCol}>
               <span style={formLabelText(t)}>Ask first when</span>
@@ -767,6 +781,49 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
               <span style={formLabelText(t)}>Blocks</span>
               <MultiSelect t={t} options={options.blocks} optionKind="blocks" selected={draft.preferredBlocks} onChange={(next) => set('preferredBlocks', next)} placeholder="Search blocks…" emptyOptionsHint="No blocks available from the project yet." />
             </label>
+          </div>
+
+          {/* Rules Ask enforces: applied to every answer the skill is used for, not guidance the AI may skip. */}
+          <div style={{ gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={sectionEyebrow(t)}>Rules Ask enforces</div>
+            <span style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.45 }}>
+              Guidance above is advice the AI reads. These rules are applied to every answer this skill is used for: AI-written SQL that leaves out a required filter is not run.
+            </span>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+              <label style={formLabelCol}>
+                <span style={formLabelText(t)}>Required filters</span>
+                <textarea
+                  value={(draft.requiredFilters ?? []).join('\n')}
+                  onChange={(event) => set('requiredFilters', event.target.value.split('\n'))}
+                  rows={3}
+                  placeholder={"status = 'completed'\nis_test = false"}
+                  style={{ ...textareaStyle(t), fontFamily: t.fontMono, fontSize: 11.5 }}
+                />
+                <span style={{ fontSize: 10.5, color: t.textMuted }}>One per line: a column and the value it must have.</span>
+              </label>
+              <label style={formLabelCol}>
+                <span style={formLabelText(t)}>Date for periods</span>
+                <input type="text" value={draft.analyticalPolicy?.timeRole ?? ''} onChange={(event) => setPolicy('timeRole', event.target.value.trim() || undefined)} placeholder="order_date" style={inputStyle(t)} />
+                <span style={{ fontSize: 10.5, color: t.textMuted }}>The date "last month" and "this year" are measured on.</span>
+              </label>
+              <label style={formLabelCol}>
+                <span style={formLabelText(t)}>Periods</span>
+                <select value={draft.analyticalPolicy?.completenessPolicy ?? ''} onChange={(event) => setPolicy('completenessPolicy', (event.target.value || undefined) as NonNullable<Skill['analyticalPolicy']>['completenessPolicy'])} style={{ ...inputStyle(t), cursor: 'pointer' }}>
+                  <option value="">Not set</option>
+                  <option value="latest_complete">Use the latest complete period</option>
+                  <option value="closed_period">Only closed periods</option>
+                  <option value="partial_current">Include the current period so far</option>
+                </select>
+              </label>
+              <label style={formLabelCol}>
+                <span style={formLabelText(t)}>Rankings use</span>
+                <select value={draft.analyticalPolicy?.defaultRankingPeriod ?? ''} onChange={(event) => setPolicy('defaultRankingPeriod', (event.target.value || undefined) as NonNullable<Skill['analyticalPolicy']>['defaultRankingPeriod'])} style={{ ...inputStyle(t), cursor: 'pointer' }}>
+                  <option value="">Not set</option>
+                  <option value="current">The current period</option>
+                  <option value="comparison">The comparison period</option>
+                </select>
+              </label>
+            </div>
           </div>
 
           {/* Advanced fields the prototype folds away — all wiring preserved. */}

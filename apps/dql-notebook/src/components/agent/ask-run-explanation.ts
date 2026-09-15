@@ -425,18 +425,38 @@ export function explainAskRun(input: ExplainAskRunInput): RunExplanation | undef
   };
 }
 
+/**
+ * One join in plain words. An AI-written join names its tables, keys and the
+ * Modeling relationship it followed ("orders → customers on customer_id =
+ * customer_id (certified relationship orders_to_customers)"); a governed join
+ * keeps the identifier-only form it has always had.
+ */
+export function describeJoin(join: Rec): string {
+  const authority = str(join.authority) ?? '';
+  const named = str(join.name) ?? (str(join.relationshipId) ? plainRefs(str(join.relationshipId)!) : undefined);
+  const relations = arr(join.relations).map(str).filter((name): name is string => Boolean(name)).map((name) => name.replace(/"/g, ''));
+  if (relations.length === 2) {
+    const keys = arr(join.keys).map(rec).filter((key): key is Rec => Boolean(key)).map((key) => `${str(key.from)} = ${str(key.to)}`);
+    const how = authority === 'certified' ? `certified relationship ${named}`
+      : authority === 'validated' ? `validated relationship ${named}`
+        : authority === 'stale' ? `relationship ${named}, certification needs a recheck`
+          : authority === 'draft' ? `draft relationship ${named}`
+            : named ? `written by AI, not on the keys of relationship ${named}` : 'written by AI; no relationship declared';
+    return `${relations.join(' → ')}${keys.length ? ` on ${keys.join(' and ')}` : ''} (${how})`;
+  }
+  // The ledger keeps identifiers only: which relationship, and whose authority joined it.
+  const name = plainRefs(str(join.relationshipId) ?? str(join.source) ?? 'a join');
+  const how = /certified|domain/.test(authority) ? 'certified relationship' : /semantic/.test(`${authority} ${str(join.source)}`) ? 'semantic layer' : 'written by AI';
+  return `${name} (${how})`;
+}
+
 function dataUsedOf(receipt: Rec, payload: Rec): RunDataUsed {
   const context = rec(receipt.context);
   const used = rec(context?.used);
   // Only the tables the answer read. The admitted bindings are every table the
   // question could have read, which is not what this answer used.
   const tables = [...new Set(arr(used?.relations).map(str).filter((name): name is string => Boolean(name)).map((name) => name.replace(/"/g, '')))];
-  // The ledger keeps identifiers only: which relationship, and whose authority joined it.
-  const joins = arr(used?.joins).map(rec).filter((join): join is Rec => Boolean(join)).map((join) => {
-    const name = plainRefs(str(join.relationshipId) ?? str(join.source) ?? 'a join');
-    const authority = /certified|domain/.test(str(join.authority) ?? '') ? 'certified relationship' : /semantic/.test(`${str(join.authority)} ${str(join.source)}`) ? 'semantic layer' : 'written by AI';
-    return `${name} (${authority})`;
-  });
+  const joins = arr(used?.joins).map(rec).filter((join): join is Rec => Boolean(join)).map(describeJoin);
   const dql = rec(payload.dqlArtifact);
   const proofs = [...arr(payload.proof), ...arr(rec(receipt.executed)?.proofs)].map(str).filter((line): line is string => Boolean(line));
   const filters = proofs.filter((line) => /^applied on the data: /.test(line)).map((line) => line.replace(/^applied on the data: /, ''));
