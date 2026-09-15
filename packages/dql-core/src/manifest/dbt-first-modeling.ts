@@ -49,6 +49,10 @@ interface DbtNodeFacts {
   columns: Set<string>;
   /** Column data types from catalog.json, lower-cased, when the catalog is present. */
   columnTypes: Map<string, string>;
+  /** Documented and catalogued column names, lower-cased. */
+  knownColumns: Set<string>;
+  /** catalog.json lists this node's columns, so a column absent from `knownColumns` is really absent. */
+  columnsComplete: boolean;
   identityFingerprint: string;
 }
 
@@ -174,6 +178,8 @@ export function loadDbtFirstModeling(
       const type = stringValue(asRecord(column).type);
       if (type) columnTypes.set(columnName, type.toLowerCase());
     }
+    const catalogColumns = Object.keys(asRecord(catalogNode(rawCatalog, uniqueId).columns));
+    const knownColumns = new Set([...columns, ...catalogColumns.map((column) => column.toLowerCase())]);
     const identityFingerprint = fingerprint({
       uniqueId,
       relation,
@@ -195,6 +201,8 @@ export function loadDbtFirstModeling(
       columns,
       identityFingerprint,
       columnTypes,
+      knownColumns,
+      columnsComplete: catalogColumns.length > 0,
     });
     nodeProvenance[uniqueId] = {
       uniqueId,
@@ -569,11 +577,11 @@ function buildRelationships(
     const toFacts = nodeFacts.get(toEntity.dbtUniqueId);
     let keyColumnsValid = true;
     for (const pair of keys) {
-      if (fromFacts && !fromFacts.columns.has(pair.from.toLowerCase())) {
+      if (columnKnownMissing(fromFacts, pair.from)) {
         keyColumnsValid = false;
         diagnostics.push(modelingError(sourcePath, `relationship "${id}" key "${pair.from}" is not a column of ${fromEntity.dbtUniqueId}`));
       }
-      if (toFacts && !toFacts.columns.has(pair.to.toLowerCase())) {
+      if (columnKnownMissing(toFacts, pair.to)) {
         keyColumnsValid = false;
         diagnostics.push(modelingError(sourcePath, `relationship "${id}" key "${pair.to}" is not a column of ${toEntity.dbtUniqueId}`));
       }
@@ -765,6 +773,16 @@ export function relationshipValidationProofFingerprint(input: {
 }
 
 /** The declared key columns' types on both sides, from the node facts, for a proof fingerprint. */
+/**
+ * A column is known to be missing only when catalog.json lists the model's
+ * columns. dbt docs name the columns someone documented, not all of them, so a
+ * key outside them is unproven rather than wrong; the warehouse check a
+ * certified join needs is what proves it exists.
+ */
+function columnKnownMissing(facts: DbtNodeFacts | undefined, column: string): boolean {
+  return Boolean(facts?.columnsComplete && !facts.knownColumns.has(column.toLowerCase()));
+}
+
 export function relationshipKeyTypes(
   keys: Array<{ from: string; to: string }>,
   fromTypes: Map<string, string> | undefined,
@@ -1035,9 +1053,9 @@ function compileConcepts(
       if (!fromKey || !toKey || !boundKeys.has(fromKey) || !boundKeys.has(toKey)) { diagnostics.push(modelingError(sourcePath, `concept "${localId}" equivalence must join two of its own bindings`)); continue; }
       const keys = arrayOfRecords(rawEquivalence.keys).map((pair) => ({ from: stringValue(pair.from) ?? '', to: stringValue(pair.to) ?? '' })).filter((pair) => pair.from && pair.to);
       if (keys.length === 0) { diagnostics.push(modelingError(sourcePath, `concept "${localId}" equivalence ${fromKey} → ${toKey} declares no keys`)); continue; }
-      const fromColumns = nodeFacts.get(entities[fromKey]!.dbtUniqueId)?.columns;
-      const toColumns = nodeFacts.get(entities[toKey]!.dbtUniqueId)?.columns;
-      const missing = keys.filter((pair) => (fromColumns && !fromColumns.has(pair.from.toLowerCase())) || (toColumns && !toColumns.has(pair.to.toLowerCase())));
+      const fromFacts = nodeFacts.get(entities[fromKey]!.dbtUniqueId);
+      const toFacts = nodeFacts.get(entities[toKey]!.dbtUniqueId);
+      const missing = keys.filter((pair) => columnKnownMissing(fromFacts, pair.from) || columnKnownMissing(toFacts, pair.to));
       if (missing.length) { diagnostics.push(modelingError(sourcePath, `concept "${localId}" equivalence key ${missing.map((pair) => `${pair.from} = ${pair.to}`).join(', ')} is not a column of both entities`)); continue; }
       const cardinality = stringValue(rawEquivalence.cardinality) ?? 'one_to_one';
       if (cardinality !== 'one_to_one') { diagnostics.push(modelingError(sourcePath, `concept "${localId}" equivalence must be one_to_one (got ${cardinality})`)); continue; }

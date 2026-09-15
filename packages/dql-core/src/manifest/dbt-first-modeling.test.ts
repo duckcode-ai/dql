@@ -203,6 +203,24 @@ relationships:
     expect(manifest.diagnostics?.some((diagnostic) => diagnostic.message.includes('validation proof'))).toBe(true);
   });
 
+  it('reads a relationship key dbt does not document as unproven, not missing, unless the catalog lists the columns', () => {
+    const notAColumn = (manifest: ReturnType<typeof buildManifest>) => (manifest.diagnostics ?? []).filter((diagnostic) => diagnostic.message.includes('is not a column of'));
+    // NBA: dim_teams_cleansed documents no columns and there is no catalog.json, yet its team_id key is real.
+    const dbtManifest = JSON.parse(readFileSync(dbtManifestPath, 'utf8'));
+    delete dbtManifest.nodes['model.commerce.dim_customers'].columns;
+    writeFileSync(dbtManifestPath, JSON.stringify(dbtManifest));
+    rmSync(join(projectRoot, 'target', 'catalog.json'));
+    expect(notAColumn(buildManifest({ projectRoot, dbtManifestPath }))).toEqual([]);
+
+    // With the catalog, a key neither documented nor catalogued is missing, and withdraws the automatic join.
+    writeFileSync(join(projectRoot, 'target', 'catalog.json'), JSON.stringify({ nodes: { 'model.commerce.dim_customers': { columns: { customer_id: { type: 'integer' } } } }, sources: {} }));
+    const relationshipPath = join(projectRoot, 'domains', 'commerce', 'modeling', 'relationships.dql.yaml');
+    writeFileSync(relationshipPath, readFileSync(relationshipPath, 'utf8').replace('keys: [{ from: customer_id, to: customer_id }]', 'keys: [{ from: customer_id, to: customer_key }]'));
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+    expect(notAColumn(manifest).map((diagnostic) => diagnostic.message)).toEqual(['relationship "order_to_customer" key "customer_key" is not a column of model.commerce.dim_customers']);
+    expect(manifest.modeling?.relationships['commerce::relationship::order_to_customer'].automaticJoinAllowed).toBe(false);
+  });
+
   it('does not compile a cross-domain automatic join without a compatible certified export contract', () => {
     const interfacePath = join(projectRoot, 'domains', 'commerce', 'modeling', 'interfaces.dql.yaml');
     writeFileSync(interfacePath, readFileSync(interfacePath, 'utf8').replace('    contract: customer_identity_contract\n', ''));
