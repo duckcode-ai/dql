@@ -323,21 +323,44 @@ export interface DbtFirstModelingResponse {
   dbtProvenance: ManifestDbtProvenance;
   modeling: ManifestDbtFirstModeling;
   domainAssets?: Record<string, Record<string, string[]>>;
-  /** Warehouse proofs Ask gathered (REL-005), keyed by relationship id or `<from>__<to>`; evidence to certify from, never a certification. */
-  askEvidence?: Record<string, AskRelationshipEvidence>;
   lineage: ManifestLineage;
   diagnostics: ManifestDiagnostic[];
   snapshot?: { id: string; stale: boolean; error?: string };
 }
 
-export interface AskRelationshipEvidence {
-  fromRelation: string;
-  toRelation: string;
-  relationshipId?: string;
-  keys: Array<{ from: string; to: string }>;
+/** A business term as the manifest compiles it (`term "Name" { … }`). */
+export interface BusinessTerm {
+  name: string;
+  filePath: string;
+  domain?: string;
+  owner?: string;
+  status?: string;
+  termType?: string;
+  tags?: string[];
+  description?: string;
+  identifiers?: string[];
+  synonyms?: string[];
+  metricRefs?: string[];
+  businessOutcome?: string;
+  businessOwner?: string;
+  decisionUse?: string;
+  reviewCadence?: string;
+  businessRules?: string[];
+  caveats?: string[];
+}
+
+export type BusinessTermInput = Omit<BusinessTerm, 'filePath'>;
+
+/** A warehouse profile of a join before its cardinality is chosen. */
+export interface RelationshipProfileResponse {
+  proposed: { cardinality: ManifestModelRelationship['cardinality']; fanout: ManifestModelRelationship['fanout'] };
   evidence: NonNullable<ManifestModelRelationship['validation']>;
-  freshness: { checkedAt?: string; expiresAt?: string; target?: string; generationToken?: string };
-  path: string;
+}
+
+export interface RelationshipKeySuggestion {
+  keys: Array<{ from: string; to: string }>;
+  source: 'dbt_test' | 'same_name' | 'named_for_table';
+  reason: string;
 }
 
 export interface DbtModelInventoryItem {
@@ -4202,6 +4225,16 @@ export const api = {
     return result.proposal;
   },
 
+  /** Check a join in the warehouse and propose its cardinality. → POST /api/modeling/dbt-first/relationships/profile */
+  async profileModelingRelationship(relationship: { from: string; to: string; keys: Array<{ from: string; to: string }> }, expectedSnapshotId: string): Promise<RelationshipProfileResponse> {
+    return request<RelationshipProfileResponse>('/api/modeling/dbt-first/relationships/profile', { method: 'POST', body: JSON.stringify({ relationship, expectedSnapshotId }) });
+  },
+
+  /** Join keys worth trying between two models. → GET /api/modeling/dbt-first/relationships/suggestions */
+  async getRelationshipKeySuggestions(from: string, to: string): Promise<{ suggestions: RelationshipKeySuggestion[] }> {
+    return request<{ suggestions: RelationshipKeySuggestion[] }>(`/api/modeling/dbt-first/relationships/suggestions?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+  },
+
   async repreviewContextProposal(id: string, selectedOperationIds: string[], options?: { rebase?: boolean }): Promise<ContextAuthoringProposalV1> {
     const result = await request<{ proposal: ContextAuthoringProposalV1 }>(`/api/context-proposals/${encodeURIComponent(id)}/repreview`, { method: 'POST', body: JSON.stringify({ selectedOperationIds, rebase: options?.rebase === true }) });
     return result.proposal;
@@ -7755,6 +7788,26 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ domain }),
     });
+  },
+
+  /** Business terms Ask maps words through. → GET /api/terms */
+  async getTerms(): Promise<{ terms: BusinessTerm[] }> {
+    return request<{ terms: BusinessTerm[] }>('/api/terms');
+  },
+
+  /** Create a term file. → POST /api/terms  body { term } */
+  async createTerm(term: BusinessTermInput): Promise<{ term: BusinessTerm }> {
+    return request<{ term: BusinessTerm }>('/api/terms', { method: 'POST', body: JSON.stringify({ term }) });
+  },
+
+  /** Rewrite the term declared in `filePath`. → PUT /api/terms  body { term, filePath } */
+  async updateTerm(filePath: string, term: BusinessTermInput): Promise<{ term: BusinessTerm }> {
+    return request<{ term: BusinessTerm }>('/api/terms', { method: 'PUT', body: JSON.stringify({ term, filePath }) });
+  },
+
+  /** Delete a term's file. → DELETE /api/terms?filePath= */
+  async deleteTerm(filePath: string): Promise<{ ok: true }> {
+    return request<{ ok: true }>(`/api/terms?filePath=${encodeURIComponent(filePath)}`, { method: 'DELETE' });
   },
 
   /** Delete a domain. → DELETE /api/domains/:id */

@@ -35,7 +35,6 @@ const ReadinessPage = lazy(() => import('../readiness/ReadinessPage').then((modu
 const AgentLogPage = lazy(() => import('../agent/AgentLogPage').then((module) => ({ default: module.AgentLogPage })));
 const AskTracePage = lazy(() => import('../agent/AskTracePage').then((module) => ({ default: module.AskTracePage })));
 const AskObservabilityPage = lazy(() => import('../agent/AskObservabilityPage').then((module) => ({ default: module.AskObservabilityPage })));
-const GovernedContextPage = lazy(() => import('../domains/GovernedContextPage').then((module) => ({ default: module.GovernedContextPage })));
 const DbtFirstModelingPage = lazy(() => import('../modeling/DbtFirstModelingPage').then((module) => ({ default: module.DbtFirstModelingPage })));
 const AppsView = lazy(() => import('../apps/AppsView').then((module) => ({ default: module.AppsView })));
 const LineageDrawer = lazy(() => import('../lineage/LineageDrawer').then((module) => ({ default: module.LineageDrawer })));
@@ -311,9 +310,10 @@ export function AppShell() {
             ) : state.mainView === 'readiness' ? (
               <ReadinessPage />
             ) : state.mainView === 'skills' ? (
-              <GovernedContextPage initialTab="skills" />
+              // Skills live on the Modeling page: one place for the context Ask reads.
+              <DbtFirstModelingPage key="modeling-skills" initialSection="skills" />
             ) : state.mainView === 'domains' || state.mainView === 'modeling' ? (
-              <DbtFirstModelingPage />
+              <DbtFirstModelingPage key="modeling" />
             ) : state.mainView === 'apps' ? (
               <AppsView />
             ) : state.mainView === 'agent_log' ? (

@@ -151,7 +151,7 @@ export function ContextProposalReviewDrawer({
           {rebaseAvailable ? <button type="button" onClick={() => void rebase()} disabled={Boolean(busy)} style={secondaryButton(theme)}><RefreshCw size={13} /> Rebase proposal</button> : null}
           <button type="button" onClick={onClose} disabled={Boolean(busy)} style={secondaryButton(theme)}>Cancel</button>
           <button type="button" onClick={() => void commit()} disabled={Boolean(busy) || selected.length === 0 || blocking.length > 0} style={{ ...primaryButton(theme), opacity: busy || selected.length === 0 || blocking.length ? .55 : 1 }}>
-            {busy ? <Loader2 size={13} /> : <ShieldCheck size={13} />} {busy === 'preview' ? 'Repreviewing…' : busy === 'commit' ? 'Saving…' : 'Save as draft'}
+            {busy ? <Loader2 size={13} /> : <ShieldCheck size={13} />} {busy === 'preview' ? 'Repreviewing…' : busy === 'commit' ? 'Saving…' : 'Save'}
           </button>
         </footer>
       </aside>
@@ -179,8 +179,15 @@ function describeOperation(operation: ContextAuthoringProposalV1['operations'][n
     case 'upsert_entity':
       return `Bind ${change.value.dbtModel.split('.').at(-1)} as ${change.value.businessName || change.value.id} in ${scope(change.value.domain, change.value.areaId)}`;
     case 'upsert_relationship': {
-      const keys = change.value.keys.map((key) => `${key.from} = ${key.to}`).join(', ');
-      return `Connect ${change.value.from} to ${change.value.to} on ${keys} (${change.value.cardinality}, draft)`;
+      const keys = change.value.keys.map((key) => `${key.from} = ${key.to}`).join(' and ');
+      const name = (ref: string) => ref.split('::').pop() ?? ref;
+      // The level the relationship is saved at, as the Modeling page names it.
+      const level = change.value.status === 'certified'
+        ? 'certified'
+        : change.value.status === 'deprecated'
+          ? 'retired'
+          : change.value.status !== 'draft' && change.value.validation?.status === 'passed' ? 'validated' : 'draft';
+      return `Connect ${name(change.value.from)} to ${name(change.value.to)} on ${keys} (${change.value.cardinality.replace(/_/g, ' ')}, saved as ${level})`;
     }
     case 'remove_entity': return `Remove model ${change.value.id}`;
     case 'remove_relationship': return `Remove relationship ${change.value.id}`;

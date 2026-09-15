@@ -161,6 +161,13 @@ export function SkillsPage({
       .filter((skill) => skillMatchesSourcePaths(skill, sourcePathFilter))
       .sort((a, b) => a.id.localeCompare(b.id));
   }, [skills, domainFilter, modelAreaFilter, sourcePathFilter]);
+  // A skill with no domain applies to every question, so a domain view lists
+  // it too: the page shows everything Ask may use here, not only what lives here.
+  const projectWide = useMemo(() => (
+    domainFilter
+      ? skills.filter((skill) => !skill.domain && !(skill.domains?.length)).sort((a, b) => a.id.localeCompare(b.id))
+      : []
+  ), [skills, domainFilter]);
 
   const handleSaved = useCallback((saved: Skill) => {
     setSkills((prev) => {
@@ -234,7 +241,7 @@ export function SkillsPage({
                   color: t.textPrimary,
                 }}
               >
-                {modelAreaFilter ? `${modelAreaFilter.split('::').at(-1)?.replace(/_/g, ' ')} skills` : domainFilter ? `${domainFilter} skills` : sourcePathFilter ? 'Authored domain skills' : 'Skills'}
+                {modelAreaFilter ? `${modelAreaFilter.split('::').at(-1)?.replace(/_/g, ' ')} skills` : domainFilter ? `${domainFilter} skills` : 'All skills'}
               </div>
             </div>
             <div
@@ -246,7 +253,7 @@ export function SkillsPage({
                 lineHeight: 1.5,
               }}
             >
-              Definitions, vocabulary, and instructions the AI follows when answering{modelAreaFilter ? ' in this model area' : domainFilter ? ' in this domain' : sourcePathFilter ? ' from authored domains' : ''}. Applied only when their triggers match — drafts never guide answers.
+              Definitions, vocabulary, and instructions the AI follows when answering{modelAreaFilter ? ' in this subject area' : domainFilter ? ' in this domain' : ''}. Ask uses a skill only when the question contains one of its trigger words or vocabulary — drafts never guide answers.
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 7, color: t.textMuted, fontSize: 10.5, minWidth: 0 }}>
               <FolderOpen size={12} strokeWidth={1.8} />
@@ -321,10 +328,15 @@ export function SkillsPage({
           </div>
         ) : loadError ? (
           <ErrorPanel t={t} message={loadError} onRetry={() => load()} />
-        ) : sorted.length === 0 ? (
+        ) : sorted.length === 0 && projectWide.length === 0 ? (
           <EmptyState t={t} onAdd={() => setForm({ kind: 'create' })} />
         ) : (
           <div style={{ display: 'grid', gap: 10 }}>
+            {sorted.length === 0 ? (
+              <div style={{ fontSize: 12, color: t.textMuted, border: `1px dashed ${t.btnBorder}`, borderRadius: 9, padding: 14 }}>
+                No skills belong to {domainFilter} yet. Add one with the words people use when they ask about it.
+              </div>
+            ) : null}
             {sorted.map((skill) => (
               <SkillRow
                 key={skill.qualifiedId ?? skill.id}
@@ -337,6 +349,25 @@ export function SkillsPage({
                 }}
               />
             ))}
+            {projectWide.length ? (
+              <>
+                <div style={{ marginTop: 12, fontSize: 12, fontWeight: 750, color: t.textPrimary }}>
+                  Project-wide skills <span style={{ color: t.textMuted, fontWeight: 600 }}>· {projectWide.length} · apply to every domain</span>
+                </div>
+                {projectWide.map((skill) => (
+                  <SkillRow
+                    key={skill.qualifiedId ?? skill.id}
+                    skill={skill}
+                    t={t}
+                    onEdit={() => setForm({ kind: 'edit', skill })}
+                    onDelete={() => {
+                      setDeleteError(null);
+                      setPendingDelete(skill);
+                    }}
+                  />
+                ))}
+              </>
+            ) : null}
           </div>
         )}
       </div>
@@ -483,7 +514,7 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
           <SkillPillGroup t={t} label="Reuse these blocks" values={skill.preferredBlocks} empty="No preferred blocks" accent mono />
           <SkillPillGroup t={t} label="Ask first when" values={skill.clarifyWhen} empty="No clarification rule defined" />
           {skill.exclusions?.length ? <SkillPillGroup t={t} label="Avoid when" values={skill.exclusions} empty="" /> : null}
-          {skill.modelAreaRefs?.length ? <SkillPillGroup t={t} label="Focus on model areas" values={skill.modelAreaRefs} empty="" mono /> : null}
+          {skill.modelAreaRefs?.length ? <SkillPillGroup t={t} label="Subject areas" values={skill.modelAreaRefs} empty="" mono /> : null}
           {skill.sourceRefs?.length ? <SkillPillGroup t={t} label="Guided modeling objects" values={skill.sourceRefs} empty="" mono /> : null}
           {skill.body ? (
             <div style={{ gridColumn: '1 / -1' }}>
@@ -659,7 +690,7 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
                 </select>
               </label>
             </div>
-            <button type="button" onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })} style={{ border: 'none', background: 'none', padding: 0, fontSize: 10.5, color: t.accent, cursor: 'pointer', fontFamily: t.font, alignSelf: 'flex-start' }} title="Create a new domain in the Modeling workspace">
+            <button type="button" onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })} style={{ border: 'none', background: 'none', padding: 0, fontSize: 10.5, color: t.accent, cursor: 'pointer', fontFamily: t.font, alignSelf: 'flex-start' }} title="Create a new domain on the Modeling page">
               + New domain
             </button>
             <div>
@@ -742,7 +773,7 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
           <details style={{ gridColumn: '1 / -1' }}>
             <summary style={{ fontSize: 11.5, fontWeight: 650, color: t.accent, cursor: 'pointer' }}>Advanced — subject areas, dimensions, and vocabulary</summary>
             <div style={{ display: 'grid', gap: 14, marginTop: 12 }}>
-              <Field label="Focused subject areas (optional)" t={t} hint="Comma-separated subject-area ids from the Modeling workspace. This boosts the skill only inside its selected domain; it never expands access.">
+              <Field label="Focused subject areas (optional)" t={t} hint="Comma-separated subject-area ids from the Modeling page. Inside its domain, the skill is used only for these subject areas; it never expands access.">
                 <CommaListInput values={draft.modelAreaRefs ?? []} onChange={(next) => set('modelAreaRefs', next)} placeholder="customer_lifecycle, revenue_reporting" style={inputStyle(t)} />
               </Field>
               <Field label="Preferred dimensions" t={t} hint="Business-safe dimensions the agent should prefer when they are compatible.">

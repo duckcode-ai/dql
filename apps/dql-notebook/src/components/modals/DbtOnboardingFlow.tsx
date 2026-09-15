@@ -405,7 +405,7 @@ export function DbtOnboardingFlow({
               <ArtifactRow label="semantic_manifest.json" value={artifactLabel(preview.artifacts.semanticManifest)} t={t} />
               <ArtifactRow label="profiles directory" value={preview.profilesDir || 'Optional · not detected'} t={t} />
             </div>
-            <Notice t={t} title="What changes" body="DQL writes project configuration and a rebuildable snapshot. dbt SQL/YAML and MetricFlow formulas remain the source of truth and are never copied into Domain Packages." />
+            <Notice t={t} title="What changes" body="DQL writes project configuration and a rebuildable snapshot. dbt SQL/YAML and MetricFlow formulas remain the source of truth and are never copied into domain folders." />
             {preview.warnings?.map((warning) => <Notice key={warning} t={t} title="Repository note" body={warning} />)}
           </Section>
         )}
@@ -432,7 +432,7 @@ export function DbtOnboardingFlow({
             </label>
             {discovery?.warnings?.map((warning) => <Notice key={warning} t={t} title="Discovery note" body={warning} />)}
             {discovery && discovery.proposals.length === 0 && (
-              <Notice t={t} title="No confident domains found" body="Continue to create domains manually in Domain Studio. Ask remains available in limited-context, review-required mode." />
+              <Notice t={t} title="No confident domains found" body="Continue to create domains on the Modeling page. Ask remains available in limited-context, review-required mode." />
             )}
             {discovery?.proposals.map((proposal) => {
               const selected = selectedProposals.has(proposal.id);
@@ -466,7 +466,7 @@ export function DbtOnboardingFlow({
             })}
             {(domainApply?.preview?.length ?? 0) > 0 && (
               <div style={{ border: `1px solid ${t.accent}55`, background: `${t.accent}09`, borderRadius: 9, padding: 12 }}>
-                <div style={{ color: t.textPrimary, font: `600 12px ${t.font}` }}>Review Domain Package source changes</div>
+                <div style={{ color: t.textPrimary, font: `600 12px ${t.font}` }}>Review domain source changes</div>
                 <div style={{ marginTop: 4, color: t.textMuted, font: `11px/1.45 ${t.font}` }}>Only sparse DQL domain declarations and bindings will be written. Confirm after reviewing these target files.</div>
                 <div style={{ display: 'grid', gap: 6, marginTop: 9 }}>
                   {domainApply?.preview?.map((change) => <div key={`${change.operation}:${change.path}`} style={{ display: 'grid', gridTemplateColumns: '60px 1fr', gap: 8, color: t.textSecondary, font: `11px ${t.font}` }}><strong>{change.operation}</strong><code style={{ color: t.textPrimary }}>{change.path}</code>{change.summary && <span style={{ gridColumn: '2', color: t.textMuted }}>{change.summary}</span>}</div>)}
@@ -477,7 +477,7 @@ export function DbtOnboardingFlow({
         )}
 
         {stage === 'domain-model' && (
-          <Section title="4. Build the Domain Model" description="The unified canvas adds analytical meaning over dbt provenance. Start small: bind high-value entities and prove only the joins agents may use." t={t}>
+          <Section title="4. Build the model" description="The unified canvas adds analytical meaning over dbt provenance. Start small: bind high-value entities and prove only the joins agents may use." t={t}>
             {appliedNames.length > 0 && <Notice t={t} title={`${appliedNames.length} draft domain${appliedNames.length === 1 ? '' : 's'} created`} body={appliedNames.join(' · ')} />}
             {setupSkipped && <Notice t={t} title="Domain setup skipped" body="You can continue, but Ask is limited-context and all generated output requires review until governed paths exist." />}
             <Checklist t={t} items={[
@@ -486,7 +486,7 @@ export function DbtOnboardingFlow({
               ['Prove relationships', 'Cardinality, fanout, key mapping, evidence, and lifecycle control agent joins.'],
               ['Export cross-domain paths', 'Provider exports and consumer imports are required in addition to relationship proof.'],
             ]} />
-            <button onClick={() => completeAndOpen('modeling')} style={secondaryButton(t)}>Open Domain Model now</button>
+            <button onClick={() => completeAndOpen('modeling')} style={secondaryButton(t)}>Open Modeling now</button>
           </Section>
         )}
 
@@ -507,7 +507,7 @@ export function DbtOnboardingFlow({
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
               <StartCard title="Ask AI" body={setupSkipped ? 'Limited-context and review-required until domains are governed.' : 'Use the governed cascade; unsafe paths clarify or refuse.'} action="Open Ask" onClick={() => completeAndOpen('ask')} t={t} />
               <StartCard title="Build a Block" body="Turn reviewed analysis into a reusable domain asset and evaluate it." action="New Block" onClick={() => completeAndOpen('block')} t={t} />
-              <StartCard title="Domain Studio" body="Continue bindings, relationships, knowledge, readiness, and dbt scope." action="Open Studio" onClick={() => completeAndOpen('modeling')} t={t} />
+              <StartCard title="Modeling" body="Continue models, relationships, terms, and skills." action="Open Modeling" onClick={() => completeAndOpen('modeling')} t={t} />
             </div>
           </Section>
         )}

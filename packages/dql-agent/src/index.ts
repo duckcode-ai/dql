@@ -2000,5 +2000,6 @@ export * from './research/investigation/index.js';
 export { generateStructured, extractFirstJsonObject, type StructuredReply } from './providers/structured-output.js';
 
 export * from './relationship-validation.js';
+export * from './relationship-suggestions.js';
 export * from './concept-draft.js';
 export { renderPhysicalIdentifier, renderPhysicalRelation } from './governed-relational-compiler.js';

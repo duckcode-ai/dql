@@ -10981,6 +10981,23 @@ describe('domains API (spec 17, part B)', () => {
     expect(parseDomainInput({ id: 'Finance' })?.name).toBe('Finance');
   });
 
+  it('parses a term body and places a new term in its domain package terms folder', async () => {
+    const { parseTermInput, termDirectoryFor } = await import('./local-runtime.js');
+    const { writeDomainDeclaration } = await import('@duckcodeailabs/dql-core');
+    expect(parseTermInput({})).toBeNull();
+    expect(parseTermInput({ name: '   ' })).toBeNull();
+    expect(parseTermInput({ name: ' Revenue ', synonyms: ['sales', ' ', 'sales'], status: 'bogus', metricRefs: ['order_total'] })).toMatchObject({
+      name: 'Revenue', synonyms: ['sales'], status: undefined, metricRefs: ['order_total'],
+    });
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-terms-api-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    writeDomainDeclaration(projectRoot, { name: 'Sales', id: 'sales' });
+    expect(termDirectoryFor(projectRoot, 'sales')).toBe('domains/sales/terms');
+    expect(termDirectoryFor(projectRoot, undefined)).toBe('terms');
+    expect(termDirectoryFor(projectRoot, 'unknown_domain')).toBe('domains/unknown-domain/terms');
+  });
+
   it('keeps domain declarations out of the Blocks library and saves bootstrap choices explicitly', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-bootstrap-'));
     tempDirs.push(projectRoot);

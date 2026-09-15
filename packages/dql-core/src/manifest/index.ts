@@ -65,6 +65,15 @@ export {
   type WrittenDomain,
 } from './domain-writer.js';
 export {
+  writeTermDeclaration,
+  deleteTermDeclaration,
+  renderTermDeclaration,
+  countTermDeclarations,
+  termFileSlug,
+  type TermInput,
+  type WrittenTerm,
+} from './term-writer.js';
+export {
   loadDomainPackageRegistry,
   type DomainPackageRecord,
   type DomainPackageRegistryResult,

@@ -2,19 +2,21 @@ import { modelAreaLocalId } from '@duckcodeailabs/dql-core/modeling-ids';
 import type { ManifestDbtFirstModeling, ManifestModelArea, ManifestModelEntity, ModelingAuthoringChange } from '@duckcodeailabs/dql-core';
 
 /**
- * The five task destinations from `05-domain-studio-ui.md`.
+ * The Modeling page's tabs (`05-domain-studio-ui.md`).
  *
- * Terms, business views, join proofs, contracts, interfaces, evaluations, dbt
- * scope, and Knowledge 360 are deliberately not destinations: their compiled
- * evidence stays available to retrieval, validation, and the Modeling
- * inspectors. Historical deep links to them normalize to `diagram`.
+ * One page, one domain and subject area picker, and a tab for each thing Ask
+ * reads: the map of models and relationships, the business words, the skills,
+ * and the blocks. Notebooks and Apps are not modeling — they only *use* a
+ * domain — so they share one "Used by" tab. Join proofs, contracts,
+ * interfaces, evaluations, dbt scope and Knowledge 360 are deliberately not
+ * tabs: their evidence stays in retrieval, validation and the inspectors.
  */
 export type DomainStudioSection =
   | 'diagram'
+  | 'terms'
   | 'skills'
   | 'blocks'
-  | 'notebooks'
-  | 'apps';
+  | 'used_by';
 
 export type DomainStudioNavigationItem = {
   id: DomainStudioSection;
@@ -30,20 +32,30 @@ export const DOMAIN_STUDIO_NAVIGATION: DomainStudioNavigationGroup[] = [
   {
     items: [
       // Modeling AI is not a destination. It is an action on the canvas, so it
-      // lives in the Modeling toolbar and docks beside the diagram it edits.
-      { id: 'diagram', label: 'Modeling' },
+      // lives in the Map toolbar and docks beside the diagram it edits.
+      { id: 'diagram', label: 'Map' },
+      { id: 'terms', label: 'Terms & concepts' },
       { id: 'skills', label: 'Skills' },
       { id: 'blocks', label: 'Blocks' },
-      { id: 'notebooks', label: 'Notebooks' },
-      { id: 'apps', label: 'Apps' },
+      { id: 'used_by', label: 'Used by' },
     ],
   },
 ];
 
 const NAVIGATION_IDS = new Set(DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items.map((item) => item.id)));
 
+/** Tabs that were merged: old links still land on the tab that replaced them. */
+const RENAMED_SECTIONS: Record<string, DomainStudioSection> = { notebooks: 'used_by', apps: 'used_by' };
+
 export function isDomainStudioSection(value: string | null): value is DomainStudioSection {
   return value !== null && NAVIGATION_IDS.has(value as DomainStudioSection);
+}
+
+/** A section from a URL or the mirror: current ids pass, merged ids map, anything else is the map. */
+export function normalizeDomainStudioSection(value: string | null | undefined): DomainStudioSection {
+  if (typeof value !== 'string') return 'diagram';
+  if (isDomainStudioSection(value)) return value;
+  return RENAMED_SECTIONS[value] ?? 'diagram';
 }
 
 export type EntityRecord = {
@@ -108,7 +120,7 @@ export function resolveDomainStudioLocation(href: string, mirrored?: string | nu
   const params = new URL(href).searchParams;
   if (DOMAIN_STUDIO_LOCATION_PARAMS.some((key) => params.has(key))) {
     const requestedSection = params.get('domainSection');
-    const section = isDomainStudioSection(requestedSection) ? requestedSection : 'diagram';
+    const section = normalizeDomainStudioSection(requestedSection);
     return {
       domain: params.get('domain'),
       section,
@@ -126,7 +138,7 @@ export function parseDomainStudioLocation(raw?: string | null): DomainStudioLoca
   if (!raw) return empty;
   try {
     const value = JSON.parse(raw) as Partial<Record<keyof DomainStudioLocation, unknown>>;
-    const section = typeof value.section === 'string' && isDomainStudioSection(value.section) ? value.section : 'diagram';
+    const section = normalizeDomainStudioSection(typeof value.section === 'string' ? value.section : null);
     const text = (input: unknown): string | null => (typeof input === 'string' && input.trim() ? input : null);
     return { domain: text(value.domain), section, modelAreaId: text(value.modelAreaId), selectedId: text(value.selectedId) };
   } catch {

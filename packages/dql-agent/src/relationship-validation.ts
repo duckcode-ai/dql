@@ -100,6 +100,48 @@ export function relationshipEvidenceFromRow(row: Record<string, unknown>, spec: 
   };
 }
 
+/**
+ * The cardinality the warehouse shows, and the fanout that follows from it.
+ *
+ * Asking a person to choose `many_to_one` and `safe` before the data has been
+ * looked at meant the defaults (`unknown`) failed every validation. The same
+ * statement already measures how many rows share a key on each side, so the
+ * builder proposes the answer and the person confirms it.
+ */
+export function proposeRelationshipCardinality(measure: { fromRows: number; toRows: number; maxFromPerKey: number; maxToPerKey: number }): { cardinality: ManifestRelationshipCardinality; fanout: ManifestFanoutPolicy } {
+  if (measure.fromRows <= 0 || measure.toRows <= 0) return { cardinality: 'unknown', fanout: 'unknown' };
+  if (measure.maxFromPerKey <= 1 && measure.maxToPerKey <= 1) return { cardinality: 'one_to_one', fanout: 'safe' };
+  if (measure.maxToPerKey <= 1) return { cardinality: 'many_to_one', fanout: 'safe' };
+  if (measure.maxFromPerKey <= 1) return { cardinality: 'one_to_many', fanout: 'safe' };
+  // Keys repeat on both sides: joining multiplies rows, so it is never safe.
+  return { cardinality: 'many_to_many', fanout: 'forbidden' };
+}
+
+export interface RelationshipProfile {
+  proposed: { cardinality: ManifestRelationshipCardinality; fanout: ManifestFanoutPolicy };
+  /** Evidence written against the proposed cardinality and fanout, so saving the proposal saves a matching proof. */
+  evidence: ManifestRelationshipValidationEvidence;
+}
+
+/**
+ * Profile a join before its cardinality is known: one statement, the proposed
+ * cardinality, and evidence for that proposal (passed when it is joinable).
+ */
+export async function profileRelationshipOnWarehouse(
+  spec: Omit<RelationshipValidationSpec, 'cardinality' | 'fanout'>,
+  execute: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }>,
+  quote: (identifier: string) => string,
+  checkedAt = new Date(),
+): Promise<RelationshipProfile> {
+  // The statement reads only relations and keys, so it is identical for any declared cardinality.
+  const sql = relationshipValidationSql({ ...spec, cardinality: 'unknown', fanout: 'unknown' }, quote);
+  const row = (await execute(sql)).rows[0] ?? {};
+  const measured = relationshipEvidenceFromRow(row, { ...spec, cardinality: 'unknown', fanout: 'unknown' }, sql, checkedAt);
+  const proposed = proposeRelationshipCardinality(measured);
+  const evidence = relationshipEvidenceFromRow(row, { ...spec, ...proposed }, sql, checkedAt);
+  return { proposed, evidence };
+}
+
 /** Run the one statement and read the one evidence. */
 export async function validateRelationshipOnWarehouse(
   spec: RelationshipValidationSpec,

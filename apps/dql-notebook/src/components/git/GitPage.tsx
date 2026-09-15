@@ -1109,7 +1109,7 @@ function GovernedContextSummary({ t, context, onEnableTracking }: { t: Theme; co
   const needsRepair = !context.trackingReady;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: needsRepair ? `${t.warning}10` : `${t.success}0d`, border: `1px solid ${needsRepair ? `${t.warning}45` : `${t.success}35`}`, borderRadius: 6, flexWrap: 'wrap' }}>
-      <span style={{ fontSize: 10, fontWeight: 750, letterSpacing: '0.05em', textTransform: 'uppercase', color: needsRepair ? t.warning : t.success }}>Governed context</span>
+      <span style={{ fontSize: 10, fontWeight: 750, letterSpacing: '0.05em', textTransform: 'uppercase', color: needsRepair ? t.warning : t.success }}>Modeling &amp; skills</span>
       <span style={{ fontSize: 11, color: t.textPrimary }}>{groupSummary('Domains', context.domains)}</span>
       <span style={{ color: t.textMuted }}>·</span>
       <span style={{ fontSize: 11, color: t.textPrimary }}>{groupSummary('Skills', context.skills)}</span>
@@ -1178,7 +1178,7 @@ function artifactGroupForPath(path: string): ArtifactGroup {
     || /^domains\//i.test(path)
     || /^\.dql\/(hints|traces|evaluations|reviews)\//i.test(path)
   ) {
-    return { id: 'business', label: 'Governed context', tone: 'good', rank: 0 };
+    return { id: 'business', label: 'Modeling & skills', tone: 'good', rank: 0 };
   }
   if (/\.dql$/i.test(path) || path.startsWith('semantic-layer/') || /\.(ya?ml)$/i.test(path) || path === 'dql.config.json' || path === 'package.json') {
     return { id: 'business', label: 'Business logic', tone: 'good', rank: 0 };

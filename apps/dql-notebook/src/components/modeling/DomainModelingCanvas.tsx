@@ -6,6 +6,7 @@ import { Link2, Maximize2, Plus } from 'lucide-react';
 import type { DbtNodeAuthoringDetail, ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
 import { themes } from '../../themes/notebook-theme';
 import { entityKindColor, entityRecords, resolveEntityRecordKey } from './domain-studio-model';
+import { relationshipStatusView } from './relationship-builder-model';
 
 export type ColumnDisplayMode = 'keys' | 'relevant' | 'all';
 export type ModelingViewMode = 'business' | 'data';
@@ -72,7 +73,7 @@ export function DomainModelingCanvas({ modeling, ghostEntityIds, ghostRelationsh
           color: theme.textMuted,
         }}
       >
-        <strong style={{ color: theme.textPrimary }}>{search.trim() ? `No models or columns match “${search.trim()}”.` : 'Start your Domain Model'}</strong>
+        <strong style={{ color: theme.textPrimary }}>{search.trim() ? `No models or columns match “${search.trim()}”.` : 'Start your model'}</strong>
         {!search.trim() && <><span>Bind a dbt model, then connect its columns to define governed analytical relationships.</span><div style={{ display: 'flex', gap: 8 }}><button onClick={onCreateDomain} style={emptyAction(theme)}><Plus size={13} /> Create domain</button><button onClick={onAddModel} style={emptyAction(theme, true)}><Link2 size={13} /> Bind first model</button></div></>}
       </div>
     );
@@ -97,7 +98,7 @@ export function DomainModelingCanvas({ modeling, ghostEntityIds, ghostRelationsh
       <Controls showInteractive={false} />
       <MiniMap pannable zoomable nodeColor={(node) => domainColor(String((node.data as EntityNodeData).entity.domain))} maskColor={`${theme.appBg}bb`} />
     </ReactFlow>
-    {contextMenu && <div style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 50, width: 178, border: `1px solid ${theme.headerBorder}`, borderRadius: 7, background: theme.cellBg, boxShadow: '0 12px 32px #0004', padding: 4 }} onClick={(event) => event.stopPropagation()}><MenuAction label="Inspect entity" onClick={() => { onSelectEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Edit Domain Model binding" onClick={() => { onEditEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Ask AI about entity" onClick={() => { onOpenAi(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Start relationship" onClick={() => { onDraftRelationship({ from: contextMenu.nodeId, to: '' }); setContextMenu(null); }} theme={theme} /></div>}
+    {contextMenu && <div style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 50, width: 178, border: `1px solid ${theme.headerBorder}`, borderRadius: 7, background: theme.cellBg, boxShadow: '0 12px 32px #0004', padding: 4 }} onClick={(event) => event.stopPropagation()}><MenuAction label="Inspect model" onClick={() => { onSelectEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Edit model" onClick={() => { onEditEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Ask about this model" onClick={() => { onOpenAi(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Start relationship" onClick={() => { onDraftRelationship({ from: contextMenu.nodeId, to: '' }); setContextMenu(null); }} theme={theme} /></div>}
     {relPopover && popoverRelationship && (
       <RelationshipPopover
         relationship={popoverRelationship}
@@ -127,7 +128,7 @@ function RelationshipPopover({ relationship, entities, x, y, theme, onClose, onE
   onEdit?: () => void;
   onViewProof: () => void;
 }) {
-  const proven = relationship.validation?.status === 'passed';
+  const status = relationshipStatusView(relationship);
   const joinLabel = relationship.keys.map((key) => `${key.from} = ${key.to}`).join(' and ') || 'No join keys declared';
   // Chips read as friendly entity names, not raw "domain::entity::id" keys.
   const nameOf = (ref: string) => {
@@ -145,7 +146,7 @@ function RelationshipPopover({ relationship, entities, x, y, theme, onClose, onE
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '11px 13px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-1)' }}>
         <Link2 size={14} color="var(--accent)" style={{ flexShrink: 0 }} />
         <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700, color: theme.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{relationship.localId}</span>
-        <span style={{ flexShrink: 0, border: `1px solid ${proven ? 'var(--status-success-border)' : 'var(--status-warning-border)'}`, color: proven ? 'var(--status-success)' : 'var(--status-warning)', background: proven ? 'var(--status-success-bg)' : 'var(--status-warning-bg)', borderRadius: 999, padding: '2px 8px', fontSize: 9.5, fontWeight: 700 }}>{proven ? 'Proven' : 'Unproven'}</span>
+        <span style={{ flexShrink: 0, border: `1px solid ${status.color}`, color: status.color, borderRadius: 999, padding: '2px 8px', fontSize: 9.5, fontWeight: 700 }}>{status.label}</span>
         <button type="button" onClick={onClose} title="Close" style={{ flexShrink: 0, width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', color: theme.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0 }}>×</button>
       </div>
       <div style={{ padding: '12px 13px', display: 'flex', flexDirection: 'column', gap: 11 }}>
@@ -164,16 +165,12 @@ function RelationshipPopover({ relationship, entities, x, y, theme, onClose, onE
             {relationship.description || `${relationship.from} ${relationship.verb ?? 'relates to'} ${relationship.to}. Add a business description so agents can pick this route with confidence.`}
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: proven ? 'var(--status-success)' : 'var(--status-warning)' }}>
-          {proven
-            ? `Join proof passed — ${relationship.validation?.joinedRows ?? '?'} rows joined, agents may use this route.`
-            : 'No warehouse proof yet — automatic agent joins stay blocked.'}
-        </div>
+        <div style={{ fontSize: 11, lineHeight: 1.5, color: theme.textSecondary }}>{status.meaning}</div>
         <div style={{ display: 'flex', gap: 8 }}>
           {onEdit ? (
             <button type="button" onClick={onEdit} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 27, padding: '0 11px', borderRadius: 7, border: 'none', background: 'var(--accent)', color: '#fff', fontSize: 11.5, fontWeight: 650, cursor: 'pointer', fontFamily: theme.font }}>Edit relationship</button>
           ) : null}
-          <button type="button" onClick={onViewProof} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 27, padding: '0 11px', borderRadius: 7, border: `1px solid ${theme.headerBorder}`, background: theme.cellBg, color: theme.textSecondary, fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font }}>View join proof</button>
+          <button type="button" onClick={onViewProof} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 27, padding: '0 11px', borderRadius: 7, border: `1px solid ${theme.headerBorder}`, background: theme.cellBg, color: theme.textSecondary, fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font }}>View details</button>
         </div>
       </div>
     </div>
@@ -358,8 +355,8 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
   const edges: Edge[] = visibleRelationships
     .filter(({ from, to }) => nodeIds.has(from) && nodeIds.has(to))
     .map(({ recordKey, relationship, from, to }) => {
-      const passed = relationship.validation?.status === 'passed';
-      const color = relationship.automaticJoinAllowed ? '#2e9b63' : relationship.staleCertification ? '#d47822' : passed ? '#5b73d6' : '#9a6b2f';
+      // The edge shows the same status the legend and inspector name.
+      const color = relationshipStatusView(relationship).color;
       const keyLabel = relationship.keys.map((key) => `${key.from} → ${key.to}`).join(', ');
       const firstKey = relationship.keys[0];
       const fromEntity = modeling.entities[from];
@@ -380,13 +377,13 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
         targetHandle: viewMode === 'data' && firstKey && toColumns.has(firstKey.to) ? `target:${firstKey.to}` : undefined,
         type: 'default',
         label: showEdgeLabels ? `${label} · ${cardinalitySymbol(relationship.cardinality)}${isGhost ? ' · proposed' : ''}` : undefined,
-        animated: isGhost || relationship.status === 'review' || relationship.status === 'reviewed',
-        markerEnd: { type: MarkerType.ArrowClosed, color: isGhost ? 'var(--accent)' : selectedId === recordKey ? 'var(--accent)' : 'var(--border-strong)' },
-        // Prototype edges: quiet bezier curves; the selected edge turns accent.
-        // A proposed edge is dashed and translucent so it reads as pending
+        animated: isGhost,
+        markerEnd: { type: MarkerType.ArrowClosed, color: isGhost || selectedId === recordKey ? 'var(--accent)' : color },
+        // Edges take their status color; the selected edge turns accent. A
+        // proposed edge is dashed and translucent so it reads as pending
         // review rather than as part of the committed model.
         style: {
-          stroke: isGhost || selectedId === recordKey ? 'var(--accent)' : 'var(--border-strong)',
+          stroke: isGhost || selectedId === recordKey ? 'var(--accent)' : color,
           strokeWidth: selectedId === recordKey ? 2 : 1.5,
           cursor: 'pointer',
           ...(isGhost ? { strokeDasharray: '6 4', opacity: 0.85 } : {}),

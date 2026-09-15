@@ -2455,43 +2455,6 @@ export function memberCandidatesSql(relation: string, column: string, quote: (na
  * the facts carry appears there. One statement answers both.
  */
 
-/** How long a warehouse proof authorizes execution before it must be gathered again (`agent.relationshipEvidenceTtlHours`, default 24). */
-export function relationshipEvidenceTtlHours(): number {
-  const raw = Number(process.env.DQL_RELATIONSHIP_EVIDENCE_TTL_HOURS ?? '');
-  return Number.isFinite(raw) && raw > 0 ? raw : 24;
-}
-
-/**
- * A DATA-GENERATION TOKEN, where the driver offers one. The snapshot is
- * metadata; warehouse rows change without a manifest change, so a proof that
- * held yesterday may not hold today. A DuckDB file's size and modification
- * time change when its data does; other drivers yield no token and rely on the
- * bounded expiry alone.
- */
-export async function evidenceGenerationToken(connection: ConnectionConfig): Promise<string | undefined> {
-  try {
-    const path = (connection as { path?: unknown; database?: unknown }).path ?? (connection as { database?: unknown }).database;
-    if (connection.driver === 'duckdb' && typeof path === 'string' && path && path !== ':memory:') {
-      const stat = statSync(path);
-      return `duckdb:${stat.size}:${Math.round(stat.mtimeMs)}`;
-    }
-  } catch { /* no token */ }
-  return undefined;
-}
-
-/**
- * Persist the evidence a proof gathered so Domain Studio can show "validated
- * by Ask on <date>" and certify from it. Ignored local state, never governed
- * source; the file names the pair, and a later proof overwrites it.
- */
-export function writeRelationshipEvidence(projectRoot: string, record: Record<string, unknown> & { fromRelation: string; toRelation: string }): void {
-  try {
-    const dir = join(projectRoot, '.dql', 'evidence', 'relationships');
-    mkdirSync(dir, { recursive: true });
-    const name = `${record.fromRelation}__${record.toRelation}`.replace(/[^A-Za-z0-9_.-]+/g, '_');
-    writeFileSync(join(dir, `${name}.relationship-evidence.json`), `${JSON.stringify({ version: 1, gatheredBy: 'ask', ...record }, null, 2)}\n`);
-  } catch { /* evidence is a convenience for review, never a condition of the answer */ }
-}
 
 /** A key both relations spell the same way, and that reads like an identifier. */
 export function sharedKeyColumn(factColumns: Iterable<string>, labelColumns: Iterable<string>): string | undefined {

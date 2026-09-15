@@ -157,6 +157,9 @@ import {
   discoverDbtDomains,
   collectDbtRelationshipTests,
   renderDomainDeclaration,
+  writeTermDeclaration,
+  deleteTermDeclaration,
+  type TermInput,
   ProjectSnapshotService,
   analyzeSqlReferences,
   buildSqlAnalyticalSignature,
@@ -176,6 +179,8 @@ import {
   askScopeFromWorkspace,
   catalogKeyTypes,
   validateRelationshipOnWarehouse,
+  profileRelationshipOnWarehouse,
+  suggestRelationshipKeys,
   narrationMaxTokensForFacts,
   AgenticExecutionCapabilityGate,
   createAgenticSqlExecutionCapability,
@@ -11260,9 +11265,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         dbtProvenance: manifest.dbtProvenance,
         modeling: manifest.modeling,
         domainAssets: collectDomainPackageAssets(projectRoot, loadDomainPackageRegistry(projectRoot)),
-        // Warehouse proofs Ask gathered while answering (REL-005): validation
-        // evidence a person can certify from, never a certification.
-        askEvidence: readAskRelationshipEvidence(projectRoot),
         lineage: manifest.lineage,
         diagnostics: manifest.diagnostics ?? [],
         snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
@@ -11759,6 +11761,61 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const code = apiErrorCode(error, 'RELATIONSHIP_VALIDATION_FAILED');
         res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh the model or configure a warehouse connection, then retry validation.'] })));
+      }
+      return;
+    }
+
+    // The relationship builder checks a join before anyone picks a
+    // cardinality: one statement, the cardinality the data shows, and evidence
+    // for that proposal so saving it saves a matching proof.
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/relationships/profile') {
+      const requestId = apiRequestId('modeling-relationship-profile');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req) as { relationship?: { from?: string; to?: string; keys?: Array<{ from: string; to: string }> }; expectedSnapshotId?: string };
+        const relationship = body.relationship;
+        const keys = (relationship?.keys ?? []).filter((key) => key?.from && key?.to);
+        if (!relationship?.from || !relationship.to || keys.length === 0) throw new Error('Choose both models and at least one pair of matching columns.');
+        if (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId) throw Object.assign(new Error('Project sources changed before the warehouse check.'), { code: 'SOURCE_CHANGED' });
+        const { fromRelation, toRelation } = relationshipRelations(snapshot.manifest, relationship.from, relationship.to);
+        const activeConnection = await resolveExecutionConnection(body as Record<string, unknown>);
+        const spec = { fromRelation, toRelation, keys };
+        const profile = await profileRelationshipOnWarehouse(
+          { ...spec, keyTypes: catalogKeyTypes(snapshot.manifest, spec) },
+          (sql) => executor.executeQuery(sql, [], {}, activeConnection),
+          (identifier) => getDialect(activeConnection.driver).quoteIdentifier(identifier),
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, ...profile }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'RELATIONSHIP_PROFILE_FAILED');
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Check the matching columns or configure a warehouse connection, then check again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/modeling/dbt-first/relationships/suggestions') {
+      const requestId = apiRequestId('modeling-relationship-suggestions');
+      const snapshot = projectSnapshot();
+      try {
+        const { fromRelation, toRelation, fromUniqueId, toUniqueId } = relationshipRelations(snapshot.manifest, url.searchParams.get('from') ?? '', url.searchParams.get('to') ?? '');
+        const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+        const columnsOf = (uniqueId: string): string[] => {
+          const cacheKey = `${snapshot.snapshotId}:${uniqueId}`;
+          if (!dbtNodeDetailCache.has(cacheKey)) dbtNodeDetailCache.set(cacheKey, dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined);
+          return dbtNodeDetailCache.get(cacheKey)?.columns.map((column) => column.name) ?? [];
+        };
+        const dbtTests = dbtRelationshipTestEdges(snapshot.snapshotId, dbtManifestPath)
+          .filter((edge) => edge.fromColumn !== 'unknown' && edge.toColumn !== 'unknown')
+          .filter((edge) => (edge.fromDbtUniqueId === fromUniqueId && edge.toDbtUniqueId === toUniqueId) || (edge.fromDbtUniqueId === toUniqueId && edge.toDbtUniqueId === fromUniqueId))
+          .map((edge) => ({ fromColumn: edge.fromColumn, toColumn: edge.toColumn, reversed: edge.fromDbtUniqueId !== fromUniqueId }));
+        const suggestions = suggestRelationshipKeys({ fromColumns: columnsOf(fromUniqueId), toColumns: columnsOf(toUniqueId), fromRelation, toRelation, dbtTests });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, suggestions }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: apiErrorCode(error, 'RELATIONSHIP_SUGGESTIONS_FAILED'), message: apiErrorMessage(error) })));
       }
       return;
     }
@@ -13498,6 +13555,68 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Business terms — the words Ask maps to governed definitions. Direct
+    //    save like skills: a term carries no join or certification authority,
+    //    and Git history is its review. ─────────────────────────────────────
+    if (path === '/api/terms' && (req.method === 'GET' || req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE')) {
+      const json = (status: number, body: unknown) => {
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(body));
+      };
+      const readTerms = () => Object.values(buildManifest({ projectRoot, dqlVersion: 'notebook' }).terms ?? {})
+        .sort((a, b) => a.name.localeCompare(b.name));
+      try {
+        if (req.method === 'GET') {
+          json(200, { terms: readTerms() });
+          return;
+        }
+        if (req.method === 'DELETE') {
+          const filePath = url.searchParams.get('filePath') ?? '';
+          if (!readTerms().some((term) => term.filePath === filePath)) {
+            json(404, { error: 'That term no longer exists. Refresh the list.' });
+            return;
+          }
+          deleteTermDeclaration(projectRoot, filePath);
+          await refreshUnifiedProjectIndexes(projectRoot);
+          json(200, { ok: true });
+          return;
+        }
+        const body = (await readJSON(req).catch(() => ({}))) as { term?: unknown; filePath?: unknown };
+        const input = parseTermInput(body?.term);
+        if (!input) {
+          json(400, { error: 'A term needs a name.' });
+          return;
+        }
+        const existing = readTerms();
+        const previousPath = req.method === 'PUT' && typeof body.filePath === 'string' ? body.filePath : undefined;
+        if (req.method === 'PUT' && !existing.some((term) => term.filePath === previousPath)) {
+          json(404, { error: 'That term no longer exists. Refresh the list.' });
+          return;
+        }
+        const clash = existing.find((term) => term.name.toLowerCase() === input.name.toLowerCase() && term.filePath !== previousPath);
+        if (clash) {
+          json(409, { error: `A term named "${clash.name}" already exists in ${clash.filePath}.` });
+          return;
+        }
+        // A term that names a metric Ask cannot find would teach it a word for
+        // nothing, so the link is checked against the governed metrics.
+        if (semanticLayer && input.metricRefs?.length) {
+          const known = new Set(semanticLayer.listMetrics(undefined, { includeMeasures: false }).map((metric) => metric.name.toLowerCase()));
+          const unknown = input.metricRefs.filter((ref) => !known.has(ref.toLowerCase()));
+          if (unknown.length) {
+            json(400, { error: `Unknown metric${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}. Pick metrics from the list.` });
+            return;
+          }
+        }
+        const written = writeTermDeclaration(projectRoot, input, { directory: termDirectoryFor(projectRoot, input.domain), existingPath: previousPath });
+        await refreshUnifiedProjectIndexes(projectRoot);
+        json(200, { term: readTerms().find((term) => term.filePath === written.path) ?? { ...input, filePath: written.path } });
+      } catch (error) {
+        json(400, { error: error instanceof Error ? error.message : String(error) });
       }
       return;
     }
@@ -21750,46 +21869,30 @@ function providerDispatchTerminalEvidence(value: unknown): ProviderDispatchTermi
   };
 }
 
-/**
- * The relationship proofs Ask wrote to `.dql/evidence/relationships/` (one
- * per relation pair), keyed by the declared relationship id when a draft
- * existed and by `<from>__<to>` otherwise. Read on demand for Domain Studio;
- * a malformed file is skipped, never fatal.
- */
-function readAskRelationshipEvidence(projectRoot: string): Record<string, AskRelationshipEvidenceV1> {
-  const dir = join(projectRoot, '.dql', 'evidence', 'relationships');
-  if (!existsSync(dir)) return {};
-  const out: Record<string, AskRelationshipEvidenceV1> = {};
-  for (const file of readdirSync(dir)) {
-    if (!file.endsWith('.relationship-evidence.json')) continue;
-    try {
-      const raw = JSON.parse(readFileSync(join(dir, file), 'utf8')) as Record<string, unknown>;
-      const evidence = raw.evidence as ManifestRelationshipValidationEvidence | undefined;
-      const fromRelation = typeof raw.fromRelation === 'string' ? raw.fromRelation : undefined;
-      const toRelation = typeof raw.toRelation === 'string' ? raw.toRelation : undefined;
-      if (!evidence || !fromRelation || !toRelation) continue;
-      const key = typeof raw.relationshipId === 'string' && raw.relationshipId ? raw.relationshipId : `${fromRelation}__${toRelation}`;
-      out[key] = {
-        fromRelation, toRelation,
-        ...(typeof raw.relationshipId === 'string' ? { relationshipId: raw.relationshipId } : {}),
-        keys: Array.isArray(raw.keys) ? raw.keys as Array<{ from: string; to: string }> : [],
-        evidence,
-        freshness: (raw.freshness ?? {}) as AskRelationshipEvidenceV1['freshness'],
-        path: `.dql/evidence/relationships/${file}`,
-      };
-    } catch { /* one unreadable file never hides the others */ }
-  }
-  return out;
+/** The warehouse relations behind two models on the map. */
+function relationshipRelations(manifest: DQLManifest, from: string, to: string): { fromRelation: string; toRelation: string; fromUniqueId: string; toUniqueId: string } {
+  const fromEntity = manifest.modeling?.entities[from];
+  const toEntity = manifest.modeling?.entities[to];
+  if (!fromEntity || !toEntity) throw new Error('Both models must be on the map before their relationship can be checked.');
+  const fromNode = manifest.dbtProvenance?.nodes[fromEntity.dbtUniqueId];
+  const toNode = manifest.dbtProvenance?.nodes[toEntity.dbtUniqueId];
+  if (!fromNode?.relation || !toNode?.relation) throw new Error('Both dbt models must expose warehouse relation names.');
+  return { fromRelation: fromNode.relation, toRelation: toNode.relation, fromUniqueId: fromEntity.dbtUniqueId, toUniqueId: toEntity.dbtUniqueId };
 }
 
-export interface AskRelationshipEvidenceV1 {
-  fromRelation: string;
-  toRelation: string;
-  relationshipId?: string;
-  keys: Array<{ from: string; to: string }>;
-  evidence: ManifestRelationshipValidationEvidence;
-  freshness: { checkedAt?: string; expiresAt?: string; target?: string; generationToken?: string };
-  path: string;
+/** dbt `relationships` tests, read once per project snapshot: the dbt manifest can be large. */
+const relationshipTestEdgesBySnapshot = new Map<string, ReturnType<typeof collectDbtRelationshipTests>>();
+
+function dbtRelationshipTestEdges(snapshotId: string, manifestPath: string | null | undefined): ReturnType<typeof collectDbtRelationshipTests> {
+  if (!manifestPath) return [];
+  const key = `${snapshotId}:${manifestPath}`;
+  if (!relationshipTestEdgesBySnapshot.has(key)) {
+    let edges: ReturnType<typeof collectDbtRelationshipTests> = [];
+    try { edges = collectDbtRelationshipTests(JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>); } catch { edges = []; }
+    relationshipTestEdgesBySnapshot.clear();
+    relationshipTestEdgesBySnapshot.set(key, edges);
+  }
+  return relationshipTestEdgesBySnapshot.get(key) ?? [];
 }
 
 async function validateModelingRelationship(
@@ -21798,16 +21901,11 @@ async function validateModelingRelationship(
   execute: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }>,
   quoteIdentifier: (identifier: string) => string = quoteSqlIdentifier,
 ): Promise<ManifestRelationshipValidationEvidence> {
-  const fromEntity = manifest.modeling?.entities[relationship.from];
-  const toEntity = manifest.modeling?.entities[relationship.to];
-  if (!fromEntity || !toEntity) throw new Error('Both relationship entities must be bound to dbt models before validation.');
-  const fromNode = manifest.dbtProvenance?.nodes[fromEntity.dbtUniqueId];
-  const toNode = manifest.dbtProvenance?.nodes[toEntity.dbtUniqueId];
-  if (!fromNode?.relation || !toNode?.relation) throw new Error('Both dbt models must expose warehouse relation names.');
+  const { fromRelation, toRelation } = relationshipRelations(manifest, relationship.from, relationship.to);
   if (!relationship.keys.length) throw new Error('At least one join key pair is required.');
-  // ONE PROOF (REL-005): the same statement and evidence Ask's warehouse proof
-  // gathers, so certification can reuse either.
-  const spec = { fromRelation: fromNode.relation, toRelation: toNode.relation, keys: relationship.keys, cardinality: relationship.cardinality, fanout: relationship.fanout };
+  // ONE PROOF (REL-005): the builder's profile and this validation run the same
+  // statement and write the same evidence.
+  const spec = { fromRelation, toRelation, keys: relationship.keys, cardinality: relationship.cardinality, fanout: relationship.fanout };
   return validateRelationshipOnWarehouse({ ...spec, keyTypes: catalogKeyTypes(manifest, spec) }, execute, quoteIdentifier);
 }
 
@@ -22762,6 +22860,45 @@ export function parseDomainInput(raw: unknown, fallbackId?: string): DomainInput
     semanticTags: asStrings(domain.semanticTags),
     sourcePath: typeof domain.sourcePath === 'string' ? domain.sourcePath : undefined,
   };
+}
+
+/** A term body from the Terms & concepts tab: a name is required, everything else is trimmed or dropped. */
+export function parseTermInput(raw: unknown): TermInput | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const term = raw as Record<string, unknown>;
+  const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+  const list = (value: unknown): string[] | undefined => Array.isArray(value)
+    ? [...new Set(value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean))]
+    : undefined;
+  const name = text(term.name);
+  if (!name) return null;
+  const status = text(term.status);
+  return {
+    name,
+    domain: text(term.domain),
+    termType: text(term.termType),
+    status: status === 'certified' || status === 'draft' || status === 'deprecated' ? status : undefined,
+    description: text(term.description),
+    owner: text(term.owner),
+    businessOwner: text(term.businessOwner),
+    tags: list(term.tags),
+    synonyms: list(term.synonyms),
+    identifiers: list(term.identifiers),
+    metricRefs: list(term.metricRefs),
+    businessOutcome: text(term.businessOutcome),
+    decisionUse: text(term.decisionUse),
+    reviewCadence: text(term.reviewCadence),
+    businessRules: list(term.businessRules),
+    caveats: list(term.caveats),
+  };
+}
+
+/** Where a new term file goes: the domain package's `terms/` folder, or project `terms/` for a project-wide term. */
+export function termDirectoryFor(projectRoot: string, domain: string | undefined): string {
+  if (!domain) return 'terms';
+  const pkg = loadDomainPackageRegistry(projectRoot).get(domain);
+  const root = pkg ? relative(resolve(projectRoot), resolve(projectRoot, pkg.root)).replace(/\\/g, '/') : `domains/${domainFolderSlug(domain)}`;
+  return `${root || '.'}/terms`;
 }
 
 // ── Domain / skill bootstrap sessions (local-only; never tracked) ────────────

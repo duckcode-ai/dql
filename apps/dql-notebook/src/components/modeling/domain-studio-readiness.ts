@@ -28,7 +28,7 @@ export function domainStudioUnavailableState(error: unknown): DomainStudioUnavai
   if (apiError?.code === 'DBT_FIRST_NOT_ENABLED') {
     return {
       title: 'Set up dbt-first modeling',
-      detail: 'Domain Studio requires a connected dbt project with manifest v3 and dbt-first modeling enabled. Open Settings → Project & dbt to connect and apply the project.',
+      detail: 'Modeling requires a connected dbt project with manifest v3 and dbt-first modeling enabled. Open Settings → Project & dbt to connect and apply the project.',
       status: 'Modeling mode · Not enabled',
     };
   }
@@ -40,7 +40,7 @@ export function domainStudioUnavailableState(error: unknown): DomainStudioUnavai
       : 'target/manifest.json';
     return {
       title: 'dbt manifest is not ready',
-      detail: `The dbt project is connected, but ${configuredPath} was not found. Run dbt parse, dbt compile, or dbt build in the configured dbt project, then refresh Domain Studio.`,
+      detail: `The dbt project is connected, but ${configuredPath} was not found. Run dbt parse, dbt compile, or dbt build in the configured dbt project, then refresh Modeling.`,
       status: `dbt manifest · Missing (${configuredPath})`,
     };
   }
@@ -48,17 +48,17 @@ export function domainStudioUnavailableState(error: unknown): DomainStudioUnavai
   if (apiError?.code === 'DBT_MANIFEST_COMPILE_FAILED') {
     return {
       title: 'dbt manifest could not be loaded',
-      detail: `${apiError.message} Rebuild the dbt manifest, then refresh Domain Studio.`,
+      detail: `${apiError.message} Rebuild the dbt manifest, then refresh Modeling.`,
       status: 'dbt manifest · Load failed',
     };
   }
 
   const message = error instanceof Error && error.message
     ? error.message
-    : 'The local DQL notebook server did not return Domain Studio data.';
+    : 'The local DQL notebook server did not return Modeling data.';
   return {
-    title: 'Domain Studio could not load',
+    title: 'Modeling could not load',
     detail: message,
-    status: 'Domain Studio · Unavailable',
+    status: 'Modeling · Unavailable',
   };
 }

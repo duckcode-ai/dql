@@ -301,7 +301,7 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
                 ))}
               </select>
               <span style={{ fontSize: 10.5, lineHeight: 1.3, color: t.textMuted, fontFamily: t.font }}>
-                Optional. Adds a Domain Studio backlink without moving the Git file.
+                Optional. Lists this notebook under the domain's Used by tab without moving the Git file.
               </span>
             </div>
           </div>

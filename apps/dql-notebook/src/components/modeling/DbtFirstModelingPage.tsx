@@ -1,6 +1,5 @@
-import type { AskRelationshipEvidence } from '../../api/client.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Blocks, Boxes, CheckCircle2, Columns3, Download, EyeOff, FileSearch, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, MessageCircle, Network, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, XCircle } from 'lucide-react';
+import { Blocks, BookOpen, Boxes, CheckCircle2, Columns3, Download, EyeOff, FileSearch, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, MessageCircle, Network, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, XCircle } from 'lucide-react';
 import { DEFAULT_MODEL_AREA_ID } from '@duckcodeailabs/dql-core/modeling-ids';
 import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, DbtSourceAuthoringInput, DbtSourcePatchPreview, ManifestModelArea, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
 import { api, type AgentRunArtifact, type ContextAuthoringProposalV1, type DbtFirstModelingResponse } from '../../api/client';
@@ -9,21 +8,23 @@ import type { NotebookFile } from '../../store/types';
 import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { SkillsPage } from '../skills/SkillsPage';
-import { Knowledge360 } from '../domains/GovernedContextPage';
-import { DomainScopeSelect } from '../panels/DomainScopeSelect';
+import { DomainSettingsDrawer, type DomainSettingsMode } from '../domains/DomainSettingsDrawer';
 import { authoredDomainOptions } from '../domains/authored-domain-options';
+import { TermsAndConceptsPanel } from './TermsAndConceptsPanel';
+import { RelationshipBuilder } from './RelationshipBuilder';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingViewMode, type RelationshipDraft } from './DomainModelingCanvas';
 import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
 import { ContextProposalReviewDrawer } from './ContextProposalReviewDrawer';
 import { AddModelsDrawer, ModelingYamlImportDrawer } from './ModelingStartDrawers';
 import { DOMAIN_STUDIO_LOCATION_KEY, DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, domainPackageTree, domainStudioLocationHref, entityKindColor, isDescriptiveOnlyChange, modelingThreadScope, resolveDomainStudioLocation, type DomainStudioSection } from './domain-studio-model';
 import { domainStudioUnavailableState, type DomainStudioUnavailableState } from './domain-studio-readiness';
-import { rankModelingOptions, type ModelingSearchOption } from './modeling-search';
+import type { ModelingSearchOption } from './modeling-search';
+import { Modal, SearchPicker, iconButtonStyle, inputStyle, linkButton } from './modeling-controls';
+import { RELATIONSHIP_LEGEND, relationshipProfileLines, relationshipSentence, relationshipStatusView } from './relationship-builder-model';
 
 type Theme = (typeof themes)['dark'];
 type Tab = DomainStudioSection;
 type Editor =
-  | { kind: 'domain' }
   | { kind: 'area'; area?: ManifestModelArea }
   | { kind: 'entity'; entity?: ManifestModelEntity; dbtUniqueId?: string; relationshipFrom?: { from: string; fromColumn?: string } }
   | {
@@ -37,16 +38,20 @@ type Editor =
 
 type DiagramSearchItem = { recordKey: string; type: 'model' | 'column'; label: string; sublabel: string; role: string | undefined };
 
-export function DbtFirstModelingPage() {
-  // UI-001/UI-006: Domain Studio is one domain-scoped workspace. DQL-owned
-  // package source is edited here; global Apps and Notebooks appear only as
-  // ProductDomainContext backlinks and keep their canonical root storage.
+export function DbtFirstModelingPage({ initialSection }: { initialSection?: DomainStudioSection } = {}) {
+  // UI-001/UI-006: Modeling is one domain-scoped page. DQL-owned package
+  // source is edited here; global Apps and Notebooks appear only as
+  // ProductDomainContext backlinks ("Used by") and keep their root storage.
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [data, setData] = useState<DbtFirstModelingResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [unavailable, setUnavailable] = useState<DomainStudioUnavailableState | null>(null);
-  const initialLocation = useMemo(() => readDomainStudioLocation(), []);
+  const [domainSettings, setDomainSettings] = useState<DomainSettingsMode | null>(null);
+  const initialLocation = useMemo(() => {
+    const location = readDomainStudioLocation();
+    return initialSection ? { ...location, section: initialSection } : location;
+  }, [initialSection]);
   const [tab, setTab] = useState<Tab>(initialLocation.section);
   const [selectedDomain, setSelectedDomain] = useState<string | null>(initialLocation.domain);
   const [selectedAreaId, setSelectedAreaId] = useState<string | null>(initialLocation.modelAreaId);
@@ -74,6 +79,7 @@ export function DbtFirstModelingPage() {
   const inspectorToggleRef = useRef<HTMLButtonElement>(null);
   const inspectorRef = useRef<HTMLElement>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
+  const [pendingRelationshipFrom, setPendingRelationshipFrom] = useState<RelationshipDraft | null>(null);
   const [startDrawer, setStartDrawer] = useState<'models' | 'yaml' | null>(null);
   const [proposal, setProposal] = useState<ContextAuthoringProposalV1 | null>(null);
   const [aiDockOpen, setAiDockOpen] = useState(() => readDiagramPreferences().aiDockOpen === true);
@@ -233,7 +239,7 @@ export function DbtFirstModelingPage() {
     for (const uniqueId of uniqueIds.slice(0, 24)) void loadNodeDetail(uniqueId);
   }, [loadNodeDetail]);
 
-  if (loading && !data) return <EmptyState t={t} title="Loading Domain Studio…" detail="Compiling dbt provenance and the sparse DQL analytical overlay." />;
+  if (loading && !data) return <EmptyState t={t} title="Loading Modeling…" detail="Reading your dbt project and the domains, relationships, terms and skills built on it." />;
   if (!data) {
     const state = unavailable ?? domainStudioUnavailableState(null);
     return <EmptyState t={t} title={state.title} detail={state.detail} status={state.status} />;
@@ -264,11 +270,31 @@ export function DbtFirstModelingPage() {
   });
   const unboundNodes = Object.values(data.dbtProvenance.nodes).filter((node) => !Object.values(data.modeling.entities).some((entity) => entity.dbtUniqueId === node.uniqueId));
   const inspectorVisible = inspectorOpen && tab === 'diagram';
-  const domainSkillPaths = [...new Set(
-    selectedDomain
-      ? (data.domainAssets?.[selectedDomain]?.skills ?? [])
-      : Object.values(data.domainAssets ?? {}).flatMap((assets) => assets.skills ?? []),
-  )].sort();
+  // With a domain chosen, the Skills tab shows that domain's Git-owned skills
+  // (plus the project-wide ones every domain inherits, see SkillsPage). With
+  // no domain it shows every skill in the project — there is no second list.
+  const domainSkillPaths = selectedDomain
+    ? [...new Set(data.domainAssets?.[selectedDomain]?.skills ?? [])].sort()
+    : undefined;
+  const domainRecord = selectedDomain
+    ? state.authoredDomains.find((domain) => domain.id === selectedDomain)
+      ?? { id: selectedDomain, name: selectedDomain, parent: data.modeling.packages[selectedDomain]?.parent, owner: data.modeling.packages[selectedDomain]?.owner }
+    : undefined;
+  const packageOptions = domainPackageTree(data.modeling.packages);
+  const authoredLabels = new Map(authoredDomainOptions(state.authoredDomains).map((option) => [option.value, option.label]));
+  const tabCounts: Partial<Record<Tab, number>> = {
+    diagram: domainEntityRecords(data.modeling, selectedDomain).length,
+    skills: selectedDomain ? (domainSkillPaths?.length ?? 0) : undefined,
+    blocks: new Set(
+      selectedDomain
+        ? (data.domainAssets?.[selectedDomain]?.blocks ?? [])
+        : Object.values(data.domainAssets ?? {}).flatMap((assets) => assets.blocks ?? []),
+    ).size,
+  };
+  const openAsk = (objectId?: string) => {
+    try { window.sessionStorage.setItem('dql-ask-domain-context', JSON.stringify({ domain: selectedDomain, modelAreaId: selectedArea?.qualifiedId, ...(objectId ? { objectId } : {}) })); } catch { /* best effort */ }
+    dispatch({ type: 'SET_MAIN_VIEW', view: 'ask' });
+  };
 
   return (
     <div
@@ -281,90 +307,98 @@ export function DbtFirstModelingPage() {
         color: t.textPrimary,
       }}
     >
+      {/* One header: which domain and subject area you are modeling, and the
+          page-level actions. There is no second navigation rail — Notebooks,
+          Blocks and Apps already live in the app rail. */}
       <header
         style={{
           minHeight: 52,
-          padding: '0 14px',
+          padding: '8px 14px',
           borderBottom: `1px solid ${t.headerBorder}`,
           background: t.headerBg,
           display: 'flex',
           alignItems: 'center',
+          gap: 10,
+          flexWrap: 'wrap',
         }}
       >
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            gap: 12,
-            alignItems: 'center',
-            width: '100%',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-            <Boxes size={16} color={t.accent} />
-            <h1 style={{ margin: 0, fontSize: 12, fontWeight: 800, whiteSpace: 'nowrap' }}>Modeling workspace</h1>
-            <span style={{ color: t.textMuted, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {selectedDomain ? `/${selectedDomain}` : '/all domains'}
-            </span>
-          </div>
-          <div style={{ display: 'flex', gap: 7 }}>
-            {selectedDomain && (
-              <Button t={t} onClick={() => {
-                try { window.sessionStorage.setItem('dql-ask-domain-context', JSON.stringify({ domain: selectedDomain, modelAreaId: selectedArea?.qualifiedId })); } catch { /* best effort */ }
-                dispatch({ type: 'SET_MAIN_VIEW', view: 'ask' });
-              }}>
-                <MessageCircle size={14} /> Ask
-              </Button>
-            )}
-            <Button t={t} onClick={() => setStartDrawer('yaml')}><FileSearch size={14} /> Import YAML</Button>
-            <IconButton t={t} title="Recompile" onClick={() => void refresh()}>
-              <RefreshCw size={15} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Boxes size={16} color={t.accent} />
+          <h1 style={{ margin: 0, fontSize: 13, fontWeight: 800, whiteSpace: 'nowrap' }}>Modeling</h1>
+        </div>
+        <ScopeSelect
+          label="Domain"
+          value={selectedDomain ?? ''}
+          onChange={(value) => selectDomain(value || null)}
+          options={[{ value: '', label: 'All domains' }, ...packageOptions.map((pkg) => ({ value: pkg.id, label: authoredLabels.get(pkg.id) ?? pkg.label }))]}
+          t={t}
+        />
+        <IconButton t={t} title="New domain" onClick={() => setDomainSettings({ kind: 'create' })}>
+          <Plus size={14} />
+        </IconButton>
+        {domainRecord ? (
+          <IconButton t={t} title="Domain settings" onClick={() => setDomainSettings({ kind: 'edit', domain: domainRecord })}>
+            <Settings2 size={14} />
+          </IconButton>
+        ) : null}
+        {selectedDomain && (tab === 'diagram' || tab === 'skills') ? (
+          <>
+            <ScopeSelect
+              label="Subject area"
+              value={selectedAreaId ?? ''}
+              onChange={(value) => { setSelectedAreaId(value || null); setSelectedId(null); }}
+              options={[{ value: '', label: 'Whole domain' }, ...domainAreas.map((area) => ({ value: area.qualifiedId, label: area.name }))]}
+              t={t}
+            />
+            <IconButton t={t} title="New subject area" onClick={() => setEditor({ kind: 'area' })}>
+              <Plus size={14} />
             </IconButton>
-          </div>
+          </>
+        ) : null}
+        <div style={{ display: 'flex', gap: 7, marginLeft: 'auto' }}>
+          {selectedDomain && (
+            <Button t={t} onClick={() => openAsk()}>
+              <MessageCircle size={14} /> Ask about {authoredLabels.get(selectedDomain) ?? selectedDomain}
+            </Button>
+          )}
+          <Button t={t} onClick={() => setStartDrawer('yaml')}><FileSearch size={14} /> Import YAML</Button>
+          <IconButton t={t} title="Recompile" onClick={() => void refresh()}>
+            <RefreshCw size={15} />
+          </IconButton>
         </div>
       </header>
+      <nav
+        role="tablist"
+        aria-label="Modeling"
+        style={{ minHeight: 40, display: 'flex', alignItems: 'center', gap: 2, padding: '0 10px', borderBottom: `1px solid ${t.headerBorder}`, background: t.headerBg, overflowX: 'auto' }}
+      >
+        {DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items).map((item) => {
+          const active = tab === item.id;
+          return (
+            <button key={item.id} type="button" role="tab" aria-selected={active} onClick={() => selectSection(item.id)} style={tabButton(t, active)}>
+              {domainSectionIcon(item.id, 14, t, active)}
+              {item.label}
+              {tabCounts[item.id] !== undefined ? <small style={{ color: active ? t.accent : t.textMuted }}>{tabCounts[item.id]}</small> : null}
+            </button>
+          );
+        })}
+        <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 10.5, color: t.textMuted, whiteSpace: 'nowrap', paddingLeft: 12 }}>
+          <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)', flexShrink: 0 }} />
+          dbt synced · {Object.keys(data.dbtProvenance.nodes).length} model{Object.keys(data.dbtProvenance.nodes).length === 1 ? '' : 's'}
+        </span>
+        {tab === 'diagram' && <button ref={inspectorToggleRef} aria-expanded={inspectorOpen} aria-controls="domain-studio-inspector" aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'} title={inspectorOpen ? 'Hide inspector' : 'Show inspector'} onClick={toggleInspector} style={{ ...iconButtonStyle(t), marginLeft: 8 }}>
+          {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+        </button>}
+      </nav>
 
       <div
         style={{
           flex: 1,
           minHeight: 0,
           display: 'grid',
-          gridTemplateColumns: inspectorVisible && !narrowLayout ? 'clamp(190px, 15vw, 232px) minmax(460px, 1fr) clamp(270px, 22vw, 380px)' : 'clamp(190px, 15vw, 232px) minmax(0, 1fr)',
+          gridTemplateColumns: inspectorVisible && !narrowLayout ? 'minmax(460px, 1fr) clamp(270px, 22vw, 380px)' : 'minmax(0, 1fr)',
         }}
       >
-        <aside
-          style={{
-            borderRight: `1px solid ${t.headerBorder}`,
-            overflow: 'auto',
-            // This is the domain workspace context rail, not the global app
-            // navigation. Keep it on the canvas surface so Paper remains warm
-            // and visually continuous from the header into the workspace.
-            background: t.appBg,
-          }}
-        >
-          <DomainPackageNavigation
-            data={data}
-            selectedDomain={selectedDomain}
-            onSelect={selectDomain}
-            t={t}
-          />
-          <DomainWorkspaceNavigation
-            data={data}
-            domain={selectedDomain}
-            active={tab}
-            onSelect={selectSection}
-            t={t}
-          />
-          {/* Keep Domain navigation compact. Detailed relationship and
-              governance evidence stays inside Modeling and the agent runtime. */}
-          <div style={{ padding: '10px 12px', borderTop: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', gap: 5, fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)', flexShrink: 0 }} />
-              dbt synced · {Object.keys(data.dbtProvenance.nodes).length} model{Object.keys(data.dbtProvenance.nodes).length === 1 ? '' : 's'}
-            </span>
-          </div>
-        </aside>
-
         <main
           style={{
             minWidth: 0,
@@ -373,39 +407,6 @@ export function DbtFirstModelingPage() {
             flexDirection: 'column',
           }}
         >
-          <div
-            style={{
-              minHeight: 42,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 7,
-              padding: '0 10px 0 14px',
-              borderBottom: `1px solid ${t.headerBorder}`,
-              background: t.headerBg,
-            }}
-          >
-            {domainSectionIcon(tab, 14, t)}
-            <strong style={{ fontSize: 11 }}>{domainStudioSectionLabel(tab)}</strong>
-            <span style={{ width: 1, height: 15, background: t.headerBorder }} />
-            <span style={{ color: t.textMuted, fontSize: 10 }}>{selectedDomain ?? 'All domains'}</span>
-            {(tab === 'diagram' || tab === 'skills') && selectedDomain && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 5 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}>
-                  Area
-                  <select aria-label="Active subject area" value={selectedAreaId ?? ''} onChange={(event) => { setSelectedAreaId(event.target.value || null); setSelectedId(null); }} style={{ ...inputStyle(t), minWidth: 146, padding: '4px 6px' }}>
-                    <option value="">All domain</option>
-                    {domainAreas.map((area) => <option key={area.qualifiedId} value={area.qualifiedId}>{area.name}</option>)}
-                  </select>
-                </label>
-                <button aria-label="Add subject area" title="Add subject area" onClick={() => setEditor({ kind: 'area' })} style={{ ...iconButtonStyle(t), width: 27, height: 27 }}>
-                  <Plus size={13} />
-                </button>
-              </div>
-            )}
-            {tab === 'diagram' && <button ref={inspectorToggleRef} aria-expanded={inspectorOpen} aria-controls="domain-studio-inspector" aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'} title={inspectorOpen ? 'Hide inspector' : 'Show inspector'} onClick={toggleInspector} style={{ ...iconButtonStyle(t), marginLeft: 'auto' }}>
-              {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-            </button>}
-          </div>
           <div style={{ flex: 1, minHeight: 0 }}>
             {tab === 'diagram' && (
               <div id="dql-modeling-diagram"
@@ -421,10 +422,9 @@ export function DbtFirstModelingPage() {
                 {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  {domainEntities.length === 0 ? <ModelingEmptyWorkspace t={t} connectedModels={Object.keys(data.dbtProvenance.nodes).length} onDbt={() => setStartDrawer('models')} onYaml={() => setStartDrawer('yaml')} onManual={() => setEditor({ kind: 'entity' })} /> : <DomainModelingCanvas modeling={ghostView.modeling} ghostEntityIds={ghostView.ghostEntityIds} ghostRelationshipIds={ghostView.ghostRelationshipIds} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} focusRequest={focusRequest ?? undefined} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onEditRelationship={(recordKey) => { const relationship = data.modeling.relationships[recordKey]; if (relationship) setEditor({ kind: 'relationship', relationship }); }} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onAddModel={() => setStartDrawer('models')} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => {
+                  {domainEntities.length === 0 ? <ModelingEmptyWorkspace t={t} connectedModels={Object.keys(data.dbtProvenance.nodes).length} onDbt={() => setStartDrawer('models')} onYaml={() => setStartDrawer('yaml')} onManual={() => setEditor({ kind: 'entity' })} /> : <DomainModelingCanvas modeling={ghostView.modeling} ghostEntityIds={ghostView.ghostEntityIds} ghostRelationshipIds={ghostView.ghostRelationshipIds} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} focusRequest={focusRequest ?? undefined} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onEditRelationship={(recordKey) => { const relationship = data.modeling.relationships[recordKey]; if (relationship) setEditor({ kind: 'relationship', relationship }); }} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onAddModel={() => setStartDrawer('models')} onCreateDomain={() => setDomainSettings({ kind: 'create' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => {
                     setSelectedId(id);
-                    try { window.sessionStorage.setItem('dql-ask-domain-context', JSON.stringify({ domain: selectedDomain, modelAreaId: selectedArea?.qualifiedId, objectId: id })); } catch { /* best effort */ }
-                    dispatch({ type: 'SET_MAIN_VIEW', view: 'ask' });
+                    openAsk(id);
                   }} theme={t} />}
                 </div>
                 {/* The AI docks beside the diagram it is editing, so a proposal
@@ -455,10 +455,22 @@ export function DbtFirstModelingPage() {
                 </div>
               </div>
             )}
+            {tab === 'terms' && <TermsAndConceptsPanel data={data} domain={selectedDomain} t={t} onProposal={setProposal} />}
             {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} modelAreaFilter={selectedAreaId} sourcePathFilter={domainSkillPaths} />}
             {tab === 'blocks' && <DomainBlocksPanel data={data} domain={selectedDomain} t={t} />}
-            {tab === 'notebooks' && <RelatedProductsPanel data={data} domain={selectedDomain} kind="notebooks" t={t} />}
-            {tab === 'apps' && <RelatedProductsPanel data={data} domain={selectedDomain} kind="apps" t={t} />}
+            {tab === 'used_by' && (
+              <ScrollPanel>
+                <PanelHeader
+                  title="Used by"
+                  detail={selectedDomain
+                    ? `Notebooks and apps that declare they use ${authoredLabels.get(selectedDomain) ?? selectedDomain}. They live in their own folders; this is a list of links, not copies.`
+                    : 'Notebooks and apps across all domains. Choose a domain to see only what uses it.'}
+                  t={t}
+                />
+                <RelatedProductsPanel data={data} domain={selectedDomain} kind="notebooks" t={t} />
+                <RelatedProductsPanel data={data} domain={selectedDomain} kind="apps" t={t} />
+              </ScrollPanel>
+            )}
           </div>
         </main>
 
@@ -466,7 +478,7 @@ export function DbtFirstModelingPage() {
           id="domain-studio-inspector"
           ref={inspectorRef}
           role="complementary"
-          aria-label="Domain Studio inspector"
+          aria-label="Modeling inspector"
           tabIndex={-1}
           onKeyDown={(event) => { if (event.key === 'Escape') toggleInspector(); }}
           style={{
@@ -507,7 +519,7 @@ export function DbtFirstModelingPage() {
             />
           ) : selectedRelationship ? (
             <RelationshipInspector
-              askEvidence={data.askEvidence?.[relationshipRecordKey(data.modeling.relationships, selectedRelationship)] ?? data.askEvidence?.[selectedRelationship.qualifiedId ?? selectedRelationship.id]}
+              entities={data.modeling.entities}
               relationship={selectedRelationship}
               t={t}
               onEdit={() =>
@@ -535,13 +547,45 @@ export function DbtFirstModelingPage() {
         </aside>}
       </div>
 
+      {domainSettings ? (
+        <DomainSettingsDrawer
+          mode={domainSettings}
+          domains={state.authoredDomains}
+          t={t}
+          onClose={() => setDomainSettings(null)}
+          onSaved={(saved) => {
+            setDomainSettings(null);
+            void refresh().then(() => selectDomain(saved.id));
+          }}
+          onDeleted={() => {
+            setDomainSettings(null);
+            selectDomain(null);
+            void refresh();
+          }}
+        />
+      ) : null}
       {startDrawer === 'models' ? <AddModelsDrawer data={data} domain={selectedDomain} areaId={selectedAreaId} theme={t} onClose={() => setStartDrawer(null)} onProposal={(next) => { setStartDrawer(null); setProposal(next); }} /> : null}
       {startDrawer === 'yaml' ? <ModelingYamlImportDrawer data={data} domain={selectedDomain} areaId={selectedAreaId} theme={t} onClose={() => setStartDrawer(null)} onProposal={(next) => { setStartDrawer(null); setProposal(next); }} /> : null}
-      {proposal ? <ContextProposalReviewDrawer proposal={proposal} theme={t} onClose={() => setProposal(null)} onCommitted={() => { setProposal(null); void refresh(); }} /> : null}
-      {editor && (
-        <ModelingEditor
-          editor={editor}
+      {proposal ? (
+        <ContextProposalReviewDrawer
+          proposal={proposal}
+          theme={t}
+          onClose={() => { setProposal(null); setPendingRelationshipFrom(null); }}
+          onCommitted={() => {
+            setProposal(null);
+            void refresh().then(() => {
+              if (!pendingRelationshipFrom) return;
+              setEditor({ kind: 'relationship', draft: pendingRelationshipFrom });
+              setPendingRelationshipFrom(null);
+            });
+          }}
+        />
+      ) : null}
+      {editor?.kind === 'relationship' ? (
+        <RelationshipBuilder
           data={data}
+          relationship={editor.relationship}
+          draft={editor.draft}
           selectedDomain={selectedDomain}
           selectedArea={selectedArea}
           t={t}
@@ -554,15 +598,38 @@ export function DbtFirstModelingPage() {
             setAiDockOpen(true);
             setModelingCorrection({ text: `Fix the failed relationship validation. Keep it draft, remove stale proof, and explain the corrected cardinality, fanout, or keys using the attached receipt.`, nonce: Date.now(), evidence });
           }}
+        />
+      ) : editor ? (
+        <ModelingEditor
+          editor={editor}
+          data={data}
+          selectedDomain={selectedDomain}
+          selectedArea={selectedArea}
+          t={t}
+          onClose={() => setEditor(null)}
+          onProposal={(next) => {
+            // "+ Add a related model": once the new model is saved, the
+            // relationship between it and the model the + was on opens next.
+            if (editor.kind === 'entity' && editor.relationshipFrom) {
+              for (const operation of next.operations) {
+                if (operation.kind === 'modeling_change' && operation.change.operation === 'upsert_entity') {
+                  setPendingRelationshipFrom({ ...editor.relationshipFrom, to: `${operation.change.value.domain}::entity::${operation.change.value.id}` });
+                  break;
+                }
+              }
+            }
+            setEditor(null);
+            setProposal(next);
+          }}
           onApplied={async (applied) => {
             setEditor(null);
             await refresh();
             if (editor.kind === 'entity' && editor.relationshipFrom && applied.operation === 'upsert_entity') {
-              setEditor({ kind: 'relationship', draft: { ...editor.relationshipFrom, to: applied.value.id } });
+              setEditor({ kind: 'relationship', draft: { ...editor.relationshipFrom, to: `${applied.value.domain}::entity::${applied.value.id}` } });
             }
           }}
         />
-      )}
+      ) : null}
       {dbtSourceEntity && nodeDetail && (
         <DbtSourceEditor
           entity={dbtSourceEntity}
@@ -659,67 +726,34 @@ function ConfirmModelDelete({ pending, busy, error, t, onCancel, onConfirm }: {
   );
 }
 
-function DomainPackageNavigation({
-  data,
-  selectedDomain,
-  onSelect,
-  t,
-}: {
-  data: DbtFirstModelingResponse;
-  selectedDomain: string | null;
-  onSelect: (domain: string | null) => void;
-  t: Theme;
-}) {
-  const { state } = useNotebook();
-  const packages = domainPackageTree(data.modeling.packages);
-  const authoredLabels = new Map(authoredDomainOptions(state.authoredDomains).map((option) => [option.value, option.label]));
+/** A labelled header picker: the domain and the subject area read as two plain choices. */
+function ScopeSelect({ label, value, options, onChange, t }: { label: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void; t: Theme }) {
   return (
-    <nav aria-label="Domain packages">
-      <DomainScopeSelect
-        id="domain-workspace-filter"
-        ariaLabel="Domain workspace"
-        value={selectedDomain ?? ''}
-        options={packages.map((pkg) => ({ value: pkg.id, label: authoredLabels.get(pkg.id) ?? pkg.label }))}
-        onChange={(value) => onSelect(value || null)}
-        summary={<>{packages.length} authored domain{packages.length === 1 ? '' : 's'} available</>}
-        t={t}
-      />
-    </nav>
+    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: t.textMuted, fontSize: 10.5, fontWeight: 650 }}>
+      {label}
+      <select aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} style={{ ...inputStyle(t), width: 'auto', minWidth: 150, maxWidth: 240, padding: '5px 7px', color: t.textPrimary }}>
+        {options.map((option) => <option key={option.value || '__all'} value={option.value}>{option.label}</option>)}
+      </select>
+    </label>
   );
 }
 
-function DomainWorkspaceNavigation({ data, domain, active, onSelect, t }: { data: DbtFirstModelingResponse; domain: string | null; active: Tab; onSelect: (section: Tab) => void; t: Theme }) {
-  const assetGroups = domain
-    ? [data.domainAssets?.[domain] ?? {}]
-    : Object.values(data.domainAssets ?? {});
-  const entities = domainEntityRecords(data.modeling, domain);
-  const counts: Partial<Record<Tab, number>> = {
-    diagram: entities.length,
-    skills: assetGroups.reduce((total, assets) => total + (assets.skills?.length ?? 0), 0),
-    blocks: new Set(assetGroups.flatMap((assets) => assets.blocks ?? [])).size,
-  };
-  return (
-    <nav aria-label={domain ? `${domain} workspace` : 'All domains workspace'} style={{ padding: '10px 7px 14px' }}>
-      {DOMAIN_STUDIO_NAVIGATION.map((group, groupIndex) => (
-        <div key={group.label ?? `group-${groupIndex}`} style={{ marginTop: groupIndex === 0 ? 0 : 12 }}>
-          {group.label ? <div style={{ padding: '0 8px 6px', color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em' }}>{group.label}</div> : null}
-          {group.items.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => onSelect(item.id)}
-              aria-current={active === item.id ? 'page' : undefined}
-              style={workspaceNavButton(t, active === item.id, false)}
-            >
-              {domainSectionIcon(item.id, 14, t, active === item.id)}
-              <span style={{ flex: 1 }}>{item.label}</span>
-              {counts[item.id] !== undefined && <small style={{ color: active === item.id ? t.accent : t.textMuted }}>{counts[item.id]}</small>}
-            </button>
-          ))}
-        </div>
-      ))}
-    </nav>
-  );
-}
+const tabButton = (t: Theme, active: boolean): React.CSSProperties => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  height: 40,
+  padding: '0 11px',
+  border: 'none',
+  borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
+  background: 'transparent',
+  color: active ? t.textPrimary : t.textSecondary,
+  fontSize: 11.5,
+  fontWeight: active ? 750 : 600,
+  fontFamily: t.font,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
+});
 
 function domainSectionIcon(section: Tab, size: number, t: Theme, active = false) {
   const Icon = section === 'blocks'
@@ -728,14 +762,12 @@ function domainSectionIcon(section: Tab, size: number, t: Theme, active = false)
       ? GitBranch
       : section === 'skills'
         ? GraduationCap
-        : section === 'notebooks' || section === 'apps'
-          ? FolderTree
-          : Boxes;
+        : section === 'terms'
+          ? BookOpen
+          : section === 'used_by'
+            ? FolderTree
+            : Boxes;
   return <Icon size={size} color={active ? t.accent : t.textMuted} />;
-}
-
-function domainStudioSectionLabel(section: Tab): string {
-  return DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items).find((item) => item.id === section)?.label ?? section;
 }
 
 function readDomainStudioLocation(): { domain: string | null; section: Tab; modelAreaId: string | null; selectedId: string | null } {
@@ -827,11 +859,9 @@ function relationshipRecordKey(relationships: Record<string, ManifestModelRelati
   return relationship.qualifiedId ?? relationship.id;
 }
 
-function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose, onProposal, onFixWithAi, onApplied }: { editor: Editor; data: DbtFirstModelingResponse; selectedDomain: string | null; selectedArea?: ManifestModelArea; t: Theme; onClose: () => void; onProposal: (proposal: ContextAuthoringProposalV1) => void; onFixWithAi: (relationshipId: string | null, evidence: unknown) => void; onApplied: (change: ModelingAuthoringChange) => Promise<void> }) {
-  const existing = editor.kind === 'relationship' ? editor.relationship : undefined;
+function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose, onProposal, onApplied }: { editor: Exclude<Editor, { kind: 'relationship' }>; data: DbtFirstModelingResponse; selectedDomain: string | null; selectedArea?: ManifestModelArea; t: Theme; onClose: () => void; onProposal: (proposal: ContextAuthoringProposalV1) => void; onApplied: (change: ModelingAuthoringChange) => Promise<void> }) {
   const existingEntity = editor.kind === 'entity' ? editor.entity : undefined;
   const existingArea = editor.kind === 'area' ? editor.area : undefined;
-  const relationshipDraft = editor.kind === 'relationship' ? editor.draft : undefined;
   // UI-019: prefill a usable scope rather than an empty one. The server creates
   // any Domain/subject area that does not exist yet inside the same proposal,
   // so a first-time author is never blocked on governance setup.
@@ -844,13 +874,12 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
   );
   const [areaId, setAreaId] = useState(
     existingArea?.localId
-      ?? data.modeling.areas[existingEntity?.areaId ?? existing?.areaId ?? '']?.localId
+      ?? data.modeling.areas[existingEntity?.areaId ?? '']?.localId
       ?? selectedArea?.localId
       ?? DEFAULT_MODEL_AREA_ID,
   );
-  const [id, setId] = useState(existing?.localId ?? existingEntity?.localId ?? existingArea?.localId ?? '');
-  const [owner, setOwner] = useState(existing?.owner ?? existingEntity?.owner ?? '');
-  const [parent, setParent] = useState('');
+  const [id, setId] = useState(existingEntity?.localId ?? existingArea?.localId ?? '');
+  const [owner, setOwner] = useState(existingEntity?.owner ?? '');
   const [dbtModel, setDbtModel] = useState(editor.kind === 'entity' ? (existingEntity?.dbtUniqueId ?? editor.dbtUniqueId ?? '') : '');
   const [businessName, setBusinessName] = useState(existingEntity?.businessName ?? '');
   const [businessContext, setBusinessContext] = useState(existingEntity?.businessContext ?? '');
@@ -863,24 +892,7 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
   const [areaDescription, setAreaDescription] = useState(existingArea?.description ?? '');
   const [areaIntents, setAreaIntents] = useState(existingArea?.intentExamples.join(', ') ?? '');
   const [areaReferences, setAreaReferences] = useState(existingArea?.referencedEntityIds.map((reference) => data.modeling.entities[reference]?.localId ?? reference).join(', ') ?? '');
-  const [from, setFrom] = useState(existing?.from ?? relationshipDraft?.from ?? '');
-  const [to, setTo] = useState(existing?.to ?? relationshipDraft?.to ?? '');
-  const [keyPairs, setKeyPairs] = useState(existing?.keys.map((key) => `${key.from}=${key.to}`).join(', ') ?? (relationshipDraft?.fromColumn && relationshipDraft.toColumn ? `${relationshipDraft.fromColumn}=${relationshipDraft.toColumn}` : ''));
-  const [cardinality, setCardinality] = useState<RelationshipAuthoringInput['cardinality']>(existing?.cardinality ?? 'unknown');
-  const [fanout, setFanout] = useState<RelationshipAuthoringInput['fanout']>(existing?.fanout ?? 'unknown');
-  const [lifecycle, setLifecycle] = useState<RelationshipAuthoringInput['status']>(existing?.status ?? 'draft');
-  const [verb, setVerb] = useState(existing?.verb ?? '');
-  const [description, setDescription] = useState(existing?.description ?? '');
-  const [fromRole, setFromRole] = useState(existing?.roles?.from ?? '');
-  const [toRole, setToRole] = useState(existing?.roles?.to ?? '');
-  const [fromOptionality, setFromOptionality] = useState(existing?.optionality?.from ?? 'unknown');
-  const [toOptionality, setToOptionality] = useState(existing?.optionality?.to ?? 'unknown');
-  const [joinTypes, setJoinTypes] = useState(existing?.joinTypes?.join(', ') ?? 'left');
-  const [measureSources, setMeasureSources] = useState(existing?.aggregation?.measuresFrom.join(', ') ?? '');
-  const [dimensionSources, setDimensionSources] = useState(existing?.aggregation?.dimensionsFrom.join(', ') ?? '');
-  const [importRefs, setImportRefs] = useState(existing?.importRefs?.join(', ') ?? '');
-  const [attributionBlock, setAttributionBlock] = useState(existing?.attributionBlock ?? '');
-  const [evidenceExpiresAt, setEvidenceExpiresAt] = useState(existing?.evidenceExpiresAt ?? '');
+  const [lifecycle, setLifecycle] = useState<RelationshipAuthoringInput['status']>('draft');
   const [entities, setEntities] = useState('');
   const [blocks, setBlocks] = useState('');
   const [purpose, setPurpose] = useState('');
@@ -898,17 +910,7 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
   const [change, setChange] = useState<ModelingAuthoringChange | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  // A draft Ask already proved on the warehouse starts from that evidence
-  // (REL-005): certifying reuses it; the person still presses Certify.
-  const askProof = existing ? data.askEvidence?.[relationshipRecordKey(data.modeling.relationships, existing)] ?? data.askEvidence?.[existing.qualifiedId ?? existing.id] : undefined;
-  const [validation, setValidation] = useState(existing?.validation ?? askProof?.evidence);
   const [selectedDbtDetail, setSelectedDbtDetail] = useState<DbtNodeAuthoringDetail | null>(null);
-  const [relationshipDetails, setRelationshipDetails] = useState<Record<string, DbtNodeAuthoringDetail | undefined>>({});
-  const [showAdvancedRelationship, setShowAdvancedRelationship] = useState(Boolean(existing && (existing.roles || existing.aggregation || existing.importRefs?.length || existing.attributionBlock || existing.evidenceExpiresAt)));
-  useEffect(() => {
-    if (editor.kind !== 'relationship' || existing || id || !from || !to) return;
-    setId(`${from}_to_${to}`.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase());
-  }, [editor.kind, existing, from, to, id]);
   useEffect(() => {
     if (editor.kind !== 'entity' || id || !dbtModel) return;
     const name = data.dbtProvenance.nodes[dbtModel]?.name;
@@ -929,33 +931,8 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
     }).catch(() => { if (!cancelled) setSelectedDbtDetail(null); });
     return () => { cancelled = true; };
   }, [dbtModel, editor.kind]);
-  useEffect(() => {
-    if (editor.kind !== 'relationship') return;
-    const requested = [from, to]
-      .map((recordKey) => data.modeling.entities[recordKey]?.dbtUniqueId)
-      .filter((value): value is string => Boolean(value));
-    const missing = requested.filter((uniqueId) => !relationshipDetails[uniqueId]);
-    if (!missing.length) return;
-    let cancelled = false;
-    void api.getDbtModelingNodes(missing).then(({ details }) => {
-      if (cancelled) return;
-      setRelationshipDetails((current) => ({ ...current, ...Object.fromEntries(details.map((detail) => [detail.uniqueId, detail])) }));
-    }).catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [editor.kind, from, to]);
 
   const buildChange = (): ModelingAuthoringChange => {
-    if (editor.kind === 'domain')
-      return {
-        operation: 'upsert_domain',
-        value: {
-          id,
-          name: id,
-          owner,
-          parent: parent || undefined,
-          exports: [],
-        },
-      };
     if (editor.kind === 'area')
       return {
         operation: 'upsert_area',
@@ -1036,53 +1013,8 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
           owner: owner || undefined,
         } satisfies DomainImportAuthoringInput,
       };
-    const parsedKeys = relationshipKeys(keyPairs);
-    const unchanged = !existing || (existing.from === from && existing.to === to && JSON.stringify(existing.keys) === JSON.stringify(parsedKeys) && existing.cardinality === cardinality && existing.fanout === fanout);
-    const currentValidation = unchanged ? validation : undefined;
-    const status = lifecycle === 'certified' && currentValidation?.status !== 'passed' ? 'reviewed' : lifecycle;
-    const fromEntity = data.modeling.entities[from];
-    const toEntity = data.modeling.entities[to];
-    return {
-      operation: 'upsert_relationship',
-      value: {
-        id,
-        domain,
-        areaId: areaId || undefined,
-        from,
-        to,
-        keys: parsedKeys,
-        cardinality,
-        fanout,
-        status,
-        owner: owner || undefined,
-        ownerDomain: domain,
-        verb: verb || undefined,
-        description: description || undefined,
-        roles: fromRole || toRole ? { from: fromRole || undefined, to: toRole || undefined } : undefined,
-        optionality: { from: fromOptionality, to: toOptionality },
-        joinTypes: csv(joinTypes) as Array<'left' | 'inner'>,
-        aggregation:
-          measureSources || dimensionSources
-            ? {
-                measuresFrom: csv(measureSources),
-                dimensionsFrom: csv(dimensionSources),
-                requiresPreAggregation: fanout !== 'safe',
-              }
-            : undefined,
-        attributionBlock: attributionBlock || undefined,
-        importRefs: csv(importRefs),
-        evidenceExpiresAt: evidenceExpiresAt || undefined,
-        crossDomain: fromEntity?.domain !== toEntity?.domain,
-        validation: currentValidation,
-        certifiedAgainst:
-          status === 'certified' && fromEntity?.grain && toEntity?.grain
-            ? {
-                from: { grain: fromEntity.grain, keys: fromEntity.keys },
-                to: { grain: toEntity.grain, keys: toEntity.keys },
-              }
-            : undefined,
-      },
-    };
+    // Relationships have their own builder (RelationshipBuilder.tsx).
+    throw new Error('Unsupported modeling editor.');
   };
   /**
    * Two-tier write path.
@@ -1118,94 +1050,26 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
       setBusy(false);
     }
   };
-  const validate = async () => {
-    try {
-      setBusy(true);
-      setMessage(null);
-      const next = buildChange();
-      if (next.operation !== 'upsert_relationship') return;
-      const evidence = await api.validateModelingRelationship(next.value, data.snapshotId);
-      setValidation(evidence);
-      setMessage(evidence.status === 'passed' ? 'Warehouse proof passed. Preview the source change to save it.' : (evidence.message ?? 'Validation failed.'));
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const entityOptions: ModelingSearchOption[] = Object.entries(data.modeling.entities).map(([recordKey, entity]) => {
-    const dbtNode = data.dbtProvenance.nodes[entity.dbtUniqueId];
-    return {
-      value: recordKey,
-      label: entity.businessName || entity.localId || entity.id,
-      description: `${entity.domain} · ${dbtNode?.relation ?? dbtNode?.name ?? entity.dbtUniqueId}`,
-      keywords: [entity.qualifiedId, entity.businessContext ?? '', entity.analyticalRole ?? ''],
-    };
-  });
-  const fromDetail = relationshipDetails[data.modeling.entities[from]?.dbtUniqueId ?? ''];
-  const toDetail = relationshipDetails[data.modeling.entities[to]?.dbtUniqueId ?? ''];
-  const fromColumnOptions: ModelingSearchOption[] = (fromDetail?.columns ?? []).map((column) => ({
-    value: column.name,
-    label: column.name,
-    description: [column.type, column.description].filter(Boolean).join(' · ') || 'dbt column',
-  }));
-  const toColumnOptions: ModelingSearchOption[] = (toDetail?.columns ?? []).map((column) => ({
-    value: column.name,
-    label: column.name,
-    description: [column.type, column.description].filter(Boolean).join(' · ') || 'dbt column',
-  }));
-  const exactColumnMatches = fromColumnOptions
-    .map((option) => option.value)
-    .filter((column) => toColumnOptions.some((option) => option.value.toLowerCase() === column.toLowerCase()))
-    .slice(0, 5);
-  const editableKeyPairs = keyPairs
-    ? keyPairs.split(',').map((pair) => {
-        const [left = '', right = ''] = pair.split('=').map((item) => item.trim());
-        return { from: left, to: right };
-      })
-    : [{ from: '', to: '' }];
-  const updateKeyPair = (index: number, side: 'from' | 'to', value: string) => {
-    const next = editableKeyPairs.map((pair, pairIndex) => pairIndex === index ? { ...pair, [side]: value } : pair);
-    setKeyPairs(next.map((pair) => `${pair.from}=${pair.to}`).join(', '));
-    setValidation(undefined);
-  };
-  const removeKeyPair = (index: number) => {
-    const next = editableKeyPairs.filter((_, pairIndex) => pairIndex !== index);
-    setKeyPairs(next.map((pair) => `${pair.from}=${pair.to}`).join(', '));
-    setValidation(undefined);
-  };
-  const addKeyPair = () => setKeyPairs([...editableKeyPairs.filter((pair) => pair.from || pair.to), { from: '', to: '' }].map((pair) => `${pair.from}=${pair.to}`).join(', '));
-  const editorReady = editor.kind === 'entity'
-    ? Boolean(domain && id && dbtModel)
-    : editor.kind === 'relationship'
-      ? Boolean(domain && id && from && to && editableKeyPairs.some((pair) => pair.from && pair.to) && editableKeyPairs.every((pair) => pair.from && pair.to))
-      : true;
+  const editorReady = editor.kind === 'entity' ? Boolean(domain && id && dbtModel) : true;
   // Drives the button label so the user knows before clicking whether this
   // saves straight away or opens a review.
   const descriptiveOnly = (() => {
     if (!editorReady) return false;
     try { return isDescriptiveOnlyChange(buildChange(), existingEntity, existingArea); } catch { return false; }
   })();
-  const title = editor.kind === 'domain' ? 'Create Domain Package' : editor.kind === 'area' ? (existingArea ? 'Edit subject area' : 'Create subject area') : editor.kind === 'entity' ? (existingEntity ? 'Edit business entity' : 'Add dbt model') : editor.kind === 'contract' ? 'Create analytical contract' : editor.kind === 'export' ? 'Publish domain export' : editor.kind === 'import' ? 'Request domain import' : existing ? 'Edit relationship' : 'Create relationship';
+  const title = editor.kind === 'area' ? (existingArea ? 'Edit subject area' : 'New subject area') : editor.kind === 'entity' ? (existingEntity ? 'Edit model' : 'Add a dbt model') : editor.kind === 'contract' ? 'Create analytical contract' : editor.kind === 'export' ? 'Publish domain export' : 'Request domain import';
   return (
     <Modal title={title} t={t} onClose={onClose}>
       {(
         <div style={{ display: 'grid', gap: 12 }}>
-          {editor.kind !== 'domain' && (
-            <Field label="Domain">
-              <Select value={domain} onChange={setDomain} values={Object.keys(data.modeling.packages)} t={t} />
-            </Field>
-          )}
-          {editor.kind !== 'relationship' && <Field label={editor.kind === 'entity' ? 'Entity id' : editor.kind === 'area' ? 'Area id' : editor.kind === 'contract' ? 'Contract id' : editor.kind === 'export' ? 'Export id' : editor.kind === 'import' ? 'Import id (optional)' : 'Domain id'}><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>}
-          {editor.kind === 'domain' && (
-            <Field label="Parent domain (optional)">
-              <Select value={parent} onChange={setParent} values={Object.keys(data.modeling.packages)} t={t} />
-            </Field>
-          )}
+          <Field label="Domain">
+            <Select value={domain} onChange={setDomain} values={Object.keys(data.modeling.packages)} t={t} />
+          </Field>
+          <Field label={editor.kind === 'entity' ? 'Model id' : editor.kind === 'area' ? 'Subject area id' : editor.kind === 'contract' ? 'Contract id' : editor.kind === 'export' ? 'Export id' : 'Import id (optional)'}><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>
           {editor.kind === 'area' && (
             <>
-              <Message text="A subject area is one small, reviewable source file — a focused diagram inside this Domain. It filters the same domain graph; it never creates a competing semantic model and never changes what an agent is allowed to use." t={t} />
-              <Field label="Area name"><Input value={areaName} onChange={setAreaName} t={t} placeholder="Customer lifecycle" /></Field>
+              <Message text="A subject area is a focused view of one part of this domain, like Customer lifecycle. It narrows the map and helps Ask pick the right skills; it never changes what Ask is allowed to use." t={t} />
+              <Field label="Subject area name"><Input value={areaName} onChange={setAreaName} t={t} placeholder="Customer lifecycle" /></Field>
               <Field label="Business question or scope"><Input value={areaDescription} onChange={setAreaDescription} t={t} placeholder="How customers progress from first order to repeat purchase." /></Field>
               <Field label="Example questions (comma-separated)"><Input value={areaIntents} onChange={setAreaIntents} t={t} placeholder="Which customers made a second purchase?" /></Field>
               <Field label="Read-only boundary entities (comma-separated)"><Input value={areaReferences} onChange={setAreaReferences} t={t} placeholder="customer" /></Field>
@@ -1255,64 +1119,6 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
                 <Field label="Lifecycle"><Select value={entityStatus === 'review' ? 'reviewed' : entityStatus} onChange={(value) => setEntityStatus(value as NonNullable<ManifestModelEntity['status']>)} values={['draft', 'evaluated', 'reviewed', 'certified', 'deprecated']} t={t} /></Field>
                 <Field label="Owner"><Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" /></Field>
               </div>
-            </>
-          )}
-          {editor.kind === 'relationship' && (
-            <>
-              <WorkflowSteps current={!from || !to ? 1 : editableKeyPairs.some((pair) => pair.from && pair.to) ? 3 : 2} labels={['Choose models', 'Match join keys', 'Review policy']} t={t} />
-              <Message text="Search business names or dbt relations, then match columns from only those two models. DQL keeps the relationship in draft until warehouse validation passes." t={t} />
-              <Field label="Subject area"><Select value={areaId} onChange={setAreaId} values={Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => area.localId)} labels={Object.fromEntries(Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => [area.localId, area.name]))} t={t} /></Field>
-              <div style={twoColumns}>
-                <Field label="From entity">
-                  <SearchPicker ariaLabel="From entity" value={from} onChange={(value) => { setFrom(value); setValidation(undefined); }} options={entityOptions} placeholder="Search source model…" t={t} />
-                </Field>
-                <Field label="To entity">
-                  <SearchPicker ariaLabel="To entity" value={to} onChange={(value) => { setTo(value); setValidation(undefined); }} options={entityOptions.filter((option) => option.value !== from)} placeholder="Search target model…" t={t} />
-                </Field>
-              </div>
-              {from && to && <SelectionSummary title={`${data.modeling.entities[from]?.businessName || data.modeling.entities[from]?.localId} → ${data.modeling.entities[to]?.businessName || data.modeling.entities[to]?.localId}`} detail={`${fromDetail?.columns.length ?? 0} source columns · ${toDetail?.columns.length ?? 0} target columns`} t={t} />}
-              <Field label="Join keys">
-                <div style={{ display: 'grid', gap: 8 }}>
-                  {exactColumnMatches.length > 0 && !editableKeyPairs.some((pair) => pair.from && pair.to) && <button type="button" onClick={() => setKeyPairs(`${exactColumnMatches[0]}=${exactColumnMatches[0]}`)} style={{ ...linkButton(t), justifySelf: 'start' }}><Sparkles size={13} /> Use exact match: {exactColumnMatches[0]}</button>}
-                  {editableKeyPairs.map((pair, index) => (
-                    <div key={`${index}:${pair.from}:${pair.to}`} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 24px minmax(0, 1fr) 30px', gap: 7, alignItems: 'center' }}>
-                      <SearchPicker ariaLabel={`Source join column ${index + 1}`} value={pair.from} onChange={(value) => updateKeyPair(index, 'from', value)} options={fromColumnOptions} placeholder={from ? 'Source column…' : 'Choose source first'} disabled={!from || !fromDetail} t={t} />
-                      <span aria-hidden="true" style={{ color: t.textMuted, textAlign: 'center' }}>→</span>
-                      <SearchPicker ariaLabel={`Target join column ${index + 1}`} value={pair.to} onChange={(value) => updateKeyPair(index, 'to', value)} options={toColumnOptions} placeholder={to ? 'Target column…' : 'Choose target first'} disabled={!to || !toDetail} t={t} />
-                      <button type="button" aria-label="Remove join key" title="Remove join key" onClick={() => removeKeyPair(index)} style={iconButtonStyle(t)}><XCircle size={14} /></button>
-                    </div>
-                  ))}
-                  <button type="button" onClick={addKeyPair} style={{ ...linkButton(t), justifySelf: 'start' }}><Plus size={13} /> Add key pair</button>
-                </div>
-              </Field>
-              {id && <div style={{ color: t.textMuted, fontSize: 9.5 }}>Relationship id: <code>{id}</code></div>}
-              <div style={twoColumns}>
-                <Field label="Cardinality">
-                  <Select value={cardinality} onChange={(v) => setCardinality(v as RelationshipAuthoringInput['cardinality'])} values={['unknown', 'one_to_one', 'one_to_many', 'many_to_one', 'many_to_many']} t={t} />
-                </Field>
-                <Field label="Fanout policy">
-                  <Select value={fanout === 'unsafe' ? 'forbidden' : fanout} onChange={(v) => setFanout(v as RelationshipAuthoringInput['fanout'])} values={['safe', 'dedupe_required', 'attribution_required', 'forbidden', 'unknown']} t={t} />
-                </Field>
-              </div>
-              <div style={twoColumns}>
-                <Field label="Business verb (optional)">
-                  <Input value={verb} onChange={setVerb} t={t} placeholder="belongs to" />
-                </Field>
-                <Field label="Description (optional)">
-                  <Input value={description} onChange={setDescription} t={t} placeholder="Why this relationship exists" />
-                </Field>
-              </div>
-              {from && to && data.modeling.entities[from]?.domain !== data.modeling.entities[to]?.domain && <Message text="This is a cross-domain relationship. Add the approved provider import in Advanced governance before certification." t={t} />}
-              <button type="button" onClick={() => setShowAdvancedRelationship((value) => !value)} style={{ ...linkButton(t), justifySelf: 'start', padding: '6px 0' }}>{showAdvancedRelationship ? 'Hide advanced governance' : 'Advanced governance and aggregation'}</button>
-              {showAdvancedRelationship && <div style={{ display: 'grid', gap: 12, padding: 12, border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg }}>
-                <div style={twoColumns}><Field label="Allowed join types"><Input value={joinTypes} onChange={setJoinTypes} t={t} placeholder="left, inner" /></Field><Field label="Lifecycle"><Select value={lifecycle === 'review' ? 'reviewed' : lifecycle ?? 'draft'} onChange={(v) => setLifecycle(v as RelationshipAuthoringInput['status'])} values={['draft', 'evaluated', 'reviewed', 'certified', 'deprecated']} t={t} /></Field></div>
-                <div style={twoColumns}><Field label="From role"><Input value={fromRole} onChange={setFromRole} t={t} /></Field><Field label="To role"><Input value={toRole} onChange={setToRole} t={t} /></Field></div>
-                <div style={twoColumns}><Field label="From optionality"><Select value={fromOptionality} onChange={(value) => setFromOptionality(value as 'required' | 'optional' | 'unknown')} values={['required', 'optional', 'unknown']} t={t} /></Field><Field label="To optionality"><Select value={toOptionality} onChange={(value) => setToOptionality(value as 'required' | 'optional' | 'unknown')} values={['required', 'optional', 'unknown']} t={t} /></Field></div>
-                <div style={twoColumns}><Field label="Measures allowed from"><Input value={measureSources} onChange={setMeasureSources} t={t} placeholder="order" /></Field><Field label="Dimensions allowed from"><Input value={dimensionSources} onChange={setDimensionSources} t={t} placeholder="customer" /></Field></div>
-                <div style={twoColumns}><Field label="Required import refs"><Input value={importRefs} onChange={setImportRefs} t={t} placeholder="commerce.customer@1" /></Field><Field label="Attribution block"><Input value={attributionBlock} onChange={setAttributionBlock} t={t} placeholder="growth.revenue_by_channel" /></Field></div>
-                <div style={twoColumns}><Field label="Evidence expires"><Input value={evidenceExpiresAt} onChange={setEvidenceExpiresAt} t={t} placeholder="2026-12-31" /></Field><Field label="Owner"><Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" /></Field></div>
-              </div>}
-              {validation && <Evidence evidence={validation} t={t} onFixWithAi={validation.status === 'failed' ? () => onFixWithAi(existing ? relationshipRecordKey(data.modeling.relationships, existing) : null, validation) : undefined} />}
             </>
           )}
           {editor.kind === 'contract' && (
@@ -1402,18 +1208,13 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
               </Field>
             </>
           )}
-          {editor.kind !== 'entity' && editor.kind !== 'relationship' && editor.kind !== 'area' && (
+          {editor.kind !== 'entity' && editor.kind !== 'area' && (
             <Field label="Owner">
               <Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" />
             </Field>
           )}
           {message && <Message text={message} t={t} />}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-            {editor.kind === 'relationship' && (
-              <Button t={t} onClick={() => void validate()} disabled={busy || !editorReady}>
-                <ShieldCheck size={14} /> Validate in warehouse
-              </Button>
-            )}
             <Button primary t={t} onClick={() => void saveChange()} disabled={busy || !editorReady}>
               {descriptiveOnly ? 'Save' : 'Preview source change'}
             </Button>
@@ -1526,7 +1327,7 @@ function LayerToolbar({ modelingView, columnMode, search, layoutMode, density, v
 const viewOptionLabel = (t: Theme): React.CSSProperties => ({ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, color: t.textSecondary, fontSize: 10.5 });
 const viewMenuButton = (t: Theme, active = false): React.CSSProperties => ({ border: 'none', borderRadius: 6, padding: '6px 7px', display: 'flex', alignItems: 'center', gap: 7, background: active ? 'var(--accent-dim)' : 'transparent', color: active ? t.accent : t.textSecondary, fontSize: 10.5, textAlign: 'left', cursor: 'pointer' });
 
-function DiagramLegend({ t }: { t: Theme }) { return <div style={{ display: 'flex', gap: 14, padding: '7px 12px', borderBottom: `1px solid ${t.headerBorder}`, background: t.headerBg, color: t.textSecondary, fontSize: 9.5 }}>{[['Safe certified', '#2e9b63'], ['Validated review', '#5b73d6'], ['Attribution / draft', '#9a6b2f'], ['Stale certification', '#d47822']].map(([label, color]) => <span key={label} style={{ display: 'flex', gap: 5, alignItems: 'center' }}><i style={{ display: 'inline-block', width: 18, height: 3, background: color, borderRadius: 2 }} />{label}</span>)}<span style={{ marginLeft: 'auto' }}>1:1 · 1:N · N:1 · N:N</span></div>; }
+function DiagramLegend({ t }: { t: Theme }) { return <div style={{ display: 'flex', gap: 14, padding: '7px 12px', borderBottom: `1px solid ${t.headerBorder}`, background: t.headerBg, color: t.textSecondary, fontSize: 9.5 }}>{RELATIONSHIP_LEGEND.map(({ label, color }) => <span key={label} style={{ display: 'flex', gap: 5, alignItems: 'center' }}><i style={{ display: 'inline-block', width: 18, height: 3, background: color, borderRadius: 2 }} />{label}</span>)}<span style={{ marginLeft: 'auto' }}>1:1 · 1:N · N:1 · N:N</span></div>; }
 
 function ModelingEmptyWorkspace({ t, connectedModels, onDbt, onYaml, onManual }: { t: Theme; connectedModels: number; onDbt: () => void; onYaml: () => void; onManual: () => void }) {
   // UI-019: all three doors are always live. A Domain and subject area are
@@ -1592,7 +1393,7 @@ function DomainBlocksPanel({ data, domain, t }: { data: DbtFirstModelingResponse
         title="Blocks"
         detail={domain
           ? `Reusable blocks owned by ${domain}. Select one to open the exact source in Block Studio.`
-          : 'All reusable blocks grouped across the current Domain Packages. Select one to open the exact source in Block Studio.'}
+          : 'All reusable blocks grouped across all domains. Select one to open the exact source in Block Studio.'}
         t={t}
       />
       {openError ? <Message text={openError} t={t} /> : null}
@@ -1679,14 +1480,8 @@ function RelatedProductsPanel({ data, domain, kind, t }: { data: DbtFirstModelin
     }
   };
   return (
-    <ScrollPanel>
-      <PanelHeader
-        title={domain ? `Related ${label}` : `All ${label}`}
-        detail={domain
-          ? `${label} are global shared products related to ${domain}. This backlink does not create a second copy inside the Domain Package.`
-          : `All global ${label.toLowerCase()} across Domain Packages. Select a domain above to narrow by owner/uses-domain metadata.`}
-        t={t}
-      />
+    <section aria-label={label} style={{ marginBottom: 22 }}>
+      <h3 style={{ ...inspectorHeading(t), margin: '0 0 10px', display: 'flex', alignItems: 'center', gap: 6 }}>{label}{!loading ? <small style={{ color: t.textMuted, fontWeight: 600 }}>{products.length || legacyPaths.length}</small> : null}</h3>
       {openError ? <Message text={openError} t={t} /> : null}
       {loading ? <Blank title={`Loading related ${label.toLowerCase()}…`} detail="Resolving global product backlinks from the compiled project snapshot." t={t} /> : products.length ? (
         <div style={{ display: 'grid', gap: 10 }}>
@@ -1721,9 +1516,9 @@ function RelatedProductsPanel({ data, domain, kind, t }: { data: DbtFirstModelin
           ))}
         </div>
       ) : (
-        <Blank title={`No related ${label.toLowerCase()} yet`} detail={`Create the ${kind === 'notebooks' ? 'notebook' : 'app'} from the global ${label} surface, then declare this domain in its product context to make the backlink appear here.`} t={t} />
+        <Blank title={`No ${label.toLowerCase()} use this domain yet`} detail={`Open a ${kind === 'notebooks' ? 'notebook' : 'app'} and add this domain to its context to list it here.`} t={t} />
       )}
-    </ScrollPanel>
+    </section>
   );
 }
 
@@ -1957,7 +1752,7 @@ function DbtSourceEditor({ entity, detail, snapshotId, t, onClose, onApplied }: 
   };
   return (
     <Modal title={`Edit dbt source · ${detail.name}`} t={t} onClose={onClose}>
-      <Message text="dbt owns descriptions and tests. DQL will preview a guarded patch to the dbt YAML source; no dbt metadata is copied into the Domain Package." t={t} />
+      <Message text="dbt owns descriptions and tests. DQL will preview a guarded patch to the dbt YAML source; no dbt metadata is copied into the domain folder." t={t} />
       {!preview ? <div style={{ display: 'grid', gap: 12 }}>
         <Field label="Model description">
           <textarea aria-label="Model description" value={description} onChange={(event) => setDescription(event.target.value)} rows={5} style={{ ...inputStyle(t), resize: 'vertical' }} />
@@ -1965,7 +1760,7 @@ function DbtSourceEditor({ entity, detail, snapshotId, t, onClose, onApplied }: 
         <Field label="Column tests (one column per line)">
           <textarea aria-label="Column tests" value={tests} onChange={(event) => setTests(event.target.value)} rows={6} placeholder="order_id: unique, not_null" style={{ ...inputStyle(t), resize: 'vertical', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }} />
         </Field>
-        <p style={{ margin: 0, color: t.textMuted, fontSize: 10 }}>Descriptions/tests stay in dbt YAML. Business meaning, relationships, contracts, and policies stay in the DQL Domain Package.</p>
+        <p style={{ margin: 0, color: t.textMuted, fontSize: 10 }}>Descriptions/tests stay in dbt YAML. Business meaning, relationships, contracts, and policies stay in the DQL domain folder.</p>
         {message && <Message text={message} t={t} />}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 7 }}><Button t={t} onClick={onClose}>Cancel</Button><Button primary t={t} disabled={busy} onClick={() => void previewPatch()}>Preview source patch</Button></div>
       </div> : <div style={{ display: 'grid', gap: 10 }}>
@@ -1985,32 +1780,33 @@ function SourcePreview({ title, source, t }: { title: string; source: string; t:
   return <section><strong style={{ fontSize: 10 }}>{title}</strong><pre tabIndex={0} style={{ maxHeight: 360, overflow: 'auto', whiteSpace: 'pre-wrap', background: t.appBg, border: `1px solid ${t.headerBorder}`, borderRadius: 6, padding: 10, fontSize: 9.5, color: t.textSecondary }}>{source}</pre></section>;
 }
 
-function RelationshipInspector({ relationship, askEvidence, t, onEdit, onDelete }: { relationship: ManifestModelRelationship; askEvidence?: AskRelationshipEvidence; t: Theme; onEdit: () => void; onDelete?: () => void }) {
+function RelationshipInspector({ relationship, entities, t, onEdit, onDelete }: { relationship: ManifestModelRelationship; entities: DbtFirstModelingResponse['modeling']['entities']; t: Theme; onEdit: () => void; onDelete?: () => void }) {
+  const status = relationshipStatusView(relationship);
+  const nameOf = (ref: string) => entities[ref]?.businessName || entities[ref]?.localId || ref.split('::').pop() || ref;
+  const fromName = nameOf(relationship.from);
+  const toName = nameOf(relationship.to);
   return (
     <Inspector t={t}>
-      <InspectorTitle title={relationship.localId} subtitle={`${relationship.from} → ${relationship.to}`} t={t} />
-      <Button primary t={t} onClick={onEdit}>
-        Validate / edit
-      </Button>
-      <h3 style={inspectorHeading(t)}>Business meaning</h3>
-      <Property label="verb" value={relationship.verb ?? 'Not described'} t={t} />
-      <p style={{ margin: '0 0 8px', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{relationship.description || `${relationship.from} relates to ${relationship.to}. Add a business description so agents can distinguish this route from similarly shaped joins.`}</p>
-      <h3 style={inspectorHeading(t)}>Join route</h3>
-      <Property label="cardinality" value={relationship.cardinality} t={t} />
-      <Property label="fanout" value={relationship.fanout} t={t} />
-      <Property label="lifecycle" value={relationship.status} t={t} />
-      <Property label="join keys" value={relationship.keys.map((key) => `${key.from} = ${key.to}`).join(', ')} t={t} />
-      <Property label="endpoint roles" value={[relationship.roles?.from, relationship.roles?.to].filter(Boolean).join(' → ') || 'Not declared'} t={t} />
-      <Property label="allowed joins" value={relationship.joinTypes?.join(', ') || 'left'} t={t} />
-      <Property label="automatic agent join" value={relationship.automaticJoinAllowed ? 'Allowed' : 'Blocked'} t={t} />
+      <InspectorTitle title={relationshipSentence(relationship.cardinality, fromName, toName)} subtitle={relationship.localId} t={t} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6 }}>
+        <span style={{ border: `1px solid ${status.color}`, color: status.color, borderRadius: 999, padding: '2px 8px', fontSize: 10, fontWeight: 750 }}>{status.label}</span>
+      </div>
+      <p style={{ margin: '0 0 8px', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{status.meaning}</p>
+      <h3 style={inspectorHeading(t)}>Matched on</h3>
+      <Property label="keys" value={relationship.keys.map((key) => `${fromName}.${key.from} = ${toName}.${key.to}`).join(' and ')} t={t} />
+      {relationship.description ? <p style={{ margin: '8px 0', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{relationship.description}</p> : null}
+      <h3 style={inspectorHeading(t)}>Warehouse check</h3>
       {relationship.validation
-        ? <Evidence evidence={relationship.validation} t={t} />
-        : askEvidence
-          ? <>
-              <Message text={`Validated by Ask on ${askEvidence.evidence.checkedAt.slice(0, 10)} while answering a question — proven on the warehouse (${askEvidence.freshness.target ?? 'the active connection'}), not certified. Certifying this relationship reuses that evidence; asking never certifies.`} t={t} />
-              <Evidence evidence={askEvidence.evidence} t={t} />
-            </>
-          : <Message text="No warehouse proof has been captured. This edge cannot authorize automatic SQL joins." t={t} />}
+        ? <Evidence evidence={relationship.validation} fromName={fromName} toName={toName} t={t} />
+        : <Message text="Not checked in the warehouse yet. Open the relationship to run the check." t={t} />}
+      <details style={{ marginTop: 10 }}>
+        <summary style={{ cursor: 'pointer', color: t.textMuted, fontSize: 10.5 }}>Details</summary>
+        <Property label="cardinality" value={relationship.cardinality.replace(/_/g, ' ')} t={t} />
+        <Property label="fanout" value={relationship.fanout} t={t} />
+        <Property label="saved status" value={relationship.status} t={t} />
+        <Property label="roles" value={[relationship.roles?.from, relationship.roles?.to].filter(Boolean).join(' → ') || 'Not declared'} t={t} />
+        <Property label="allowed joins" value={relationship.joinTypes?.join(', ') || 'left'} t={t} />
+      </details>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
         <Button primary t={t} onClick={onEdit}>Edit relationship</Button>
         {onDelete ? <Button t={t} danger onClick={onDelete}>Delete relationship</Button> : null}
@@ -2076,7 +1872,7 @@ function StudioSummary({ data, domainEntities, domainRelationships, t, onSelectR
   );
 }
 
-function Evidence({ evidence, t, onFixWithAi }: { evidence: NonNullable<ManifestModelRelationship['validation']>; t: Theme; onFixWithAi?: () => void }) {
+export function Evidence({ evidence, t, onFixWithAi, fromName = 'source', toName = 'target' }: { evidence: NonNullable<ManifestModelRelationship['validation']>; t: Theme; onFixWithAi?: () => void; fromName?: string; toName?: string }) {
   return (
     <div
       style={{
@@ -2088,14 +1884,11 @@ function Evidence({ evidence, t, onFixWithAi }: { evidence: NonNullable<Manifest
         fontSize: 11,
       }}
     >
-      <b style={{ color: evidence.status === 'passed' ? '#2e9b63' : '#c94b55' }}>{evidence.status === 'passed' ? 'Warehouse proof passed' : 'Warehouse proof failed'}</b>
-      <div style={{ color: t.textSecondary, marginTop: 7, lineHeight: 1.55 }}>
-        Rows: {evidence.fromRows} → {evidence.toRows}
-        <br />
-        Joined: {evidence.joinedRows} · unmatched: {evidence.unmatchedFrom}
-        <br />
-        Max rows/key: {evidence.maxFromPerKey} → {evidence.maxToPerKey}
-      </div>
+      <b style={{ color: evidence.status === 'passed' ? '#2e9b63' : '#c94b55' }}>{evidence.status === 'passed' ? 'Safe to join' : 'Not safe to join as declared'}</b>
+      <span style={{ color: t.textMuted, marginLeft: 6, fontSize: 10 }}>checked {evidence.checkedAt.slice(0, 10)}</span>
+      <ul style={{ color: t.textSecondary, margin: '7px 0 0', paddingLeft: 16, lineHeight: 1.55 }}>
+        {relationshipProfileLines(evidence, fromName, toName).map((line) => <li key={line}>{line}</li>)}
+      </ul>
       {onFixWithAi ? <button type="button" onClick={onFixWithAi} style={{ ...linkButton(t), marginTop: 9 }}><Sparkles size={13} /> Fix with Modeling AI</button> : null}
     </div>
   );
@@ -2121,56 +1914,6 @@ function EmptyState({ t, title, detail, status }: { t: Theme; title: string; det
     </div>
   );
 }
-function Modal({ title, t, onClose, children }: { title: string; t: Theme; onClose: () => void; children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 100,
-        background: '#0008',
-        display: 'grid',
-        placeItems: 'center',
-        padding: 20,
-      }}
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        tabIndex={-1}
-        onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}
-        style={{
-          width: 'min(720px, 94vw)',
-          maxHeight: '88vh',
-          overflow: 'auto',
-          background: t.appBg,
-          border: `1px solid ${t.headerBorder}`,
-          borderRadius: 12,
-          boxShadow: '0 24px 80px #0006',
-        }}
-      >
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            padding: '15px 18px',
-            borderBottom: `1px solid ${t.headerBorder}`,
-          }}
-        >
-          <strong>{title}</strong>
-          <button aria-label={`Close ${title}`} title="Close" onClick={onClose} style={iconButtonStyle(t)}>
-            <XCircle size={17} />
-          </button>
-        </div>
-        <div style={{ padding: 18 }}>{children}</div>
-      </div>
-    </div>
-  );
-}
 function WorkflowSteps({ current, labels, t }: { current: number; labels: string[]; t: Theme }) {
   return (
     <div aria-label={`Step ${current} of ${labels.length}`} style={{ display: 'grid', gridTemplateColumns: `repeat(${labels.length}, minmax(0, 1fr))`, gap: 6 }}>
@@ -2188,40 +1931,6 @@ function SelectionSummary({ title, detail, t }: { title: string; detail: string;
   return <div style={{ display: 'grid', gap: 3, padding: '9px 11px', border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.cellBg }}><strong style={{ fontSize: 11 }}>{title}</strong><span style={{ color: t.textMuted, fontSize: 9.5, overflowWrap: 'anywhere' }}>{detail}</span></div>;
 }
 
-function SearchPicker({ ariaLabel, value, onChange, options, placeholder, disabled = false, t }: { ariaLabel?: string; value: string; onChange: (value: string) => void; options: ModelingSearchOption[]; placeholder: string; disabled?: boolean; t: Theme }) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState('');
-  const selected = options.find((option) => option.value === value);
-  const results = rankModelingOptions(options, query, 50);
-  return (
-    <div style={{ position: 'relative', minWidth: 0 }}>
-      <div style={{ position: 'relative' }}>
-        <Search size={13} aria-hidden="true" style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: t.textMuted, pointerEvents: 'none' }} />
-        <input
-          role="combobox"
-          aria-label={ariaLabel}
-          aria-expanded={open}
-          aria-controls={open ? 'modeling-search-results' : undefined}
-          disabled={disabled}
-          value={open ? query : (selected?.label ?? value)}
-          placeholder={placeholder}
-          onFocus={() => { setOpen(true); setQuery(''); }}
-          onBlur={() => { setOpen(false); setQuery(''); }}
-          onChange={(event) => { setOpen(true); setQuery(event.target.value); }}
-          onKeyDown={(event) => { if (event.key === 'Escape') { setOpen(false); setQuery(''); } }}
-          style={{ ...inputStyle(t), paddingLeft: 29, paddingRight: value ? 29 : 8, opacity: disabled ? 0.6 : 1 }}
-        />
-        {value && !disabled && <button type="button" aria-label="Clear selection" onMouseDown={(event) => event.preventDefault()} onClick={() => { onChange(''); setQuery(''); setOpen(true); }} style={{ ...iconButtonStyle(t), position: 'absolute', right: 3, top: '50%', transform: 'translateY(-50%)', width: 24, height: 24, border: 'none' }}><XCircle size={13} /></button>}
-      </div>
-      {open && !disabled && (
-        <div id="modeling-search-results" role="listbox" style={{ position: 'absolute', zIndex: 90, top: 'calc(100% + 4px)', left: 0, right: 0, maxHeight: 230, overflowY: 'auto', border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.cellBg, boxShadow: '0 12px 32px #0004', padding: 4 }}>
-          {results.length ? results.map((option) => <button key={option.value} type="button" role="option" aria-selected={option.value === value} onMouseDown={(event) => event.preventDefault()} onClick={() => { onChange(option.value); setOpen(false); setQuery(''); }} style={{ display: 'grid', width: '100%', gap: 2, padding: '8px 9px', border: 'none', borderRadius: 5, textAlign: 'left', background: option.value === value ? 'var(--accent-dim)' : 'transparent', color: t.textPrimary, cursor: 'pointer' }}><strong style={{ fontSize: 10.5 }}>{option.label}</strong>{option.description && <span style={{ color: t.textMuted, fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{option.description}</span>}</button>) : <div style={{ padding: 12, color: t.textMuted, fontSize: 10 }}>No matching results.</div>}
-          {options.length > 50 && <div style={{ padding: '6px 9px 4px', borderTop: `1px solid ${t.headerBorder}`, color: t.textMuted, fontSize: 9 }}>Showing the best 50 of {options.length.toLocaleString()}. Refine your search for a specific result.</div>}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function DbtModelPicker({ value, onChange, selectedNode, t }: { value: string; onChange: (value: string) => void; selectedNode?: { name: string; relation?: string; sourcePath?: string }; domain: string; t: Theme }) {
   const [query, setQuery] = useState('');
@@ -2503,13 +2212,6 @@ function csv(value: string): string[] {
     .map((item) => item.trim())
     .filter(Boolean);
 }
-function relationshipKeys(value: string): Array<{ from: string; to: string }> {
-  return csv(value).map((pair) => {
-    const [from, to] = pair.split('=').map((item) => item.trim());
-    if (!from || !to) throw new Error(`Invalid join key pair "${pair}". Use from_key=to_key.`);
-    return { from, to };
-  });
-}
 type DiagramPreferences = Partial<{
   viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode;
   density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean;
@@ -2556,26 +2258,6 @@ const sourcePreview = (t: Theme): React.CSSProperties => ({
   fontSize: 10,
   lineHeight: 1.5,
 });
-const inputStyle = (t: Theme): React.CSSProperties => ({
-  width: '100%',
-  boxSizing: 'border-box',
-  border: `1px solid ${t.headerBorder}`,
-  background: t.cellBg,
-  color: t.textPrimary,
-  borderRadius: 6,
-  padding: '8px 9px',
-  fontSize: 11,
-});
-const iconButtonStyle = (t: Theme): React.CSSProperties => ({
-  border: `1px solid ${t.headerBorder}`,
-  background: t.appBg,
-  color: t.textSecondary,
-  borderRadius: 6,
-  padding: 7,
-  display: 'grid',
-  placeItems: 'center',
-  cursor: 'pointer',
-});
 const treeButton = (t: Theme, active: boolean): React.CSSProperties => ({
   width: 'calc(100% - 12px)',
   margin: '2px 6px',
@@ -2605,14 +2287,6 @@ const workspaceNavButton = (t: Theme, active: boolean, nested: boolean): React.C
   fontSize: 10.5,
   fontWeight: active ? 700 : 500,
   textAlign: 'left',
-  cursor: 'pointer',
-});
-const linkButton = (t: Theme): React.CSSProperties => ({
-  border: 0,
-  background: 'transparent',
-  color: t.accent,
-  fontSize: 10,
-  fontWeight: 650,
   cursor: 'pointer',
 });
 const inspectorHeading = (t: Theme): React.CSSProperties => ({
