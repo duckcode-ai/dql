@@ -11,11 +11,12 @@ import { RELATIONSHIP_LEVELS } from './relationship-builder-model';
 
 type Theme = (typeof themes)['dark'];
 
+// Section wording for a list of relationships at one level.
 const LEVEL_TEXT: Record<AskImpactResponse['relationships'][number]['level'], { title: string; meaning: string }> = {
-  certified: { title: 'Joins Ask must use', meaning: RELATIONSHIP_LEVELS.find((level) => level.value === 'certified')!.meaning },
-  validated: { title: 'Joins Ask prefers', meaning: RELATIONSHIP_LEVELS.find((level) => level.value === 'validated')!.meaning },
+  certified: { title: 'Joins Ask must use', meaning: 'When Ask writes SQL that joins these models, it must use exactly these keys.' },
+  validated: { title: 'Joins Ask prefers', meaning: 'Checked safe to join in the warehouse. Ask prefers these when it writes SQL.' },
   stale: { title: 'Certified joins that need a recheck', meaning: 'Their warehouse check is missing, stale or failed, so Ask treats them as hints until they are checked again.' },
-  draft: { title: 'Joins Ask sees as hints', meaning: RELATIONSHIP_LEVELS.find((level) => level.value === 'draft')!.meaning },
+  draft: { title: 'Joins Ask sees as hints', meaning: 'Not checked in the warehouse yet. Certify one to make Ask use its keys.' },
 };
 
 export function AskImpactDrawer({ domain, area, areaName, t, onClose }: { domain: string; area?: string | null; areaName?: string; t: Theme; onClose: () => void }) {
