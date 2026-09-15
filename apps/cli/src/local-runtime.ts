@@ -712,17 +712,25 @@ export function resolveProjectSemanticConfig(
   return configured;
 }
 
-function hasDbtSemanticArtifacts(projectRoot: string, dbtProjectDir: string, configuredManifestPath?: string): boolean {
+/**
+ * Whether the dbt project defines a semantic layer. dbt writes
+ * `semantic_manifest.json` and empty `semantic_models`/`metrics` maps on every
+ * parse, so their presence proves nothing: a project with none would switch a
+ * native DQL semantic layer to an empty dbt one and lose every governed metric.
+ * It counts only when at least one semantic model or metric exists.
+ */
+export function hasDbtSemanticArtifacts(projectRoot: string, dbtProjectDir: string, configuredManifestPath?: string): boolean {
   const dbtRoot = resolve(projectRoot, dbtProjectDir);
   const manifestPath = resolve(dbtRoot, configuredManifestPath ?? 'target/manifest.json');
-  if (existsSync(join(dirname(manifestPath), 'semantic_manifest.json'))) return true;
-  if (!existsSync(manifestPath)) return false;
-  try {
-    const parsed = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
-    if (parsed.semantic_models && typeof parsed.semantic_models === 'object') return true;
-    if (parsed.metrics && typeof parsed.metrics === 'object') return true;
-  } catch {
-    return false;
+  const entries = (value: unknown): number => Array.isArray(value) ? value.length : value && typeof value === 'object' ? Object.keys(value).length : 0;
+  for (const path of [join(dirname(manifestPath), 'semantic_manifest.json'), manifestPath]) {
+    if (!existsSync(path)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+      if (entries(parsed.semantic_models) > 0 || entries(parsed.metrics) > 0) return true;
+    } catch {
+      // An unreadable artifact defines nothing.
+    }
   }
   return false;
 }

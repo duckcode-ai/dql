@@ -118,16 +118,15 @@ function autoDetect(projectRoot: string): SemanticLayerResult {
 }
 
 function hasDbtSemanticArtifacts(projectRoot: string): boolean {
+  // dbt writes both artifacts on every parse, with empty semantic_models and
+  // metrics when a project defines none; only a defined model or metric counts.
+  const entries = (value: unknown): number => Array.isArray(value) ? value.length : value && typeof value === 'object' ? Object.keys(value).length : 0;
   for (const file of ['target/semantic_manifest.json', 'target/manifest.json']) {
     const path = join(projectRoot, file);
     if (!existsSync(path)) continue;
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
-      if (file.endsWith('semantic_manifest.json')) {
-        return Array.isArray(parsed.semantic_models) || Array.isArray(parsed.metrics);
-      }
-      if (parsed.semantic_models && typeof parsed.semantic_models === 'object') return true;
-      if (parsed.metrics && typeof parsed.metrics === 'object') return true;
+      if (entries(parsed.semantic_models) > 0 || entries(parsed.metrics) > 0) return true;
     } catch {
       // Continue to YAML discovery below.
     }

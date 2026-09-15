@@ -11006,6 +11006,21 @@ describe('domains API (spec 17, part B)', () => {
     expect(impact).toMatchObject({ terms: 1, concepts: 0, certifiedBlocks: 1, relationships: [] });
   });
 
+  it('keeps a native DQL semantic layer when the dbt project defines no semantic models or metrics', async () => {
+    const { resolveProjectSemanticConfig } = await import('./local-runtime.js');
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-semantic-provider-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    // dbt writes both artifacts on every parse, empty when nothing is defined.
+    writeFileSync(join(projectRoot, 'target', 'semantic_manifest.json'), JSON.stringify({ semantic_models: [], metrics: [], project_configuration: {} }), 'utf-8');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({ nodes: {}, semantic_models: {}, metrics: {} }), 'utf-8');
+    const config = { semanticLayer: { provider: 'dql' as const, path: 'semantic-layer' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' } };
+    expect(resolveProjectSemanticConfig(config as never, projectRoot)).toEqual({ provider: 'dql', path: 'semantic-layer' });
+
+    writeFileSync(join(projectRoot, 'target', 'semantic_manifest.json'), JSON.stringify({ semantic_models: [{ name: 'orders' }], metrics: [] }), 'utf-8');
+    expect(resolveProjectSemanticConfig(config as never, projectRoot)).toMatchObject({ provider: 'dbt', projectPath: '.' });
+  });
+
   it('parses a term body and places a new term in its domain package terms folder', async () => {
     const { parseTermInput, termDirectoryFor } = await import('./local-runtime.js');
     const { writeDomainDeclaration } = await import('@duckcodeailabs/dql-core');
