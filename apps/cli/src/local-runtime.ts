@@ -23564,7 +23564,12 @@ async function buildAiModelingOperations(
   const scopedRecordKeys = new Set(Object.entries(modeling.entities)
     .filter(([, entity]) => scopedEntities.includes(entity))
     .map(([recordKey]) => recordKey));
-  const scopedDbtIds = new Set(scopedEntities.map((entity) => entity.dbtUniqueId));
+  // Models the open draft adds are in scope for the turn that revises it.
+  const draftEntities = draftEntityIndex(priorOperations);
+  const scopedDbtIds = new Set([
+    ...scopedEntities.map((entity) => entity.dbtUniqueId),
+    ...draftEntities.map((entity) => entity.dbtModel),
+  ]);
   const wantsNewModels = requestAsksForNewModels(request.question, unbound.map((node) => `${node.name ?? ''} ${node.uniqueId}`));
   const focusedId = request.selectedObject?.kind === 'model'
     ? request.selectedObject.id
@@ -23630,7 +23635,16 @@ async function buildAiModelingOperations(
   // proposes. Keyed by a normalized id because Modeling writes hyphenated ids
   // ("local-team-season-facts") while a model answers in snake_case — without
   // this every relationship to an existing model was silently dropped.
-  const entityIdByNormalizedId = new Map(scopedEntities.map((entity) => [normalizeAuthoringEntityId(entity.localId), entity.localId] as const));
+  const entityIdByNormalizedId = new Map([
+    ...scopedEntities.map((entity) => [normalizeAuthoringEntityId(entity.localId), entity.localId] as const),
+    ...draftEntities.map((entity) => [normalizeAuthoringEntityId(entity.id), entity.id] as const),
+  ]);
+  // Where each entity id gets its columns from, including models that so far
+  // exist only in the draft being revised.
+  const dbtModelForEntityId = new Map<string, string>([
+    ...domainEntities.map((entity) => [entity.localId, entity.dbtUniqueId] as const),
+    ...draftEntities.map((entity) => [entity.id, entity.dbtModel] as const),
+  ]);
   const operations: ContextAuthoringOperation[] = [];
 
   let droppedOutOfScope = 0;
@@ -23643,6 +23657,7 @@ async function buildAiModelingOperations(
       const id = authoringEntityIdForDbtModel(candidate.id, candidate.dbtModel, domainEntities);
       if (!id) continue;
       entityIdByNormalizedId.set(normalizeAuthoringEntityId(id), id);
+      dbtModelForEntityId.set(id, candidate.dbtModel);
       const detail = manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, candidate.dbtModel) : undefined;
       const columns = new Set((detail?.columns ?? []).map((column) => column.name.toLowerCase()));
       columnsFor.set(id, columns);
@@ -23675,8 +23690,8 @@ async function buildAiModelingOperations(
     const knownColumns = (entityId: string): Set<string> => {
       const cached = columnsFor.get(entityId);
       if (cached) return cached;
-      const entity = Object.values(modeling.entities).find((item) => item.domain === domain && item.localId === entityId);
-      const detail = entity && manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, entity.dbtUniqueId) : undefined;
+      const dbtUniqueId = dbtModelForEntityId.get(entityId);
+      const detail = dbtUniqueId && manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, dbtUniqueId) : undefined;
       const columns = new Set((detail?.columns ?? []).map((column) => column.name.toLowerCase()));
       columnsFor.set(entityId, columns);
       return columns;
@@ -23725,6 +23740,21 @@ export function mergeAuthoringOperations(
   next: ContextAuthoringOperation[],
 ): ContextAuthoringOperation[] {
   return [...new Map([...base, ...next].map((operation) => [operation.id, operation])).values()];
+}
+
+/**
+ * The models an open draft adds. A follow-up may name them ("make that
+ * many_to_one") even though they are not committed yet, so they have to count
+ * as real for the turn that revises the draft.
+ */
+export function draftEntityIndex(operations: ContextAuthoringOperation[]): Array<{ id: string; dbtModel: string }> {
+  const entities: Array<{ id: string; dbtModel: string }> = [];
+  for (const operation of operations) {
+    if (operation.kind !== 'modeling_change' || operation.change.operation !== 'upsert_entity') continue;
+    const { id, dbtModel } = operation.change.value;
+    if (typeof id === 'string' && id && typeof dbtModel === 'string' && dbtModel) entities.push({ id, dbtModel });
+  }
+  return entities;
 }
 
 /**

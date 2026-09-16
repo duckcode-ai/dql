@@ -7,6 +7,7 @@ import {
   normalizeAuthoringEntityId,
   authoringEntityIdForDbtModel,
   mergeAuthoringOperations,
+  draftEntityIndex,
   buildAgentValueProbeSql,
   buildAgentExactValueProbeSql,
   agentLiteralProbeTarget,
@@ -11915,6 +11916,19 @@ describe('authoring AI stays inside what the author asked for', () => {
     // had just invented.
     expect(normalizeAuthoringEntityId('local-team-season-facts')).toBe(normalizeAuthoringEntityId('local_team_season_facts'));
     expect(normalizeAuthoringEntityId('Dim Teams Cleansed')).toBe('dim_teams_cleansed');
+  });
+
+  it('counts the models an open draft adds, so a follow-up may name them', () => {
+    // "Make that many_to_one" answers with the relationship alone; its ends
+    // live in the draft, not in the committed manifest. Ignoring them dropped
+    // the operation and the whole turn refused.
+    const draft = [
+      { id: 'entity:nba:local_player_game_facts', kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id: 'local_player_game_facts', dbtModel: 'model.nba.local_player_game_facts' } } },
+      { id: 'relationship:nba:x', kind: 'modeling_change', change: { operation: 'upsert_relationship', value: { id: 'x', from: 'a', to: 'b' } } },
+    ] as never;
+
+    expect(draftEntityIndex(draft)).toEqual([{ id: 'local_player_game_facts', dbtModel: 'model.nba.local_player_game_facts' }]);
+    expect(draftEntityIndex([] as never)).toEqual([]);
   });
 
   it('a follow-up overwrites the change it revises and keeps the rest of the draft', () => {
