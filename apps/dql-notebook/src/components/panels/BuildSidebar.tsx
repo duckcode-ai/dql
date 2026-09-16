@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Blocks, Box, ChevronDown, ChevronRight, Database, FileText, Folder, FolderOpen, Layers, NotebookPen, Plus, Search, Trash2 } from 'lucide-react';
+import { Blocks, Box, ChevronDown, ChevronRight, Database, FileText, Folder, FolderOpen, Layers, NotebookPen, Plus, Search, Trash2, Upload } from 'lucide-react';
 import { api, DqlApiError } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { controlStyle } from '../../themes/control-tokens';
@@ -228,6 +228,8 @@ function NotebooksList({ t, onOpenFile, search, domain, onDomainChange }: {
   const [pendingDelete, setPendingDelete] = useState<NotebookFile | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
   const domains = notebookDomains(state.files, state.authoredDomains);
   const selectedDomain = domains.includes(domain) ? domain : '';
   const authoredOptions = authoredDomainOptions(state.authoredDomains);
@@ -258,6 +260,28 @@ function NotebooksList({ t, onOpenFile, search, domain, onDomainChange }: {
       setDeleting(false);
     }
   };
+
+  // Publishing moves the file, so the open editor has to follow it: saving
+  // against the old draft path would quietly recreate the private copy.
+  const publish = async (file: NotebookFile) => {
+    setPublishing(file.path);
+    setPublishError(null);
+    try {
+      const result = await api.publishNotebook(file.path);
+      if (!result.ok || !result.path) {
+        setPublishError(result.error ?? 'Could not publish this notebook.');
+        return;
+      }
+      const published: NotebookFile = { ...file, path: result.path, folder: 'notebooks', visibility: 'shared' };
+      dispatch({ type: 'FILE_REMOVED', path: file.path });
+      dispatch({ type: 'FILE_ADDED', file: published });
+      if (state.activeFile?.path === file.path) onOpenFile(published);
+    } catch (error) {
+      setPublishError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPublishing(null);
+    }
+  };
   return (
     <div>
       <DomainScopeSelect
@@ -282,9 +306,14 @@ function NotebooksList({ t, onOpenFile, search, domain, onDomainChange }: {
           activePath={state.activeFile?.path}
           onOpenFile={onOpenFile}
           onDelete={(file) => { setDeleteError(null); setPendingDelete(file); }}
+          onPublish={(file) => void publish(file)}
+          publishingPath={publishing}
           t={t}
         />
       )}
+      {publishError ? (
+        <div style={{ padding: '8px 12px', fontSize: 11.5, color: t.error, fontFamily: t.font }}>{publishError}</div>
+      ) : null}
       {/* Reveal the destructive action on hover only, and colour it red on
           approach — the row's primary action is opening the notebook. */}
       <style>{`
@@ -292,6 +321,10 @@ function NotebooksList({ t, onOpenFile, search, domain, onDomainChange }: {
         .dql-nb-row:hover .dql-nb-delete { opacity: 1; }
         .dql-nb-delete:hover { color: ${t.error} !important; background: ${t.error}12 !important; border-color: ${t.error}44 !important; }
         .dql-nb-delete:focus-visible { opacity: 1; }
+        .dql-nb-publish { opacity: 0; transition: opacity .12s, color .12s, background .12s, border-color .12s; }
+        .dql-nb-row:hover .dql-nb-publish { opacity: 1; }
+        .dql-nb-publish:hover { color: ${t.accent} !important; background: var(--accent-dim) !important; border-color: ${t.accent}44 !important; }
+        .dql-nb-publish:focus-visible { opacity: 1; }
       `}</style>
       {pendingDelete ? (
         <DeleteNotebookDialog
@@ -312,6 +345,8 @@ function NotebookLibraryTree({
   activePath,
   onOpenFile,
   onDelete,
+  onPublish,
+  publishingPath,
   t,
   depth = 0,
 }: {
@@ -319,6 +354,8 @@ function NotebookLibraryTree({
   activePath?: string;
   onOpenFile: (file: NotebookFile) => void;
   onDelete: (file: NotebookFile) => void;
+  onPublish: (file: NotebookFile) => void;
+  publishingPath: string | null;
   t: Theme;
   depth?: number;
 }) {
@@ -331,6 +368,8 @@ function NotebookLibraryTree({
           activePath={activePath}
           onOpenFile={onOpenFile}
           onDelete={onDelete}
+          onPublish={onPublish}
+          publishingPath={publishingPath}
           t={t}
           depth={depth}
         />
@@ -341,6 +380,8 @@ function NotebookLibraryTree({
           active={activePath === node.file.path}
           onOpenFile={onOpenFile}
           onDelete={onDelete}
+          onPublish={onPublish}
+          publishing={publishingPath === node.file.path}
           t={t}
           depth={depth}
         />
@@ -354,6 +395,8 @@ function NotebookFolder({
   activePath,
   onOpenFile,
   onDelete,
+  onPublish,
+  publishingPath,
   t,
   depth,
 }: {
@@ -361,6 +404,8 @@ function NotebookFolder({
   activePath?: string;
   onOpenFile: (file: NotebookFile) => void;
   onDelete: (file: NotebookFile) => void;
+  onPublish: (file: NotebookFile) => void;
+  publishingPath: string | null;
   t: Theme;
   depth: number;
 }) {
@@ -400,6 +445,8 @@ function NotebookFolder({
           activePath={activePath}
           onOpenFile={onOpenFile}
           onDelete={onDelete}
+          onPublish={onPublish}
+          publishingPath={publishingPath}
           t={t}
           depth={depth + 1}
         />
@@ -413,6 +460,8 @@ function NotebookFileRow({
   active,
   onOpenFile,
   onDelete,
+  onPublish,
+  publishing,
   t,
   depth,
 }: {
@@ -420,22 +469,53 @@ function NotebookFileRow({
   active: boolean;
   onOpenFile: (file: NotebookFile) => void;
   onDelete: (file: NotebookFile) => void;
+  onPublish: (file: NotebookFile) => void;
+  publishing: boolean;
   t: Theme;
   depth: number;
 }) {
+  const isPrivate = file.visibility === 'private';
   return (
     <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }} className="dql-nb-row">
       <button
         type="button"
         onClick={() => onOpenFile(file)}
-        style={{ ...rowStyle(t, active), paddingLeft: 10 + depth * 14, paddingRight: 30 }}
-        title={`${file.path}${file.ownerDomain ? ` · Owner domain: ${file.ownerDomain}` : ''}`}
+        style={{ ...rowStyle(t, active), paddingLeft: 10 + depth * 14, paddingRight: isPrivate ? 54 : 30 }}
+        title={`${file.path}${file.ownerDomain ? ` · Owner domain: ${file.ownerDomain}` : ''}${isPrivate ? ' · Private: not in Git until you publish it' : ''}`}
       >
         <FileText size={13} color={t.textMuted} style={{ flexShrink: 0 }} />
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5 }}>
           {file.name.replace(/\.dqln?$|\.ipynb$/i, '')}
         </span>
+        {isPrivate ? (
+          <span
+            style={{
+              flexShrink: 0, fontSize: 9, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase',
+              padding: '1px 5px', borderRadius: 4, color: t.textMuted,
+              border: `1px solid ${t.cellBorder}`, background: t.btnBg,
+            }}
+          >
+            Private
+          </span>
+        ) : null}
       </button>
+      {isPrivate ? (
+        <button
+          type="button"
+          className="dql-nb-publish"
+          onClick={(event) => { event.stopPropagation(); onPublish(file); }}
+          disabled={publishing}
+          title={`Publish ${file.name} to notebooks/ so the team can see it`}
+          aria-label={`Publish ${file.name}`}
+          style={{
+            position: 'absolute', right: 30, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            width: 22, height: 22, borderRadius: 5, border: '1px solid transparent',
+            background: 'transparent', color: t.textMuted, cursor: publishing ? 'wait' : 'pointer', padding: 0,
+          }}
+        >
+          <Upload size={12} />
+        </button>
+      ) : null}
       <button
         type="button"
         className="dql-nb-delete"
@@ -454,7 +534,7 @@ function NotebookFileRow({
   );
 }
 
-/** Deleting a notebook removes the file from disk, so it asks first. */
+/** Deleting takes the notebook off the file list, so it asks first. */
 function DeleteNotebookDialog({
   file, t, busy, error, onCancel, onConfirm,
 }: {
@@ -479,7 +559,7 @@ function DeleteNotebookDialog({
       >
         <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Delete this notebook?</div>
         <div style={{ fontSize: 12.5, color: t.textSecondary, fontFamily: t.font, lineHeight: 1.5 }}>
-          <code style={{ fontFamily: t.fontMono, fontSize: 12 }}>{file.path}</code> will be removed from disk. Blocks and metrics it referenced are not affected.
+          <code style={{ fontFamily: t.fontMono, fontSize: 12 }}>{file.path}</code> moves to a recovery bundle under <code style={{ fontFamily: t.fontMono, fontSize: 12 }}>.dql/local/trash/</code>, so it can be fetched back. Blocks and metrics it referenced are not affected.
         </div>
         {error ? <div style={{ fontSize: 12, color: t.error, fontFamily: t.font }}>{error}</div> : null}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>

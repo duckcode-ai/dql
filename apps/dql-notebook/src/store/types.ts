@@ -783,6 +783,11 @@ export interface NotebookFile {
   ownerDomain?: string;
   usesDomains?: string[];
   isNew?: boolean;
+  /**
+   * `private` lives under `.dql/local/` and is invisible to git until it is
+   * published; `shared` (the default) is a tracked path the team reviews.
+   */
+  visibility?: 'private' | 'shared';
 }
 
 export interface SchemaColumn {

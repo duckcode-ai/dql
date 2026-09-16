@@ -15782,7 +15782,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'notebook';
-        const nbDir = join(projectRoot, 'notebooks');
+        const privateDraft = (body as { visibility?: unknown }).visibility === 'private';
+        const nbDir = privateDraft ? privateNotebookDir(projectRoot) : join(projectRoot, 'notebooks');
         mkdirSync(nbDir, { recursive: true });
         const nbPath = join(nbDir, `${slug}.dqlnb`);
         if (existsSync(nbPath)) {
@@ -15795,8 +15796,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           usesDomains: normalizedUsesDomains,
         });
         writeFileSync(nbPath, content, 'utf-8');
+        const createdPath = privateDraft
+          ? `${PRIVATE_NOTEBOOK_PREFIX}/${slug}.dqlnb`
+          : `notebooks/${slug}.dqlnb`;
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ path: `notebooks/${slug}.dqlnb`, content }));
+        res.end(serializeJSON({
+          path: createdPath,
+          content,
+          visibility: privateDraft ? 'private' : 'shared',
+        }));
       } catch (error) {
         if (error instanceof DQLAccessDeniedError) {
           res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -15805,6 +15813,66 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // POST /api/notebooks/publish — move a private draft into tracked source.
+    // Publishing is the moment a notebook becomes the team's: until now it sat
+    // under .dql/local/, which the ignore rules keep out of every commit and
+    // diff. The move is a rename, so the file is never half-published.
+    if (req.method === 'POST' && path === '/api/notebooks/publish') {
+      try {
+        const body = await readJSON(req) as { path?: unknown };
+        const requested = typeof body.path === 'string' ? normalizeNotebookPath(body.path.trim()) : '';
+        if (!requested) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Missing notebook path.' }));
+          return;
+        }
+        if (!isPrivateNotebookPath(requested) || requested.includes('..') || !/\.(dqlnb|dql)$/i.test(requested)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Only a private notebook draft can be published.' }));
+          return;
+        }
+        const source = resolve(projectRoot, requested);
+        const rootPrefix = `${resolve(projectRoot)}${sep}`;
+        if (!source.startsWith(rootPrefix) || !existsSync(source)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Draft not found.' }));
+          return;
+        }
+        const fileName = requested.split('/').at(-1) as string;
+        const destination = join(projectRoot, 'notebooks', fileName);
+        if (existsSync(destination)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            ok: false,
+            error: `notebooks/${fileName} already exists. Rename the draft before publishing it.`,
+          }));
+          return;
+        }
+        mkdirSync(join(projectRoot, 'notebooks'), { recursive: true });
+        renameSync(source, destination);
+        // Cached results are local state, not something to publish: leaving the
+        // sidecar behind would strand it beside a draft that no longer exists.
+        const sidecar = source.replace(/\.(dqlnb|dql)$/i, '.run.json');
+        if (sidecar !== source) rmSync(sidecar, { force: true });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          path: `notebooks/${fileName}`,
+          previousPath: requested,
+          visibility: 'shared',
+        }));
+      } catch (error) {
+        if (error instanceof DQLAccessDeniedError) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: error.message, code: 'unauthorized' }));
+          return;
+        }
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
@@ -15820,8 +15888,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ ok: false, error: 'Missing notebook path.' }));
           return;
         }
-        const normalized = relativePath.replace(/\\/g, '/').replace(/^\.\//, '');
-        if (!normalized.startsWith('notebooks/') || !/\.(dqlnb|dql)$/i.test(normalized) || normalized.includes('..')) {
+        const normalized = normalizeNotebookPath(relativePath);
+        const deletable = normalized.startsWith('notebooks/') || isPrivateNotebookPath(normalized);
+        if (!deletable || !/\.(dqlnb|dql)$/i.test(normalized) || normalized.includes('..')) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ ok: false, error: 'Only notebook files under notebooks/ can be deleted.' }));
           return;
@@ -15838,13 +15907,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ ok: false, error: 'Notebook not found.' }));
           return;
         }
-        rmSync(absolute, { force: true });
+        // A private draft was never committed and an uncommitted notebook is not
+        // in git either, so deleting the file outright is unrecoverable. It goes
+        // to the same recovery bundle discard uses instead.
+        const recovered = moveToTrashBundle(projectRoot, projectRoot, [normalized], 'notebooks');
         // Drop the run-state sidecar too, or the next notebook created with the
         // same slug inherits the deleted one's cached results.
         const sidecar = absolute.replace(/\.(dqlnb|dql)$/i, '.run.json');
         if (sidecar !== absolute) rmSync(sidecar, { force: true });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ ok: true, path: normalized }));
+        res.end(serializeJSON({ ok: true, path: normalized, recovered }));
       } catch (error) {
         if (error instanceof DQLAccessDeniedError) {
           res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -27938,7 +28010,34 @@ type NotebookFileEntry = {
   folder: string;
   ownerDomain?: string;
   usesDomains?: string[];
+  /**
+   * Where the file lives relative to source control. `shared` is a tracked
+   * path the team sees; `private` is a draft under `.dql/local/`, which the
+   * ignore rules keep out of git until it is published.
+   */
+  visibility?: 'private' | 'shared';
 };
+
+/**
+ * Private notebook drafts. `.dql/local/` is already ignored, so a draft here
+ * never reaches a commit, a diff or a teammate until publishing moves it into
+ * `notebooks/`. This is the same lifecycle Apps already have (PRD-005): work
+ * starts private, and sharing is a decision rather than a side effect of
+ * pressing save.
+ */
+const PRIVATE_NOTEBOOK_PREFIX = '.dql/local/drafts/notebooks';
+
+function privateNotebookDir(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'local', 'drafts', 'notebooks');
+}
+
+function isPrivateNotebookPath(path: string): boolean {
+  return normalizeNotebookPath(path).startsWith(`${PRIVATE_NOTEBOOK_PREFIX}/`);
+}
+
+function normalizeNotebookPath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/^\.\//, '');
+}
 
 function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
   const result: NotebookFileEntry[] = [];
@@ -27956,7 +28055,31 @@ function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
     collect(dir, folder, type);
   }
   collectDomainArtifacts(join(projectRoot, 'domains'), 'domains');
+  collectPrivateDrafts();
   return result;
+
+  // Private drafts sit outside every tracked folder, so the scan has to reach
+  // for them deliberately. They are listed like any other notebook — hiding
+  // them would just lose the user's work behind a folder they never open.
+  function collectPrivateDrafts(): void {
+    const dir = privateNotebookDir(projectRoot);
+    if (!existsSync(dir)) return;
+    try {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        if (!entry.name.endsWith('.dql') && !entry.name.endsWith('.dqlnb')) continue;
+        const fullPath = join(dir, entry.name);
+        result.push({
+          name: entry.name.replace(/\.(dql|dqlnb)$/, ''),
+          path: `${PRIVATE_NOTEBOOK_PREFIX}/${entry.name}`,
+          type: 'notebook',
+          folder: 'notebooks',
+          visibility: 'private',
+          ...readNotebookFileProductContext(fullPath, 'notebook'),
+        });
+      }
+    } catch { /* an unreadable drafts dir must not break the file list */ }
+  }
 
   function collectDomainArtifacts(currentDir: string, relativeDir: string): void {
     if (!existsSync(currentDir)) return;
@@ -35237,6 +35360,58 @@ export interface GitDiscardResult {
 }
 
 /**
+ * Move files somewhere they can be fetched back from, and record what moved.
+ *
+ * Shared by discard and by deleting a private draft. Neither is recoverable
+ * from git — one was never committed, the other never tracked — so erasing
+ * them outright is the one delete with no way back. Throws only after putting
+ * back whatever had already moved, so a half-finished bundle cannot lose work.
+ */
+function moveToTrashBundle(
+  trashOwnerRoot: string,
+  sourceRoot: string,
+  paths: string[],
+  category: string,
+): { recoveryId: string; trashPath: string; files: string[] } {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const trashRoot = join(trashOwnerRoot, '.dql', 'local', 'trash', category);
+  let recoveryId = stamp;
+  let trashDir = join(trashRoot, recoveryId);
+  let suffix = 2;
+  while (existsSync(trashDir)) {
+    recoveryId = `${stamp}-${suffix++}`;
+    trashDir = join(trashRoot, recoveryId);
+  }
+  const moved: string[] = [];
+  try {
+    for (const path of paths) {
+      const destination = join(trashDir, 'files', path);
+      mkdirSync(dirname(destination), { recursive: true });
+      renameSync(join(sourceRoot, path), destination);
+      moved.push(path);
+    }
+    writeFileSync(join(trashDir, 'recovery.json'), `${JSON.stringify({
+      version: 1,
+      recoveryId,
+      discardedAt: new Date().toISOString(),
+      files: moved,
+    }, null, 2)}\n`, 'utf-8');
+  } catch (error) {
+    for (const path of moved) {
+      const destination = join(trashDir, 'files', path);
+      if (existsSync(destination)) renameSync(destination, join(sourceRoot, path));
+    }
+    rmSync(trashDir, { recursive: true, force: true });
+    throw error;
+  }
+  return {
+    recoveryId,
+    trashPath: relative(trashOwnerRoot, trashDir).replace(/\\/g, '/'),
+    files: moved,
+  };
+}
+
+/**
  * Discard, without destroying anything git cannot give back.
  *
  * A tracked file is restored from the index. An untracked file exists nowhere
@@ -35275,39 +35450,11 @@ async function gitDiscard(cwd: string, paths: string[]): Promise<GitDiscardResul
 
   let recovered: GitDiscardResult['recovered'];
   if (untracked.length > 0) {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const trashRoot = join(cwd, '.dql', 'local', 'trash', 'discarded');
-    let recoveryId = stamp;
-    let trashDir = join(trashRoot, recoveryId);
-    let suffix = 2;
-    while (existsSync(trashDir)) {
-      recoveryId = `${stamp}-${suffix++}`;
-      trashDir = join(trashRoot, recoveryId);
-    }
-    const moved: string[] = [];
     try {
-      for (const path of untracked) {
-        const destination = join(trashDir, 'files', path);
-        mkdirSync(dirname(destination), { recursive: true });
-        renameSync(join(gitRoot, path), destination);
-        moved.push(path);
-      }
-      writeFileSync(join(trashDir, 'recovery.json'), `${JSON.stringify({
-        version: 1,
-        recoveryId,
-        discardedAt: new Date().toISOString(),
-        files: moved,
-      }, null, 2)}\n`, 'utf-8');
+      recovered = moveToTrashBundle(cwd, gitRoot, untracked, 'discarded');
     } catch (error) {
-      // Put back whatever moved, so a half-finished discard cannot lose work.
-      for (const path of moved) {
-        const destination = join(trashDir, 'files', path);
-        if (existsSync(destination)) renameSync(destination, join(gitRoot, path));
-      }
-      rmSync(trashDir, { recursive: true, force: true });
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    recovered = { recoveryId, trashPath: relative(cwd, trashDir).replace(/\\/g, '/'), files: moved };
   }
 
   return {

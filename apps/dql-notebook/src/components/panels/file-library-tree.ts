@@ -61,6 +61,9 @@ export function buildFileLibraryTree(
 
 function displayFolders(file: NotebookFile, folderKey: FileLibraryFolderKey): string[] {
   const parts = file.path.replace(/\\/g, '/').split('/').filter(Boolean);
+  // A private draft groups by what it is, not by the `.dql/local/` path that
+  // happens to keep it out of git.
+  if (file.visibility === 'private') return ['Private'];
   if (parts[0] === 'domains') {
     const featureNames = folderKey === 'business-views'
       ? ['views', 'business-views']

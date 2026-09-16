@@ -4814,8 +4814,32 @@ export const api = {
     );
   },
 
-  async deleteNotebook(path: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+  /**
+   * Deleting does not erase: the file moves to a recovery bundle the response
+   * names, because a private draft or an uncommitted notebook exists nowhere
+   * else.
+   */
+  async deleteNotebook(path: string): Promise<{
+    ok: boolean;
+    path?: string;
+    error?: string;
+    recovered?: { recoveryId: string; trashPath: string; files: string[] };
+  }> {
     return request(`/api/notebooks?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+  },
+
+  /** Move a private draft into `notebooks/`, where git and the team can see it. */
+  async publishNotebook(path: string): Promise<{
+    ok: boolean;
+    path?: string;
+    previousPath?: string;
+    visibility?: 'shared';
+    error?: string;
+  }> {
+    return request('/api/notebooks/publish', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    });
   },
 
   async createNotebook(
@@ -4824,9 +4848,10 @@ export const api = {
     context: {
       ownerDomain?: string;
       usesDomains?: string[];
+      visibility?: 'private' | 'shared';
     } = {},
-  ): Promise<{ path: string; content: string }> {
-    return request<{ path: string; content: string }>('/api/notebooks', {
+  ): Promise<{ path: string; content: string; visibility?: 'private' | 'shared' }> {
+    return request<{ path: string; content: string; visibility?: 'private' | 'shared' }>('/api/notebooks', {
       method: 'POST',
       body: JSON.stringify({ name, template, ...context }),
     });

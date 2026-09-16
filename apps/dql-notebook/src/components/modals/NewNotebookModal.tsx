@@ -56,6 +56,9 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
   const [name, setName] = useState('');
   const [template, setTemplate] = useState<NotebookTemplate>('blank');
   const [ownerDomain, setOwnerDomain] = useState('');
+  // Shared by default: this is the behaviour every existing notebook has, and
+  // quietly hiding new work from the team would be the worse surprise.
+  const [visibility, setVisibility] = useState<'private' | 'shared'>('shared');
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -91,6 +94,7 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
     try {
       const result = await api.createNotebook(slug, template, {
         ...(ownerDomain ? { ownerDomain, usesDomains: [ownerDomain] } : {}),
+        visibility,
       });
       const file: NotebookFile = {
         name: `${slug}.dqlnb`,
@@ -98,6 +102,7 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
         type: 'notebook',
         folder: 'notebooks',
         isNew: true,
+        visibility: result.visibility ?? visibility,
       };
       dispatch({ type: 'FILE_ADDED', file });
       dispatch({
@@ -117,6 +122,7 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
         type: 'notebook',
         folder: 'notebooks',
         isNew: true,
+        visibility,
       };
       dispatch({ type: 'FILE_ADDED', file });
       dispatch({
@@ -198,7 +204,7 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
                 Create notebook
               </h2>
               <p style={{ margin: '3px 0 0', color: t.textMuted, fontSize: 11.5, lineHeight: 1.35, fontFamily: t.font }}>
-                Choose how much starter structure you want. Every option creates the same editable, Git-tracked notebook.
+                Choose who this notebook is for and how much starter structure you want. Templates only add cells.
               </p>
             </div>
           </div>
@@ -269,7 +275,9 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
               )}
               {name && !error && (
                 <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>
-                  Git path: notebooks/{slugify(name)}.dqlnb
+                  {visibility === 'private'
+                    ? `Private path: .dql/local/drafts/notebooks/${slugify(name)}.dqlnb`
+                    : `Git path: notebooks/${slugify(name)}.dqlnb`}
                 </span>
               )}
             </div>
@@ -303,6 +311,28 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
               <span style={{ fontSize: 10.5, lineHeight: 1.3, color: t.textMuted, fontFamily: t.font }}>
                 Optional. Lists this notebook under the domain's Used by tab without moving the Git file.
               </span>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: t.textSecondary, fontFamily: t.font }}>
+              Who is this for
+            </label>
+            <div role="radiogroup" aria-label="Notebook visibility" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+              <VisibilityOption
+                selected={visibility === 'shared'}
+                onSelect={() => setVisibility('shared')}
+                label="Shared with the team"
+                description="Saved in notebooks/. Git tracks it, so the team reviews it and keeps or discards it."
+                t={t}
+              />
+              <VisibilityOption
+                selected={visibility === 'private'}
+                onSelect={() => setVisibility('private')}
+                label="Private to me"
+                description="Saved outside Git. Nobody else sees it and no commit includes it until you publish it."
+                t={t}
+              />
             </div>
           </div>
 
@@ -390,6 +420,47 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+function VisibilityOption({
+  selected,
+  onSelect,
+  label,
+  description,
+  t,
+}: {
+  selected: boolean;
+  onSelect: () => void;
+  label: string;
+  description: string;
+  t: Theme;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={onSelect}
+      style={{
+        position: 'relative',
+        display: 'grid',
+        gap: 4,
+        padding: '10px 28px 10px 10px',
+        borderRadius: 10,
+        border: `1px solid ${selected ? t.accent : t.inputBorder}`,
+        background: selected ? 'var(--accent-dim)' : t.cellBg,
+        cursor: 'pointer',
+        textAlign: 'left',
+        fontFamily: t.font,
+      }}
+    >
+      <span style={{ fontSize: 12.5, fontWeight: 750, color: t.textPrimary }}>{label}</span>
+      <span style={{ fontSize: 11, color: t.textSecondary, lineHeight: 1.3 }}>{description}</span>
+      <span aria-hidden="true" style={{ position: 'absolute', right: 10, top: 10, width: 14, height: 14, borderRadius: 999, border: `1.5px solid ${selected ? t.accent : t.textMuted}`, display: 'inline-grid', placeItems: 'center' }}>
+        {selected ? <span style={{ width: 7, height: 7, borderRadius: 999, background: t.accent }} /> : null}
+      </span>
+    </button>
   );
 }
 
