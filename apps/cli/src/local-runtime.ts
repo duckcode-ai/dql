@@ -16771,6 +16771,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           metricRefs,
           template,
           blockType,
+          visibility,
         } = body as {
           name: string;
           domain?: string;
@@ -16781,6 +16782,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           metricRefs?: string[];
           template?: string;
           blockType?: 'custom' | 'semantic';
+          visibility?: 'private' | 'shared';
         };
         if (!name || typeof name !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -16802,9 +16804,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           metricRefs,
           template,
           blockType,
+          visibility,
         });
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON(created));
+        res.end(serializeJSON({ ...created, visibility: visibility === 'private' ? 'private' : 'shared' }));
       } catch (error) {
         if (error instanceof Error && error.message === 'BLOCK_EXISTS') {
           res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -16944,6 +16947,85 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // POST /api/blocks/publish — move a private block into tracked source.
+    // Two files travel together: the block and its companion YAML. A block
+    // published without its companion would lose its semantic bindings, so a
+    // failed companion move puts the block back where it was.
+    if (req.method === 'POST' && path === '/api/blocks/publish') {
+      try {
+        const body = await readJSON(req) as { path?: unknown };
+        const requested = typeof body.path === 'string' ? normalizeNotebookPath(body.path.trim()) : '';
+        if (!requested) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Missing block path.' }));
+          return;
+        }
+        if (!isPrivateBlockPath(requested) || !requested.endsWith('.dql') || requested.includes('..')) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Only a private block can be published.' }));
+          return;
+        }
+        const sourceAbs = resolve(projectRoot, requested);
+        const rootPrefix = `${resolve(projectRoot)}${sep}`;
+        if (!sourceAbs.startsWith(rootPrefix) || !existsSync(sourceAbs)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Private block not found.' }));
+          return;
+        }
+        const source = readFileSync(sourceAbs, 'utf-8');
+        const rawDomain = (/^\s*domain\s*=\s*"([^"]+)"/m.exec(source)?.[1] ?? '').trim();
+        const safeDomain = (rawDomain === 'uncategorized' ? '' : rawDomain)
+          .toLowerCase()
+          .replace(/[^a-z0-9._/-]+/g, '-')
+          .replace(/^\/+|\/+$/g, '');
+        const inside = requested.slice(`${PRIVATE_BLOCK_PREFIX}/`.length);
+        const segments = inside.split('/').filter(Boolean);
+        const slug = (segments.at(-1) as string).replace(/\.dql$/, '');
+        const folder = segments.slice(0, -1).join('/');
+        const target = resolveBlockWriteTarget(projectRoot, safeDomain, folder, slug, 'shared');
+        if (existsSync(target.absPath)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            ok: false,
+            error: `${target.relativePath} already exists. Rename the private block before publishing it.`,
+          }));
+          return;
+        }
+        const companionFrom = blockCompanionRelativePath(projectRoot, requested);
+        const companionTo = blockCompanionRelativePath(projectRoot, target.relativePath);
+        mkdirSync(dirname(target.absPath), { recursive: true });
+        renameSync(sourceAbs, target.absPath);
+        try {
+          if (companionFrom && companionTo && existsSync(join(projectRoot, companionFrom))) {
+            const companionAbs = join(projectRoot, companionTo);
+            mkdirSync(dirname(companionAbs), { recursive: true });
+            renameSync(join(projectRoot, companionFrom), companionAbs);
+          }
+        } catch (error) {
+          // Put the block back rather than leave it published without bindings.
+          renameSync(target.absPath, sourceAbs);
+          throw error;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          path: target.relativePath,
+          previousPath: requested,
+          companionPath: companionTo,
+          visibility: 'shared',
+        }));
+      } catch (error) {
+        if (error instanceof DQLAccessDeniedError) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: error.message, code: 'unauthorized' }));
+          return;
+        }
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/blocks/templates') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ templates: listBlockTemplates() }));
@@ -16958,6 +17040,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           owner: string | null; tags: string[]; path: string;
           lastModified: string; description: string;
           llmContext: string | null;
+          visibility: 'private' | 'shared';
         }> = [];
         const seen = new Set<string>();
         const scanDir = (dir: string) => {
@@ -16999,6 +17082,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   lastModified: stat.mtime.toISOString(),
                   description: descMatch?.[1] ?? '',
                   llmContext: llmMatch?.[1] ?? null,
+                  visibility: isPrivateBlockPath(relPath) ? 'private' : 'shared',
                 });
               } catch { /* skip unreadable files */ }
             }
@@ -17006,6 +17090,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         };
         scanDir(join(projectRoot, 'blocks'));
         scanDir(join(projectRoot, 'domains'));
+        // Private blocks are listed like any other: hiding them would lose the
+        // author's work behind a folder they never open.
+        scanDir(privateBlockDir(projectRoot));
         blocks.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ blocks }));
@@ -28025,10 +28112,10 @@ type NotebookFileEntry = {
  * starts private, and sharing is a decision rather than a side effect of
  * pressing save.
  */
-const PRIVATE_NOTEBOOK_PREFIX = '.dql/local/drafts/notebooks';
+const PRIVATE_NOTEBOOK_PREFIX = '.dql/local/private/notebooks';
 
 function privateNotebookDir(projectRoot: string): string {
-  return join(projectRoot, '.dql', 'local', 'drafts', 'notebooks');
+  return join(projectRoot, '.dql', 'local', 'private', 'notebooks');
 }
 
 function isPrivateNotebookPath(path: string): boolean {
@@ -28037,6 +28124,24 @@ function isPrivateNotebookPath(path: string): boolean {
 
 function normalizeNotebookPath(path: string): string {
   return path.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/**
+ * Private blocks, and the companion YAML that travels with them.
+ *
+ * Deliberately not called a "draft": blocks already have a tracked `_drafts/`
+ * folder holding unpublished edits to a certified block, which is a different
+ * thing. A private block is one nobody else can see yet.
+ */
+const PRIVATE_BLOCK_PREFIX = '.dql/local/private/blocks';
+const PRIVATE_BLOCK_COMPANION_PREFIX = '.dql/local/private/semantic-layer/blocks';
+
+function privateBlockDir(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'local', 'private', 'blocks');
+}
+
+function isPrivateBlockPath(path: string): boolean {
+  return normalizeNotebookPath(path).startsWith(`${PRIVATE_BLOCK_PREFIX}/`);
 }
 
 function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
@@ -30256,7 +30361,11 @@ export function saveBlockStudioArtifacts(
 export function deleteBlockStudioArtifacts(
   projectRoot: string,
   relativePath: string,
-): { path: string; companionPath: string | null } {
+): {
+  path: string;
+  companionPath: string | null;
+  recovered: { recoveryId: string; trashPath: string; files: string[] };
+} {
   const normalizedPath = normalize(relativePath).replace(/^\/+/, '').replaceAll('\\', '/');
   if (!isBlockStudioBlockPath(normalizedPath) || !normalizedPath.endsWith('.dql')) {
     throw new Error('Invalid block path');
@@ -30272,16 +30381,23 @@ export function deleteBlockStudioArtifacts(
   }
 
   const companionPath = blockCompanionRelativePath(projectRoot, normalizedPath);
-  rmSync(absolutePath, { force: true });
+  const toRecover = [normalizedPath];
   if (companionPath) {
     const absoluteCompanionPath = resolve(rootPath, companionPath);
     const companionRelative = relative(rootPath, absoluteCompanionPath).replaceAll('\\', '/');
-    if (companionRelative && !companionRelative.startsWith('../') && companionRelative !== '..') {
-      rmSync(absoluteCompanionPath, { force: true });
+    if (companionRelative
+      && !companionRelative.startsWith('../')
+      && companionRelative !== '..'
+      && existsSync(absoluteCompanionPath)) {
+      toRecover.push(companionRelative);
     }
   }
+  // Block and companion move together into one bundle. A block recovered
+  // without its companion is not something anyone could put back by hand, and
+  // a private block is in no commit to restore from.
+  const recovered = moveToTrashBundle(projectRoot, projectRoot, toRecover, 'blocks');
 
-  return { path: normalizedPath, companionPath };
+  return { path: normalizedPath, companionPath, recovered };
 }
 
 /**
@@ -30418,7 +30534,11 @@ function isDraftBlockPath(value: string | null | undefined): boolean {
 function isBlockStudioBlockPath(value: string | null | undefined): boolean {
   if (!value) return false;
   const normalized = normalize(value).replace(/^\/+/, '');
-  return normalized.startsWith('blocks/') || /^domains\/.+\/blocks\//.test(normalized);
+  // A private block is still a block: it opens, runs, saves and changes status
+  // like any other. Only where it lives, and who can see it, is different.
+  return normalized.startsWith('blocks/')
+    || /^domains\/.+\/blocks\//.test(normalized)
+    || normalized.startsWith(`${PRIVATE_BLOCK_PREFIX}/`);
 }
 
 function inferBlockStudioPathDomain(projectRoot: string, blockPath: string): string {
@@ -30451,6 +30571,12 @@ function inferBlockStudioFolderPath(projectRoot: string, blockPath: string): str
 
 function blockCompanionRelativePath(projectRoot: string, blockPath: string): string | null {
   const normalized = normalize(blockPath).replace(/^\/+/, '');
+  // The companion of a private block has to be private too, or the block hides
+  // while its YAML announces it in tracked source.
+  if (isPrivateBlockPath(normalized)) {
+    const withoutRoot = normalized.slice(`${PRIVATE_BLOCK_PREFIX}/`.length).replace(/\.dql$/, '.yaml');
+    return `${PRIVATE_BLOCK_COMPANION_PREFIX}/${withoutRoot}`;
+  }
   if (normalized.startsWith('blocks/')) {
     const withoutRoot = normalized.slice('blocks/'.length).replace(/\.dql$/, '.yaml');
     return join('semantic-layer', 'blocks', withoutRoot).replaceAll('\\', '/');
@@ -33115,8 +33241,15 @@ function resolveBlockWriteTarget(
   safeDomain: string,
   safeFolderPath: string,
   slug: string,
+  visibility: 'private' | 'shared' = 'shared',
 ): { relativePath: string; absPath: string } {
   const folder = safeFolderPath ? `${safeFolderPath}/` : '';
+  if (visibility === 'private') {
+    // Flat under the private root, keeping any folder the author chose. The
+    // domain is recorded in the source, so publishing can still place it.
+    const relativePath = `${PRIVATE_BLOCK_PREFIX}/${folder}${slug}.dql`;
+    return { relativePath, absPath: join(projectRoot, relativePath) };
+  }
   const packageRoot = safeDomain ? loadDomainPackageRegistry(projectRoot).get(safeDomain)?.root : undefined;
   if (packageRoot) {
     const relativePackageRoot = relative(projectRoot, packageRoot).replaceAll('\\', '/');
@@ -33148,6 +33281,7 @@ export function createBlockArtifacts(
     examples?: Array<{ question: string; sql?: string }>;
     invariants?: string[];
     gitMetadata?: BlockGitMetadata | null;
+    visibility?: 'private' | 'shared';
   },
 ): { path: string; content: string; companionPath: string } {
   const slug = options.name.toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^[-_]+|[-_]+$/g, '') || 'block';
@@ -33157,7 +33291,7 @@ export function createBlockArtifacts(
     .replace(/[^a-z0-9._/-]+/g, '-')
     .replace(/^\/+|\/+$/g, '');
   const safeFolderPath = normalizeBlockStudioFolderPath(options.folderPath);
-  const target = resolveBlockWriteTarget(projectRoot, safeDomain, safeFolderPath, slug);
+  const target = resolveBlockWriteTarget(projectRoot, safeDomain, safeFolderPath, slug, options.visibility);
   mkdirSync(dirname(target.absPath), { recursive: true });
   const blockPath = target.absPath;
   if (existsSync(blockPath)) {
@@ -33201,6 +33335,7 @@ export function createBlockArtifacts(
     content: fileContent,
     gitMetadata: options.gitMetadata,
     gitPath: relativePath,
+    visibility: options.visibility,
   });
   return {
     path: relativePath,
@@ -33401,6 +33536,7 @@ function writeBlockCompanionFile(
     semanticDimensions?: string[];
     gitMetadata?: BlockGitMetadata | null;
     gitPath?: string;
+    visibility?: 'private' | 'shared';
     importMeta?: {
       importId?: string;
       candidateId?: string;
@@ -33412,7 +33548,9 @@ function writeBlockCompanionFile(
   const extractedRefs = extractSemanticReferenceNames(options.content);
   const semanticMetrics = Array.from(new Set([...(options.semanticMetrics ?? []), ...extractedRefs.metrics]));
   const semanticDimensions = Array.from(new Set([...(options.semanticDimensions ?? []), ...extractedRefs.dimensions]));
-  const companionDir = join(projectRoot, 'semantic-layer', 'blocks', options.domain, options.folderPath ?? '');
+  const companionDir = options.visibility === 'private'
+    ? join(projectRoot, '.dql', 'local', 'private', 'semantic-layer', 'blocks', options.folderPath ?? '')
+    : join(projectRoot, 'semantic-layer', 'blocks', options.domain, options.folderPath ?? '');
   mkdirSync(companionDir, { recursive: true });
   const companionPath = join(companionDir, `${options.slug}.yaml`);
   const lines = [

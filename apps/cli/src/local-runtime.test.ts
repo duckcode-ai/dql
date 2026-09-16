@@ -9821,13 +9821,17 @@ describe('semantic block save artifacts', () => {
     });
     const deleted = deleteBlockStudioArtifacts(projectRoot, blockPath);
 
-    expect(deleted).toEqual({
+    expect(deleted).toMatchObject({
       path: blockPath,
       companionPath: 'semantic-layer/blocks/finance/revenue-summary.yaml',
     });
     expect(existsSync(join(projectRoot, blockPath))).toBe(false);
     expect(existsSync(join(projectRoot, deleted.companionPath!))).toBe(false);
     expect(existsSync(join(projectRoot, keepPath))).toBe(true);
+    // Gone from the project, not from the disk: both files are in one
+    // recovery bundle, and nothing else went with them.
+    expect(deleted.recovered.files).toEqual([blockPath, 'semantic-layer/blocks/finance/revenue-summary.yaml']);
+    expect(existsSync(join(projectRoot, deleted.recovered.trashPath, 'files', blockPath))).toBe(true);
     expect(() => deleteBlockStudioArtifacts(projectRoot, '../../outside.dql')).toThrow('Invalid block path');
     expect(() => deleteBlockStudioArtifacts(projectRoot, blockPath)).toThrow(`File not found: ${blockPath}`);
   });

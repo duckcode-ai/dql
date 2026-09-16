@@ -33,6 +33,8 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
   const [blockType, setBlockType] = useState<'custom' | 'semantic'>(state.newBlockModalDefaultType);
   const [domain, setDomain] = useState('');
   const [folderPath, setFolderPath] = useState('');
+  // Shared by default, matching every block that already exists.
+  const [visibility, setVisibility] = useState<'private' | 'shared'>('shared');
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -73,6 +75,7 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
         blockType,
         ...(domain ? { domain } : {}),
         ...(folderPath.trim() ? { folderPath: folderPath.trim() } : {}),
+        visibility,
       });
       const file: NotebookFile = {
         name: `${slug}.dql`,
@@ -80,6 +83,7 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
         type: 'block',
         folder: result.path.split('/').slice(0, -1).join('/'),
         isNew: true,
+        visibility: result.visibility ?? visibility,
       };
       dispatch({ type: 'FILE_ADDED', file });
       dispatch({ type: 'CLOSE_NEW_BLOCK_MODAL' });
@@ -211,6 +215,40 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: t.textSecondary, fontFamily: t.font }}>
+              Who is this for
+            </label>
+            <div role="radiogroup" aria-label="Block visibility" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {([
+                { value: 'shared' as const, label: 'Shared with the team', description: 'Git tracks it, so the team reviews it.' },
+                { value: 'private' as const, label: 'Private to me', description: 'Outside Git until you publish it.' },
+              ]).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={visibility === option.value}
+                  onClick={() => setVisibility(option.value)}
+                  style={{
+                    display: 'grid',
+                    gap: 3,
+                    padding: '9px 10px',
+                    borderRadius: 8,
+                    border: `1px solid ${visibility === option.value ? t.accent : t.inputBorder}`,
+                    background: visibility === option.value ? 'var(--accent-dim)' : t.inputBg,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    fontFamily: t.font,
+                  }}
+                >
+                  <span style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary }}>{option.label}</span>
+                  <span style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.3 }}>{option.description}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <label
               style={{
                 fontSize: 12,
@@ -251,7 +289,9 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
             )}
             {name && !error && (
               <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>
-                Git path: {blockGitPath(domains, domain, folderPath, slugify(name))}
+                {visibility === 'private'
+                  ? `Private path: .dql/local/private/blocks/${folderPath.trim() ? `${folderPath.trim().replace(/^\/+|\/+$/g, '')}/` : ''}${slugify(name)}.dql`
+                  : `Git path: ${blockGitPath(domains, domain, folderPath, slugify(name))}`}
               </span>
             )}
           </div>

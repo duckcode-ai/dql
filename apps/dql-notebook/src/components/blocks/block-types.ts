@@ -15,6 +15,12 @@ export interface BlockEntry {
   lastModified: string;
   description: string;
   llmContext?: string | null;
+  /**
+   * `private` lives under `.dql/local/` and is invisible to git until it is
+   * published. Not to be confused with the tracked `_drafts/` folder, which
+   * holds unpublished edits to a certified block.
+   */
+  visibility?: 'private' | 'shared';
 }
 
 export const STATUS_COLORS: Record<string, string> = {

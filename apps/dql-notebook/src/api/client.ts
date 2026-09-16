@@ -4866,11 +4866,26 @@ export const api = {
       owner?: string;
       tags?: string[];
       folderPath?: string;
+      visibility?: 'private' | 'shared';
     },
-  ): Promise<{ path: string; content: string }> {
-    return request<{ path: string; content: string }>('/api/blocks', {
+  ): Promise<{ path: string; content: string; visibility?: 'private' | 'shared' }> {
+    return request<{ path: string; content: string; visibility?: 'private' | 'shared' }>('/api/blocks', {
       method: 'POST',
       body: JSON.stringify({ name, ...options }),
+    });
+  },
+
+  /** Move a private block, and the companion YAML with it, into tracked source. */
+  async publishBlock(path: string): Promise<{
+    ok: boolean;
+    path?: string;
+    previousPath?: string;
+    companionPath?: string | null;
+    error?: string;
+  }> {
+    return request('/api/blocks/publish', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
     });
   },
 
@@ -4880,6 +4895,7 @@ export const api = {
       owner: string | null; tags: string[]; path: string;
       lastModified: string; description: string;
       llmContext?: string | null;
+      visibility?: 'private' | 'shared';
     }>;
     /** Why the library could not be read; an empty library is not the same as a failed one. */
     error?: string;

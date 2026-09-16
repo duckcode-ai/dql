@@ -830,6 +830,8 @@ function BlocksList({ t, search, domain, onDomainChange, onOpenBlock, onDeleteBl
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [publishing, setPublishing] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
   const blockFileKey = state.files.filter((f) => f.type === 'block').map((f) => f.path).sort().join('|');
 
   useEffect(() => {
@@ -865,6 +867,25 @@ function BlocksList({ t, search, domain, onDomainChange, onOpenBlock, onDeleteBl
     const file = { name: block.path.split('/').pop() ?? block.name, path: block.path, type: 'block' as const, folder: 'blocks' };
     if (!state.files.some((f) => f.path === block.path)) dispatch({ type: 'FILE_ADDED', file });
     void api.openBlockStudio(block.path).then((payload) => dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload }));
+  };
+
+  // Publishing moves the block and its companion into tracked source. The
+  // library is re-read afterwards, so the row loses its Private badge.
+  const publish = async (block: BlockEntry) => {
+    setPublishing(block.path);
+    setPublishError(null);
+    try {
+      const result = await api.publishBlock(block.path);
+      if (!result.ok) {
+        setPublishError(result.error ?? 'Could not publish this block.');
+        return;
+      }
+      setRetryKey((current) => current + 1);
+    } catch (error) {
+      setPublishError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPublishing(null);
+    }
   };
 
   const draftCount = filtered.filter((block) => String(block.status ?? 'draft') !== 'certified').length;
@@ -903,9 +924,12 @@ function BlocksList({ t, search, domain, onDomainChange, onOpenBlock, onDeleteBl
           })}
           onOpen={open}
           onDelete={onDeleteBlock}
+          onPublish={(block) => void publish(block)}
+          publishingPath={publishing}
           certifiedNames={certifiedNames}
           t={t}
         />}
+    {publishError ? <div role="alert" style={{ padding: '8px 12px', fontSize: 11.5, color: t.error, fontFamily: t.font }}>{publishError}</div> : null}
   </div>;
 }
 
@@ -917,6 +941,8 @@ function BlockTree({
   onToggleFolder,
   onOpen,
   onDelete,
+  onPublish,
+  publishingPath,
   certifiedNames,
   t,
 }: {
@@ -927,6 +953,8 @@ function BlockTree({
   onToggleFolder: (path: string) => void;
   onOpen: (block: BlockEntry) => void;
   onDelete?: (block: BlockEntry) => void;
+  onPublish?: (block: BlockEntry) => void;
+  publishingPath?: string | null;
   /** Names of certified blocks, so a draft of one reads as pending edits to it. */
   certifiedNames?: Set<string>;
   t: Theme;
@@ -936,7 +964,7 @@ function BlockTree({
       {nodes.map((node) => {
         if (node.kind === 'block') {
           const editsCertified = node.block.status !== 'certified' && /(^|\/)_drafts\//.test(node.block.path) && Boolean(certifiedNames?.has(node.block.name));
-          return <BlockRow key={node.block.path} block={node.block} depth={depth} t={t} editsCertified={editsCertified} onOpen={() => onOpen(node.block)} onDelete={onDelete ? () => onDelete(node.block) : undefined} />;
+          return <BlockRow key={node.block.path} block={node.block} depth={depth} t={t} editsCertified={editsCertified} onOpen={() => onOpen(node.block)} onDelete={onDelete ? () => onDelete(node.block) : undefined} onPublish={onPublish ? () => onPublish(node.block) : undefined} publishing={publishingPath === node.block.path} />;
         }
         const expanded = expandAll || expandedFolders.has(node.path);
         return (
@@ -952,7 +980,7 @@ function BlockTree({
               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{blockFolderLabel(node.name)}</span>
               <span style={{ fontSize: 10, color: t.textMuted }}>{countTreeBlocks(node.children)}</span>
             </button>
-            {expanded ? <BlockTree nodes={node.children} depth={depth + 1} expandAll={expandAll} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onOpen={onOpen} onDelete={onDelete} certifiedNames={certifiedNames} t={t} /> : null}
+            {expanded ? <BlockTree nodes={node.children} depth={depth + 1} expandAll={expandAll} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onOpen={onOpen} onDelete={onDelete} onPublish={onPublish} publishingPath={publishingPath} certifiedNames={certifiedNames} t={t} /> : null}
           </React.Fragment>
         );
       })}
@@ -966,9 +994,10 @@ function countTreeBlocks(nodes: BlockLibraryTreeNode[]): number {
 
 // Prototype block row: blocks glyph · mono name over a meta line · status dot.
 // A single click opens the block's detail overview (description lives there).
-function BlockRow({ block, depth = 0, t, onOpen, onDelete, editsCertified = false }: { block: BlockEntry; depth?: number; t: Theme; onOpen: () => void; onDelete?: () => void; editsCertified?: boolean }) {
+function BlockRow({ block, depth = 0, t, onOpen, onDelete, onPublish, publishing = false, editsCertified = false }: { block: BlockEntry; depth?: number; t: Theme; onOpen: () => void; onDelete?: () => void; onPublish?: () => void; publishing?: boolean; editsCertified?: boolean }) {
   const status = String(block.status ?? 'draft');
   const dot = STATUS_COLOR[status] ?? t.warning;
+  const isPrivate = block.visibility === 'private';
   // Delete is a destructive action: it appears on hover or keyboard focus, not on every row.
   const [active, setActive] = useState(false);
   return (
@@ -990,7 +1019,15 @@ function BlockRow({ block, depth = 0, t, onOpen, onDelete, editsCertified = fals
           <span style={{ fontSize: 10.5, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[block.domain, editsCertified ? 'draft · edits to the certified block' : status].filter(Boolean).join(' · ')}</span>
         </span>
       </button>
+      {isPrivate ? (
+        <span title="Private: not in Git until you publish it" style={{ flexShrink: 0, fontSize: 9, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase', padding: '1px 5px', borderRadius: 4, color: t.textMuted, border: `1px solid ${t.cellBorder}`, background: t.btnBg }}>Private</span>
+      ) : null}
       <span title={status} style={{ flexShrink: 0, width: 7, height: 7, borderRadius: 999, background: dot }} />
+      {isPrivate && onPublish ? (
+        <button type="button" aria-label={`Publish ${block.name}`} title={`Publish ${block.name} so the team can see it`} onClick={onPublish} disabled={publishing} style={{ width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: 'none', borderRadius: 6, background: 'transparent', color: t.accent, cursor: publishing ? 'wait' : 'pointer', opacity: active ? 1 : 0, transition: 'opacity .12s ease' }}>
+          <Upload size={13} />
+        </button>
+      ) : null}
       {onDelete ? (
         <button type="button" aria-label={`Delete ${block.name}`} title={`Delete ${block.name}`} onClick={onDelete} style={{ width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: 'none', borderRadius: 6, background: 'transparent', color: t.error, cursor: 'pointer', opacity: active ? 1 : 0, transition: 'opacity .12s ease' }}>
           <Trash2 size={13} />

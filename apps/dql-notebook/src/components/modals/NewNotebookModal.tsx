@@ -276,7 +276,7 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
               {name && !error && (
                 <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>
                   {visibility === 'private'
-                    ? `Private path: .dql/local/drafts/notebooks/${slugify(name)}.dqlnb`
+                    ? `Private path: .dql/local/private/notebooks/${slugify(name)}.dqlnb`
                     : `Git path: notebooks/${slugify(name)}.dqlnb`}
                 </span>
               )}

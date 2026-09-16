@@ -52,7 +52,7 @@ function postJson(url: string, body: unknown): Promise<Response> {
   return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 }
 
-const DRAFT_DIR = join('.dql', 'local', 'drafts', 'notebooks');
+const DRAFT_DIR = join('.dql', 'local', 'private', 'notebooks');
 
 describe('private notebook drafts stay out of git until they are published', () => {
   it('creates a private draft outside source control and lists it as private', async () => {
@@ -66,7 +66,7 @@ describe('private notebook drafts stay out of git until they are published', () 
       });
       expect(created.status).toBe(201);
       const body = await created.json() as { path: string; visibility: string };
-      expect(body.path).toBe('.dql/local/drafts/notebooks/scratch_idea.dqlnb');
+      expect(body.path).toBe('.dql/local/private/notebooks/scratch_idea.dqlnb');
       expect(body.visibility).toBe('private');
       expect(existsSync(join(project, DRAFT_DIR, 'scratch_idea.dqlnb'))).toBe(true);
       expect(existsSync(join(project, 'notebooks', 'scratch_idea.dqlnb'))).toBe(false);
@@ -77,7 +77,7 @@ describe('private notebook drafts stay out of git until they are published', () 
         type: string;
       }>;
       expect(listed).toContainEqual(expect.objectContaining({
-        path: '.dql/local/drafts/notebooks/scratch_idea.dqlnb',
+        path: '.dql/local/private/notebooks/scratch_idea.dqlnb',
         visibility: 'private',
         type: 'notebook',
       }));
@@ -103,7 +103,7 @@ describe('private notebook drafts stay out of git until they are published', () 
     git(project, ['init']);
     await withServer(project, async (base) => {
       await postJson(`${base}/api/notebooks`, { name: 'Ready To Share', template: 'blank', visibility: 'private' });
-      const draftPath = '.dql/local/drafts/notebooks/ready_to_share.dqlnb';
+      const draftPath = '.dql/local/private/notebooks/ready_to_share.dqlnb';
       const draftContent = readFileSync(join(project, DRAFT_DIR, 'ready_to_share.dqlnb'), 'utf-8');
 
       const published = await postJson(`${base}/api/notebooks/publish`, { path: draftPath });
@@ -131,7 +131,7 @@ describe('private notebook drafts stay out of git until they are published', () 
     await withServer(project, async (base) => {
       await postJson(`${base}/api/notebooks`, { name: 'Overlap', template: 'blank', visibility: 'private' });
       const published = await postJson(`${base}/api/notebooks/publish`, {
-        path: '.dql/local/drafts/notebooks/overlap.dqlnb',
+        path: '.dql/local/private/notebooks/overlap.dqlnb',
       });
       expect(published.status).toBe(409);
       const body = await published.json() as { ok: boolean; error: string };
@@ -161,7 +161,7 @@ describe('private notebook drafts stay out of git until they are published', () 
     const project = tempProject('dql-private-notebook-delete-');
     await withServer(project, async (base) => {
       await postJson(`${base}/api/notebooks`, { name: 'Throwaway', template: 'blank', visibility: 'private' });
-      const draftPath = '.dql/local/drafts/notebooks/throwaway.dqlnb';
+      const draftPath = '.dql/local/private/notebooks/throwaway.dqlnb';
       const draftContent = readFileSync(join(project, DRAFT_DIR, 'throwaway.dqlnb'), 'utf-8');
 
       const deleted = await fetch(`${base}/api/notebooks?path=${encodeURIComponent(draftPath)}`, { method: 'DELETE' });

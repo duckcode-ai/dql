@@ -25,6 +25,20 @@ export function blockFolderInsideDomain(blockPath: string, domain: string): stri
   return parts.slice(0, -1).join('/');
 }
 
+const PRIVATE_BLOCK_PREFIX = '.dql/local/private/blocks/';
+
+/**
+ * Folders inside the private root, so a private block groups by the folder its
+ * author chose rather than by the `.dql/local/` path that keeps it out of git.
+ */
+function privateBlockFolders(blockPath: string): string[] {
+  const normalized = blockPath.replace(/\\/g, '/');
+  const inside = normalized.startsWith(PRIVATE_BLOCK_PREFIX)
+    ? normalized.slice(PRIVATE_BLOCK_PREFIX.length)
+    : normalized;
+  return inside.split('/').filter(Boolean).slice(0, -1);
+}
+
 export function buildBlockLibraryTree(blocks: BlockEntry[], domain: string): BlockLibraryTreeNode[] {
   type MutableFolder = { name: string; path: string; folders: Map<string, MutableFolder>; blocks: BlockEntry[] };
   const root: MutableFolder = { name: '', path: '', folders: new Map(), blocks: [] };
@@ -35,7 +49,9 @@ export function buildBlockLibraryTree(blocks: BlockEntry[], domain: string): Blo
     const parts = relativePath.split('/').filter(Boolean);
     // Selected-domain views omit the redundant domain folder. The all-domains
     // view keeps ownership visible as its top-level grouping.
-    const folders = domain ? parts.slice(0, -1) : [owningDomain, ...parts.slice(0, -1)];
+    const folders = block.visibility === 'private'
+      ? ['Private', ...privateBlockFolders(block.path)]
+      : domain ? parts.slice(0, -1) : [owningDomain, ...parts.slice(0, -1)];
     let cursor = root;
     for (const folderName of folders) {
       const folderPath = [cursor.path, folderName].filter(Boolean).join('/');
