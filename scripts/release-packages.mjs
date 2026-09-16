@@ -343,6 +343,16 @@ export async function main({ argv = process.argv.slice(2), cwd = process.cwd(), 
   // publish hooks before pack/publish.
   console.log('\nPreparing package manifests...');
   const originals = preparePackageManifests(cwd);
+  // `finally` does not run when the process is killed. Stopping a publish at
+  // npm's approval prompt used to leave every manifest pointing at registry
+  // versions instead of workspace:*, and the next build then ran the packages
+  // in the wrong order.
+  const restoreOnSignal = (signal) => {
+    restoreOriginals(originals);
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.once('SIGINT', restoreOnSignal);
+  process.once('SIGTERM', restoreOnSignal);
 
   let exitCode = 0;
   try {
@@ -374,6 +384,8 @@ export async function main({ argv = process.argv.slice(2), cwd = process.cwd(), 
     exitCode = 1;
   } finally {
     // Always restore originals so workspace:* stays in the repo.
+    process.removeListener('SIGINT', restoreOnSignal);
+    process.removeListener('SIGTERM', restoreOnSignal);
     restoreOriginals(originals);
   }
 
