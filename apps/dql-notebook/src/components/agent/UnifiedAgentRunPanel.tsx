@@ -780,6 +780,9 @@ export function UnifiedAgentRunPanel({
             sourceRunId: priorAuthoringRun.id,
             sourceArtifactId: priorAuthoringArtifact.id,
             revision: (priorAuthoringRun.derivation?.revision ?? 1) + 1,
+            // The draft still on screen. Without its id the next message could
+            // only start over, so "make that many_to_one" rebuilt from scratch.
+            ...(priorAuthoringArtifact.ref ? { priorProposalId: priorAuthoringArtifact.ref } : {}),
           } : {}),
         },
         conversationContext: buildConversationContext(items),

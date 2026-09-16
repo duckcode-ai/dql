@@ -6,6 +6,7 @@ import {
   skillDraftId,
   normalizeAuthoringEntityId,
   authoringEntityIdForDbtModel,
+  mergeAuthoringOperations,
   buildAgentValueProbeSql,
   buildAgentExactValueProbeSql,
   agentLiteralProbeTarget,
@@ -11914,6 +11915,19 @@ describe('authoring AI stays inside what the author asked for', () => {
     // had just invented.
     expect(normalizeAuthoringEntityId('local-team-season-facts')).toBe(normalizeAuthoringEntityId('local_team_season_facts'));
     expect(normalizeAuthoringEntityId('Dim Teams Cleansed')).toBe('dim_teams_cleansed');
+  });
+
+  it('a follow-up overwrites the change it revises and keeps the rest of the draft', () => {
+    const operation = (id: string, value: Record<string, unknown>) => ({
+      id, kind: 'modeling_change' as const, change: { operation: 'upsert_relationship' as const, value },
+    });
+    const merged = mergeAuthoringOperations(
+      [operation('entity:nba:teams', { id: 'teams' }), operation('relationship:nba:facts_to_teams', { id: 'facts_to_teams', cardinality: 'unknown' })] as never,
+      [operation('relationship:nba:facts_to_teams', { id: 'facts_to_teams', cardinality: 'many_to_one' })] as never,
+    );
+
+    expect(merged.map((item) => item.id)).toEqual(['entity:nba:teams', 'relationship:nba:facts_to_teams']);
+    expect((merged[1] as { change: { value: { cardinality: string } } }).change.value.cardinality).toBe('many_to_one');
   });
 
   it('writes an AI change to a model already on the map under the id it already has', () => {

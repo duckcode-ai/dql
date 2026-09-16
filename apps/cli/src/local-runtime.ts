@@ -6231,6 +6231,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const previewContextAuthoring = (input: {
     origin: ContextAuthoringOrigin;
     operations: ContextAuthoringOperation[];
+    /** The draft this one revises: carried forward, then overwritten by `operations` sharing an id. */
+    baseOperations?: ContextAuthoringOperation[];
     expectedSnapshotId?: string;
     sourceRunId?: string;
     sourceArtifactId?: string;
@@ -6243,7 +6245,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     if (input.operations.length === 0) throw Object.assign(new Error('At least one authoring operation is required.'), { code: 'INVALID_REQUEST' });
     const diagnostics: ContextAuthoringDiagnosticV1[] = [...(input.diagnostics ?? [])];
-    const operations = input.operations.map((operation): ContextAuthoringOperation => {
+    // A follow-up turn changes part of a draft and leaves the rest standing.
+    // Operation ids are deterministic (entity:<domain>:<id>), so the new turn
+    // overwrites the operation it revises instead of proposing a second one.
+    const requested = input.baseOperations?.length
+      ? mergeAuthoringOperations(input.baseOperations, input.operations)
+      : input.operations;
+    const operations = requested.map((operation): ContextAuthoringOperation => {
       if (operation.kind === 'skill_change') {
         const value = { ...operation.value };
         value.status = 'draft';
@@ -6379,12 +6387,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // matcher is the documented provider-unavailable fallback, and the answer
     // says which one ran so an evidence-only suggestion is never mistaken for
     // an AI proposal.
+    // The draft the author is looking at. A second message revises it rather
+    // than starting from the committed files again.
+    const openDraft = openAuthoringDraft(contextProposalStore, request, snapshot.snapshotId, 'modeling_change');
     const provider = await createBlockStudioAssistProvider(projectRoot);
     let usedProvider = Boolean(provider);
     let operations: ContextAuthoringOperation[];
     if (provider) {
       try {
-        operations = await buildAiModelingOperations(projectRoot, snapshot.manifest, request, provider);
+        operations = await buildAiModelingOperations(projectRoot, snapshot.manifest, request, provider, openDraft?.operations ?? []);
       } catch (error) {
         // Fall back only when the provider itself is unusable. A rejected
         // proposal (invented identifiers, nothing to propose) is a real result
@@ -6399,6 +6410,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const proposal = previewContextAuthoring({
       origin: request.workspaceContext?.correction === true ? 'correction' : 'ai',
       operations,
+      ...(openDraft ? { baseOperations: openDraft.operations } : {}),
       // Base the draft on the snapshot it was just built from, not on the id the
       // client captured at page load. Gating construction on the client's id
       // rejected a proposal assembled from `snapshot.manifest` moments earlier,
@@ -6431,12 +6443,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const snapshot = projectSnapshot();
     // SKILL-006: same contract as Modeling AI — a provider drafts the skill
     // body and vocabulary; the template is the labelled fallback.
+    const openDraft = openAuthoringDraft(contextProposalStore, request, snapshot.snapshotId, 'skill_change');
     const provider = await createBlockStudioAssistProvider(projectRoot);
     let usedProvider = Boolean(provider);
     let operations: ContextAuthoringOperation[];
     if (provider) {
       try {
-        operations = await buildAiSkillOperations(projectRoot, snapshot.manifest, request, provider);
+        operations = await buildAiSkillOperations(projectRoot, snapshot.manifest, request, provider, openDraft?.operations ?? []);
       } catch {
         // The provider was unusable. Say so: a template presented as an AI
         // draft reads as guidance someone wrote.
@@ -6449,6 +6462,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const proposal = previewContextAuthoring({
       origin: request.workspaceContext?.correction === true ? 'correction' : 'ai',
       operations,
+      ...(openDraft ? { baseOperations: openDraft.operations } : {}),
       // Same reasoning as the modeling executor above: base the draft on the
       // snapshot it was built from; apply-time re-validation catches real drift.
       expectedSnapshotId: snapshot.snapshotId,
@@ -23505,6 +23519,7 @@ async function buildAiModelingOperations(
   manifest: DQLManifest,
   request: AgentRunRequest,
   provider: AgentProvider,
+  priorOperations: ContextAuthoringOperation[] = [],
 ): Promise<ContextAuthoringOperation[]> {
   const modeling = manifest.modeling;
   if (!modeling || !manifest.dbtProvenance) throw new Error('Modeling AI requires a compiled dbt-first project snapshot.');
@@ -23572,6 +23587,8 @@ async function buildAiModelingOperations(
     focusedModel: focusedId
       ? Object.values(modeling.entities).find((entity) => entity.qualifiedId === focusedId)
       : undefined,
+    // What this turn is revising, when the author is following up on a draft.
+    draftInProgress: priorOperations.flatMap((operation) => operation.kind === 'modeling_change' ? [operation.change] : []),
   };
 
   let raw: string;
@@ -23591,6 +23608,9 @@ async function buildAiModelingOperations(
           wantsNewModels
             ? 'You may add models from availableDbtModels when the request asks for them.'
             : 'Propose changes only for the models listed in currentModels. This request did not ask for new models, so do not add any.',
+          priorOperations.length
+            ? 'draftInProgress holds the changes you proposed last turn and the request revises them: return only the operations that change, repeating the id of the one you are revising. Everything you leave out stays as it is.'
+            : 'There is no draft in progress.',
         ].join(' '),
       },
       { role: 'user', content: JSON.stringify(payload) },
@@ -23693,6 +23713,41 @@ async function buildAiModelingOperations(
   }
   if (operations.length === 0) throw new Error('Modeling AI referenced models or columns that are not in the current dbt snapshot, so nothing was proposed.');
   return operations;
+}
+
+/**
+ * A follow-up turn overwrites the operation it revises and leaves the rest of
+ * the draft standing. Operation ids are deterministic, so "make that
+ * many_to_one" replaces that one relationship instead of proposing a second.
+ */
+export function mergeAuthoringOperations(
+  base: ContextAuthoringOperation[],
+  next: ContextAuthoringOperation[],
+): ContextAuthoringOperation[] {
+  return [...new Map([...base, ...next].map((operation) => [operation.id, operation])).values()];
+}
+
+/**
+ * The uncommitted draft a follow-up message revises, when the author is looking
+ * at one. A draft built on an older snapshot is ignored — the files moved under
+ * it — and the turn starts fresh rather than editing something stale.
+ */
+function openAuthoringDraft(
+  store: FileContextAuthoringProposalStore,
+  request: AgentRunRequest,
+  snapshotId: string,
+  kind: ContextAuthoringOperation['kind'],
+): ContextAuthoringProposalV1 | undefined {
+  const id = request.workspaceContext?.priorProposalId;
+  if (typeof id !== 'string' || !id.trim()) return undefined;
+  let proposal: ContextAuthoringProposalV1 | undefined;
+  try {
+    proposal = store.get(id);
+  } catch {
+    return undefined;
+  }
+  if (!proposal || proposal.status !== 'proposed' || proposal.baseSnapshotId !== snapshotId) return undefined;
+  return proposal.operations.some((operation) => operation.kind === kind) ? proposal : undefined;
 }
 
 /**
@@ -23956,10 +24011,15 @@ async function buildAiSkillOperations(
   manifest: DQLManifest,
   request: AgentRunRequest,
   provider: AgentProvider,
+  priorOperations: ContextAuthoringOperation[] = [],
 ): Promise<ContextAuthoringOperation[]> {
   const base = buildMetadataBoundSkillOperations(projectRoot, manifest, request);
   const operation = base[0];
   if (!operation || operation.kind !== 'skill_change') return base;
+  // A follow-up ("give it more trigger words") edits the draft on screen, not
+  // the saved skill the draft was built from.
+  const priorDraft = priorOperations.find((candidate) => candidate.kind === 'skill_change' && candidate.id === operation.id);
+  const current = priorDraft && priorDraft.kind === 'skill_change' ? priorDraft : operation;
 
   const raw = await provider.generate([
     {
@@ -23979,7 +24039,8 @@ async function buildAiSkillOperations(
         request: request.question.trim(),
         domain: operation.value.domain,
         modelAreaRefs: operation.value.modelAreaRefs,
-        currentSkill: { id: operation.value.id, description: operation.value.description, body: operation.value.body },
+        currentSkill: { id: current.value.id, description: current.value.description, body: current.value.body },
+        ...(priorDraft ? { revising: 'currentSkill is the draft from the previous turn; change only what this request asks for.' } : {}),
         governedReferences: {
           metrics: operation.value.preferredMetrics,
           blocks: operation.value.preferredBlocks,
@@ -23997,10 +24058,10 @@ async function buildAiSkillOperations(
 
   const vocabulary = contextRecord(parsed.vocabulary);
   return [{
-    ...operation,
-    evidence: [...(operation.evidence ?? []), 'drafted by Skills AI from governed references only'],
+    ...current,
+    evidence: [...(current.evidence ?? []), 'drafted by Skills AI from governed references only'],
     value: {
-      ...operation.value,
+      ...current.value,
       description: typeof parsed.description === 'string' && parsed.description.trim() ? parsed.description.trim() : operation.value.description,
       body,
       triggers: contextStrings(parsed.triggers).slice(0, 12).length ? contextStrings(parsed.triggers).slice(0, 12) : operation.value.triggers,
