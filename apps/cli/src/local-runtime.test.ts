@@ -5,6 +5,7 @@ import {
   requestAsksForNewModels,
   skillDraftId,
   normalizeAuthoringEntityId,
+  authoringEntityIdForDbtModel,
   buildAgentValueProbeSql,
   buildAgentExactValueProbeSql,
   agentLiteralProbeTarget,
@@ -11894,11 +11895,16 @@ describe('Modeling AI provider replies (AGT-024)', () => {
 
 describe('authoring AI stays inside what the author asked for', () => {
   it('treats only a request that asks for models as permission to add them', () => {
+    const unbound = ['fct_player_performance model.nba.fct_player_performance', 'dim_seasons model.nba.dim_seasons'];
     // "Connect these models" on a 2-model area came back with 6 extra models.
-    expect(requestAsksForNewModels('Propose draft relationships between the models in this area and explain the evidence for each key pair.')).toBe(false);
-    expect(requestAsksForNewModels('Write the business context and grain for the focused model')).toBe(false);
+    expect(requestAsksForNewModels('Propose draft relationships between the models in this area and explain the evidence for each key pair.', unbound)).toBe(false);
+    expect(requestAsksForNewModels('Write the business context and grain for the focused model', unbound)).toBe(false);
     expect(requestAsksForNewModels('Add the games fact model and connect it to the team dimension')).toBe(true);
     expect(requestAsksForNewModels('bind the remaining dbt models for this area')).toBe(true);
+    // Asking to build something out is asking for the models it needs.
+    expect(requestAsksForNewModels('Can you build the Performance domain that capture the right modeling, relationships for players performance', unbound)).toBe(true);
+    // Naming a model that is not on the map yet asks for it just as plainly.
+    expect(requestAsksForNewModels('how do seasons relate to team results', unbound)).toBe(true);
   });
 
   it('resolves an entity id the model spells in snake_case to the hyphenated id on the map', () => {
@@ -11908,6 +11914,14 @@ describe('authoring AI stays inside what the author asked for', () => {
     // had just invented.
     expect(normalizeAuthoringEntityId('local-team-season-facts')).toBe(normalizeAuthoringEntityId('local_team_season_facts'));
     expect(normalizeAuthoringEntityId('Dim Teams Cleansed')).toBe('dim_teams_cleansed');
+  });
+
+  it('writes an AI change to a model already on the map under the id it already has', () => {
+    // Otherwise "shorten the description of Local Team Season Facts" proposes a
+    // second local_team_season_facts beside the local-team-season-facts on the map.
+    const existing = [{ localId: 'local-team-season-facts', dbtUniqueId: 'model.nba_analysis.local_team_season_facts' }];
+    expect(authoringEntityIdForDbtModel('local_team_season_facts', 'model.nba_analysis.local_team_season_facts', existing)).toBe('local-team-season-facts');
+    expect(authoringEntityIdForDbtModel(undefined, 'model.nba_analysis.dim_seasons', existing)).toBe('dim_seasons');
   });
 
   it('names a drafted skill after its subject, not the sentence that asked for it', () => {

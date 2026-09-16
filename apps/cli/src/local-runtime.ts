@@ -23550,7 +23550,7 @@ async function buildAiModelingOperations(
     .filter(([, entity]) => scopedEntities.includes(entity))
     .map(([recordKey]) => recordKey));
   const scopedDbtIds = new Set(scopedEntities.map((entity) => entity.dbtUniqueId));
-  const wantsNewModels = requestAsksForNewModels(request.question);
+  const wantsNewModels = requestAsksForNewModels(request.question, unbound.map((node) => `${node.name ?? ''} ${node.uniqueId}`));
   const focusedId = request.selectedObject?.kind === 'model'
     ? request.selectedObject.id
     : typeof context.focusedObjectId === 'string' ? context.focusedObjectId : undefined;
@@ -23619,7 +23619,8 @@ async function buildAiModelingOperations(
       if (!candidate.dbtModel || !knownDbtIds.has(candidate.dbtModel)) continue;
       // Scope is enforced here too: a prompt line is guidance, this is the rule.
       if (!wantsNewModels && !scopedDbtIds.has(candidate.dbtModel)) { droppedOutOfScope += 1; continue; }
-      const id = authoringSlug(candidate.id || candidate.dbtModel.split('.').at(-1) || 'model').replace(/-/g, '_');
+      const boundEntity = domainEntities.find((entity) => entity.dbtUniqueId === candidate.dbtModel);
+      const id = authoringEntityIdForDbtModel(candidate.id, candidate.dbtModel, domainEntities);
       if (!id) continue;
       entityIdByNormalizedId.set(normalizeAuthoringEntityId(id), id);
       const detail = manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, candidate.dbtModel) : undefined;
@@ -23632,7 +23633,10 @@ async function buildAiModelingOperations(
         change: {
           operation: 'upsert_entity',
           value: {
-            id, domain, areaId, dbtModel: candidate.dbtModel,
+            id, domain,
+            // An existing model keeps the subject area it is already filed under.
+            areaId: (boundEntity ? modeling.areas[boundEntity.areaId ?? '']?.localId : undefined) ?? areaId,
+            dbtModel: candidate.dbtModel,
             businessName: candidate.businessName?.trim() || titleCaseAuthoring(id),
             businessContext: candidate.businessContext?.trim() || undefined,
             grain: candidate.grain && columns.has(candidate.grain.toLowerCase()) ? candidate.grain : undefined,
@@ -23692,6 +23696,21 @@ async function buildAiModelingOperations(
 }
 
 /**
+ * The id an AI-proposed model is written under. A dbt model already on the map
+ * keeps the id it has: generating a fresh snake_case one wrote a second copy of
+ * the model beside the original instead of editing it.
+ */
+export function authoringEntityIdForDbtModel(
+  candidateId: string | undefined,
+  dbtModel: string,
+  existing: Array<{ localId: string; dbtUniqueId: string }>,
+): string {
+  const bound = existing.find((entity) => entity.dbtUniqueId === dbtModel);
+  if (bound) return bound.localId;
+  return authoringSlug(candidateId || dbtModel.split('.').at(-1) || 'model').replace(/-/g, '_');
+}
+
+/**
  * One spelling for an entity id, so a model that answers `local_team_season_facts`
  * still resolves to the `local-team-season-facts` on the map.
  */
@@ -23703,8 +23722,16 @@ export function normalizeAuthoringEntityId(value: string): string {
  * Whether a modeling request asks to bring new models in. Without this every
  * "describe" or "connect" request could return a pile of unrequested models.
  */
-export function requestAsksForNewModels(question: string): boolean {
-  return /\b(add|adds|adding|bind|binds|binding|include|includes|including|import|imports|onboard|onboards|new|missing|another|more|extra|remaining|rest of)\b/.test(question.toLowerCase());
+export function requestAsksForNewModels(question: string, unboundModelNames: string[] = []): boolean {
+  // "model"/"models" are deliberately absent: "relationships between the models
+  // in this area" is about what is already there, not a request for more.
+  if (/\b(add|adds|adding|bind|binds|binding|include|includes|including|import|imports|onboard|onboards|build|builds|building|create|creates|creating|design|designs|designing|set up|expand|extend|capture|captures|cover|covers|new|missing|another|more|extra|remaining|rest of)\b/.test(question.toLowerCase())) return true;
+  // Naming something that is not on the map yet ("players performance") asks
+  // for it just as plainly as the verb does.
+  const tokens = authoringTokens(question);
+  return unboundModelNames.some((name) => name.toLowerCase().split(/[^a-z0-9]+/)
+    .filter((part) => part.length > 3)
+    .some((part) => tokens.includes(part)));
 }
 
 type AiModelingCandidate =
