@@ -228,6 +228,57 @@ describe('direct CLI Ask trace bridge (OBS-001, OBS-007)', () => {
 });
 
 describe('agent eval answer harness', () => {
+  it('scores a benchmark question by its correct answer, ignoring column names', () => {
+    const answered = answerResult({ result: { columns: ['policy', 'losses'], rows: [{ policy: 'P2', losses: 20 }, { policy: 'P1', losses: 10 }] } as AgentAnswer['result'] });
+    const expected = { goldRows: [{ policy_number: 'P1', total_loss: 10 }, { policy_number: 'P2', total_loss: 20 }], goldSql: 'select ...' };
+
+    const right = __test__.evaluateCase({ question: 'loss by policy', expected }, answered);
+    expect(right.failures).toEqual([]);
+    expect(right.executionMatched).toBe(true);
+    expect(right.goldMatchReason).toBeUndefined();
+
+    const wrong = __test__.evaluateCase(
+      { question: 'loss by policy', expected: { goldRows: [{ policy_number: 'P1', total_loss: 10 }] } },
+      answered,
+    );
+    expect(wrong.executionMatched).toBe(false);
+    expect(wrong.goldMatchReason).toBe('returned 2 row(s); the correct answer has 1');
+    expect(wrong.failures).toEqual(['answer does not match the correct answer: returned 2 row(s); the correct answer has 1']);
+  });
+
+  it('scores a refusal on a question with a correct answer as wrong, not as a match', () => {
+    const refused = answerResult({ kind: 'no_answer', result: undefined });
+    const evaluation = __test__.evaluateCase(
+      { question: 'loss by policy', expected: { goldRows: [] } },
+      refused,
+    );
+    // An empty correct answer is not matched by saying nothing.
+    expect(evaluation.executionMatched).toBe(false);
+    expect(evaluation.goldMatchReason).toBe('no data answer was returned');
+    expect(evaluation.failures.some((failure) => failure.startsWith('FALSE REFUSAL'))).toBe(true);
+  });
+
+  it('records the trust label, answering path, proofs, SQL and row count of each answer', () => {
+    const run = runtimeRun({
+      trustState: 'governed',
+      diagnosticReceiptV9: { executed: { tier: 'semantic', sqlFingerprint: 'f', rowCount: 2, ms: 5, proofs: ['certified_join:policy_claim'] } },
+    } as Partial<AgentRun>);
+    const answered = answerResult({
+      sql: 'select policy, sum(loss) from claims group by 1',
+      result: { columns: ['policy', 'loss'], rows: [{ policy: 'P1', loss: 1 }, { policy: 'P2', loss: 2 }] } as AgentAnswer['result'],
+    });
+    expect(__test__.answerEvidence(run, answered)).toEqual({
+      trustState: 'governed',
+      tier: 'semantic',
+      proofs: ['certified_join:policy_claim'],
+      sql: 'select policy, sum(loss) from claims group by 1',
+      rowCount: 2,
+    });
+    expect(__test__.answerEvidence(runtimeRun({}), answerResult({ sql: undefined, proposedSql: undefined, result: undefined }))).toEqual({
+      trustState: 'review_required',
+    });
+  });
+
   it('scores the persisted certified runtime route rather than an absent AgentAnswer context pack', () => {
     const persisted = runtimeRun({
       route: 'certified_answer',

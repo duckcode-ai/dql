@@ -35,6 +35,8 @@ import {
   evalCassetteCanonicalizationV2,
   withCassette,
 } from './agent-eval-cassette.js';
+import type { AgentRun } from '@duckcodeailabs/dql-agent';
+import { goldRowsMatch } from './eval-row-match.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
@@ -929,6 +931,18 @@ interface AgentEvalCase {
     minToolCalls?: number;
     rows?: unknown[];
     /**
+     * A public benchmark's correct answer: the rows its reference SQL returns.
+     * Compared by values, ignoring column names and order (see
+     * eval-row-match.ts), because a benchmark names its columns its own way.
+     */
+    goldRows?: unknown[];
+    /** The reference SQL the gold rows came from, kept for audit. */
+    goldSql?: string;
+    /** The question asks for an order, so rows must come back in it. */
+    goldOrdered?: boolean;
+    /** The answer may carry columns the correct answer does not. */
+    goldAllowExtraColumns?: boolean;
+    /**
      * Is this question answerable at all?
      *
      * When true, ANY refusal (`no_answer` / `clarify`) is a FALSE REFUSAL — the
@@ -998,6 +1012,20 @@ interface AgentEvalResult {
   meaningResolved?: boolean;
   /** Compact trace receipt evidence from a runtime-driven Ask run. */
   observability?: RuntimeDrivenRun['observability'];
+  /** Why the rows did not match the correct answer, when they did not. */
+  goldMatchReason?: string;
+  /**
+   * What a benchmark report needs from each answer: the trust label shown to
+   * the user, which path answered (certified block, semantic layer, AI SQL),
+   * the proofs that path recorded, the SQL, and how many rows came back.
+   */
+  answer?: {
+    trustState?: string;
+    tier?: string;
+    proofs?: string[];
+    sql?: string;
+    rowCount?: number;
+  };
 }
 
 type AgentEvalTraceStageName =
@@ -1124,7 +1152,11 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
       // calls the answer loop directly and cannot observe any of them, which is
       // why a refusal metric taken from it reads cleaner than users experience.
       const runtimeRun = via === 'runtime'
-        ? await driveViaRuntime({ runtimeBase, question: testCase.question })
+        ? await driveViaRuntime({
+            runtimeBase,
+            question: testCase.question,
+            ...(testCase.domain ? { workspaceContext: { domain: testCase.domain } } : {}),
+          })
         : undefined;
       // Runtime mode is scored from the persisted AgentRun. The transport
       // adapter intentionally has no AgentAnswer.contextPack, so borrowing the
@@ -1182,6 +1214,8 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         ...(runtimeProjection ? { providerDispatchCount: runtimeProjection.providerDispatchCount } : {}),
         expected: testCase.expected,
         validationCode: evaluation.validationCode,
+        ...(evaluation.goldMatchReason ? { goldMatchReason: evaluation.goldMatchReason } : {}),
+        answer: answerEvidence(runtimeRun, result),
         trace: buildEvalTrace({
           testCase,
           result,
@@ -1316,6 +1350,7 @@ function evaluateCase(
   failures: string[];
   validationCode?: string;
   executionMatched?: boolean;
+  goldMatchReason?: string;
 } {
   const expected = testCase.expected;
   if (!expected) return { failures: [] };
@@ -1411,7 +1446,22 @@ function evaluateCase(
     executionMatched = rowsEqual(actualRows, expected.rows);
     if (!executionMatched) failures.push('executed rows did not match expected rows');
   }
-  return { failures, validationCode, executionMatched };
+  let goldMatchReason: string | undefined;
+  if (expected.goldRows) {
+    const actualRows = result.result?.rows ?? [];
+    const match = producedDataAnswer
+      ? goldRowsMatch(actualRows, expected.goldRows, {
+          ordered: expected.goldOrdered,
+          allowExtraColumns: expected.goldAllowExtraColumns,
+        })
+      : { match: false, reason: 'no data answer was returned' };
+    executionMatched = match.match;
+    if (!match.match) {
+      goldMatchReason = match.reason;
+      failures.push(`answer does not match the correct answer: ${match.reason}`);
+    }
+  }
+  return { failures, validationCode, executionMatched, goldMatchReason };
 }
 
 /**
@@ -2017,7 +2067,21 @@ async function executeRuntimeCell(
   return payload;
 }
 
+/** The per-answer facts a benchmark report publishes. */
+function answerEvidence(run: AgentRun, result: AgentAnswer): AgentEvalResult['answer'] {
+  const receipt = (run as { diagnosticReceiptV9?: { executed?: { tier?: string; proofs?: string[] } } }).diagnosticReceiptV9;
+  const sql = result.sql ?? result.proposedSql;
+  return {
+    trustState: run.trustState,
+    ...(receipt?.executed?.tier ? { tier: receipt.executed.tier } : {}),
+    ...(receipt?.executed?.proofs?.length ? { proofs: receipt.executed.proofs } : {}),
+    ...(sql ? { sql } : {}),
+    ...(result.result?.rows ? { rowCount: result.result.rows.length } : {}),
+  };
+}
+
 export const __test__ = {
+  answerEvidence,
   agentEvalThresholdsPass,
   buildEvalTrace,
   cliAnalysisDepth,
