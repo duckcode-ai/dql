@@ -4,6 +4,7 @@ import {
   parseAiModelingOperations,
   requestAsksForNewModels,
   skillDraftId,
+  normalizeAuthoringEntityId,
   buildAgentValueProbeSql,
   buildAgentExactValueProbeSql,
   agentLiteralProbeTarget,
@@ -11898,6 +11899,15 @@ describe('authoring AI stays inside what the author asked for', () => {
     expect(requestAsksForNewModels('Write the business context and grain for the focused model')).toBe(false);
     expect(requestAsksForNewModels('Add the games fact model and connect it to the team dimension')).toBe(true);
     expect(requestAsksForNewModels('bind the remaining dbt models for this area')).toBe(true);
+  });
+
+  it('resolves an entity id the model spells in snake_case to the hyphenated id on the map', () => {
+    // Modeling writes "local-team-season-facts"; the model answers
+    // "local_team_season_facts". Comparing them raw dropped every relationship
+    // to a model that already existed, so the AI could only relate models it
+    // had just invented.
+    expect(normalizeAuthoringEntityId('local-team-season-facts')).toBe(normalizeAuthoringEntityId('local_team_season_facts'));
+    expect(normalizeAuthoringEntityId('Dim Teams Cleansed')).toBe('dim_teams_cleansed');
   });
 
   it('names a drafted skill after its subject, not the sentence that asked for it', () => {

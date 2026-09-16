@@ -23606,7 +23606,11 @@ async function buildAiModelingOperations(
   // references something the project does not have is dropped, not repaired.
   const knownDbtIds = new Set(Object.keys(manifest.dbtProvenance.nodes));
   const columnsFor = new Map<string, Set<string>>();
-  const proposedEntityIds = new Set(Object.values(modeling.entities).filter((entity) => entity.domain === domain).map((entity) => entity.localId));
+  // Entity ids the model may name: the ones already in scope, plus whatever it
+  // proposes. Keyed by a normalized id because Modeling writes hyphenated ids
+  // ("local-team-season-facts") while a model answers in snake_case — without
+  // this every relationship to an existing model was silently dropped.
+  const entityIdByNormalizedId = new Map(scopedEntities.map((entity) => [normalizeAuthoringEntityId(entity.localId), entity.localId] as const));
   const operations: ContextAuthoringOperation[] = [];
 
   let droppedOutOfScope = 0;
@@ -23617,7 +23621,7 @@ async function buildAiModelingOperations(
       if (!wantsNewModels && !scopedDbtIds.has(candidate.dbtModel)) { droppedOutOfScope += 1; continue; }
       const id = authoringSlug(candidate.id || candidate.dbtModel.split('.').at(-1) || 'model').replace(/-/g, '_');
       if (!id) continue;
-      proposedEntityIds.add(id);
+      entityIdByNormalizedId.set(normalizeAuthoringEntityId(id), id);
       const detail = manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, candidate.dbtModel) : undefined;
       const columns = new Set((detail?.columns ?? []).map((column) => column.name.toLowerCase()));
       columnsFor.set(id, columns);
@@ -23641,9 +23645,9 @@ async function buildAiModelingOperations(
       continue;
     }
 
-    const from = authoringSlug(candidate.from ?? '').replace(/-/g, '_');
-    const to = authoringSlug(candidate.to ?? '').replace(/-/g, '_');
-    if (!proposedEntityIds.has(from) || !proposedEntityIds.has(to) || from === to) continue;
+    const from = entityIdByNormalizedId.get(normalizeAuthoringEntityId(candidate.from ?? ''));
+    const to = entityIdByNormalizedId.get(normalizeAuthoringEntityId(candidate.to ?? ''));
+    if (!from || !to || from === to) continue;
     const knownColumns = (entityId: string): Set<string> => {
       const cached = columnsFor.get(entityId);
       if (cached) return cached;
@@ -23685,6 +23689,14 @@ async function buildAiModelingOperations(
   }
   if (operations.length === 0) throw new Error('Modeling AI referenced models or columns that are not in the current dbt snapshot, so nothing was proposed.');
   return operations;
+}
+
+/**
+ * One spelling for an entity id, so a model that answers `local_team_season_facts`
+ * still resolves to the `local-team-season-facts` on the map.
+ */
+export function normalizeAuthoringEntityId(value: string): string {
+  return authoringSlug(value).replace(/-/g, '_');
 }
 
 /**
