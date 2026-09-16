@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   applyRequestedTopNToExploratorySql,
   parseAiModelingOperations,
+  requestAsksForNewModels,
+  skillDraftId,
   buildAgentValueProbeSql,
   buildAgentExactValueProbeSql,
   agentLiteralProbeTarget,
@@ -11886,6 +11888,22 @@ describe('Modeling AI provider replies (AGT-024)', () => {
     expect(parseAiModelingOperations(JSON.stringify({
       operations: [{ kind: 'upsert_relationship', id: 'r', from: 'a', to: 'b', keys: [{ from: 'only_one_side' }] }],
     }))[0]?.keys).toEqual([]);
+  });
+});
+
+describe('authoring AI stays inside what the author asked for', () => {
+  it('treats only a request that asks for models as permission to add them', () => {
+    // "Connect these models" on a 2-model area came back with 6 extra models.
+    expect(requestAsksForNewModels('Propose draft relationships between the models in this area and explain the evidence for each key pair.')).toBe(false);
+    expect(requestAsksForNewModels('Write the business context and grain for the focused model')).toBe(false);
+    expect(requestAsksForNewModels('Add the games fact model and connect it to the team dimension')).toBe(true);
+    expect(requestAsksForNewModels('bind the remaining dbt models for this area')).toBe(true);
+  });
+
+  it('names a drafted skill after its subject, not the sentence that asked for it', () => {
+    expect(skillDraftId('Create a skill: team wins for a season come from local_team_season_facts.wins for one season only; trigger words wins, record, standings.', 'nba_analysis'))
+      .toBe('team-wins-season-come-guidance');
+    expect(skillDraftId('   ', 'nba_analysis')).toBe('nba-analysis-guidance');
   });
 });
 

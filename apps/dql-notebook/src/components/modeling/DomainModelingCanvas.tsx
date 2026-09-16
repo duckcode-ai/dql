@@ -74,7 +74,7 @@ export function DomainModelingCanvas({ modeling, ghostEntityIds, ghostRelationsh
         }}
       >
         <strong style={{ color: theme.textPrimary }}>{search.trim() ? `No models or columns match “${search.trim()}”.` : 'Start your model'}</strong>
-        {!search.trim() && <><span>Bind a dbt model, then connect its columns to define governed analytical relationships.</span><div style={{ display: 'flex', gap: 8 }}><button onClick={onCreateDomain} style={emptyAction(theme)}><Plus size={13} /> Create domain</button><button onClick={onAddModel} style={emptyAction(theme, true)}><Link2 size={13} /> Bind first model</button></div></>}
+        {!search.trim() && <><span>Add a dbt model, then connect its columns to define governed analytical relationships.</span><div style={{ display: 'flex', gap: 8 }}><button onClick={onCreateDomain} style={emptyAction(theme)}><Plus size={13} /> Create domain</button><button onClick={onAddModel} style={emptyAction(theme, true)}><Link2 size={13} /> Add models</button></div></>}
       </div>
     );
   const handleConnect = (connection: Connection) => {

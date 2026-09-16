@@ -6432,10 +6432,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // SKILL-006: same contract as Modeling AI — a provider drafts the skill
     // body and vocabulary; the template is the labelled fallback.
     const provider = await createBlockStudioAssistProvider(projectRoot);
-    const operations = provider
-      ? await buildAiSkillOperations(projectRoot, snapshot.manifest, request, provider)
-        .catch(() => buildMetadataBoundSkillOperations(projectRoot, snapshot.manifest, request))
-      : buildMetadataBoundSkillOperations(projectRoot, snapshot.manifest, request);
+    let usedProvider = Boolean(provider);
+    let operations: ContextAuthoringOperation[];
+    if (provider) {
+      try {
+        operations = await buildAiSkillOperations(projectRoot, snapshot.manifest, request, provider);
+      } catch {
+        // The provider was unusable. Say so: a template presented as an AI
+        // draft reads as guidance someone wrote.
+        usedProvider = false;
+        operations = buildMetadataBoundSkillOperations(projectRoot, snapshot.manifest, request);
+      }
+    } else {
+      operations = buildMetadataBoundSkillOperations(projectRoot, snapshot.manifest, request);
+    }
     const proposal = previewContextAuthoring({
       origin: request.workspaceContext?.correction === true ? 'correction' : 'ai',
       operations,
@@ -6447,11 +6457,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     });
     return {
       summary: `Prepared ${proposal.impact.skillChanges} metadata-bound Skill change${proposal.impact.skillChanges === 1 ? '' : 's'} for review.`,
-      answer: 'I prepared a scope-qualified Skill draft. It will not guide an agent unless you save it and later activate it explicitly.',
+      answer: usedProvider
+        ? 'I prepared a scope-qualified Skill draft. It will not guide an agent unless you save it and later activate it explicitly.'
+        : 'No AI provider completed this request, so this is a metadata-bound Skill template rather than an AI draft. Edit it before saving; it will not guide an agent unless you save and activate it.',
       status: 'needs_review',
       trustState: 'review_required',
       stopReason: 'human_review_required',
-      artifacts: [{ id: `${runId}:skill-proposal`, kind: 'skill_change_proposal', title: 'Skill change proposal', trustState: 'review_required', ref: proposal.id, payload: proposal }],
+      artifacts: [{ id: `${runId}:skill-proposal`, kind: 'skill_change_proposal', title: usedProvider ? 'Skill change proposal' : 'Metadata-only Skill template', trustState: 'review_required', ref: proposal.id, payload: proposal }],
       evaluations: proposal.diagnostics.map((diagnostic) => ({ id: `${proposal.id}:${diagnostic.code}`, label: diagnostic.code, passed: diagnostic.severity !== 'blocking', severity: diagnostic.severity, message: diagnostic.message })),
       nextActions: [{ id: 'review-skill-proposal', label: 'Review Skill draft', artifactKind: 'skill_change_proposal' }],
     };
@@ -23527,21 +23539,38 @@ async function buildAiModelingOperations(
     ...unbound,
   ].filter((node, index, values) => values.findIndex((other) => other.uniqueId === node.uniqueId) === index).slice(0, 24);
 
+  // The author is looking at one subject area, so that is what the AI may
+  // change. Models outside it are offered only when the request actually asks
+  // for new ones: "connect these models" once came back with six models nobody
+  // asked about, which buries the two the author meant.
+  const domainEntities = Object.values(modeling.entities).filter((entity) => entity.domain === domain);
+  const inArea = area ? domainEntities.filter((entity) => entity.areaId === area.qualifiedId) : domainEntities;
+  const scopedEntities = inArea.length > 0 ? inArea : domainEntities;
+  const scopedRecordKeys = new Set(Object.entries(modeling.entities)
+    .filter(([, entity]) => scopedEntities.includes(entity))
+    .map(([recordKey]) => recordKey));
+  const scopedDbtIds = new Set(scopedEntities.map((entity) => entity.dbtUniqueId));
+  const wantsNewModels = requestAsksForNewModels(request.question);
+  const focusedId = request.selectedObject?.kind === 'model'
+    ? request.selectedObject.id
+    : typeof context.focusedObjectId === 'string' ? context.focusedObjectId : undefined;
+
   const payload = {
     request: request.question.trim(),
     targetDomain: domain,
     targetAreaId: areaId,
-    currentModels: Object.values(modeling.entities).filter((entity) => entity.domain === domain).map((entity) => ({
+    currentModels: scopedEntities.map((entity) => ({
       id: entity.localId, dbtUniqueId: entity.dbtUniqueId, businessName: entity.businessName,
       businessContext: entity.businessContext, grain: entity.grain, keys: entity.keys, analyticalRole: entity.analyticalRole,
     })),
-    currentRelationships: Object.values(modeling.relationships).filter((relationship) => relationship.ownerDomain === domain).map((relationship) => ({
+    currentRelationships: Object.values(modeling.relationships).filter((relationship) => relationship.ownerDomain === domain
+      && scopedRecordKeys.has(relationship.from) && scopedRecordKeys.has(relationship.to)).map((relationship) => ({
       id: relationship.localId, from: modeling.entities[relationship.from]?.localId, to: modeling.entities[relationship.to]?.localId,
       keys: relationship.keys, cardinality: relationship.cardinality, fanout: relationship.fanout, status: relationship.status,
     })),
-    availableDbtModels: ranked.map((node) => describe(node.uniqueId)),
-    focusedModel: request.selectedObject?.kind === 'model'
-      ? Object.values(modeling.entities).find((entity) => entity.qualifiedId === request.selectedObject!.id)
+    availableDbtModels: wantsNewModels ? ranked.map((node) => describe(node.uniqueId)) : [],
+    focusedModel: focusedId
+      ? Object.values(modeling.entities).find((entity) => entity.qualifiedId === focusedId)
       : undefined,
   };
 
@@ -23559,6 +23588,9 @@ async function buildAiModelingOperations(
           'businessContext states what one row means in business terms. Never restate the request back as business context.',
           'Set cardinality and fanout from the evidence; use "unknown" when the metadata does not establish them. Never claim a relationship is certified or validated.',
           'Do not propose deletions, cross-domain relationships, or changes to dbt-owned SQL, columns, tests, or descriptions.',
+          wantsNewModels
+            ? 'You may add models from availableDbtModels when the request asks for them.'
+            : 'Propose changes only for the models listed in currentModels. This request did not ask for new models, so do not add any.',
         ].join(' '),
       },
       { role: 'user', content: JSON.stringify(payload) },
@@ -23577,9 +23609,12 @@ async function buildAiModelingOperations(
   const proposedEntityIds = new Set(Object.values(modeling.entities).filter((entity) => entity.domain === domain).map((entity) => entity.localId));
   const operations: ContextAuthoringOperation[] = [];
 
+  let droppedOutOfScope = 0;
   for (const candidate of parsed) {
     if (candidate.kind === 'upsert_entity') {
       if (!candidate.dbtModel || !knownDbtIds.has(candidate.dbtModel)) continue;
+      // Scope is enforced here too: a prompt line is guidance, this is the rule.
+      if (!wantsNewModels && !scopedDbtIds.has(candidate.dbtModel)) { droppedOutOfScope += 1; continue; }
       const id = authoringSlug(candidate.id || candidate.dbtModel.split('.').at(-1) || 'model').replace(/-/g, '_');
       if (!id) continue;
       proposedEntityIds.add(id);
@@ -23645,8 +23680,19 @@ async function buildAiModelingOperations(
     });
   }
 
+  if (operations.length === 0 && droppedOutOfScope > 0) {
+    throw new Error(`Modeling AI only proposed ${droppedOutOfScope} model${droppedOutOfScope === 1 ? '' : 's'} outside this subject area, which this request did not ask for. Ask to add models by name to bring new ones in.`);
+  }
   if (operations.length === 0) throw new Error('Modeling AI referenced models or columns that are not in the current dbt snapshot, so nothing was proposed.');
   return operations;
+}
+
+/**
+ * Whether a modeling request asks to bring new models in. Without this every
+ * "describe" or "connect" request could return a pile of unrequested models.
+ */
+export function requestAsksForNewModels(question: string): boolean {
+  return /\b(add|adds|adding|bind|binds|binding|include|includes|including|import|imports|onboard|onboards|new|missing|another|more|extra|remaining|rest of)\b/.test(question.toLowerCase());
 }
 
 type AiModelingCandidate =
@@ -23954,7 +24000,7 @@ function buildMetadataBoundSkillOperations(
     ? request.selectedObject.id
     : undefined;
   if (focusReference && !contextSourceReferenceExists(manifest, focusReference)) throw new Error('The focused modeling object is not present in the current snapshot.');
-  const id = existing?.localId ?? existing?.id ?? `${authoringSlug(request.question).slice(0, 48) || domain.replace(/[^a-z0-9]+/gi, '-')}-guidance`;
+  const id = existing?.localId ?? existing?.id ?? skillDraftId(request.question, domain);
   const body = existing
     ? `${existing.body.trim()}\n\n## Proposed correction\n${request.question.trim()}\n`
     : `## Purpose\nGuide analysis for ${domain} using reviewed repository metadata.\n\n## Guardrails\n${request.question.trim()}\n\n## Clarify\nAsk when the requested metric, model, or relationship is not governed.`;
@@ -24011,6 +24057,17 @@ function defaultAuthoringDomainId(manifest: DQLManifest): string {
 function authoringTokens(value: string): string[] {
   const stop = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'build', 'create', 'model', 'models', 'skill', 'please', 'into', 'about']);
   return [...new Set(value.toLowerCase().split(/[^a-z0-9_]+/).filter((token) => token.length > 2 && !stop.has(token)))];
+}
+
+/**
+ * A drafted skill is named for its subject, not for the sentence that asked for
+ * it: "create a skill: team wins ... trigger words wins, record" became the id
+ * `create-a-skill-team-wins-for-a-season-come-from--guidance`.
+ */
+export function skillDraftId(question: string, domain: string): string {
+  const words = authoringTokens(question).filter((token) => token.length <= 18).slice(0, 4);
+  const base = (words.join('-') || authoringSlug(domain) || 'domain').slice(0, 48).replace(/-+$/, '');
+  return `${base}-guidance`;
 }
 
 function authoringSlug(value: string): string {

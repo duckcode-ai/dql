@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Blocks, BookOpen, Boxes, CheckCircle2, Columns3, Download, EyeOff, FileSearch, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, MessageCircle, Network, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, XCircle } from 'lucide-react';
 import { DEFAULT_MODEL_AREA_ID } from '@duckcodeailabs/dql-core/modeling-ids';
-import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, DbtSourceAuthoringInput, DbtSourcePatchPreview, ManifestModelArea, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
+import type { DbtNodeAuthoringDetail, DbtSourceAuthoringInput, DbtSourcePatchPreview, ManifestModelArea, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview } from '@duckcodeailabs/dql-core';
 import { api, type AgentRunArtifact, type ContextAuthoringProposalV1, type DbtFirstModelingResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { NotebookFile } from '../../store/types';
@@ -32,10 +32,7 @@ type Editor =
       kind: 'relationship';
       relationship?: ManifestModelRelationship;
       draft?: RelationshipDraft;
-    }
-  | { kind: 'contract' }
-  | { kind: 'export' }
-  | { kind: 'import' };
+    };
 
 type DiagramSearchItem = { recordKey: string; type: 'model' | 'column'; label: string; sublabel: string; role: string | undefined };
 
@@ -934,21 +931,6 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
   const [areaDescription, setAreaDescription] = useState(existingArea?.description ?? '');
   const [areaIntents, setAreaIntents] = useState(existingArea?.intentExamples.join(', ') ?? '');
   const [areaReferences, setAreaReferences] = useState(existingArea?.referencedEntityIds.map((reference) => data.modeling.entities[reference]?.localId ?? reference).join(', ') ?? '');
-  const [lifecycle, setLifecycle] = useState<RelationshipAuthoringInput['status']>('draft');
-  const [entities, setEntities] = useState('');
-  const [blocks, setBlocks] = useState('');
-  const [purpose, setPurpose] = useState('');
-  const [metrics, setMetrics] = useState('');
-  const [dimensions, setDimensions] = useState('');
-  const [allowedFilters, setAllowedFilters] = useState('');
-  const [requiredFilters, setRequiredFilters] = useState('');
-  const [evaluationRefs, setEvaluationRefs] = useState('');
-  const [exportEntity, setExportEntity] = useState('');
-  const [allowedKeys, setAllowedKeys] = useState('');
-  const [purposes, setPurposes] = useState('');
-  const [consumerDomains, setConsumerDomains] = useState('');
-  const [classification, setClassification] = useState('internal');
-  const [exportRef, setExportRef] = useState('');
   const [change, setChange] = useState<ModelingAuthoringChange | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -1005,56 +987,6 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
           keys: csv(keys).length > 0 ? csv(keys) : keysFromGrain(grain, selectedDbtDetail),
         },
       };
-    if (editor.kind === 'contract')
-      return {
-        operation: 'upsert_contract',
-        value: {
-          id,
-          domain,
-          entities: csv(entities),
-          blocks: csv(blocks),
-          status: 'draft',
-          owner,
-          requiredEvaluation: true,
-          purpose: purpose || undefined,
-          metricRefs: csv(metrics),
-          dimensions: csv(dimensions),
-          allowedFilters: csv(allowedFilters),
-          requiredFilters: csv(requiredFilters),
-          evaluationRefs: csv(evaluationRefs),
-        },
-      };
-    if (editor.kind === 'export')
-      return {
-        operation: 'upsert_export',
-        value: {
-          id,
-          domain,
-          entity: exportEntity || undefined,
-          metrics: csv(metrics),
-          blocks: csv(blocks),
-          allowedKeys: csv(allowedKeys),
-          allowedDimensions: csv(dimensions),
-          allowedFilters: csv(allowedFilters),
-          purposes: csv(purposes),
-          consumerDomains: csv(consumerDomains),
-          classification: classification || undefined,
-          status: lifecycle,
-          owner: owner || undefined,
-        } satisfies DomainExportAuthoringInput,
-      };
-    if (editor.kind === 'import')
-      return {
-        operation: 'upsert_import',
-        value: {
-          id: id || undefined,
-          domain,
-          exportRef,
-          purpose,
-          status: lifecycle,
-          owner: owner || undefined,
-        } satisfies DomainImportAuthoringInput,
-      };
     // Relationships have their own builder (RelationshipBuilder.tsx).
     throw new Error('Unsupported modeling editor.');
   };
@@ -1099,7 +1031,15 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
     if (!editorReady) return false;
     try { return isDescriptiveOnlyChange(buildChange(), existingEntity, existingArea); } catch { return false; }
   })();
-  const title = editor.kind === 'area' ? (existingArea ? 'Edit subject area' : 'New subject area') : editor.kind === 'entity' ? (existingEntity ? 'Edit model' : 'Add a dbt model') : editor.kind === 'contract' ? 'Create analytical contract' : editor.kind === 'export' ? 'Publish domain export' : 'Request domain import';
+  // "+ Add a related model" starts from a model on the canvas. Say so, and say
+  // what happens next, instead of showing the same blank "Add a dbt model".
+  const relationshipOrigin = editor.kind === 'entity' && editor.relationshipFrom
+    ? data.modeling.entities[editor.relationshipFrom.from]
+    : undefined;
+  const originName = relationshipOrigin?.businessName || relationshipOrigin?.localId || '';
+  const title = editor.kind === 'area'
+    ? (existingArea ? 'Edit subject area' : 'New subject area')
+    : existingEntity ? 'Edit model' : relationshipOrigin ? `Add a model related to ${originName}` : 'Add a dbt model';
   return (
     <Modal title={title} t={t} onClose={onClose}>
       {(
@@ -1107,7 +1047,7 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
           <Field label="Domain">
             <Select value={domain} onChange={setDomain} values={Object.keys(data.modeling.packages)} t={t} />
           </Field>
-          <Field label={editor.kind === 'entity' ? 'Model id' : editor.kind === 'area' ? 'Subject area id' : editor.kind === 'contract' ? 'Contract id' : editor.kind === 'export' ? 'Export id' : 'Import id (optional)'}><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>
+          {editor.kind === 'area' && <Field label="Subject area id"><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>}
           {editor.kind === 'area' && (
             <>
               <Message text="A subject area is a focused view of one part of this domain, like Customer lifecycle. It narrows the map and helps Ask pick the right skills; it never changes what Ask is allowed to use." t={t} />
@@ -1119,13 +1059,16 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
           )}
           {editor.kind === 'entity' && (
             <>
-              <WorkflowSteps current={dbtModel ? 2 : 1} labels={['Find dbt model', 'Add business meaning', 'Review source change']} t={t} />
-              <Message text="Search by model name, relation, or source path. Results stay bounded even when the dbt project has thousands of models." t={t} />
+              <WorkflowSteps current={dbtModel ? 2 : 1} labels={['Find dbt model', 'Add business meaning']} t={t} />
+              {relationshipOrigin
+                ? <Message text={`Pick the dbt model that ${originName} relates to. When you save it, the relationship builder opens with ${originName} on the left so you can match the columns.`} t={t} />
+                : <Message text="Search by model name, relation, or source path. Results stay bounded even when the dbt project has thousands of models." t={t} />}
               <Field label="Subject area"><Select value={areaId} onChange={setAreaId} values={Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => area.localId)} labels={Object.fromEntries(Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => [area.localId, area.name]))} t={t} /></Field>
               <Field label="dbt model">
                 <DbtModelPicker value={dbtModel} onChange={setDbtModel} selectedNode={data.dbtProvenance.nodes[dbtModel]} domain={domain} t={t} />
               </Field>
               {selectedDbtDetail && <SelectionSummary title={selectedDbtDetail.name} detail={`${selectedDbtDetail.relation ?? selectedDbtDetail.uniqueId} · ${selectedDbtDetail.columns.length} columns${selectedDbtDetail.dqlMeta?.grain ? ` · grain: ${selectedDbtDetail.dqlMeta.grain}` : ''}`} t={t} />}
+              {dbtModel && <Field label="Model id"><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>}
               <Field label="Business name"><Input value={businessName} onChange={setBusinessName} t={t} placeholder="Customer order" /></Field>
               <Field label="Business context"><Input value={businessContext} onChange={setBusinessContext} t={t} placeholder="One order used to understand repeat purchasing and revenue." /></Field>
               <div style={twoColumns}>
@@ -1162,98 +1105,6 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
                 <Field label="Owner"><Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" /></Field>
               </div>
             </>
-          )}
-          {editor.kind === 'contract' && (
-            <>
-              <Field label="Covered entities">
-                <Input value={entities} onChange={setEntities} t={t} placeholder="order, customer" />
-              </Field>
-              <Field label="Certified blocks">
-                <Input value={blocks} onChange={setBlocks} t={t} placeholder="orders_360" />
-              </Field>
-              <Field label="Decision purpose">
-                <Input value={purpose} onChange={setPurpose} t={t} placeholder="Revenue reporting" />
-              </Field>
-              <div style={twoColumns}>
-                <Field label="Metrics">
-                  <Input value={metrics} onChange={setMetrics} t={t} />
-                </Field>
-                <Field label="Dimensions">
-                  <Input value={dimensions} onChange={setDimensions} t={t} />
-                </Field>
-              </div>
-              <div style={twoColumns}>
-                <Field label="Allowed filters">
-                  <Input value={allowedFilters} onChange={setAllowedFilters} t={t} />
-                </Field>
-                <Field label="Required filters">
-                  <Input value={requiredFilters} onChange={setRequiredFilters} t={t} />
-                </Field>
-              </div>
-              <Field label="Evaluation refs">
-                <Input value={evaluationRefs} onChange={setEvaluationRefs} t={t} placeholder="revenue_accuracy" />
-              </Field>
-            </>
-          )}
-          {editor.kind === 'export' && (
-            <>
-              <Field label="Exported entity">
-                <Select value={exportEntity} onChange={setExportEntity} values={Object.keys(data.modeling.entities).filter((entityId) => data.modeling.entities[entityId]?.domain === domain)} t={t} />
-              </Field>
-              <div style={twoColumns}>
-                <Field label="Allowed keys">
-                  <Input value={allowedKeys} onChange={setAllowedKeys} t={t} />
-                </Field>
-                <Field label="Allowed dimensions">
-                  <Input value={dimensions} onChange={setDimensions} t={t} />
-                </Field>
-              </div>
-              <div style={twoColumns}>
-                <Field label="Metrics">
-                  <Input value={metrics} onChange={setMetrics} t={t} />
-                </Field>
-                <Field label="Blocks">
-                  <Input value={blocks} onChange={setBlocks} t={t} />
-                </Field>
-              </div>
-              <Field label="Allowed filters">
-                <Input value={allowedFilters} onChange={setAllowedFilters} t={t} />
-              </Field>
-              <div style={twoColumns}>
-                <Field label="Approved purposes">
-                  <Input value={purposes} onChange={setPurposes} t={t} placeholder="revenue reporting" />
-                </Field>
-                <Field label="Consumer domains">
-                  <Input value={consumerDomains} onChange={setConsumerDomains} t={t} placeholder="growth" />
-                </Field>
-              </div>
-              <div style={twoColumns}>
-                <Field label="Classification">
-                  <Input value={classification} onChange={setClassification} t={t} />
-                </Field>
-                <Field label="Lifecycle">
-                  <Select value={lifecycle === 'review' ? 'reviewed' : lifecycle ?? 'draft'} onChange={(v) => setLifecycle(v as RelationshipAuthoringInput['status'])} values={['draft', 'evaluated', 'reviewed', 'certified', 'deprecated']} t={t} />
-                </Field>
-              </div>
-            </>
-          )}
-          {editor.kind === 'import' && (
-            <>
-              <Field label="Provider export">
-                <Select value={exportRef} onChange={setExportRef} values={Object.values(data.modeling.interfaces?.exports ?? {}).map((item) => `${item.domain}.${item.localId}@${item.version}`)} t={t} />
-              </Field>
-              <Field label="Exact analytical purpose">
-                <Input value={purpose} onChange={setPurpose} t={t} placeholder="Revenue by acquisition channel" />
-              </Field>
-              <Field label="Lifecycle">
-                <Select value={lifecycle === 'review' ? 'reviewed' : lifecycle ?? 'draft'} onChange={(v) => setLifecycle(v as RelationshipAuthoringInput['status'])} values={['draft', 'evaluated', 'reviewed', 'certified', 'deprecated']} t={t} />
-              </Field>
-            </>
-          )}
-          {editor.kind !== 'entity' && editor.kind !== 'area' && (
-            <Field label="Owner">
-              <Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" />
-            </Field>
           )}
           {message && <Message text={message} t={t} />}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -1378,9 +1229,9 @@ function ModelingEmptyWorkspace({ t, connectedModels, onDbt, onYaml, onManual }:
   const actions = [
     { icon: <Boxes size={20} />, title: 'Use connected dbt', detail: `${connectedModels} model${connectedModels === 1 ? '' : 's'} available. Search, multi-select, confirm where they belong, then review the bindings.`, action: onDbt },
     { icon: <FileSearch size={20} />, title: 'Import modeling YAML', detail: 'Discover DQL modeling or dbt YAML from this project, a safe local path, an upload, or pasted content. Relationships declared in dbt tests come across as draft edges.', action: onYaml },
-    { icon: <Plus size={20} />, title: 'Start manually', detail: 'Create one model binding or relationship with guided review.', action: onManual },
+    { icon: <Plus size={20} />, title: 'Add one model by hand', detail: 'Pick a single dbt model and describe what one of its rows means. Connect it to others afterwards.', action: onManual },
   ];
-  return <div style={{ height: '100%', display: 'grid', placeItems: 'center', padding: 28 }}><div style={{ width: 'min(840px, 100%)' }}><div style={{ textAlign: 'center', marginBottom: 18 }}><h2 style={{ margin: 0, fontSize: 18 }}>Start modeling domain context</h2><p style={{ margin: '7px 0 0', color: t.textMuted, fontSize: 11.5 }}>Choose the source you already have. Every path creates the same write-free proposal before a draft can be saved.</p></div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>{actions.map((item) => <button key={item.title} type="button" onClick={item.action} style={{ ...overviewCard(t), minHeight: 150, textAlign: 'left', cursor: 'pointer' }}><span style={{ width: 38, height: 38, borderRadius: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-dim)', color: t.accent }}>{item.icon}</span><b style={{ display: 'block', marginTop: 12 }}>{item.title}</b><span style={{ display: 'block', marginTop: 6, color: t.textSecondary, fontSize: 10.5, lineHeight: 1.5 }}>{item.detail}</span></button>)}</div></div></div>;
+  return <div style={{ height: '100%', display: 'grid', placeItems: 'center', padding: 28 }}><div style={{ width: 'min(840px, 100%)' }}><div style={{ textAlign: 'center', marginBottom: 18 }}><h2 style={{ margin: 0, fontSize: 18 }}>Start modeling domain context</h2><p style={{ margin: '7px 0 0', color: t.textMuted, fontSize: 11.5 }}>Choose the source you already have. Every path shows you the exact source change before anything is written.</p></div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>{actions.map((item) => <button key={item.title} type="button" onClick={item.action} style={{ ...overviewCard(t), minHeight: 150, textAlign: 'left', cursor: 'pointer' }}><span style={{ width: 38, height: 38, borderRadius: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-dim)', color: t.accent }}>{item.icon}</span><b style={{ display: 'block', marginTop: 12 }}>{item.title}</b><span style={{ display: 'block', marginTop: 6, color: t.textSecondary, fontSize: 10.5, lineHeight: 1.5 }}>{item.detail}</span></button>)}</div></div></div>;
 }
 
 function exportDiagramSvg() {
@@ -1892,7 +1743,7 @@ function StudioSummary({ data, domainEntities, domainRelationships, t, onSelectR
         {domainRelationships.length > 0
           ? check(provenCount === domainRelationships.length, provenCount === domainRelationships.length ? 'All relationships have join proofs' : `${provenCount} of ${domainRelationships.length} relationships have join proofs`)
           : check(false, 'No relationships yet — drag between column handles to create one')}
-        {check(boundCount === domainEntities.length && domainEntities.length > 0, domainEntities.length === 0 ? 'No entities bound yet — use Bind model' : `${boundCount} of ${domainEntities.length} entities bound to dbt`)}
+        {check(boundCount === domainEntities.length && domainEntities.length > 0, domainEntities.length === 0 ? 'No models added yet — use Add models' : `${boundCount} of ${domainEntities.length} entities bound to dbt`)}
         {missingContext.length > 0
           ? check(false, `${missingContext[0].localId}${missingContext.length > 1 ? ` and ${missingContext.length - 1} more` : ''} ha${missingContext.length > 1 ? 've' : 's'} no business description`)
           : domainEntities.length > 0 ? check(true, 'Every entity has a business description') : null}
