@@ -458,6 +458,11 @@ export interface Skill {
   sourcePath: string;
   /** A dbt-seeded editable starter ("starter — edit me"). */
   isStarter?: boolean;
+  /**
+   * `private` lives under `.dql/local/`, outside Git, and shapes no answer
+   * until it is published. `shared` (the default) is team guidance in Git.
+   */
+  visibility?: 'private' | 'shared';
   /** Spec 17 (part B) — the domain this skill belongs to (domain id). */
   domain?: string;
   domains?: string[];

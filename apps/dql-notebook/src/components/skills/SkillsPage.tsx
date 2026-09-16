@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { CommaListInput } from '../common/CommaListInput';
 import type { CSSProperties } from 'react';
-import { GraduationCap, Plus, Pencil, Trash2, X, Sparkles, Loader2, AlertTriangle, RefreshCw, FolderOpen } from 'lucide-react';
+import { GraduationCap, Plus, Pencil, Trash2, X, Sparkles, Loader2, AlertTriangle, RefreshCw, FolderOpen, Upload } from 'lucide-react';
 import { api, type ContextAuthoringProposalV1 } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
@@ -180,6 +180,33 @@ export function SkillsPage({
     setForm(null);
   }, []);
 
+  // Publishing moves the file into the shared Skills folder and gives the
+  // skill its shared identity, so the row is replaced rather than patched.
+  const [publishing, setPublishing] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const publishSkill = useCallback(async (skill: Skill) => {
+    const identity = skill.qualifiedId ?? skill.id;
+    setPublishing(identity);
+    setPublishError(null);
+    try {
+      const result = await api.publishSkill(identity);
+      if (!result.ok) {
+        setPublishError(result.error ?? 'Could not publish this skill.');
+        return;
+      }
+      const published = result.skill;
+      setSkills((prev) => {
+        const rest = prev.filter((s) => (s.qualifiedId ?? s.id) !== identity);
+        return published ? [...rest, published] : rest;
+      });
+      if (!published) void api.getSkills().then((res) => setSkills(res.skills)).catch(() => undefined);
+    } catch (error) {
+      setPublishError(error instanceof Error && error.message ? error.message : 'Could not publish this skill.');
+    } finally {
+      setPublishing(null);
+    }
+  }, []);
+
   const confirmDelete = useCallback(async () => {
     if (!pendingDelete) return;
     setDeleting(true);
@@ -332,6 +359,7 @@ export function SkillsPage({
           <EmptyState t={t} onAdd={() => setForm({ kind: 'create' })} />
         ) : (
           <div style={{ display: 'grid', gap: 10 }}>
+            {publishError ? <InlineNote t={t} tone="error">{publishError}</InlineNote> : null}
             {sorted.length === 0 ? (
               <div style={{ fontSize: 12, color: t.textMuted, border: `1px dashed ${t.btnBorder}`, borderRadius: 9, padding: 14 }}>
                 No skills belong to {domainFilter} yet. Add one with the words people use when they ask about it.
@@ -343,6 +371,8 @@ export function SkillsPage({
                 skill={skill}
                 t={t}
                 onEdit={() => setForm({ kind: 'edit', skill })}
+                onPublish={() => void publishSkill(skill)}
+                publishing={publishing === (skill.qualifiedId ?? skill.id)}
                 onDelete={() => {
                   setDeleteError(null);
                   setPendingDelete(skill);
@@ -360,6 +390,8 @@ export function SkillsPage({
                     skill={skill}
                     t={t}
                     onEdit={() => setForm({ kind: 'edit', skill })}
+                    onPublish={() => void publishSkill(skill)}
+                    publishing={publishing === (skill.qualifiedId ?? skill.id)}
                     onDelete={() => {
                       setDeleteError(null);
                       setPendingDelete(skill);
@@ -429,7 +461,8 @@ function SkillsAiPanel({ themeMode, domain, modelAreaId, selectedSkill, correcti
 // Prototype skill card: icon tile + mono id + badges header row, one-line
 // description, and a Details toggle that opens the 2-col Apply-when /
 // Prefer-these-metrics grid with the full-width Guidance box.
-function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEdit: () => void; onDelete: () => void }): JSX.Element {
+function SkillRow({ skill, t, onEdit, onDelete, onPublish, publishing = false }: { skill: Skill; t: Theme; onEdit: () => void; onDelete: () => void; onPublish?: () => void; publishing?: boolean }): JSX.Element {
+  const isPrivate = skill.visibility === 'private';
   const [expanded, setExpanded] = useState(false);
   const domains = skill.domains?.length ? skill.domains : skill.domain ? [skill.domain] : [];
   return (
@@ -448,8 +481,11 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 13, fontWeight: 650, color: t.textPrimary, fontFamily: t.fontMono }}>{skill.id}</span>
-            {skill.status === 'draft' ? <span style={starterBadge(t)}>draft — inactive</span> : null}
-            {skill.status === 'active' || !skill.status ? <span style={activeBadge(t)}>active</span> : null}
+            {isPrivate ? (
+              <span style={starterBadge(t)} title="Outside Git. It shapes no answer until you publish it.">private — not applied</span>
+            ) : null}
+            {!isPrivate && skill.status === 'draft' ? <span style={starterBadge(t)}>draft — inactive</span> : null}
+            {!isPrivate && (skill.status === 'active' || !skill.status) ? <span style={activeBadge(t)}>active</span> : null}
             {domains.map((domain) => (
               <span key={domain} style={domainBadge(t)}>
                 {domain}
@@ -492,6 +528,12 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
         <button type="button" onClick={() => setExpanded((value) => !value)} style={{ ...ghostButton(t), height: 26, padding: '0 10px', fontSize: 11 }} title={expanded ? 'Hide skill details' : 'Show skill details'}>
           {expanded ? 'Hide details' : 'Details'}
         </button>
+        {isPrivate && onPublish ? (
+          <button type="button" onClick={onPublish} disabled={publishing} style={{ ...ghostButton(t), height: 26, padding: '0 10px', fontSize: 11, gap: 5 }} title="Move this skill into the shared Skills folder, where it starts shaping answers">
+            {publishing ? <Loader2 size={12} strokeWidth={2} /> : <Upload size={12} strokeWidth={1.75} />}
+            {publishing ? 'Publishing…' : 'Publish'}
+          </button>
+        ) : null}
         <button type="button" onClick={onEdit} style={{ ...iconButton(t), width: 26, height: 26 }} title="Edit skill">
           <Pencil size={12} strokeWidth={1.75} />
         </button>
@@ -619,7 +661,11 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
           </span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary }}>{editing ? 'Edit skill' : 'New skill'}</div>
-            <div style={{ fontSize: 11, color: t.textMuted, marginTop: 1 }}>Git-backed guidance · applied only when triggers match</div>
+            <div style={{ fontSize: 11, color: t.textMuted, marginTop: 1 }}>
+              {draft.visibility === 'private'
+                ? 'Private · outside Git · applied only after you publish it'
+                : 'Git-backed guidance · applied only when triggers match'}
+            </div>
           </div>
           <button type="button" onClick={() => !saving && onClose()} style={{ ...iconButton(t), width: 26, height: 26, border: 'none', background: 'none' }} title="Close">
             <X size={14} strokeWidth={2} />
@@ -643,6 +689,39 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
           {/* Identity */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={sectionEyebrow(t)}>Identity</div>
+            {editing ? null : (
+              <div role="radiogroup" aria-label="Skill visibility" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                {([
+                  { value: 'shared' as const, label: 'Shared with the team', description: 'Saved in Git. Ask applies it once active.' },
+                  { value: 'private' as const, label: 'Private to me', description: 'Outside Git. Applies to no answer until you publish it.' },
+                ]).map((option) => {
+                  const selected = (draft.visibility ?? 'shared') === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => set('visibility', option.value)}
+                      style={{
+                        display: 'grid',
+                        gap: 3,
+                        padding: '8px 10px',
+                        borderRadius: 8,
+                        border: `1px solid ${selected ? t.accent : t.btnBorder}`,
+                        background: selected ? 'var(--accent-dim)' : t.cellBg,
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        fontFamily: t.font,
+                      }}
+                    >
+                      <span style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary }}>{option.label}</span>
+                      <span style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.3 }}>{option.description}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <label style={formLabelCol}>
               <span style={formLabelText(t)}>Name</span>
               <input type="text" value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="e.g. Revenue definition" style={inputStyle(t)} />
@@ -650,11 +729,11 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
                 Saved as{' '}
                 <input
                   type="text"
-                  value={`skills/${draft.id}.skill.md`}
+                  value={`${draft.visibility === 'private' ? '.dql/local/private/skills' : 'skills'}/${draft.id}.skill.md`}
                   disabled={editing}
                   onChange={(e) => {
                     setIdTouched(true);
-                    set('id', slugifyWhileTyping(e.target.value.replace(/^skills\//, '').replace(/\.skill\.md$/, '')));
+                    set('id', slugifyWhileTyping(e.target.value.replace(/^(?:\.dql\/local\/private\/)?skills\//, '').replace(/\.skill\.md$/, '')));
                   }}
                   onBlur={() => set('id', slugify(draft.id))}
                   title="File name — letters, numbers, and dashes"
@@ -1122,7 +1201,7 @@ function ConfirmDeleteDialog({ skill, t, deleting, error, onCancel, onConfirm }:
           <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>Delete this skill?</div>
         </div>
         <div style={{ fontSize: 13, color: t.textSecondary, lineHeight: 1.55 }}>
-          <span style={{ fontFamily: t.fontMono, color: t.textPrimary }}>{skill.id}</span> will be removed and the AI will stop following it. This can't be undone.
+          <span style={{ fontFamily: t.fontMono, color: t.textPrimary }}>{skill.id}</span> will be removed and the AI will stop following it. The file moves to a recovery bundle under <span style={{ fontFamily: t.fontMono }}>.dql/local/trash/</span>, so it can be fetched back.
         </div>
         {error ? (
           <InlineNote t={t} tone="error">

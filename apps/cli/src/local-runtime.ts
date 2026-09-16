@@ -306,6 +306,8 @@ import {
   buildDomainSkillBootstrapPrompt,
   mergeDomainSkillBootstrapEnrichment,
   writeSkill,
+  parseSkill,
+  skillPath,
   previewSkillChange,
   buildContextAuthoringProposal,
   contextAuthoringDependencyClosure,
@@ -13499,9 +13501,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'GET' && path === '/api/skills') {
       try {
-        const skills = loadSkills(projectRoot).skills
-          .filter((skill) => skill.scope === 'project')
-          .map(serializeSkill);
+        const skills = [
+          ...loadSkills(projectRoot).skills.filter((skill) => skill.scope === 'project'),
+          ...loadPrivateSkills(projectRoot),
+        ].map(serializeSkill);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ skills }));
       } catch (error) {
@@ -13552,6 +13555,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Provide { skill } with id, scope, and body.' }));
           return;
         }
+        const wantsPrivate = (body?.skill as { visibility?: unknown } | undefined)?.visibility === 'private';
+        if (wantsPrivate) {
+          const target = privateSkillPath(projectRoot, input.id);
+          const sharedTwin = loadSkills(projectRoot).skills.some((skill) => skill.id === input.id);
+          if (existsSync(target) || sharedTwin) {
+            res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ error: `A skill named ${input.id} already exists. Choose another name.` }));
+            return;
+          }
+          const written = writeSkill(projectRoot, { ...input, sourcePath: target });
+          // Nothing shared changed, so there is no index or snapshot to refresh:
+          // a private skill is invisible to retrieval until it is published.
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            skill: serializeSkill({
+              ...written,
+              localId: written.id,
+              qualifiedId: `${PRIVATE_SKILL_IDENTITY_PREFIX}${written.id}`,
+            }),
+          }));
+          return;
+        }
         const skill = writeSkill(projectRoot, input);
         projectSnapshots.invalidate();
         invalidateAgentProjectState(projectRoot);
@@ -13565,6 +13590,57 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // POST /api/skills/publish — move a private skill into the shared Skills
+    // folder. This is the moment it starts shaping answers, so the project
+    // indexes are refreshed here and nowhere earlier.
+    if (req.method === 'POST' && path === '/api/skills/publish') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as { id?: unknown };
+        const identity = typeof body.id === 'string' ? body.id.trim() : '';
+        const privateId = privateSkillLocalId(identity);
+        if (!privateId) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Only a private skill can be published.' }));
+          return;
+        }
+        const source = privateSkillPath(projectRoot, privateId);
+        if (!existsSync(source)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: `Private skill not found: ${privateId}` }));
+          return;
+        }
+        const parsed = parseSkill(readFileSync(source, 'utf-8'), source);
+        const domains = parsed?.domains?.length ? parsed.domains : parsed?.domain ? [parsed.domain] : [];
+        const destination = skillPath(projectRoot, privateId, domains);
+        const sharedTwin = loadSkills(projectRoot).skills.some((skill) => skill.id === privateId);
+        if (existsSync(destination) || sharedTwin) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            ok: false,
+            error: `A shared skill named ${privateId} already exists. Rename the private skill before publishing it.`,
+          }));
+          return;
+        }
+        mkdirSync(dirname(destination), { recursive: true });
+        renameSync(source, destination);
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        await refreshUnifiedProjectIndexes(projectRoot);
+        const published = loadSkills(projectRoot).skills.find((skill) => resolve(skill.sourcePath) === resolve(destination));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          previousId: identity,
+          path: relative(projectRoot, destination).replace(/\\/g, '/'),
+          ...(published ? { skill: serializeSkill(published) } : {}),
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'PUT' && path.startsWith('/api/skills/')) {
       try {
         const id = decodeURIComponent(path.slice('/api/skills/'.length));
@@ -13573,6 +13649,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (!input) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: 'Provide { skill } with scope and body.' }));
+          return;
+        }
+        const privateId = privateSkillLocalId(id);
+        if (privateId) {
+          // Written back to its own private file. Resolving it through
+          // `loadSkills` would miss it and write a shared copy instead —
+          // editing a private skill would silently publish it.
+          const target = privateSkillPath(projectRoot, privateId);
+          if (!existsSync(target)) {
+            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ error: `Private skill not found: ${privateId}` }));
+            return;
+          }
+          const written = writeSkill(projectRoot, { ...input, id: privateId, sourcePath: target });
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            skill: serializeSkill({ ...written, localId: privateId, qualifiedId: id }),
+          }));
           return;
         }
         const skill = writeSkill(projectRoot, { ...input, qualifiedId: id });
@@ -13591,12 +13685,39 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'DELETE' && path.startsWith('/api/skills/')) {
       try {
         const id = decodeURIComponent(path.slice('/api/skills/'.length));
-        deleteSkill(projectRoot, id);
+        const privateId = privateSkillLocalId(id);
+        if (privateId) {
+          const target = privateSkillPath(projectRoot, privateId);
+          if (!existsSync(target)) {
+            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ error: `Private skill not found: ${privateId}` }));
+            return;
+          }
+          // Never committed, so the recovery bundle is the only way back.
+          const recovered = moveToTrashBundle(projectRoot, projectRoot, [
+            relative(projectRoot, target).replace(/\\/g, '/'),
+          ], 'skills');
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: true, recovered }));
+          return;
+        }
+        // A shared skill inside the project goes to the recovery bundle too: an
+        // uncommitted one is in no commit to restore. A Skills folder configured
+        // outside the project keeps the old delete, since a bundle path must
+        // stay inside the project.
+        const existing = loadSkills(projectRoot).skills.find((skill) => skill.qualifiedId === id || skill.id === id);
+        const relativeSource = existing ? relative(projectRoot, existing.sourcePath).replace(/\\/g, '/') : '';
+        let recovered: ReturnType<typeof moveToTrashBundle> | undefined;
+        if (existing && relativeSource && !relativeSource.startsWith('..') && !isAbsolute(relativeSource)) {
+          recovered = moveToTrashBundle(projectRoot, projectRoot, [relativeSource], 'skills');
+        } else {
+          deleteSkill(projectRoot, id);
+        }
         projectSnapshots.invalidate();
         invalidateAgentProjectState(projectRoot);
         await refreshUnifiedProjectIndexes(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ ok: true }));
+        res.end(serializeJSON({ ok: true, ...(recovered ? { recovered } : {}) }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -22825,11 +22946,13 @@ function serializeSkill(skill: Skill): {
   vocabulary: Record<string, string>;
   sourcePath: string;
   isStarter?: boolean;
+  visibility: 'private' | 'shared';
 } {
   return {
     id: skill.id,
     localId: skill.localId,
     qualifiedId: skill.qualifiedId,
+    visibility: isPrivateSkillSource(skill.sourcePath) ? 'private' : 'shared',
     scope: 'project',
     user: undefined,
     domain: skill.domain,
@@ -28142,6 +28265,61 @@ function privateBlockDir(projectRoot: string): string {
 
 function isPrivateBlockPath(path: string): boolean {
   return normalizeNotebookPath(path).startsWith(`${PRIVATE_BLOCK_PREFIX}/`);
+}
+
+/**
+ * Private skills.
+ *
+ * A private skill does not shape any answer until it is published. Every Ask,
+ * catalog, manifest and index path reads skills through `loadSkills`, and
+ * `loadSkills` never looks here — so no answer can depend on guidance that
+ * exists only on one person's machine, and teammates asking the same question
+ * get the same reading. Publishing is what makes a skill apply.
+ *
+ * Private skills carry a `private::skill::<id>` identity, so an edit or delete
+ * can never be resolved to a shared skill that happens to use the same id.
+ */
+const PRIVATE_SKILL_PREFIX = '.dql/local/private/skills';
+const PRIVATE_SKILL_IDENTITY_PREFIX = 'private::skill::';
+
+function privateSkillDir(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'local', 'private', 'skills');
+}
+
+function privateSkillFileName(id: string): string {
+  const safe = id.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'skill';
+  return `${safe}.skill.md`;
+}
+
+function privateSkillPath(projectRoot: string, id: string): string {
+  return join(privateSkillDir(projectRoot), privateSkillFileName(id));
+}
+
+function privateSkillLocalId(identity: string): string | null {
+  return identity.startsWith(PRIVATE_SKILL_IDENTITY_PREFIX)
+    ? identity.slice(PRIVATE_SKILL_IDENTITY_PREFIX.length)
+    : null;
+}
+
+function isPrivateSkillSource(sourcePath: string): boolean {
+  return sourcePath.replace(/\\/g, '/').includes(`/${PRIVATE_SKILL_PREFIX}/`);
+}
+
+/** Read only by the Skills page and the private write paths — never by retrieval. */
+function loadPrivateSkills(projectRoot: string): Skill[] {
+  const dir = privateSkillDir(projectRoot);
+  if (!existsSync(dir)) return [];
+  const skills: Skill[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.skill.md')) continue;
+    const sourcePath = join(dir, entry.name);
+    try {
+      const parsed = parseSkill(readFileSync(sourcePath, 'utf-8'), sourcePath);
+      if (!parsed) continue;
+      skills.push({ ...parsed, localId: parsed.id, qualifiedId: `${PRIVATE_SKILL_IDENTITY_PREFIX}${parsed.id}` });
+    } catch { /* a malformed private skill must not break the Skills page */ }
+  }
+  return skills;
 }
 
 function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {

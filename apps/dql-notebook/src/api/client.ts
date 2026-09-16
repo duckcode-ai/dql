@@ -7826,9 +7826,27 @@ export const api = {
     return request('/api/settings/embeddings/reindex', { method: 'POST' });
   },
 
-  async deleteSkill(id: string): Promise<{ ok: true }> {
-    return request<{ ok: true }>(`/api/skills/${encodeURIComponent(id)}`, {
+  /** Deleting moves the skill file to a recovery bundle rather than erasing it. */
+  async deleteSkill(id: string): Promise<{
+    ok: true;
+    recovered?: { recoveryId: string; trashPath: string; files: string[] };
+  }> {
+    return request(`/api/skills/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+    });
+  },
+
+  /** Move a private skill into the shared Skills folder, where it starts shaping answers. */
+  async publishSkill(id: string): Promise<{
+    ok: boolean;
+    previousId?: string;
+    path?: string;
+    skill?: Skill;
+    error?: string;
+  }> {
+    return request('/api/skills/publish', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
     });
   },
 
