@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -57,6 +57,111 @@ async function withServer<T>(projectRoot: string, run: (base: string) => Promise
 function postJson(url: string, body: unknown): Promise<Response> {
   return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 }
+
+function committedProject(prefix: string): string {
+  const dir = tempProject(prefix);
+  git(dir, ['init']);
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-m', 'first']);
+  return dir;
+}
+
+describe('discarding never destroys work git cannot return', () => {
+  it('reverts a tracked file, recovers an untracked one, and leaves ignored paths alone', async () => {
+    const project = committedProject('dql-git-discard-');
+    writeFileSync(join(project, 'dql.config.json'), '{"project":"edited"}\n');
+    mkdirSync(join(project, 'notebooks'), { recursive: true });
+    writeFileSync(join(project, 'notebooks', 'scratch.dqlnb'), '{"cells":[]}\n');
+    writeFileSync(join(project, '.gitignore'), 'ignored.txt\n');
+    git(project, ['add', '.gitignore']);
+    git(project, ['commit', '-m', 'ignore']);
+    writeFileSync(join(project, 'ignored.txt'), 'local only\n');
+
+    await withServer(project, async (base) => {
+      const res = await postJson(`${base}/api/git/discard`, {
+        paths: ['dql.config.json', 'notebooks/scratch.dqlnb', 'ignored.txt'],
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        ok: boolean;
+        reverted?: string[];
+        recovered?: { trashPath: string; files: string[] };
+        skipped?: string[];
+      };
+
+      expect(body.ok).toBe(true);
+      // Tracked edit goes back to the committed content.
+      expect(body.reverted).toEqual(['dql.config.json']);
+      expect(readFileSync(join(project, 'dql.config.json'), 'utf-8')).toBe('{}\n');
+      // The never-committed notebook leaves the worktree but stays recoverable.
+      expect(body.recovered?.files).toEqual(['notebooks/scratch.dqlnb']);
+      expect(existsSync(join(project, 'notebooks', 'scratch.dqlnb'))).toBe(false);
+      const recoveredFile = join(project, body.recovered!.trashPath, 'files', 'notebooks', 'scratch.dqlnb');
+      expect(readFileSync(recoveredFile, 'utf-8')).toBe('{"cells":[]}\n');
+      expect(existsSync(join(project, body.recovered!.trashPath, 'recovery.json'))).toBe(true);
+      // An ignored path is local state: say so instead of reporting success.
+      expect(body.skipped).toEqual(['ignored.txt']);
+      expect(existsSync(join(project, 'ignored.txt'))).toBe(true);
+    });
+  });
+});
+
+describe('a commit keeps only what was chosen', () => {
+  it('commits the named paths and refuses when nothing is selected', async () => {
+    const project = committedProject('dql-git-commit-');
+    writeFileSync(join(project, 'wanted.dql'), 'block wanted {}\n');
+    writeFileSync(join(project, 'unwanted.dql'), 'block unwanted {}\n');
+
+    await withServer(project, async (base) => {
+      const chosen = await postJson(`${base}/api/git/commit`, { message: 'keep one', paths: ['wanted.dql'] });
+      expect(chosen.status).toBe(200);
+      expect(git(project, ['show', '--name-only', '--format=', 'HEAD']).trim()).toBe('wanted.dql');
+
+      const empty = await postJson(`${base}/api/git/commit`, { message: 'nothing chosen' });
+      expect(empty.status).toBe(400);
+      expect((await empty.json() as { error?: string }).error).toContain('Nothing is selected');
+      // The unrelated file is still waiting, not swept into a commit.
+      expect(git(project, ['status', '--porcelain', 'unwanted.dql'])).toContain('unwanted.dql');
+    });
+  });
+});
+
+describe('a project inside a bigger repository reviews only itself', () => {
+  it('scopes status and stage-all to the project folder', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'dql-git-nested-'));
+    tempDirs.push(repo);
+    git(repo, ['init']);
+    writeFileSync(join(repo, 'README.md'), '# parent repo\n');
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '-m', 'parent']);
+    const project = join(repo, 'analytics');
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, 'dql.config.json'), '{}\n');
+    // A change in the surrounding repo that this project must not touch.
+    writeFileSync(join(repo, 'unrelated.py'), 'print("theirs")\n');
+
+    await withServer(project, async (base) => {
+      const status = await (await fetch(`${base}/api/git/status`)).json() as {
+        projectPrefix?: string;
+        changes: Array<{ path: string }>;
+      };
+      expect(status.projectPrefix).toBe('analytics');
+      // Everything offered belongs to this project — the surrounding
+      // repository's own change is filtered out. (Starting the server also
+      // writes the project's .gitignore, so more than one file is listed.)
+      const listed = status.changes.map((change) => change.path);
+      expect(listed).toContain('analytics/dql.config.json');
+      expect(listed.every((path) => path.startsWith('analytics/'))).toBe(true);
+      expect(listed).not.toContain('unrelated.py');
+
+      const committed = await postJson(`${base}/api/git/commit`, { message: 'project only', stageAll: true });
+      expect(committed.status).toBe(200);
+      const files = git(repo, ['show', '--name-only', '--format=', 'HEAD']);
+      expect(files).toContain('analytics/dql.config.json');
+      expect(files).not.toContain('unrelated.py');
+    });
+  });
+});
 
 describe('block history path boundary', () => {
   it('rejects shell metacharacters and paths outside the project', () => {

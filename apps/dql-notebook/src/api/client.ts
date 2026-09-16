@@ -6759,7 +6759,14 @@ export const api = {
     }
   },
 
-  async gitDiscard(paths: string[]): Promise<{ ok: boolean; error?: string }> {
+  /** Untracked files are moved to a recovery bundle rather than deleted. */
+  async gitDiscard(paths: string[]): Promise<{
+    ok: boolean;
+    error?: string;
+    reverted?: string[];
+    recovered?: { recoveryId: string; trashPath: string; files: string[] };
+    skipped?: string[];
+  }> {
     try {
       return await request<any>('/api/git/discard', { method: 'POST', body: JSON.stringify({ paths }) });
     } catch (e) {
@@ -6767,11 +6774,15 @@ export const api = {
     }
   },
 
-  async gitCommit(message: string, stageAll = false): Promise<{ ok: boolean; error?: string; hash?: string }> {
+  /** Pass the exact paths to keep. `stageAll` stages this project's folder only. */
+  async gitCommit(
+    message: string,
+    options: { stageAll?: boolean; paths?: string[] } = {},
+  ): Promise<{ ok: boolean; error?: string; hash?: string }> {
     try {
       return await request<any>('/api/git/commit', {
         method: 'POST',
-        body: JSON.stringify({ message, stageAll }),
+        body: JSON.stringify({ message, ...options }),
       });
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };

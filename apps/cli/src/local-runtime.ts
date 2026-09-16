@@ -16466,8 +16466,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     if (req.method === 'POST' && path === '/api/git/commit') {
       try {
-        const body = (await readJSON(req)) as { message?: string; stageAll?: boolean };
-        const result = await gitCommit(projectRoot, body.message ?? '', body.stageAll === true);
+        const body = (await readJSON(req)) as { message?: string; stageAll?: boolean; paths?: string[] };
+        const result = await gitCommit(projectRoot, body.message ?? '', {
+          stageAll: body.stageAll === true,
+          ...(Array.isArray(body.paths) ? { paths: body.paths } : {}),
+        });
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));
       } catch (e) {
@@ -34659,6 +34662,13 @@ export interface GitStatusResult {
   ahead: number;
   behind: number;
   changes: Array<{ path: string; status: string }>;
+  /**
+   * The project's folder inside the repository, '' when the project is the
+   * repository root. A DQL workspace inside a larger repo (a dbt project, say)
+   * used to list and stage that whole repo's changes; changes are now scoped
+   * here, and the prefix is reported so the UI can say what it is showing.
+   */
+  projectPrefix?: string;
   error?: string;
 }
 
@@ -34937,16 +34947,55 @@ async function readGitStatus(cwd: string): Promise<GitStatusResult> {
   // Enumerate every untracked path so tracked and untracked changes share the
   // same per-file review contract.
   const statusRes = await execGit(gitRoot, ['status', '--porcelain=v1', '--untracked-files=all']);
+  const projectPrefix = projectPrefixWithin(gitRoot, cwd);
   const changes: Array<{ path: string; status: string }> = [];
   if (statusRes.code === 0) {
     for (const line of statusRes.stdout.split('\n')) {
       if (!line) continue;
       const code = line.slice(0, 2);
       const p = line.slice(3);
+      if (!withinProjectPrefix(p, projectPrefix)) continue;
       changes.push({ path: p, status: code });
     }
   }
-  return { inRepo: true, branch, ahead, behind, changes };
+  return { inRepo: true, branch, ahead, behind, changes, projectPrefix };
+}
+
+/**
+ * The project's folder inside the repository.
+ *
+ * Both sides are resolved first: `rev-parse --show-toplevel` answers with the
+ * real path while the project path may still hold a symlink (`/var` against
+ * `/private/var` on macOS), and comparing the two spellings produced a prefix
+ * of `../../..` — which read as "not inside the repository" and silently
+ * turned the scoping back off.
+ */
+function projectPrefixWithin(gitRoot: string, cwd: string): string {
+  const resolved = (value: string) => {
+    try {
+      return realpathSync(value);
+    } catch {
+      return value;
+    }
+  };
+  return relative(resolved(gitRoot), resolved(cwd)).replace(/\\/g, '/');
+}
+
+/**
+ * Whether a porcelain path belongs to this project. A DQL workspace inside a
+ * larger repository listed — and could stage — that whole repository's
+ * changes; the project only reviews its own. A rename reads `old -> new`, and
+ * either side landing in the project makes it this project's business.
+ */
+function withinProjectPrefix(porcelainPath: string, projectPrefix: string): boolean {
+  if (!projectPrefix || projectPrefix.startsWith('..')) return true;
+  const under = (value: string) => {
+    const path = value.replace(/^"|"$/g, '');
+    return path === projectPrefix || path.startsWith(`${projectPrefix}/`);
+  };
+  const arrow = porcelainPath.indexOf(' -> ');
+  if (arrow === -1) return under(porcelainPath);
+  return under(porcelainPath.slice(0, arrow)) || under(porcelainPath.slice(arrow + 4));
 }
 
 export interface GitCommit {
@@ -35176,30 +35225,129 @@ async function gitUnstage(cwd: string, paths: string[]): Promise<{ ok: boolean; 
   return fallback.code === 0 ? { ok: true } : { ok: false, error: gitErrorOutput(fallback) };
 }
 
-async function gitDiscard(cwd: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
+export interface GitDiscardResult {
+  ok: boolean;
+  error?: string;
+  /** Tracked files returned to their committed state; git still has them. */
+  reverted?: string[];
+  /** Untracked files moved somewhere they can be fetched back from. */
+  recovered?: { recoveryId: string; trashPath: string; files: string[] };
+  /** Paths git ignores or that no longer exist: nothing was done to them. */
+  skipped?: string[];
+}
+
+/**
+ * Discard, without destroying anything git cannot give back.
+ *
+ * A tracked file is restored from the index. An untracked file exists nowhere
+ * else, so it moves to a recovery bundle under `.dql/local/trash/discarded/`
+ * instead of being deleted: `git clean -f` used to erase a just-authored
+ * notebook or skill permanently, behind a single confirm. Deleting an App
+ * already leaves a recovery bundle; source control now does the same.
+ */
+async function gitDiscard(cwd: string, paths: string[]): Promise<GitDiscardResult> {
   const gitRoot = await resolveGitRoot(cwd);
   if (!gitRoot) return { ok: false, error: 'Not a git repository' };
   const v = validatePaths(gitRoot, paths);
   if (!v.ok) return { ok: false, error: v.error };
-  // For tracked files: `restore --worktree` reverts to HEAD. For untracked
-  // files: that's a no-op and we delete them via `clean -f`. Run both so
-  // the caller doesn't have to know which list each path is in.
-  const restore = await execGit(gitRoot, ['restore', '--worktree', '--', ...v.paths]);
-  const clean = await execGit(gitRoot, ['clean', '-f', '--', ...v.paths]);
-  if (restore.code !== 0 && clean.code !== 0) {
-    return { ok: false, error: gitErrorOutput(restore) || gitErrorOutput(clean) };
+
+  const tracked = new Set<string>();
+  const lsFiles = await execGit(gitRoot, ['ls-files', '-z', '--', ...v.paths]);
+  if (lsFiles.code === 0) for (const entry of lsFiles.stdout.split('\0')) if (entry) tracked.add(entry);
+
+  const reverted: string[] = [];
+  const untracked: string[] = [];
+  const skipped: string[] = [];
+  for (const path of v.paths) {
+    if (tracked.has(path)) { reverted.push(path); continue; }
+    if (!existsSync(join(gitRoot, path))) { skipped.push(path); continue; }
+    // An ignored path is local state (a cache, a database, a credential file).
+    // Reporting it as discarded when nothing happened was the old silent lie.
+    const ignored = await execGit(gitRoot, ['check-ignore', '--quiet', '--', path]);
+    if (ignored.code === 0) { skipped.push(path); continue; }
+    untracked.push(path);
   }
-  return { ok: true };
+
+  if (reverted.length > 0) {
+    const restore = await execGit(gitRoot, ['restore', '--worktree', '--', ...reverted]);
+    if (restore.code !== 0) return { ok: false, error: gitErrorOutput(restore) };
+  }
+
+  let recovered: GitDiscardResult['recovered'];
+  if (untracked.length > 0) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const trashRoot = join(cwd, '.dql', 'local', 'trash', 'discarded');
+    let recoveryId = stamp;
+    let trashDir = join(trashRoot, recoveryId);
+    let suffix = 2;
+    while (existsSync(trashDir)) {
+      recoveryId = `${stamp}-${suffix++}`;
+      trashDir = join(trashRoot, recoveryId);
+    }
+    const moved: string[] = [];
+    try {
+      for (const path of untracked) {
+        const destination = join(trashDir, 'files', path);
+        mkdirSync(dirname(destination), { recursive: true });
+        renameSync(join(gitRoot, path), destination);
+        moved.push(path);
+      }
+      writeFileSync(join(trashDir, 'recovery.json'), `${JSON.stringify({
+        version: 1,
+        recoveryId,
+        discardedAt: new Date().toISOString(),
+        files: moved,
+      }, null, 2)}\n`, 'utf-8');
+    } catch (error) {
+      // Put back whatever moved, so a half-finished discard cannot lose work.
+      for (const path of moved) {
+        const destination = join(trashDir, 'files', path);
+        if (existsSync(destination)) renameSync(destination, join(gitRoot, path));
+      }
+      rmSync(trashDir, { recursive: true, force: true });
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    recovered = { recoveryId, trashPath: relative(cwd, trashDir).replace(/\\/g, '/'), files: moved };
+  }
+
+  return {
+    ok: true,
+    reverted,
+    ...(recovered ? { recovered } : {}),
+    ...(skipped.length > 0 ? { skipped } : {}),
+  };
 }
 
-async function gitCommit(cwd: string, message: string, stageAll: boolean): Promise<{ ok: boolean; error?: string; hash?: string }> {
+async function gitCommit(
+  cwd: string,
+  message: string,
+  options: { stageAll?: boolean; paths?: string[] } = {},
+): Promise<{ ok: boolean; error?: string; hash?: string }> {
   const gitRoot = await resolveGitRoot(cwd);
   if (!gitRoot) return { ok: false, error: 'Not a git repository' };
   const trimmed = message.trim();
   if (!trimmed) return { ok: false, error: 'Commit message required' };
-  if (stageAll) {
-    const add = await execGit(gitRoot, ['add', '-A']);
+  if (options.paths?.length) {
+    const v = validatePaths(gitRoot, options.paths);
+    if (!v.ok) return { ok: false, error: v.error };
+    const add = await execGit(gitRoot, ['add', '--', ...v.paths]);
     if (add.code !== 0) return { ok: false, error: gitErrorOutput(add) };
+  } else if (options.stageAll) {
+    // Scoped to this project. A bare `add -A` runs at the repository root, so
+    // a DQL workspace inside a larger repo swept every unrelated change in
+    // that repo into the commit.
+    const projectPrefix = projectPrefixWithin(gitRoot, cwd);
+    if (projectPrefix.startsWith('..')) {
+      // Where the project sits is unclear, so sweeping the repository is the
+      // one thing not to do: ask for the changes by name instead.
+      return { ok: false, error: 'This project could not be located inside the repository. Choose the changes to keep explicitly.' };
+    }
+    const add = await execGit(gitRoot, projectPrefix ? ['add', '-A', '--', projectPrefix] : ['add', '-A']);
+    if (add.code !== 0) return { ok: false, error: gitErrorOutput(add) };
+  }
+  const staged = await execGit(gitRoot, ['diff', '--cached', '--name-only']);
+  if (staged.code === 0 && !staged.stdout.trim()) {
+    return { ok: false, error: 'Nothing is selected to keep. Include the changes you want to commit first.' };
   }
   const res = await execGit(gitRoot, ['commit', '-m', trimmed]);
   if (res.code !== 0) return { ok: false, error: gitErrorOutput(res) };
@@ -35291,7 +35439,8 @@ async function gitCreateReview(cwd: string, input: { paths: string[]; title: str
   }
   const stage = await gitStage(gitRoot, validPaths.paths);
   if (!stage.ok) return stage;
-  const commit = await gitCommit(gitRoot, title, false);
+  // The review set was staged just above; commit exactly that.
+  const commit = await gitCommit(gitRoot, title, {});
   if (!commit.ok) return commit;
   const pushed = await gitPush(gitRoot);
   if (!pushed.ok) return { ...pushed, branch, hash: commit.hash };

@@ -314,9 +314,15 @@ export function GitPage() {
 
   const onStage = (path: string) => runOp('stage', () => api.gitStage([path]));
   const onUnstage = (path: string) => runOp('unstage', () => api.gitUnstage([path]));
-  const onDiscard = (path: string) => {
-    if (!window.confirm(`Discard local changes to ${path}? This cannot be undone.`)) return;
-    void runOp('discard', () => api.gitDiscard([path]), 'Discarded local changes');
+  const onDiscard = async (path: string) => {
+    if (!window.confirm(`Discard changes to ${path}? A file that was never committed moves to a recovery folder you can restore from.`)) return;
+    const res = await runOp('discard', () => api.gitDiscard([path]));
+    if (!res.ok) return;
+    flash('ok', res.recovered
+      ? `Moved to ${res.recovered.trashPath} — restore it from there if you need it back`
+      : res.skipped?.length
+        ? 'Nothing to discard — that path is ignored by Git'
+        : 'Reverted to the last committed version');
   };
   const onStageAll = () => runOp('stage', async () => {
     const paths = unstagedFiles.map((e) => e.path);
@@ -326,8 +332,10 @@ export function GitPage() {
   const onCommit = async () => {
     const msg = commitMsg.trim();
     if (!msg) return flash('err', 'Commit message required');
-    const stageAll = stagedFiles.length === 0;
-    const res = await runOp('commit', () => api.gitCommit(msg, stageAll), 'Committed');
+    // Commit exactly what this page lists. Falling back to "stage everything"
+    // swept unrelated changes from a surrounding repository into the commit.
+    const paths = stagedFiles.length > 0 ? undefined : unstagedFiles.map((entry) => entry.path);
+    const res = await runOp('commit', () => api.gitCommit(msg, paths ? { paths } : {}), 'Committed');
     if (res.ok) setCommitMsg('');
   };
   const onCommitAndPush = async () => {
@@ -335,8 +343,8 @@ export function GitPage() {
     if (!msg) return flash('err', 'Commit message required');
     // Check before committing, so a commit is never left behind by a push that cannot happen.
     if (!remote.url) return requestRemote('Add a Git remote before committing and pushing.');
-    const stageAll = stagedFiles.length === 0;
-    const c = await runOp('commit', () => api.gitCommit(msg, stageAll));
+    const paths = stagedFiles.length > 0 ? undefined : unstagedFiles.map((entry) => entry.path);
+    const c = await runOp('commit', () => api.gitCommit(msg, paths ? { paths } : {}));
     if (!c.ok) return;
     setCommitMsg('');
     await pushOrAskForRemote('Pushed to remote');
@@ -410,7 +418,7 @@ export function GitPage() {
       const created = await runOp('branch', () => api.gitCreateBranch(branch, true));
       if (!created.ok) return;
     }
-    const committed = await runOp('commit', () => api.gitCommit(msg, false));
+    const committed = await runOp('commit', () => api.gitCommit(msg, {}));
     if (!committed.ok) return;
     const pushed = await pushOrAskForRemote('Shared to your branch');
     if (pushed.ok) setSharedInfo({ count, message: msg, base });
