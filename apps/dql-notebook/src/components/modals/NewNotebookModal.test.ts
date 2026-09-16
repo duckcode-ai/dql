@@ -6,6 +6,7 @@ import {
   NOTEBOOK_TEMPLATE_DESCRIPTIONS,
   NOTEBOOK_TEMPLATE_LABELS,
 } from './notebook-templates';
+import { notebookFileStem } from './artifact-location';
 
 describe('focused notebook templates', () => {
   it('starts a blank notebook without placeholder cells', () => {
@@ -36,5 +37,14 @@ describe('focused notebook templates', () => {
       experiment: '1 DQL query · 3 note sections',
     });
     expect(Object.values(NOTEBOOK_TEMPLATE_DESCRIPTIONS).every((description) => description.length > 30)).toBe(true);
+  });
+});
+
+describe('notebook file name hint', () => {
+  it('names the file the server actually writes', () => {
+    // The dialog sends "scratch-idea"; the server writes scratch_idea.dqlnb.
+    expect(notebookFileStem('scratch-idea')).toBe('scratch_idea');
+    expect(notebookFileStem('q3--review_')).toBe('q3_review');
+    expect(notebookFileStem('---')).toBe('notebook');
   });
 });

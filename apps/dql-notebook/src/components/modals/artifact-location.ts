@@ -10,3 +10,12 @@ export function blockGitPath(domains: Domain[], domainId: string, folderPath: st
     ? `${packageRoot}/blocks/${suffix}`
     : `blocks/${domainId}/${suffix}`;
 }
+
+/**
+ * The file name the server gives a new notebook. The server turns every run of
+ * characters other than letters and digits into one underscore, so a hint
+ * built from the dialog's hyphenated slug named a file that never appeared.
+ */
+export function notebookFileStem(slug: string): string {
+  return slug.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'notebook';
+}

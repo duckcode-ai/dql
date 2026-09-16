@@ -14,6 +14,7 @@ import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import type { NotebookFile } from '../../store/types';
 import { authoredDomainOptions } from '../domains/authored-domain-options';
+import { notebookFileStem } from './artifact-location';
 import {
   buildTemplateCells,
   NOTEBOOK_TEMPLATE_CELL_SUMMARIES,
@@ -89,6 +90,7 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
     setError(null);
 
     const slug = slugify(name);
+    const stem = notebookFileStem(slug);
     const cells = buildTemplateCells(template);
 
     try {
@@ -97,7 +99,7 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
         visibility,
       });
       const file: NotebookFile = {
-        name: `${slug}.dqlnb`,
+        name: `${stem}.dqlnb`,
         path: result.path,
         type: 'notebook',
         folder: 'notebooks',
@@ -115,9 +117,9 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
       onFileOpened(file);
     } catch {
       // Server not available — create locally
-      const path = `notebooks/${slug}.dqlnb`;
+      const path = `notebooks/${stem}.dqlnb`;
       const file: NotebookFile = {
-        name: `${slug}.dqlnb`,
+        name: `${stem}.dqlnb`,
         path,
         type: 'notebook',
         folder: 'notebooks',
@@ -276,8 +278,8 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
               {name && !error && (
                 <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>
                   {visibility === 'private'
-                    ? `Private path: .dql/local/private/notebooks/${slugify(name)}.dqlnb`
-                    : `Git path: notebooks/${slugify(name)}.dqlnb`}
+                    ? `Private path: .dql/local/private/notebooks/${notebookFileStem(slugify(name))}.dqlnb`
+                    : `Git path: notebooks/${notebookFileStem(slugify(name))}.dqlnb`}
                 </span>
               )}
             </div>
