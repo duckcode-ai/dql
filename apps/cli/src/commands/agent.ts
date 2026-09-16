@@ -1015,6 +1015,12 @@ interface AgentEvalResult {
   /** Why the rows did not match the correct answer, when they did not. */
   goldMatchReason?: string;
   /**
+   * The runtime never produced a run for this case (timeout, transport or
+   * server error). Recorded so one slow question cannot end the suite, and
+   * kept apart from refusals: nothing was refused.
+   */
+  runtimeError?: string;
+  /**
    * What a benchmark report needs from each answer: the trust label shown to
    * the user, which path answered (certified block, semantic layer, AI SQL),
    * the proofs that path recorded, the SQL, and how many rows came back.
@@ -1118,6 +1124,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
     ? buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined })
     : null;
   const results: AgentEvalResult[] = [];
+  const caseTimeoutMs = (flags as { caseTimeoutMs?: number }).caseTimeoutMs;
 
   try {
     for (const testCase of cases) {
@@ -1151,13 +1158,20 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
       // router, engine, plan boundary, and gates. The in-process driver below
       // calls the answer loop directly and cannot observe any of them, which is
       // why a refusal metric taken from it reads cleaner than users experience.
-      const runtimeRun = via === 'runtime'
-        ? await driveViaRuntime({
-            runtimeBase,
-            question: testCase.question,
-            ...(testCase.domain ? { workspaceContext: { domain: testCase.domain } } : {}),
-          })
-        : undefined;
+      let runtimeRun: AgentRun | undefined;
+      try {
+        runtimeRun = via === 'runtime'
+          ? await driveViaRuntime({
+              runtimeBase,
+              question: testCase.question,
+              ...(testCase.domain ? { workspaceContext: { domain: testCase.domain } } : {}),
+              ...(caseTimeoutMs ? { timeoutMs: caseTimeoutMs } : {}),
+            })
+          : undefined;
+      } catch (error) {
+        results.push(runtimeErrorResult(testCase, error, Date.now() - startedAt, caseTimeoutMs ?? 120_000));
+        continue;
+      }
       // Runtime mode is scored from the persisted AgentRun. The transport
       // adapter intentionally has no AgentAnswer.contextPack, so borrowing the
       // local preflight pack here would fabricate retrieval/route evidence for a
@@ -1300,6 +1314,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   }
   console.log(`Refusal recall: ${formatRate(metrics.refusal_recall)} (${metrics.refusal_required_case_count} case(s) that must refuse)`);
   console.log(`Execution match rate: ${formatRate(metrics.execution_match_rate)}`);
+  if (metrics.runtime_error_count > 0) console.log(`Runtime errors: ${metrics.runtime_error_count} case(s) got no answer`);
   console.log(`Tool requirement pass rate: ${formatRate(metrics.tool_requirement_pass_rate)}`);
   console.log(`Tool-observed case count: ${metrics.tool_observed_case_count}`);
   console.log(`Average tool calls: ${metrics.avg_tool_calls}`);
@@ -1489,9 +1504,34 @@ export function evalCaseIsAnswerable(expected: AgentEvalCase['expected']): boole
  * ZERO options is a true dead end: the reported production loop was exactly
  * this, and a free-text reply to it reproduced the same question forever.
  */
+/** A case whose runtime call failed: failed, never a match, never a refusal. */
+function runtimeErrorResult(testCase: AgentEvalCase, error: unknown, durationMs: number, timeoutMs: number): AgentEvalResult {
+  const aborted = error instanceof Error && error.name === 'AbortError';
+  const message = aborted
+    ? `no answer within ${Math.round(timeoutMs / 1000)}s`
+    : error instanceof Error ? error.message : String(error);
+  const scoresRows = Boolean(testCase.expected?.rows || testCase.expected?.goldRows);
+  return {
+    name: testCase.name ?? testCase.question,
+    passed: false,
+    failures: [`the runtime did not answer: ${message}`],
+    durationMs,
+    runtimeError: message,
+    ...(scoresRows ? { executionMatched: false } : {}),
+    kind: 'no_answer',
+    followUp: Boolean(testCase.followUp),
+    draftSaved: false,
+    toolCalls: 0,
+    expected: testCase.expected,
+    trace: [{ stage: 'answer', status: 'failed', message: `The runtime did not answer: ${message}` }],
+  };
+}
+
 export function evalResultRefused(
-  result: Pick<AgentEvalResult, 'kind' | 'route' | 'clarificationOptionCount' | 'conversationalAnswer'>,
+  result: Pick<AgentEvalResult, 'kind' | 'route' | 'clarificationOptionCount' | 'conversationalAnswer' | 'runtimeError'>,
 ): boolean {
+  // No run came back, so nothing was refused; the case failed on its own count.
+  if (result.runtimeError) return false;
   // A substantive conversational reply is an ANSWER, not a dead end. A governed
   // definition ("**top_customers** — Top 10 customers by lifetime spend…") is
   // exactly what a "what does X mean?" turn should return, and scoring it as a
@@ -1579,6 +1619,8 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
      */
     false_refusal_rate: ratio(answerableCases.filter(evalResultRefused).length, answerableCases.length),
     false_refusal_count: answerableCases.filter(evalResultRefused).length,
+    /** Cases the runtime never answered (timeout, transport or server error). */
+    runtime_error_count: results.filter((result) => result.runtimeError).length,
     answerable_case_count: answerableCases.length,
     /**
      * Answerable cases that asked an option-bearing clarification instead of
@@ -2089,6 +2131,7 @@ export const __test__ = {
   computeEvalMetrics,
   narrationOutcomeForEval,
   evaluateCase,
+  runtimeErrorResult,
 };
 
 /** Percentile over observed case durations. Returns null when nothing timed. */

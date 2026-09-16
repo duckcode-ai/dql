@@ -8,7 +8,7 @@ import {
   type AgentRun,
   type AskTraceObserverV1,
 } from '@duckcodeailabs/dql-agent';
-import { __test__, createDirectCliAskTraceProvider, runCanonicalCliAsk } from './agent.js';
+import { __test__, createDirectCliAskTraceProvider, evalResultRefused, runCanonicalCliAsk } from './agent.js';
 import { answerFromRuntimeRun, projectRuntimeRun } from './agent-eval-runtime.js';
 
 afterEach(() => {
@@ -277,6 +277,32 @@ describe('agent eval answer harness', () => {
     expect(__test__.answerEvidence(runtimeRun({}), answerResult({ sql: undefined, proposedSql: undefined, result: undefined }))).toEqual({
       trustState: 'review_required',
     });
+  });
+
+  it('records a question the runtime never answered as failed, not as a refusal', () => {
+    const aborted = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+    const result = __test__.runtimeErrorResult(
+      { name: 'slow', question: 'How many policies?', expected: { answerable: true, goldRows: [[2]] } },
+      aborted,
+      600_123,
+      600_000,
+    );
+    expect(result).toMatchObject({
+      name: 'slow',
+      passed: false,
+      runtimeError: 'no answer within 600s',
+      executionMatched: false,
+      failures: ['the runtime did not answer: no answer within 600s'],
+    });
+    expect(evalResultRefused(result)).toBe(false);
+    const metrics = __test__.computeEvalMetrics([result]);
+    expect(metrics.runtime_error_count).toBe(1);
+    expect(metrics.false_refusal_count).toBe(0);
+    expect(metrics.execution_match_rate).toBe(0);
+
+    const other = __test__.runtimeErrorResult({ question: 'q' }, new Error('socket hang up'), 5, 120_000);
+    expect(other.runtimeError).toBe('socket hang up');
+    expect(other.executionMatched).toBeUndefined();
   });
 
   it('scores the persisted certified runtime route rather than an absent AgentAnswer context pack', () => {

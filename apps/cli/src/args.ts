@@ -79,6 +79,8 @@ export interface CLIFlags {
   minAnswerRate?: number;
   /** `dql agent eval --min-tool-requirement <0..1>` — fail below this tool-observed requirement pass rate. */
   minToolRequirement?: number;
+  /** `dql agent eval --via runtime`: how long one question may take before it is recorded as failed. */
+  caseTimeoutMs?: number;
   /** `dql agent eval --min-execution-match <0..1>` — fail below this execution_match_rate (catches class-B wrong-number regressions on `expected.rows` cases). */
   minExecutionMatch?: number;
   /** `dql agent eval --min-judge-pass <0..1>` — fail below this LLM-judge pass rate (semantic accuracy). */
@@ -283,6 +285,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === '--min-answer-rate' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minAnswerRate = value;
+    } else if (arg === '--case-timeout-ms' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value > 0) flags.caseTimeoutMs = value;
     } else if (arg === '--min-tool-requirement' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minToolRequirement = value;
