@@ -1311,6 +1311,73 @@ describe('the tables between two named tables come from the Modeling map', () =>
   });
 });
 
+describe('a wide question keeps the linking tables when many tables need columns', () => {
+  const connection: ConnectionConfig = { driver: 'duckdb', path: ':memory:' } as ConnectionConfig;
+  const tables: Record<string, string[]> = {
+    claims: ['claim_id', 'claim_amount'],
+    cc_link: ['claim_id', 'detail_id'],
+    cd_link: ['detail_id', 'policy_id'],
+    policies: ['policy_id', 'policy_number'],
+    alpha: ['alpha_id', 'alpha_value'],
+    bravo: ['bravo_id', 'bravo_value'],
+    charlie: ['charlie_id', 'charlie_value'],
+    deltas: ['delta_id', 'delta_value'],
+    echoes: ['echo_id', 'echo_value'],
+  };
+  const relationship = (id: string, from: string, to: string, key: string) => ({ id, from, to, keys: [{ from: key, to: key }], cardinality: 'many_to_one', status: 'draft' });
+  const manifest = {
+    sources: Object.fromEntries(Object.keys(tables).map((name) => [name, { name, origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: `model.${name}`, schema: 'ins', columns: {} } }])),
+    dbtProvenance: { nodes: Object.fromEntries(Object.keys(tables).map((name) => [`model.${name}`, { relation: `ins.${name}` }])) },
+    modeling: {
+      entities: Object.fromEntries(Object.keys(tables).map((name) => [name, { id: name, dbtUniqueId: `model.${name}` }])),
+      relationships: {
+        a: relationship('link_to_claim', 'cc_link', 'claims', 'claim_id'),
+        b: relationship('link_to_detail', 'cc_link', 'cd_link', 'detail_id'),
+        c: relationship('detail_to_policy', 'cd_link', 'policies', 'policy_id'),
+      },
+    },
+  };
+  const unreadable = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Claims by policy with five extras.', measures: [{ ref: 'metric:ins.claim_count' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' });
+
+  it('describes the linking tables before the rest, five at a time', async () => {
+    const prompts: string[] = [];
+    const provider: AgentProvider = {
+      name: 'ollama', available: async () => true,
+      generate: async (messages) => {
+        if (!messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) return unreadable;
+        prompts.push(messages.map((message) => message.content).join('\n'));
+        return 'NO_SQL: nothing to draft in this test.';
+      },
+    };
+    const route = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-wide-route',
+      executor: { executeQuery: vi.fn(async (sql: string) => {
+        if (sql.includes('information_schema.columns')) {
+          const rows = Object.entries(tables).filter(([name]) => sql.includes(`'${name}'`))
+            .flatMap(([name, columns]) => columns.map((column) => ({ table_schema: 'ins', table_name: name, column_name: column, data_type: 'VARCHAR' })));
+          return { columns: [], rowCount: rows.length, executionTimeMs: 1, rows };
+        }
+        return { columns: [], rowCount: 0, executionTimeMs: 1, rows: [] };
+      }) } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => undefined,
+      getManifest: () => ({ snapshotId: 'snapshot:wide-route', manifest: manifest as never }),
+      selectProvider: async () => provider,
+      compileSemantic: async () => { throw new Error('no semantic layer'); },
+      priorIntent: () => undefined,
+    });
+    await route({
+      runId: 'run:wide-route',
+      request: { question: 'Count claims for each of the policies with alpha, bravo, charlie, deltas and echoes', requestedMode: 'ask' } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts[0]).toContain('executable relation:ins.cc_link');
+    expect(prompts[0]).toContain('executable relation:ins.cd_link');
+    expect(prompts[0]).toContain('executable relation:ins.echoes');
+  });
+});
+
 describe('on a modeled project, tables are ranked by the Modeling map', () => {
   const connection: ConnectionConfig = { driver: 'duckdb', path: ':memory:' } as ConnectionConfig;
   const tables: Record<string, string[]> = {

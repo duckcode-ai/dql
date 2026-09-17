@@ -1896,8 +1896,14 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         return !entry || entry.physical?.binding?.columnCompleteness !== 'complete' || !current.entries.some((item) => item.kind === 'column' && samePhysicalEntry(item, entry));
       });
       if (needsColumns.length > 0) {
+        // Tables the Modeling map added come first: they are how the others
+        // join, and a table without described columns is dropped below. The
+        // number described stays as it was — describing more tables leaves
+        // more columns in the request's vocabulary, and a later question then
+        // reads wider than the certified block that answers it.
+        const ordered = [...needsColumns.filter((relation) => bridged.includes(relation)), ...needsColumns.filter((relation) => !bridged.includes(relation))];
         try {
-          const found = await describeRelations(needsColumns.slice(0, 12));
+          const found = await describeRelations(ordered);
           if (found.length > 0) {
             current = mergeDiscoveredRelations(current, found);
             requestVocabulary = current;

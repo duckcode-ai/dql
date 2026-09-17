@@ -1,9 +1,9 @@
 {
   "key": "cd31d1c1bdc03f845114a3f6eb59bbed",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks why revenue has declined broken down by region and which region merits investment, but this project has no region concept or dimension, and cannot produce causal explanations.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"revenue by region and why it declined / which region to invest in\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks why revenue is down by region and which region to invest in, but this project has no region dimension or entity, and it asks for causal explanation and investment advice rather than a measurable quantity.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"revenue down by region, and which region to invest in\",\"options\":[],\"material\":true}],\"provenance\":{}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T14:07:34.996Z",
+  "recordedAt": "2026-09-17T18:11:29.624Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

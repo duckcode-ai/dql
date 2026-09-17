@@ -1,9 +1,9 @@
 {
   "key": "e8683f0ce17640a54a210a8ec5803a17",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for churn rate broken down by region, but this project has no churn concept or region dimension.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"churn rate by region\",\"options\":[],\"material\":true,\"question\":\"This project has no churn metric and no region dimension in its vocabulary — can you clarify what data you're looking for, or is this outside the scope of this commerce dataset?\"}],\"provenance\":{}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks for churn rate broken down by region, but this project has no churn metric and no region dimension defined anywhere in the vocabulary.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"churn rate by region\",\"options\":[],\"material\":true}],\"provenance\":{}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T14:03:05.092Z",
+  "recordedAt": "2026-09-17T18:07:12.394Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

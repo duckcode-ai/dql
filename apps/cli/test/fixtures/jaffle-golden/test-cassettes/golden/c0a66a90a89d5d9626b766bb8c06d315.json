@@ -1,9 +1,9 @@
 {
   "key": "c0a66a90a89d5d9626b766bb8c06d315",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total supply cost broken down by product.\",\"measures\":[{\"ref\":\"column:dev.supplies.supply_cost\",\"aggregation\":\"sum\",\"alias\":\"supply_cost\"}],\"groupBy\":[{\"ref\":\"dimension:supplies.product_id\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"ordering\":{\"ref\":\"supply_cost\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"column:dev.supplies.supply_cost\":\"q:supply cost\",\"dimension:supplies.product_id\":\"q:by product\",\"dimension:products.product_name\":\"q:by product\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total supply cost broken down by product.\",\"measures\":[{\"ref\":\"column:dev.supplies.supply_cost\",\"aggregation\":\"sum\",\"alias\":\"supply_cost\"}],\"groupBy\":[{\"ref\":\"entity:products.product\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"column:dev.supplies.supply_cost\":\"q:supply cost\",\"entity:products.product\":\"q:by product\",\"dimension:products.product_name\":\"q:by product\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T14:02:31.174Z",
+  "recordedAt": "2026-09-17T18:06:39.249Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

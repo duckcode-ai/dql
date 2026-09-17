@@ -1,9 +1,9 @@
 {
   "key": "d8baf4fcfc622a486ac37e716bba22ac",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show beverage product revenue and item count by product.\",\"measures\":[{\"ref\":\"block:commerce.beverage_revenue_by_product\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:beverage revenue by product\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Beverage revenue and item counts broken down by product.\",\"measures\":[{\"ref\":\"block:commerce.beverage_revenue_by_product\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.beverage_revenue_by_product\":\"q:beverage revenue by product\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T14:00:01.737Z",
+  "recordedAt": "2026-09-17T18:03:52.778Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

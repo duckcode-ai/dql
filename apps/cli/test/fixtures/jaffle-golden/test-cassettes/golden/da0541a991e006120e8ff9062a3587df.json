@@ -1,9 +1,9 @@
 {
   "key": "da0541a991e006120e8ff9062a3587df",
   "operation": "generate",
-  "text": "```sql\nSELECT\n    l.location_id,\n    l.location_name,\n    SUM(o.order_total) AS total_revenue\nFROM \"jaffle_shop\".\"dev\".\"orders\" o\nJOIN \"jaffle_shop\".\"dev\".\"locations\" l\n    ON o.location_id = l.location_id\nGROUP BY l.location_id, l.location_name\nORDER BY total_revenue DESC\nLIMIT 500;\n```",
+  "text": "SELECT l.location_id, l.location_name, SUM(o.order_total) AS total_revenue\nFROM \"jaffle_shop\".\"dev\".\"orders\" o\nJOIN \"jaffle_shop\".\"dev\".\"locations\" l ON o.location_id = l.location_id\nGROUP BY l.location_id, l.location_name\nORDER BY total_revenue DESC;",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T13:59:40.687Z",
+  "recordedAt": "2026-09-17T18:03:21.133Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

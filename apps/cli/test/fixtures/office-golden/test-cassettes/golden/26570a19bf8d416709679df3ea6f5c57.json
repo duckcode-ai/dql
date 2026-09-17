@@ -1,9 +1,9 @@
 {
   "key": "26570a19bf8d416709679df3ea6f5c57",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"List the opportunities whose Salesloft tags include Splunk.\",\"measures\":[],\"groupBy\":[{\"ref\":\"dimension:opportunities.OPPORTUNITY_ID\",\"role\":\"key\"}],\"display\":[\"dimension:opportunity_enhanced.ACCOUNT_NAME\",\"dimension:opportunities.TAGS\"],\"filters\":[{\"ref\":\"dimension:opportunities.TAGS\",\"op\":\"contains\",\"values\":[\"Splunk\"],\"source\":\"question\"}],\"expectedShape\":\"lookup\",\"unresolved\":[],\"provenance\":{\"dimension:opportunities.OPPORTUNITY_ID\":\"q:opportunities\",\"dimension:opportunities.TAGS\":\"q:tagged Splunk\",\"dimension:opportunity_enhanced.ACCOUNT_NAME\":\"q:Which opportunities\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"List the opportunities whose Salesloft tags include Splunk.\",\"measures\":[],\"groupBy\":[{\"ref\":\"dimension:opportunities.OPPORTUNITY_ID\",\"role\":\"key\"}],\"display\":[\"dimension:opportunities.TAGS\"],\"filters\":[{\"ref\":\"dimension:opportunities.TAGS\",\"op\":\"contains\",\"values\":[\"Splunk\"],\"source\":\"question\"}],\"expectedShape\":\"ranking\",\"limit\":100,\"unresolved\":[],\"provenance\":{\"dimension:opportunities.OPPORTUNITY_ID\":\"q:Which opportunities\",\"dimension:opportunities.TAGS\":\"q:tagged Splunk\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T14:26:05.412Z",
+  "recordedAt": "2026-09-17T17:53:49.147Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

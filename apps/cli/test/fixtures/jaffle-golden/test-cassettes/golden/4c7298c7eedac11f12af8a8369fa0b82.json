@@ -1,9 +1,9 @@
 {
   "key": "4c7298c7eedac11f12af8a8369fa0b82",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top customers ranked by beverage revenue.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:top customers for beverage product category\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Who are the top customers ranked by beverage revenue.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:top customers for beverage product category\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T13:57:44.338Z",
+  "recordedAt": "2026-09-17T18:00:48.558Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

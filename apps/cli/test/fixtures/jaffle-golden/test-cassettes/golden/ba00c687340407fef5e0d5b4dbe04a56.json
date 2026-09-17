@@ -1,9 +1,9 @@
 {
   "key": "ba00c687340407fef5e0d5b4dbe04a56",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross order revenue broken down by customer (shopper).\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"entity:customers.customer\":\"q:shopper\",\"dimension:customers.customer_name\":\"q:shopper\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross lifetime revenue broken down by customer (shopper).\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"ordering\":{\"ref\":\"metric:customers.lifetime_spend\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:revenue\",\"entity:customers.customer\":\"q:shopper\",\"dimension:customers.customer_name\":\"q:shopper\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T14:07:58.401Z",
+  "recordedAt": "2026-09-17T18:11:56.932Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",
