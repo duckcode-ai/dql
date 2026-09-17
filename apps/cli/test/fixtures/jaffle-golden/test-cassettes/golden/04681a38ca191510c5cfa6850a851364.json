@@ -1,0 +1,23 @@
+{
+  "key": "04681a38ca191510c5cfa6850a851364",
+  "operation": "generate",
+  "text": "SELECT customer_id, customer_name, lifetime_spend\nFROM \"jaffle_shop\".\"dev\".\"customers\"\nWHERE LOWER(customer_name) = LOWER('Jordan Lee');",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T07:05:42.890Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "04681a38ca191510c5cfa6850a8513644bb4108cf3bda1970c2c144b51260f83",
+    "postCanonicalHash": "04681a38ca191510c5cfa6850a8513644bb4108cf3bda1970c2c144b51260f83",
+    "appliedRuleClasses": []
+  }
+}

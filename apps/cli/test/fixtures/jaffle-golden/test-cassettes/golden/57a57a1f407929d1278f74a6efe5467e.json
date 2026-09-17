@@ -1,9 +1,9 @@
 {
   "key": "57a57a1f407929d1278f74a6efe5467e",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Compare total food revenue and total drink (beverage) revenue.\",\"measures\":[{\"ref\":\"metric:order_item.food_revenue\",\"alias\":\"food_revenue\"},{\"ref\":\"metric:order_item.drink_revenue\",\"alias\":\"drink_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.food_revenue\":\"q:food revenue\",\"metric:order_item.drink_revenue\":\"q:drink revenue\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Compare total food revenue and total drink (beverage) revenue from order items.\",\"measures\":[{\"ref\":\"metric:order_item.food_revenue\",\"alias\":\"food_revenue\"},{\"ref\":\"metric:order_item.drink_revenue\",\"alias\":\"drink_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:order_item.food_revenue\":\"q:food revenue\",\"metric:order_item.drink_revenue\":\"q:drink revenue\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:44:07.944Z",
+  "recordedAt": "2026-09-17T07:00:25.396Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

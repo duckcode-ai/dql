@@ -1,9 +1,9 @@
 {
   "key": "b9eab28337a1a92296137e4259e0392f",
   "operation": "generate",
-  "text": "SELECT player_id, player_name, SUM(pts) AS total_points\nFROM \"nba_golden\".\"dev\".\"player_game_stats\"\nWHERE LOWER(player_name) LIKE '%totally imaginary person%'\n  AND game_date >= '2017-01-01' AND game_date < '2018-01-01'\nGROUP BY player_id, player_name;",
+  "text": "```sql\nSELECT player_id, player_name, SUM(pts) AS total_points\nFROM \"nba_golden\".\"dev\".\"player_game_stats\"\nWHERE LOWER(player_name) = LOWER('Totally Imaginary Person')\n  AND game_date >= '2017-01-01' AND game_date < '2018-01-01'\nGROUP BY player_id, player_name;\n```",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:57:22.069Z",
+  "recordedAt": "2026-09-17T07:13:44.213Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

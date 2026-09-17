@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { joinKeyPairs } from '@duckcodeailabs/dql-agent';
-import { certifiedJoinViolations, classifySqlJoins, joinableRelations, ledgerJoins, sameRelation, type ModelingRelationshipEdge } from './join-relationships.js';
+import { certifiedJoinViolations, classifySqlJoins, joinableRelations, ledgerJoins, modeledJoinPaths, sameRelation, type ModelingRelationshipEdge } from './join-relationships.js';
 
 const certified: ModelingRelationshipEdge = {
   relationshipId: 'commerce::relationship::orders_to_customers', name: 'orders_to_customers',
@@ -64,5 +64,54 @@ describe('AI-written joins against Modeling relationships', () => {
       { source: 'dql_relationship', relationshipId: draft.relationshipId, name: 'items_to_products', authority: 'draft', relations: ['dev.order_items', 'dev.products'], keys: [{ from: 'product_id', to: 'product_id' }] },
       { source: 'ai_sql', authority: 'none', relations: ['dev.order_items', 'dev.locations'], keys: [{ from: 'location_id', to: 'location_id' }] },
     ]);
+  });
+});
+
+describe('tables between the chosen ones, over the Modeling map', () => {
+  const hop = (from: string, to: string, key: string, level: ModelingRelationshipEdge['level'] = 'certified'): ModelingRelationshipEdge => ({
+    relationshipId: `${from}_${to}`, name: `${from}_${to}`, fromRelation: `main.${from}`, toRelation: `main.${to}`,
+    keys: [{ from: key, to: key }], level, cardinality: 'many_to_one',
+  });
+  // claim -> claim_coverage -> coverage_detail -> policy, plus a draft shortcut and an unrelated branch.
+  const edges = [
+    hop('claim_coverage', 'claim', 'claim_id'),
+    hop('claim_coverage', 'coverage_detail', 'coverage_id'),
+    hop('coverage_detail', 'policy', 'policy_id'),
+    hop('claim', 'policy', 'policy_ref', 'draft'),
+    hop('policy', 'agent', 'agent_id'),
+  ];
+
+  it('adds the bridge tables on the certified route between two named tables', () => {
+    const { paths, added } = modeledJoinPaths(['"db"."main"."claim"', '"db"."main"."policy"'], edges.filter((edge) => edge.level === 'certified'));
+    expect(added).toEqual(['main.claim_coverage', 'main.coverage_detail']);
+    expect(paths).toHaveLength(1);
+    expect(paths[0]!.edges.map((edge) => edge.name)).toEqual(['claim_coverage_claim', 'claim_coverage_coverage_detail', 'coverage_detail_policy']);
+  });
+
+  it('prefers a certified route of up to three hops over a direct draft join', () => {
+    const route = modeledJoinPaths(['main.claim', 'main.policy'], edges);
+    expect(route.added).toEqual(['main.claim_coverage', 'main.coverage_detail']);
+    expect(route.paths[0]!.edges.every((edge) => edge.level === 'certified')).toBe(true);
+    // Beyond the hop limit the draft join is the only route, and it is used.
+    const short = modeledJoinPaths(['main.claim', 'main.policy'], edges, { maxHops: 2 });
+    expect(short.added).toEqual([]);
+    expect(short.paths[0]!.edges[0]!.level).toBe('draft');
+  });
+
+  it('respects the hop and size limits and never routes through another chosen table', () => {
+    const certified = edges.filter((edge) => edge.level === 'certified');
+    expect(modeledJoinPaths(['main.claim', 'main.policy'], certified, { maxHops: 2 }).paths).toEqual([]);
+    expect(modeledJoinPaths(['main.claim', 'main.policy'], certified, { maxAdded: 1 }).added).toEqual([]);
+    const viaChosen = modeledJoinPaths(['main.claim', 'main.coverage_detail', 'main.agent'], certified);
+    expect(viaChosen.paths.every((path) => !path.through.some((node) => ['main.claim', 'main.coverage_detail', 'main.agent'].includes(node)))).toBe(true);
+    expect(viaChosen.added).toEqual(['main.claim_coverage', 'main.policy']);
+  });
+
+  it('adds nothing for one table, unmodeled tables, or tables already joined directly', () => {
+    expect(modeledJoinPaths(['main.claim'], edges).added).toEqual([]);
+    expect(modeledJoinPaths(['main.orders', 'main.customers'], edges).paths).toEqual([]);
+    const direct = modeledJoinPaths(['main.policy', 'main.agent'], edges);
+    expect(direct.added).toEqual([]);
+    expect(direct.paths[0]!.edges[0]!.name).toBe('policy_agent');
   });
 });

@@ -1,0 +1,23 @@
+{
+  "key": "5dd17e971caceaf85972ef9587deca79",
+  "operation": "generate",
+  "text": "NO_SQL: This is a commerce analytics dataset with no weather data available.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T07:03:24.210Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "5dd17e971caceaf85972ef9587deca79cd6e2f527e2cf6a26431e6b6d8a36732",
+    "postCanonicalHash": "5dd17e971caceaf85972ef9587deca79cd6e2f527e2cf6a26431e6b6d8a36732",
+    "appliedRuleClasses": []
+  }
+}

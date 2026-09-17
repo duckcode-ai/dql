@@ -70,7 +70,7 @@ import {
   type RuntimeSchemaTable,
 } from '@duckcodeailabs/dql-agent';
 import { buildProjectVocabulary, buildVocabularySource, embeddedManifestRelations, normalizeRelationName, type VocabularySourceInput } from './vocabulary-source.js';
-import { certifiedJoinViolations, classifySqlJoins, ledgerJoins, modelingRelationshipEdges, type LedgerJoin } from './join-relationships.js';
+import { certifiedJoinViolations, classifySqlJoins, ledgerJoins, modeledJoinPaths, modelingRelationshipEdges, sameRelation, type LedgerJoin } from './join-relationships.js';
 
 /**
  * THE ASK PIPELINE HOST.
@@ -612,6 +612,32 @@ export function joinsAnyRelation(candidate: string, anchors: string[], columnsOf
  * about that value; it is not a rule for every question in its scope. A hint
  * naming no value applies as retrieved.
  */
+const SKILL_WORD = /[a-z][a-z0-9]{2,}/g;
+const SKILL_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'what', 'which', 'each', 'all', 'are', 'from', 'that', 'this', 'how', 'many', 'much', 'our', 'have', 'has', 'jaffle', 'main', 'dev']);
+
+/**
+ * THE SKILLS AN AI-WRITTEN STATEMENT READS: at most two selected skills with
+ * written guidance, ranked by the distinct words (and table names, split on
+ * underscores) they share with the question and the chosen tables. A skill
+ * that shares nothing is not shown.
+ */
+export function skillsForDraft(entries: VocabularyEntry[], text: string, max = 2): VocabularyEntry[] {
+  const words = (value: string) => new Set((value.toLowerCase().replace(/[_."]/g, ' ').match(SKILL_WORD) ?? []).filter((word) => !SKILL_STOPWORDS.has(word)));
+  const wanted = words(text);
+  return entries
+    .filter((entry) => entry.kind === 'skill' && Boolean(entry.skill?.guidance))
+    .map((entry, index) => {
+      const own = words(`${entry.name} ${entry.label ?? ''} ${entry.description ?? ''} ${entry.skill!.guidance}`);
+      let shared = 0;
+      for (const word of wanted) if (own.has(word)) shared += 1;
+      return { entry, shared, index };
+    })
+    .filter((item) => item.shared > 0)
+    .sort((a, b) => b.shared - a.shared || a.index - b.index)
+    .slice(0, max)
+    .map((item) => item.entry);
+}
+
 /** A declared relationship two tables of an AI-written statement both carry the keys of. */
 export type PreferredJoin = { name: string; certified: boolean; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: string };
 
@@ -1770,7 +1796,18 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       const reachesReading = (candidate: string) => joinsAnyRelation(candidate, readingRelations, sourceColumns);
       // Tables that share a key with the reading's tables come first; the rest
       // stay available. Whether a table is "right" is the AI's call, disclosed.
-      const rankByReach = (names: string[]): string[] => names.map((name, index) => ({ name, index, reach: reachesReading(name) ? 1 : 0 })).sort((left, right) => right.reach - left.reach || left.index - right.index).map((item) => item.name);
+      // On a modeled project the Modeling map decides reach: a table on the map
+      // reaches the reading only through modeled relationships (two hops at
+      // most), so a table that merely shares a column name ranks last.
+      const modeledEdges = readingRelations.length > 0 ? modelingRelationshipEdges(deps.getManifest().manifest) : [];
+      const onMap = (name: string) => modeledEdges.some((edge) => sameRelation(edge.fromRelation, name) || sameRelation(edge.toRelation, name));
+      const reachOf = (name: string): number => {
+        if (modeledEdges.length > 0 && onMap(name)) {
+          return readingRelations.some((relation) => sameRelation(relation, name) || modeledJoinPaths([name, relation], modeledEdges, { maxHops: 2, maxAdded: 2 }).paths.length > 0) ? 2 : 0;
+        }
+        return reachesReading(name) ? 1 : 0;
+      };
+      const rankByReach = (names: string[]): string[] => names.map((name, index) => ({ name, index, reach: reachOf(name) })).sort((left, right) => right.reach - left.reach || left.index - right.index).map((item) => item.name);
       const catalogPick = (text: string, exclude: string[], max: number, objectTypes: string[] = ['dbt_column', 'dbt_model', 'dbt_source', 'warehouse_table']): string[] => {
         if (!deps.searchCatalog || !text.trim()) return [];
         try {
@@ -1793,13 +1830,41 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         } catch { /* the relations named so far stand */ }
       }
       if (relations.length === 0) return { error: 'no table in this project matches the question' };
+      // THE TABLES BETWEEN: when the team modeled how the chosen tables
+      // connect, the tables on that route are drafted over too, and each hop
+      // is shown as a preferred join. Only relations this request admits are added.
+      const modeledRoutes: Array<{ name: string; certified: boolean; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: string }> = [];
+      const bridged: string[] = [];
+      if (relations.length >= 2) {
+        try {
+          const source = view.source ?? (await baseSourceFor(connection)).source;
+          const admitted = (name: string): string | undefined => {
+            const found = (source?.relations ?? []).find((item) => sameRelation(item.binding ? physicalRelationText(item.binding) : [item.schema, item.name].filter(Boolean).join('.'), name));
+            return found ? (found.binding ? physicalRelationText(found.binding) : [found.schema, found.name].filter(Boolean).join('.')) : undefined;
+          };
+          const physicalOf = (name: string) => relations.find((relation) => sameRelation(relation, name)) ?? admitted(name);
+          const { paths } = modeledJoinPaths(relations, modelingRelationshipEdges(deps.getManifest().manifest));
+          for (const path of paths) {
+            const through = path.through.map(admitted);
+            if (through.some((relation) => !relation)) continue;
+            for (const relation of through as string[]) {
+              if (!relations.some((known) => physicalRelationIdentity(known) === physicalRelationIdentity(relation))) { relations.push(relation); bridged.push(relation); }
+            }
+            for (const edge of path.edges) {
+              const from = physicalOf(edge.fromRelation);
+              const to = physicalOf(edge.toRelation);
+              if (from && to) modeledRoutes.push({ name: edge.name, certified: edge.level === 'certified', from, to, keys: edge.keys, cardinality: edge.cardinality });
+            }
+          }
+        } catch { /* the tables chosen so far stand */ }
+      }
       const needsColumns = relations.filter((relation) => {
         const entry = current.entries.find((item) => item.kind === 'relation' && entryPhysicalRelation(item) !== undefined && physicalRelationIdentity(entryPhysicalRelation(item)!) === physicalRelationIdentity(relation));
         return !entry || entry.physical?.binding?.columnCompleteness !== 'complete' || !current.entries.some((item) => item.kind === 'column' && samePhysicalEntry(item, entry));
       });
       if (needsColumns.length > 0) {
         try {
-          const found = await describeRelations(needsColumns.slice(0, 5));
+          const found = await describeRelations(needsColumns.slice(0, 9));
           if (found.length > 0) {
             current = mergeDiscoveredRelations(current, found);
             requestVocabulary = current;
@@ -1809,7 +1874,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       // Only tables whose columns are known can be drafted over.
       relations = relations.filter((relation) => current.entries.some((item) => item.kind === 'column' && (() => { const physical = entryPhysicalRelation(item); return physical !== undefined && physicalRelationIdentity(physical) === physicalRelationIdentity(relation); })()));
       if (relations.length === 0) return { error: 'the tables that match the question could not be described on this connection' };
-      hostStep({ phase: 'schema', title: `Chose ${relations.length === 1 ? 'the table' : 'the tables'} ${relations.join(', ')}`, state: 'done', detail: `picked from ${refs.length ? 'the fields the reading named' : 'the words of the question'}${catalogPicked.length ? `; found by the catalog search: ${catalogPicked.join(', ')}` : ''}${needsColumns.length ? `; columns of ${needsColumns.slice(0, 4).join(', ')} read from the warehouse` : ''}` });
+      hostStep({ phase: 'schema', title: `Chose ${relations.length === 1 ? 'the table' : 'the tables'} ${relations.join(', ')}`, state: 'done', detail: `picked from ${refs.length ? 'the fields the reading named' : 'the words of the question'}${catalogPicked.length ? `; found by the catalog search: ${catalogPicked.join(', ')}` : ''}${bridged.length ? `; added to connect them over modeled relationships: ${bridged.join(', ')}` : ''}${needsColumns.length ? `; columns of ${needsColumns.slice(0, 4).join(', ')} read from the warehouse` : ''}` });
       // THE CONTEXT THE DRAFT READS: what the user said, the previous reading,
       // and what the project says about this data (domain notes, business
       // terms the question uses, approved hints).
@@ -1845,7 +1910,20 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         });
       // PREFERRED JOINS: hints for how two of these tables join, never a gate.
       const joinHints = preferredJoinHints(current.entries, relations, sourceColumns);
-      const joinLines = joinHints.map(preferredJoinLine);
+      // A modeled hop is shown unless a hint above already covers that pair of
+      // tables, so a draft that already had its joins reads the same as before.
+      const pairKey = (a: string, b: string) => [physicalRelationIdentity(a), physicalRelationIdentity(b)].sort().join(' ~ ');
+      const hinted = new Set(joinHints.map((hint) => pairKey(hint.from, hint.to)));
+      const routeLines = modeledRoutes
+        .filter((route) => relations.some((relation) => physicalRelationIdentity(relation) === physicalRelationIdentity(route.from)) && relations.some((relation) => physicalRelationIdentity(relation) === physicalRelationIdentity(route.to)))
+        .filter((route) => !hinted.has(pairKey(route.from, route.to)))
+        .map(preferredJoinLine);
+      const joinLines = [...new Set([...routeLines, ...joinHints.map(preferredJoinLine)])];
+      // THE PROJECT'S WRITTEN RULES: the skills selected for this request whose
+      // text shares the most words with the question and the chosen tables,
+      // long enough to carry a definition (the reading step sees a short card).
+      const skillLines = skillsForDraft(current.entries, `${question} ${intent?.reading ?? ''} ${relations.join(' ')}`)
+        .map((entry) => `- project skill ${entry.label ?? entry.name}: ${(entry.skill?.guidance ?? entry.description ?? '').replace(/\s+/g, ' ').slice(0, 1500)}`);
       const contextLines = [
         ...(contextText ? [`- conversation so far: ${contextText.slice(0, 600)}`] : []),
         ...(prior?.intent.reading ? [`- previous reading: ${prior.intent.reading.slice(0, 300)}${prior.summary ? `; its answer: ${prior.summary.slice(0, 300)}` : ''}`] : []),
@@ -1854,6 +1932,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         ...termLines,
         ...metricLines,
         ...joinLines,
+        ...skillLines,
         ...hintLines,
       ];
       const attemptDraft = async (note?: string, label?: 'fix' | 'widen'): Promise<Awaited<ReturnType<NonNullable<PrepareDeps['draftSql']>>>> => {

@@ -1,9 +1,9 @@
 {
   "key": "bdf8ad4ecd3c9258870f562dbd9e5c35",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What is the total lifetime spend for the customer named Jordan Lee?\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Jordan Lee\"],\"source\":\"question\"}],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:lifetime spend\",\"dimension:customers.customer_name\":\"q:Jordan Lee\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What is the gross lifetime spend for the customer named Jordan Lee?\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Jordan Lee\"],\"source\":\"question\"}],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:lifetime spend\",\"dimension:customers.customer_name\":\"q:Jordan Lee\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:49:47.179Z",
+  "recordedAt": "2026-09-17T07:05:39.258Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

@@ -219,7 +219,8 @@
      "order_count",
      "orders",
      "count_lifetime_orders",
-     "order_id"
+     "order_id",
+     "orders_placed"
     ]
    },
    "identity": [

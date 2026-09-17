@@ -1,9 +1,9 @@
 {
   "key": "86b1afeb12ff8684821ec83665db601c",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross order revenue broken down by location.\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[{\"ref\":\"entity:locations.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"metric:orders.order_total\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:total revenue\",\"entity:locations.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross order revenue broken down by location.\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[{\"ref\":\"entity:orders.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:total revenue\",\"entity:orders.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:42:56.999Z",
+  "recordedAt": "2026-09-17T06:59:15.429Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

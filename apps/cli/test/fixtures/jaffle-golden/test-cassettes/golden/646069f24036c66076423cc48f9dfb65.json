@@ -1,9 +1,9 @@
 {
   "key": "646069f24036c66076423cc48f9dfb65",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross order revenue including tax across all orders.\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:revenue do we have including tax\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross order revenue including tax across all orders.\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:revenue including tax\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:51:13.787Z",
+  "recordedAt": "2026-09-17T07:07:05.413Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

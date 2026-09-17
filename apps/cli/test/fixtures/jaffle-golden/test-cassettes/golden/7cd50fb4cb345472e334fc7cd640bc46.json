@@ -1,9 +1,9 @@
 {
   "key": "7cd50fb4cb345472e334fc7cd640bc46",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total revenue from beverage products.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:order_item.drink_revenue\":\"q:beverage revenue\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total revenue from beverage (drink) products.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:order_item.drink_revenue\":\"q:beverage revenue\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:42:05.199Z",
+  "recordedAt": "2026-09-17T06:58:22.714Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

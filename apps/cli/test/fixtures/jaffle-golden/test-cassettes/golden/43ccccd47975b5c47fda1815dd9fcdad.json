@@ -1,0 +1,23 @@
+{
+  "key": "43ccccd47975b5c47fda1815dd9fcdad",
+  "operation": "generate",
+  "text": "```sql\nSELECT\n  SUM(oi.product_price) - SUM(o.order_cost) AS gross_profit,\n  (SUM(oi.product_price) - SUM(o.order_cost)) / NULLIF(SUM(oi.product_price), 0) AS gross_margin_pct\nFROM \"jaffle_shop\".\"dev\".\"order_items\" oi\nJOIN \"jaffle_shop\".\"dev\".\"orders\" o\n  ON oi.order_id = o.order_id\nWHERE oi.ordered_at >= '2025-01-01' AND oi.ordered_at < '2026-01-01'\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T07:06:02.144Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "43ccccd47975b5c47fda1815dd9fcdad127511530c4af578e87cc1b486042a25",
+    "postCanonicalHash": "43ccccd47975b5c47fda1815dd9fcdad127511530c4af578e87cc1b486042a25",
+    "appliedRuleClasses": []
+  }
+}

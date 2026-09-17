@@ -1,9 +1,9 @@
 {
   "key": "505730c7d08c92f93f83e74f37df680c",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Which player scored the most total points across games in calendar year 2017?\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:scored the most points\",\"dimension:player_game_stats.player_id\":\"q:Who scored\",\"dimension:player_game_stats.player_name\":\"q:Who scored\",\"dimension:player_game_stats.game_date\":\"q:in calendar year 2017\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Which player scored the most total points across games in calendar year 2017?\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:players.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:players.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":1,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.pts\":\"q:scored the most points\",\"dimension:players.player_id\":\"q:Who scored\",\"dimension:players.player_name\":\"q:Who scored\",\"dimension:player_game_stats.game_date\":\"q:calendar year 2017\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:55:15.273Z",
+  "recordedAt": "2026-09-17T07:11:39.079Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

@@ -1,9 +1,9 @@
 {
   "key": "ed8650e797350ccbdf2eff4cc2e294aa",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Find the five players with the highest total points scored during the 2016-17 NBA season (season code 2016).\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"dimension:player_game_stats.season\",\"op\":\"eq\",\"values\":[2016],\"source\":\"question\"}],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":5,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:top five scorers\",\"dimension:player_game_stats.player_id\":\"q:top five scorers\",\"dimension:player_game_stats.player_name\":\"q:top five scorers\",\"dimension:player_game_stats.season\":\"q:2016-17 NBA season\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by total points scored in the 2016-17 NBA season (season code 2016) and return the top five.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\",\"scope\":[{\"ref\":\"dimension:player_game_stats.season\",\"op\":\"eq\",\"values\":[2016],\"source\":\"question\"},{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}]}],\"groupBy\":[{\"ref\":\"dimension:players.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:players.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":5,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.pts\":\"q:top five scorers\",\"dimension:player_game_stats.season\":\"q:2016-17 NBA season\",\"dimension:player_game_stats.played\":\"q:scorers (played games)\",\"dimension:players.player_id\":\"q:top five scorers\",\"dimension:players.player_name\":\"q:top five scorers\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:55:36.339Z",
+  "recordedAt": "2026-09-17T07:11:57.961Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

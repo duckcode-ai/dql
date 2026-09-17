@@ -4,7 +4,7 @@ import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeaila
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, createAgentRunBudget, parseIntent, physicalRelationBinding, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import { preferredJoinHints, preferredJoinLine, joinHintUsed, hintsForQuestion, joinsAnyRelation, sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
+import { preferredJoinHints, preferredJoinLine, skillsForDraft, joinHintUsed, hintsForQuestion, joinsAnyRelation, sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -1243,6 +1243,154 @@ describe('the schema lane on the host: no governed reading, the AI drafts SQL fr
     expect(statements.every((sql) => sql.includes('information_schema'))).toBe(true);
     expect(result.status).not.toBe('completed');
     expect(JSON.stringify(result)).toContain('nothing in sales.opportunities records a lost deal count');
+  });
+});
+
+describe('the tables between two named tables come from the Modeling map', () => {
+  const connection: ConnectionConfig = { driver: 'duckdb', path: ':memory:' } as ConnectionConfig;
+  const tables: Record<string, string[]> = {
+    claims: ['claim_id', 'claim_amount'],
+    cc_link: ['claim_id', 'detail_id'],
+    cd_link: ['detail_id', 'policy_id'],
+    policies: ['policy_id', 'policy_number'],
+  };
+  const source = (name: string) => ({ name, origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: `model.${name}`, schema: 'ins', columns: Object.fromEntries(tables[name]!.map((column) => [column, { name: column }])) } });
+  const relationship = (id: string, from: string, to: string, key: string) => ({ id, from, to, keys: [{ from: key, to: key }], cardinality: 'many_to_one', status: 'draft' });
+  const manifest = {
+    sources: Object.fromEntries(Object.keys(tables).map((name) => [name, source(name)])),
+    dbtProvenance: { nodes: Object.fromEntries(Object.keys(tables).map((name) => [`model.${name}`, { relation: `ins.${name}` }])) },
+    modeling: {
+      entities: Object.fromEntries(Object.keys(tables).map((name) => [name, { id: name, dbtUniqueId: `model.${name}` }])),
+      relationships: {
+        a: relationship('link_to_claim', 'cc_link', 'claims', 'claim_id'),
+        b: relationship('link_to_detail', 'cc_link', 'cd_link', 'detail_id'),
+        c: relationship('detail_to_policy', 'cd_link', 'policies', 'policy_id'),
+      },
+    },
+  };
+  const unreadable = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Claim count by policy.', measures: [{ ref: 'metric:ins.claim_count' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' });
+
+  it('adds the linking tables to the draft and shows each hop as a join', async () => {
+    const prompts: string[] = [];
+    const provider: AgentProvider = {
+      name: 'ollama', available: async () => true,
+      generate: async (messages) => {
+        if (!messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) return unreadable;
+        prompts.push(messages.map((message) => message.content).join('\n'));
+        return 'NO_SQL: nothing to draft in this test.';
+      },
+    };
+    const route = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-modeled-route',
+      executor: { executeQuery: vi.fn(async (sql: string) => {
+        if (sql.includes('information_schema.columns')) {
+          const rows = Object.entries(tables).filter(([name]) => sql.includes(`'${name}'`))
+            .flatMap(([name, columns]) => columns.map((column) => ({ table_schema: 'ins', table_name: name, column_name: column, data_type: 'VARCHAR' })));
+          return { columns: [], rowCount: rows.length, executionTimeMs: 1, rows };
+        }
+        return { columns: [], rowCount: 0, executionTimeMs: 1, rows: [] };
+      }) } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => undefined,
+      getManifest: () => ({ snapshotId: 'snapshot:modeled-route', manifest: manifest as never }),
+      selectProvider: async () => provider,
+      compileSemantic: async () => { throw new Error('no semantic layer'); },
+      priorIntent: () => undefined,
+    });
+    await route({
+      runId: 'run:modeled-route',
+      request: { question: 'Count claims for each of the policies', requestedMode: 'ask' } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+    expect(prompts.length).toBeGreaterThan(0);
+    const first = prompts[0]!;
+    expect(first).toContain('ins.cc_link');
+    expect(first).toContain('ins.cd_link');
+    expect(first).toContain('preferred join (declared, not validated: link_to_claim)');
+    expect(first).toContain('preferred join (declared, not validated: detail_to_policy)');
+  });
+});
+
+describe('on a modeled project, tables are ranked by the Modeling map', () => {
+  const connection: ConnectionConfig = { driver: 'duckdb', path: ':memory:' } as ConnectionConfig;
+  const tables: Record<string, string[]> = {
+    claims: ['claim_id', 'claim_amount'],
+    cc_link: ['claim_id', 'detail_id'],
+    // Look-alikes carry a claim_id too, but the team never related them to claims.
+    policy_no_a: ['policy_ref', 'claim_id'],
+    policy_no_b: ['policy_ref', 'claim_id'],
+    policy_no_c: ['policy_ref', 'claim_id'],
+  };
+  const relationship = (id: string, from: string, to: string, key: string) => ({ id, from, to, keys: [{ from: key, to: key }], cardinality: 'many_to_one', status: 'draft' });
+  const manifest = {
+    sources: Object.fromEntries(Object.entries(tables).map(([name, columns]) => [name, { name, origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: `model.${name}`, schema: 'ins', columns: Object.fromEntries(columns.map((column) => [column, { name: column }])) } }])),
+    dbtProvenance: { nodes: Object.fromEntries(Object.keys(tables).map((name) => [`model.${name}`, { relation: `ins.${name}` }])) },
+    modeling: {
+      entities: Object.fromEntries(Object.keys(tables).map((name) => [name, { id: name, dbtUniqueId: `model.${name}` }])),
+      relationships: {
+        a: relationship('link_to_claim', 'cc_link', 'claims', 'claim_id'),
+        b: relationship('a_to_b', 'policy_no_a', 'policy_no_b', 'policy_ref'),
+        c: relationship('b_to_c', 'policy_no_b', 'policy_no_c', 'policy_ref'),
+      },
+    },
+  };
+  const reading = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Total claim amount by detail.', measures: [{ ref: 'metric:ins.unknown_total' }, { ref: 'column:ins.claims.claim_amount', aggregation: 'sum' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped' });
+
+  it('a table the question reaches over modeled relationships is chosen before look-alikes that do not connect', async () => {
+    const prompts: string[] = [];
+    const provider: AgentProvider = {
+      name: 'ollama', available: async () => true,
+      generate: async (messages) => {
+        if (!messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) return reading;
+        prompts.push(messages.map((message) => message.content).join('\n'));
+        return 'NO_SQL: nothing to draft in this test.';
+      },
+    };
+    const route = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-modeled-rank',
+      executor: { executeQuery: vi.fn(async (sql: string) => {
+        if (sql.includes('information_schema.columns')) {
+          const rows = Object.entries(tables).filter(([name]) => sql.includes(`'${name}'`))
+            .flatMap(([name, columns]) => columns.map((column) => ({ table_schema: 'ins', table_name: name, column_name: column, data_type: 'VARCHAR' })));
+          return { columns: [], rowCount: rows.length, executionTimeMs: 1, rows };
+        }
+        return { columns: [], rowCount: 0, executionTimeMs: 1, rows: [] };
+      }) } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => undefined,
+      getManifest: () => ({ snapshotId: 'snapshot:modeled-rank', manifest: manifest as never }),
+      selectProvider: async () => provider,
+      compileSemantic: async () => { throw new Error('no semantic layer'); },
+      priorIntent: () => undefined,
+      // The catalog offers the look-alikes first.
+      searchCatalog: () => ['policy_no_a', 'policy_no_b', 'policy_no_c', 'cc_link'].map((name) => ({ objectType: 'dbt_model', name, relation: `ins.${name}` })),
+    });
+    await route({
+      runId: 'run:modeled-rank',
+      request: { question: 'Total claim amount by detail', requestedMode: 'ask' } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+    expect(prompts.length).toBeGreaterThan(0);
+    const relationsSection = prompts[0]!.slice(prompts[0]!.indexOf('RELATIONS AND COLUMNS'));
+    // Three catalog picks: the connected table takes one of them, so the last look-alike is left out.
+    expect(relationsSection).toContain('executable relation:ins.cc_link');
+    expect(relationsSection).not.toContain('executable relation:ins.policy_no_c');
+  });
+});
+
+describe('the skills an AI-written statement reads', () => {
+  const skill = (name: string, guidance: string) => ({ kind: 'skill', ref: `skill:${name}`, name, aliases: [], skill: { preferredRefs: [], requiredFilters: [], clarifyWhen: [], vocabulary: {}, guidance } }) as unknown as Parameters<typeof skillsForDraft>[0][number];
+  const entries = [
+    skill('locations', 'Addresses live in location_address; geographic_location holds the region.'),
+    skill('premiums', 'A premium is a policy_amount row that has a premium row; sum policy_amount for premiums.'),
+    skill('claims', 'Loss payments are claim_amount rows that have a loss_payment row.'),
+    skill('empty', ''),
+  ];
+
+  it('keeps at most two skills that share words with the question and tables, best first', () => {
+    expect(skillsForDraft(entries, 'total premiums by policy "main"."policy_amount"').map((entry) => entry.name)).toEqual(['premiums', 'claims']);
+    expect(skillsForDraft(entries, 'loss payment amount by claim, with premium').map((entry) => entry.name)).toEqual(['claims', 'premiums']);
+    expect(skillsForDraft(entries, 'how many orders')).toEqual([]);
   });
 });
 

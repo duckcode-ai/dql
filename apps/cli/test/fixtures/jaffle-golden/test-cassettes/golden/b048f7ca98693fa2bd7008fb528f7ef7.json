@@ -3,7 +3,7 @@
   "operation": "generate",
   "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by their lifetime spend to find the top customers.\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:customers.lifetime_spend\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:top customers\",\"entity:customers.customer\":\"q:customers\",\"dimension:customers.customer_name\":\"q:customers\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:41:27.622Z",
+  "recordedAt": "2026-09-17T06:57:52.631Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

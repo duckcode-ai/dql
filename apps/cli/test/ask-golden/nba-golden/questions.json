@@ -443,7 +443,8 @@
      "assist_turnover_ratio",
      "assists_per_turnover",
      "ast_tov_ratio",
-     "ast_to_turnover_ratio"
+     "ast_to_turnover_ratio",
+     "ast_to_to_ratio"
     ]
    },
    "identity": [

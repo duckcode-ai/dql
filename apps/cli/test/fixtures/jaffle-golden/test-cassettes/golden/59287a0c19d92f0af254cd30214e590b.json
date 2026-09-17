@@ -1,0 +1,24 @@
+{
+  "key": "59287a0c19d92f0af254cd30214e590b",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"For customer Ryan Byrd, show total revenue (gross lifetime spend including tax) and beverage (drink) revenue.\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\",\"alias\":\"total_revenue\"},{\"ref\":\"metric:order_item.drink_revenue\",\"alias\":\"beverage_revenue\"}],\"groupBy\":[],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[{\"ref\":\"dimension:customers.customer_name\",\"op\":\"eq\",\"values\":[\"Ryan byrd\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:total revenue\",\"metric:order_item.drink_revenue\":\"q:beverage revenue\",\"dimension:customers.customer_name\":\"q:Ryan byrd\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T07:10:54.338Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "59287a0c19d92f0af254cd30214e590b708f2bf61b263a096cf9fe2a2d4862ba",
+    "postCanonicalHash": "59287a0c19d92f0af254cd30214e590b708f2bf61b263a096cf9fe2a2d4862ba",
+    "appliedRuleClasses": []
+  }
+}

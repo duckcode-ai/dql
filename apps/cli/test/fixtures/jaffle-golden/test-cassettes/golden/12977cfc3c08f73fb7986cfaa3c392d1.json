@@ -1,0 +1,23 @@
+{
+  "key": "12977cfc3c08f73fb7986cfaa3c392d1",
+  "operation": "generate",
+  "text": "NO_SQL: No churn metric or region dimension exists in the listed tables/columns to compute churn rate by region.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T07:02:53.574Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "12977cfc3c08f73fb7986cfaa3c392d15bfaf2fcb302a48d8aac6be41cd70686",
+    "postCanonicalHash": "12977cfc3c08f73fb7986cfaa3c392d15bfaf2fcb302a48d8aac6be41cd70686",
+    "appliedRuleClasses": []
+  }
+}

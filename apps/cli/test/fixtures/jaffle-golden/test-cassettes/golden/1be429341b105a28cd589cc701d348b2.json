@@ -1,0 +1,23 @@
+{
+  "key": "1be429341b105a28cd589cc701d348b2",
+  "operation": "generate",
+  "text": "```sql\nWITH monthly AS (\n  SELECT\n    SUM(CASE WHEN order_items.ordered_at >= '2025-07-01' AND order_items.ordered_at < '2025-08-01' THEN order_items.product_price ELSE 0 END) AS revenue_jul_2025,\n    SUM(CASE WHEN order_items.ordered_at >= '2025-08-01' AND order_items.ordered_at < '2025-09-01' THEN order_items.product_price ELSE 0 END) AS revenue_aug_2025\n  FROM \"jaffle_shop\".\"dev\".\"order_items\" AS order_items\n  WHERE order_items.ordered_at >= '2025-07-01' AND order_items.ordered_at < '2025-09-01'\n)\nSELECT\n  revenue_jul_2025,\n  revenue_aug_2025,\n  CASE WHEN revenue_jul_2025 = 0 THEN NULL\n       ELSE (revenue_aug_2025 - revenue_jul_2025) / revenue_jul_2025 * 100\n  END AS revenue_change_pct\nFROM monthly;\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T07:06:35.011Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "1be429341b105a28cd589cc701d348b243c0bd79209ac116d577f8e8bf403c8b",
+    "postCanonicalHash": "1be429341b105a28cd589cc701d348b243c0bd79209ac116d577f8e8bf403c8b",
+    "appliedRuleClasses": []
+  }
+}

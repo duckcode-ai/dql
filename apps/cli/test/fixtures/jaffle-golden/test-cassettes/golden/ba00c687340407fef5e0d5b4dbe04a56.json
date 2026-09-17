@@ -1,9 +1,9 @@
 {
   "key": "ba00c687340407fef5e0d5b4dbe04a56",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total gross revenue broken down by customer (shopper).\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:revenue\",\"entity:customers.customer\":\"q:shopper\",\"dimension:customers.customer_name\":\"q:shopper\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total order revenue broken down by customer (shopper).\",\"measures\":[{\"ref\":\"metric:orders.order_total\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"entity:orders.customer\":\"q:shopper\",\"dimension:customers.customer_name\":\"q:shopper\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:52:09.715Z",
+  "recordedAt": "2026-09-17T07:07:55.443Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

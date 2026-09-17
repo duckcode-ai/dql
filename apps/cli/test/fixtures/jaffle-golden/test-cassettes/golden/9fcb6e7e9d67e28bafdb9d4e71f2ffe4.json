@@ -1,9 +1,9 @@
 {
   "key": "9fcb6e7e9d67e28bafdb9d4e71f2ffe4",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total count of orders.\",\"measures\":[{\"ref\":\"metric:orders.orders\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.orders\":\"q:how many orders\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count the total number of orders.\",\"measures\":[{\"ref\":\"metric:orders.orders\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.orders\":\"q:how many orders are there\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:48:05.419Z",
+  "recordedAt": "2026-09-17T07:04:23.631Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

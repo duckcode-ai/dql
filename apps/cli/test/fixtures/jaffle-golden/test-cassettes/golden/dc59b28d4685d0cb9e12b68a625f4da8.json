@@ -1,0 +1,23 @@
+{
+  "key": "dc59b28d4685d0cb9e12b68a625f4da8",
+  "operation": "generate",
+  "text": "```sql\nSELECT\n  l.location_id,\n  l.location_name,\n  SUM(CASE WHEN oi.is_food_item THEN oi.product_price ELSE 0 END) AS food_revenue\nFROM \"jaffle_shop\".\"dev\".\"order_items\" oi\nJOIN \"jaffle_shop\".\"dev\".\"orders\" o\n  ON oi.order_id = o.order_id\nJOIN \"jaffle_shop\".\"dev\".\"locations\" l\n  ON o.location_id = l.location_id\nGROUP BY l.location_id, l.location_name\nORDER BY food_revenue DESC\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T07:04:10.848Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "dc59b28d4685d0cb9e12b68a625f4da8c118def6688265da5d83159c412d6af2",
+    "postCanonicalHash": "dc59b28d4685d0cb9e12b68a625f4da8c118def6688265da5d83159c412d6af2",
+    "appliedRuleClasses": []
+  }
+}

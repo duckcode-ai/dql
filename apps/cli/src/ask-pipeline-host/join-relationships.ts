@@ -179,3 +179,98 @@ export function ledgerJoins(uses: SqlJoinUse[]): LedgerJoin[] {
     ? { source: 'dql_relationship', relationshipId: use.relationship.relationshipId, name: use.relationship.name, authority: use.relationship.level, relations: [...use.relations], keys: use.keys }
     : { source: 'ai_sql', authority: 'none', relations: [...use.relations], keys: use.keys, ...(use.relationship ? { relationshipId: use.relationship.relationshipId, name: use.relationship.name } : {}) }));
 }
+
+/** A path of modeled relationships that connects two chosen tables. */
+export interface ModeledJoinPath {
+  between: [string, string];
+  /** Edges in walking order; `edge.fromRelation`/`toRelation` keep the relationship's own direction. */
+  edges: ModelingRelationshipEdge[];
+  /** Tables on the path that were not chosen. */
+  through: string[];
+}
+
+// A certified hop is the cheapest; a draft hop is allowed but costs more than
+// a three-hop certified route, so certified knowledge wins whenever it reaches
+// within the hop limit. A stale certification counts as a draft.
+const HOP_COST: Record<RelationshipJoinLevel, number> = { certified: 1, validated: 1.5, stale: 3.5, draft: 3.5 };
+
+/**
+ * THE TABLES BETWEEN. A question names the tables it is about (claims,
+ * policies); the tables that connect them (a coverage bridge) are rarely named,
+ * so an AI drafting SQL over only the named tables finds "no column links
+ * claim to policy" although the team modeled exactly that link. For every pair
+ * of chosen tables, the cheapest route over the Modeling map (certified hops
+ * preferred, at most `maxHops`) is found; its intermediate tables are added
+ * (at most `maxAdded`, cheapest routes first) and its hops become join hints.
+ * Nothing here is a gate: the AI still chooses the joins, and certified keys
+ * still bind any join it makes (`certifiedJoinViolations`).
+ */
+export function modeledJoinPaths(
+  chosen: string[],
+  edges: ModelingRelationshipEdge[],
+  options: { maxHops?: number; maxAdded?: number } = {},
+): { paths: ModeledJoinPath[]; added: string[] } {
+  const maxHops = options.maxHops ?? 3;
+  const maxAdded = options.maxAdded ?? 4;
+  const nodeOf = (relation: string): string | undefined => {
+    for (const edge of edges) {
+      if (sameRelation(edge.fromRelation, relation)) return edge.fromRelation;
+      if (sameRelation(edge.toRelation, relation)) return edge.toRelation;
+    }
+    return undefined;
+  };
+  const neighbours = new Map<string, Array<{ to: string; edge: ModelingRelationshipEdge }>>();
+  const link = (from: string, to: string, edge: ModelingRelationshipEdge) => {
+    if (!neighbours.has(from)) neighbours.set(from, []);
+    neighbours.get(from)!.push({ to, edge });
+  };
+  for (const edge of edges) {
+    link(edge.fromRelation, edge.toRelation, edge);
+    link(edge.toRelation, edge.fromRelation, edge);
+  }
+  const chosenNodes = [...new Set(chosen.map(nodeOf).filter((node): node is string => Boolean(node)))];
+  const isChosen = (node: string) => chosenNodes.includes(node);
+
+  const cheapest = (start: string, goal: string): { cost: number; nodes: string[]; edges: ModelingRelationshipEdge[] } | undefined => {
+    // Dijkstra over a small graph; ties keep the first-declared relationship.
+    const best = new Map<string, { cost: number; hops: number; nodes: string[]; edges: ModelingRelationshipEdge[] }>([[start, { cost: 0, hops: 0, nodes: [start], edges: [] }]]);
+    const open = [start];
+    while (open.length > 0) {
+      open.sort((a, b) => best.get(a)!.cost - best.get(b)!.cost);
+      const node = open.shift()!;
+      const here = best.get(node)!;
+      if (node === goal) return here;
+      if (here.hops >= maxHops) continue;
+      for (const { to, edge } of neighbours.get(node) ?? []) {
+        // A route runs through tables nobody chose; it never detours through another chosen table.
+        if (to !== goal && isChosen(to)) continue;
+        if (here.nodes.includes(to)) continue;
+        const cost = here.cost + HOP_COST[edge.level];
+        const known = best.get(to);
+        if (known && known.cost <= cost) continue;
+        best.set(to, { cost, hops: here.hops + 1, nodes: [...here.nodes, to], edges: [...here.edges, edge] });
+        if (!open.includes(to)) open.push(to);
+      }
+    }
+    return undefined;
+  };
+
+  const routes: Array<{ cost: number; path: ModeledJoinPath }> = [];
+  for (let i = 0; i < chosenNodes.length; i += 1) {
+    for (let j = i + 1; j < chosenNodes.length; j += 1) {
+      const route = cheapest(chosenNodes[i]!, chosenNodes[j]!);
+      if (!route) continue;
+      routes.push({ cost: route.cost, path: { between: [chosenNodes[i]!, chosenNodes[j]!], edges: route.edges, through: route.nodes.slice(1, -1) } });
+    }
+  }
+  routes.sort((a, b) => a.cost - b.cost);
+  const added: string[] = [];
+  const paths: ModeledJoinPath[] = [];
+  for (const { path } of routes) {
+    const fresh = path.through.filter((node) => !added.includes(node));
+    if (added.length + fresh.length > maxAdded) continue;
+    added.push(...fresh);
+    paths.push(path);
+  }
+  return { paths, added };
+}

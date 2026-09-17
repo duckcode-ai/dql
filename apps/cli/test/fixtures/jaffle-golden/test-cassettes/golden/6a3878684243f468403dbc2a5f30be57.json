@@ -1,9 +1,9 @@
 {
   "key": "6a3878684243f468403dbc2a5f30be57",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total product revenue broken down by product type.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\"}],\"groupBy\":[{\"ref\":\"dimension:products.product_type\",\"role\":\"categorical\"}],\"display\":[\"dimension:products.product_type\"],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"dimension:products.product_type\":\"q:by product type\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Total product revenue broken down by product type.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\"}],\"groupBy\":[{\"ref\":\"dimension:products.product_type\",\"role\":\"categorical\"}],\"display\":[\"dimension:products.product_type\"],\"filters\":[],\"expectedShape\":\"grouped\",\"ordering\":{\"ref\":\"metric:order_item.revenue\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:revenue\",\"dimension:products.product_type\":\"q:by product type\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:43:54.781Z",
+  "recordedAt": "2026-09-17T07:00:17.478Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

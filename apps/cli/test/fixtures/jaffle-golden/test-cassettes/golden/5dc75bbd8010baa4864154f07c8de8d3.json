@@ -1,9 +1,9 @@
 {
   "key": "5dc75bbd8010baa4864154f07c8de8d3",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Food revenue broken down by location.\",\"measures\":[{\"ref\":\"metric:order_item.food_revenue\"}],\"groupBy\":[{\"ref\":\"entity:locations.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.food_revenue\":\"q:food revenue\",\"entity:locations.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"},\"ordering\":{\"ref\":\"metric:order_item.food_revenue\",\"direction\":\"desc\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Food revenue broken down by location.\",\"measures\":[{\"ref\":\"metric:order_item.food_revenue\"}],\"groupBy\":[{\"ref\":\"entity:locations.location\",\"role\":\"key\"}],\"display\":[\"dimension:locations.location_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"metric:order_item.food_revenue\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:order_item.food_revenue\":\"q:food revenue\",\"entity:locations.location\":\"q:by location\",\"dimension:locations.location_name\":\"q:by location\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T00:47:52.310Z",
+  "recordedAt": "2026-09-17T07:04:05.948Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",
