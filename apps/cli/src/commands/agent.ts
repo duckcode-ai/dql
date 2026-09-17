@@ -1031,6 +1031,8 @@ interface AgentEvalResult {
     proofs?: string[];
     sql?: string;
     rowCount?: number;
+    /** AI calls that left the machine, and the result rows they carried (Ask's target is 0). */
+    egress?: { receipts: number; resultRows: number };
   };
 }
 
@@ -2119,6 +2121,12 @@ function answerEvidence(run: AgentRun, result: AgentAnswer): AgentEvalResult['an
     ...(receipt?.executed?.proofs?.length ? { proofs: receipt.executed.proofs } : {}),
     ...(sql ? { sql } : {}),
     ...(result.result?.rows ? { rowCount: result.result.rows.length } : {}),
+    ...(run.providerEgressReceipts ? {
+      egress: {
+        receipts: run.providerEgressReceipts.length,
+        resultRows: run.providerEgressReceipts.reduce((sum, entry) => sum + (entry.resultRowCount ?? 0), 0),
+      },
+    } : {}),
   };
 }
 

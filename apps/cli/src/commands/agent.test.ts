@@ -277,6 +277,11 @@ describe('agent eval answer harness', () => {
     expect(__test__.answerEvidence(runtimeRun({}), answerResult({ sql: undefined, proposedSql: undefined, result: undefined }))).toEqual({
       trustState: 'review_required',
     });
+    const egressed = runtimeRun({
+      providerEgressReceipts: [{ resultRowCount: 0 }, { resultRowCount: 3 }],
+    } as unknown as Partial<AgentRun>);
+    expect(__test__.answerEvidence(egressed, answerResult({ sql: undefined, proposedSql: undefined, result: undefined }))?.egress)
+      .toEqual({ receipts: 2, resultRows: 3 });
   });
 
   it('records a question the runtime never answered as failed, not as a refusal', () => {
