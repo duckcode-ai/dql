@@ -4,8 +4,9 @@ import type { ProviderName } from './types.js';
  * Reasoning effort — the single, provider-agnostic knob the agent uses to trade
  * latency/cost against answer quality. Each provider translates it into its own
  * native parameter (Anthropic `output_config.effort`, OpenAI `reasoning_effort` /
- * Responses `reasoning.effort`, Gemini `thinkingConfig`). Providers that have no
- * reasoning surface (Ollama, subscription CLIs) simply ignore it.
+ * Responses `reasoning.effort`, Gemini `thinkingConfig`, the Claude Code CLI's
+ * `--effort`). Providers that have no reasoning surface (Ollama, the Codex CLI)
+ * simply ignore it.
  *
  * The abstraction mirrors the coding-extension's model so the two products speak
  * the same language, but stays deliberately light: no full model registry, just

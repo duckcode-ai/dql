@@ -1,0 +1,23 @@
+{
+  "key": "d16686fbac22ab9873168e23d6712872",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top scorers by total points, but it is unclear which NBA season \\\"this season\\\" refers to since the data only covers the 2016 and 2017 seasons.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"sum\",\"alias\":\"total_points\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"limit\":10,\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"this season\",\"options\":[\"dimension:player_game_stats.season=2016\",\"dimension:player_game_stats.season=2017\"],\"material\":true,\"question\":\"Which NBA season do you mean by 'this season' — the 2016-17 season (season code 2016) or the 2017-18 season (season code 2017)? The dataset only covers these two.\"}],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:top scorers\",\"dimension:player_game_stats.player_id\":\"q:top scorers\",\"dimension:player_game_stats.player_name\":\"q:top scorers\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T00:58:17.723Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d16686fbac22ab9873168e23d671287252a50f75f978cf0155a2958d947ad672",
+    "postCanonicalHash": "d16686fbac22ab9873168e23d671287252a50f75f978cf0155a2958d947ad672",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "803a486ce623bf697c836bb20feb21a3",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"For fiscal year FY26 opportunities involving competitor Splunk, show the count of lost opportunities and total lost amount by close-date month.\",\"measures\":[{\"ref\":\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\",\"aggregation\":\"count\",\"alias\":\"lost_opportunities_count\",\"scope\":[{\"ref\":\"dimension:opportunity_enhanced.IS_CLOSED\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"},{\"ref\":\"dimension:opportunity_enhanced.IS_WON\",\"op\":\"is_false\",\"values\":[false],\"source\":\"question\"}]},{\"ref\":\"column:SALES.OPPORTUNITY_ENHANCED.AMOUNT\",\"aggregation\":\"sum\",\"alias\":\"lost_amount\",\"scope\":[{\"ref\":\"dimension:opportunity_enhanced.IS_CLOSED\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"},{\"ref\":\"dimension:opportunity_enhanced.IS_WON\",\"op\":\"is_false\",\"values\":[false],\"source\":\"question\"}]}],\"groupBy\":[{\"ref\":\"dimension:opportunity_enhanced.CLOSE_DATE\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[{\"ref\":\"dimension:opportunity_enhanced.FISCAL_YEAR\",\"op\":\"eq\",\"values\":[2026],\"source\":\"question\"},{\"ref\":\"dimension:opportunity.COMPETITOR_C\",\"op\":\"eq\",\"values\":[\"Splunk\"],\"source\":\"question\"}],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\":\"q:Lost opportunities count\",\"column:SALES.OPPORTUNITY_ENHANCED.AMOUNT\":\"q:Lost Amount\",\"dimension:opportunity_enhanced.IS_CLOSED\":\"q:Lost opportunities\",\"dimension:opportunity_enhanced.IS_WON\":\"q:Lost opportunities\",\"dimension:opportunity_enhanced.CLOSE_DATE\":\"q:by month\",\"dimension:opportunity_enhanced.FISCAL_YEAR\":\"q:fiscal year FY26\",\"dimension:opportunity.COMPETITOR_C\":\"q:competitor involved is Splunk\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T01:02:51.882Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "803a486ce623bf697c836bb20feb21a3c9e5dc7cfb02b7c76e68ed0c4078f1c1",
+    "postCanonicalHash": "803a486ce623bf697c836bb20feb21a3c9e5dc7cfb02b7c76e68ed0c4078f1c1",
+    "appliedRuleClasses": []
+  }
+}

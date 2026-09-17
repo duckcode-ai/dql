@@ -1,0 +1,23 @@
+{
+  "key": "b66757f788aa29c12239581b94621540",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The user wants the win rate against Splunk (won opportunities / total opportunities where the recorded competitor is Splunk) broken down by sales region, but this project has no sales-region dimension, so only the overall win rate against Splunk can be computed.\",\"measures\":[{\"ref\":\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\",\"aggregation\":\"count\",\"alias\":\"splunk_won_count\",\"scope\":[{\"ref\":\"dimension:opportunity.COMPETITOR_C\",\"op\":\"eq\",\"values\":[\"Splunk\"],\"source\":\"question\"},{\"ref\":\"dimension:opportunity_enhanced.IS_WON\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"}]},{\"ref\":\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\",\"aggregation\":\"count\",\"alias\":\"splunk_total_count\",\"scope\":[{\"ref\":\"dimension:opportunity.COMPETITOR_C\",\"op\":\"eq\",\"values\":[\"Splunk\"],\"source\":\"question\"}]},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"splunk_won_count\",\"denominator\":\"splunk_total_count\"},\"alias\":\"win_rate_vs_splunk\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[{\"clause\":\"by sales region\",\"options\":[],\"material\":true,\"question\":\"This project has no sales-region dimension for opportunities — should I return the overall win rate against Splunk instead, or is there another field you consider the sales region?\"}],\"provenance\":{\"column:SALES.OPPORTUNITY_ENHANCED.OPPORTUNITY_ID\":\"q:win rate against Splunk\",\"dimension:opportunity.COMPETITOR_C\":\"q:against Splunk\",\"dimension:opportunity_enhanced.IS_WON\":\"q:win rate\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T01:04:14.867Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "b66757f788aa29c12239581b946215408b3a44c9288f3b72b97fe9b8b9f3b05b",
+    "postCanonicalHash": "b66757f788aa29c12239581b946215408b3a44c9288f3b72b97fe9b8b9f3b05b",
+    "appliedRuleClasses": []
+  }
+}

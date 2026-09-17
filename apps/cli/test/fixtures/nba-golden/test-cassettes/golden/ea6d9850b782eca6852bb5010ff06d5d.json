@@ -1,0 +1,23 @@
+{
+  "key": "ea6d9850b782eca6852bb5010ff06d5d",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank players by field-goal percentage (made/attempted) in calendar 2017, restricted to those with at least 100 field-goal attempts.\",\"measures\":[{\"ref\":\"column:dev.player_game_stats.fga\",\"aggregation\":\"sum\",\"alias\":\"fga_attempts\"},{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"column:dev.player_game_stats.fgm\",\"numeratorAggregation\":\"sum\",\"denominator\":\"column:dev.player_game_stats.fga\",\"denominatorAggregation\":\"sum\"},\"alias\":\"fg_pct\"}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"measure:fga_attempts\",\"op\":\"gte\",\"values\":[100],\"source\":\"question\"}],\"ordering\":{\"ref\":\"measure:fg_pct\",\"direction\":\"desc\"},\"limit\":10,\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"column:dev.player_game_stats.fga\":\"q:field-goal percentage / at least 100 attempts\",\"column:dev.player_game_stats.fgm\":\"q:field-goal percentage\",\"dimension:player_game_stats.player_id\":\"q:shooters\",\"dimension:player_game_stats.player_name\":\"q:shooters\",\"dimension:player_game_stats.game_date\":\"q:in 2017\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T00:59:08.032Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "ea6d9850b782eca6852bb5010ff06d5d6bd508f1a36b63892969280059ab7d3d",
+    "postCanonicalHash": "ea6d9850b782eca6852bb5010ff06d5d6bd508f1a36b63892969280059ab7d3d",
+    "appliedRuleClasses": []
+  }
+}

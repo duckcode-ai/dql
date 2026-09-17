@@ -5713,6 +5713,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
       const requested = agentRunWorkspaceValue(request, 'provider');
       const selected = await selectAssistProvider(projectRoot, requested as ProviderSettingsId | undefined);
+      if (selected) askRequestProviders.set(request, selected.id);
       return selected?.provider;
     },
     // The engine the semantic candidate will compile on, decided the same
@@ -5792,7 +5793,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return envelope;
         },
       });
-      return { options: trace.options, settle: trace.settle };
+      // How hard the model thinks on this call. Without it every provider ran
+      // at its own default, and on the subscription CLI that default spent
+      // 8-12k thinking tokens reading one question: 80-120 s per call against
+      // a 90 s CLI deadline, so Ask timed out, retried and often gave up.
+      const reasoningEffort = askDispatchReasoningEffort(
+        projectRoot,
+        purpose,
+        request,
+        askRequestProviders.get(request) ?? getActiveProvider(projectRoot),
+      );
+      return { options: { ...trace.options, reasoningEffort }, settle: trace.settle };
     },
     priorIntent: (request) => {
       const store = getConversationStore();
@@ -22699,6 +22710,9 @@ export function governedProviderPreflightError(requestedProvider?: string): Erro
   );
 }
 
+/** The provider each Ask request selected, so its calls use that provider's reasoning ceiling. */
+const askRequestProviders = new WeakMap<object, ProviderSettingsId>();
+
 /** Map a runner provider id to the settings id whose reasoning ceiling applies. */
 function reasoningSettingsIdFor(provider: ProviderId): ProviderSettingsId {
   return provider === 'claude-agent-sdk' ? 'anthropic' : (provider as ProviderSettingsId);
@@ -22743,6 +22757,40 @@ function resolveRunReasoningEffort(
   let desired: ReasoningEffort = route ? routeReasoningEffort(route) : 'medium';
   if (isRepair) desired = bumpReasoningEffort(desired);
   return ceiling ? clampReasoningEffort(desired, ceiling) : desired;
+}
+
+/**
+ * The reasoning effort for one provider call made by the Ask pipeline. The
+ * request's own choice (an explicit effort, or the composer's thinking mode)
+ * wins; otherwise the route decides (`medium` for reading an answer's
+ * question, `high` for drafting SQL and for research). A pipeline repair asks one level harder, and the provider's
+ * Settings ceiling caps the result. This is the rule the pre-pipeline runtime
+ * applied per run; it was lost when that runtime was removed.
+ */
+export function askDispatchReasoningEffort(
+  projectRoot: string,
+  purpose: 'resolve' | 'correct' | 'repair' | 'draft' | 'research_select' | 'research_narrate',
+  request: Pick<AgentRunRequest, 'reasoningEffort' | 'thinkingMode'>,
+  provider: ProviderId | undefined,
+): ReasoningEffort {
+  const isRepair = purpose === 'repair';
+  const requested = request.reasoningEffort
+    ?? (request.thinkingMode ? resolveThinkingMode(request.thinkingMode).reasoningEffort : undefined);
+  // Writing a SQL statement is authoring, the `sql_cell` effort: in the golden
+  // suite a medium-effort draft joined order costs onto order items and
+  // counted each cost once per item. Reading the question stays at the route's
+  // effort; that is the call whose thinking time the subscription CLI could
+  // not afford.
+  const route: AgentRunRoute = purpose === 'research_select' || purpose === 'research_narrate'
+    ? 'research'
+    : purpose === 'draft' ? 'sql_cell' : 'generated_answer';
+  if (!provider) {
+    const desired = requested ?? routeReasoningEffort(route);
+    return isRepair ? bumpReasoningEffort(desired) : desired;
+  }
+  return requested
+    ? resolveRequestedRunReasoningEffort(projectRoot, provider, requested, isRepair)
+    : resolveRunReasoningEffort(projectRoot, provider, route, isRepair);
 }
 
 function resolveRequestedRunReasoningEffort(

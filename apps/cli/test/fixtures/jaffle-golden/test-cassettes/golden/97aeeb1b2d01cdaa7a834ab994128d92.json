@@ -1,0 +1,23 @@
+{
+  "key": "97aeeb1b2d01cdaa7a834ab994128d92",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What is the average order value, computed as lifetime pre-tax spend divided by lifetime order count per the governed metric?\",\"measures\":[{\"ref\":\"metric:customers.average_order_value\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:customers.average_order_value\":\"q:average order value\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T00:45:04.590Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "97aeeb1b2d01cdaa7a834ab994128d9289b6f3f849448f27d35b5ff3aff9598f",
+    "postCanonicalHash": "97aeeb1b2d01cdaa7a834ab994128d9289b6f3f849448f27d35b5ff3aff9598f",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "d282ebb8adb72f620018ffb6fb1ef6c5",
+  "operation": "generate",
+  "text": "NO_SQL: No column captures ticket revenue for any team.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T00:57:52.577Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "d282ebb8adb72f620018ffb6fb1ef6c5bc5cf0834c9d7c7be4f987c8e17523d4",
+    "postCanonicalHash": "d282ebb8adb72f620018ffb6fb1ef6c5bc5cf0834c9d7c7be4f987c8e17523d4",
+    "appliedRuleClasses": []
+  }
+}

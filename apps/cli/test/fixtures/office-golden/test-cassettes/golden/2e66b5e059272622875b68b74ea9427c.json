@@ -1,0 +1,23 @@
+{
+  "key": "2e66b5e059272622875b68b74ea9427c",
+  "operation": "generate",
+  "text": "SELECT COUNT(OPPORTUNITY_ID) AS lost_opportunities\nFROM OFFICE_DW.SALES.OPPORTUNITY_ENHANCED\nWHERE IS_CLOSED = 1\n  AND IS_WON = 0\n  AND (FISCAL_YEAR = 26 OR FISCAL_YEAR = 2026)\nLIMIT 501",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T01:03:19.142Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "2e66b5e059272622875b68b74ea9427ca906aa3cc561dea48377e29ce81b6696",
+    "postCanonicalHash": "2e66b5e059272622875b68b74ea9427ca906aa3cc561dea48377e29ce81b6696",
+    "appliedRuleClasses": []
+  }
+}

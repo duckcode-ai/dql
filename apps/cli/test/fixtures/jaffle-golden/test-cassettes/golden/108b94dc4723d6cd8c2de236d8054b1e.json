@@ -1,0 +1,23 @@
+{
+  "key": "108b94dc4723d6cd8c2de236d8054b1e",
+  "operation": "generate",
+  "text": "NO_SQL: No relation or column here links order_items (order_id) to customers (customer_id), so revenue cannot be joined to a shopper.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T00:52:17.045Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "108b94dc4723d6cd8c2de236d8054b1e3575fe9b54826e207fa0b5b6d5f66adb",
+    "postCanonicalHash": "108b94dc4723d6cd8c2de236d8054b1e3575fe9b54826e207fa0b5b6d5f66adb",
+    "appliedRuleClasses": []
+  }
+}

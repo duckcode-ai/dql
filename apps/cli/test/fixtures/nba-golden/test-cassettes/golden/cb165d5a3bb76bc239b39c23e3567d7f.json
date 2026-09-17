@@ -1,0 +1,23 @@
+{
+  "key": "cb165d5a3bb76bc239b39c23e3567d7f",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Compare LeBron James and Stephen Curry's per-game points, rebounds, and assists averages for games played in 2017.\",\"measures\":[{\"ref\":\"dimension:player_game_stats.pts\",\"aggregation\":\"avg\",\"alias\":\"pts_per_game\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}]},{\"ref\":\"dimension:player_game_stats.reb\",\"aggregation\":\"avg\",\"alias\":\"reb_per_game\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}]},{\"ref\":\"dimension:player_game_stats.ast\",\"aggregation\":\"avg\",\"alias\":\"ast_per_game\",\"scope\":[{\"ref\":\"dimension:player_game_stats.played\",\"op\":\"eq\",\"values\":[1],\"source\":\"question\"}]}],\"groupBy\":[{\"ref\":\"dimension:player_game_stats.player_id\",\"role\":\"key\"}],\"display\":[\"dimension:player_game_stats.player_name\"],\"filters\":[{\"ref\":\"dimension:player_game_stats.player_name\",\"op\":\"in\",\"values\":[\"LeBron James\",\"Stephen Curry\"],\"source\":\"question\"}],\"expectedShape\":\"comparison\",\"time\":{\"ref\":\"dimension:player_game_stats.game_date\",\"window\":{\"start\":\"2017-01-01\",\"end\":\"2018-01-01\",\"expression\":\"in 2017\"}},\"unresolved\":[],\"provenance\":{\"dimension:player_game_stats.pts\":\"q:points\",\"dimension:player_game_stats.reb\":\"q:rebounds\",\"dimension:player_game_stats.ast\":\"q:assists\",\"dimension:player_game_stats.player_id\":\"q:LeBron James and Stephen Curry\",\"dimension:player_game_stats.player_name\":\"q:LeBron James and Stephen Curry\",\"dimension:player_game_stats.game_date\":\"q:in 2017\",\"dimension:player_game_stats.played\":\"q:per game\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T00:58:39.666Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "cb165d5a3bb76bc239b39c23e3567d7f6dcec78184e24a2220fa88a623f693c9",
+    "postCanonicalHash": "cb165d5a3bb76bc239b39c23e3567d7f6dcec78184e24a2220fa88a623f693c9",
+    "appliedRuleClasses": []
+  }
+}

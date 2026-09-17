@@ -1,0 +1,24 @@
+{
+  "key": "05ee9a65f1efc3ae5e530520e3ac1826",
+  "operation": "generate",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top customers by beverage revenue, including customer name, beverage order count, and beverage product variety.\",\"measures\":[{\"ref\":\"metric:order_item.drink_revenue\",\"alias\":\"beverage_revenue\"},{\"ref\":\"entity:order_item.order_id\",\"aggregation\":\"count_distinct\",\"alias\":\"beverage_orders\",\"scope\":[{\"ref\":\"dimension:order_item.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"inherited\"}]},{\"ref\":\"entity:order_item.product\",\"aggregation\":\"count_distinct\",\"alias\":\"beverage_product_types\",\"scope\":[{\"ref\":\"dimension:order_item.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"inherited\"}]}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"beverage_revenue\",\"direction\":\"desc\"},\"limit\":10,\"unresolved\":[],\"provenance\":{\"metric:order_item.drink_revenue\":\"inherited\",\"entity:order_item.order_id\":\"inherited\",\"entity:order_item.product\":\"inherited\",\"entity:orders.customer\":\"q:top customers\",\"dimension:customers.customer_name\":\"q:include the customer name\"}}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T00:53:42.686Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 3,
+    "messageRoles": [
+      "system",
+      "user",
+      "user"
+    ],
+    "preCanonicalHash": "05ee9a65f1efc3ae5e530520e3ac1826809b4fd3edbf5f46ecbcb61358ded3a5",
+    "postCanonicalHash": "05ee9a65f1efc3ae5e530520e3ac1826809b4fd3edbf5f46ecbcb61358ded3a5",
+    "appliedRuleClasses": []
+  }
+}

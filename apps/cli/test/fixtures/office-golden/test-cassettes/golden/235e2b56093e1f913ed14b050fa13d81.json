@@ -1,0 +1,23 @@
+{
+  "key": "235e2b56093e1f913ed14b050fa13d81",
+  "operation": "generate",
+  "text": "```sql\nSELECT\n  CAST(SUM(CASE WHEN oe.IS_WON THEN 1 ELSE 0 END) AS DOUBLE) / COUNT(*) AS win_rate_vs_splunk\nFROM OFFICE_DW.SALES.OPPORTUNITY_ENHANCED oe\nJOIN OFFICE_DW.SFDC.OPPORTUNITY o\n  ON oe.OPPORTUNITY_ID = o.ID\nWHERE LOWER(o.COMPETITOR_C) LIKE '%splunk%';\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T01:04:19.933Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "235e2b56093e1f913ed14b050fa13d8162287c4240d9fe53d333ea3aff4cda25",
+    "postCanonicalHash": "235e2b56093e1f913ed14b050fa13d8162287c4240d9fe53d333ea3aff4cda25",
+    "appliedRuleClasses": []
+  }
+}

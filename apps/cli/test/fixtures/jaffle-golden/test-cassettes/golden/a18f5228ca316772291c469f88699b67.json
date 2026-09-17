@@ -1,0 +1,22 @@
+{
+  "key": "a18f5228ca316772291c469f88699b67",
+  "operation": "generate",
+  "text": "{\"dimensions\": [\"dimension:locations.location_name\", \"dimension:products.product_name\", \"dimension:products.product_type\", \"dimension:customers.customer_type\", \"dimension:orders.order_total_dim\", \"dimension:products.product_price\"]}",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T00:52:43.959Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 1,
+    "messageRoles": [
+      "user"
+    ],
+    "preCanonicalHash": "a18f5228ca316772291c469f88699b673e3b78330e77c62dd4ddc9d906dea813",
+    "postCanonicalHash": "a18f5228ca316772291c469f88699b673e3b78330e77c62dd4ddc9d906dea813",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "key": "8996630be4403d93e029e9365f079be5",
+  "operation": "generate",
+  "text": "NO_SQL: This project's data covers Jaffle Shop commerce metrics, not weather information.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T00:46:49.372Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "8996630be4403d93e029e9365f079be5524ef2159a3b2ba42be67b534ecf4de8",
+    "postCanonicalHash": "8996630be4403d93e029e9365f079be5524ef2159a3b2ba42be67b534ecf4de8",
+    "appliedRuleClasses": []
+  }
+}
