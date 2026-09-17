@@ -1,9 +1,9 @@
 {
   "key": "f6d69806832940b55d76c72b466ab8ba",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Which customers have placed the most orders, ranked by count of lifetime orders.\",\"measures\":[{\"ref\":\"metric:customers.count_lifetime_orders\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:customers.count_lifetime_orders\":\"q:placed the most orders\",\"entity:customers.customer\":\"q:which customers\",\"dimension:customers.customer_name\":\"q:which customers\"},\"ordering\":{\"ref\":\"metric:customers.count_lifetime_orders\",\"direction\":\"desc\"},\"limit\":10}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by their total number of lifetime orders placed, highest first.\",\"measures\":[{\"ref\":\"metric:customers.count_lifetime_orders\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"metric:customers.count_lifetime_orders\",\"direction\":\"desc\"},\"limit\":10,\"unresolved\":[],\"provenance\":{\"metric:customers.count_lifetime_orders\":\"q:placed the most orders\",\"entity:customers.customer\":\"q:which customers\",\"dimension:customers.customer_name\":\"q:which customers\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:03:36.722Z",
+  "recordedAt": "2026-09-17T14:03:49.053Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

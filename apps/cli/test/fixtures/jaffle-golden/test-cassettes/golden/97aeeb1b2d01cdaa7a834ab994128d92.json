@@ -1,9 +1,9 @@
 {
   "key": "97aeeb1b2d01cdaa7a834ab994128d92",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What is the overall average order value (lifetime spend pre-tax divided by lifetime orders per customer)?\",\"measures\":[{\"ref\":\"metric:customers.average_order_value\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:customers.average_order_value\":\"q:average order value\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What is the average order value across all customers?\",\"measures\":[{\"ref\":\"metric:customers.average_order_value\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:customers.average_order_value\":\"q:average order value\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:01:21.445Z",
+  "recordedAt": "2026-09-17T14:01:36.205Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

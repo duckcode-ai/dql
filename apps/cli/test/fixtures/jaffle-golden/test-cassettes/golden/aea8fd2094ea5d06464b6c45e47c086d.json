@@ -1,9 +1,9 @@
 {
   "key": "aea8fd2094ea5d06464b6c45e47c086d",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What was the average order value (order revenue including tax divided by order count) for orders placed in 2025?\",\"measures\":[{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"metric:orders.order_total\",\"denominator\":\"metric:orders.order_count\"},\"alias\":\"average_order_value_2025\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"time\":{\"ref\":\"dimension:orders.ordered_at\",\"window\":{\"start\":\"2025-01-01\",\"end\":\"2026-01-01\",\"expression\":\"in 2025\"}},\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:average order value\",\"metric:orders.order_count\":\"q:average order value\",\"dimension:orders.ordered_at\":\"q:in 2025\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"What was the average order value (order revenue per order) in 2025?\",\"measures\":[{\"derived\":{\"kind\":\"ratio\",\"numerator\":\"metric:orders.order_total\",\"denominator\":\"metric:orders.order_count\"},\"alias\":\"average_order_value\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"time\":{\"ref\":\"dimension:orders.ordered_at\",\"window\":{\"start\":\"2025-01-01\",\"end\":\"2026-01-01\",\"expression\":\"in 2025\"}},\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:average order value\",\"metric:orders.order_count\":\"q:average order value\",\"dimension:orders.ordered_at\":\"q:in 2025\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:04:48.029Z",
+  "recordedAt": "2026-09-17T14:05:01.872Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

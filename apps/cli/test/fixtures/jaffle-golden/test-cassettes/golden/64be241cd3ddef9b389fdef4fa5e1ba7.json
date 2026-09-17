@@ -1,9 +1,9 @@
 {
   "key": "64be241cd3ddef9b389fdef4fa5e1ba7",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top 5 customers ranked by total gross order revenue.\",\"measures\":[{\"ref\":\"metric:orders.order_total\",\"alias\":\"revenue\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:orders.order_total\":\"q:revenue\",\"entity:orders.customer\":\"q:customers\",\"dimension:customers.customer_name\":\"q:customers\"},\"ordering\":{\"ref\":\"metric:orders.order_total\",\"direction\":\"desc\"},\"limit\":5}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Top 5 customers ranked by their gross lifetime revenue (order total including tax).\",\"measures\":[{\"ref\":\"metric:customers.lifetime_spend\"}],\"groupBy\":[{\"ref\":\"entity:customers.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"ordering\":{\"ref\":\"metric:customers.lifetime_spend\",\"direction\":\"desc\"},\"limit\":5,\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:customers.lifetime_spend\":\"q:revenue\",\"entity:customers.customer\":\"q:customers\",\"dimension:customers.customer_name\":\"q:customers\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T06:58:08.554Z",
+  "recordedAt": "2026-09-17T13:58:33.368Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

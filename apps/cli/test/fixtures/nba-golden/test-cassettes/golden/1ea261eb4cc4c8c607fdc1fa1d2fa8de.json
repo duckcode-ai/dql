@@ -1,0 +1,23 @@
+{
+  "key": "1ea261eb4cc4c8c607fdc1fa1d2fa8de",
+  "operation": "generate",
+  "text": "NO_SQL: The dataset only covers calendar 2016 and 2017, so no data exists for calendar year 2030.",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T14:13:06.344Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "1ea261eb4cc4c8c607fdc1fa1d2fa8de29a5f96a0fa01914a1047fc769b870d9",
+    "postCanonicalHash": "1ea261eb4cc4c8c607fdc1fa1d2fa8de29a5f96a0fa01914a1047fc769b870d9",
+    "appliedRuleClasses": []
+  }
+}

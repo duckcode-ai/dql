@@ -1,9 +1,9 @@
 {
   "key": "212b175c827560ddf5d19781c79272a5",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks which players are most likely to get injured next season, a predictive medical outcome not present in this dataset.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"players most likely to get injured next season\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks which players are most likely to get injured next season.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"players most likely to get injured next season\",\"options\":[],\"material\":true}],\"provenance\":{}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:14:01.199Z",
+  "recordedAt": "2026-09-17T14:13:43.447Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

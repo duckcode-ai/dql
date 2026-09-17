@@ -1,9 +1,9 @@
 {
   "key": "8a9df3c252491f7fcf45b62fd0940675",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count of orders broken down by customer type (new vs returning).\",\"measures\":[{\"ref\":\"metric:orders.orders\"}],\"groupBy\":[{\"ref\":\"dimension:customers.customer_type\",\"role\":\"categorical\"}],\"display\":[\"dimension:customers.customer_type\"],\"filters\":[],\"expectedShape\":\"grouped\",\"ordering\":{\"ref\":\"metric:orders.orders\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:orders.orders\":\"q:how many orders\",\"dimension:customers.customer_type\":\"q:by customer type\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count of orders broken down by customer type (new vs returning).\",\"measures\":[{\"ref\":\"metric:orders.orders\"}],\"groupBy\":[{\"ref\":\"dimension:customers.customer_type\",\"role\":\"categorical\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"grouped\",\"unresolved\":[],\"provenance\":{\"metric:orders.orders\":\"q:how many orders\",\"dimension:customers.customer_type\":\"q:by customer type\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:01:08.137Z",
+  "recordedAt": "2026-09-17T14:01:23.538Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

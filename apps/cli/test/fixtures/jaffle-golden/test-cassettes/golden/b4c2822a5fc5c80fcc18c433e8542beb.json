@@ -1,9 +1,9 @@
 {
   "key": "b4c2822a5fc5c80fcc18c433e8542beb",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Rank customers by their beverage (drink) product revenue, showing beverage revenue, beverage order count, and product variety.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:top customers for beverage product category\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show the top customers ranked by beverage revenue.\",\"measures\":[{\"ref\":\"block:commerce.top_beverage_customers\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"block:commerce.top_beverage_customers\":\"q:top customers for beverage product category\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:08:30.758Z",
+  "recordedAt": "2026-09-17T14:08:57.802Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

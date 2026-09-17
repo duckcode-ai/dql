@@ -1,9 +1,9 @@
 {
   "key": "788618cad50435b9bc491f9c3ad4691d",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Beverage revenue broken down by product, identified by product key and labeled with product name.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:products.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"}],\"alias\":\"beverage_revenue\"}],\"groupBy\":[{\"ref\":\"entity:products.product\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:beverage revenue\",\"dimension:products.is_drink_item\":\"q:beverage\",\"entity:products.product\":\"q:product\",\"dimension:products.product_name\":\"q:product\"},\"ordering\":{\"ref\":\"measure:beverage_revenue\",\"direction\":\"desc\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show total beverage (drink) product revenue broken down by product.\",\"measures\":[{\"ref\":\"metric:order_item.revenue\",\"scope\":[{\"ref\":\"dimension:order_item.is_drink_item\",\"op\":\"is_true\",\"values\":[true],\"source\":\"question\"}],\"alias\":\"beverage_revenue\"}],\"groupBy\":[{\"ref\":\"entity:products.product\",\"role\":\"key\"}],\"display\":[\"dimension:products.product_name\"],\"filters\":[],\"ordering\":{\"ref\":\"measure:0\",\"direction\":\"desc\"},\"expectedShape\":\"ranking\",\"unresolved\":[],\"provenance\":{\"metric:order_item.revenue\":\"q:beverage revenue\",\"dimension:order_item.is_drink_item\":\"q:beverage\",\"entity:products.product\":\"q:by product\",\"dimension:products.product_name\":\"q:by product\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:00:05.941Z",
+  "recordedAt": "2026-09-17T14:00:20.658Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

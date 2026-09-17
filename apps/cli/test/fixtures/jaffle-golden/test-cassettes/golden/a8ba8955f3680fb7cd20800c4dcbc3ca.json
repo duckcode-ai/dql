@@ -3,7 +3,7 @@
   "operation": "generate",
   "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count the number of orders placed by each customer.\",\"measures\":[{\"ref\":\"metric:orders.orders\"}],\"groupBy\":[{\"ref\":\"entity:orders.customer\",\"role\":\"key\"}],\"display\":[\"dimension:customers.customer_name\"],\"filters\":[],\"expectedShape\":\"ranking\",\"ordering\":{\"ref\":\"metric:orders.orders\",\"direction\":\"desc\"},\"unresolved\":[],\"provenance\":{\"metric:orders.orders\":\"q:how many orders did each customer place\",\"entity:orders.customer\":\"q:each customer\",\"dimension:customers.customer_name\":\"q:each customer\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T06:58:59.883Z",
+  "recordedAt": "2026-09-17T13:59:21.403Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

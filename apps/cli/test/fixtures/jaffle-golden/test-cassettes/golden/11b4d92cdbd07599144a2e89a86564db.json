@@ -1,9 +1,9 @@
 {
   "key": "11b4d92cdbd07599144a2e89a86564db",
   "operation": "generate",
-  "text": "```sql\nSELECT customer_id, customer_name, lifetime_spend\nFROM \"jaffle_shop\".\"dev\".\"customers\"\nORDER BY lifetime_spend DESC\nLIMIT 10\n```",
+  "text": "SELECT \"customer_id\", \"customer_name\", \"lifetime_spend\" FROM \"jaffle_shop\".\"dev\".\"customers\" ORDER BY \"lifetime_spend\" DESC LIMIT 10;",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T06:57:56.199Z",
+  "recordedAt": "2026-09-17T13:58:11.541Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

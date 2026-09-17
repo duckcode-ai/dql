@@ -1,9 +1,9 @@
 {
   "key": "b7e791eef92f7cf0c25977c878a21bca",
   "operation": "generate",
-  "text": "```sql\nSELECT c.customer_id, c.customer_name, COUNT(o.order_id) AS orders\nFROM \"jaffle_shop\".\"dev\".\"customers\" c\nLEFT JOIN \"jaffle_shop\".\"dev\".\"orders\" o\n  ON o.customer_id = c.customer_id\nGROUP BY c.customer_id, c.customer_name\nORDER BY orders DESC\nLIMIT 500\n```",
+  "text": "```sql\nSELECT c.customer_id, c.customer_name, COUNT(o.order_id) AS orders\nFROM \"jaffle_shop\".\"dev\".\"customers\" c\nLEFT JOIN \"jaffle_shop\".\"dev\".\"orders\" o ON o.customer_id = c.customer_id\nGROUP BY c.customer_id, c.customer_name\nORDER BY orders DESC\n```",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T06:59:03.793Z",
+  "recordedAt": "2026-09-17T13:59:25.642Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

@@ -70,7 +70,7 @@ import {
   type RuntimeSchemaTable,
 } from '@duckcodeailabs/dql-agent';
 import { buildProjectVocabulary, buildVocabularySource, embeddedManifestRelations, normalizeRelationName, type VocabularySourceInput } from './vocabulary-source.js';
-import { certifiedJoinViolations, classifySqlJoins, ledgerJoins, modeledJoinPaths, modelingRelationshipEdges, sameRelation, type LedgerJoin } from './join-relationships.js';
+import { certifiedJoinViolations, classifySqlJoins, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, modelingRelationshipEdges, sameRelation, type LedgerJoin } from './join-relationships.js';
 
 /**
  * THE ASK PIPELINE HOST.
@@ -612,6 +612,21 @@ export function joinsAnyRelation(candidate: string, anchors: string[], columnsOf
  * about that value; it is not a rule for every question in its scope. A hint
  * naming no value applies as retrieved.
  */
+/**
+ * Whether text mentions a table name as words: `loss_reserve` is mentioned by
+ * "loss reserve" and "loss reserves" as well as by its own spelling. Names
+ * shorter than four letters are matched only as written.
+ */
+export function mentionsName(text: string, name: string): boolean {
+  const lower = ` ${text.toLowerCase()} `;
+  const plain = name.toLowerCase();
+  if (lower.includes(` ${plain} `)) return true;
+  if (plain.replace(/[^a-z]/g, '').length < 4) return false;
+  const words = plain.split(/[_\s]+/).filter(Boolean).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (words.length === 0) return false;
+  return new RegExp(`(^|[^a-z0-9])${words.join('[\\s_-]+')}(e?s)?([^a-z0-9]|$)`).test(lower);
+}
+
 const SKILL_WORD = /[a-z][a-z0-9]{2,}/g;
 const SKILL_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'what', 'which', 'each', 'all', 'are', 'from', 'that', 'this', 'how', 'many', 'much', 'our', 'have', 'has', 'jaffle', 'main', 'dev']);
 
@@ -1768,7 +1783,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       };
       const text = ` ${question} ${intent?.reading ?? ''} `.toLowerCase();
       const named = current.entries
-        .filter((entry) => entry.kind === 'relation' && [entry.name, entry.model ?? '', ...(entry.physical?.binding?.aliases ?? [])].some((name) => name && text.includes(` ${name.toLowerCase()} `)))
+        .filter((entry) => entry.kind === 'relation' && [entry.name, entry.model ?? '', ...(entry.physical?.binding?.aliases ?? [])].some((name) => name && mentionsName(text, name)))
         .map((entry) => entryPhysicalRelation(entry))
         .filter((relation): relation is string => Boolean(relation));
       const mentioned = [...`${reason ?? ''} ${previous?.error ?? ''}`.matchAll(/\b(?:column|relation|dimension|metric|measure):[A-Za-z0-9_.$"]+/g)].map((match) => match[0]);
@@ -1776,7 +1791,19 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       const priorDraftRelations = prior?.drafted && prior.sql
         ? relationsInSql(prior.sql).filter((relation) => (view.source?.relations ?? []).some((admitted) => physicalRelationIdentity(admitted.binding ? physicalRelationText(admitted.binding) : [admitted.schema, admitted.name].filter(Boolean).join('.')) === physicalRelationIdentity(relation)))
         : [];
-      let relations = [...new Set([...refs, ...mentioned].map(relationOf).filter((relation): relation is string => Boolean(relation)).concat(named, priorDraftRelations))].slice(0, 6);
+      // A metric the reading uses may be defined over more tables than its own
+      // (a flag joined in from another model): the tables its definition
+      // names are part of what the draft needs.
+      const definitionRelations = refs.flatMap((ref) => {
+        const entry = current.get(ref) ?? current.resolve(ref);
+        if (!entry || (entry.kind !== 'metric' && entry.kind !== 'measure')) return [];
+        const definition = ` ${[entry.expr, entry.engineOnly, entry.description, entry.derived?.expr].filter(Boolean).join(' ')} `.toLowerCase();
+        return current.entries
+          .filter((item) => item.kind === 'relation' && [item.name, item.model ?? ''].some((name) => name && mentionsName(definition, name.split('.').pop()!)))
+          .map((item) => entryPhysicalRelation(item))
+          .filter((relation): relation is string => Boolean(relation));
+      });
+      let relations = [...new Set([...refs, ...mentioned].map(relationOf).filter((relation): relation is string => Boolean(relation)).concat(named, definitionRelations, priorDraftRelations))].slice(0, 8);
       // THE TABLES THE QUESTION IS ABOUT. With no reading to name them, the
       // question's own words choose them, the same relation-first discovery
       // context assembly uses; they are described before any SQL is written.
@@ -1835,15 +1862,21 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       // is shown as a preferred join. Only relations this request admits are added.
       const modeledRoutes: Array<{ name: string; certified: boolean; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality?: string }> = [];
       const bridged: string[] = [];
+      const draftSource = view.source ?? (await baseSourceFor(connection).catch(() => undefined))?.source;
+      const admitted = (name: string): string | undefined => {
+        const found = (draftSource?.relations ?? []).find((item) => sameRelation(item.binding ? physicalRelationText(item.binding) : [item.schema, item.name].filter(Boolean).join('.'), name));
+        return found ? (found.binding ? physicalRelationText(found.binding) : [found.schema, found.name].filter(Boolean).join('.')) : undefined;
+      };
+      const mapEdges = modelingRelationshipEdges(deps.getManifest().manifest);
+      // A MARKER TABLE brings the table its values live on.
+      for (const item of markerTables(relations, mapEdges, sourceColumns)) {
+        const base = relations.find((relation) => sameRelation(relation, item.base)) ?? admitted(item.base);
+        if (base && !relations.some((relation) => physicalRelationIdentity(relation) === physicalRelationIdentity(base))) { relations.push(base); bridged.push(base); }
+      }
       if (relations.length >= 2) {
         try {
-          const source = view.source ?? (await baseSourceFor(connection)).source;
-          const admitted = (name: string): string | undefined => {
-            const found = (source?.relations ?? []).find((item) => sameRelation(item.binding ? physicalRelationText(item.binding) : [item.schema, item.name].filter(Boolean).join('.'), name));
-            return found ? (found.binding ? physicalRelationText(found.binding) : [found.schema, found.name].filter(Boolean).join('.')) : undefined;
-          };
           const physicalOf = (name: string) => relations.find((relation) => sameRelation(relation, name)) ?? admitted(name);
-          const { paths } = modeledJoinPaths(relations, modelingRelationshipEdges(deps.getManifest().manifest));
+          const { paths } = modeledJoinPaths(relations, mapEdges);
           for (const path of paths) {
             const through = path.through.map(admitted);
             if (through.some((relation) => !relation)) continue;
@@ -1864,7 +1897,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       });
       if (needsColumns.length > 0) {
         try {
-          const found = await describeRelations(needsColumns.slice(0, 9));
+          const found = await describeRelations(needsColumns.slice(0, 12));
           if (found.length > 0) {
             current = mergeDiscoveredRelations(current, found);
             requestVocabulary = current;
@@ -1919,6 +1952,9 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         .filter((route) => !hinted.has(pairKey(route.from, route.to)))
         .map(preferredJoinLine);
       const joinLines = [...new Set([...routeLines, ...joinHints.map(preferredJoinLine)])];
+      const markerLines = markerTables(relations, mapEdges, sourceColumns)
+        .map((item) => ({ ...item, base: relations.find((relation) => sameRelation(relation, item.base)) ?? item.base }))
+        .map(markerTableLine);
       // THE PROJECT'S WRITTEN RULES: the skills selected for this request whose
       // text shares the most words with the question and the chosen tables,
       // long enough to carry a definition (the reading step sees a short card).
@@ -1932,6 +1968,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         ...termLines,
         ...metricLines,
         ...joinLines,
+        ...markerLines,
         ...skillLines,
         ...hintLines,
       ];
@@ -1957,7 +1994,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
             entry ? `- executable relation:${relation} [${entry.physical?.binding?.columnCompleteness ?? 'partial'} columns; logical ${entry.physical?.binding?.logicalRelation ?? entry.model ?? relation}]` : `- executable relation:${relation}`,
             ...current.entries.filter((item) => item.kind === 'column' && samePhysicalEntry(item, entry)).map((item) => renderCard(item)),
           ];
-          for (const line of lines) { if (chars + line.length > 14_000) break; cards.push(line); chars += line.length + 1; }
+          for (const line of lines) { if (chars + line.length > 18_000) break; cards.push(line); chars += line.length + 1; }
         }
         const dialect = connection?.driver ?? 'duckdb';
         const messages: AgentMessage[] = [

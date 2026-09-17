@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { joinKeyPairs } from '@duckcodeailabs/dql-agent';
-import { certifiedJoinViolations, classifySqlJoins, joinableRelations, ledgerJoins, modeledJoinPaths, sameRelation, type ModelingRelationshipEdge } from './join-relationships.js';
+import { certifiedJoinViolations, classifySqlJoins, joinableRelations, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, sameRelation, type ModelingRelationshipEdge } from './join-relationships.js';
 
 const certified: ModelingRelationshipEdge = {
   relationshipId: 'commerce::relationship::orders_to_customers', name: 'orders_to_customers',
@@ -113,5 +113,32 @@ describe('tables between the chosen ones, over the Modeling map', () => {
     const direct = modeledJoinPaths(['main.policy', 'main.agent'], edges);
     expect(direct.added).toEqual([]);
     expect(direct.paths[0]!.edges[0]!.name).toBe('policy_agent');
+  });
+});
+
+describe('marker tables: a key-only side of a one-to-one relationship', () => {
+  const edge = (from: string, to: string, key: string, cardinality = 'one_to_one'): ModelingRelationshipEdge => ({
+    relationshipId: `${from}_${to}`, name: `${from}_is_${to}`, fromRelation: `main.${from}`, toRelation: `main.${to}`, keys: [{ from: key, to: key }], level: 'certified', cardinality,
+  });
+  const columns: Record<string, string[]> = {
+    '"db"."main"."loss_payment"': ['Claim_Amount_Identifier'],
+    '"db"."main"."claim_amount"': ['Claim_Amount_Identifier', 'Claim_Identifier', 'Claim_Amount'],
+    '"db"."main"."policy"': ['policy_id', 'policy_number'],
+    '"db"."main"."policy_extra"': ['policy_id', 'note'],
+  };
+  const columnsOf = (relation: string) => columns[relation] ?? [];
+
+  it('names the marker, its base and the join, whichever direction the relationship was declared', () => {
+    const found = markerTables(['"db"."main"."loss_payment"', '"db"."main"."claim_amount"'], [edge('claim_amount', 'loss_payment', 'Claim_Amount_Identifier')], columnsOf);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ marker: '"db"."main"."loss_payment"', base: '"db"."main"."claim_amount"' });
+    expect(markerTableLine(found[0]!)).toContain('For "loss payment" values, use the "db"."main"."claim_amount" rows that have a matching "db"."main"."loss_payment" row (JOIN "db"."main"."loss_payment" ON "db"."main"."loss_payment".Claim_Amount_Identifier = "db"."main"."claim_amount".Claim_Amount_Identifier)');
+  });
+
+  it('names the base even when only the marker was chosen, and ignores tables with columns of their own or other cardinalities', () => {
+    const onlyMarker = markerTables(['"db"."main"."loss_payment"'], [edge('loss_payment', 'claim_amount', 'Claim_Amount_Identifier')], columnsOf);
+    expect(onlyMarker.map((item) => item.base)).toEqual(['main.claim_amount']);
+    expect(markerTables(['"db"."main"."policy"', '"db"."main"."policy_extra"'], [edge('policy_extra', 'policy', 'policy_id')], columnsOf)).toEqual([]);
+    expect(markerTables(['"db"."main"."loss_payment"'], [edge('loss_payment', 'claim_amount', 'Claim_Amount_Identifier', 'many_to_one')], columnsOf)).toEqual([]);
   });
 });

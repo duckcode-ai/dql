@@ -274,3 +274,58 @@ export function modeledJoinPaths(
   }
   return { paths, added };
 }
+
+/** A table that only marks rows of another: it holds nothing but the one-to-one key. */
+export interface MarkerTable {
+  marker: string;
+  base: string;
+  /** Key pairs oriented marker → base. */
+  keys: Array<{ from: string; to: string }>;
+  relationshipName: string;
+}
+
+/**
+ * MARKER TABLES. A modeled one-to-one relationship whose one side has no
+ * column besides its key (a `premium` table holding only a policy amount id)
+ * says that side is a kind of the other: its rows mark which base rows belong
+ * to it, and the values live on the base. An AI drafting SQL over the marker
+ * alone finds "no amount column" and stops; told what the marker means, it
+ * joins the base to it and uses the base's values.
+ */
+export function markerTables(
+  relations: string[],
+  edges: ModelingRelationshipEdge[],
+  columnsOf: (relation: string) => string[],
+): MarkerTable[] {
+  const found: MarkerTable[] = [];
+  const onlyKeys = (relation: string, keys: string[]) => {
+    const columns = columnsOf(relation).map((column) => column.toLowerCase());
+    const wanted = new Set(keys.map((key) => key.toLowerCase()));
+    return columns.length > 0 && columns.every((column) => wanted.has(column));
+  };
+  for (const edge of edges) {
+    if (edge.cardinality !== 'one_to_one') continue;
+    const sides: Array<[string, string, Array<{ from: string; to: string }>]> = [
+      [edge.fromRelation, edge.toRelation, edge.keys],
+      [edge.toRelation, edge.fromRelation, edge.keys.map((key) => ({ from: key.to, to: key.from }))],
+    ];
+    for (const [marker, base, keys] of sides) {
+      const chosen = relations.find((relation) => sameRelation(relation, marker));
+      if (!chosen) continue;
+      if (!onlyKeys(chosen, keys.map((key) => key.from))) continue;
+      // A base that is itself only keys marks nothing; skip a key-only pair.
+      const baseChosen = relations.find((relation) => sameRelation(relation, base));
+      if (baseChosen && onlyKeys(baseChosen, keys.map((key) => key.to))) continue;
+      if (found.some((item) => sameRelation(item.marker, marker) && sameRelation(item.base, base))) continue;
+      found.push({ marker: chosen, base: baseChosen ?? base, keys, relationshipName: edge.name });
+    }
+  }
+  return found;
+}
+
+/** The line an AI drafting SQL reads for one marker table. */
+export function markerTableLine(item: MarkerTable): string {
+  const name = (relation: string) => relation.split('.').pop()!.replace(/"/g, '');
+  const on = item.keys.map((key) => `${item.marker}.${key.from} = ${item.base}.${key.to}`).join(' AND ');
+  return `- ${item.marker} holds no values of its own (only its key): a row in it marks the ${item.base} row with the same key as a ${name(item.marker).replace(/_/g, ' ')} (modeled one-to-one: ${item.relationshipName}). For "${name(item.marker).replace(/_/g, ' ')}" values, use the ${item.base} rows that have a matching ${item.marker} row (JOIN ${item.marker} ON ${on}); the values are the columns of ${item.base}.`;
+}

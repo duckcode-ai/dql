@@ -1,9 +1,9 @@
 {
   "key": "d0ac1d6175c6aa1f95b6cfd0ffb2e6be",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count of orders containing a drink item, broken down by month.\",\"measures\":[{\"ref\":\"metric:orders.drink_orders\"}],\"groupBy\":[{\"ref\":\"dimension:orders.ordered_at\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"metric:orders.drink_orders\":\"q:drink orders\",\"dimension:orders.ordered_at\":\"q:by month\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count of orders containing drink items, broken down by month.\",\"measures\":[{\"ref\":\"metric:orders.drink_orders\"}],\"groupBy\":[{\"ref\":\"dimension:orders.ordered_at\",\"role\":\"time\",\"grain\":\"month\"}],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"metric:orders.drink_orders\":\"q:drink orders\",\"dimension:orders.ordered_at\":\"q:by month\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:01:43.798Z",
+  "recordedAt": "2026-09-17T14:01:58.465Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

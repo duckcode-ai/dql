@@ -4,7 +4,7 @@ import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeaila
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, createAgentRunBudget, parseIntent, physicalRelationBinding, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import { preferredJoinHints, preferredJoinLine, skillsForDraft, joinHintUsed, hintsForQuestion, joinsAnyRelation, sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
+import { preferredJoinHints, preferredJoinLine, skillsForDraft, mentionsName, joinHintUsed, hintsForQuestion, joinsAnyRelation, sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -1375,6 +1375,75 @@ describe('on a modeled project, tables are ranked by the Modeling map', () => {
     // Three catalog picks: the connected table takes one of them, so the last look-alike is left out.
     expect(relationsSection).toContain('executable relation:ins.cc_link');
     expect(relationsSection).not.toContain('executable relation:ins.policy_no_c');
+  });
+});
+
+describe('a question mentions a table by its words', () => {
+  it('matches underscores as spaces and a plural, but not a part of another word', () => {
+    expect(mentionsName('what are the loss reserve amounts', 'loss_reserve')).toBe(true);
+    expect(mentionsName('total loss reserves by claim', 'loss_reserve')).toBe(true);
+    expect(mentionsName('count the order_items rows', 'order_items')).toBe(true);
+    expect(mentionsName('how many claims do we have', 'claim')).toBe(true);
+    expect(mentionsName('the reclaimed amount', 'claim')).toBe(false);
+    expect(mentionsName('loss payment and reserve', 'loss_reserve')).toBe(false);
+    // Short names only match as written.
+    expect(mentionsName('fire dept', 'dep')).toBe(false);
+    expect(mentionsName('by dep code', 'dep')).toBe(true);
+  });
+});
+
+describe('a marker table reaches the draft with the table its values live on', () => {
+  const connection: ConnectionConfig = { driver: 'duckdb', path: ':memory:' } as ConnectionConfig;
+  const tables: Record<string, string[]> = {
+    amounts: ['amount_id', 'claim_id', 'amount_value'],
+    reserve_flags: ['amount_id'],
+  };
+  const manifest = {
+    sources: Object.fromEntries(Object.entries(tables).map(([name, columns]) => [name, { name, origin: 'dbt', referencedBy: [], dbtModel: { uniqueId: `model.${name}`, schema: 'ins', columns: Object.fromEntries(columns.map((column) => [column, { name: column }])) } }])),
+    dbtProvenance: { nodes: Object.fromEntries(Object.keys(tables).map((name) => [`model.${name}`, { relation: `ins.${name}` }])) },
+    modeling: {
+      entities: Object.fromEntries(Object.keys(tables).map((name) => [name, { id: name, dbtUniqueId: `model.${name}` }])),
+      relationships: { a: { id: 'reserve_is_amount', from: 'reserve_flags', to: 'amounts', keys: [{ from: 'amount_id', to: 'amount_id' }], cardinality: 'one_to_one', status: 'draft' } },
+    },
+  };
+  const unreadable = JSON.stringify({ version: 1, kind: 'analytics', reading: 'Reserve flag totals.', measures: [{ ref: 'metric:ins.reserve_total' }], groupBy: [], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'scalar' });
+
+  it('names the marker, adds its base and says how to use it', async () => {
+    const prompts: string[] = [];
+    const provider: AgentProvider = {
+      name: 'ollama', available: async () => true,
+      generate: async (messages) => {
+        if (!messages[0]!.content.startsWith('You write exactly ONE read-only SQL statement')) return unreadable;
+        prompts.push(messages.map((message) => message.content).join('\n'));
+        return 'NO_SQL: nothing to draft in this test.';
+      },
+    };
+    const route = createAskPipelineRouteExecutor({
+      projectRoot: '/tmp/ask-marker-table',
+      executor: { executeQuery: vi.fn(async (sql: string) => {
+        if (sql.includes('information_schema.columns')) {
+          const rows = Object.entries(tables).filter(([name]) => sql.includes(`'${name}'`))
+            .flatMap(([name, columns]) => columns.map((column) => ({ table_schema: 'ins', table_name: name, column_name: column, data_type: 'VARCHAR' })));
+          return { columns: [], rowCount: rows.length, executionTimeMs: 1, rows };
+        }
+        return { columns: [], rowCount: 0, executionTimeMs: 1, rows: [] };
+      }) } as unknown as QueryExecutor,
+      resolveConnection: async () => connection,
+      getSemanticLayer: () => undefined,
+      getManifest: () => ({ snapshotId: 'snapshot:marker-table', manifest: manifest as never }),
+      selectProvider: async () => provider,
+      compileSemantic: async () => { throw new Error('no semantic layer'); },
+      priorIntent: () => undefined,
+    });
+    await route({
+      runId: 'run:marker-table',
+      request: { question: 'Total of the reserve flags', requestedMode: 'ask' } as AgentRunRequest,
+      route: 'generated_answer', maxRepairAttempts: 0, attempt: 0, emit: () => {},
+    });
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts[0]).toContain('executable relation:ins.amounts');
+    expect(prompts[0]).toContain('- ins.reserve_flags holds no values of its own (only its key)');
+    expect(prompts[0]).toContain('use the ins.amounts rows that have a matching ins.reserve_flags row');
   });
 });
 

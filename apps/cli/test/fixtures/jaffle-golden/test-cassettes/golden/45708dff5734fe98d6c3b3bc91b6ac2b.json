@@ -1,9 +1,9 @@
 {
   "key": "45708dff5734fe98d6c3b3bc91b6ac2b",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show gross order revenue broken down by calendar month.\",\"measures\":[{\"ref\":\"block:commerce.monthly_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"block:commerce.monthly_revenue\":\"q:revenue by month\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Show gross order revenue by calendar month.\",\"measures\":[{\"ref\":\"block:commerce.monthly_revenue\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"trend\",\"unresolved\":[],\"provenance\":{\"block:commerce.monthly_revenue\":\"q:revenue by month\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T06:58:43.116Z",
+  "recordedAt": "2026-09-17T13:59:12.057Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

@@ -1,9 +1,9 @@
 {
   "key": "978378d730ae22b51c91f6e4bcea998e",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks which players had the most double-doubles (games with double-digit totals in two of points/rebounds/assists/steals/blocks) in 2017.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"count of double-doubles per player in 2017\",\"options\":[],\"material\":true}],\"provenance\":{}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"The question asks which players had the most double-doubles (double-digit totals in two statistical categories in a single game) in 2017, but this project has no metric, column, or definition for a double-double.\",\"measures\":[],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"ranking\",\"unresolved\":[{\"clause\":\"most double-doubles in 2017\",\"options\":[],\"material\":true,\"question\":\"This project has no definition or computed field for 'double-double' (double-digit totals in two stat categories in a single game); it cannot be derived from the available metrics or columns as written. Would you like a related ranking instead, such as top scorers or rebounders in 2017?\"}],\"provenance\":{}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:12:34.502Z",
+  "recordedAt": "2026-09-17T14:12:31.195Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

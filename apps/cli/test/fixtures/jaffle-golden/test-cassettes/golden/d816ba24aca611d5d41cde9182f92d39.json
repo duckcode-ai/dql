@@ -1,9 +1,9 @@
 {
   "key": "d816ba24aca611d5d41cde9182f92d39",
   "operation": "generate",
-  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count of large orders (orders with total over 20).\",\"measures\":[{\"ref\":\"metric:orders.large_orders\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.large_orders\":\"q:large orders\"}}",
+  "text": "{\"version\":1,\"kind\":\"analytics\",\"reading\":\"Count of large orders (orders with total over 20).\",\"measures\":[{\"ref\":\"metric:orders.large_orders\"}],\"groupBy\":[],\"display\":[],\"filters\":[],\"expectedShape\":\"scalar\",\"unresolved\":[],\"provenance\":{\"metric:orders.large_orders\":\"q:how many large orders were there\"}}",
   "providerName": "claude",
-  "recordedAt": "2026-09-17T07:01:33.918Z",
+  "recordedAt": "2026-09-17T14:01:46.857Z",
   "provenance": {
     "kind": "recorded_provider",
     "replayClassification": "recorded_provider",

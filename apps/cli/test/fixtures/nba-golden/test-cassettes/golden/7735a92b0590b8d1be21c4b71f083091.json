@@ -1,0 +1,23 @@
+{
+  "key": "7735a92b0590b8d1be21c4b71f083091",
+  "operation": "generate",
+  "text": "```sql\nSELECT\n  player_id,\n  player_name,\n  SUM(fg3m) AS three_pointers_made,\n  SUM(fg3a) AS three_point_attempts,\n  CASE WHEN SUM(fg3a) = 0 THEN NULL ELSE CAST(SUM(fg3m) AS REAL) / SUM(fg3a) END AS three_point_pct\nFROM \"nba_golden\".\"dev\".\"player_game_stats\"\nWHERE game_date >= '2017-01-01' AND game_date < '2018-01-01'\nGROUP BY player_id, player_name\nORDER BY three_pointers_made DESC\nLIMIT 10;\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-09-17T14:15:36.288Z",
+  "provenance": {
+    "kind": "recorded_provider",
+    "replayClassification": "recorded_provider",
+    "providerQuality": "eligible"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 2,
+    "messageRoles": [
+      "system",
+      "user"
+    ],
+    "preCanonicalHash": "7735a92b0590b8d1be21c4b71f083091211e543667ed6c7331f61ce330e57525",
+    "postCanonicalHash": "7735a92b0590b8d1be21c4b71f083091211e543667ed6c7331f61ce330e57525",
+    "appliedRuleClasses": []
+  }
+}
