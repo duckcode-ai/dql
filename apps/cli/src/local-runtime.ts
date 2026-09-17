@@ -5689,7 +5689,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const planned = await resolvePlannedSemanticAdapter(projectRoot, undefined);
     const semanticManifestPath = resolveSemanticManifestPath(projectRoot, { dbtProjectDir: projectConfig.dbt?.projectDir, dbtManifestPath: projectConfig.dbt?.manifestPath, provenanceManifestPath: projectSnapshot().manifest?.dbtProvenance?.manifestPath });
     const value = planned === 'metricflow-cli' && !existsSync(semanticManifestPath)
-      ? { engine: 'native' as const, downgraded: `MetricFlow is installed but ${semanticManifestPath} was not found; run \`dbt parse\` in the dbt project so derived metrics compile on MetricFlow` }
+      ? { engine: 'native' as const, downgraded: `MetricFlow is installed but ${relative(projectRoot, semanticManifestPath) || semanticManifestPath} was not found; run \`dbt parse\` in the dbt project so derived metrics compile on MetricFlow` }
       : { engine: planned };
     plannedEngineCache = { at: Date.now(), value };
     return value;

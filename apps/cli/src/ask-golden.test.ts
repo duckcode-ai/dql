@@ -70,6 +70,10 @@ const LIVE = process.env.DQL_ASK_GOLDEN_LIVE === '1';
 // dispatch on a larger vocabulary); under vitest that scale is off, so a live
 // lane sets it explicitly. Replay is instant and keeps the strict deadline.
 if (LIVE && !process.env.DQL_AGENT_DEADLINE_SCALE) process.env.DQL_AGENT_DEADLINE_SCALE = '4';
+// The suite runs on the native semantic engine, as CI does (no MetricFlow
+// there). A developer's own `mf` on PATH would otherwise change the engine,
+// and every prompt that mentions it, between recording and replay.
+if (!process.env.DQL_METRICFLOW_BIN) process.env.DQL_METRICFLOW_BIN = join(tmpdir(), 'dql-ask-golden-no-metricflow', 'mf');
 const RECORD = process.env.DQL_ASK_GOLDEN_RECORD === '1';
 const REPEAT = Math.max(1, Number(process.env.DQL_ASK_GOLDEN_REPEAT ?? '1') || 1);
 /** `DQL_ASK_GOLDEN_KEEP=1` leaves the temporary project (and its run/trace stores) on disk for inspection. */
