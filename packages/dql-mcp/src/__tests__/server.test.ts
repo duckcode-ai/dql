@@ -13,6 +13,12 @@ import { getTableSchemaInput, searchMetadataInput, validateSqlInput } from '../t
 import { queryViaBlockInput } from '../tools/query-via-block.js';
 import { querySemanticModelInput } from '../tools/query-semantic-model.js';
 import { queryViaMetadataInput } from '../tools/query-via-metadata.js';
+import {
+  describeDatasetInput,
+  listDatasetsInput,
+  previewTileQueryInput,
+  queryDatasetInput,
+} from '../tools/datasets.js';
 import { searchBlocksInput } from '../tools/search-blocks.js';
 import { listDimensionsInput, listMetricsInput } from '../tools/semantic.js';
 import { suggestBlockInput } from '../tools/suggest-block.js';
@@ -41,7 +47,7 @@ describe('DQL MCP server instructions', () => {
     const registrations = __test__.buildMcpToolRegistrations({} as DQLContext);
 
     expect(registrations.map((tool) => tool.name)).toEqual(dqlToolNamesForSurface('mcp_agentic'));
-    expect(registrations).toHaveLength(20);
+    expect(registrations).toHaveLength(24);
     expect(registrations.map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
         'ask_dql',
@@ -52,6 +58,10 @@ describe('DQL MCP server instructions', () => {
         'explain_relationship_proof',
         'expand_context',
         'inspect_dql_project',
+        'list_datasets',
+        'describe_dataset',
+        'preview_tile_query',
+        'query_dataset',
         // Governed-generation tools (DQL generates end-to-end; UI parity).
         'answer_question',
         'build_block_from_prompt',
@@ -142,6 +152,10 @@ describe('DQL MCP server instructions', () => {
       get_table_schema: getTableSchemaInput,
       validate_sql: validateSqlInput,
       inspect_dql_project: inspectDqlProjectInput,
+      list_datasets: listDatasetsInput,
+      describe_dataset: describeDatasetInput,
+      preview_tile_query: previewTileQueryInput,
+      query_dataset: queryDatasetInput,
       build_dql_block: buildDqlBlockInput,
       build_dql_app: buildDqlAppInput,
       list_proposals: listProposalsInput,
@@ -170,6 +184,9 @@ describe('DQL MCP server instructions', () => {
     expect(getTableSchemaInput.table.safeParse('orders').success).toBe(true);
     expect(validateSqlInput.sql.safeParse('SELECT 1').success).toBe(true);
     expect(inspectDqlProjectInput.refresh.safeParse(false).success).toBe(true);
+    expect(describeDatasetInput.sourceId.safeParse('app:block:commerce:orders').success).toBe(true);
+    expect(queryDatasetInput.query.safeParse({ dimensions: [], measures: [{ measure: 'revenue' }] }).success).toBe(true);
+    expect(queryDatasetInput.query.safeParse({ sql: 'SELECT 1', dimensions: [], measures: [] }).success).toBe(false);
     expect(buildDqlAppInput.prompt.safeParse(undefined).success).toBe(false);
     expect(buildDqlBlockInput.sql.safeParse('SELECT 1').success).toBe(true);
     expect(listProposalsInput.since.safeParse('2026-07-01T00:00:00Z').success).toBe(true);

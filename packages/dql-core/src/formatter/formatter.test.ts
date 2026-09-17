@@ -75,6 +75,51 @@ filter.dropdown(SELECT DISTINCT region FROM orders,label="Region",param="region"
     expect(formatted).toContain('assert segment IN ["Enterprise", "SMB"]');
   });
 
+  it('formats v3 dataset metadata deterministically without converting legacy grain metadata', () => {
+    const source = `block "Order lines dataset" {
+      status = "certified"
+      grain = { keys = ["order_line_id"], entities = ["order_line"], keyEvidence = "proof.order-lines", timeGrain = "day" }
+      measures {
+        net_amount { from = "net_amount", additive = "additive", allowedAggs = ["sum"], agg = "sum" }
+      }
+      fields {
+        net_amount { type = "number", role = "attribute" }
+        order_line_id { type = "string", role = "key" }
+      }
+      query = """SELECT order_line_id, net_amount FROM order_lines"""
+    }`;
+
+    const formatted = formatDQL(source);
+
+    expect(formatted).toContain('grain = {');
+    expect(formatted).toContain('keyEvidence = "proof.order-lines"');
+    expect(formatted).toContain('fields {');
+    expect(formatted).toContain('net_amount { role = "attribute", type = "number" }');
+    expect(formatted).toContain('measures {');
+    expect(formatted).toContain('net_amount { agg = "sum", from = "net_amount", additive = "additive", allowedAggs = ["sum"] }');
+    expect(formatDQL(formatted)).toBe(formatted);
+    const parsed = parse(formatted);
+    const block = parsed.statements[0];
+    expect(block.kind).toBeDefined();
+  });
+
+  it('formats calculated Dataset measures and aggregate time-bucket declarations deterministically', () => {
+    const formatted = formatDQL(`block "Daily Orders" {
+      type = "custom"
+      status = "review"
+      grain = { entities = ["order"], keys = ["order_date", "customer_id"], keyEvidence = "proof.daily", timeGrain = "day", timeBucketBy = "order_date", aggregate = true }
+      fields { order_date { role = "time", type = "date", grains = ["day", "month"] } customer_id { role = "key", type = "string" } net_amount { role = "attribute", type = "number" } margin_amount { role = "attribute", type = "number" } }
+      measures { gross_margin { agg = "sum", expression = "SUM(margin_amount)", additive = "additive", allowedAggs = ["sum"] } orders_by_day { agg = "count_distinct", from = "customer_id", timeBucketBy = "order_date", additive = "additive", allowedAggs = ["count_distinct"] } }
+      query = """SELECT order_date, customer_id, net_amount, margin_amount FROM daily_orders"""
+    }`);
+
+    expect(formatted).toContain('timeBucketBy = "order_date"');
+    expect(formatted).toContain('aggregate = true');
+    expect(formatted).toContain('gross_margin { agg = "sum", expression = "SUM(margin_amount)", additive = "additive", allowedAggs = ["sum"] }');
+    expect(formatted).toContain('orders_by_day { agg = "count_distinct", from = "customer_id", timeBucketBy = "order_date", additive = "additive", allowedAggs = ["count_distinct"] }');
+    expect(formatDQL(formatted)).toBe(formatted);
+  });
+
   it('canonicalizes legacy singular semantic metrics to the universal array contract', () => {
     const formatted = formatDQL(`block "revenue" {
       type = "semantic"

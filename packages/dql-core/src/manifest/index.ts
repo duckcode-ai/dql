@@ -2,6 +2,7 @@
 
 export {
   buildManifest,
+  validateDatasetBlockSource,
   collectInputFiles,
   loadProjectConfig,
   resolveDataLexManifestPath,
@@ -110,6 +111,9 @@ export {
 export type {
   DQLManifest,
   ManifestBlock,
+  ManifestDatasetGrain,
+  ManifestDatasetField,
+  ManifestDatasetMeasure,
   ManifestDomain,
   ManifestTerm,
   ManifestBusinessView,

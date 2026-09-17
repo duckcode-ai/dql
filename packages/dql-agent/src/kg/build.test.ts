@@ -1007,4 +1007,60 @@ describe('buildKGFromManifest', () => {
       expect.objectContaining({ src: 'entity:order', dst: 'dbt_model:model.shop.orders', kind: 'binds_to' }),
     ]));
   });
+
+  it('projects a native model-scoped semantic Dataset capability without relabeling it as a block', () => {
+    const layer = new SemanticLayer();
+    layer.addCube({
+      name: 'order_lines', label: 'Order lines', description: '', domain: 'commerce',
+      sql: 'SELECT * FROM order_lines', table: 'order_lines',
+      measures: [
+        { name: 'semantic_revenue', label: 'Revenue', description: '', sql: 'SUM(net_amount)', type: 'sum', aggregation: 'sum', table: 'order_lines', cube: 'order_lines', domain: 'commerce', aggTimeDimension: 'order_date' },
+        { name: 'semantic_customer_count', label: 'Distinct customers', description: '', sql: 'COUNT(DISTINCT customer_id)', type: 'count_distinct', aggregation: 'count_distinct', table: 'order_lines', cube: 'order_lines', domain: 'commerce', aggTimeDimension: 'order_date' },
+      ],
+      dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'order_lines', cube: 'order_lines', domain: 'commerce', entityLink: 'order_line' }],
+      timeDimensions: [{ name: 'order_date', label: 'Order date', description: '', sql: 'order_date', type: 'date', table: 'order_lines', cube: 'order_lines', domain: 'commerce', entityLink: 'order_line', isTimeDimension: true, granularities: ['day', 'month'], primaryTime: true }],
+      joins: [], segments: [], preAggregations: [], defaultTimeDimension: 'order_date',
+      source: { provider: 'dql', objectType: 'cube', objectId: 'order_lines' },
+    });
+    layer.addEntity({
+      name: 'order_line', label: 'Order line', description: '', domain: 'commerce', type: 'primary',
+      expr: 'order_line_id', table: 'order_lines', cube: 'order_lines',
+      source: { provider: 'dql', objectType: 'entity', objectId: 'order_line' },
+    });
+    layer.addSemanticModel({
+      name: 'order_lines', label: 'Order lines', description: '', domain: 'commerce', table: 'order_lines',
+      entities: ['order_line'], measures: ['semantic_revenue', 'semantic_customer_count'],
+      dimensions: ['region'], timeDimensions: ['order_date'],
+      source: { provider: 'dql', objectType: 'semantic_model', objectId: 'order_lines' },
+    });
+    layer.addMetric({
+      name: 'semantic_revenue', label: 'Revenue', description: '', domain: 'commerce', status: 'certified',
+      sql: 'SUM(net_amount)', type: 'sum', aggregation: 'sum', metricType: 'simple', table: 'order_lines', cube: 'order_lines',
+      typeParams: { measure: 'semantic_revenue' }, aggTimeDimension: 'order_date',
+      source: { provider: 'dql', objectType: 'metric', objectId: 'order_lines.semantic_revenue' },
+    });
+    layer.addMetric({
+      name: 'semantic_customer_count', label: 'Distinct customers', description: '', domain: 'commerce', status: 'certified',
+      sql: 'COUNT(DISTINCT customer_id)', type: 'count_distinct', aggregation: 'count_distinct', metricType: 'simple', table: 'order_lines', cube: 'order_lines',
+      typeParams: { measure: 'semantic_customer_count' }, aggTimeDimension: 'order_date',
+      source: { provider: 'dql', objectType: 'metric', objectId: 'order_lines.semantic_customer_count' },
+    });
+
+    const graph = buildKGFromSemanticLayer(layer, ['commerce']);
+    const revenue = graph.nodes.find((node) => node.nodeId === 'metric:order_lines.semantic_revenue');
+    const customerCount = graph.nodes.find((node) => node.nodeId === 'metric:order_lines.semantic_customer_count');
+
+    expect(revenue?.payload?.analyticalCapability).toMatchObject({
+      semanticModelId: 'semantic:commerce:model:order_lines',
+      aggregation: 'sum',
+      additivity: { entities: 'additive', time: 'additive' },
+      operations: expect.arrayContaining(['having']),
+      executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+    });
+    expect(customerCount?.payload?.analyticalCapability).toMatchObject({
+      aggregation: 'count_distinct',
+      additivity: { entities: 'non_additive', time: 'non_additive' },
+      executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+    });
+  });
 });

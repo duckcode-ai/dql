@@ -178,6 +178,75 @@ describe('buildManifest source-cache correctness', () => {
   });
 });
 
+describe('buildManifest Dataset aggregate contracts', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dql-dataset-aggregate-'));
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    writeFileSync(join(tmpDir, 'dql.config.json'), JSON.stringify({ project: 'dataset-aggregate' }));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('keeps a calculated measure and exact aggregate time bucket through the parsed manifest', () => {
+    writeFileSync(join(tmpDir, 'blocks', 'daily.dql'), `block "Daily customer Dataset" {
+  domain = "commerce"
+  type = "custom"
+  status = "review"
+  grain = { entities = ["customer_day"], keys = ["customer_day_id", "order_date"], keyEvidence = "proof.customer-day", timeGrain = "day", timeBucketBy = "order_date", aggregate = true }
+  fields {
+    customer_day_id { role = "key", type = "string" }
+    order_date { role = "time", type = "date", grains = ["day", "month"] }
+    daily_revenue { role = "attribute", type = "number" }
+    daily_margin { role = "attribute", type = "number" }
+  }
+  measures {
+    revenue { agg = "sum", from = "daily_revenue", additive = "additive", allowedAggs = ["sum"] }
+    gross_margin { agg = "sum", expression = "SUM(daily_revenue) - SUM(daily_margin)", additive = "additive", allowedAggs = ["sum"] }
+  }
+  query = """SELECT customer_day_id, order_date, daily_revenue, daily_margin FROM daily_customer_orders"""
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir });
+    const block = manifest.blocks['Daily customer Dataset'];
+
+    expect((manifest.diagnostics ?? []).filter((diagnostic) => diagnostic.severity === 'error')).toEqual([]);
+    expect(block?.datasetGrain).toMatchObject({ aggregate: true, timeGrain: 'day', timeBucketBy: 'order_date' });
+    expect(block?.datasetMeasures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'gross_margin', expression: 'SUM(daily_revenue) - SUM(daily_margin)' }),
+    ]));
+  });
+
+  it('rejects aggregate sources without a native time-bucket key or a time-additive distinct contract', () => {
+    writeFileSync(join(tmpDir, 'blocks', 'invalid-daily.dql'), `block "Invalid daily Dataset" {
+  domain = "commerce"
+  type = "custom"
+  status = "review"
+  grain = { entities = ["customer_day"], keys = ["customer_day_id"], keyEvidence = "proof.customer-day", timeGrain = "day", aggregate = true }
+  fields {
+    customer_day_id { role = "key", type = "string" }
+    order_date { role = "time", type = "date", grains = ["day", "month"] }
+    customer_id { role = "attribute", type = "string" }
+  }
+  measures {
+    customers { agg = "count_distinct", from = "customer_id", additive = "additive", allowedAggs = ["count_distinct"] }
+  }
+  query = """SELECT customer_day_id, order_date, customer_id FROM daily_customer_orders"""
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir });
+    const messages = (manifest.diagnostics ?? []).filter((diagnostic) => diagnostic.severity === 'error').map((diagnostic) => diagnostic.message);
+
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.stringContaining('time-additive distinct measure'),
+      expect.stringContaining('requires both timeGrain and exact timeBucketBy'),
+    ]));
+  });
+});
+
 describe('buildManifest semantic lineage metadata', () => {
   let tmpDir: string;
 

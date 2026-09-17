@@ -6,11 +6,13 @@
  * and optionally imports dbt manifest data.
  */
 
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname, relative } from 'node:path';
 import { Parser } from '../parser/index.js';
 import { analyze, detectTrustConflicts } from '../semantic/index.js';
 import { extractTablesFromSql } from '../lineage/sql-parser.js';
+import { parseDatasetAggregateExpression } from '../datasets/aggregate-expression.node.js';
 import { extractColumnLineage, type ColumnLineageResult } from '../lineage/column-lineage.js';
 import { detectOutputDrift } from './output-drift.js';
 import { buildLineageGraph } from '../lineage/builder.js';
@@ -41,6 +43,7 @@ import type {
   ManifestDiagnostic,
   ManifestApp,
   ManifestDashboard,
+  ManifestDatasetTile,
   ManifestBusinessView,
   ManifestDomain,
   ManifestTerm,
@@ -56,6 +59,7 @@ import {
   normalizeProductDomainContext,
   type AppDocument,
   type DashboardDocument,
+  tileQueryHash,
 } from '../apps/index.js';
 import { loadDbtRunState, applyBlockDataState, type DbtRunStateIndex } from './dbt-freshness.js';
 import { blockParameterDefinitions } from '../blocks/parameters.js';
@@ -343,7 +347,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
 
   // Apps & dashboards (consumption layer). Scanned after blocks/notebooks
   // because dashboard refs are resolved against the block path → name map.
-  const { apps, dashboards } = scanAppsAndDashboards(projectRoot, blocks, diagnostics);
+  const { apps, dashboards } = scanAppsAndDashboards(projectRoot, blocks, knowledgeBlocks, diagnostics);
 
   // Build lineage
   const lineage = buildManifestLineage(
@@ -393,6 +397,30 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   diagnostics.push(...inlineKnowledgeGraph.diagnostics);
   const knowledgeGraph = compactManifestKnowledgeGraph(inlineKnowledgeGraph);
   return { ...baseManifest, knowledgeGraph, diagnostics };
+}
+
+/**
+ * Validate the Dataset declarations in one in-memory DQL source without
+ * writing it into a project. Source-authoring proposals use this same
+ * grammar-to-manifest validation as `buildManifest`, so an accepted proposal
+ * cannot introduce a Dataset declaration which would only fail after its
+ * source file has changed.
+ */
+export function validateDatasetBlockSource(source: string, filePath = '<memory>.dql'): {
+  blocks: ManifestBlock[];
+  diagnostics: ManifestDiagnostic[];
+} {
+  const diagnostics: ManifestDiagnostic[] = [];
+  const ast = new Parser(source, filePath).parse();
+  const blocks: ManifestBlock[] = [];
+  for (const statement of ast.statements) {
+    const block = statement as any;
+    if (block.kind !== 'BlockDecl') continue;
+    const manifestBlock = blockDeclToManifestBlock(block, filePath);
+    validateDatasetBlockContract(manifestBlock, diagnostics);
+    blocks.push(manifestBlock);
+  }
+  return { blocks, diagnostics };
 }
 
 /**
@@ -873,6 +901,7 @@ function scanBlocks(
           if (block.kind !== 'BlockDecl') continue;
 
           const nextBlock = blockDeclToManifestBlock(block, relPath);
+          validateDatasetBlockContract(nextBlock, diagnostics);
           all.push(nextBlock);
           if (blocks[block.name]) {
             diagnostics?.push({
@@ -2012,6 +2041,7 @@ function stripDbtRolePrefix(name: string): string | undefined {
 function scanAppsAndDashboards(
   projectRoot: string,
   blocks: Record<string, ManifestBlock>,
+  blockDeclarations: ManifestBlock[],
   diagnostics: ManifestDiagnostic[],
 ): { apps: Record<string, ManifestApp>; dashboards: Record<string, ManifestDashboard> } {
   const apps: Record<string, ManifestApp> = {};
@@ -2023,6 +2053,14 @@ function scanAppsAndDashboards(
     if (block.filePath) blockPathToName.set(block.filePath, block.name);
   }
   const knownBlockNames = new Set(Object.keys(blocks));
+  // App Studio persists a path-qualified source id, not the legacy block name.
+  // Retain every declaration here so compile diagnostics cannot accidentally
+  // resolve a same-named block from another Domain or source file.
+  const datasetBlocksBySourceId = new Map<string, ManifestBlock>();
+  for (const block of blockDeclarations) {
+    if (!block.filePath) continue;
+    datasetBlocksBySourceId.set(manifestDatasetBlockSourceId(block), block);
+  }
 
   const appJsonPaths = findAppDocuments(projectRoot);
   for (const appJsonPath of appJsonPaths) {
@@ -2061,6 +2099,20 @@ function scanAppsAndDashboards(
       }
       if (!dashboard) continue;
 
+      // APP-034 / APP-041: a v3 tile is an explicit query over a captured
+      // Dataset source revision. Read the current block source during compile
+      // so a field removal or edited source is visible before the runtime
+      // rejects the page. Semantic provider contracts remain target-bound and
+      // are revalidated by their execution gateway; block sources have a
+      // complete Git-owned contract available in this compiler pass.
+      validateDashboardDatasetSourceDrift({
+        projectRoot,
+        dashboard,
+        filePath: dqldRel,
+        blockSources: datasetBlocksBySourceId,
+        diagnostics,
+      });
+
       const refs = extractDashboardBlockRefs(dashboard);
       const resolvedById: string[] = [];
       const resolvedByPath: string[] = [];
@@ -2084,6 +2136,7 @@ function scanAppsAndDashboards(
       }
 
       const qualifiedId = `${app.id}/${dashboard.id}`;
+      const datasetTiles = manifestDatasetTiles(dashboard);
       const dashRecord: ManifestDashboard = {
         id: dashboard.id,
         appId: app.id,
@@ -2109,6 +2162,7 @@ function scanAppsAndDashboards(
         unresolvedRefs: unresolved,
         params: (dashboard.params ?? []).map((p) => p.id),
         filters: (dashboard.filters ?? []).map((f) => f.id),
+        ...(datasetTiles.length > 0 ? { datasetTiles } : {}),
         layout: {
           kind: dashboard.layout.kind,
           cols: dashboard.layout.cols,
@@ -2165,6 +2219,176 @@ function scanAppsAndDashboards(
   }
 
   return { apps, dashboards };
+}
+
+/**
+ * Build offline lineage facts for v3 field-query tiles.  The stored Dataset
+ * binding, rather than an inferred block name or generated SQL, is the
+ * authority here.  Runtime execution later adds target-specific evidence.
+ */
+function manifestDatasetTiles(dashboard: DashboardDocument): ManifestDatasetTile[] {
+  if (dashboard.version !== 3 || !dashboard.datasets?.length) return [];
+
+  const bindings = new Map(dashboard.datasets.map((binding) => [binding.sourceId, binding]));
+  const tiles: ManifestDatasetTile[] = [];
+  for (const item of dashboard.layout.items) {
+    if (!item.query || !item.sourceId) continue;
+    const binding = bindings.get(item.sourceId);
+    // Parser/runtime reject this malformed v3 relationship. Do not invent a
+    // lineage source record from an unbound tile in the compiler meanwhile.
+    if (!binding) continue;
+
+    const sourceFingerprint = manifestDatasetLineageHash({
+      sourceId: binding.sourceId,
+      sourceRevision: binding.sourceRevision,
+      snapshotId: binding.snapshotId,
+      contractFingerprint: binding.contractFingerprint,
+    });
+    const queryFingerprint = manifestDatasetLineageHash({ query: tileQueryHash(item.query) });
+    const dependencyFingerprint = manifestDatasetLineageHash({
+      tileId: item.i,
+      sourceFingerprint,
+      queryFingerprint,
+      // Keep an inconsistent tile-level revision visible in the dependency
+      // identity until the regular source-drift diagnostic is repaired.
+      tileSourceRevision: item.sourceRevision,
+      // Runtime inputs live outside TileQuery. Hash their authored contract
+      // without exposing raw values in lineage so a parameter/filter or
+      // declared interaction edit cannot look equivalent to an earlier tile.
+      parameterBindings: item.parameterBindings ?? [],
+      filterBindings: item.filterBindings ?? [],
+      dashboardParams: dashboard.params ?? [],
+      dashboardFilters: dashboard.filters ?? [],
+      dashboardInteractions: dashboard.interactions ?? null,
+    });
+    tiles.push({
+      id: item.i,
+      sourceId: binding.sourceId,
+      sourceRevision: binding.sourceRevision,
+      snapshotId: binding.snapshotId,
+      contractFingerprint: binding.contractFingerprint,
+      sourceFingerprint,
+      queryFingerprint,
+      dependencyFingerprint,
+      sourceKind: manifestDatasetSourceKind(binding.sourceId),
+      selectedOutputs: {
+        dimensions: item.query.dimensions.map((dimension) => dimension.field),
+        measures: item.query.measures.map((measure) => measure.measure),
+        filters: (item.query.filters ?? []).map((filter) => filter.field),
+        having: (item.query.having ?? []).map((filter) => filter.field),
+      },
+    });
+  }
+  return tiles;
+}
+
+function manifestDatasetSourceKind(sourceId: string): ManifestDatasetTile['sourceKind'] {
+  if (sourceId.startsWith('app:block:')) return 'block_dataset';
+  if (sourceId.startsWith('app:semantic:')) return 'semantic_dataset';
+  return 'other_dataset';
+}
+
+function manifestDatasetLineageHash(value: unknown): string {
+  return `sha256:${createHash('sha256').update(JSON.stringify(canonicalManifestDatasetLineageValue(value))).digest('hex')}`;
+}
+
+function canonicalManifestDatasetLineageValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalManifestDatasetLineageValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => [key, canonicalManifestDatasetLineageValue(entry)]));
+}
+
+function validateDashboardDatasetSourceDrift(input: {
+  projectRoot: string;
+  dashboard: DashboardDocument;
+  filePath: string;
+  blockSources: ReadonlyMap<string, ManifestBlock>;
+  diagnostics: ManifestDiagnostic[];
+}): void {
+  const { projectRoot, dashboard, filePath, blockSources, diagnostics } = input;
+  if (dashboard.version !== 3 || !dashboard.datasets?.length) return;
+
+  const bindingBySourceId = new Map(dashboard.datasets.map((binding) => [binding.sourceId, binding]));
+  for (const binding of dashboard.datasets) {
+    const block = blockSources.get(binding.sourceId);
+    if (!block) {
+      // `app:semantic:` has no compiler-local contract: native, dbt, and
+      // MetricFlow adapters bind it against the active target at runtime.
+      // A missing block identity, however, is a deterministic compile error.
+      if (binding.sourceId.startsWith('app:block:')) {
+        diagnostics.push({
+          kind: 'drift',
+          filePath,
+          severity: 'error',
+          message: `APP_DATASET_SOURCE_UNRESOLVED: Dataset source ${binding.sourceId} no longer resolves to its declared block. Choose the current Dataset and reselect its fields.`,
+        });
+      }
+      continue;
+    }
+    const currentRevision = manifestDatasetBlockSourceRevision(projectRoot, block);
+    if (currentRevision !== binding.sourceRevision) {
+      diagnostics.push({
+        kind: 'drift',
+        filePath,
+        severity: 'error',
+        message: `APP_DATASET_SOURCE_DRIFT: Dataset source ${binding.sourceId} changed after this page was authored. Choose the current Dataset and reselect its fields before publishing.`,
+      });
+    }
+  }
+
+  for (const item of dashboard.layout.items) {
+    if (!item.query || !item.sourceId) continue;
+    const block = blockSources.get(item.sourceId);
+    if (!block) continue;
+    const binding = bindingBySourceId.get(item.sourceId);
+    if (!binding) continue;
+    const physical = new Set((block.datasetFields ?? []).map((field) => field.name.toLowerCase()));
+    const measures = new Set((block.datasetMeasures ?? []).map((measure) => measure.name.toLowerCase()));
+    const diagnosePhysical = (field: string, role: string) => {
+      if (physical.has(field.toLowerCase())) return;
+      diagnostics.push({
+        kind: 'drift',
+        filePath,
+        severity: 'error',
+        message: `APP_DATASET_FIELD_DRIFT: Tile ${item.i} selects ${role} ${field}, which is no longer declared by Dataset ${binding.id}. Refresh the Dataset and reselect supported fields.`,
+      });
+    };
+    const diagnoseMeasure = (measure: string, role: string) => {
+      if (measures.has(measure.toLowerCase())) return;
+      diagnostics.push({
+        kind: 'drift',
+        filePath,
+        severity: 'error',
+        message: `APP_DATASET_FIELD_DRIFT: Tile ${item.i} selects ${role} ${measure}, which is no longer declared by Dataset ${binding.id}. Refresh the Dataset and reselect supported measures.`,
+      });
+    };
+    for (const dimension of item.query.dimensions) diagnosePhysical(dimension.field, 'dimension');
+    for (const measure of item.query.measures) diagnoseMeasure(measure.measure, 'measure');
+    for (const filter of item.query.filters ?? []) diagnosePhysical(filter.field, 'filter field');
+    for (const filter of item.query.having ?? []) diagnoseMeasure(filter.field, 'HAVING measure');
+  }
+}
+
+/** Keep compiler source identity byte-for-byte aligned with App source catalog. */
+function manifestDatasetBlockSourceId(block: ManifestBlock): string {
+  const domain = block.domain?.trim() || 'global';
+  const identity = createHash('sha256').update(`${block.filePath}\u0000${block.name}`).digest('hex').slice(0, 20);
+  return `app:block:${domain}:${identity}`;
+}
+
+/** The runtime and metadata catalog bind block source revisions to raw DQL text. */
+function manifestDatasetBlockSourceRevision(projectRoot: string, block: ManifestBlock): string {
+  const path = join(projectRoot, block.filePath);
+  try {
+    return `sha256:${createHash('sha256').update(readFileSync(path, 'utf8')).digest('hex')}`;
+  } catch {
+    // This is handled by the existing block scan. A stable fallback preserves
+    // deterministic diagnostics rather than depending on filesystem metadata.
+    return `sha256:${createHash('sha256').update(JSON.stringify(block)).digest('hex')}`;
+  }
 }
 
 function appDocumentToManifest(
@@ -2479,31 +2703,41 @@ function buildManifestLineage(
     };
   }
 
+  const manifestNodes: ManifestLineage['nodes'] = graphJson.nodes.map((n) => ({
+    id: n.id,
+    type: n.type,
+    name: n.name,
+    layer: n.layer,
+    domain: n.domain,
+    owner: n.owner,
+    status: n.status,
+    filePath: blocks[n.name]?.filePath
+      ?? businessViews?.[n.name]?.filePath
+      ?? terms?.[n.name]?.filePath
+      ?? metrics[n.name]?.filePath
+      ?? dimensions[n.name]?.filePath
+      ?? n.metadata?.filePath,
+    columns: n.columns,
+    metadata: n.metadata,
+  }));
+  const manifestEdges: ManifestLineage['edges'] = graphJson.edges.map((e) => ({
+    source: e.source,
+    target: e.target,
+    type: e.type,
+    sourceDomain: e.sourceDomain,
+    targetDomain: e.targetDomain,
+  }));
+
+  appendVirtualAppTileLineage({
+    nodes: manifestNodes,
+    edges: manifestEdges,
+    blocks,
+    dashboards: appDashboards,
+  });
+
   return {
-    nodes: graphJson.nodes.map((n) => ({
-      id: n.id,
-      type: n.type,
-      name: n.name,
-      layer: n.layer,
-      domain: n.domain,
-      owner: n.owner,
-      status: n.status,
-      filePath: blocks[n.name]?.filePath
-        ?? businessViews?.[n.name]?.filePath
-        ?? terms?.[n.name]?.filePath
-        ?? metrics[n.name]?.filePath
-        ?? dimensions[n.name]?.filePath
-        ?? n.metadata?.filePath,
-      columns: n.columns,
-      metadata: n.metadata,
-    })),
-    edges: graphJson.edges.map((e) => ({
-      source: e.source,
-      target: e.target,
-      type: e.type,
-      sourceDomain: e.sourceDomain,
-      targetDomain: e.targetDomain,
-    })),
+    nodes: manifestNodes,
+    edges: manifestEdges,
     domains,
     crossDomainFlows: flows.map((f) => ({
       from: f.from,
@@ -2512,6 +2746,99 @@ function buildManifestLineage(
     })),
     domainTrust,
   };
+}
+
+/**
+ * Add virtual Dataset-source and App-tile nodes after generic lineage
+ * construction.  A v3 TileQuery is saved analytical intent, not physical
+ * SQL. Its offline lineage therefore stops at the exact Dataset binding and
+ * records no target-specific SQL fingerprint.
+ */
+function appendVirtualAppTileLineage(input: {
+  nodes: ManifestLineage['nodes'];
+  edges: ManifestLineage['edges'];
+  blocks: Record<string, ManifestBlock>;
+  dashboards?: Record<string, ManifestDashboard>;
+}): void {
+  const { nodes, edges, blocks, dashboards } = input;
+  if (!dashboards) return;
+
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const edgeIds = new Set(edges.map((edge) => `${edge.source}\u0000${edge.target}\u0000${edge.type}`));
+  const blockBySourceId = new Map(
+    Object.values(blocks).map((block) => [manifestDatasetBlockSourceId(block), block.name]),
+  );
+  const addEdge = (source: string, target: string, type: string, sourceDomain?: string, targetDomain?: string) => {
+    const id = `${source}\u0000${target}\u0000${type}`;
+    if (edgeIds.has(id)) return;
+    edgeIds.add(id);
+    edges.push({ source, target, type, sourceDomain, targetDomain });
+  };
+
+  for (const dashboard of Object.values(dashboards).sort((left, right) => left.qualifiedId.localeCompare(right.qualifiedId))) {
+    const dashboardNodeId = `dashboard:${dashboard.qualifiedId}`;
+    if (!nodeIds.has(dashboardNodeId)) continue;
+    for (const tile of [...(dashboard.datasetTiles ?? [])].sort((left, right) => left.id.localeCompare(right.id))) {
+      const sourceNodeId = `dataset_source:${tile.sourceFingerprint}`;
+      if (!nodeIds.has(sourceNodeId)) {
+        nodeIds.add(sourceNodeId);
+        nodes.push({
+          id: sourceNodeId,
+          type: 'dataset_source',
+          name: tile.sourceId,
+          layer: 'consumption',
+          domain: dashboard.domain,
+          filePath: dashboard.filePath,
+          metadata: {
+            artifactKind: 'virtual_dataset_source',
+            sourceKind: tile.sourceKind,
+            sourceId: tile.sourceId,
+            sourceRevision: tile.sourceRevision,
+            snapshotId: tile.snapshotId,
+            contractFingerprint: tile.contractFingerprint,
+            sourceFingerprint: tile.sourceFingerprint,
+            // Deliberately no `physicalSqlFingerprint`: compilation is offline
+            // and semantic adapters may not have a physical SQL representation.
+            physicalSqlAvailability: 'unavailable_offline',
+          },
+        });
+        const blockName = tile.sourceKind === 'block_dataset' ? blockBySourceId.get(tile.sourceId) : undefined;
+        if (blockName) {
+          addEdge(`block:${blockName}`, sourceNodeId, 'contains', dashboard.domain, dashboard.domain);
+        }
+      }
+
+      const tileNodeId = `app_tile:${dashboard.qualifiedId}:${tile.id}`;
+      if (!nodeIds.has(tileNodeId)) {
+        nodeIds.add(tileNodeId);
+        nodes.push({
+          id: tileNodeId,
+          type: 'app_tile',
+          name: tile.id,
+          layer: 'consumption',
+          domain: dashboard.domain,
+          filePath: dashboard.filePath,
+          metadata: {
+            artifactKind: 'virtual_app_tile',
+            sourceKind: tile.sourceKind,
+            sourceId: tile.sourceId,
+            sourceRevision: tile.sourceRevision,
+            snapshotId: tile.snapshotId,
+            contractFingerprint: tile.contractFingerprint,
+            sourceFingerprint: tile.sourceFingerprint,
+            queryFingerprint: tile.queryFingerprint,
+            dependencyFingerprint: tile.dependencyFingerprint,
+            selectedOutputs: tile.selectedOutputs,
+            // Query intent is recorded above. Runtime receipts alone may add a
+            // target-specific SQL fingerprint after actual execution.
+            physicalSqlAvailability: 'unavailable_offline',
+          },
+        });
+      }
+      addEdge(sourceNodeId, tileNodeId, 'feeds', dashboard.domain, dashboard.domain);
+      addEdge(tileNodeId, dashboardNodeId, 'contains', dashboard.domain, dashboard.domain);
+    }
+  }
 }
 
 // ---- AST Helpers ----
@@ -2559,6 +2886,46 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
     termRefs: Array.isArray(block.termRefs) ? block.termRefs : undefined,
     pattern: typeof block.pattern === 'string' ? block.pattern : undefined,
     grain: typeof block.grain === 'string' ? block.grain : undefined,
+    datasetGrain: block.datasetGrain && typeof block.datasetGrain === 'object'
+      ? {
+          entities: Array.isArray(block.datasetGrain.entities) ? block.datasetGrain.entities : [],
+          keys: Array.isArray(block.datasetGrain.keys) ? block.datasetGrain.keys : [],
+          keyEvidence: typeof block.datasetGrain.keyEvidence === 'string' ? block.datasetGrain.keyEvidence : undefined,
+          description: typeof block.datasetGrain.description === 'string' ? block.datasetGrain.description : undefined,
+          timeGrain: typeof block.datasetGrain.timeGrain === 'string' ? block.datasetGrain.timeGrain : undefined,
+          timeBucketBy: typeof block.datasetGrain.timeBucketBy === 'string' ? block.datasetGrain.timeBucketBy : undefined,
+          aggregate: block.datasetGrain.aggregate === true || undefined,
+        }
+      : undefined,
+    datasetFields: Array.isArray(block.datasetFields)
+      ? block.datasetFields.map((field: any) => ({
+          name: field.name,
+          role: field.role,
+          type: field.type,
+          grains: Array.isArray(field.grains) ? field.grains : undefined,
+          primary: field.primary === true || undefined,
+          hierarchy: field.hierarchy,
+          level: field.level,
+          status: field.status,
+        }))
+      : undefined,
+    datasetMeasures: Array.isArray(block.datasetMeasures)
+      ? block.datasetMeasures.map((measure: any) => ({
+          name: measure.name,
+          aggregation: measure.aggregation,
+          from: measure.from,
+          numerator: measure.numerator,
+          denominator: measure.denominator,
+          expression: measure.expression,
+          timeBucketBy: measure.timeBucketBy,
+          additive: measure.additive,
+          entityAdditive: measure.entityAdditive,
+          allowedAggs: Array.isArray(measure.allowedAggs) ? measure.allowedAggs : undefined,
+          format: measure.format,
+          currency: measure.currency,
+          status: measure.status,
+        }))
+      : undefined,
     entities: Array.isArray(block.entities) ? block.entities : undefined,
     declaredOutputs: Array.isArray(block.outputs) ? block.outputs : undefined,
     dimensions: Array.isArray(block.dimensions) ? block.dimensions : undefined,
@@ -2602,6 +2969,7 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
     outputContract: buildOutputContract(
       Array.isArray(block.outputs) ? block.outputs : undefined,
       columnLineage,
+      Array.isArray(block.datasetFields) ? block.datasetFields : undefined,
     ),
   };
 }
@@ -2625,8 +2993,14 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
 function buildOutputContract(
   declaredOutputs: string[] | undefined,
   columnLineage: ColumnLineageResult | null,
+  datasetFields?: Array<{ name?: string; role?: string; type?: string }>,
 ): Array<{ name: string; type?: string; role?: string }> | undefined {
   const roleByName = new Map<string, string>();
+  const datasetFieldByName = new Map<string, { role?: string; type?: string }>();
+  for (const field of datasetFields ?? []) {
+    const name = typeof field.name === 'string' ? field.name.trim() : '';
+    if (name) datasetFieldByName.set(name.toLowerCase(), { role: field.role, type: field.type });
+  }
   if (columnLineage?.parsed) {
     for (const col of columnLineage.columns) {
       if (col.isAggregate) roleByName.set(col.name.toLowerCase(), 'metric');
@@ -2640,7 +3014,8 @@ function buildOutputContract(
       const name = typeof raw === 'string' ? raw.trim() : '';
       if (!name || seen.has(name.toLowerCase())) continue;
       seen.add(name.toLowerCase());
-      contract.push({ name, role: roleByName.get(name.toLowerCase()) });
+      const datasetField = datasetFieldByName.get(name.toLowerCase());
+      contract.push({ name, type: datasetField?.type, role: datasetField?.role ?? roleByName.get(name.toLowerCase()) });
     }
     return contract.length > 0 ? contract : undefined;
   }
@@ -2657,9 +3032,129 @@ function buildOutputContract(
     const name = col.name?.trim();
     if (!name || seen.has(name.toLowerCase())) continue;
     seen.add(name.toLowerCase());
-    contract.push({ name, role: col.isAggregate ? 'metric' : undefined });
+    const datasetField = datasetFieldByName.get(name.toLowerCase());
+    contract.push({ name, type: datasetField?.type, role: datasetField?.role ?? (col.isAggregate ? 'metric' : undefined) });
   }
   return contract.length > 0 ? contract : undefined;
+}
+
+/**
+ * Dataset declarations are intentionally strict. This only validates source
+ * shape and physical dependencies; a `keyEvidence` id is resolved against a
+ * typed proof later by the local runtime/catalog, because a nonempty string is
+ * not evidence of uniqueness, source identity, or snapshot freshness.
+ */
+function validateDatasetBlockContract(block: ManifestBlock, diagnostics?: ManifestDiagnostic[]): void {
+  const hasDataset = Boolean(block.datasetGrain || block.datasetFields || block.datasetMeasures);
+  if (!hasDataset) return;
+  const error = (message: string) => diagnostics?.push({
+    kind: 'resolve',
+    filePath: block.filePath,
+    severity: 'error',
+    message: `Dataset contract for block "${block.name}": ${message}`,
+  });
+  if (!block.datasetGrain || !block.datasetFields?.length || !block.datasetMeasures?.length) {
+    error('grain, fields, and measures must all be declared together.');
+    return;
+  }
+  if (!block.datasetGrain.entities.length || !block.datasetGrain.keys.length) {
+    error('grain must declare at least one entity and one physical key.');
+  }
+  if (block.status === 'certified' && !block.datasetGrain.keyEvidence?.trim()) {
+    error('a certified dataset requires a typed keyEvidence reference; a preview is not a grain proof.');
+  }
+  const physical = new Map<string, NonNullable<ManifestBlock['datasetFields']>[number]>();
+  for (const field of block.datasetFields) {
+    const normalized = field.name?.trim().toLowerCase();
+    if (!normalized) {
+      error('every field needs a physical name.');
+      continue;
+    }
+    if (physical.has(normalized)) error(`physical field "${field.name}" is declared more than once.`);
+    physical.set(normalized, field);
+    if (!field.type) error(`physical field "${field.name}" needs a declared type.`);
+    if (field.role === 'time' && (!field.grains?.length || field.grains.some((grain) => !grain.trim()))) {
+      error(`time field "${field.name}" needs supported time grains.`);
+    }
+  }
+  const outputNames = new Set((block.outputContract ?? []).map((output) => output.name.toLowerCase()));
+  for (const field of block.datasetFields) {
+    if (field.name && outputNames.size > 0 && !outputNames.has(field.name.toLowerCase())) {
+      error(`physical field "${field.name}" is not present in the block output contract.`);
+    }
+  }
+  for (const key of block.datasetGrain.keys) {
+    const field = physical.get(key.toLowerCase());
+    if (!field) error(`grain key "${key}" is not a declared physical field.`);
+    else if (field.role !== 'key' && !(block.datasetGrain.aggregate && field.role === 'time' && field.name === block.datasetGrain.timeBucketBy)) {
+      error(`grain key "${key}" must have role "key"${block.datasetGrain.aggregate ? ' unless it is the declared aggregate timeBucketBy field' : ''}.`);
+    }
+  }
+  const measureNames = new Set<string>();
+  for (const measure of block.datasetMeasures) {
+    const name = measure.name?.trim().toLowerCase();
+    if (!name) {
+      error('every measure needs a name.');
+      continue;
+    }
+    if (measureNames.has(name)) error(`measure "${measure.name}" is declared more than once.`);
+    measureNames.add(name);
+    const dependencies = measure.expression
+      ? []
+      : measure.aggregation === 'ratio'
+        ? [measure.numerator, measure.denominator]
+        : [measure.from];
+    if (measure.expression && (measure.from || measure.numerator || measure.denominator)) {
+      error(`calculated measure "${measure.name}" cannot combine expression with legacy physical inputs.`);
+    }
+    if (!measure.expression && measure.aggregation === 'ratio' && (!measure.numerator || !measure.denominator)) {
+      error(`ratio measure "${measure.name}" requires numerator and denominator physical fields.`);
+    }
+    if (!measure.expression && measure.aggregation !== 'ratio' && !measure.from) {
+      error(`${measure.aggregation} measure "${measure.name}" requires a physical from field.`);
+    }
+    for (const dependency of dependencies) {
+      if (dependency && !physical.has(dependency.toLowerCase())) {
+        error(`measure "${measure.name}" depends on undeclared physical field "${dependency}".`);
+      }
+    }
+    if (measure.expression) {
+      try {
+        const parsed = parseDatasetAggregateExpression({
+          expression: measure.expression,
+          physicalFields: block.datasetFields.map((field) => field.name),
+        });
+        if (parsed.aggregation !== measure.aggregation) {
+          error(`calculated measure "${measure.name}" declares ${measure.aggregation}, but its expression resolves to ${parsed.aggregation}.`);
+        }
+      } catch (cause) {
+        error(`calculated measure "${measure.name}" is invalid: ${cause instanceof Error ? cause.message : 'unknown expression error'}`);
+      }
+    }
+    if (measure.timeBucketBy) {
+      const bucket = physical.get(measure.timeBucketBy.toLowerCase());
+      if (!bucket || bucket.role !== 'time') {
+        error(`measure "${measure.name}" timeBucketBy "${measure.timeBucketBy}" must reference a declared physical time field.`);
+      }
+    }
+    if (measure.aggregation === 'count_distinct' && measure.additive === 'additive' && !measure.timeBucketBy) {
+      error(`time-additive distinct measure "${measure.name}" requires an exact timeBucketBy field and current grain proof.`);
+    }
+    if (!measure.allowedAggs?.includes(measure.aggregation)) {
+      error(`measure "${measure.name}" must include its declared aggregation in allowedAggs.`);
+    }
+  }
+  if (block.datasetGrain.aggregate) {
+    const bucket = block.datasetGrain.timeBucketBy;
+    if (!block.datasetGrain.timeGrain || !bucket) {
+      error('an aggregate dataset requires both timeGrain and exact timeBucketBy evidence.');
+    } else {
+      const field = physical.get(bucket.toLowerCase());
+      if (!field || field.role !== 'time') error(`aggregate dataset timeBucketBy "${bucket}" must reference a declared time field.`);
+      else if (!field.grains?.includes(block.datasetGrain.timeGrain)) error(`aggregate dataset timeBucketBy "${bucket}" does not declare the ${block.datasetGrain.timeGrain} grain.`);
+      if (!block.datasetGrain.keys.some((key) => key.toLowerCase() === bucket.toLowerCase())) error(`aggregate dataset timeBucketBy "${bucket}" must be included in the declared grain keys.`);
+    }
+  }
 }
 
 function domainDeclToManifestDomain(domain: any, filePath: string): ManifestDomain {

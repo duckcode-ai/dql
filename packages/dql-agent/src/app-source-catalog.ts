@@ -3,7 +3,10 @@ import type {
   AppBuildSourceCapabilities,
   AppBuildSourceLifecycle,
   AppBuildSourcePolicy,
+  DatasetDescriptor,
+  MetricCapabilityContract,
 } from '@duckcodeailabs/dql-core';
+import { normalizeDatasetDescriptor, normalizeMetricCapabilityContract } from '@duckcodeailabs/dql-core';
 import {
   acquireActiveKnowledgeSnapshot,
   type MetadataObject,
@@ -23,7 +26,7 @@ export interface AppSourceCatalogRecord {
   qualifiedIdentity: string;
   sourceRevision: string;
   snapshotId: string;
-  kind: 'block';
+  kind: 'block' | 'semantic';
   lifecycle: AppBuildSourceLifecycle;
   trust: AppSourceTrust;
   executable: boolean;
@@ -47,7 +50,7 @@ export interface AppSourceCatalogQuery {
   limit?: number;
   lifecycles?: AppBuildSourceLifecycle[];
   domains?: string[];
-  kinds?: Array<'block'>;
+  kinds?: Array<'block' | 'semantic'>;
   sourcePolicy?: AppBuildSourcePolicy;
   includeDeprecated?: boolean;
 }
@@ -116,21 +119,39 @@ export function queryAppSourceCatalog(
     }
     const offset = cursor?.offset ?? 0;
     const pageSize = Math.min(100, Math.max(1, Math.floor(input.limit ?? 50)));
-    const lifecycles = input.lifecycles?.length
+    const lifecycles: AppBuildSourceLifecycle[] = input.lifecycles?.length
       ? input.lifecycles
       : input.includeDeprecated
         ? [...DEFAULT_LIFECYCLES, 'deprecated']
         : DEFAULT_LIFECYCLES;
-    const result = lease.catalog.queryObjectsPage({
+    const policy = input.sourcePolicy ?? 'governed_only';
+    const queryInput: {
+      query: string;
+      objectTypes: string[];
+      domains?: string[];
+      statuses: string[];
+    } = {
       query,
       objectTypes: [APP_SOURCE_OBJECT_TYPE],
       domains: input.domains,
       statuses: lifecycles,
-      offset,
-      limit: pageSize,
-    });
-    const policy = input.sourcePolicy ?? 'governed_only';
-    const items = result.items.map((object) => appSourceFromMetadata(object, lease.snapshotId, policy));
+    };
+    // Metadata's page cursor is over all source types. Applying a kind filter
+    // after one raw page used to advance by the filtered item count, which
+    // duplicated or skipped sources on the next request. A kind-filtered
+    // catalog therefore materializes its bounded source inventory first and
+    // uses a filtered offset consistently for both the page and cursor.
+    const kindFilter = input.kinds?.length ? new Set(input.kinds) : undefined;
+    const filteredItems = kindFilter
+      ? allCatalogSourcesForKinds(lease.catalog, queryInput, lease.snapshotId, policy, kindFilter)
+      : undefined;
+    const result = kindFilter
+      ? undefined
+      : lease.catalog.queryObjectsPage({ ...queryInput, offset, limit: pageSize });
+    const items = filteredItems
+      ? filteredItems.slice(offset, offset + pageSize)
+      : result!.items.map((object) => appSourceFromMetadata(object, lease.snapshotId, policy));
+    const total = filteredItems?.length ?? result!.total;
     const nextOffset = offset + items.length;
     const inventory = lease.catalog.listAllObjects({ objectTypes: [APP_SOURCE_OBJECT_TYPE] })
       .filter((object) => input.includeDeprecated || object.status !== 'deprecated');
@@ -138,16 +159,43 @@ export function queryAppSourceCatalog(
       version: 1,
       snapshotId: lease.snapshotId,
       items,
-      ...(nextOffset < result.total
+      ...(nextOffset < total
         ? { nextCursor: encodeCursor({ version: 1, snapshotId: lease.snapshotId, offset: nextOffset, queryHash }) }
         : {}),
-      total: result.total,
+      total,
       pageSize,
       facets: buildFacets(inventory),
     };
   } finally {
     lease.release();
   }
+}
+
+function allCatalogSourcesForKinds(
+  catalog: ReturnType<typeof acquireActiveKnowledgeSnapshot>['catalog'],
+  input: {
+    query: string;
+    objectTypes: string[];
+    domains?: string[];
+    statuses: string[];
+  },
+  snapshotId: string,
+  policy: AppBuildSourcePolicy,
+  kinds: ReadonlySet<'block' | 'semantic'>,
+): AppSourceCatalogRecord[] {
+  const items: AppSourceCatalogRecord[] = [];
+  let offset = 0;
+  let total = 0;
+  do {
+    const page = catalog.queryObjectsPage({ ...input, offset, limit: 250 });
+    total = page.total;
+    for (const object of page.items) {
+      const source = appSourceFromMetadata(object, snapshotId, policy);
+      if (kinds.has(source.kind)) items.push(source);
+    }
+    offset += page.items.length;
+  } while (offset < total);
+  return items;
 }
 
 /** Exact, snapshot-bound batch resolution used before server composition. */
@@ -215,10 +263,13 @@ function appSourceFromMetadata(
   sourcePolicy: AppBuildSourcePolicy,
 ): AppSourceCatalogRecord {
   const payload = object.payload ?? {};
+  const kind = payload.kind === 'semantic' ? 'semantic' : 'block';
   const lifecycle = appSourceLifecycle(object.status);
-  const certified = lifecycle === 'certified';
+  const dataset = normalizeDatasetDescriptor(payload.dataset);
+  const certified = dataset ? dataset.trust === 'certified' : lifecycle === 'certified';
   const policyAllowsPreview = certified || sourcePolicy === 'include_review_required';
   const deprecated = lifecycle === 'deprecated';
+  const bindingRequired = dataset?.binding.state === 'target_required';
   const reasonCodes = deprecated
     ? ['SOURCE_DEPRECATED']
     : certified
@@ -226,7 +277,9 @@ function appSourceFromMetadata(
       : sourcePolicy === 'governed_only'
         ? ['ENABLE_REVIEW_REQUIRED_SOURCES']
         : ['REVIEW_REQUIRED_SOURCE'];
+  if (bindingRequired) reasonCodes.push('CONNECT_SOURCE_TO_VERIFY');
   const sourcePath = stringValue(object.sourcePath) ?? stringValue(payload.executionRef) ?? '';
+  const metricCapabilities = metricCapabilitiesFromPayload(payload.metricCapabilitiesById ?? payload.metricCapabilities);
   const capabilities: AppBuildSourceCapabilities = {
     measures: stringArray(payload.measures),
     dimensions: stringArray(payload.dimensions),
@@ -235,6 +288,9 @@ function appSourceFromMetadata(
     ...(stringValue(payload.grain) ? { grain: stringValue(payload.grain) } : {}),
     ...(stringValue(payload.chartType) ? { chartType: stringValue(payload.chartType) } : {}),
     allowedVisualizations: stringArray(payload.allowedVisualizations),
+    ...(dataset ? { dataset } : {}),
+    ...(Object.keys(metricCapabilities).length > 0 ? { metricCapabilities } : {}),
+    ...(stringValue(payload.semanticModelId) ? { semanticModelId: stringValue(payload.semanticModelId) } : {}),
     parameters: Array.isArray(payload.parameters)
       ? payload.parameters.flatMap((value) => {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
@@ -255,7 +311,7 @@ function appSourceFromMetadata(
     qualifiedIdentity: stringValue(payload.qualifiedId) ?? object.fullName ?? object.objectKey,
     sourceRevision: stringValue(payload.sourceRevision) ?? stringValue(payload.fingerprint) ?? 'unknown',
     snapshotId,
-    kind: 'block',
+    kind,
     lifecycle,
     trust: certified ? 'certified' : 'review_required',
     executable: Boolean(sourcePath),
@@ -271,6 +327,9 @@ function appSourceFromMetadata(
     eligibility: {
       discoverable: !deprecated,
       localPreview: !deprecated && policyAllowsPreview,
+      // The target-bound preflight performs the final proof check. Discovery
+      // may show a declared certified source without falsely claiming the
+      // target has already been verified.
       projectPublish: !deprecated && certified,
       reasonCodes,
     },
@@ -279,13 +338,26 @@ function appSourceFromMetadata(
   };
 }
 
+function metricCapabilitiesFromPayload(value: unknown): Record<string, MetricCapabilityContract> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const capabilities: Record<string, MetricCapabilityContract> = {};
+  for (const [metricId, candidate] of Object.entries(value as Record<string, unknown>)) {
+    const capability = normalizeMetricCapabilityContract(candidate);
+    if (!capability || capability.metricId !== metricId) continue;
+    capabilities[metricId] = capability;
+  }
+  return capabilities;
+}
+
 function buildFacets(objects: MetadataObject[]): AppSourceCatalogPage['facets'] {
-  const facets: AppSourceCatalogPage['facets'] = { lifecycles: {}, domains: {}, kinds: { block: objects.length } };
+  const facets: AppSourceCatalogPage['facets'] = { lifecycles: {}, domains: {}, kinds: {} };
   for (const object of objects) {
     const lifecycle = appSourceLifecycle(object.status);
     facets.lifecycles[lifecycle] = (facets.lifecycles[lifecycle] ?? 0) + 1;
     const domain = object.domain ?? 'Unassigned';
     facets.domains[domain] = (facets.domains[domain] ?? 0) + 1;
+    const kind = object.payload?.kind === 'semantic' ? 'semantic' : 'block';
+    facets.kinds[kind] = (facets.kinds[kind] ?? 0) + 1;
   }
   return facets;
 }

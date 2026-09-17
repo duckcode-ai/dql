@@ -25,6 +25,10 @@ export type DqlToolName =
   | 'resolve_analytical_path'
   | 'explain_relationship_proof'
   | 'inspect_dql_project'
+  | 'list_datasets'
+  | 'describe_dataset'
+  | 'preview_tile_query'
+  | 'query_dataset'
   | 'build_dql_block'
   | 'build_dql_app'
   | 'list_proposals'
@@ -78,6 +82,117 @@ const RESEARCH_INTENT_ENUM = [
 ] as const;
 
 const HINT_STATUS_ENUM = ['candidate', 'approved', 'rejected', 'retired'] as const;
+
+/**
+ * The App Dataset MCP surface accepts the same declarative TileQuery contract
+ * that Studio stores.  It intentionally has no SQL field: local runtime
+ * resolves the current catalog, source revision, proof, target and execution.
+ */
+const DATASET_TILE_QUERY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['dimensions', 'measures'],
+  properties: {
+    dimensions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['field'],
+        properties: {
+          field: { type: 'string' },
+          timeGrain: { type: 'string' },
+          alias: { type: 'string' },
+        },
+      },
+    },
+    measures: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['measure'],
+        properties: { measure: { type: 'string' }, alias: { type: 'string' } },
+      },
+    },
+    filters: { type: 'array', items: datasetTileFilterSchema() },
+    having: { type: 'array', items: datasetTileFilterSchema() },
+    comparison: {
+      type: 'object',
+      additionalProperties: false,
+      required: [
+        'version',
+        'timeField',
+        'timeRole',
+        'calendarId',
+        'timezone',
+        'grain',
+        'completenessPolicy',
+        'periods',
+        'basePeriodId',
+        'comparisonPeriodIds',
+        'alignment',
+        'outputs',
+        'zeroDenominatorPolicy',
+      ],
+      properties: {
+        version: { type: 'number', enum: [1] },
+        timeField: { type: 'string' },
+        timeRole: { type: 'string' },
+        calendarId: { type: 'string' },
+        timezone: { type: 'string' },
+        grain: { type: 'string' },
+        completenessPolicy: { type: 'string', enum: ['partial_current', 'latest_complete', 'closed_period'] },
+        periods: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['id', 'kind'],
+            properties: {
+              id: { type: 'string' },
+              kind: { type: 'string', enum: ['absolute', 'current', 'previous_period', 'previous_year'] },
+              start: { type: 'string' },
+              end: { type: 'string' },
+              alignToPeriodId: { type: 'string' },
+            },
+          },
+        },
+        basePeriodId: { type: 'string' },
+        comparisonPeriodIds: { type: 'array', items: { type: 'string' } },
+        alignment: { type: 'string', enum: ['elapsed_period', 'calendar_period', 'fiscal_period'] },
+        outputs: { type: 'array', items: { type: 'string', enum: ['value', 'absolute_delta', 'percent_delta'] } },
+        zeroDenominatorPolicy: { type: 'string', enum: ['null', 'not_applicable'] },
+      },
+    },
+    orderBy: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['alias', 'direction'],
+        properties: { alias: { type: 'string' }, direction: { type: 'string', enum: ['asc', 'desc'] } },
+      },
+    },
+    limit: { type: 'number', minimum: 1, maximum: 10000 },
+    detail: { type: 'boolean' },
+    detailColumns: { type: 'array', items: { type: 'string' } },
+    respectsGlobalFilters: { type: 'boolean' },
+  },
+} as const satisfies JsonSchema;
+
+function datasetTileFilterSchema(): JsonSchema {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['field', 'op'],
+    properties: {
+      field: { type: 'string' },
+      op: { type: 'string', enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'between', 'contains'] },
+      values: { type: 'array', items: {} },
+    },
+  };
+}
 
 const DOMAIN_FILTER_SCHEMA = {
   type: 'object',
@@ -662,6 +777,77 @@ const CORE_TOOL_DEFINITIONS = [
       additionalProperties: false,
       properties: {
         refresh: { type: 'boolean', description: 'Refresh metadata and agent index before returning status. Default true.' },
+      },
+    },
+    surfaces: ['mcp', 'mcp_agentic', 'claude_code'],
+  },
+  {
+    name: 'list_datasets',
+    description:
+      'List current approved governed App Datasets available to the local Dataset runtime. Returns source identity, capability, lifecycle, and trust metadata only; it does not execute SQL.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        query: { type: 'string', description: 'Optional title or domain search text.' },
+        serverUrl: { type: 'string', description: 'Optional local DQL runtime base URL.' },
+      },
+    },
+    surfaces: ['mcp', 'mcp_agentic', 'claude_code'],
+  },
+  {
+    name: 'describe_dataset',
+    description:
+      'Describe one current approved governed App Dataset by exact sourceId, including its approved fields, measures, parameters, lifecycle, and trust. This does not execute SQL.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sourceId'],
+      properties: {
+        sourceId: { type: 'string', description: 'Exact governed Dataset source id returned by list_datasets.' },
+        serverUrl: { type: 'string', description: 'Optional local DQL runtime base URL.' },
+      },
+    },
+    surfaces: ['mcp', 'mcp_agentic', 'claude_code'],
+  },
+  {
+    name: 'preview_tile_query',
+    description:
+      'Validate a typed TileQuery against one current governed App Dataset before execution. The server resolves source identity and approved capability; SQL and client trust claims are not accepted.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sourceId', 'query'],
+      properties: {
+        sourceId: { type: 'string', description: 'Exact governed Dataset source id returned by list_datasets.' },
+        query: DATASET_TILE_QUERY_SCHEMA,
+        parameters: {
+          type: 'object',
+          description: 'Optional values for parameters declared by this Dataset only.',
+          additionalProperties: true,
+        },
+        serverUrl: { type: 'string', description: 'Optional local DQL runtime base URL.' },
+      },
+    },
+    surfaces: ['mcp', 'mcp_agentic', 'claude_code'],
+  },
+  {
+    name: 'query_dataset',
+    description:
+      'Execute a typed TileQuery through the same governed App Dataset runtime used by App Builder. Returns current result, trust, and source/query/target receipt fingerprints. It creates no App, draft, story, or publication evidence.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sourceId', 'query'],
+      properties: {
+        sourceId: { type: 'string', description: 'Exact governed Dataset source id returned by list_datasets.' },
+        query: DATASET_TILE_QUERY_SCHEMA,
+        parameters: {
+          type: 'object',
+          description: 'Optional values for parameters declared by this Dataset only.',
+          additionalProperties: true,
+        },
+        serverUrl: { type: 'string', description: 'Optional local DQL runtime base URL.' },
       },
     },
     surfaces: ['mcp', 'mcp_agentic', 'claude_code'],

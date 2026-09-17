@@ -1,8 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import type { AppBlockRecommendation, AppStudioBuildDraft } from '../../api/client';
-import { defaultStudioFilterType, discoverAppFilterCandidates, discoverPageFilterCandidates, filterTileMappingsForField } from './app-studio-filter-candidates';
+import {
+  datasetFilterBindingsForSelection,
+  defaultStudioFilterType,
+  discoverAppFilterCandidates,
+  discoverPageFilterCandidates,
+  filterTileMappingsForField,
+  type StudioFilterTileMapping,
+} from './app-studio-filter-candidates';
 
 describe('App Studio filter discovery (UI-022)', () => {
+  it('keeps an exact Dataset component selection, including an intentional empty set', () => {
+    const mappings: StudioFilterTileMapping[] = [
+      {
+        key: 'overview:revenue', pageId: 'overview', pageTitle: 'Overview', tileId: 'revenue', tileTitle: 'Revenue',
+        sourceName: 'Orders', supported: true, datasetId: 'orders', datasetField: 'region',
+      },
+      {
+        key: 'overview:monthly-revenue', pageId: 'overview', pageTitle: 'Overview', tileId: 'monthly-revenue', tileTitle: 'Monthly Revenue',
+        sourceName: 'Orders', supported: true, datasetId: 'orders', datasetField: 'region',
+      },
+    ];
+
+    expect(datasetFilterBindingsForSelection(mappings, new Set(['overview:revenue']))).toEqual({
+      orders: { field: 'region', tileIds: ['revenue'] },
+    });
+    expect(datasetFilterBindingsForSelection(mappings, new Set())).toEqual({
+      orders: { field: 'region', tileIds: [] },
+    });
+  });
+
   it('infers warehouse timestamp columns as date range controls', () => {
     expect(defaultStudioFilterType('first_ordered_at')).toBe('daterange');
     expect(defaultStudioFilterType('created_on')).toBe('daterange');
@@ -169,5 +196,57 @@ describe('App Studio filter discovery (UI-022)', () => {
       { id: 'order_date', sourceNames: ['sales::block::Orders by Region'], affectedTileCount: 1, pageCount: 1 },
       { id: 'region', sourceNames: ['sales::block::Orders by Region'], affectedTileCount: 1, pageCount: 1 },
     ]);
+  });
+
+  it('maps a field-based Dataset filter by exact Dataset binding, never by a matching source field name', () => {
+    const descriptor = {
+      version: 1,
+      id: 'orders', kind: 'block', sourceRevision: 'sha256:orders', snapshotId: 'snapshot-orders',
+      contractRef: { kind: 'block_source', id: 'commerce::orders', fingerprint: 'sha256:contract-orders' },
+      binding: { sourceQualifiedId: 'commerce::orders', sourceRevision: 'sha256:orders', contractFingerprint: 'sha256:contract-orders', state: 'target_required', proofId: 'proof-orders' },
+      label: 'Orders', lifecycle: 'certified', trust: 'certified',
+      grain: { entityIds: ['order_line'], keyFields: ['order_line_id'], keyEvidence: 'proof-orders' },
+      fields: [
+        { kind: 'physical', name: 'region', qualifiedId: 'commerce::orders::region', type: 'string', role: 'dimension', status: 'approved' },
+        { kind: 'physical', name: 'order_line_id', qualifiedId: 'commerce::orders::order_line_id', type: 'string', role: 'key', status: 'approved' },
+        { kind: 'measure', name: 'revenue', qualifiedId: 'commerce::orders::revenue', aggregation: 'sum', from: 'net_amount', dependsOn: ['net_amount'], additivity: { entities: 'additive', time: 'additive' }, allowedAggs: ['sum'], status: 'approved' },
+      ], operations: ['filter', 'group'], execution: { route: 'certified' },
+    } as const;
+    const pages = [{
+      version: 3,
+      id: 'overview',
+      metadata: { title: 'Overview' },
+      datasets: [{ id: 'dataset-orders', sourceId: 'source-orders', sourceRevision: 'sha256:orders', snapshotId: 'snapshot-orders', contractFingerprint: 'sha256:contract-orders' }],
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [{
+          i: 'orders-by-region', title: 'Orders by region', x: 0, y: 0, w: 6, h: 4,
+          sourceId: 'source-orders', sourceRevision: 'sha256:orders',
+          query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+          viz: { type: 'bar' },
+        }],
+      },
+    }] as unknown as AppStudioBuildDraft['pages'];
+    const boundSources = [{
+      id: 'source-orders', kind: 'block', sourceRef: 'blocks/orders.dql', sourceRevision: 'sha256:orders', sourceFingerprint: 'sha256:orders',
+      qualifiedIdentity: 'commerce::orders', lifecycle: 'certified', trustState: 'certified', reviewStatus: 'not_required',
+      capabilities: { measures: ['revenue'], dimensions: ['region'], outputs: ['revenue', 'region'], filters: [], allowedVisualizations: ['bar'], parameters: [], dataset: descriptor },
+    }] as unknown as AppStudioBuildDraft['sources'];
+
+    expect(discoverAppFilterCandidates(pages, [], {}, boundSources)).toEqual([{
+      id: 'order_line_id', sourceNames: ['commerce::orders'], affectedTileCount: 1, pageCount: 1,
+    }, {
+      id: 'region', sourceNames: ['commerce::orders'], affectedTileCount: 1, pageCount: 1,
+    }]);
+    expect(filterTileMappingsForField(pages, [], 'region', {}, boundSources)).toEqual([
+      expect.objectContaining({
+        key: 'overview:orders-by-region', supported: true, datasetId: 'dataset-orders', datasetField: 'region',
+        sourceId: 'source-orders', sourceRevision: 'sha256:orders',
+      }),
+    ]);
+    expect(filterTileMappingsForField(pages, [], 'revenue', {}, boundSources)[0]).toMatchObject({
+      supported: false,
+      reason: expect.stringContaining('not an approved physical field'),
+    });
   });
 });

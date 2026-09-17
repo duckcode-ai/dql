@@ -735,7 +735,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined, decla
     }
   }
 
-  for (const metric of layer.listMetrics(undefined, { includeMeasures: false })) {
+  for (const metric of layer.listMetrics(undefined, { includeMeasures: false, includeVariants: true })) {
     const model = semanticModels.find((candidate) => candidate.name === metric.cube);
     // CONTRACT-002 / AGT-014: the agent sees the same model-qualified
     // compatibility projection as the UI. An unowned metric must never fall
@@ -1297,16 +1297,22 @@ function buildSemanticMetricCapability(input: {
     ...(completenessPolicy
       ? { freshness: { defaultCompletenessPolicy: completenessPolicy } }
       : {}),
-    // The current native semantic adapter supports filtering, grouping,
-    // time-series grouping, ordering, and limiting. Multi-period arithmetic is
-    // withheld until the AC3 executable graph ships.
-    operations: ["filter", "group", "trend", "rank"],
+    // Native DQL semantics can predicate an already-aggregated selected
+    // metric. That is an operation capability, not an adapter fallback: the
+    // App runtime still verifies that the exact active adapter advertises it
+    // before compilation. MetricFlow/dbt capabilities stay withheld until
+    // their provider path exposes an equivalent post-aggregate operation.
+    operations: ["filter", "group", "trend", "rank", ...(metric.source?.provider === "dbt" ? [] : ["having" as const])],
     supportedOutputKinds: ["dimension", "metric_value", "rank"],
     executionCapabilities: [
       {
         route: "semantic",
         adapterId:
-          metric.source?.provider === "dbt" ? "metricflow" : "semantic-native",
+          // `native` is the execution-gateway adapter identity. The older
+          // `semantic-native` catalog spelling was descriptive only and could
+          // never match a target-bound native plan, leaving valid local DQL
+          // semantic models un-runnable in App Studio.
+          metric.source?.provider === "dbt" ? "metricflow" : "native",
       },
     ],
   };

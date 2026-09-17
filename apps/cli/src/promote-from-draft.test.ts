@@ -129,6 +129,36 @@ describe('promoteFromDraft (dql certify --from-draft)', () => {
     expect(existsSync(join(tmp, 'blocks/_drafts/mau.dql'))).toBe(false);
   });
 
+  it('preserves Dataset tile review-draft provenance as derived_from on later certification', () => {
+    const provenance = JSON.stringify({
+      version: 1,
+      kind: 'dataset_tile_provenance',
+      appId: 'app.commerce', pageId: 'overview', tileId: 'revenue',
+      datasetId: 'dataset:commerce:orders', sourceRevision: 'sha256:source', contractFingerprint: 'sha256:contract',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }] }, queryFingerprint: 'sha256:query',
+      filterFingerprint: 'sha256:filters', parameterFingerprint: 'sha256:params', interactionFingerprint: 'sha256:interactions',
+      snapshotFingerprint: 'sha256:snapshot', targetFingerprint: 'sha256:target', personaPolicyFingerprint: 'sha256:policy',
+      receiptId: 'app_run_1', sqlFingerprint: 'sha256:sql', schemaFingerprint: 'sha256:schema', resultFingerprint: 'sha256:result',
+      createdAt: '2026-09-11T00:00:00.000Z',
+    });
+    const draftDir = join(tmp, 'blocks', '_drafts');
+    mkdirSync(draftDir, { recursive: true });
+    writeFileSync(join(draftDir, 'revenue.dql'), `block "Revenue" {
+  domain = "commerce"
+  type = "custom"
+  status = "draft"
+  dataset_tile_provenance = ${JSON.stringify(provenance)}
+  query = """SELECT SUM(net_amount) AS revenue FROM order_lines"""
+}\n`);
+
+    const out = promoteFromDraft(tmp, baseFlags({ fromDraft: 'blocks/_drafts/revenue.dql', domain: 'commerce' }));
+
+    expect(out.ok).toBe(true);
+    const certified = readFileSync(join(tmp, 'blocks', 'commerce', 'revenue.dql'), 'utf-8');
+    expect(certified).toContain('derived_from = ');
+    expect(certified).not.toContain('dataset_tile_provenance = ');
+  });
+
   it('promotes a domain-first draft into domains/<domain>/blocks/<slug>.dql', () => {
     writeDomainDraft(tmp, 'customer', 'mau');
     const out = promoteFromDraft(

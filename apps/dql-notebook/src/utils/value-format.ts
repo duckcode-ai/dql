@@ -116,7 +116,9 @@ export function formatDisplayValue(
     if (kind === 'currency') {
       return new Intl.NumberFormat('en-US', {
         style: 'currency',
-        currency: 'USD',
+        // A Dataset measure owns its currency. Legacy results without a
+        // governed unit retain the established USD fallback.
+        currency: options.meta?.unit && /^[A-Z]{3}$/.test(options.meta.unit) ? options.meta.unit : 'USD',
         ...(options.compact
           ? { notation: 'compact', maximumFractionDigits: 1 }
           : { minimumFractionDigits: 2, maximumFractionDigits: 2 }),

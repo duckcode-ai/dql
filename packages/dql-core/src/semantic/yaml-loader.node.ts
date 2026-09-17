@@ -17,6 +17,8 @@ import {
   SemanticLayer,
   parseMetricDefinition,
   parseDimensionDefinition,
+  parseEntityDefinition,
+  parseSemanticModelDefinition,
   parseHierarchyDefinition,
   parseCubeDefinition,
   parseSegmentDefinition,
@@ -30,6 +32,8 @@ import { expandDefinitions, addIfNamed } from './yaml-loader.js';
  *   semanticLayerDir/
  *     metrics/       → *.yaml metric definitions
  *     dimensions/    → *.yaml dimension definitions
+ *     entities/      → *.yaml entity definitions
+ *     semantic_models/ → *.yaml semantic model declarations
  *     hierarchies/   → *.yaml hierarchy definitions
  *     cubes/         → *.yaml cube definitions
  *     segments/      → *.yaml segment definitions
@@ -42,6 +46,8 @@ export function loadSemanticLayerFromDir(semanticLayerDir: string): SemanticLaye
   const subdirs: Array<{ folder: string; keys: string[]; loader: (raw: Record<string, unknown>) => void }> = [
     { folder: 'metrics', keys: ['metrics'], loader: (raw) => addIfNamed(parseMetricDefinition(raw), (item) => layer.addMetric(item)) },
     { folder: 'dimensions', keys: ['dimensions'], loader: (raw) => addIfNamed(parseDimensionDefinition(raw), (item) => layer.addDimension(item)) },
+    { folder: 'entities', keys: ['entities'], loader: (raw) => addIfNamed(parseEntityDefinition(raw), (item) => layer.addEntity(item)) },
+    { folder: 'semantic_models', keys: ['semantic_models', 'semanticModels'], loader: (raw) => addIfNamed(parseSemanticModelDefinition(raw), (item) => layer.addSemanticModel(item)) },
     { folder: 'hierarchies', keys: ['hierarchies'], loader: (raw) => addIfNamed(parseHierarchyDefinition(raw), (item) => layer.addHierarchy(item)) },
     { folder: 'cubes', keys: ['cubes'], loader: (raw) => addIfNamed(parseCubeDefinition(raw), (item) => layer.addCube(item)) },
     { folder: 'segments', keys: ['segments'], loader: (raw) => addIfNamed(parseSegmentDefinition(raw), (item) => layer.addSegment(item)) },
@@ -88,7 +94,7 @@ function withLocalSemanticSource(
     source: {
       ...existing,
       provider: typeof existing.provider === 'string' ? existing.provider : 'dql',
-      objectType: typeof existing.objectType === 'string' ? existing.objectType : folder.replace(/s$/, ''),
+      objectType: typeof existing.objectType === 'string' ? existing.objectType : semanticObjectTypeForFolder(folder),
       objectId: typeof existing.objectId === 'string' ? existing.objectId : objectName ?? relativePath,
       objectName: typeof existing.objectName === 'string' ? existing.objectName : objectName,
       extra: {
@@ -98,6 +104,13 @@ function withLocalSemanticSource(
       },
     },
   };
+}
+
+function semanticObjectTypeForFolder(folder: string): string {
+  if (folder === 'entities') return 'entity';
+  if (folder === 'semantic_models') return 'semantic_model';
+  if (folder === 'pre_aggregations') return 'pre_aggregation';
+  return folder.replace(/s$/, '');
 }
 
 function collectYamlFiles(dir: string): string[] {

@@ -1,7 +1,15 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import { Activity, AlertTriangle, BarChart3, Bot, ChartArea, ChartColumnBig, ChartColumnIncreasing, ChartColumnStacked, ChartScatter, CheckCircle2, Donut, Filter, Gauge, GitBranch, Grid3x3, GripVertical, Hash, LineChart, Loader2, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, Workflow, Wrench, X } from 'lucide-react';
-import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse, type DashboardStoryBrief } from '../../api/client';
+import {
+  api,
+  type AppBlockRecommendation,
+  type DashboardDatasetCrossFilter,
+  type DashboardDatasetHierarchyDrill,
+  type DashboardDocumentResponse,
+  type DashboardRunResponse,
+  type DashboardStoryBrief,
+} from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
 import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
@@ -39,22 +47,101 @@ function normalizeChartType(value: unknown): ChartType {
 import { useOpenAnswerInNotebook } from '../../utils/answer-to-notebook';
 import { formatDisplayValue } from '../../utils/value-format';
 import type { InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
+import {
+  buildDatasetCrossFilter,
+  appendDatasetHierarchyDrill,
+  datasetAffectedTileIds,
+  datasetCrossFilterFields,
+  datasetMarkActions,
+  popDatasetHierarchyDrill,
+  removeDatasetCrossFilter,
+  replaceDatasetCrossFilter,
+} from './app-dataset-interactions';
+import { formatDatasetGrainEvidenceDetail } from './dataset-grain-evidence';
+import {
+  isCurrentDatasetTileEvidence,
+  presentDashboardTileRunEvidence,
+  presentDatasetTileEvidence,
+  type DatasetEvidenceRow,
+} from './dataset-tile-evidence';
+import { datasetComparisonSummary } from './app-dataset-comparison';
+import { datasetTileVisualizationCompatibility } from '@duckcodeailabs/dql-core/apps/tile-query';
 
 const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
   .then((module) => ({ default: module.UnifiedAgentRunPanel })));
 
 type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 type DashboardRunTile = DashboardRunResponse['tiles'][number];
+type DashboardHierarchyCandidate = NonNullable<NonNullable<DashboardRunTile['dataset']>['hierarchy']>['candidates'][number];
 const SIDE_PANEL_HEIGHT = 'clamp(320px, calc(100vh - 220px), 760px)';
 const APP_CHART_TYPE_OPTIONS: Array<{ value: ChartType; label: string }> = [
   { value: 'table', label: 'Table' },
   ...CHART_TYPE_OPTIONS,
 ];
 
+/**
+ * Published Apps render a persisted document read-only. If an older local
+ * draft somehow contains a malformed v3 Dataset scalar tile, surface the
+ * authored mismatch rather than passing a multi-field result to a KPI that
+ * only shows one value.
+ */
+export function datasetTileVisualizationDisplayError(item: DashboardLayoutItem): string | undefined {
+  if (!item.query) return undefined;
+  const visualization = datasetTileVisualizationCompatibility(item.query, item.viz.type);
+  return visualization.compatible
+    ? undefined
+    : `${visualization.message} Open App Studio and switch to Table or change the Dataset field selection.`;
+}
+
+/**
+ * Dataset artifacts contain a declarative TileQuery specification, not a
+ * Notebook-executable DQL block. Keep the App action unavailable until a
+ * typed handoff exists instead of relabeling that JSON as a SQL block.
+ */
+export function canOpenTileInNotebook(tile: DashboardRunTile): boolean {
+  const artifact = tile.artifact;
+  return artifact?.sourceKind !== 'dataset_query' && Boolean(tile.result && (artifact?.dql || artifact?.sql));
+}
+
 function sampleRows(rows?: Array<Record<string, unknown>>, columns?: string[]): Array<Record<string, unknown>> | undefined {
   if (!Array.isArray(rows) || rows.length === 0) return undefined;
   const selectedColumns = Array.isArray(columns) && columns.length > 0 ? columns.slice(0, 8) : Object.keys(rows[0] ?? {}).slice(0, 8);
   return rows.slice(0, 5).map((row) => Object.fromEntries(selectedColumns.map((column) => [column, row[column]])));
+}
+
+/**
+ * A partial response is an execution result for only declared affected tiles.
+ * Preserve results for other tiles from the last settled scope, but never
+ * carry its story, facts, receipt identity, or filter options forward. Those
+ * describe a whole dashboard and must be obtained from a full current run.
+ */
+export function mergePartialDashboardRun(
+  previous: DashboardRunResponse,
+  partial: DashboardRunResponse,
+  layoutItems: DashboardLayoutItem[],
+): DashboardRunResponse {
+  const updates = new Map(partial.tiles.map((tile) => [tile.tileId, tile]));
+  const priorTiles = new Map(previous.tiles.map((tile) => [tile.tileId, tile]));
+  const tiles = layoutItems.flatMap((item) => {
+    const updated = updates.get(item.i);
+    if (updated) return [updated];
+    const prior = priorTiles.get(item.i);
+    return prior ? [prior] : [];
+  });
+  return {
+    ...partial,
+    partial: true,
+    executedTileIds: partial.executedTileIds ?? partial.tiles.map((tile) => tile.tileId),
+    tiles,
+    facts: [],
+    story: partial.story,
+    filterOptions: undefined,
+  };
+}
+
+/** A mounted dashboard owns only its own supersession lane on the local server. */
+function createDashboardRunScope(): string {
+  return `viewer_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
 }
 
 
@@ -72,10 +159,12 @@ export function DashboardRenderer({
   selectedBlockId,
   onBlockFocus,
   onAskBlock,
+  onAskChart,
   onOpenLineageNode,
   copilotOpen,
   onCopilotChange,
   onRunChange,
+  onNavigateDashboard,
 }: {
   appId: string;
   dashboard: DashboardDocumentResponse['dashboard'];
@@ -86,19 +175,35 @@ export function DashboardRenderer({
   selectedBlockId?: string | null;
   onBlockFocus?: (blockId: string) => void;
   onAskBlock?: (blockId: string, question: string) => void;
+  /** A Dataset chart question carries only the server-issued settled run id. */
+  onAskChart?: (input: { tileId: string; runId: string; question: string }) => void;
   onOpenLineageNode?: (nodeId: string) => void;
   copilotOpen?: boolean;
   onCopilotChange?: (open: boolean) => void;
   onRunChange?: (run: DashboardRunResponse | null) => void;
+  /** Page navigation is owned by AppsView because it owns page filter state. */
+  onNavigateDashboard?: (input: {
+    fromDashboardId: string;
+    toDashboardId: string;
+    carryFilterIds: string[];
+    variables: Record<string, unknown>;
+  }) => Promise<{ ok: boolean; error?: string }> | { ok: boolean; error?: string } | void;
 }): JSX.Element {
   const { state } = useNotebook();
   const t = themes[state.themeMode as NotebookThemeMode];
   const [run, setRun] = useState<DashboardRunResponse | null>(null);
+  const [activeCrossFilters, setActiveCrossFilters] = useState<DashboardDatasetCrossFilter[]>([]);
+  const [activeHierarchyDrills, setActiveHierarchyDrills] = useState<DashboardDatasetHierarchyDrill[]>([]);
+  const [crossFilterNotice, setCrossFilterNotice] = useState<string | null>(null);
   const [businessStory, setBusinessStory] = useState<DashboardStoryBrief | null>(null);
   const latestRunIdRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(false);
   /** Monotonic id so only the newest dashboard run may write state. */
   const runRequestRef = useRef(0);
+  const runScopeRef = useRef(createDashboardRunScope());
+  const visibleTileIdsRef = useRef<string[]>([]);
+  const pendingAffectedTileIdsRef = useRef<string[] | null>(null);
+  const latestSettledRunRef = useRef<DashboardRunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   // Server-persisted conversation thread, keyed per app dashboard so a page
@@ -128,6 +233,10 @@ export function DashboardRenderer({
   const openAnswerInNotebook = useOpenAnswerInNotebook();
   const variablesKey = useMemo(() => JSON.stringify(variables ?? {}), [variables]);
   const runVariables = useMemo<Record<string, unknown>>(() => JSON.parse(variablesKey), [variablesKey]);
+  const crossFiltersKey = useMemo(() => JSON.stringify(activeCrossFilters), [activeCrossFilters]);
+  const effectiveCrossFilters = useMemo<DashboardDatasetCrossFilter[]>(() => JSON.parse(crossFiltersKey), [crossFiltersKey]);
+  const hierarchyDrillsKey = useMemo(() => JSON.stringify(activeHierarchyDrills), [activeHierarchyDrills]);
+  const effectiveHierarchyDrills = useMemo<DashboardDatasetHierarchyDrill[]>(() => JSON.parse(hierarchyDrillsKey), [hierarchyDrillsKey]);
   const tileResults = useMemo(() => {
     const map = new Map<string, DashboardRunResponse['tiles'][number]>();
     for (const tile of run?.tiles ?? []) map.set(tile.tileId, tile);
@@ -162,6 +271,11 @@ export function DashboardRenderer({
     () => editable ? activeLayout.items : activeLayout.items.filter((item) => !isStakeholderHiddenReviewTile(item)),
     [activeLayout.items, editable],
   );
+  // The browser owns presentation visibility, but the server validates these
+  // IDs against the authored page before using them as a bounded scheduler
+  // hint. Hidden review tiles are intentionally not refreshed for a
+  // stakeholder-only render.
+  visibleTileIdsRef.current = baseVisibleItems.map((item) => item.i);
   const visibleItems = useMemo(
     () => editable ? baseVisibleItems : prepareStakeholderItems(baseVisibleItems, tileResults, cols),
     [baseVisibleItems, cols, editable, tileResults],
@@ -185,53 +299,95 @@ export function DashboardRenderer({
     [activeLayout.items, storySections],
   );
   const dashboardStory = useMemo(
-    () => (editable || storySections ? null : buildDashboardStory(visibleItems, tileResults, runVariables)),
-    [editable, runVariables, storySections, tileResults, visibleItems],
+    () => (editable || storySections || run?.partial || run?.incomplete ? null : buildDashboardStory(visibleItems, tileResults, runVariables)),
+    [editable, run?.incomplete, run?.partial, runVariables, storySections, tileResults, visibleItems],
   );
 
   useEffect(() => {
     setPendingLayoutItems(null);
     setLayoutNotice(null);
+    setActiveCrossFilters([]);
+    setActiveHierarchyDrills([]);
+    setCrossFilterNotice(null);
+    pendingAffectedTileIdsRef.current = null;
+    latestSettledRunRef.current = null;
   }, [dashboard.id]);
 
-  useEffect(() => {
-    // Sequence the run rather than using a boolean `cancelled` flag.
-    //
-    // The old cleanup skipped `setLoading(false)` for a superseded run, so
-    // leaving the App (or any dependency change) while a run was in flight left
-    // `loading` stuck at true — and `TileBody` renders "Loading data..." for
-    // every tile that has no cached result whenever `loading` is true. Coming
-    // back to the App then showed tiles loading forever.
-    //
-    // Now only the newest request may write state, and it always clears the
-    // loading flag; a superseded response is ignored without freezing the UI.
+  /**
+   * Every published dashboard trigger uses this path. The server cancels or
+   * invalidates superseded work, while this monotonic sequence prevents a late
+   * browser response or story fetch from repainting an older scope.
+   */
+  const runLatest = useCallback(async (
+    nextVariables: Record<string, unknown>,
+    nextCrossFilters: DashboardDatasetCrossFilter[],
+    nextHierarchyDrills: DashboardDatasetHierarchyDrill[],
+    schedule?: { tileId?: string; affectedTileIds?: string[] },
+  ): Promise<DashboardRunResponse | null> => {
     const requestId = runRequestRef.current + 1;
     runRequestRef.current = requestId;
     const isCurrent = () => runRequestRef.current === requestId;
+    const boundedRefresh = Boolean(schedule?.tileId || schedule?.affectedTileIds?.length);
+    const priorRun = latestSettledRunRef.current;
     setLoading(true);
     setError(null);
-    void api.runDashboard(appId, dashboard.id, runVariables).then((result) => {
-      if (!isCurrent()) return;
-      setRun(result);
-      setBusinessStory(result?.story ?? null);
+    setBusinessStory(null);
+    // Do not present a prior result as the scope represented by the currently
+    // selected page filter or mark while the fresh governed execution runs.
+    // An affected-only refresh keeps unaffected tiles only when the authored
+    // mapping says their inputs cannot change; the visible status marks the
+    // mapped tiles stale until their server result settles.
+    if (!boundedRefresh || !priorRun) {
+      setRun(null);
+      onRunChange?.(null);
+    } else {
+      // The old rows remain visible only for unrelated tiles. Their combined
+      // story, filters, and evidence are invalid until the mapped tile subset
+      // has returned for this interaction scope.
+      const stalePresentation = { ...priorRun, partial: true, facts: [] };
+      setRun(stalePresentation);
+      onRunChange?.(stalePresentation);
+    }
+    try {
+      const result = await api.runDashboard(appId, dashboard.id, nextVariables, nextCrossFilters, {
+        runScope: runScopeRef.current,
+        ...(schedule?.tileId ? { tileId: schedule.tileId } : {}),
+        ...(schedule?.affectedTileIds?.length ? { affectedTileIds: schedule.affectedTileIds } : { visibleTileIds: visibleTileIdsRef.current }),
+        ...(nextHierarchyDrills.length ? { datasetDrills: nextHierarchyDrills } : {}),
+      });
+      if (!isCurrent()) return null;
+      const accepted = result?.partial && boundedRefresh && priorRun
+        ? mergePartialDashboardRun(priorRun, result, dashboard.layout.items)
+        : result;
+      setRun(accepted);
+      if (accepted) latestSettledRunRef.current = accepted;
+      setBusinessStory(result?.partial || result?.incomplete ? null : result?.story ?? null);
       latestRunIdRef.current = result?.runId ?? null;
-      onRunChange?.(result);
+      onRunChange?.(accepted);
       if (!result) setError('Dashboard run failed.');
-      if (result?.runId) {
+      if (result?.runId && !result.partial && !result.incomplete) {
         void api.getDashboardStory(appId, dashboard.id, result.runId).then((storyResult) => {
           if (!isCurrent() || !storyResult || latestRunIdRef.current !== storyResult.runId) return;
           if (storyResult.snapshotId !== result.snapshotId || storyResult.filterFingerprint !== result.filterFingerprint || storyResult.resultFingerprint !== result.resultFingerprint || storyResult.personaFingerprint !== result.personaFingerprint) return;
           setBusinessStory(storyResult.story);
         });
       }
-    }).catch((err) => {
-      if (!isCurrent()) return;
+      return result;
+    } catch (err) {
+      if (!isCurrent()) return null;
       setError(err instanceof Error ? err.message : String(err));
       onRunChange?.(null);
-    }).finally(() => {
+      return null;
+    } finally {
       if (isCurrent()) setLoading(false);
-    });
-  }, [appId, dashboard.id, dashboard.layout.items.length, onRunChange, runVariables, state.activePersona?.userId]);
+    }
+  }, [appId, dashboard.id, dashboard.layout.items, onRunChange]);
+
+  useEffect(() => {
+    const affectedTileIds = pendingAffectedTileIdsRef.current;
+    pendingAffectedTileIdsRef.current = null;
+    void runLatest(runVariables, effectiveCrossFilters, effectiveHierarchyDrills, affectedTileIds?.length ? { affectedTileIds } : undefined);
+  }, [dashboard.layout.items.length, effectiveCrossFilters, effectiveHierarchyDrills, runLatest, runVariables, state.activePersona?.userId]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -240,18 +396,12 @@ export function DashboardRenderer({
       void api.getDashboard(appId, dashboard.id).then((next) => {
         if (next?.dashboard) onDashboardChanged?.(next.dashboard);
       });
-      void api.runDashboard(appId, dashboard.id, runVariables).then((nextRun) => {
-        if (nextRun) {
-          setRun(nextRun);
-          setBusinessStory(nextRun.story);
-          latestRunIdRef.current = nextRun.runId;
-          onRunChange?.(nextRun);
-        }
-      });
+      pendingAffectedTileIdsRef.current = null;
+      void runLatest(runVariables, effectiveCrossFilters, effectiveHierarchyDrills);
     };
     window.addEventListener('dql-app-dashboard-updated', handler);
     return () => window.removeEventListener('dql-app-dashboard-updated', handler);
-  }, [appId, dashboard.id, onDashboardChanged, onRunChange, runVariables]);
+  }, [appId, dashboard.id, effectiveCrossFilters, effectiveHierarchyDrills, onDashboardChanged, runLatest, runVariables]);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -498,22 +648,102 @@ export function DashboardRenderer({
 
   const retryTile = useCallback(async (tileId: string) => {
     setRetryingTileId(tileId);
-    const retried = await api.retryDashboardTile(appId, dashboard.id, tileId, runVariables);
+    const retried = await runLatest(runVariables, effectiveCrossFilters, effectiveHierarchyDrills, { tileId });
     setRetryingTileId(null);
-    const retriedTile = retried?.tiles.find((candidate) => candidate.tileId === tileId);
-    if (!retried || !retriedTile) {
+    if (!retried?.tiles.some((candidate) => candidate.tileId === tileId)) {
       setError('This App tile could not be retried.');
+    }
+  }, [effectiveCrossFilters, effectiveHierarchyDrills, runLatest, runVariables]);
+
+  const applyDatasetMark = useCallback((item: DashboardLayoutItem, field: string, values: unknown[]) => {
+    const selection = buildDatasetCrossFilter(dashboard, item, field, values);
+    if (!selection.crossFilter) {
+      setCrossFilterNotice(selection.error ?? 'This result mark cannot be applied.');
       return;
     }
-    const merged = run
-      ? { ...run, tiles: run.tiles.map((candidate) => candidate.tileId === tileId ? retriedTile : candidate) }
-      : retried;
-    setRun(merged);
-    setBusinessStory(null);
-    onRunChange?.(merged);
-  }, [appId, dashboard.id, onRunChange, run, runVariables]);
+    setCrossFilterNotice(`${field} selection applied to the explicitly mapped Dataset tiles.`);
+    // A hierarchy path is bound to its source query and effective filter
+    // scope. Starting a new mark selection returns it to the authored base
+    // query before the server validates the next request.
+    setActiveHierarchyDrills([]);
+    setActiveCrossFilters((current) => {
+      const next = replaceDatasetCrossFilter(current, selection.crossFilter!);
+      pendingAffectedTileIdsRef.current = datasetAffectedTileIds(dashboard, [
+        ...current,
+        selection.crossFilter!,
+        ...next,
+      ]);
+      return next;
+    });
+  }, [dashboard]);
+
+  const clearDatasetMarks = useCallback(() => {
+    if (activeCrossFilters.length === 0) return;
+    setCrossFilterNotice('Selected result marks cleared. Refreshing mapped Dataset tiles…');
+    setActiveHierarchyDrills([]);
+    setActiveCrossFilters((current) => {
+      pendingAffectedTileIdsRef.current = datasetAffectedTileIds(dashboard, current);
+      return [];
+    });
+  }, [activeCrossFilters.length, dashboard]);
+
+  const removeDatasetMark = useCallback((fromTileId: string, field: string) => {
+    setActiveHierarchyDrills([]);
+    setActiveCrossFilters((current) => {
+      const next = removeDatasetCrossFilter(current, fromTileId, field);
+      pendingAffectedTileIdsRef.current = datasetAffectedTileIds(dashboard, current);
+      return next;
+    });
+    setCrossFilterNotice(`${field} result mark cleared. Refreshing mapped Dataset tiles…`);
+  }, [dashboard]);
+
+  const applyDatasetHierarchyDrill = useCallback((
+    item: DashboardLayoutItem,
+    candidate: DashboardHierarchyCandidate,
+    row: Record<string, unknown>,
+  ) => {
+    const next = appendDatasetHierarchyDrill(activeHierarchyDrills, item.i, candidate, row);
+    if (!next.drills) {
+      setCrossFilterNotice(next.error ?? 'This result mark cannot be used for a declared hierarchy drill.');
+      return;
+    }
+    // This is a read-only exploration request. `runLatest` sends the selected
+    // tile as a bounded partial refresh, which prevents an interactive query
+    // from becoming an App-wide story or publication receipt.
+    // Every active drill must be scheduled with its own replay request. The
+    // server rejects a drill for an unscheduled tile so a stale browser stack
+    // cannot change an unrelated result.
+    pendingAffectedTileIdsRef.current = next.drills.map((drill) => drill.tileId);
+    setCrossFilterNotice(`Drilling from ${formatGenUiLabel(candidate.fromField)} to ${formatGenUiLabel(candidate.toField)}…`);
+    setActiveHierarchyDrills(next.drills);
+  }, [activeHierarchyDrills]);
+
+  const returnFromDatasetHierarchyDrill = useCallback((tileId: string) => {
+    const existing = activeHierarchyDrills.find((drill) => drill.tileId === tileId);
+    if (!existing) return;
+    const next = popDatasetHierarchyDrill(activeHierarchyDrills, tileId);
+    pendingAffectedTileIdsRef.current = [...new Set([tileId, ...next.map((drill) => drill.tileId)])];
+    setCrossFilterNotice('Returning to the previous declared grouping…');
+    setActiveHierarchyDrills(next);
+  }, [activeHierarchyDrills]);
+
+  const navigateFromDatasetTile = useCallback(async (tileId: string) => {
+    const navigation = dashboard.interactions?.navigate?.find((candidate) => candidate.fromTile === tileId);
+    if (!navigation || !onNavigateDashboard) {
+      setCrossFilterNotice('No detail-page navigation is configured for this tile. Open its interaction settings to add one.');
+      return;
+    }
+    const outcome = await onNavigateDashboard({
+      fromDashboardId: dashboard.id,
+      toDashboardId: navigation.toPage,
+      carryFilterIds: navigation.carryFilters,
+      variables: runVariables,
+    });
+    if (outcome && !outcome.ok) setCrossFilterNotice(outcome.error ?? 'The configured detail page could not be opened.');
+  }, [dashboard.id, dashboard.interactions?.navigate, onNavigateDashboard, runVariables]);
 
   const openTileInNotebook = useCallback(async (item: DashboardLayoutItem, tile: DashboardRunTile) => {
+    if (!canOpenTileInNotebook(tile)) return;
     const artifact = tile.artifact;
     const payload: InsertDqlPayload = {
       title: item.title ?? artifact?.name ?? tile.title ?? 'App analysis',
@@ -678,6 +908,42 @@ export function DashboardRenderer({
       )}
       {editable && <div style={dashboardEditHintStyle}>{editableCanvas ? 'Drag tiles, select a block for Copilot context, or use the tile controls for sizing and chart settings.' : `${breakpoint === 'medium' ? 'Tablet' : 'Mobile'} preview uses the saved responsive projection. Return to a wide canvas to rearrange tiles.`}</div>}
 
+      {activeCrossFilters.length > 0 ? (
+        <div
+          aria-label="Selected result marks"
+          style={{ margin: '8px 0', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11.5 }}
+        >
+          <span style={{ color: 'var(--text-secondary)' }}>Selected marks</span>
+          {activeCrossFilters.map((filter) => (
+            <button
+              key={`${filter.fromTileId}:${filter.fromSourceId}:${filter.fromSourceRevision}:${filter.field}`}
+              type="button"
+              onClick={() => removeDatasetMark(filter.fromTileId, filter.field)}
+              title="Remove this result-mark filter"
+              style={{ ...generatedMetaPillStyle, cursor: 'pointer' }}
+            >
+              <Filter size={10} /> {formatGenUiLabel(filter.field)}: {filter.values.map((value) => String(value)).join(', ')} <X size={10} />
+            </button>
+          ))}
+          <button type="button" onClick={clearDatasetMarks} style={toolbarButtonStyle(false)}>Reset marks</button>
+        </div>
+      ) : null}
+      {crossFilterNotice ? (
+        <div role="status" style={{ ...saveStatusStyle('var(--text-secondary)'), marginBottom: 8 }}>
+          <Filter size={13} /> {crossFilterNotice}
+        </div>
+      ) : null}
+      {run?.partial ? (
+        <div role="status" style={{ ...saveStatusStyle('var(--text-secondary)'), marginBottom: 8 }}>
+          <Activity size={13} /> Refreshed a bounded set of components. Run the full dashboard before using a combined story or publication evidence.
+        </div>
+      ) : null}
+      {run?.incomplete ? (
+        <div role="status" style={{ ...saveStatusStyle('var(--text-secondary)'), marginBottom: 8 }}>
+          <AlertTriangle size={13} /> {run.incomplete.message}
+        </div>
+      ) : null}
+
       {!editable && businessStory ? (
         <BusinessStoryPanel story={businessStory} onResearch={openCopilot} onEvidence={openLineage} />
       ) : dashboardStory ? <DashboardStoryStrip story={dashboardStory} /> : null}
@@ -788,6 +1054,8 @@ export function DashboardRenderer({
                       selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
                       onFocusBlock={onBlockFocus}
                       onAskBlock={onAskBlock}
+                      onAskChart={onAskChart}
+                      runId={run?.runId}
                       onMove={() => undefined}
                       onDragMove={() => undefined}
                       onDragEnd={() => undefined}
@@ -796,7 +1064,14 @@ export function DashboardRenderer({
                       retrying={retryingTileId === item.i}
                       retryDisabled={Boolean(retryingTileId && retryingTileId !== item.i)}
                       onOpenNotebook={(nextTile) => void openTileInNotebook(item, nextTile)}
-              activeVariables={runVariables}
+                      activeVariables={runVariables}
+                      crossFilterFields={datasetCrossFilterFields(dashboard, item)}
+                      onSelectDatasetMark={(field, values) => applyDatasetMark(item, field, values)}
+                      onDrillDatasetMark={(candidate, row) => applyDatasetHierarchyDrill(item, candidate, row)}
+                      onDrillBack={() => returnFromDatasetHierarchyDrill(item.i)}
+                      onNavigate={dashboard.interactions?.navigate?.some((candidate) => candidate.fromTile === item.i)
+                        ? () => void navigateFromDatasetTile(item.i)
+                        : undefined}
                     />
                   ))}
                 </div>
@@ -842,6 +1117,8 @@ export function DashboardRenderer({
               selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
               onFocusBlock={onBlockFocus}
               onAskBlock={onAskBlock}
+              onAskChart={onAskChart}
+              runId={run?.runId}
               onMove={(point) => void moveTileToPoint(item.i, point)}
               onDragMove={(point) => updateDragPreview(item.i, point)}
               onDragEnd={clearDragPreview}
@@ -851,6 +1128,13 @@ export function DashboardRenderer({
               retryDisabled={Boolean(retryingTileId && retryingTileId !== item.i)}
               onOpenNotebook={(nextTile) => void openTileInNotebook(item, nextTile)}
               activeVariables={runVariables}
+              crossFilterFields={datasetCrossFilterFields(dashboard, item)}
+              onSelectDatasetMark={(field, values) => applyDatasetMark(item, field, values)}
+              onDrillDatasetMark={(candidate, row) => applyDatasetHierarchyDrill(item, candidate, row)}
+              onDrillBack={() => returnFromDatasetHierarchyDrill(item.i)}
+              onNavigate={dashboard.interactions?.navigate?.some((candidate) => candidate.fromTile === item.i)
+                ? () => void navigateFromDatasetTile(item.i)
+                : undefined}
             />
           ))}
         </div>
@@ -917,6 +1201,41 @@ export function DashboardRenderer({
   );
 }
 
+/**
+ * Dataset field tiles receive their actual page-filter scope from the server
+ * runtime. Legacy block bindings are not a valid fallback for them: a v3
+ * Dataset tile deliberately keeps its filter mapping on the page's exact
+ * `datasetBindings`, not on `item.filterBindings`.
+ */
+export function dashboardTileFilterNotices(input: {
+  item: DashboardLayoutItem;
+  tile?: DashboardRunTile;
+  activeVariables?: Record<string, unknown>;
+}) {
+  const datasetUnboundNotices = input.tile?.dataset?.unboundFilters ?? [];
+  if (input.item.query) {
+    return { unfilteredNotice: null, datasetUnboundNotices };
+  }
+  const active = Object.entries(input.activeVariables ?? {})
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key]) => key);
+  if (active.length === 0) return { unfilteredNotice: null, datasetUnboundNotices };
+  const ignored = active.filter((filterId) => {
+    const binding: { unsupportedReason?: string; binding?: string; param?: string } | undefined =
+      (input.item.filterBindings ?? []).find((candidate) => candidate.filter === filterId)
+      ?? (input.item.parameterBindings ?? []).find((candidate) => (candidate.filter || candidate.field || candidate.param) === filterId);
+    return !binding || Boolean(binding.unsupportedReason) || !(binding.binding ?? binding.param);
+  });
+  if (ignored.length === 0) return { unfilteredNotice: null, datasetUnboundNotices };
+  return {
+    unfilteredNotice: {
+      label: ignored.length === 1 ? `Not filtered by ${ignored[0]}` : `Not filtered by ${ignored.length} page filters`,
+      detail: `This tile has no column bound to ${ignored.join(', ')}, so it shows the full scope while the rest of the page is narrowed.`,
+    },
+    datasetUnboundNotices,
+  };
+}
+
 function DashboardTile({
   item,
   tile,
@@ -929,6 +1248,8 @@ function DashboardTile({
   selected,
   onFocusBlock,
   onAskBlock,
+  onAskChart,
+  runId,
   onMove,
   onDragMove,
   onDragEnd,
@@ -938,6 +1259,11 @@ function DashboardTile({
   retryDisabled = false,
   onOpenNotebook,
   activeVariables,
+  crossFilterFields = [],
+  onSelectDatasetMark,
+  onDrillDatasetMark,
+  onDrillBack,
+  onNavigate,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
@@ -950,6 +1276,8 @@ function DashboardTile({
   selected?: boolean;
   onFocusBlock?: (blockId: string) => void;
   onAskBlock?: (blockId: string, question: string) => void;
+  onAskChart?: (input: { tileId: string; runId: string; question: string }) => void;
+  runId?: string;
   onMove: (point: { clientX: number; clientY: number }) => void;
   onDragMove?: (point: { clientX: number; clientY: number }) => void;
   onDragEnd?: () => void;
@@ -960,6 +1288,12 @@ function DashboardTile({
   onOpenNotebook?: (tile: DashboardRunTile) => void;
   /** Page filter values in force, so a tile can say when it ignores one. */
   activeVariables?: Record<string, unknown>;
+  /** Server-owned, explicitly authored Dataset mapping origins for this tile. */
+  crossFilterFields?: string[];
+  onSelectDatasetMark?: (field: string, values: unknown[]) => void;
+  onDrillDatasetMark?: (candidate: DashboardHierarchyCandidate, row: Record<string, unknown>) => void;
+  onDrillBack?: () => void;
+  onNavigate?: () => void;
 }): JSX.Element {
   const tileRef = useRef<HTMLDivElement | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
@@ -967,7 +1301,8 @@ function DashboardTile({
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<'how' | 'dql' | 'sql'>('how');
   const blockId = getDashboardItemBlockId(item);
-  const canAsk = Boolean(!editable && blockId && onAskBlock);
+  const canAskChart = canAskDatasetChart(tile, editable, runId, Boolean(onAskChart));
+  const canAsk = canAskChart || Boolean(!editable && blockId && onAskBlock);
   const blockRef = blockId
     ? `block:${blockId}`
     : item.semantic
@@ -1031,23 +1366,8 @@ function DashboardTile({
    * narrower scope, and the two are indistinguishable on screen — the reader
    * compares a filtered tile against an unfiltered one and never knows.
    */
-  const unfilteredNotice = useMemo(() => {
-    const active = Object.entries(activeVariables ?? {})
-      .filter(([, value]) => value !== undefined && value !== null && value !== '')
-      .map(([key]) => key);
-    if (active.length === 0) return null;
-    const ignored = active.filter((filterId) => {
-      const binding: { unsupportedReason?: string; binding?: string; param?: string } | undefined =
-        (item.filterBindings ?? []).find((candidate) => candidate.filter === filterId)
-        ?? (item.parameterBindings ?? []).find((candidate) => (candidate.filter || candidate.field || candidate.param) === filterId);
-      return !binding || Boolean(binding.unsupportedReason) || !(binding.binding ?? binding.param);
-    });
-    if (ignored.length === 0) return null;
-    return {
-      label: ignored.length === 1 ? `Not filtered by ${ignored[0]}` : `Not filtered by ${ignored.length} page filters`,
-      detail: `This tile has no column bound to ${ignored.join(', ')}, so it shows the full scope while the rest of the page is narrowed.`,
-    };
-  }, [activeVariables, item.filterBindings, item.parameterBindings]);
+  const { unfilteredNotice, datasetUnboundNotices } = dashboardTileFilterNotices({ item, tile, activeVariables });
+  const comparisonSummary = item.query ? datasetComparisonSummary(item.query.comparison) : undefined;
 
   /**
    * Rename the tile from its own header.
@@ -1179,12 +1499,16 @@ function DashboardTile({
           style={askHintStyle}
           onClick={(event) => {
             event.stopPropagation();
+            if (canAskChart && runId) {
+              onAskChart?.({ tileId: item.i, runId, question: 'What does this chart show?' });
+              return;
+            }
             if (blockId) onFocusBlock?.(blockId);
             if (blockId) onAskBlock?.(blockId, defaultTileCopilotQuestion(item.title ?? blockId));
           }}
-          title="Open app Copilot for this tile"
+          title={canAskChart ? 'Ask about this current Dataset chart' : 'Open app Copilot for this tile'}
         >
-          <Sparkles size={11} strokeWidth={2} /> Ask AI
+          <Sparkles size={11} strokeWidth={2} /> {canAskChart ? 'Ask about chart' : 'Ask AI'}
         </button>
       ) : null}
       {editable && !narrow ? (
@@ -1331,6 +1655,20 @@ function DashboardTile({
               </span>
             </div>
           ) : null}
+          {datasetUnboundNotices.map((notice) => (
+            <div key={`${notice.filterId}:${notice.code}`} style={{ marginTop: 5 }}>
+              <span style={generatedMetaPillStyle} title={notice.message}>
+                <Filter size={9} /> Excluded from {formatGenUiLabel(notice.filterId)}
+              </span>
+            </div>
+          ))}
+          {comparisonSummary ? (
+            <div style={{ marginTop: 5 }}>
+              <span style={generatedMetaPillStyle} title={comparisonSummary}>
+                <Activity size={9} /> Period comparison
+              </span>
+            </div>
+          ) : null}
           {aiPinTrust || repair ? (
             <div style={{ marginTop: 5, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               {aiPinTrust ? <TrustPill trust={aiPinTrust} /> : null}
@@ -1381,9 +1719,14 @@ function DashboardTile({
           onRetry={onRetry}
           retrying={retrying}
           retryDisabled={retryDisabled}
+          crossFilterFields={crossFilterFields}
+          onSelectDatasetMark={onSelectDatasetMark}
+          onDrillDatasetMark={onDrillDatasetMark}
+          onDrillBack={onDrillBack}
+          onNavigate={onNavigate}
         />
       </div>
-      {!editable ? <TileInsightCaption tile={tile} themeMode={themeMode} /> : null}
+      {!editable ? <TileInsightCaption item={item} tile={tile} themeMode={themeMode} /> : null}
       {!editable && canInspect ? (
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, paddingTop: 2 }}>
           <button
@@ -1394,7 +1737,7 @@ function DashboardTile({
             }}
             style={tileEvidenceButtonStyle}
           >
-            {inspectorOpen ? 'Hide details' : 'How it works'}
+            {inspectorOpen ? 'Hide details' : tile?.artifact?.sourceKind === 'dataset_query' ? 'View execution evidence' : 'How it works'}
           </button>
         </div>
       ) : null}
@@ -1412,10 +1755,20 @@ function DashboardTile({
   );
 }
 
+/** Dataset questions are enabled only for a current, settled runtime result. */
+export function canAskDatasetChart(
+  tile: DashboardRunTile | undefined,
+  editable: boolean,
+  runId: string | undefined,
+  hasHandler: boolean,
+): boolean {
+  return Boolean(!editable && hasHandler && runId && tile?.tileType === 'dataset' && tile.status === 'ok');
+}
+
 /** Data-driven one-line insight under a tile (leader + share), computed from results. */
-function TileInsightCaption({ tile, themeMode }: { tile?: DashboardRunResponse['tiles'][number]; themeMode: ThemeMode }): JSX.Element | null {
+function TileInsightCaption({ item, tile, themeMode }: { item: DashboardLayoutItem; tile?: DashboardRunResponse['tiles'][number]; themeMode: ThemeMode }): JSX.Element | null {
   const t = themes[themeMode];
-  const caption = useMemo(() => computeTileInsight(tile), [tile]);
+  const caption = useMemo(() => computeTileInsight(tile, item), [item, tile]);
   if (!caption) return null;
   return (
     <div style={{ padding: '4px 10px 8px', fontSize: 11.5, color: t.textMuted, lineHeight: 1.4, display: 'flex', gap: 5, alignItems: 'baseline' }}>
@@ -1425,7 +1778,7 @@ function TileInsightCaption({ tile, themeMode }: { tile?: DashboardRunResponse['
   );
 }
 
-export function computeTileInsight(tile?: DashboardRunResponse['tiles'][number]): string | null {
+export function computeTileInsight(tile?: DashboardRunResponse['tiles'][number], item?: DashboardLayoutItem): string | null {
   const rows = tile?.result?.rows;
   const columns = tile?.result?.columns;
   if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(columns) || columns.length === 0) return null;
@@ -1441,9 +1794,11 @@ export function computeTileInsight(tile?: DashboardRunResponse['tiles'][number])
   const valueSamples = rows.map((row) => row[valueCol]);
   const labelSamples = labelCol ? rows.map((row) => row[labelCol]) : [];
   const metricLabel = formatGenUiLabel(valueCol);
+  const valueMeta = tile?.result?.columnsMeta?.find((meta) => meta.name === valueCol);
+  const formatMetric = (value: unknown, compact = true) => formatDisplayValue(valueCol, value, valueSamples, { compact, ...(valueMeta ? { meta: valueMeta } : {}) });
   if (rows.length === 1) {
     const v = toNum((rows[0] as Record<string, unknown>)[valueCol]);
-    return v !== undefined ? `${metricLabel}: ${formatDashboardValue(valueCol, v, valueSamples, { compact: true })}.` : null;
+    return v !== undefined ? `${metricLabel}: ${formatMetric(v)}.` : null;
   }
   const ranked = (rows as Array<Record<string, unknown>>)
     .map((r) => ({
@@ -1454,7 +1809,14 @@ export function computeTileInsight(tile?: DashboardRunResponse['tiles'][number])
   const total = ranked.reduce((s, e) => s + e.value, 0);
   const top = ranked[0];
   if (!top) return null;
-  const formattedTopValue = formatDashboardValue(valueCol, top.value, valueSamples, { compact: true });
+  const formattedTopValue = formatMetric(top.value);
+  // Grouped Dataset rows are not additive by default: a customer COUNT
+  // DISTINCT and a ratio-of-sums are both wrong when summed across months.
+  // Keep the caption at the result's actual grain instead of fabricating a
+  // share from the visible rows (which may also be a limited Top-N result).
+  if (item?.query?.dimensions?.length) {
+    return `${top.label} reports ${metricLabel} at ${formattedTopValue} for this grouped Dataset result.`;
+  }
   return total > 0
     ? `${top.label} leads ${metricLabel} at ${formattedTopValue} (${Math.round((top.value / total) * 100)}%).`
     : `${top.label} leads ${metricLabel} at ${formattedTopValue}.`;
@@ -1728,18 +2090,21 @@ function ReviewAppendix({
         </span>
       </summary>
       <div style={{ display: 'grid', gap: 12, padding: '0 16px 16px' }}>
+        {run.incomplete ? <div role="status" style={saveStatusStyle('var(--text-secondary)')}>
+          <AlertTriangle size={13} /> {run.incomplete.message}
+        </div> : null}
         <div style={reviewAppendixGridStyle}>
           <div><strong>Run</strong><br /><span>{run.runId}</span></div>
           <div><strong>Snapshot</strong><br /><span>{run.snapshotId}</span></div>
           <div><strong>Trust</strong><br /><span>{run.story.trustState}</span></div>
           <div><strong>Filters</strong><br /><span>{activeFilters.length ? activeFilters.map(([key, value]) => `${key}: ${String(value)}`).join(' · ') : 'Current unfiltered scope'}</span></div>
         </div>
-        <div>
+        {!run.incomplete ? <div>
           <strong style={{ fontSize: 12 }}>Evidence used by the story</strong>
           <div style={{ ...dashboardStoryChipRowStyle, marginTop: 7 }}>
             {run.story.evidenceRefs.map((ref) => <span key={ref} style={dashboardStoryChipStyle}>{ref}</span>)}
           </div>
-        </div>
+        </div> : null}
         {issues.length ? (
           <div>
             <strong style={{ fontSize: 12 }}>Items requiring review</strong>
@@ -1813,7 +2178,7 @@ function defaultTileCopilotQuestion(title: string): string {
   return `/ask Explain ${title} for a stakeholder. Start with the business meaning, current result, active filters, caveats, and recommended next action.`;
 }
 
-function TileBody({
+export function TileBody({
   item,
   tile,
   loading,
@@ -1825,6 +2190,11 @@ function TileBody({
   onRetry,
   retrying,
   retryDisabled,
+  crossFilterFields = [],
+  onSelectDatasetMark,
+  onDrillDatasetMark,
+  onDrillBack,
+  onNavigate,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
@@ -1837,7 +2207,13 @@ function TileBody({
   onRetry?: () => void;
   retrying?: boolean;
   retryDisabled?: boolean;
+  crossFilterFields?: string[];
+  onSelectDatasetMark?: (field: string, values: unknown[]) => void;
+  onDrillDatasetMark?: (candidate: DashboardHierarchyCandidate, row: Record<string, unknown>) => void;
+  onDrillBack?: () => void;
+  onNavigate?: () => void;
 }): JSX.Element {
+  const [markActionId, setMarkActionId] = useState<string>('filter');
   if (loading && !tile) return <span>Loading data...</span>;
   if (tile?.tileType === 'text') {
     if (genUi) {
@@ -1894,14 +2270,48 @@ function TileBody({
       : <span>No result.</span>;
   }
 
+  const datasetVisualizationError = datasetTileVisualizationDisplayError(item);
+  if (datasetVisualizationError) {
+    return <div role="alert" style={{ display: 'grid', gap: 6, justifyItems: 'center', textAlign: 'center', padding: 8 }}>
+      <strong>Dataset visualization needs attention</strong>
+      <span>{datasetVisualizationError}</span>
+    </div>;
+  }
+
   const chartConfig = mergeDashboardTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);
   const chart = String(chartConfig.chart ?? tile.viz?.type ?? '').toLowerCase();
+  const hierarchy = tile.dataset?.hierarchy;
+  const hierarchyCandidates = (hierarchy?.candidates ?? []).filter((candidate) => rowValueExists(tile.result!.rows, candidate.fromAlias));
+  const selectableFields = crossFilterFields.filter((field) => tile.result!.columns.includes(field));
+  const markActions = datasetMarkActions(selectableFields, hierarchyCandidates);
+  const selectedMarkAction = markActions.find((action) => action.id === markActionId) ?? markActions[0];
+  const selectResultRow = selectedMarkAction
+    ? (row: Record<string, unknown>) => {
+      if (selectedMarkAction.kind === 'drill') {
+        const candidate = selectedMarkAction.candidate;
+        if (onDrillDatasetMark && row[candidate.fromAlias] !== undefined && row[candidate.fromAlias] !== null) {
+          onDrillDatasetMark(candidate, row);
+        }
+        return;
+      }
+      const field = selectableFields.find((candidate) => row[candidate] !== undefined && row[candidate] !== null);
+      if (field) onSelectDatasetMark?.(field, [row[field]]);
+    }
+    : undefined;
   let dataView: JSX.Element;
-  if (chart === 'table' || item.viz.type === 'table' || item.viz.type === 'pivot') {
+  const groupedDatasetKpi = chart === 'kpi' && Boolean(item.query?.dimensions?.length) && tile.result.rows.length > 1;
+  if (groupedDatasetKpi) {
+    dataView = (
+      <div style={{ width: '100%', alignSelf: 'stretch', display: 'grid', gap: 6 }}>
+        <small style={{ color: 'var(--text-secondary)', lineHeight: 1.35 }}>This Dataset tile is grouped. Its values are shown at the selected grain instead of being summed into a KPI.</small>
+        <TableOutput result={tile.result} themeMode={themeMode} initialPageSize={10} onRowClick={selectResultRow} />
+      </div>
+    );
+  } else if (chart === 'table' || item.viz.type === 'table' || item.viz.type === 'pivot') {
     if (tile.tileType !== 'aiPin' && (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable')) {
       dataView = <GeneratedEvidenceTable result={tile.result} genUi={genUi} themeMode={themeMode} />;
     } else {
-      dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} initialPageSize={10} /></div>;
+      dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} initialPageSize={10} onRowClick={selectResultRow} /></div>;
     }
   } else {
     const chartResult = chart === 'kpi'
@@ -1917,14 +2327,58 @@ function TileBody({
             themeMode={themeMode}
             chartConfig={{ ...chartConfig, title: undefined }}
             availableHeight={availableHeight}
+            onMarkSelect={selectResultRow}
           />
         )}
       </DashboardChartFrame>
     );
   }
+  const detailAction = onNavigate ? (
+    <button
+      type="button"
+      onClick={(event) => { event.stopPropagation(); onNavigate(); }}
+      style={{ marginTop: 6, alignSelf: 'flex-start', border: '1px solid var(--border-default)', borderRadius: 6, background: 'var(--bg-1)', color: 'var(--accent)', padding: '5px 8px', fontSize: 11, fontWeight: 720, cursor: 'pointer' }}
+    >
+      Open configured details
+    </button>
+  ) : null;
+  const hierarchyAction = hierarchy ? (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
+      {markActions.length > 1 ? (
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-secondary)' }}>
+          Click action
+          <select value={selectedMarkAction?.id ?? ''} onChange={(event) => setMarkActionId(event.target.value)} style={{ fontSize: 11 }}>
+            {markActions.map((action) => (
+              <option key={action.id} value={action.id}>
+                {action.kind === 'filter' ? 'Filter linked tiles' : `Drill to ${formatGenUiLabel(action.candidate.toField)}`}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {selectedMarkAction?.kind === 'drill' ? (
+        <small style={{ color: 'var(--text-secondary)', lineHeight: 1.35 }}>
+          {markActions.length > 1 ? 'Choose the drill action, then ' : ''}Click a {formatGenUiLabel(selectedMarkAction.candidate.fromField)} mark to drill to {formatGenUiLabel(selectedMarkAction.candidate.toField)}.
+        </small>
+      ) : null}
+      {hierarchy.activeSteps.length > 0 && onDrillBack ? (
+        <button
+          type="button"
+          onClick={(event) => { event.stopPropagation(); onDrillBack(); }}
+          style={{ border: '1px solid var(--border-default)', borderRadius: 6, background: 'var(--bg-1)', color: 'var(--accent)', padding: '5px 8px', fontSize: 11, fontWeight: 720, cursor: 'pointer' }}
+        >
+          Back
+        </button>
+      ) : null}
+    </div>
+  ) : null;
   return tile.tileType === 'aiPin' && tile.aiPin
     ? <AiPinSummary pin={tile.aiPin} themeMode={themeMode} dataView={dataView} />
-    : dataView;
+    : <>{dataView}{hierarchyAction}{detailAction}</>;
+}
+
+function rowValueExists(rows: Array<Record<string, unknown>>, field: string): boolean {
+  return rows.some((row) => row[field] !== undefined && row[field] !== null);
 }
 
 /**
@@ -1972,7 +2426,7 @@ function DashboardChartFrame({
   );
 }
 
-function TileEvidencePanel({
+export function TileEvidencePanel({
   item,
   tile,
   tab,
@@ -1988,11 +2442,20 @@ function TileEvidencePanel({
   onClose: () => void;
 }): JSX.Element {
   const artifact = tile.artifact;
-  const canOpenNotebook = Boolean(tile.result && (artifact?.dql || artifact?.sql));
+  const grainEvidenceDetail = formatDatasetGrainEvidenceDetail(tile.dataset?.grainRuntimeEvidence);
+  const isDatasetArtifact = artifact?.sourceKind === 'dataset_query';
+  const currentDatasetEvidence = isDatasetArtifact && isCurrentDatasetTileEvidence(item, tile)
+    ? presentDatasetTileEvidence(tile)
+    : undefined;
+  const comparisonSummary = isDatasetArtifact ? datasetComparisonSummary(item.query?.comparison) : undefined;
+  const runEvidence = presentDashboardTileRunEvidence(tile);
+  const canOpenNotebook = canOpenTileInNotebook(tile);
   const sourceLabel = artifact?.sourceKind === 'certified_block'
     ? 'Certified block'
     : artifact?.sourceKind === 'semantic_query'
       ? 'Governed semantic query'
+      : artifact?.sourceKind === 'dataset_query'
+        ? 'Governed Dataset query'
       : artifact?.sourceKind === 'draft_analysis'
         ? 'App analysis'
         : artifact?.sourceKind === 'ai_pin'
@@ -2022,7 +2485,13 @@ function TileEvidencePanel({
               onClick={() => onTab(candidate)}
               style={tileEvidenceTabStyle(tab === candidate)}
             >
-              {candidate === 'how' ? 'How it works' : candidate.toUpperCase()}
+              {candidate === 'how'
+                ? 'How it works'
+                : candidate === 'dql' && isDatasetArtifact
+                  ? 'Authored query spec'
+                  : candidate === 'sql' && isDatasetArtifact
+                    ? 'Executed SQL'
+                    : candidate.toUpperCase()}
             </button>
           ))}
         </div>
@@ -2030,7 +2499,23 @@ function TileEvidencePanel({
           {tab === 'how' ? (
             <div style={{ display: 'grid', gap: 12, fontSize: 12.5, lineHeight: 1.5 }}>
               <EvidenceRow label="Source" value={artifact?.sourcePath ?? tile.citation?.path ?? tile.citation?.name ?? sourceLabel} />
-              <EvidenceRow label="Result" value={tile.result ? `${tile.result.rowCount} rows · ${tile.result.columns.length} columns` : tile.status} />
+              <EvidenceRow label="Result" value={runEvidence.result} />
+              {tile.dataset?.sourceId ? <EvidenceRow label="Dataset source" value={`${tile.dataset.sourceId}${tile.dataset.sourceRevision ? ` · ${tile.dataset.sourceRevision}` : ''}`} /> : null}
+              {tile.dataset?.queryFingerprint ? <EvidenceRow label="Dataset query" value={tile.dataset.queryFingerprint} /> : null}
+              {tile.dataset?.filterFingerprint ? <EvidenceRow label="Dataset filters" value={tile.dataset.filterFingerprint} /> : null}
+              {tile.dataset?.executionFingerprint ? <EvidenceRow label="Execution" value={tile.dataset.executionFingerprint} /> : null}
+              {comparisonSummary ? <EvidenceRow label="Period comparison" value={comparisonSummary} /> : null}
+              {tile.dataset?.proofState ? <EvidenceRow label="Grain evidence" value={tile.dataset.proofState} /> : null}
+              {grainEvidenceDetail ? <EvidenceRow label="Current grain check" value={grainEvidenceDetail} /> : null}
+              {isDatasetArtifact && currentDatasetEvidence ? <>
+                <EvidenceRow label="Bound parameters" value="Values are redacted; binding types and fingerprints are listed below." />
+                <EvidenceRows rows={currentDatasetEvidence.parameterEvidence} />
+                <EvidenceRows rows={currentDatasetEvidence.provenance} />
+                {currentDatasetEvidence.receipt.rows.length ? <EvidenceRows rows={currentDatasetEvidence.receipt.rows} /> : null}
+                {currentDatasetEvidence.receipt.notice ? <EvidenceRow label="Provider receipt" value={currentDatasetEvidence.receipt.notice} /> : null}
+              </> : null}
+              {isDatasetArtifact && !currentDatasetEvidence ? <EvidenceRow label="Execution evidence" value="This result no longer matches the current Dataset source or query. Run the dashboard again before inspecting execution evidence." /> : null}
+              {isDatasetArtifact ? <EvidenceRow label="Notebook" value="Dataset queries cannot be opened in Notebook yet." /> : null}
               {artifact?.explanation?.length ? (
                 <div>
                   <b>Execution</b>
@@ -2039,28 +2524,24 @@ function TileEvidencePanel({
                   </ul>
                 </div>
               ) : null}
-              {tile.filters ? (
-                <EvidenceRow
-                  label="Filters"
-                  value={`${tile.filters.applied.map((filter) => filter.filter).join(', ') || 'None applied'}${tile.filters.skipped.length ? ` · ${tile.filters.skipped.length} skipped` : ''}`}
-                />
-              ) : null}
-              {tile.invocation ? (
-                <EvidenceRow
-                  label="Parameters"
-                  value={tile.invocation.resolvedParameters.map((parameter) => `${parameter.name} (${parameter.source})`).join(', ') || 'None'}
-                />
-              ) : null}
+              {runEvidence.filters ? <EvidenceRow label="Filters" value={runEvidence.filters} /> : null}
+              {runEvidence.parameters ? <EvidenceRow label="Parameters" value={runEvidence.parameters} /> : null}
               {tile.repair ? <EvidenceRow label="Repair" value={tile.repair.message} /> : null}
               <div style={{ padding: 10, borderRadius: 8, background: 'var(--bg-2)', color: 'var(--text-secondary)' }}>
-                Parameter values are intentionally omitted here. Open the editable Notebook cell to inspect or change the full execution contract.
+                {isDatasetArtifact
+                  ? 'Parameter values are intentionally omitted here. Dataset execution evidence remains available in this App.'
+                  : 'Parameter values are intentionally omitted here. Open the editable Notebook cell to inspect or change the full execution contract.'}
               </div>
             </div>
           ) : (
             <pre style={tileEvidenceCodeStyle}>
               {tab === 'dql'
-                ? artifact?.dql ?? 'This tile does not expose DQL source. Its governed semantic intent is composed into SQL at runtime.'
-                : artifact?.sql ?? 'Executed SQL is not available for this saved result.'}
+                ? isDatasetArtifact
+                  ? currentDatasetEvidence?.authoredQuerySpec ?? currentDatasetEvidence?.authoredQuerySpecUnavailable ?? 'This result no longer matches the current Dataset source or query. Run the dashboard again before inspecting execution evidence.'
+                  : artifact?.dql ?? 'This tile does not expose DQL source. Its governed semantic intent is composed into SQL at runtime.'
+                : isDatasetArtifact
+                  ? currentDatasetEvidence?.executedSql ?? currentDatasetEvidence?.executedSqlUnavailable ?? 'This result no longer matches the current Dataset source or query. Run the dashboard again before inspecting execution evidence.'
+                  : artifact?.sql ?? 'Executed SQL is not available for this saved result.'}
             </pre>
           )}
         </div>
@@ -2084,6 +2565,11 @@ function EvidenceRow({ label, value }: { label: string; value: string }): JSX.El
       <span style={{ minWidth: 0, overflowWrap: 'anywhere', color: 'var(--text-secondary)' }}>{value}</span>
     </div>
   );
+}
+
+function EvidenceRows({ rows }: { rows: DatasetEvidenceRow[] }): JSX.Element | null {
+  if (rows.length === 0) return null;
+  return <>{rows.map((row) => <EvidenceRow key={`${row.label}:${row.value}`} label={row.label} value={row.value} />)}</>;
 }
 
 function TileEditorControls({

@@ -5,12 +5,15 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { loadDashboardDocument } from '@duckcodeailabs/dql-core';
+import type { AppSourceCatalogRecord } from '@duckcodeailabs/dql-agent';
+import type { AppBuildDraft, AppBuildDraftSource, DashboardDocument, DatasetDescriptor } from '@duckcodeailabs/dql-core';
+import { appBuildPreviewIntentFingerprint, loadDashboardDocument } from '@duckcodeailabs/dql-core';
 import { defaultLocalAppsDbPath, defaultPersonaRegistry, LocalAppStorage } from '@duckcodeailabs/dql-project';
 import {
   __test__,
   addAskResultToAppBuildDraft,
   approveAppSemanticTiles,
+  applyAppAutopilotChange,
   commitAppAiBuild,
   createAppAiBuildSession,
   createAppPackage,
@@ -28,6 +31,7 @@ import {
   renameApp,
   previewNotebookForApp,
   preflightStoredAppBuildDraft,
+  prepareAppAutopilotChange,
   proposeAppAiBuild,
   proposeAppBuildDraftOperations,
   recommendBlocks,
@@ -60,6 +64,155 @@ afterEach(() => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function publishedDatasetDescriptor(
+  sourceId: string,
+  kind: 'block' | 'semantic',
+  sourceRevision: string,
+  contractFingerprint: string,
+): DatasetDescriptor {
+  return {
+    version: 1,
+    id: `dataset:${sourceId}`,
+    kind,
+    sourceRevision,
+    snapshotId: 'published-snapshot',
+    contractRef: {
+      kind: kind === 'semantic' ? 'semantic_model' : 'block_source',
+      id: sourceId,
+      fingerprint: contractFingerprint,
+    },
+    binding: {
+      sourceQualifiedId: sourceId,
+      sourceRevision,
+      contractFingerprint,
+      state: 'target_required',
+    },
+    label: `${kind} orders`,
+    domain: 'commerce',
+    lifecycle: 'certified',
+    trust: 'certified',
+    grain: { entityIds: ['order_line'], keyFields: ['order_line_id'], keyEvidence: 'proof:order-lines' },
+    fields: [
+      { kind: 'physical', name: 'order_line_id', qualifiedId: `${sourceId}:order_line_id`, type: 'string', role: 'key', status: 'approved' },
+      { kind: 'physical', name: 'region', qualifiedId: `${sourceId}:region`, type: 'string', role: 'dimension', status: 'approved' },
+      {
+        kind: 'measure', name: 'revenue', qualifiedId: `${sourceId}:revenue`, aggregation: 'sum', from: 'net_amount',
+        dependsOn: ['net_amount'], additivity: { entities: 'additive', time: 'additive' }, allowedAggs: ['sum'], status: 'approved',
+      },
+    ],
+    operations: ['filter', 'group', 'trend'],
+    execution: { route: kind === 'semantic' ? 'semantic' : 'certified', ...(kind === 'semantic' ? { adapterId: 'native' } : {}) },
+  };
+}
+
+function publishedDatasetCatalogRecord(
+  sourceId: string,
+  kind: 'block' | 'semantic',
+  sourceRevision: string,
+  dataset: DatasetDescriptor,
+): AppSourceCatalogRecord {
+  return {
+    sourceId,
+    qualifiedIdentity: sourceId,
+    sourceRevision,
+    snapshotId: 'current-catalog-snapshot',
+    kind,
+    lifecycle: 'certified',
+    trust: 'certified',
+    executable: true,
+    name: sourceId.split(':').at(-1) ?? sourceId,
+    title: `${kind} orders`,
+    domain: 'commerce',
+    sourcePath: kind === 'semantic' ? 'semantic/order-lines.yaml' : 'domains/commerce/blocks/order-lines.dql',
+    executionRef: kind === 'semantic' ? 'order_lines' : 'domains/commerce/blocks/order-lines.dql',
+    tags: ['commerce'],
+    capabilities: {
+      measures: ['revenue'],
+      dimensions: ['region'],
+      outputs: ['revenue'],
+      filters: ['region'],
+      allowedVisualizations: ['kpi', 'table'],
+      dataset,
+      parameters: [],
+    },
+    eligibility: { discoverable: true, localPreview: true, projectPublish: true, reasonCodes: [] },
+    reasons: [],
+  };
+}
+
+/** A persisted source card is deliberately just historic input in these API
+ * tests. The PATCH boundary must replace it with the current catalog record. */
+function publishedDatasetDraftSource(record: AppSourceCatalogRecord): AppBuildDraftSource {
+  const certified = record.lifecycle === 'certified' && record.trust === 'certified';
+  return {
+    id: record.sourceId,
+    kind: record.kind === 'semantic' ? 'governed_semantic' : 'block',
+    sourceRef: record.executionRef,
+    qualifiedIdentity: record.qualifiedIdentity,
+    sourcePath: record.sourcePath,
+    executionRef: record.executionRef,
+    snapshotId: record.snapshotId,
+    sourceRevision: record.sourceRevision,
+    sourceFingerprint: record.sourceRevision,
+    lifecycle: record.lifecycle,
+    capabilities: record.capabilities,
+    trustState: certified ? 'certified' : 'review_required',
+    reviewStatus: certified ? 'not_required' : 'required',
+  };
+}
+
+function publishedDatasetPage(input: {
+  id: string;
+  title: string;
+  sourceId: string;
+  sourceRevision: string;
+  contractFingerprint: string;
+  tileId: string;
+  tileTitle: string;
+  query: NonNullable<DashboardDocument['layout']['items'][number]['query']>;
+  viz: DashboardDocument['layout']['items'][number]['viz']['type'];
+}): DashboardDocument {
+  const datasetId = `dataset-${input.id}`;
+  return {
+    version: 3,
+    id: input.id,
+    metadata: {
+      title: input.title,
+      domain: 'commerce',
+      audience: 'operators',
+      visibility: 'shared',
+      lifecycle: 'certified',
+    },
+    datasets: [{
+      id: datasetId,
+      sourceId: input.sourceId,
+      sourceRevision: input.sourceRevision,
+      snapshotId: 'published-snapshot',
+      contractFingerprint: input.contractFingerprint,
+    }],
+    layout: {
+      kind: 'grid',
+      cols: 12,
+      rowHeight: 80,
+      items: [{
+        i: input.tileId,
+        x: 0,
+        y: 0,
+        w: 6,
+        h: 4,
+        sourceId: input.sourceId,
+        sourceRevision: input.sourceRevision,
+        query: input.query,
+        viz: { type: input.viz },
+        title: input.tileTitle,
+        sourceClass: input.sourceId.startsWith('app:semantic:') ? 'governed_semantic' : 'certified_block',
+        trustState: 'certified',
+        reviewStatus: 'certified',
+      }],
+    },
+  };
+}
 
 describe('Apps command center API helpers', () => {
   it('recommends certified domain and tag matches before unrelated blocks', () => {
@@ -343,6 +496,778 @@ describe('Apps command center API helpers', () => {
     expect(editDraft.pages.flatMap((page) => page.layout.items)).toEqual(expect.arrayContaining([
       expect.objectContaining({ sourceId, sourceRevision }),
     ]));
+  });
+
+  it('restores published v3 Dataset pages from current exact catalog records and keeps drift repairable', () => {
+    const root = createProject();
+    const created = createAppPackage(root, {
+      name: 'Published Dataset Restore',
+      domain: 'commerce',
+      dashboardTitle: 'Overview',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const blockId = 'app:block:commerce:orders';
+    const semanticId = 'app:semantic:commerce:orders';
+    const blockRevision = 'sha256:block-published';
+    const semanticRevision = 'sha256:semantic-published';
+    const blockContract = 'sha256:block-contract';
+    const semanticContract = 'sha256:semantic-contract';
+    const blockDataset = publishedDatasetDescriptor(blockId, 'block', blockRevision, blockContract);
+    const semanticDataset = publishedDatasetDescriptor(semanticId, 'semantic', semanticRevision, semanticContract);
+    const overview = publishedDatasetPage({
+      id: 'overview',
+      title: 'Overview',
+      sourceId: blockId,
+      sourceRevision: blockRevision,
+      contractFingerprint: blockContract,
+      tileId: 'revenue-kpi',
+      tileTitle: 'Revenue',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+      viz: 'kpi',
+    });
+    const detail = publishedDatasetPage({
+      id: 'detail',
+      title: 'Semantic detail',
+      sourceId: semanticId,
+      sourceRevision: semanticRevision,
+      contractFingerprint: semanticContract,
+      tileId: 'semantic-revenue',
+      tileTitle: 'Semantic revenue',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+      viz: 'table',
+    });
+    writeFileSync(join(root, 'apps', created.app.id, 'dashboards', 'overview.dqld'), JSON.stringify(overview, null, 2) + '\n');
+    writeFileSync(join(root, 'apps', created.app.id, 'dashboards', 'detail.dqld'), JSON.stringify(detail, null, 2) + '\n');
+
+    const records = [
+      publishedDatasetCatalogRecord(blockId, 'block', blockRevision, blockDataset),
+      publishedDatasetCatalogRecord(semanticId, 'semantic', semanticRevision, semanticDataset),
+    ];
+    const restored = createStoredAppBuildDraft(root, {
+      baseAppId: created.app.id,
+      name: 'Published Dataset Restore',
+      authoringMode: 'manual',
+      sourcePolicy: 'governed_only',
+    }, {
+      resolvePublishedDatasetSources: (ids) => ({
+        snapshotId: 'current-catalog-snapshot',
+        items: records.filter((record) => ids.includes(record.sourceId)),
+        missingSourceIds: [],
+      }),
+    });
+
+    expect(restored.pages.map((page) => page.id).sort()).toEqual(['detail', 'overview']);
+    expect(restored.pages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'overview',
+        datasets: [expect.objectContaining({ sourceId: blockId, sourceRevision: blockRevision, contractFingerprint: blockContract })],
+        layout: expect.objectContaining({ items: [expect.objectContaining({ sourceId: blockId, sourceRevision: blockRevision, query: expect.any(Object) })] }),
+      }),
+      expect.objectContaining({
+        id: 'detail',
+        datasets: [expect.objectContaining({ sourceId: semanticId, sourceRevision: semanticRevision, contractFingerprint: semanticContract })],
+        layout: expect.objectContaining({ items: [expect.objectContaining({ sourceId: semanticId, sourceRevision: semanticRevision, query: expect.any(Object) })] }),
+      }),
+    ]));
+    expect(restored.sources.find((source) => source.id === blockId)).toMatchObject({
+      id: blockId,
+      kind: 'block',
+      sourceRevision: blockRevision,
+      snapshotId: 'current-catalog-snapshot',
+      trustState: 'certified',
+      capabilities: { dataset: blockDataset },
+    });
+    expect(restored.sources.find((source) => source.id === semanticId)).toMatchObject({
+      id: semanticId,
+      kind: 'governed_semantic',
+      sourceRevision: semanticRevision,
+      snapshotId: 'current-catalog-snapshot',
+      trustState: 'certified',
+      capabilities: { dataset: semanticDataset },
+    });
+    expect(restored.reviewTasks).toEqual([]);
+
+    const revisionDrift = createStoredAppBuildDraft(root, {
+      baseAppId: created.app.id,
+      name: 'Published Dataset Restore',
+      authoringMode: 'manual',
+      sourcePolicy: 'governed_only',
+    }, {
+      resolvePublishedDatasetSources: (ids) => ({
+        snapshotId: 'later-catalog-snapshot',
+        items: records
+          .map((record) => record.sourceId === blockId
+            ? { ...record, sourceRevision: 'sha256:block-current' }
+            : record)
+          .filter((record) => ids.includes(record.sourceId)),
+        missingSourceIds: [],
+      }),
+    });
+    const staleBlock = revisionDrift.sources.find((source) => source.id === blockId);
+    expect(staleBlock).toMatchObject({
+      id: blockId,
+      sourceRevision: blockRevision,
+      lifecycle: 'unknown',
+      trustState: 'review_required',
+      reviewStatus: 'required',
+    });
+    expect(staleBlock?.capabilities).toBeUndefined();
+    expect(revisionDrift.pages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'overview', datasets: [expect.objectContaining({ sourceId: blockId, sourceRevision: blockRevision, contractFingerprint: blockContract })] }),
+      expect.objectContaining({ id: 'detail', datasets: [expect.objectContaining({ sourceId: semanticId, sourceRevision: semanticRevision, contractFingerprint: semanticContract })] }),
+    ]));
+    expect(revisionDrift.reviewTasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId: blockId, message: expect.stringContaining('changed Dataset source revision') }),
+    ]));
+    expect(preflightStoredAppBuildDraft(root, revisionDrift).join('\n')).toContain('no longer exposes a field-based Dataset contract');
+  });
+
+  it('rejects a forged certified semantic Dataset PATCH and stale receipt when current authority is review-required', async () => {
+    const root = createProject();
+    const sourceId = 'app:semantic:commerce:orders';
+    const sourceRevision = 'sha256:semantic-stable-revision';
+    const contractFingerprint = 'sha256:semantic-stable-contract';
+    const dataset = publishedDatasetDescriptor(sourceId, 'semantic', sourceRevision, contractFingerprint);
+    const page = publishedDatasetPage({
+      id: 'overview',
+      title: 'Semantic overview',
+      sourceId,
+      sourceRevision,
+      contractFingerprint,
+      tileId: 'semantic-revenue',
+      tileTitle: 'Semantic revenue',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+      viz: 'kpi',
+    });
+    const certifiedCatalog = publishedDatasetCatalogRecord(sourceId, 'semantic', sourceRevision, dataset);
+    const reviewCatalog: AppSourceCatalogRecord = {
+      ...certifiedCatalog,
+      lifecycle: 'review',
+      trust: 'review_required',
+      eligibility: {
+        discoverable: true,
+        localPreview: true,
+        projectPublish: false,
+        reasonCodes: ['REVIEW_REQUIRED_SOURCE'],
+      },
+    };
+    const initial = createStoredAppBuildDraft(root, {
+      name: 'Semantic authority guard',
+      goal: 'Prevent a forged semantic Dataset source from publishing.',
+      authoringMode: 'manual',
+      sourcePolicy: 'include_review_required',
+      template: 'blank',
+    });
+    const reviewTask = {
+      id: 'review-semantic-source',
+      message: 'Semantic source needs governed review.',
+      status: 'open' as const,
+      sourceId,
+      pageId: page.id,
+      tileId: 'semantic-revenue',
+    };
+    const forgedSource: AppBuildDraftSource = {
+      id: sourceId,
+      kind: 'governed_semantic' as const,
+      sourceRef: certifiedCatalog.executionRef,
+      qualifiedIdentity: certifiedCatalog.qualifiedIdentity,
+      sourcePath: certifiedCatalog.sourcePath,
+      executionRef: certifiedCatalog.executionRef,
+      snapshotId: certifiedCatalog.snapshotId,
+      sourceRevision,
+      sourceFingerprint: sourceRevision,
+      lifecycle: 'certified' as const,
+      capabilities: certifiedCatalog.capabilities,
+      trustState: 'certified' as const,
+      reviewStatus: 'not_required' as const,
+    };
+    const forgedDraft: AppBuildDraft = {
+      ...initial,
+      pages: [page],
+      sources: [forgedSource],
+      reviewTasks: [reviewTask],
+      previewReceipts: [{
+        id: 'settled-semantic-run',
+        pageId: page.id,
+        revision: initial.revision,
+        snapshotId: 'snapshot-a',
+        filterFingerprint: 'filters-a',
+        resultFingerprint: 'results-a',
+        intentFingerprint: '',
+        createdAt: '2026-09-11T00:00:00.000Z',
+      }],
+    };
+    const forgedIntentFingerprint = appBuildPreviewIntentFingerprint(forgedDraft, page.id);
+    forgedDraft.previewReceipts = forgedDraft.previewReceipts?.map((receipt) => ({ ...receipt, intentFingerprint: forgedIntentFingerprint }));
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(root));
+    try {
+      storage.saveAppBuildDraft(forgedDraft);
+    } finally {
+      storage.close();
+    }
+    const sourceAuthority = async (sourceIds: string[]) => {
+      expect(sourceIds).toEqual([sourceId]);
+      return [reviewCatalog];
+    };
+    const verifyAppBuildPreview = async () => ({
+      ok: true as const,
+      snapshotId: 'snapshot-a',
+      filterFingerprint: 'filters-a',
+      resultFingerprint: 'results-a',
+      intentFingerprint: forgedIntentFingerprint,
+    });
+
+    const forgedPatch = await invokeAppsApi(root, `/api/app-builds/${forgedDraft.id}`, 'PATCH', {
+      expectedRevision: forgedDraft.revision,
+      operations: [
+        {
+          type: 'upsert_source',
+          source: {
+            ...forgedSource,
+            lifecycle: 'certified',
+            trustState: 'certified',
+            reviewStatus: 'not_required',
+          },
+        },
+        { type: 'remove_review_task', taskId: reviewTask.id },
+      ],
+    }, { resolveDatasetSourceAuthority: sourceAuthority, verifyAppBuildPreview });
+    expect(forgedPatch).toMatchObject({ handled: true, status: 400 });
+    expect((forgedPatch.payload as any).error).toContain('APP_BUILD_DATASET_REVIEW_TASK_REQUIRED');
+
+    // Simulate a legacy/stored earlier receipt whose local source card still
+    // claims certification after the same source id, revision, and contract
+    // were downgraded in the authoritative catalog. Preflight must fail from
+    // current lifecycle/eligibility, not trust the stored card or receipt.
+    const preflight = await invokeAppsApi(root, `/api/app-builds/${forgedDraft.id}/preflight`, 'POST', {
+      expectedRevision: forgedDraft.revision,
+      proposalHash: forgedDraft.proposalHash,
+    }, { resolveDatasetSourceAuthority: sourceAuthority, verifyAppBuildPreview });
+    expect(preflight).toMatchObject({ handled: true, status: 400 });
+    expect((preflight.payload as any).errors.join('\n')).toContain('APP_BUILD_DATASET_SOURCE_AUTHORITY_STALE');
+  });
+
+  it('refreshes a changed Dataset source only with explicit review policy and current server authority (APP-056)', async () => {
+    const root = createProject();
+    const sourceId = 'app:block:commerce:orders';
+    const oldRevision = 'sha256:orders-before-source-change';
+    const currentRevision = 'sha256:orders-after-source-change';
+    const oldContract = 'sha256:orders-before-contract';
+    const currentContract = 'sha256:orders-after-contract';
+    const oldDataset = publishedDatasetDescriptor(sourceId, 'block', oldRevision, oldContract);
+    const currentDataset: DatasetDescriptor = {
+      ...publishedDatasetDescriptor(sourceId, 'block', currentRevision, currentContract),
+      lifecycle: 'review',
+      trust: 'review_required',
+    };
+    const oldCatalog = publishedDatasetCatalogRecord(sourceId, 'block', oldRevision, oldDataset);
+    const currentCatalog: AppSourceCatalogRecord = {
+      ...publishedDatasetCatalogRecord(sourceId, 'block', currentRevision, currentDataset),
+      lifecycle: 'review',
+      trust: 'review_required',
+      eligibility: {
+        discoverable: true,
+        localPreview: true,
+        projectPublish: false,
+        reasonCodes: ['REVIEW_REQUIRED_SOURCE'],
+      },
+    };
+    const oldPage = publishedDatasetPage({
+      id: 'overview',
+      title: 'Orders',
+      sourceId,
+      sourceRevision: oldRevision,
+      contractFingerprint: oldContract,
+      tileId: 'revenue',
+      tileTitle: 'Revenue',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+      viz: 'kpi',
+    });
+    const currentPage = publishedDatasetPage({
+      id: 'overview',
+      title: 'Orders',
+      sourceId,
+      sourceRevision: currentRevision,
+      contractFingerprint: currentContract,
+      tileId: 'revenue',
+      tileTitle: 'Revenue',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+      viz: 'kpi',
+    });
+    const initial = createStoredAppBuildDraft(root, {
+      name: 'Refresh changed Dataset',
+      goal: 'Keep the App bound to the current Dataset revision.',
+      authoringMode: 'manual',
+      sourcePolicy: 'governed_only',
+      template: 'blank',
+    });
+    const stored: AppBuildDraft = {
+      ...initial,
+      sources: [publishedDatasetDraftSource(oldCatalog)],
+      pages: [oldPage],
+      reviewTasks: [{
+        id: 'orders-source-changed',
+        message: 'Refresh the changed Dataset source.',
+        status: 'open',
+        sourceId,
+        pageId: oldPage.id,
+        tileId: 'revenue',
+      }],
+    };
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(root));
+    try {
+      storage.saveAppBuildDraft(stored);
+    } finally {
+      storage.close();
+    }
+    const sourceAuthority = async (sourceIds: string[]) => {
+      expect(sourceIds).toEqual([sourceId]);
+      return [currentCatalog];
+    };
+    // Browser policy alone cannot opt a governed-only App into a review source.
+    const withoutPolicy = await invokeAppsApi(root, `/api/app-builds/${stored.id}`, 'PATCH', {
+      expectedRevision: stored.revision,
+      operations: [
+        { type: 'upsert_source', source: { ...publishedDatasetDraftSource(oldCatalog), lifecycle: 'certified', trustState: 'certified', reviewStatus: 'not_required' } },
+        { type: 'upsert_page', page: currentPage },
+      ],
+    }, { resolveDatasetSourceAuthority: sourceAuthority });
+    expect(withoutPolicy).toMatchObject({ handled: true, status: 400 });
+    expect((withoutPolicy.payload as any).error).toContain('include_review_required policy');
+
+    const refreshed = await invokeAppsApi(root, `/api/app-builds/${stored.id}`, 'PATCH', {
+      expectedRevision: stored.revision,
+      operations: [
+        { type: 'set_source_policy', sourcePolicy: 'include_review_required' },
+        // This intentionally claims the old certified card. The API must
+        // replace it with currentCatalog rather than trust these fields.
+        { type: 'upsert_source', source: { ...publishedDatasetDraftSource(oldCatalog), lifecycle: 'certified', trustState: 'certified', reviewStatus: 'not_required' } },
+        { type: 'upsert_page', page: currentPage },
+        {
+          type: 'set_review_task',
+          task: {
+            id: 'orders-current-review',
+            message: 'Current source requires review.',
+            status: 'open',
+            sourceId,
+            pageId: currentPage.id,
+            tileId: 'revenue',
+          },
+        },
+      ],
+    }, { resolveDatasetSourceAuthority: sourceAuthority });
+    expect(refreshed).toMatchObject({ handled: true, status: 200 });
+    const rebound = (refreshed.payload as any).draft as AppBuildDraft;
+    expect(rebound).toMatchObject({ sourcePolicy: 'include_review_required' });
+    expect(rebound.sources).toEqual([expect.objectContaining({
+      id: sourceId,
+      sourceRevision: currentRevision,
+      lifecycle: 'review',
+      trustState: 'review_required',
+      reviewStatus: 'required',
+      capabilities: expect.objectContaining({ dataset: expect.objectContaining({
+        sourceRevision: currentRevision,
+        contractRef: expect.objectContaining({ fingerprint: currentContract }),
+      }) }),
+    })]);
+    expect(rebound.pages[0]).toMatchObject({
+      datasets: [expect.objectContaining({ sourceRevision: currentRevision, contractFingerprint: currentContract })],
+      layout: { items: [expect.objectContaining({ sourceRevision: currentRevision, trustState: 'review_required' })] },
+    });
+
+    // The same current card is not a blank check: an invalid field query is
+    // rejected before persistence, leaving the repaired binding intact.
+    const invalid = await invokeAppsApi(root, `/api/app-builds/${stored.id}`, 'PATCH', {
+      expectedRevision: rebound.revision,
+      operations: [{
+        type: 'update_tile',
+        pageId: currentPage.id,
+        tileId: 'revenue',
+        patch: {
+          query: { dimensions: [], measures: [{ measure: 'missing_revenue' }], respectsGlobalFilters: true },
+        },
+      }],
+    }, { resolveDatasetSourceAuthority: sourceAuthority });
+    expect(invalid).toMatchObject({ handled: true, status: 400 });
+    expect((invalid.payload as any).error).toContain('APP_BUILD_DATASET_QUERY_REJECTED');
+    const afterInvalid = new LocalAppStorage(defaultLocalAppsDbPath(root));
+    try {
+      expect(afterInvalid.getAppBuildDraft(stored.id)).toMatchObject({ revision: rebound.revision });
+    } finally {
+      afterInvalid.close();
+    }
+  });
+
+  it('allows opted-in review Dataset preview evidence but refuses governed-only preview and Project publication (APP-058)', async () => {
+    const root = createProject();
+    const sourceId = 'app:block:commerce:review-orders';
+    const sourceRevision = 'sha256:review-orders-source';
+    const contractFingerprint = 'sha256:review-orders-contract';
+    const reviewDataset: DatasetDescriptor = {
+      ...publishedDatasetDescriptor(sourceId, 'block', sourceRevision, contractFingerprint),
+      lifecycle: 'review',
+      trust: 'review_required',
+    };
+    const reviewCatalog: AppSourceCatalogRecord = {
+      ...publishedDatasetCatalogRecord(sourceId, 'block', sourceRevision, reviewDataset),
+      lifecycle: 'review',
+      trust: 'review_required',
+      eligibility: {
+        discoverable: true,
+        localPreview: true,
+        projectPublish: false,
+        reasonCodes: ['REVIEW_REQUIRED_SOURCE'],
+      },
+    };
+    const certifiedPresentationPage = publishedDatasetPage({
+      id: 'overview',
+      title: 'Review orders',
+      sourceId,
+      sourceRevision,
+      contractFingerprint,
+      tileId: 'review-revenue',
+      tileTitle: 'Review revenue',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+      viz: 'kpi',
+    });
+    // This matches the persisted source/page state after an explicit current
+    // review-source refresh. Attaching receipt evidence must not need to
+    // rewrite presentation fields or change the executed intent.
+    const page: DashboardDocument = {
+      ...certifiedPresentationPage,
+      layout: {
+        ...certifiedPresentationPage.layout,
+        items: certifiedPresentationPage.layout.items.map((tile) => ({
+          ...tile,
+          sourceClass: 'exploratory_analysis',
+          trustState: 'review_required',
+          reviewStatus: 'review_required',
+          review: { status: 'required', sourceFingerprint: sourceRevision },
+        })),
+      },
+    };
+    const initial = createStoredAppBuildDraft(root, {
+      name: 'Review preview authority',
+      goal: 'Preview a review-required Dataset locally without granting publication.',
+      authoringMode: 'manual',
+      sourcePolicy: 'include_review_required',
+      template: 'blank',
+    });
+    const reviewDraft: AppBuildDraft = {
+      ...initial,
+      sources: [publishedDatasetDraftSource(reviewCatalog)],
+      pages: [page],
+      reviewTasks: [{
+        id: 'review-orders-task',
+        message: 'Review the current Dataset source before Project publication.',
+        status: 'open',
+        sourceId,
+        pageId: page.id,
+        tileId: 'review-revenue',
+      }],
+    };
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(root));
+    try {
+      storage.saveAppBuildDraft(reviewDraft);
+    } finally {
+      storage.close();
+    }
+    const sourceAuthority = async (sourceIds: string[]) => {
+      expect(sourceIds).toEqual([sourceId]);
+      return [reviewCatalog];
+    };
+    const purposes: Array<'local_preview' | 'project_publish'> = [];
+    const verifyPreview = async (input: {
+      purpose: 'local_preview' | 'project_publish';
+      intentFingerprint: string;
+    }) => {
+      purposes.push(input.purpose);
+      if (input.purpose === 'project_publish') {
+        return { ok: false as const, error: 'Dataset is review-required and cannot be published.' };
+      }
+      return {
+        ok: true as const,
+        snapshotId: 'snapshot-review',
+        filterFingerprint: 'filters-review',
+        resultFingerprint: 'results-review',
+        intentFingerprint: input.intentFingerprint,
+      };
+    };
+    const receipt = {
+      id: 'review-local-preview',
+      pageId: page.id,
+      revision: reviewDraft.revision,
+      snapshotId: 'snapshot-review',
+      filterFingerprint: 'filters-review',
+      resultFingerprint: 'results-review',
+      createdAt: '2026-09-11T00:00:00.000Z',
+    };
+
+    const savedPreview = await invokeAppsApi(root, `/api/app-builds/${reviewDraft.id}`, 'PATCH', {
+      expectedRevision: reviewDraft.revision,
+      operations: [{ type: 'set_preview_receipt', receipt }],
+    }, { resolveDatasetSourceAuthority: sourceAuthority, verifyAppBuildPreview: verifyPreview });
+    expect(savedPreview).toMatchObject({ handled: true, status: 200 });
+    expect(purposes).toEqual(['local_preview']);
+
+    const savedDraft = (savedPreview.payload as { draft: AppBuildDraft }).draft;
+    expect(savedDraft.sources).toEqual([expect.objectContaining({
+      id: sourceId,
+      lifecycle: 'review',
+      trustState: 'review_required',
+      reviewStatus: 'required',
+    })]);
+    expect(savedDraft.pages[0]?.layout.items[0]).toMatchObject({
+      trustState: 'review_required',
+      reviewStatus: 'review_required',
+    });
+    const publication = await invokeAppsApi(root, `/api/app-builds/${reviewDraft.id}/preflight`, 'POST', {
+      expectedRevision: savedDraft.revision,
+      proposalHash: savedDraft.proposalHash,
+    }, { resolveDatasetSourceAuthority: sourceAuthority, verifyAppBuildPreview: verifyPreview });
+    expect(publication).toMatchObject({ handled: true, status: 400 });
+    expect((publication.payload as { errors: string[] }).errors.join('\n')).toContain('APP_BUILD_DATASET_PUBLICATION_INELIGIBLE');
+    expect(purposes).toContain('project_publish');
+
+    const governedInitial = createStoredAppBuildDraft(root, {
+      name: 'Governed-only review refusal',
+      goal: 'Reject review-required sources until local preview policy is explicitly enabled.',
+      authoringMode: 'manual',
+      sourcePolicy: 'governed_only',
+      template: 'blank',
+    });
+    const governedDraft: AppBuildDraft = {
+      ...governedInitial,
+      sources: [publishedDatasetDraftSource(reviewCatalog)],
+      pages: [page],
+    };
+    const governedStorage = new LocalAppStorage(defaultLocalAppsDbPath(root));
+    try {
+      governedStorage.saveAppBuildDraft(governedDraft);
+    } finally {
+      governedStorage.close();
+    }
+    const governedReceipt = {
+      ...receipt,
+      id: 'governed-only-review-preview',
+      revision: governedDraft.revision,
+    };
+    const rejectedPreview = await invokeAppsApi(root, `/api/app-builds/${governedDraft.id}`, 'PATCH', {
+      expectedRevision: governedDraft.revision,
+      operations: [{ type: 'set_preview_receipt', receipt: governedReceipt }],
+    }, { resolveDatasetSourceAuthority: sourceAuthority, verifyAppBuildPreview: verifyPreview });
+    expect(rejectedPreview).toMatchObject({ handled: true, status: 400 });
+    expect((rejectedPreview.payload as { error: string }).error).toContain('requires include_review_required policy');
+  });
+
+  it('refuses a client-issued preview receipt invalidation', async () => {
+    const root = createProject();
+    const draft = createStoredAppBuildDraft(root, {
+      name: 'Receipt invalidation boundary',
+      goal: 'Keep preview receipt invalidation inside the active runtime.',
+      authoringMode: 'manual',
+      template: 'blank',
+    });
+    const response = await invokeAppsApi(root, `/api/app-builds/${draft.id}`, 'PATCH', {
+      expectedRevision: draft.revision,
+      operations: [{ type: 'clear_preview_receipt', pageId: 'overview', expectedReceiptId: 'app_run_old' }],
+    });
+    expect(response).toMatchObject({ handled: true, status: 400 });
+    expect((response.payload as { error: string }).error).toContain('receipt invalidation is issued only by the active App runtime');
+  });
+
+  it('atomically replaces an unavailable Dataset placeholder only when no old Dataset tile or binding remains', async () => {
+    const root = createProject();
+    const missingSourceId = 'app:block:commerce:missing-orders';
+    const replacementSourceId = 'app:block:commerce:current-orders';
+    const missingRevision = 'sha256:missing-orders-revision';
+    const replacementRevision = 'sha256:current-orders-revision';
+    const missingContract = 'sha256:missing-orders-contract';
+    const replacementContract = 'sha256:current-orders-contract';
+    const missingPage = publishedDatasetPage({
+      id: 'overview',
+      title: 'Unavailable orders',
+      sourceId: missingSourceId,
+      sourceRevision: missingRevision,
+      contractFingerprint: missingContract,
+      tileId: 'orders-revenue',
+      tileTitle: 'Orders revenue',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+      viz: 'kpi',
+    });
+    const replacementDataset = publishedDatasetDescriptor(
+      replacementSourceId,
+      'block',
+      replacementRevision,
+      replacementContract,
+    );
+    const replacementCatalog = publishedDatasetCatalogRecord(
+      replacementSourceId,
+      'block',
+      replacementRevision,
+      replacementDataset,
+    );
+    const replacementPage = publishedDatasetPage({
+      id: 'overview',
+      title: 'Current orders',
+      sourceId: replacementSourceId,
+      sourceRevision: replacementRevision,
+      contractFingerprint: replacementContract,
+      tileId: 'orders-revenue',
+      tileTitle: 'Orders revenue',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+      viz: 'kpi',
+    });
+    const missingPlaceholder: AppBuildDraftSource = {
+      id: missingSourceId,
+      kind: 'block',
+      sourceRef: missingSourceId,
+      sourceRevision: missingRevision,
+      sourceFingerprint: missingRevision,
+      lifecycle: 'unknown',
+      trustState: 'review_required',
+      reviewStatus: 'required',
+    };
+    const replacementClaim: AppBuildDraftSource = {
+      id: replacementSourceId,
+      kind: 'review_block',
+      sourceRef: 'browser-forged-source',
+      sourceRevision: 'sha256:browser-forged-revision',
+      sourceFingerprint: 'sha256:browser-forged-revision',
+      lifecycle: 'review',
+      trustState: 'review_required',
+      reviewStatus: 'required',
+    };
+    const saveDraft = (name: string, page: DashboardDocument) => {
+      const initial = createStoredAppBuildDraft(root, {
+        name,
+        goal: 'Repair an unavailable Dataset binding with an explicit current source.',
+        authoringMode: 'manual',
+        sourcePolicy: 'include_review_required',
+        template: 'blank',
+      });
+      const task = {
+        id: `${initial.id}-repair-missing-source`,
+        message: 'Rebind the unavailable Dataset source.',
+        status: 'open' as const,
+        sourceId: missingSourceId,
+        pageId: page.id,
+        tileId: 'orders-revenue',
+      };
+      const draft: AppBuildDraft = {
+        ...initial,
+        sources: [missingPlaceholder],
+        pages: [page],
+        reviewTasks: [task],
+      };
+      const storage = new LocalAppStorage(defaultLocalAppsDbPath(root));
+      try {
+        storage.saveAppBuildDraft(draft);
+      } finally {
+        storage.close();
+      }
+      return { draft, task };
+    };
+    const authorityCalls: string[][] = [];
+    const sourceAuthority = async (sourceIds: string[]) => {
+      authorityCalls.push([...sourceIds]);
+      return sourceIds.includes(replacementSourceId) ? [replacementCatalog] : [];
+    };
+
+    const { draft: original, task } = saveDraft('Replace unavailable Dataset', missingPage);
+    // An unchanged placeholder never regains authority merely because another
+    // current Dataset happens to be discoverable.
+    const unchangedPreflight = await invokeAppsApi(root, `/api/app-builds/${original.id}/preflight`, 'POST', {
+      expectedRevision: original.revision,
+      proposalHash: original.proposalHash,
+    }, { resolveDatasetSourceAuthority: sourceAuthority });
+    expect(unchangedPreflight).toMatchObject({ handled: true, status: 400 });
+    expect((unchangedPreflight.payload as any).errors.join('\n')).toContain('APP_BUILD_DATASET_AUTHORITY_UNAVAILABLE');
+    expect(authorityCalls.at(-1)).toEqual([missingSourceId]);
+
+    const replacementPatch = await invokeAppsApi(root, `/api/app-builds/${original.id}`, 'PATCH', {
+      expectedRevision: original.revision,
+      operations: [
+        { type: 'remove_source', sourceId: missingSourceId },
+        { type: 'upsert_source', source: replacementClaim },
+        { type: 'upsert_page', page: replacementPage },
+        { type: 'remove_review_task', taskId: task.id },
+      ],
+    }, { resolveDatasetSourceAuthority: sourceAuthority });
+    expect(replacementPatch).toMatchObject({ handled: true, status: 200 });
+    expect(authorityCalls.at(-1)).toEqual([replacementSourceId]);
+    const repaired = (replacementPatch.payload as any).draft as AppBuildDraft;
+    expect(repaired.sources).toEqual([expect.objectContaining({
+      id: replacementSourceId,
+      kind: 'block',
+      sourceRef: replacementCatalog.executionRef,
+      sourceRevision: replacementRevision,
+      lifecycle: 'certified',
+      trustState: 'certified',
+      reviewStatus: 'not_required',
+      capabilities: expect.objectContaining({
+        dataset: expect.objectContaining({
+          contractRef: expect.objectContaining({ fingerprint: replacementContract }),
+        }),
+      }),
+    })]);
+    expect(repaired.pages[0]?.datasets).toEqual([expect.objectContaining({
+      sourceId: replacementSourceId,
+      sourceRevision: replacementRevision,
+      contractFingerprint: replacementContract,
+    })]);
+
+    // Page bindings are authority-bearing too. Leaving the old binding or
+    // field tile behind keeps the missing source in the final graph and fails
+    // the whole atomic edit rather than persisting a partially repaired draft.
+    const danglingPage: DashboardDocument = {
+      ...replacementPage,
+      datasets: [
+        ...replacementPage.datasets!,
+        { ...missingPage.datasets![0]!, id: 'missing-orders-binding' },
+      ],
+      layout: {
+        ...replacementPage.layout,
+        items: [
+          ...replacementPage.layout.items,
+          { ...missingPage.layout.items[0]!, i: 'still-missing-orders', y: 4 },
+        ],
+      },
+    };
+    const { draft: dangling, task: danglingTask } = saveDraft('Reject dangling Dataset authority', missingPage);
+    const danglingPatch = await invokeAppsApi(root, `/api/app-builds/${dangling.id}`, 'PATCH', {
+      expectedRevision: dangling.revision,
+      operations: [
+        { type: 'remove_source', sourceId: missingSourceId },
+        { type: 'upsert_source', source: replacementClaim },
+        { type: 'upsert_page', page: danglingPage },
+        { type: 'remove_review_task', taskId: danglingTask.id },
+      ],
+    }, { resolveDatasetSourceAuthority: sourceAuthority });
+    expect(danglingPatch).toMatchObject({ handled: true, status: 400 });
+    expect((danglingPatch.payload as any).error).toContain('APP_BUILD_DATASET_SOURCE_DRIFT');
+    expect((danglingPatch.payload as any).error).toContain(missingSourceId);
+    expect(authorityCalls.at(-1)).toEqual(expect.arrayContaining([missingSourceId, replacementSourceId]));
+    // The server validates the complete final graph before storage. A failed
+    // repair must not leave a partially replaced source, page binding, or
+    // resolved task behind for the next Studio load.
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(root));
+    try {
+      const persisted = storage.getAppBuildDraft(dangling.id);
+      expect(persisted?.revision).toBe(dangling.revision);
+      expect(persisted?.sources).toHaveLength(1);
+      expect(persisted?.sources[0]?.id).toBe(missingSourceId);
+      expect(persisted?.sources[0]).not.toHaveProperty('capabilities');
+      expect(persisted?.pages[0]?.datasets?.[0]).toMatchObject({ sourceId: missingSourceId, sourceRevision: missingRevision });
+      expect(persisted?.pages[0]?.layout.items[0]).toMatchObject({ sourceId: missingSourceId, sourceRevision: missingRevision });
+      expect(persisted?.reviewTasks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: danglingTask.id, status: 'open' }),
+      ]));
+    } finally {
+      storage.close();
+    }
   });
 
   it('adds a certified Ask answer to the editable draft without writing Project App source', () => {
@@ -1140,41 +2065,562 @@ describe('Apps command center API helpers', () => {
     }, {
       planAppBuild: async () => {
         planningCalls += 1;
-        return JSON.stringify({
-          frame: { goal: 'Regional order health', metrics: ['orders'], dimensions: ['region'], filters: ['order_date'] },
-          requirements: [
-            { id: 'r-orders', question: 'Orders by region', role: 'breakdown', required: true, measures: ['orders'], dimensions: ['region'], filters: ['order_date'] },
-            { id: 'r-growth', question: 'Explain order growth', role: 'trend', required: true, measures: ['orders'], dimensions: ['week'], filters: ['order_date'] },
-          ],
-          components: [
-            { id: 'orders-chart', title: 'Orders by region', sourceId: draftSource.sourceId, requirementIds: ['r-orders'], role: 'breakdown', view: 'bar', rationale: 'Exact regional draft block' },
-          ],
-        });
+        return {
+          content: JSON.stringify({
+            frame: { goal: 'Regional order health', metrics: ['orders'], dimensions: ['region'], filters: ['order_date'] },
+            requirements: [
+              { id: 'r-orders', question: 'Orders by region', role: 'breakdown', required: true, measures: ['orders'], dimensions: ['region'], filters: ['order_date'] },
+              { id: 'r-growth', question: 'Explain order growth', role: 'trend', required: true, measures: ['orders'], dimensions: ['week'], filters: ['order_date'] },
+            ],
+            components: [
+              { id: 'orders-chart', title: 'Orders by region', sourceId: draftSource.sourceId, requirementIds: ['r-orders'], role: 'breakdown', view: 'bar', rationale: 'Exact regional draft block' },
+            ],
+          }),
+          providerId: 'claude-code',
+        };
       },
     });
+    expect(proposalResponse.status, JSON.stringify(proposalResponse.payload)).toBe(201);
     const proposal = (proposalResponse.payload as any).proposal;
     expect(planningCalls).toBe(1);
+    expect(proposal.plannerProvenance).toEqual({
+      version: 1,
+      mode: 'ai',
+      providerInvocation: 'succeeded',
+      providerId: 'claude-code',
+    });
+    expect(JSON.parse(readFileSync(join(root, '.dql', 'local', 'app-builds', aiDraft.id, 'proposals', `${proposal.id}.json`), 'utf8'))).toMatchObject({
+      plannerProvenance: proposal.plannerProvenance,
+    });
     expect(proposal.summary).toMatchObject({ requirements: 2, covered: 0, gaps: 2, certifiedSources: 0 });
     expect(proposal.defaultSelectedSourceIds).toEqual([draftSource.sourceId]);
 
+    const contextProposal = {
+      version: 1,
+      id: 'context-gap-order-growth',
+      origin: 'ai',
+      status: 'proposed',
+      trustState: 'review_required',
+      createdAt: '2026-09-11T00:00:00.000Z',
+      baseSnapshotId: 'snapshot-order-growth',
+      dependencyFingerprints: {},
+      operations: [{ id: 'dataset-draft:order-growth', kind: 'dataset_draft' }],
+      patches: [{ path: 'domains/sales/blocks/_drafts/order-growth.dql', before: '', after: 'block "Order growth review Dataset" {}', changed: true, owner: 'dql', operationId: 'dataset-draft:order-growth' }],
+      diagnostics: [{ code: 'DATASET_DRAFT_REVIEW_REQUIRED', severity: 'info', message: 'Review required.' }],
+      impact: { files: 1, modelingChanges: 0, skillChanges: 0, dbtSourceChanges: 0, datasetChanges: 1 },
+      proposalHash: 'context-gap-order-growth-hash',
+    } as any;
+    let gapInput: Record<string, unknown> | undefined;
     const gapResponse = await invokeAppsApi(
       root,
       `/api/app-builds/${aiDraft.id}/ai-proposals/${proposal.id}/gaps`,
       'POST',
       { expectedRevision: aiDraft.revision, expectedProposalHash: aiDraft.proposalHash, requirementId: 'r-growth' },
       {
-        generateGovernedAnswer: async () => ({
-          text: 'Review weekly order growth.',
-          sql: 'SELECT order_week, COUNT(*) AS orders FROM analytics.orders GROUP BY order_week',
-          suggestedViz: 'line',
-        } as never),
+        createDatasetGapProposal: async (input) => {
+          gapInput = input as unknown as Record<string, unknown>;
+          return contextProposal;
+        },
       },
     );
-    const revised = (gapResponse.payload as any).proposal;
-    const reviewSource = revised.operations.find((operation: any) => operation.type === 'upsert_source' && operation.source.kind === 'review_dql');
-    expect(reviewSource?.source).toMatchObject({ lifecycle: 'review', trustState: 'review_required' });
-    expect(revised.summary).toMatchObject({ covered: 1, gaps: 1 });
-    expect(existsSync(join(root, '.dql', 'local', 'app-builds', aiDraft.id, reviewSource.source.sourceRef))).toBe(true);
+    expect(gapResponse.status, JSON.stringify(gapResponse.payload)).toBe(201);
+    expect(gapResponse.payload).toMatchObject({
+      ok: true,
+      requirementId: 'r-growth',
+      contextProposal: { id: 'context-gap-order-growth', trustState: 'review_required' },
+    });
+    expect((gapResponse.payload as any).proposal).toBeUndefined();
+    expect(gapInput).toMatchObject({ appBuildId: aiDraft.id, requirement: { id: 'r-growth' } });
+    expect(existsSync(join(root, '.dql', 'local', 'app-builds', aiDraft.id, 'order-growth.dql'))).toBe(false);
+  });
+
+  it('stores a field-builder query with its v3 Dataset binding atomically (APP-031)', async () => {
+    const root = createProject();
+    writeDatasetBlock(root, 'commerce/order-lines.dql');
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Order line field App', goal: 'Explore order line revenue by region', authoringMode: 'manual',
+      sourcePolicy: 'governed_only', domain: 'commerce',
+    });
+    const draft = (created.payload as any).draft;
+    const catalog = await invokeAppsApi(root, `/api/app-builds/${draft.id}/source-candidates?limit=50`, 'GET', {});
+    const source = (catalog.payload as any).items.find((item: any) => item.capabilities?.dataset?.id);
+    expect(source).toMatchObject({
+      lifecycle: 'certified', trust: 'certified',
+      capabilities: { dataset: { kind: 'block', fields: expect.arrayContaining([expect.objectContaining({ name: 'region', kind: 'physical' }), expect.objectContaining({ name: 'revenue', kind: 'measure' })]) } },
+    });
+
+    const composed = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'manual', expectedRevision: draft.revision, expectedProposalHash: draft.proposalHash,
+      selections: [{
+        sourceId: source.sourceId, pageId: 'overview', view: 'chart', title: 'Revenue by region',
+        query: {
+          dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }],
+          filters: [{ field: 'region', op: 'in', values: ['US', 'CA'] }],
+          orderBy: [{ alias: 'revenue', direction: 'desc' }], respectsGlobalFilters: true,
+        },
+      }],
+    });
+    expect(composed).toMatchObject({ handled: true, status: 200, payload: { ok: true } });
+    const saved = (composed.payload as any).draft;
+    expect(saved.pages[0]).toMatchObject({ version: 3 });
+    expect(saved.pages[0].datasets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId: source.sourceId, sourceRevision: source.sourceRevision }),
+    ]));
+    expect(saved.pages[0].layout.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        title: 'Revenue by region',
+        sourceId: source.sourceId,
+        query: expect.objectContaining({
+          dimensions: [{ field: 'region' }],
+          measures: [{ measure: 'revenue' }],
+          filters: [{ field: 'region', op: 'in', values: ['US', 'CA'] }],
+        }),
+      }),
+    ]));
+
+    const rejected = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'manual', expectedRevision: saved.revision, expectedProposalHash: saved.proposalHash,
+      selections: [{ sourceId: source.sourceId, pageId: 'overview', view: 'chart', query: { dimensions: [{ field: 'unapproved_field' }], measures: [{ measure: 'revenue' }] } }],
+    });
+    expect(rejected.status).toBe(409);
+    expect((rejected.payload as any).error).toContain('APP_BUILD_DATASET_QUERY_REJECTED');
+
+    const scalarVisualizationRejected = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'manual', expectedRevision: saved.revision, expectedProposalHash: saved.proposalHash,
+      selections: [{
+        sourceId: source.sourceId, pageId: 'overview', view: 'kpi', title: 'Hidden fields must fail',
+        query: { dimensions: [], measures: [{ measure: 'revenue' }, { measure: 'order_count' }] },
+      }],
+    });
+    expect(scalarVisualizationRejected.status).toBe(409);
+    expect((scalarVisualizationRejected.payload as any).error).toContain('APP_BUILD_DATASET_VISUALIZATION_INVALID');
+    expect((scalarVisualizationRejected.payload as any).error).toContain('exactly one selected measure');
+
+    const groupedScalarRejected = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'manual', expectedRevision: saved.revision, expectedProposalHash: saved.proposalHash,
+      selections: [{
+        sourceId: source.sourceId, pageId: 'overview', view: 'kpi', title: 'Grouped KPI must fail',
+        query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
+      }],
+    });
+    expect(groupedScalarRejected.status).toBe(409);
+    expect((groupedScalarRejected.payload as any).error).toContain('APP_BUILD_DATASET_VISUALIZATION_INVALID');
+    expect((groupedScalarRejected.payload as any).error).toContain('cannot group by a field');
+  });
+
+  it('AGT-026 persists several query-bound Dataset tiles from one source without false requirement coverage', async () => {
+    const root = createProject();
+    writeDatasetBlock(root, 'commerce/order-lines.dql');
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'AI Dataset tiles', goal: 'Review revenue and order volume by region', authoringMode: 'ai',
+      sourcePolicy: 'governed_only', domain: 'commerce',
+    });
+    const draft = (created.payload as any).draft;
+    const catalog = await invokeAppsApi(root, `/api/app-builds/${draft.id}/source-candidates?limit=50`, 'GET', {});
+    const source = (catalog.payload as any).items.find((item: any) => item.capabilities?.dataset?.id);
+    const provider = async () => JSON.stringify({
+      frame: { goal: 'Commerce overview' },
+      requirements: [
+        { id: 'revenue', question: 'Revenue', role: 'kpi', required: true, measures: ['revenue'], dimensions: [], filters: [] },
+        { id: 'regional-revenue', question: 'Revenue by region', role: 'breakdown', required: true, measures: ['revenue'], dimensions: ['region'], filters: [] },
+        { id: 'orders', question: 'Order count', role: 'kpi', required: true, measures: ['order_count'], dimensions: [], filters: [] },
+      ],
+      components: [
+        { id: 'revenue-kpi', title: 'Revenue', sourceId: source.sourceId, requirementIds: ['revenue'], role: 'kpi', view: 'kpi', rationale: 'Total', query: { dimensions: [], measures: [{ measure: 'revenue' }] } },
+        { id: 'regional-revenue', title: 'Revenue by region', sourceId: source.sourceId, requirementIds: ['regional-revenue'], role: 'breakdown', view: 'bar', rationale: 'Breakdown', query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] } },
+        { id: 'orders-kpi', title: 'Order count', sourceId: source.sourceId, requirementIds: ['orders'], role: 'kpi', view: 'kpi', rationale: 'Count', query: { dimensions: [], measures: [{ measure: 'order_count' }] } },
+        // This valid revenue query cannot cover the distinct order-count
+        // requirement merely because the source card advertises both fields.
+        { id: 'wrong-coverage', title: 'Order count', sourceId: source.sourceId, requirementIds: ['orders'], role: 'kpi', view: 'kpi', rationale: 'Wrong', query: { dimensions: [], measures: [{ measure: 'revenue' }] } },
+      ],
+      pages: [
+        { id: 'overview', title: 'Overview', componentIds: ['revenue-kpi', 'regional-revenue', 'wrong-coverage'], sections: [{ id: 'kpis', title: 'Key metrics', kind: 'kpi_band', componentIds: ['revenue-kpi', 'wrong-coverage'] }, { id: 'trend', title: 'Regional performance', kind: 'insight', componentIds: ['regional-revenue'] }] },
+        { id: 'details', title: 'Order details', componentIds: ['orders-kpi'], sections: [{ id: 'appendix', title: 'Orders', kind: 'appendix', componentIds: ['orders-kpi'] }] },
+      ],
+      filters: [{ id: 'region', label: 'Region', field: 'region', scope: 'app', componentIds: ['revenue-kpi', 'regional-revenue', 'wrong-coverage', 'orders-kpi'] }],
+      navigation: [{ fromComponentId: 'regional-revenue', toPageId: 'details' }],
+      crossFilters: [{ fromComponentId: 'regional-revenue', fromField: 'region', toComponentId: 'wrong-coverage', toField: 'region' }],
+      detailDrills: [{ pageId: 'details', componentId: 'orders-kpi', fields: ['region'] }],
+    });
+
+    const proposed = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals`, 'POST', {
+      prompt: draft.frame.goal, expectedRevision: draft.revision, proposalHash: draft.proposalHash,
+    }, { planAppBuild: provider });
+    expect(proposed.status).toBe(201);
+    const proposal = (proposed.payload as any).proposal;
+    const pageOperation = proposal.operations.find((operation: any) => operation.type === 'upsert_page' && operation.page.id === 'overview');
+    expect(pageOperation.page).toMatchObject({ version: 3 });
+    expect(pageOperation.page.datasets).toEqual([
+      expect.objectContaining({ sourceId: source.sourceId, sourceRevision: source.sourceRevision }),
+    ]);
+    expect(pageOperation.page.layout.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ i: 'revenue-kpi', sourceId: source.sourceId, sourceRevision: source.sourceRevision, query: { dimensions: [], measures: [{ measure: 'revenue' }] } }),
+      expect.objectContaining({ i: 'regional-revenue', sourceId: source.sourceId, query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] } }),
+      expect.objectContaining({ i: 'wrong-coverage', sourceId: source.sourceId, query: { dimensions: [], measures: [{ measure: 'revenue' }] } }),
+    ]));
+    expect(pageOperation.page.layout.items.every((item: any) => item.block === undefined)).toBe(true);
+    expect(pageOperation.page.sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'kpis', kind: 'kpi_band' }),
+      expect.objectContaining({ id: 'trend', kind: 'insight' }),
+    ]));
+    const detailPageOperation = proposal.operations.find((operation: any) => operation.type === 'upsert_page' && operation.page.id === 'details');
+    expect(detailPageOperation.page.metadata.title).toBe('Order details');
+    expect(detailPageOperation.page.layout.items.find((item: any) => item.i === 'orders-kpi')).toMatchObject({
+      query: { measures: [{ measure: 'order_count' }] },
+    });
+    expect(proposal.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'set_filter', pageId: 'overview', filter: expect.objectContaining({ id: 'region', scope: { app: true } }) }),
+      expect.objectContaining({ type: 'set_filter', pageId: 'details', filter: expect.objectContaining({ id: 'region', scope: { app: true } }) }),
+      expect.objectContaining({ type: 'set_interactions', pageId: 'overview', interactions: expect.objectContaining({
+        crossFilter: expect.objectContaining({ mappings: [expect.objectContaining({ fromTileId: 'regional-revenue', fromField: 'region', toField: 'region' })] }),
+        navigate: [expect.objectContaining({ fromTile: 'regional-revenue', toPage: 'details', carryFilters: ['region'] })],
+      }) }),
+      expect.objectContaining({ type: 'set_interactions', pageId: 'details', interactions: expect.objectContaining({ detail: expect.objectContaining({ columns: ['region'] }) }) }),
+    ]));
+    const requirements = proposal.operations.find((operation: any) => operation.type === 'set_requirements');
+    expect(requirements.coverage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ requirementId: 'revenue', status: 'covered', componentIds: ['revenue-kpi'] }),
+      expect.objectContaining({ requirementId: 'regional-revenue', status: 'covered', componentIds: ['regional-revenue'] }),
+      expect.objectContaining({ requirementId: 'orders', status: 'covered', componentIds: ['orders-kpi'] }),
+    ]));
+
+    // Re-resolving authority is necessary, but it cannot silently upgrade a
+    // server-issued proposal to a newer Dataset definition. The proposal must
+    // be regenerated after a source revision or contract change.
+    const changedRevision = `sha256:${'d'.repeat(64)}`;
+    const changedContract = `sha256:${'e'.repeat(64)}`;
+    const staleAuthority = async (sourceIds: string[]) => sourceIds.map((sourceId) => {
+      expect(sourceId).toBe(source.sourceId);
+      return {
+        ...source,
+        sourceRevision: changedRevision,
+        capabilities: {
+          ...source.capabilities,
+          dataset: {
+            ...source.capabilities.dataset,
+            sourceRevision: changedRevision,
+            contractRef: { ...source.capabilities.dataset.contractRef, fingerprint: changedContract },
+            binding: {
+              ...source.capabilities.dataset.binding,
+              sourceRevision: changedRevision,
+              contractFingerprint: changedContract,
+            },
+          },
+        },
+      };
+    });
+    const staleCompose = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'ai', proposalId: proposal.id, selectedSourceIds: [source.sourceId],
+      expectedRevision: draft.revision, expectedProposalHash: draft.proposalHash,
+    }, { resolveDatasetSourceAuthority: staleAuthority });
+    expect(staleCompose.status).toBe(409);
+    expect((staleCompose.payload as any).error).toContain('APP_BUILD_DATASET_PROPOSAL_STALE');
+    const unchanged = await invokeAppsApi(root, `/api/app-builds/${draft.id}`, 'GET', {});
+    expect((unchanged.payload as any).draft.revision).toBe(draft.revision);
+
+    const composed = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'ai', proposalId: proposal.id, selectedSourceIds: [source.sourceId],
+      expectedRevision: draft.revision, expectedProposalHash: draft.proposalHash,
+    });
+    expect(composed.status).toBe(200);
+    const saved = (composed.payload as any).draft;
+    expect(saved.pages[0].datasets).toEqual([
+      expect.objectContaining({ sourceId: source.sourceId, sourceRevision: source.sourceRevision }),
+    ]);
+    expect(saved.pages[0].layout.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ i: 'revenue-kpi', query: expect.objectContaining({ measures: [{ measure: 'revenue' }] }) }),
+      expect.objectContaining({ i: 'regional-revenue', query: expect.objectContaining({ dimensions: [{ field: 'region' }] }) }),
+      expect.objectContaining({ i: 'wrong-coverage', query: expect.objectContaining({ measures: [{ measure: 'revenue' }] }) }),
+    ]));
+    expect(saved.pages.find((page: any) => page.id === 'details')).toMatchObject({
+      metadata: { title: 'Order details' },
+      filters: [expect.objectContaining({ id: 'region', scope: { app: true } })],
+      layout: { items: [expect.objectContaining({ i: 'orders-kpi', query: expect.objectContaining({ measures: [{ measure: 'order_count' }] }) })] },
+      interactions: { detail: expect.objectContaining({ columns: ['region'] }) },
+    });
+    expect(saved.pages.find((page: any) => page.id === 'overview')).toMatchObject({
+      filters: [expect.objectContaining({ id: 'region', scope: { app: true } })],
+      interactions: expect.objectContaining({
+        navigate: [expect.objectContaining({ fromTile: 'regional-revenue', toPage: 'details', carryFilters: ['region'] })],
+      }),
+    });
+  });
+
+  it('APP-065 prepares and atomically applies a source-pinned universal App Autopilot Dataset change', async () => {
+    const root = createProject();
+    writeDatasetBlock(root, 'commerce/order-lines.dql');
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Copilot Dataset App', goal: 'Review revenue', authoringMode: 'manual',
+      sourcePolicy: 'governed_only', domain: 'commerce',
+    });
+    const initial = (created.payload as any).draft;
+    const candidates = await invokeAppsApi(root, `/api/app-builds/${initial.id}/source-candidates?limit=50`, 'GET', {});
+    const source = (candidates.payload as any).items.find((item: any) => item.capabilities?.dataset?.id);
+    const composed = await invokeAppsApi(root, `/api/app-builds/${initial.id}/compose`, 'POST', {
+      mode: 'manual', expectedRevision: initial.revision, expectedProposalHash: initial.proposalHash,
+      selections: [{
+        sourceId: source.sourceId, pageId: 'overview', view: 'kpi', title: 'Revenue',
+        query: { dimensions: [], measures: [{ measure: 'revenue' }], respectsGlobalFilters: true },
+      }],
+    });
+    expect(composed.status).toBe(200);
+    const draft = (composed.payload as any).draft;
+    const tile = draft.pages[0].layout.items.find((item: any) => item.query?.measures?.[0]?.measure === 'revenue');
+
+    const proposal = await prepareAppAutopilotChange(root, {
+      draftId: draft.id,
+      pageId: 'overview',
+      tileId: tile.i,
+      intent: { action: 'group_tile', request: 'Group this tile by Region', field: 'region' },
+      runId: 'run_app_autopilot',
+      artifactId: 'app_autopilot:run_app_autopilot',
+    });
+    expect(proposal).toMatchObject({
+      version: 1,
+      runId: 'run_app_autopilot',
+      artifactId: 'app_autopilot:run_app_autopilot',
+      draftId: draft.id,
+      pageId: 'overview',
+      tileId: tile.i,
+      intent: { action: 'group_tile', request: 'Group this tile by Region', field: 'region' },
+      planningMode: 'universal_agent',
+      source: {
+        sourceId: source.sourceId,
+        sourceRevision: source.sourceRevision,
+        contractFingerprint: source.capabilities.dataset.contractRef.fingerprint,
+      },
+      operations: [{
+        type: 'update_tile', pageId: 'overview', tileId: tile.i,
+        patch: { query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] }, viz: { type: 'bar' } },
+      }],
+    });
+    expect(JSON.stringify(proposal)).not.toMatch(/select\s|remove_source|browser-forged/i);
+    const unchanged = await invokeAppsApi(root, `/api/app-builds/${draft.id}`, 'GET', {});
+    expect((unchanged.payload as any).draft).toMatchObject({
+      revision: draft.revision,
+      proposalHash: draft.proposalHash,
+    });
+    expect((unchanged.payload as any).draft.pages[0].layout.items.find((item: any) => item.i === tile.i).query.dimensions).toEqual([]);
+
+    const changedRevision = `sha256:${'f'.repeat(64)}`;
+    const changedContract = `sha256:${'a'.repeat(64)}`;
+    const staleAuthority = async (sourceIds: string[]) => sourceIds.map((sourceId) => {
+      expect(sourceId).toBe(source.sourceId);
+      return {
+        ...source,
+        sourceRevision: changedRevision,
+        capabilities: {
+          ...source.capabilities,
+          dataset: {
+            ...source.capabilities.dataset,
+            sourceRevision: changedRevision,
+            contractRef: { ...source.capabilities.dataset.contractRef, fingerprint: changedContract },
+            binding: {
+              ...source.capabilities.dataset.binding,
+              sourceRevision: changedRevision,
+              contractFingerprint: changedContract,
+            },
+          },
+        },
+      };
+    });
+    await expect(applyAppAutopilotChange(root, {
+      draftId: draft.id,
+      proposalId: proposal.id,
+      runId: proposal.runId,
+      artifactId: proposal.artifactId,
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      proposalHash: proposal.proposalHash,
+    }, staleAuthority)).rejects.toThrow('APP_AUTOPILOT_CHANGE_STALE');
+    const stillUnchanged = await invokeAppsApi(root, `/api/app-builds/${draft.id}`, 'GET', {});
+    expect((stillUnchanged.payload as any).draft.revision).toBe(draft.revision);
+
+    const accepted = await applyAppAutopilotChange(root, {
+      draftId: draft.id,
+      proposalId: proposal.id,
+      runId: proposal.runId,
+      artifactId: proposal.artifactId,
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      proposalHash: proposal.proposalHash,
+    });
+    expect(accepted.deduped).toBe(false);
+    const saved = accepted.draft;
+    expect(saved.revision).toBe(draft.revision + 1);
+    expect(saved.previewReceipts).toBeUndefined();
+    expect(saved.pages[0].layout.items.find((item: any) => item.i === tile.i)).toMatchObject({
+      title: 'Revenue by Region',
+      viz: { type: 'bar' },
+      query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
+    });
+    const repeatedApply = await applyAppAutopilotChange(root, {
+      draftId: draft.id,
+      proposalId: proposal.id,
+      runId: proposal.runId,
+      artifactId: proposal.artifactId,
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      proposalHash: proposal.proposalHash,
+    });
+    expect(repeatedApply).toMatchObject({ deduped: true, proposalId: proposal.id, draft: { revision: saved.revision } });
+
+    // A compound presentation request is one immutable proposal and one
+    // atomic update_tile operation. It does not create a partial title-only or
+    // visualization-only draft revision before the explicit guarded Apply.
+    const compound = await prepareAppAutopilotChange(root, {
+      draftId: saved.id,
+      pageId: 'overview',
+      tileId: tile.i,
+      intent: {
+        action: 'change_visualization',
+        request: 'Change the title to Revenue Trend by Region and show this as a line chart.',
+        title: 'Revenue Trend by Region',
+        visualization: 'line',
+      },
+      runId: 'run_app_autopilot_compound',
+      artifactId: 'app_autopilot:run_app_autopilot_compound',
+    });
+    expect(compound.operations).toEqual([{
+      type: 'update_tile', pageId: 'overview', tileId: tile.i,
+      patch: { title: 'Revenue Trend by Region', viz: { type: 'line' } },
+    }]);
+    const beforeCompoundApply = await invokeAppsApi(root, `/api/app-builds/${saved.id}`, 'GET', {});
+    expect((beforeCompoundApply.payload as any).draft.pages[0].layout.items.find((item: any) => item.i === tile.i)).toMatchObject({
+      title: 'Revenue by Region', viz: { type: 'bar' },
+    });
+    const compoundApplied = await applyAppAutopilotChange(root, {
+      draftId: saved.id,
+      proposalId: compound.id,
+      runId: compound.runId,
+      artifactId: compound.artifactId,
+      expectedRevision: saved.revision,
+      expectedProposalHash: saved.proposalHash,
+      proposalHash: compound.proposalHash,
+    });
+    expect(compoundApplied).toMatchObject({ deduped: false, draft: { revision: saved.revision + 1 } });
+    expect(compoundApplied.draft.pages[0].layout.items.find((item: any) => item.i === tile.i)).toMatchObject({
+      title: 'Revenue Trend by Region', viz: { type: 'line' },
+    });
+
+    await expect(prepareAppAutopilotChange(root, {
+      draftId: saved.id,
+      pageId: 'overview',
+      tileId: tile.i,
+      intent: { action: 'group_tile', request: 'SELECT region FROM orders', field: 'region' },
+      runId: 'run_app_autopilot_invalid',
+      artifactId: 'app_autopilot:run_app_autopilot_invalid',
+    })).rejects.toThrow('APP_AUTOPILOT_INTENT_INVALID');
+    await expect(prepareAppAutopilotChange(root, {
+      draftId: compoundApplied.draft.id,
+      pageId: 'overview',
+      tileId: tile.i,
+      intent: { action: 'unknown_action' as any, request: 'Change the title to Revenue.' },
+      runId: 'run_app_autopilot_unknown_action',
+      artifactId: 'app_autopilot:run_app_autopilot_unknown_action',
+    })).rejects.toThrow('APP_AUTOPILOT_INTENT_INVALID');
+  });
+
+  it('APP-064 routes an explicit uncovered App requirement to an immutable typed Dataset draft proposal', async () => {
+    const root = createProject();
+    writeDatasetBlock(root, 'commerce/order-lines.dql');
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Gap review App', goal: 'Show retention health', authoringMode: 'ai',
+      sourcePolicy: 'include_review_required', domain: 'commerce',
+    });
+    const draft = (created.payload as any).draft;
+    const catalog = await invokeAppsApi(root, `/api/app-builds/${draft.id}/source-candidates?limit=50`, 'GET', {});
+    const source = (catalog.payload as any).items.find((item: any) => item.capabilities?.dataset?.id);
+    const plan = async () => JSON.stringify({
+      frame: { goal: 'Show retention health' },
+      requirements: [{
+        id: 'retention-health', question: 'Retention health', role: 'kpi', required: true,
+        measures: ['retention_score'], dimensions: [], filters: [],
+      }],
+      // It names an unapproved field. The planner keeps the requirement visible
+      // as a gap; the App API must not materialize this as a SQL tile.
+      components: [{
+        id: 'invalid-retention', title: 'Retention health', sourceId: source.sourceId,
+        requirementIds: ['retention-health'], role: 'kpi', view: 'kpi', rationale: 'Not an approved Dataset measure',
+        query: { dimensions: [], measures: [{ measure: 'retention_score' }] },
+      }],
+    });
+    const proposed = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals`, 'POST', {
+      prompt: draft.frame.goal, expectedRevision: draft.revision, proposalHash: draft.proposalHash,
+    }, { planAppBuild: plan });
+    expect(proposed.status, JSON.stringify(proposed.payload)).toBe(201);
+    const proposal = (proposed.payload as any).proposal;
+    const gapRequirement = proposal.operations.find((operation: any) => operation.type === 'set_requirements').coverage
+      .find((coverage: any) => coverage.status === 'gap');
+    // The provider's malformed field query deliberately falls back to a
+    // deterministic requirement, whose id is server-issued. The explicit gap
+    // request must use that current id instead of preserving provider text.
+    expect(gapRequirement).toEqual(expect.objectContaining({ status: 'gap' }));
+    expect(JSON.stringify(proposal.operations)).not.toContain('SELECT ');
+
+    let gapInput: Record<string, unknown> | undefined;
+    const contextProposal = {
+      version: 1,
+      id: 'context-gap-retention',
+      origin: 'ai',
+      status: 'proposed',
+      trustState: 'review_required',
+      createdAt: '2026-09-11T00:00:00.000Z',
+      baseSnapshotId: 'snapshot-gap',
+      dependencyFingerprints: {},
+      operations: [{ id: 'dataset-draft:retention', kind: 'dataset_draft' }],
+      patches: [{ path: 'domains/commerce/blocks/_drafts/retention-health.dql', before: '', after: 'block "Retention review Dataset" {}', changed: true, owner: 'dql', operationId: 'dataset-draft:retention' }],
+      diagnostics: [{ code: 'DATASET_DRAFT_REVIEW_REQUIRED', severity: 'info', message: 'Review required.' }],
+      impact: { files: 1, modelingChanges: 0, skillChanges: 0, dbtSourceChanges: 0, datasetChanges: 1 },
+      proposalHash: 'context-gap-hash',
+    } as any;
+    const generated = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals/${proposal.id}/gaps`, 'POST', {
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      requirementId: gapRequirement.requirementId,
+      domain: 'commerce',
+      sourceRelation: 'review_retention_source',
+    }, {
+      createDatasetGapProposal: async (input) => {
+        gapInput = input as unknown as Record<string, unknown>;
+        return contextProposal;
+      },
+    });
+    expect(generated.status).toBe(201);
+    expect(generated.payload).toMatchObject({ ok: true, requirementId: gapRequirement.requirementId, contextProposal: { id: 'context-gap-retention', trustState: 'review_required' } });
+    expect((generated.payload as any).proposal).toBeUndefined();
+    expect(gapInput).toMatchObject({ appBuildId: draft.id, requirement: { id: gapRequirement.requirementId }, domain: 'commerce', sourceRelation: 'review_retention_source' });
+
+    const stale = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals/${proposal.id}/gaps`, 'POST', {
+      expectedRevision: draft.revision + 1,
+      expectedProposalHash: draft.proposalHash,
+      requirementId: gapRequirement.requirementId,
+    }, { createDatasetGapProposal: async () => contextProposal });
+    expect(stale.status).toBe(409);
+    expect((stale.payload as any).error).toContain('APP_BUILD_PROPOSAL_CONFLICT');
+  });
+
+  it('reports and enforces the explicit local Dataset feature opt-in (APP-007)', async () => {
+    const root = createProject();
+    writeDatasetBlock(root, 'commerce/order-lines.dql');
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Feature-gated Dataset App', goal: 'Explore revenue by region', authoringMode: 'manual',
+      sourcePolicy: 'governed_only', domain: 'commerce',
+    }, { datasetsEnabled: false });
+    const draft = (created.payload as any).draft;
+    const catalog = await invokeAppsApi(root, `/api/app-builds/${draft.id}/source-candidates?limit=50`, 'GET', {}, { datasetsEnabled: false });
+    expect(catalog).toMatchObject({ status: 200, payload: { features: { datasets: false } } });
+    const source = (catalog.payload as any).items.find((item: any) => item.capabilities?.dataset?.id);
+
+    const blocked = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'manual', expectedRevision: draft.revision, expectedProposalHash: draft.proposalHash,
+      selections: [{
+        sourceId: source.sourceId, pageId: 'overview', view: 'chart',
+        query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
+      }],
+    }, { datasetsEnabled: false });
+    expect(blocked.status).toBe(409);
+    expect((blocked.payload as any).error).toContain('APP_DATASETS_FEATURE_DISABLED');
   });
 
   it('keeps exact source additions authoritative across proposal revisions and review policy (PRD-007, AGT-026, API-014)', async () => {
@@ -1752,6 +3198,64 @@ describe('Apps command center API helpers', () => {
     }, 'revenue-app', { question: 'What changed?' });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/active persona belongs to App "growth-app"/);
+  });
+
+  it('APP-066 routes a Dataset chart question only through server-issued current run context', async () => {
+    const root = createProject();
+    const appResult = createAppPackage(root, {
+      name: 'Commerce App', domain: 'commerce', dashboardTitle: 'Overview', owners: ['owner@local'], selectedBlockIds: [],
+    });
+    expect(appResult.ok).toBe(true);
+    if (!appResult.ok) return;
+    const calls: unknown[] = [];
+    const context = {
+      version: 1 as const,
+      appId: 'commerce-app', dashboardId: 'overview', tileId: 'revenue', runId: 'run-current', evidenceScope: 'full_dashboard' as const,
+      snapshotId: 'snapshot-current', dashboardFingerprint: 'sha256:dashboard',
+      source: { sourceId: 'source.orders', sourceRevision: 'sha256:source', contractFingerprint: 'sha256:contract', lifecycle: 'certified', trust: 'certified' },
+      authoredQuery: { dimensions: [], measures: [{ measure: 'revenue' }] }, authoredQueryFingerprint: 'sha256:authored',
+      executionQueryFingerprint: 'sha256:query', filterFingerprint: 'sha256:filters', parameterFingerprint: 'sha256:params', interactionFingerprint: 'sha256:interaction', executionFingerprint: 'sha256:execution', resultFingerprint: 'sha256:result', schemaFingerprint: 'sha256:schema', personaPolicyFingerprint: 'sha256:persona',
+      effectiveFilters: { region: 'CA' }, appliedFilters: [{ field: 'region', op: 'eq' as const, values: ['CA'], placement: 'where' as const }], unboundFilters: [],
+      result: { columns: ['revenue'], rows: [{ revenue: 60 }], rowCount: 1 },
+    };
+    const result = await __test__.askAppQuestion({
+      projectRoot: root, req: {} as any, res: {} as any,
+      url: new URL('http://local.test/api/apps/commerce-app/ask'), path: '/api/apps/commerce-app/ask',
+      planResearch: async () => { throw new Error('chart questions must not route to generic research'); },
+      answerDatasetChart: async (input: unknown) => {
+        calls.push(input);
+        return {
+          ok: true as const,
+          answer: 'Revenue is 60 for Region = CA.',
+          answerMode: 'provider' as const,
+          trustState: 'certified' as const,
+          reviewStatus: 'certified' as const,
+          citations: [{ kind: 'dataset_query', name: 'Orders Dataset' }],
+          followUps: ['Rerun the chart before asking again after changes'],
+          context,
+        };
+      },
+    }, 'commerce-app', {
+      question: 'What does this chart show?', dashboardId: 'overview', tileId: 'revenue', runId: 'run-current',
+      variables: { region: 'US' }, context: { rows: [{ revenue: 130 }], trust: 'browser-claimed' },
+    });
+
+    expect(calls).toEqual([{
+      appId: 'commerce-app', dashboardId: 'overview', tileId: 'revenue', runId: 'run-current', question: 'What does this chart show?',
+    }]);
+    expect(result).toMatchObject({
+      ok: true, route: 'dataset_chart_answer', answer: 'Revenue is 60 for Region = CA.', answerMode: 'provider',
+      trustState: 'certified', analyticalContext: { source: { sourceRevision: 'sha256:source' }, effectiveFilters: { region: 'CA' } },
+    });
+
+    const stale = await __test__.askAppQuestion({
+      projectRoot: root, req: {} as any, res: {} as any,
+      url: new URL('http://local.test/api/apps/commerce-app/ask'), path: '/api/apps/commerce-app/ask',
+      answerDatasetChart: async () => ({ ok: false as const, error: 'The Dataset source changed after this chart ran. Run the current chart again.' }),
+    }, 'commerce-app', {
+      question: 'What does this chart show?', dashboardId: 'overview', tileId: 'revenue', runId: 'run-current',
+    });
+    expect(stale).toEqual({ ok: false, error: 'The Dataset source changed after this chart ran. Run the current chart again.' });
   });
 
   it('routes an OFF-tile question through the governed answer loop, not the focused tile', async () => {
@@ -3118,12 +4622,197 @@ function createProject(): string {
   return root;
 }
 
+describe('Dataset tile review-draft save API', () => {
+  it('passes only identifiers and optimistic guards to the server-owned runtime evidence hook', async () => {
+    const root = createProject();
+    const received: unknown[] = [];
+    const result = await invokeAppsApi(
+      root,
+      '/api/app-builds/build-1/dashboards/overview/tiles/revenue/save-as-block',
+      'POST',
+      {
+        runId: 'app_run_1',
+        expectedRevision: 4,
+        expectedProposalHash: 'sha256:draft',
+        name: 'Revenue total',
+        domain: 'commerce',
+        description: 'Current governed total',
+        // Browser SQL/rows must not become input authority at this boundary.
+        sql: 'SELECT unsafe_client_sql',
+        result: { rows: [{ revenue: 999 }] },
+      },
+      {
+        saveDatasetTileAsBlock: async (input) => {
+          received.push(input);
+          return {
+            ok: true,
+            path: 'domains/commerce/blocks/_drafts/revenue-total.dql',
+            status: 'draft',
+            provenanceFingerprint: 'sha256:provenance',
+            replacementEligible: false,
+            replacementMessage: 'Saved as a fixed-value review draft.',
+          };
+        },
+      },
+    );
+    expect(result.handled).toBe(true);
+    expect(result.status).toBe(201);
+    expect(received).toEqual([{
+      draftId: 'build-1',
+      dashboardId: 'overview',
+      tileId: 'revenue',
+      runId: 'app_run_1',
+      expectedRevision: 4,
+      expectedProposalHash: 'sha256:draft',
+      name: 'Revenue total',
+      domain: 'commerce',
+      description: 'Current governed total',
+    }]);
+
+    const invalid = await invokeAppsApi(
+      root,
+      '/api/app-builds/build-1/dashboards/overview/tiles/revenue/save-as-block',
+      'POST',
+      { runId: 'app_run_1', expectedRevision: '4', expectedProposalHash: 'sha256:draft' },
+      { saveDatasetTileAsBlock: async () => { throw new Error('must not be called'); } },
+    );
+    expect(invalid.status).toBe(400);
+    expect(invalid.payload).toMatchObject({ code: 'DATASET_TILE_SAVE_INVALID_REQUEST' });
+  });
+
+  it('passes only review-draft identifiers and optimistic guards to the replacement proof hook', async () => {
+    const root = createProject();
+    const received: unknown[] = [];
+    const result = await invokeAppsApi(
+      root,
+      '/api/app-builds/build-1/dashboards/overview/tiles/revenue/replace-with-block',
+      'POST',
+      {
+        runId: 'app_run_1',
+        expectedRevision: 4,
+        expectedProposalHash: 'sha256:draft',
+        blockPath: 'domains/commerce/blocks/_drafts/revenue-total.dql',
+        enableReviewRequired: true,
+        // Neither client SQL/results nor a browser trust assertion reaches the
+        // authority-bearing same-scope proof closure.
+        sql: 'SELECT unsafe_client_sql',
+        result: { rows: [{ revenue: 999 }] },
+        trustState: 'certified',
+      },
+      {
+        replaceDatasetTileWithReviewBlock: async (input) => {
+          received.push(input);
+          return { ok: false, code: 'DATASET_TILE_REPLACE_TEST_REFUSAL', error: 'server-owned proof refused', status: 409 };
+        },
+      },
+    );
+    expect(result.handled).toBe(true);
+    expect(result.status).toBe(409);
+    expect(received).toEqual([{
+      draftId: 'build-1',
+      dashboardId: 'overview',
+      tileId: 'revenue',
+      runId: 'app_run_1',
+      expectedRevision: 4,
+      expectedProposalHash: 'sha256:draft',
+      blockPath: 'domains/commerce/blocks/_drafts/revenue-total.dql',
+      enableReviewRequired: true,
+    }]);
+
+    const invalid = await invokeAppsApi(
+      root,
+      '/api/app-builds/build-1/dashboards/overview/tiles/revenue/replace-with-block',
+      'POST',
+      {
+        runId: 'app_run_1', expectedRevision: 4, expectedProposalHash: 'sha256:draft',
+        blockPath: 'domains/commerce/blocks/_drafts/revenue-total.dql', enableReviewRequired: 'yes',
+      },
+      { replaceDatasetTileWithReviewBlock: async () => { throw new Error('must not be called'); } },
+    );
+    expect(invalid.status).toBe(400);
+    expect(invalid.payload).toMatchObject({ code: 'DATASET_TILE_REPLACE_INVALID_REQUEST' });
+  });
+});
+
+describe('Legacy semantic-to-Dataset conversion API', () => {
+  it('passes only route identities and optimistic guards to the server-owned preview and accept hooks', async () => {
+    const root = createProject();
+    const previewed: unknown[] = [];
+    const accepted: unknown[] = [];
+    const hooks = {
+      previewSemanticTileConversion: async (input: unknown) => {
+        previewed.push(input);
+        return { ok: false as const, code: 'SEMANTIC_CONVERSION_TEST_REFUSAL', error: 'server-owned mapping refused', status: 409 };
+      },
+      acceptSemanticTileConversion: async (input: unknown) => {
+        accepted.push(input);
+        return { ok: false as const, code: 'SEMANTIC_CONVERSION_TEST_REFUSAL', error: 'server-owned proof refused', status: 409 };
+      },
+    };
+
+    const preview = await invokeAppsApi(
+      root,
+      '/api/app-builds/build-1/dashboards/overview/tiles/legacy-revenue/preview-semantic-conversion',
+      'POST',
+      {
+        expectedRevision: 4,
+        expectedProposalHash: 'sha256:draft',
+        // Client payload cannot supply source identity, query, SQL, rows, or a proof.
+        sourceId: 'untrusted-source',
+        query: { measures: [{ measure: 'untrusted' }] },
+        sql: 'SELECT unsafe_client_sql',
+        result: { rows: [{ revenue: 999 }] },
+        equivalenceProofFingerprint: 'sha256:forged',
+      },
+      hooks,
+    );
+    expect(preview.status).toBe(409);
+    expect(previewed).toEqual([{
+      draftId: 'build-1', dashboardId: 'overview', tileId: 'legacy-revenue',
+      expectedRevision: 4, expectedProposalHash: 'sha256:draft',
+    }]);
+
+    const accept = await invokeAppsApi(
+      root,
+      '/api/app-builds/build-1/dashboards/overview/tiles/legacy-revenue/semantic-conversions/conv_1/accept',
+      'POST',
+      {
+        expectedRevision: 4,
+        expectedProposalHash: 'sha256:draft',
+        sourceId: 'untrusted-source',
+        query: { measures: [{ measure: 'untrusted' }] },
+        sql: 'SELECT unsafe_client_sql',
+        result: { rows: [{ revenue: 999 }] },
+      },
+      hooks,
+    );
+    expect(accept.status).toBe(409);
+    expect(accepted).toEqual([{
+      draftId: 'build-1', dashboardId: 'overview', tileId: 'legacy-revenue', proposalId: 'conv_1',
+      expectedRevision: 4, expectedProposalHash: 'sha256:draft',
+    }]);
+
+    const invalid = await invokeAppsApi(
+      root,
+      '/api/app-builds/build-1/dashboards/overview/tiles/legacy-revenue/preview-semantic-conversion',
+      'POST',
+      { expectedRevision: '4', expectedProposalHash: 'sha256:draft' },
+      hooks,
+    );
+    expect(invalid.status).toBe(400);
+    expect(invalid.payload).toMatchObject({ code: 'SEMANTIC_TILE_CONVERSION_INVALID_REQUEST' });
+    expect(previewed).toHaveLength(1);
+  });
+});
+
 async function invokeAppsApi(
   projectRoot: string,
   path: string,
   method: string,
   body: unknown,
-  hooks: Partial<Pick<Parameters<typeof handleAppsApi>[0], 'planAppBuild' | 'generateGovernedAnswer'>> = {},
+  hooks: Partial<Pick<Parameters<typeof handleAppsApi>[0],
+    'planAppBuild' | 'generateGovernedAnswer' | 'datasetsEnabled' | 'resolveDatasetSourceAuthority' | 'verifyAppBuildPreview' | 'createDatasetGapProposal' | 'saveDatasetTileAsBlock' | 'replaceDatasetTileWithReviewBlock' | 'previewSemanticTileConversion' | 'acceptSemanticTileConversion'
+  >> = {},
 ): Promise<{ handled: boolean; status: number; payload: unknown }> {
   const req = Readable.from([Buffer.from(JSON.stringify(body), 'utf-8')]) as IncomingMessage;
   req.method = method;
@@ -3157,6 +4846,39 @@ function writeBlock(
   block: TestBlockSpec,
 ): void {
   writeBlockFile(join(root, 'blocks', relPath), block);
+}
+
+/** A real v3 block declaration for the App field-builder API contract. */
+function writeDatasetBlock(root: string, relPath: string): void {
+  const path = join(root, 'blocks', relPath);
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, `block "Order lines" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  description = "Governed order line Dataset"
+  owner = "analytics@local"
+  tags = ["orders", "revenue"]
+  grain = {
+    entities = ["order_line"]
+    keys = ["order_line_id"]
+    keyEvidence = "proof.order-lines"
+  }
+  fields {
+    order_line_id { role = "key", type = "string" }
+    region { role = "dimension", type = "string" }
+    net_amount { role = "attribute", type = "number" }
+  }
+  measures {
+    revenue { agg = "sum", from = "net_amount", additive = "additive", allowedAggs = ["sum"] }
+    order_count { agg = "count", from = "order_line_id", additive = "additive", allowedAggs = ["count"] }
+  }
+  query = """
+SELECT order_line_id, region, net_amount FROM order_lines
+"""
+  visualization { chart = "bar" }
+}
+`);
 }
 
 function writeDomainBlock(

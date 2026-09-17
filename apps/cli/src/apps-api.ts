@@ -5,15 +5,17 @@
  */
 
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join, dirname, relative, basename } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type {
   AgentAnswer,
   AgentResultPayload,
   AppBuilderPlannerCompletion,
+  AppBuilderPlannerProvenance,
   AppPlan,
   AppSourceCatalogRecord,
+  ContextAuthoringProposalV1,
   NarrateInput,
   NarrateItem,
   NarrateResult,
@@ -30,17 +32,33 @@ import {
   suggestAppId,
   createAppBuildDraft,
   appBuildDraftHash,
+  appBuildPreviewIntentFingerprint,
   applyAppBuildDraftOperations,
+  packDashboardLayoutItems,
   type AppDocument,
   type BlockParameterDefinition,
   type DashboardDisplayMetadata,
+  type DashboardDatasetBinding,
   type DashboardDocument,
   type DashboardFilter,
   type DashboardGridItem,
+  type DashboardInteractions,
+  type DatasetDescriptor,
+  type DatasetPhysicalField,
+  type SemanticTileConversionProvenanceV1,
+  type TileQuery,
   type AppBuildDraft,
+  type AppBuildRequirement,
   type AppBuildDraftOperation,
   type AppBuildDraftSource,
   type AppBuildSourceLifecycle,
+  type AppBuildSourcePolicy,
+  type AppAnalyticalContextV1,
+  datasetPhysicalField,
+  normalizeTileQuery,
+  datasetTileVisualizationCompatibility,
+  tileQueryOutputAliases,
+  validateTileQuery,
 } from '@duckcodeailabs/dql-core';
 import {
   defaultPersonaRegistry,
@@ -62,6 +80,8 @@ interface Ctx {
   url: URL;
   path: string;
   projectRoot: string;
+  /** Explicit local project opt-in for Dataset field-query authoring. */
+  datasetsEnabled?: boolean;
   executeSql?: (sql: string) => Promise<unknown>;
   generateInvestigationSql?: (input: AppInvestigationGenerationRequest) => Promise<AppInvestigationGenerationResult>;
   runNotebook?: (appId: string, notebookPath: string) => Promise<void>;
@@ -74,15 +94,86 @@ interface Ctx {
   /** App-specific planning call. The runtime supplies the same configured
    * provider adapter as Ask, but App Builder owns the structured state machine. */
   planAppBuild?: AppBuilderPlannerCompletion;
+  /**
+   * The runtime owns the immutable Context Authoring store and the current
+   * project snapshot.  App gaps call this narrow hook so they create a typed
+   * Domain Dataset draft instead of an app-local free-SQL artifact.
+   */
+  createDatasetGapProposal?: (input: {
+    appBuildId: string;
+    requirement: AppBuildRequirement;
+    domain?: string;
+    sourceRelation?: string;
+  }) => Promise<ContextAuthoringProposalV1>;
   /** Story narrator — supplied by the runtime (LLM-backed with a deterministic
    *  fallback). Commit uses it to write the app's narrated story sections. */
   narrate?: (input: NarrateInput) => Promise<NarrateResult>;
   verifyDashboardRun?: (input: { runId: string; appId: string; dashboardId: string; tileIds: string[] }) =>
     | { ok: true; snapshotId: string; resultFingerprint: string }
     | { ok: false; error: string };
-  verifyAppBuildPreview?: (input: { runId: string; draftId: string; dashboardId: string; tileIds: string[] }) =>
-    | { ok: true; snapshotId: string; resultFingerprint: string }
+  verifyAppBuildPreview?: (input: {
+    runId: string;
+    draftId: string;
+    dashboardId: string;
+    tileIds: string[];
+    datasetTileIds?: string[];
+    intentFingerprint: string;
+    /** Local review preview and Project publication have different authority gates. */
+    purpose: 'local_preview' | 'project_publish';
+  }) =>
+    | Promise<
+      | { ok: true; snapshotId: string; filterFingerprint: string; resultFingerprint: string; intentFingerprint: string }
+      | { ok: false; error: string }
+    >
+    | { ok: true; snapshotId: string; filterFingerprint: string; resultFingerprint: string; intentFingerprint: string }
     | { ok: false; error: string };
+  /**
+   * The local runtime owns the only authoritative Dataset chart-run evidence.
+   * Apps API deliberately receives a narrow answer port instead of accepting
+   * rows, source contracts, or receipts from the browser.
+   */
+  answerDatasetChart?: (input: {
+    appId: string;
+    dashboardId: string;
+    tileId: string;
+    runId: string;
+    question: string;
+  }) => Promise<
+    | {
+      ok: true;
+      answer: string;
+      answerMode?: 'provider' | 'deterministic_context_summary' | 'out_of_context';
+      trustState: 'certified' | 'review_required' | 'draft_ready';
+      reviewStatus: 'certified' | 'review_required' | 'draft_ready';
+      citations: Array<{ kind: string; name: string; path?: string }>;
+      followUps: string[];
+      context: AppAnalyticalContextV1;
+    }
+    | { ok: false; error: string }
+  >;
+  /**
+   * The runtime owns current Dataset execution evidence and the existing
+   * review-draft block writer.  This port deliberately receives only route
+   * identifiers and optimistic content guards; SQL, result rows, source
+   * contracts, and receipts are never accepted from the browser.
+   */
+  saveDatasetTileAsBlock?: (input: DatasetTileSaveAsBlockRequest) => Promise<DatasetTileSaveAsBlockResponse>;
+  /**
+   * Replacing an App Dataset tile is a separate, proof-gated action. The
+   * browser may name only an already-saved review-draft path and optimistic
+   * guards; the runtime reloads the current App, source, and block authority
+   * and performs the fresh same-scope equivalence check.
+   */
+  replaceDatasetTileWithReviewBlock?: (input: DatasetTileReplaceWithBlockRequest) => Promise<DatasetTileReplaceWithBlockResponse>;
+  /**
+   * M4-CONV-01: the browser names a legacy tile and optimistic guards only.
+   * The runtime resolves semantic/Dataset identity and runs the proof itself.
+   */
+  previewSemanticTileConversion?: (input: SemanticTileConversionPreviewRequest) => Promise<SemanticTileConversionPreviewResponse>;
+  acceptSemanticTileConversion?: (input: SemanticTileConversionAcceptRequest) => Promise<SemanticTileConversionAcceptResponse>;
+  /** Internal test seam for a current immutable source catalog. The local
+   * runtime leaves this unset and always resolves the real project catalog. */
+  resolveDatasetSourceAuthority?: (sourceIds: string[]) => Promise<AppSourceCatalogRecord[]> | AppSourceCatalogRecord[];
   queueOperation?: <TResult>(
     input: { type: string; scope: string; resourceRevision?: string; message?: string; cancellable?: boolean },
     task: (signal: AbortSignal, report: (progress: Partial<LocalOperationProgress>) => void) => Promise<TResult>,
@@ -90,11 +181,95 @@ interface Ctx {
   scheduleProjectRefresh?: (reason: string) => void;
 }
 
+export interface DatasetTileSaveAsBlockRequest {
+  draftId: string;
+  dashboardId: string;
+  tileId: string;
+  runId: string;
+  expectedRevision: number;
+  expectedProposalHash: string;
+  name?: string;
+  domain?: string;
+  description?: string;
+}
+
+export type DatasetTileSaveAsBlockResponse =
+  | {
+    ok: true;
+    path: string;
+    status: 'draft';
+    provenanceFingerprint: string;
+    replacementEligible: boolean;
+    replacementMessage?: string;
+  }
+  | { ok: false; code: string; error: string; status?: number };
+
+export interface DatasetTileReplaceWithBlockRequest {
+  draftId: string;
+  dashboardId: string;
+  tileId: string;
+  runId: string;
+  expectedRevision: number;
+  expectedProposalHash: string;
+  /** Relative path of a server-created `_drafts` block. */
+  blockPath: string;
+  /** Explicitly acknowledges that the replacement remains review-required. */
+  enableReviewRequired?: boolean;
+}
+
+export type DatasetTileReplaceWithBlockResponse =
+  | {
+    ok: true;
+    draft: AppBuildDraft;
+    blockPath: string;
+    equivalenceProofFingerprint: string;
+  }
+  | { ok: false; code: string; error: string; status?: number };
+
+export interface SemanticTileConversionPreviewRequest {
+  draftId: string;
+  dashboardId: string;
+  tileId: string;
+  expectedRevision: number;
+  expectedProposalHash: string;
+}
+
+export type SemanticTileConversionPreviewResponse =
+  | {
+    ok: true;
+    proposalId: string;
+    candidate: {
+      sourceId: string;
+      sourceRevision: string;
+      contractFingerprint: string;
+      query: TileQuery;
+      queryFingerprint: string;
+      provenance: SemanticTileConversionProvenanceV1;
+    };
+    equivalenceProofFingerprint: string;
+  }
+  | { ok: false; code: string; error: string; status?: number };
+
+export interface SemanticTileConversionAcceptRequest {
+  draftId: string;
+  dashboardId: string;
+  tileId: string;
+  proposalId: string;
+  expectedRevision: number;
+  expectedProposalHash: string;
+}
+
+export type SemanticTileConversionAcceptResponse =
+  | { ok: true; draft: AppBuildDraft; equivalenceProofFingerprint: string }
+  | { ok: false; code: string; error: string; status?: number };
+
 /** Runtime hooks the two-phase app build can use during propose (all optional —
  *  without them, gaps stay listed as uncovered research questions). */
 export interface AppBuildHooks {
   generateGovernedAnswer?: (question: string, context?: AppContextEnvelopeV1) => Promise<AppBuildGeneratedAnswer>;
   planAppBuild?: AppBuilderPlannerCompletion;
+  /** The App feature gate also applies to AI-authored field-query tiles. */
+  datasetsEnabled?: boolean;
 }
 
 /**
@@ -195,7 +370,29 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         template?: 'executive_brief' | 'operational_dashboard' | 'investigation' | 'blank';
         entrypoint?: 'studio' | 'ask';
       }>(req);
-      const draft = createStoredAppBuildDraft(projectRoot, body);
+      // Opening a published v3 Dataset App creates a new local draft.  The
+      // page binding is immutable authored provenance; the source cards must
+      // come from the *current* governed catalog so Studio cannot resurrect a
+      // serialized capability/trust claim from the published document.
+      let datasetCatalogError: string | undefined;
+      let resolvePublishedDatasetSources: CreateStoredAppBuildDraftOptions['resolvePublishedDatasetSources'];
+      if (body.baseAppId) {
+        try {
+          const { ensureAgentProjectReady, resolveAppSourceCatalogRecords } = await import('@duckcodeailabs/dql-agent');
+          await ensureAgentProjectReady(projectRoot);
+          resolvePublishedDatasetSources = (sourceIds, sourcePolicy) => resolveAppSourceCatalogRecords(
+            projectRoot,
+            sourceIds,
+            sourcePolicy,
+          );
+        } catch (error) {
+          datasetCatalogError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      const draft = createStoredAppBuildDraft(projectRoot, body, {
+        ...(resolvePublishedDatasetSources ? { resolvePublishedDatasetSources } : {}),
+        ...(datasetCatalogError ? { datasetCatalogError } : {}),
+      });
       sendJson(res, 201, { ok: true, draft });
     } catch (err) {
       sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -241,7 +438,11 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         sourcePolicy: current.sourcePolicy,
         includeDeprecated: ctx.url.searchParams.get('includeDeprecated') === 'true',
       });
-      sendJson(res, 200, { ok: true, ...page });
+      sendJson(res, 200, {
+        ok: true,
+        features: { datasets: ctx.datasetsEnabled === true },
+        ...page,
+      });
     } catch (err) {
       const error = err as Error & { code?: string };
       sendJson(res, error.code?.includes('CURSOR') ? 409 : 400, { ok: false, code: error.code, error: error.message });
@@ -257,10 +458,23 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         sendJson(res, 404, { ok: false, error: 'App Build Draft not found.' });
         return true;
       }
-      const body = await readJson<{ sourceIds?: string[] }>(req);
+      const body = await readJson<{ sourceIds?: string[]; includeReviewRequired?: boolean }>(req);
+      if (body.includeReviewRequired !== undefined && body.includeReviewRequired !== true) {
+        throw new Error('APP_BUILD_SOURCE_RESOLVE_INVALID: includeReviewRequired must be true when supplied.');
+      }
+      if (body.sourceIds !== undefined && (!Array.isArray(body.sourceIds) || body.sourceIds.some((sourceId) => typeof sourceId !== 'string' || !sourceId.trim()))) {
+        throw new Error('APP_BUILD_SOURCE_RESOLVE_INVALID: sourceIds must be a non-empty string array when supplied.');
+      }
       const { ensureAgentProjectReady, resolveAppSourceCatalogRecords } = await import('@duckcodeailabs/dql-agent');
       await ensureAgentProjectReady(projectRoot);
-      const result = resolveAppSourceCatalogRecords(projectRoot, body.sourceIds ?? [], current.sourcePolicy);
+      // Reading a review-required candidate lets Studio present a deliberate
+      // local-policy choice after a source revision changes. It never alters
+      // the draft policy or grants execution/publication eligibility.
+      const result = resolveAppSourceCatalogRecords(
+        projectRoot,
+        body.sourceIds ?? [],
+        body.includeReviewRequired === true ? 'include_review_required' : current.sourcePolicy,
+      );
       sendJson(res, 200, { ok: true, ...result });
     } catch (err) {
       const error = err as Error & { code?: string };
@@ -288,10 +502,21 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         sendJson(res, 409, { ok: false, error: 'APP_BUILD_PROPOSAL_CONFLICT: refresh the local draft before applying changes.' });
         return true;
       }
-      const next = applyAppBuildDraftOperations(current, body.expectedRevision ?? -1, body.operations ?? []);
+      // Dataset source cards are server-resolved authority, never browser
+      // assertions. Bind/canonicalize them before a preview receipt is
+      // evaluated so a client cannot claim certification or remove a review
+      // task around a stale semantic capability.
+      const authorityBoundOperations = await bindServerResolvedDatasetSourceOperations(
+        projectRoot,
+        current,
+        body.operations ?? [],
+        ctx.resolveDatasetSourceAuthority,
+      );
+      const operations = await bindServerIssuedPreviewReceipts(current, authorityBoundOperations, ctx.verifyAppBuildPreview);
+      const next = applyAppBuildDraftOperations(current, body.expectedRevision ?? -1, operations);
       writeStoredAppBuildDraft(projectRoot, next, {
         expectedRevision: current.revision,
-        operations: body.operations ?? [],
+        operations,
       });
       sendJson(res, 200, { ok: true, draft: next });
     } catch (err) {
@@ -300,6 +525,221 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     }
     return true;
   }
+
+  const saveDatasetTileMatch = path.match(/^\/api\/app-builds\/([^/]+)\/dashboards\/([^/]+)\/tiles\/([^/]+)\/save-as-block$/);
+  if (saveDatasetTileMatch && req.method === 'POST') {
+    try {
+      if (!ctx.saveDatasetTileAsBlock) {
+        sendJson(res, 409, {
+          ok: false,
+          code: 'DATASET_TILE_SAVE_UNAVAILABLE',
+          error: 'This local runtime cannot save a Dataset tile as a review draft. Update the local DQL runtime and run the tile again.',
+        });
+        return true;
+      }
+      const body = await readJson<{
+        runId?: unknown;
+        expectedRevision?: unknown;
+        expectedProposalHash?: unknown;
+        name?: unknown;
+        domain?: unknown;
+        description?: unknown;
+      }>(req);
+      const runId = cleanString(body.runId);
+      const expectedProposalHash = cleanString(body.expectedProposalHash);
+      const expectedRevision = typeof body.expectedRevision === 'number' && Number.isInteger(body.expectedRevision)
+        ? body.expectedRevision
+        : undefined;
+      if (!runId || expectedRevision === undefined || !expectedProposalHash) {
+        sendJson(res, 400, {
+          ok: false,
+          code: 'DATASET_TILE_SAVE_INVALID_REQUEST',
+          error: 'Saving a Dataset tile requires the current run id, draft revision, and content hash.',
+        });
+        return true;
+      }
+      for (const [label, value] of [
+        ['name', body.name],
+        ['domain', body.domain],
+        ['description', body.description],
+      ] as const) {
+        if (value !== undefined && typeof value !== 'string') {
+          sendJson(res, 400, {
+            ok: false,
+            code: 'DATASET_TILE_SAVE_INVALID_REQUEST',
+            error: `Dataset tile ${label} must be text when supplied.`,
+          });
+          return true;
+        }
+      }
+      const result = await ctx.saveDatasetTileAsBlock({
+        draftId: decodeURIComponent(saveDatasetTileMatch[1]),
+        dashboardId: decodeURIComponent(saveDatasetTileMatch[2]),
+        tileId: decodeURIComponent(saveDatasetTileMatch[3]),
+        runId,
+        expectedRevision,
+        expectedProposalHash,
+        ...(cleanString(body.name) ? { name: cleanString(body.name) } : {}),
+        ...(cleanString(body.domain) ? { domain: cleanString(body.domain) } : {}),
+        ...(cleanString(body.description) ? { description: cleanString(body.description) } : {}),
+      });
+      sendJson(res, result.ok ? 201 : (result.status ?? 409), result);
+    } catch (err) {
+      sendJson(res, 400, {
+        ok: false,
+        code: 'DATASET_TILE_SAVE_INVALID_REQUEST',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return true;
+  }
+
+  const replaceDatasetTileMatch = path.match(/^\/api\/app-builds\/([^/]+)\/dashboards\/([^/]+)\/tiles\/([^/]+)\/replace-with-block$/);
+  if (replaceDatasetTileMatch && req.method === 'POST') {
+    try {
+      if (!ctx.replaceDatasetTileWithReviewBlock) {
+        sendJson(res, 409, {
+          ok: false,
+          code: 'DATASET_TILE_REPLACE_UNAVAILABLE',
+          error: 'This local runtime cannot replace a Dataset tile with a review draft. Update the local DQL runtime and run a fresh preview.',
+        });
+        return true;
+      }
+      const body = await readJson<{
+        runId?: unknown;
+        expectedRevision?: unknown;
+        expectedProposalHash?: unknown;
+        blockPath?: unknown;
+        enableReviewRequired?: unknown;
+      }>(req);
+      const runId = cleanString(body.runId);
+      const expectedProposalHash = cleanString(body.expectedProposalHash);
+      const blockPath = cleanString(body.blockPath);
+      const expectedRevision = typeof body.expectedRevision === 'number' && Number.isInteger(body.expectedRevision)
+        ? body.expectedRevision
+        : undefined;
+      if (!runId || expectedRevision === undefined || !expectedProposalHash || !blockPath) {
+        sendJson(res, 400, {
+          ok: false,
+          code: 'DATASET_TILE_REPLACE_INVALID_REQUEST',
+          error: 'Replacing a Dataset tile requires the current run id, draft revision, content hash, and saved review-draft path.',
+        });
+        return true;
+      }
+      if (body.enableReviewRequired !== undefined && typeof body.enableReviewRequired !== 'boolean') {
+        sendJson(res, 400, {
+          ok: false,
+          code: 'DATASET_TILE_REPLACE_INVALID_REQUEST',
+          error: 'The review-required acknowledgement must be true or false when supplied.',
+        });
+        return true;
+      }
+      const result = await ctx.replaceDatasetTileWithReviewBlock({
+        draftId: decodeURIComponent(replaceDatasetTileMatch[1]),
+        dashboardId: decodeURIComponent(replaceDatasetTileMatch[2]),
+        tileId: decodeURIComponent(replaceDatasetTileMatch[3]),
+        runId,
+        expectedRevision,
+        expectedProposalHash,
+        blockPath,
+        ...(body.enableReviewRequired === true ? { enableReviewRequired: true } : {}),
+      });
+      sendJson(res, result.ok ? 200 : (result.status ?? 409), result);
+    } catch (err) {
+      sendJson(res, 400, {
+        ok: false,
+        code: 'DATASET_TILE_REPLACE_INVALID_REQUEST',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return true;
+  }
+
+  const semanticConversionPreviewMatch = path.match(/^\/api\/app-builds\/([^/]+)\/dashboards\/([^/]+)\/tiles\/([^/]+)\/preview-semantic-conversion$/);
+  if (semanticConversionPreviewMatch && req.method === 'POST') {
+    try {
+      if (!ctx.previewSemanticTileConversion) {
+        sendJson(res, 409, {
+          ok: false,
+          code: 'SEMANTIC_TILE_CONVERSION_UNAVAILABLE',
+          error: 'This local runtime cannot preview a legacy semantic-to-Dataset conversion. Update DQL and run a fresh legacy semantic tile.',
+        });
+        return true;
+      }
+      const body = await readJson<{ expectedRevision?: unknown; expectedProposalHash?: unknown }>(req);
+      const expectedProposalHash = cleanString(body.expectedProposalHash);
+      const expectedRevision = typeof body.expectedRevision === 'number' && Number.isInteger(body.expectedRevision)
+        ? body.expectedRevision
+        : undefined;
+      if (expectedRevision === undefined || !expectedProposalHash) {
+        sendJson(res, 400, {
+          ok: false,
+          code: 'SEMANTIC_TILE_CONVERSION_INVALID_REQUEST',
+          error: 'Previewing a conversion requires the current App draft revision and content hash.',
+        });
+        return true;
+      }
+      const result = await ctx.previewSemanticTileConversion({
+        draftId: decodeURIComponent(semanticConversionPreviewMatch[1]),
+        dashboardId: decodeURIComponent(semanticConversionPreviewMatch[2]),
+        tileId: decodeURIComponent(semanticConversionPreviewMatch[3]),
+        expectedRevision,
+        expectedProposalHash,
+      });
+      sendJson(res, result.ok ? 200 : (result.status ?? 409), result);
+    } catch (err) {
+      sendJson(res, 400, {
+        ok: false,
+        code: 'SEMANTIC_TILE_CONVERSION_INVALID_REQUEST',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return true;
+  }
+
+  const semanticConversionAcceptMatch = path.match(/^\/api\/app-builds\/([^/]+)\/dashboards\/([^/]+)\/tiles\/([^/]+)\/semantic-conversions\/([^/]+)\/accept$/);
+  if (semanticConversionAcceptMatch && req.method === 'POST') {
+    try {
+      if (!ctx.acceptSemanticTileConversion) {
+        sendJson(res, 409, {
+          ok: false,
+          code: 'SEMANTIC_TILE_CONVERSION_UNAVAILABLE',
+          error: 'This local runtime cannot accept a legacy semantic-to-Dataset conversion. Update DQL and preview the tile again.',
+        });
+        return true;
+      }
+      const body = await readJson<{ expectedRevision?: unknown; expectedProposalHash?: unknown }>(req);
+      const expectedProposalHash = cleanString(body.expectedProposalHash);
+      const expectedRevision = typeof body.expectedRevision === 'number' && Number.isInteger(body.expectedRevision)
+        ? body.expectedRevision
+        : undefined;
+      if (expectedRevision === undefined || !expectedProposalHash) {
+        sendJson(res, 400, {
+          ok: false,
+          code: 'SEMANTIC_TILE_CONVERSION_INVALID_REQUEST',
+          error: 'Accepting a conversion requires the current App draft revision and content hash.',
+        });
+        return true;
+      }
+      const result = await ctx.acceptSemanticTileConversion({
+        draftId: decodeURIComponent(semanticConversionAcceptMatch[1]),
+        dashboardId: decodeURIComponent(semanticConversionAcceptMatch[2]),
+        tileId: decodeURIComponent(semanticConversionAcceptMatch[3]),
+        proposalId: decodeURIComponent(semanticConversionAcceptMatch[4]),
+        expectedRevision,
+        expectedProposalHash,
+      });
+      sendJson(res, result.ok ? 200 : (result.status ?? 409), result);
+    } catch (err) {
+      sendJson(res, 400, {
+        ok: false,
+        code: 'SEMANTIC_TILE_CONVERSION_INVALID_REQUEST',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return true;
+  }
+
   if (buildMatch && req.method === 'DELETE') {
     try {
       const id = decodeURIComponent(buildMatch[1]);
@@ -356,7 +796,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       const proposal = await proposeAppBuildDraftOperations(projectRoot, current, {
         prompt: cleanString(body.prompt) || current.frame.goal,
         selectedBlockIds: body.selectedBlockIds,
-      }, { generateGovernedAnswer: ctx.generateGovernedAnswer, planAppBuild: ctx.planAppBuild });
+      }, { generateGovernedAnswer: ctx.generateGovernedAnswer, planAppBuild: ctx.planAppBuild, datasetsEnabled: ctx.datasetsEnabled });
       writeAppBuildDraftAiProposal(projectRoot, proposal);
       sendJson(res, 201, { ok: true, proposal });
     } catch (err) {
@@ -379,7 +819,14 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh before composing this App.' });
         return true;
       }
-      const result = await composeStoredAppBuildDraft(projectRoot, current, body);
+      if (ctx.datasetsEnabled === false && body.mode === 'manual' && body.selections.some((selection) => selection.query !== undefined)) {
+        sendJson(res, 409, {
+          ok: false,
+          error: 'APP_DATASETS_FEATURE_DISABLED: enable apps.datasets in dql.config.json before composing field-based Dataset tiles.',
+        });
+        return true;
+      }
+      const result = await composeStoredAppBuildDraft(projectRoot, current, body, ctx.resolveDatasetSourceAuthority);
       sendJson(res, 200, { ok: true, ...result });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -424,7 +871,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       const proposal = await proposeAppBuildDraftOperations(projectRoot, current, {
         prompt: [current.frame.goal, answerText.length ? `Clarification decisions: ${answerText.join('; ')}` : ''].filter(Boolean).join('\n'),
         selectedBlockIds: selectedSourceIds,
-      }, { generateGovernedAnswer: ctx.generateGovernedAnswer, planAppBuild: ctx.planAppBuild });
+      }, { generateGovernedAnswer: ctx.generateGovernedAnswer, planAppBuild: ctx.planAppBuild, datasetsEnabled: ctx.datasetsEnabled });
       proposal.defaultSelectedSourceIds = selectedSourceIds.filter((sourceId) => proposal.operations.some((operation) => (
         operation.type === 'upsert_source' && operation.source.id === sourceId
       )));
@@ -447,7 +894,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         sendJson(res, 404, { ok: false, error: 'App Build proposal not found.' });
         return true;
       }
-      const body = await readJson<{ expectedRevision?: number; expectedProposalHash?: string; requirementId?: string }>(req);
+      const body = await readJson<{ expectedRevision?: number; expectedProposalHash?: string; requirementId?: string; domain?: string; sourceRelation?: string }>(req);
       if (body.expectedRevision !== current.revision || body.expectedProposalHash !== current.proposalHash
         || previous.baseRevision !== current.revision || previous.baseProposalHash !== current.proposalHash) {
         sendJson(res, 409, { ok: false, error: 'APP_BUILD_PROPOSAL_CONFLICT: refresh before generating a gap.' });
@@ -457,10 +904,29 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVIEW_POLICY_REQUIRED: enable review-required sources before generating a gap.' });
         return true;
       }
-      if (!ctx.generateGovernedAnswer) throw new Error('The configured provider cannot generate an App gap in this runtime.');
-      const proposal = await generateExplicitAppBuildGap(projectRoot, current, previous, cleanString(body.requirementId), ctx.generateGovernedAnswer);
-      writeAppBuildDraftAiProposal(projectRoot, proposal);
-      sendJson(res, 201, { ok: true, proposal });
+      const requirementOperation = previous.operations.find((operation) => operation.type === 'set_requirements');
+      const requirement = requirementOperation?.type === 'set_requirements'
+        ? requirementOperation.requirements.find((candidate) => candidate.id === cleanString(body.requirementId))
+        : undefined;
+      const coverage = requirementOperation?.type === 'set_requirements'
+        ? requirementOperation.coverage?.find((candidate) => candidate.requirementId === requirement?.id)
+        : undefined;
+      if (!requirement || coverage?.status === 'covered') {
+        sendJson(res, 404, { ok: false, error: 'APP_BUILD_GAP_NOT_FOUND: choose an uncovered App requirement.' });
+        return true;
+      }
+      if (!ctx.createDatasetGapProposal) {
+        throw new Error('APP_BUILD_DATASET_GAP_UNAVAILABLE: this runtime cannot prepare a typed Dataset review draft.');
+      }
+      const sourceRelation = typeof body.sourceRelation === 'string' ? cleanString(body.sourceRelation) : undefined;
+      const domain = typeof body.domain === 'string' ? cleanString(body.domain) : undefined;
+      const contextProposal = await ctx.createDatasetGapProposal({
+        appBuildId: current.id,
+        requirement,
+        ...(domain ? { domain } : {}),
+        ...(sourceRelation ? { sourceRelation } : {}),
+      });
+      sendJson(res, 201, { ok: true, contextProposal, requirementId: requirement.id });
     } catch (err) {
       sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
@@ -480,7 +946,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh before preflight.' });
       return true;
     }
-    const errors = preflightAppBuildRequestErrors(projectRoot, current, ctx.verifyAppBuildPreview);
+    const errors = await preflightAppBuildRequestErrors(projectRoot, current, ctx.verifyAppBuildPreview, ctx.resolveDatasetSourceAuthority);
     if (errors.length) {
       sendJson(res, 400, {
         ok: false,
@@ -510,7 +976,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh the Build Frame before committing.' });
         return true;
       }
-      const errors = preflightAppBuildRequestErrors(projectRoot, current, ctx.verifyAppBuildPreview);
+      const errors = await preflightAppBuildRequestErrors(projectRoot, current, ctx.verifyAppBuildPreview, ctx.resolveDatasetSourceAuthority);
       if (errors.length) {
         sendJson(res, 400, {
           ok: false,
@@ -1672,6 +2138,8 @@ interface AppAskRequest {
   variables?: Record<string, unknown>;
   context?: unknown;
   runInvestigation?: boolean;
+  /** Server-issued current dashboard run; required for Dataset chart grounding. */
+  runId?: string;
 }
 
 interface AppAskDecision {
@@ -2557,6 +3025,11 @@ export interface AppBuildDraftAiProposal {
   draftId: string;
   baseRevision: number;
   baseProposalHash: string;
+  /**
+   * Server-owned provenance for the dedicated initial App generator. This is
+   * intentionally separate from universal App Autopilot AgentRun receipts.
+   */
+  plannerProvenance: AppBuilderPlannerProvenance;
   operations: AppBuildDraftOperation[];
   /** Governed sources start selected; generated review DQL is always opt-in. */
   defaultSelectedSourceIds?: string[];
@@ -2578,6 +3051,87 @@ export interface AppBuildDraftAiProposal {
   };
 }
 
+/**
+ * A bounded, immutable App Autopilot change for one existing Dataset tile.
+ *
+ * The universal AgentRunEngine owns the conversation, provider transport,
+ * lifecycle, and artifact delivery. This App-only object is the reviewed,
+ * server-compiled mutation it carries. It is deliberately an
+ * AppBuildDraft-operation list rather than SQL or a browser-supplied model
+ * payload, so the same Dataset authority checks apply before every apply.
+ */
+export interface AppAutopilotChangeProposal {
+  version: 1;
+  id: string;
+  /** Immutable link back to the universal AgentRun artifact allowed to apply it. */
+  runId: string;
+  artifactId: string;
+  draftId: string;
+  baseRevision: number;
+  baseProposalHash: string;
+  pageId: string;
+  tileId: string;
+  request: string;
+  /** Server-normalized provider intent. It is data for the bounded compiler,
+   * never a browser supplied AppBuildDraftOperation. */
+  intent: AppAutopilotIntent;
+  /** Server-issued source identity captured when this typed change was
+   * previewed. Acceptance compares it with the live catalog; it never
+   * upgrades a proposal to a newer Dataset contract on the user's behalf. */
+  source: {
+    sourceId: string;
+    sourceRevision: string;
+    contractFingerprint: string;
+  };
+  planningMode: 'universal_agent';
+  operations: AppBuildDraftOperation[];
+  diagnostics: Array<{ code: string; severity: 'info' | 'blocking'; message: string }>;
+  createdAt: string;
+  proposalHash: string;
+  /** Set only after a successful local-draft write. Repeated Apply is idempotent. */
+  appliedAt?: string;
+  appliedRevision?: number;
+}
+
+/** The bounded App changes App Autopilot may prepare for human review. */
+export type AppAutopilotAction =
+  | 'group_tile'
+  | 'change_visualization'
+  | 'rename_tile'
+  | 'add_tile'
+  | 'remove_tile'
+  | 'add_page'
+  | 'remove_page'
+  | 'add_filter'
+  | 'remove_filter'
+  | 'map_filter'
+  | 'add_cross_filter'
+  | 'add_navigation'
+  | 'add_detail_drill'
+  | 'arrange_layout';
+
+/**
+ * This is the narrow provider-to-compiler contract. Every optional identifier
+ * is resolved against server-owned App/Dataset state before an operation is
+ * emitted, so it cannot introduce raw SQL, a source, a join, or a lifecycle
+ * claim.
+ */
+export interface AppAutopilotIntent {
+  action: AppAutopilotAction;
+  request: string;
+  summary?: string;
+  field?: string;
+  measure?: string;
+  visualization?: DashboardGridItem['viz']['type'];
+  title?: string;
+  /** Exact approved physical target field for an explicit cross-filter mapping. */
+  targetField?: string;
+  targetPageId?: string;
+  targetTileId?: string;
+  filterId?: string;
+  scope?: 'page' | 'app';
+}
+
 export type AppBuildComposeRequest = {
   expectedRevision: number;
   expectedProposalHash: string;
@@ -2590,15 +3144,20 @@ export type AppBuildComposeRequest = {
       sourceId: string;
       pageId?: string;
       view: 'kpi' | 'chart' | 'table';
+      /** A field-builder query. It is validated against the resolved Dataset
+       * before the complete page revision is stored. */
+      query?: TileQuery;
+      /** Presentation-only title; source and query identities remain explicit. */
+      title?: string;
     }>;
   }
 );
 
 function appDraftSourceFromCatalog(source: AppSourceCatalogRecord): AppBuildDraftSource {
-  const certified = source.lifecycle === 'certified';
+  const certified = source.trust === 'certified';
   return {
     id: source.sourceId,
-    kind: 'block',
+    kind: source.kind === 'semantic' ? 'governed_semantic' : 'block',
     sourceRef: source.executionRef,
     qualifiedIdentity: source.qualifiedIdentity,
     sourcePath: source.sourcePath,
@@ -2610,6 +3169,542 @@ function appDraftSourceFromCatalog(source: AppSourceCatalogRecord): AppBuildDraf
     capabilities: source.capabilities,
     trustState: certified ? 'certified' : 'review_required',
     reviewStatus: certified ? 'not_required' : 'required',
+  };
+}
+
+type DatasetDraftReference = {
+  page: DashboardDocument;
+  tile: DashboardGridItem;
+  sourceId: string;
+  pageBinding?: DashboardDatasetBinding;
+};
+
+type DatasetDraftAuthorityPurpose = 'local_preview' | 'project_publish';
+
+/**
+ * A field tile is owned by a source id plus an exact page binding. Keeping
+ * this extraction at the App API boundary makes every mutation and preflight
+ * use the same provenance contract instead of trusting a source card copied
+ * through a browser PATCH body.
+ */
+function datasetDraftReferences(draft: AppBuildDraft): DatasetDraftReference[] {
+  return draft.pages.flatMap((page) => page.layout.items.flatMap((tile) => {
+    if (!tile.query || !tile.sourceId) return [];
+    const sourceId = tile.sourceId.trim();
+    if (!sourceId) return [];
+    const pageBinding = tile.sourceRevision
+      ? page.datasets?.find((binding) => binding.sourceId === sourceId && binding.sourceRevision === tile.sourceRevision)
+      : undefined;
+    return [{ page, tile, sourceId, ...(pageBinding ? { pageBinding } : {}) }];
+  }));
+}
+
+function datasetDraftSourceIds(
+  draft: AppBuildDraft,
+  additionalIds: Iterable<string> = [],
+): string[] {
+  const ids = new Set(datasetDraftReferences(draft).map((reference) => reference.sourceId));
+  for (const sourceId of additionalIds) {
+    const clean = cleanString(sourceId);
+    if (clean) ids.add(clean);
+  }
+  return Array.from(ids);
+}
+
+function expectedDatasetDraftSourceKind(source: AppSourceCatalogRecord): AppBuildDraftSource['kind'] {
+  return source.kind === 'semantic' ? 'governed_semantic' : 'block';
+}
+
+function datasetDraftAuthorityIssue(
+  reference: DatasetDraftReference,
+  stored: AppBuildDraftSource | undefined,
+  current: AppSourceCatalogRecord | undefined,
+): string | undefined {
+  const title = reference.tile.title || `${reference.page.id}/${reference.tile.i}`;
+  if (!stored || !stored.capabilities?.dataset) {
+    return `APP_BUILD_DATASET_SOURCE_REPAIR_REQUIRED: ${title} has no stored approved Dataset capability. Refresh or reselect this Dataset before continuing.`;
+  }
+  if (!current || !current.capabilities.dataset) {
+    return `APP_BUILD_DATASET_SOURCE_DRIFT: ${title} no longer resolves to a current approved Dataset contract. Refresh or reselect this Dataset before continuing.`;
+  }
+  const descriptor = stored.capabilities.dataset;
+  const currentDescriptor = current.capabilities.dataset;
+  const expectedKind = expectedDatasetDraftSourceKind(current);
+  const storedKindMatches = stored.kind === expectedKind
+    || (expectedKind === 'block' && stored.kind === 'certified_block');
+  const expectedTrustState = current.trust === 'certified' ? 'certified' : 'review_required';
+  const expectedReviewStatus = current.trust === 'certified' ? 'not_required' : 'required';
+  if (!storedKindMatches
+    || stored.sourceRevision !== current.sourceRevision
+    || (stored.sourceFingerprint !== undefined && stored.sourceFingerprint !== current.sourceRevision)
+    || descriptor.sourceRevision !== current.sourceRevision
+    || descriptor.binding.sourceRevision !== current.sourceRevision
+    || descriptor.contractRef.fingerprint !== currentDescriptor.contractRef.fingerprint
+    || descriptor.binding.contractFingerprint !== currentDescriptor.binding.contractFingerprint
+    || stored.lifecycle !== current.lifecycle
+    || stored.trustState !== expectedTrustState
+    || stored.reviewStatus !== expectedReviewStatus) {
+    return `APP_BUILD_DATASET_SOURCE_AUTHORITY_STALE: ${title} does not match the current governed Dataset source authority. Refresh or reselect this Dataset before continuing.`;
+  }
+  if (!reference.tile.sourceRevision || !reference.pageBinding
+    || reference.tile.sourceRevision !== current.sourceRevision
+    || reference.pageBinding.sourceRevision !== current.sourceRevision
+    || reference.pageBinding.contractFingerprint !== currentDescriptor.contractRef.fingerprint) {
+    return `APP_BUILD_DATASET_SOURCE_REPAIR_REQUIRED: ${title} is missing its exact current Dataset revision and contract binding. Refresh or reselect this Dataset before continuing.`;
+  }
+  return undefined;
+}
+
+async function resolveCurrentDatasetSourceRecords(
+  projectRoot: string,
+  sourceIds: string[],
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
+): Promise<Map<string, AppSourceCatalogRecord>> {
+  if (sourceIds.length === 0) return new Map();
+  if (resolver) {
+    const records = await resolver(sourceIds);
+    const byId = new Map(records.map((source) => [source.sourceId, source]));
+    const missingSourceIds = sourceIds.filter((sourceId) => !byId.has(sourceId));
+    if (missingSourceIds.length > 0) {
+      throw new Error(`APP_BUILD_DATASET_SOURCE_DRIFT: these Dataset sources no longer resolve in the current governed catalog: ${missingSourceIds.join(', ')}`);
+    }
+    return byId;
+  }
+  const { ensureAgentProjectReady, resolveAppSourceCatalogRecords } = await import('@duckcodeailabs/dql-agent');
+  await ensureAgentProjectReady(projectRoot);
+  // Discovery includes review-required sources so local draft preview can
+  // honour an explicit source-policy opt-in. Eligibility is enforced below;
+  // this call alone never grants execution or publication permission.
+  const resolved = resolveAppSourceCatalogRecords(projectRoot, sourceIds, 'include_review_required');
+  if (resolved.missingSourceIds.length > 0) {
+    throw new Error(`APP_BUILD_DATASET_SOURCE_DRIFT: these Dataset sources no longer resolve in the current governed catalog: ${resolved.missingSourceIds.join(', ')}`);
+  }
+  return new Map(resolved.items.map((source) => [source.sourceId, source]));
+}
+
+async function datasetDraftCurrentAuthorityErrors(
+  projectRoot: string,
+  draft: AppBuildDraft,
+  purpose: DatasetDraftAuthorityPurpose,
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
+): Promise<string[]> {
+  const references = datasetDraftReferences(draft);
+  if (references.length === 0) return [];
+  let records: Map<string, AppSourceCatalogRecord>;
+  try {
+    records = await resolveCurrentDatasetSourceRecords(projectRoot, datasetDraftSourceIds(draft), resolver);
+  } catch (error) {
+    return [`APP_BUILD_DATASET_AUTHORITY_UNAVAILABLE: ${error instanceof Error ? error.message : String(error)}`];
+  }
+  const storedById = new Map(draft.sources.map((source) => [source.id, source]));
+  const errors: string[] = [];
+  for (const reference of references) {
+    const source = records.get(reference.sourceId);
+    const authorityIssue = datasetDraftAuthorityIssue(reference, storedById.get(reference.sourceId), source);
+    if (authorityIssue) {
+      errors.push(authorityIssue);
+      continue;
+    }
+    // `resolveCurrentDatasetSourceRecords` deliberately discovers review
+    // candidates so a stale App can explain and repair itself. Discovery is
+    // not an opt-in: the resulting draft must carry the explicit local review
+    // policy before a review-required Dataset can be previewed.
+    if ((source!.lifecycle !== 'certified' || source!.trust !== 'certified')
+      && draft.sourcePolicy !== 'include_review_required') {
+      errors.push(`APP_BUILD_REVIEW_POLICY_REQUIRED: ${reference.tile.title || reference.tile.i} uses a ${source!.lifecycle} Dataset source. Enable review-required sources explicitly before local preview.`);
+      continue;
+    }
+    if (!source!.eligibility.localPreview) {
+      errors.push(`APP_BUILD_REVIEW_POLICY_REQUIRED: ${reference.tile.title || reference.tile.i} is currently ${source!.lifecycle} and is not eligible for this local preview policy.`);
+      continue;
+    }
+    if (purpose === 'project_publish'
+      && (source!.lifecycle !== 'certified'
+        || source!.trust !== 'certified'
+        || !source!.eligibility.projectPublish)) {
+      errors.push(`APP_BUILD_DATASET_PUBLICATION_INELIGIBLE: ${reference.tile.title || reference.tile.i} is currently ${source!.lifecycle} and cannot be published until its governed Dataset source is certified and eligible.`);
+    }
+  }
+  return Array.from(new Set(errors));
+}
+
+/**
+ * Canonicalize Dataset source mutations against the current server catalog.
+ * This rejects a browser attempt to manufacture a trusted semantic source and
+ * leaves legacy whole-block / non-Dataset source operations untouched.
+ */
+async function bindServerResolvedDatasetSourceOperations(
+  projectRoot: string,
+  draft: AppBuildDraft,
+  operations: AppBuildDraftOperation[],
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
+): Promise<AppBuildDraftOperation[]> {
+  // Resolve potentially field-based source ids *before* applying browser
+  // source objects. A repair request intentionally replaces an unknown
+  // placeholder with a catalog card, so applying the untrusted replacement
+  // first would let core draft policy reject the very repair we need to
+  // canonicalize.
+  const sourceIds = datasetDraftOperationSourceIds(draft, operations);
+  if (sourceIds.length === 0) return operations;
+  const records = await resolveCurrentDatasetSourceRecords(projectRoot, sourceIds, resolver);
+  let canonicalOperations = operations.map((operation) => {
+    if (operation.type !== 'upsert_source' || !sourceIds.includes(operation.source.id)) return operation;
+    const source = records.get(operation.source.id);
+    if (!source || !source.capabilities.dataset) {
+      throw new Error(`APP_BUILD_DATASET_SOURCE_DRIFT: ${operation.source.id} no longer resolves to a current approved Dataset source.`);
+    }
+    return { type: 'upsert_source' as const, source: appDraftSourceFromCatalog(source) };
+  });
+  const candidate = canonicalOperations.length > 0
+    ? applyAppBuildDraftOperations(draft, draft.revision, canonicalOperations)
+    : draft;
+  // Tile trust is a denormalized presentation field, never a browser
+  // authority assertion. Once the resulting graph has a current Dataset
+  // source, project the same lifecycle into its field tiles before it is
+  // stored. This also keeps a refreshed review Dataset visibly review-required
+  // instead of letting an old certified tile label survive the rebind.
+  const presentationUpdates = candidate.pages.flatMap((page) => {
+    const canonical = canonicalizeDatasetTilePresentation(page, records);
+    return canonical === page ? [] : [{ type: 'upsert_page' as const, page: canonical }];
+  });
+  if (presentationUpdates.length > 0) {
+    canonicalOperations = [...canonicalOperations, ...presentationUpdates];
+  }
+  const authoritativeCandidate = presentationUpdates.length > 0
+    ? applyAppBuildDraftOperations(draft, draft.revision, canonicalOperations)
+    : candidate;
+  const contractErrors = datasetDraftContractErrors(authoritativeCandidate, records);
+  if (contractErrors.length > 0) throw new Error(contractErrors[0]!);
+  const authorityErrors = await datasetDraftCurrentAuthorityErrors(projectRoot, authoritativeCandidate, 'local_preview', resolver);
+  if (authorityErrors.length > 0) throw new Error(authorityErrors[0]!);
+
+  // A review task is evidence of an unresolved Dataset lifecycle. It can only
+  // be removed after the same canonical source has become certified; hiding
+  // it through a PATCH must not make a review source publishable.
+  const candidateReferences = new Set(datasetDraftReferences(authoritativeCandidate).map((reference) => reference.sourceId));
+  for (const operation of canonicalOperations) {
+    if (operation.type !== 'remove_review_task') continue;
+    const task = draft.reviewTasks.find((candidateTask) => candidateTask.id === operation.taskId);
+    if (!task?.sourceId || !candidateReferences.has(task.sourceId)) continue;
+    const source = records.get(task.sourceId);
+    if (!source || source.lifecycle !== 'certified' || source.trust !== 'certified' || !source.eligibility.projectPublish) {
+      throw new Error(`APP_BUILD_DATASET_REVIEW_TASK_REQUIRED: ${task.sourceId} remains review-required in the current governed catalog and cannot be cleared before certification.`);
+    }
+  }
+  return canonicalOperations;
+}
+
+/**
+ * Recompute only denormalized Dataset tile presentation fields from the
+ * current catalog record. Source revision and binding identities are left
+ * untouched here and validated separately; a stale page still fails closed.
+ */
+function canonicalizeDatasetTilePresentation(
+  page: DashboardDocument,
+  records: Map<string, AppSourceCatalogRecord>,
+): DashboardDocument {
+  let changed = false;
+  const items = page.layout.items.map((tile) => {
+    if (!tile.query || !tile.sourceId) return tile;
+    const source = records.get(tile.sourceId);
+    if (!source?.capabilities.dataset) return tile;
+    const certified = source.lifecycle === 'certified' && source.trust === 'certified';
+    const next: DashboardGridItem = {
+      ...tile,
+      sourceClass: source.kind === 'semantic'
+        ? 'governed_semantic'
+        : certified ? 'certified_block' : 'exploratory_analysis',
+      trustState: certified ? 'certified' : 'review_required',
+      reviewStatus: certified ? 'certified' : 'review_required',
+      review: {
+        status: certified ? 'not_required' : 'required',
+        sourceFingerprint: source.sourceRevision,
+      },
+    };
+    if (next.sourceClass !== tile.sourceClass
+      || next.trustState !== tile.trustState
+      || next.reviewStatus !== tile.reviewStatus
+      || next.review?.status !== tile.review?.status
+      || next.review?.sourceFingerprint !== tile.review?.sourceFingerprint) {
+      changed = true;
+      return next;
+    }
+    return tile;
+  });
+  return changed ? { ...page, layout: { ...page.layout, items } } : page;
+}
+
+/**
+ * A source card is only capability authority after the whole resulting page
+ * graph still binds every field query, filter mapping, and detail action to
+ * that card's current descriptor. This closes the browser-PATCH bypass while
+ * retaining legacy pages that do not use v3 Dataset bindings.
+ */
+function datasetDraftContractErrors(
+  draft: AppBuildDraft,
+  records: Map<string, AppSourceCatalogRecord>,
+): string[] {
+  const errors: string[] = [];
+  for (const page of draft.pages) {
+    const bindingById = new Map((page.datasets ?? []).map((binding) => [binding.id, binding]));
+    for (const tile of page.layout.items) {
+      if (!tile.query || !tile.sourceId) continue;
+      const source = records.get(tile.sourceId);
+      const descriptor = source?.capabilities.dataset;
+      if (!descriptor) continue;
+      const binding = Array.from(bindingById.values()).find((candidate) => candidate.sourceId === tile.sourceId
+        && candidate.sourceRevision === tile.sourceRevision);
+      if (!binding) {
+        errors.push(`APP_BUILD_DATASET_BINDING_REQUIRED: ${page.id}/${tile.i} requires an exact current Dataset page binding.`);
+        continue;
+      }
+      const validation = validateTileQuery(descriptor, tile.query);
+      if (validation.outcome !== 'covered') {
+        const detail = validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ');
+        errors.push(`APP_BUILD_DATASET_QUERY_${validation.outcome.toUpperCase()}: ${page.id}/${tile.i} is not fully covered by the current Dataset contract. ${detail}`.trim());
+      }
+      const visualization = datasetTileVisualizationCompatibility(tile.query, tile.viz.type);
+      if (!visualization.compatible) {
+        errors.push(`APP_BUILD_DATASET_VISUALIZATION_INVALID: ${page.id}/${tile.i}: ${visualization.message}`);
+      }
+    }
+    for (const filter of page.filters ?? []) {
+      for (const [bindingId, target] of Object.entries(filter.datasetBindings ?? {})) {
+        const binding = bindingById.get(bindingId);
+        const descriptor = binding ? records.get(binding.sourceId)?.capabilities.dataset : undefined;
+        if (!binding || !descriptor) continue;
+        const field = datasetPhysicalField(descriptor, target.field);
+        if (!field || field.status !== 'approved') {
+          errors.push(`APP_BUILD_DATASET_FILTER_INVALID: ${page.id}/${filter.id} targets ${target.field}, which is not an approved physical field for ${binding.sourceId}.`);
+        }
+      }
+    }
+    for (const mapping of page.interactions?.crossFilter?.mappings ?? []) {
+      const targetBinding = bindingById.get(mapping.toDataset);
+      const targetDescriptor = targetBinding ? records.get(targetBinding.sourceId)?.capabilities.dataset : undefined;
+      if (targetBinding && targetDescriptor) {
+        const targetField = datasetPhysicalField(targetDescriptor, mapping.toField);
+        if (!targetField || targetField.status !== 'approved') {
+          errors.push(`APP_BUILD_DATASET_CROSS_FILTER_INVALID: ${page.id}/${mapping.fromTileId} targets ${mapping.toField}, which is not an approved physical field for ${targetBinding.sourceId}.`);
+        }
+      }
+      const fromTile = page.layout.items.find((tile) => tile.i === mapping.fromTileId);
+      if (fromTile?.query && fromTile.sourceId) {
+        const sourceDescriptor = records.get(fromTile.sourceId)?.capabilities.dataset;
+        if (sourceDescriptor && !tileQueryOutputAliases(fromTile.query).some((output) => output.kind === 'dimension'
+          && output.alias.toLowerCase() === mapping.fromField.toLowerCase())) {
+          errors.push(`APP_BUILD_DATASET_CROSS_FILTER_INVALID: ${page.id}/${mapping.fromTileId} no longer emits ${mapping.fromField}.`);
+        }
+      }
+    }
+    const detail = page.interactions?.detail;
+    const detailBinding = detail ? bindingById.get(detail.dataset) : undefined;
+    const detailDescriptor = detailBinding ? records.get(detailBinding.sourceId)?.capabilities.dataset : undefined;
+    if (detail && detailBinding && detailDescriptor) {
+      for (const column of detail.columns) {
+        const field = datasetPhysicalField(detailDescriptor, column);
+        if (!field || field.status !== 'approved') {
+          errors.push(`APP_BUILD_DATASET_DETAIL_INVALID: ${page.id} detail column ${column} is not an approved physical field for ${detailBinding.sourceId}.`);
+        }
+      }
+    }
+  }
+  return Array.from(new Set(errors));
+}
+
+function datasetDraftOperationSourceIds(
+  draft: AppBuildDraft,
+  operations: AppBuildDraftOperation[],
+): string[] {
+  // Resolve only the Dataset authority that remains in the ordered authored
+  // graph. A repair may remove an unavailable placeholder A and atomically
+  // replace every page binding with B. Resolving A before that replacement
+  // would make a valid repair impossible; leaving a tile or binding on A
+  // keeps A in this projection and fails closed instead.
+  const projectedSources = new Map(draft.sources.map((source) => [source.id, source]));
+  const projectedPages = new Map(draft.pages.map((page) => [page.id, page]));
+  for (const operation of operations) {
+    if (operation.type === 'upsert_source') {
+      projectedSources.set(operation.source.id, operation.source);
+      continue;
+    }
+    if (operation.type === 'remove_source') {
+      projectedSources.delete(operation.sourceId);
+      continue;
+    }
+    if (operation.type === 'upsert_page') {
+      projectedPages.set(operation.page.id, operation.page);
+      continue;
+    }
+    if (operation.type === 'remove_page') {
+      projectedPages.delete(operation.pageId);
+      continue;
+    }
+    if (operation.type === 'add_tile' || operation.type === 'update_tile' || operation.type === 'remove_tile' || operation.type === 'set_layout') {
+      const page = projectedPages.get(operation.pageId);
+      if (!page) continue;
+      if (operation.type === 'add_tile') {
+        projectedPages.set(page.id, {
+          ...page,
+          layout: { ...page.layout, items: [...page.layout.items, operation.tile] },
+        });
+        continue;
+      }
+      if (operation.type === 'update_tile') {
+        projectedPages.set(page.id, {
+          ...page,
+          layout: {
+            ...page.layout,
+            items: page.layout.items.map((tile) => tile.i === operation.tileId
+              ? { ...tile, ...operation.patch, i: tile.i }
+              : tile),
+          },
+        });
+        continue;
+      }
+      if (operation.type === 'remove_tile') {
+        projectedPages.set(page.id, {
+          ...page,
+          layout: { ...page.layout, items: page.layout.items.filter((tile) => tile.i !== operation.tileId) },
+        });
+        continue;
+      }
+      projectedPages.set(page.id, { ...page, layout: operation.layout });
+      continue;
+    }
+
+    // Source identities are unchanged by the remaining operations.
+  }
+
+  const ids = new Set<string>();
+  // A persisted Dataset card is still a governed authority assertion even if
+  // a tile is not yet attached. Canonicalize it before it can be used later.
+  for (const source of projectedSources.values()) {
+    if (!source.capabilities?.dataset) continue;
+    const sourceId = cleanString(source.id);
+    if (sourceId) ids.add(sourceId);
+  }
+  for (const page of projectedPages.values()) {
+    // A Dataset binding carries its own source/revision/contract authority.
+    // Include it even when no tile currently selects it, so a dangling old
+    // binding cannot survive a source replacement.
+    for (const binding of page.datasets ?? []) {
+      const sourceId = cleanString(binding.sourceId);
+      if (sourceId) ids.add(sourceId);
+    }
+    for (const tile of page.layout.items) {
+      if (!tile.query) continue;
+      const sourceId = cleanString(tile.sourceId);
+      if (sourceId) ids.add(sourceId);
+    }
+  }
+  return Array.from(ids);
+}
+
+type AiProposalDatasetSourcePin = {
+  sourceId: string;
+  sourceRevision: string;
+  contractFingerprint: string;
+  locations: string[];
+};
+
+/**
+ * An AI proposal stores server-issued Dataset identities as reviewed intent.
+ * They are deliberately separate from the source card capability resolver:
+ * canonicalizing a card after the source changed would otherwise make an old
+ * proposal appear current.  The source may be re-resolved for authority, but
+ * its exact revision and contract must still match the proposal before an App
+ * can be composed from it.
+ */
+function aiProposalDatasetSourcePins(
+  operations: AppBuildDraftOperation[],
+): AiProposalDatasetSourcePin[] {
+  const pins = new Map<string, AiProposalDatasetSourcePin>();
+  const add = (input: { sourceId: string; sourceRevision?: string; contractFingerprint?: string; location: string }) => {
+    const sourceId = cleanString(input.sourceId);
+    const sourceRevision = cleanString(input.sourceRevision);
+    const contractFingerprint = cleanString(input.contractFingerprint);
+    if (!sourceId || !sourceRevision || !contractFingerprint) {
+      throw new Error(`APP_BUILD_DATASET_PROPOSAL_INVALID: ${input.location} is missing its server-issued Dataset revision or contract.`);
+    }
+    const existing = pins.get(sourceId);
+    if (existing && (existing.sourceRevision !== sourceRevision || existing.contractFingerprint !== contractFingerprint)) {
+      throw new Error(`APP_BUILD_DATASET_PROPOSAL_INVALID: ${sourceId} has conflicting Dataset authority pins in one proposal.`);
+    }
+    if (existing) {
+      existing.locations.push(input.location);
+      return;
+    }
+    pins.set(sourceId, { sourceId, sourceRevision, contractFingerprint, locations: [input.location] });
+  };
+  for (const operation of operations) {
+    if (operation.type === 'upsert_source' && operation.source.capabilities?.dataset) {
+      add({
+        sourceId: operation.source.id,
+        sourceRevision: operation.source.sourceRevision,
+        contractFingerprint: operation.source.capabilities.dataset.contractRef.fingerprint,
+        location: `source ${operation.source.id}`,
+      });
+      continue;
+    }
+    if (operation.type !== 'upsert_page') continue;
+    for (const binding of operation.page.datasets ?? []) {
+      add({
+        sourceId: binding.sourceId,
+        sourceRevision: binding.sourceRevision,
+        contractFingerprint: binding.contractFingerprint,
+        location: `page ${operation.page.id} binding ${binding.id}`,
+      });
+    }
+  }
+  return Array.from(pins.values());
+}
+
+async function assertAiProposalDatasetSourcePinsCurrent(
+  projectRoot: string,
+  operations: AppBuildDraftOperation[],
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
+): Promise<void> {
+  const pins = aiProposalDatasetSourcePins(operations);
+  if (pins.length === 0) return;
+  const records = await resolveCurrentDatasetSourceRecords(projectRoot, pins.map((pin) => pin.sourceId), resolver);
+  for (const pin of pins) {
+    const current = records.get(pin.sourceId);
+    const dataset = current?.capabilities.dataset;
+    if (!current || !dataset
+      || current.sourceRevision !== pin.sourceRevision
+      || dataset.contractRef.fingerprint !== pin.contractFingerprint
+      || dataset.binding.sourceRevision !== pin.sourceRevision
+      || dataset.binding.contractFingerprint !== pin.contractFingerprint) {
+      throw new Error(`APP_BUILD_DATASET_PROPOSAL_STALE: ${pin.sourceId} changed revision or contract after this App proposal was generated. Refresh the proposal before composing.`);
+    }
+  }
+}
+
+/** A deliberate, editable first tile for the field-builder primary flow. */
+function defaultTileQueryForDataset(
+  dataset: DatasetDescriptor,
+  view: 'kpi' | 'chart' | 'table',
+): DashboardGridItem['query'] | undefined {
+  const measure = dataset.fields.find((field) => field.kind === 'measure' && field.status === 'approved');
+  if (!measure) return undefined;
+  const groupField = dataset.fields.find((field): field is DatasetPhysicalField => field.kind === 'physical'
+    && field.status === 'approved'
+    && (field.role === 'time' || field.role === 'dimension' || field.role === 'attribute'));
+  const dimensions = view === 'kpi' || !groupField
+    ? []
+    : [{
+      field: groupField.name,
+      ...(groupField.role === 'time' && groupField.time?.grains.length
+        ? { timeGrain: groupField.time.grains[0] }
+        : {}),
+    }];
+  return {
+    dimensions,
+    measures: [{ measure: measure.name }],
+    ...(view === 'chart' && dimensions.length > 0 ? { orderBy: [{ alias: measure.name, direction: 'desc' as const }] } : {}),
+    ...(view === 'table' ? { limit: 100 } : {}),
+    respectsGlobalFilters: true,
   };
 }
 
@@ -2874,6 +3969,7 @@ export async function proposeAppBuildDraftOperations(
 ): Promise<AppBuildDraftAiProposal> {
   const prompt = cleanString(input.prompt) || draft.frame.goal;
   const {
+    datasetPlannedQueryCoversRequirement,
     ensureAgentProjectReady,
     planAppBuildBrief,
     resolveAppSourceCatalogRecords,
@@ -2913,38 +4009,138 @@ export async function proposeAppBuildDraftOperations(
     complete: hooks?.planAppBuild,
   });
   const byId = new Map(candidates.map((candidate) => [candidate.sourceId, candidate]));
-  const plannedSources = brief.selectedSourceIds.flatMap((sourceId) => {
-    const source = byId.get(sourceId);
-    return source ? [source] : [];
+  if (hooks?.datasetsEnabled === false && brief.components.some((component) => byId.get(component.sourceId)?.capabilities.dataset)) {
+    throw new Error('APP_DATASETS_FEATURE_DISABLED: enable apps.datasets in dql.config.json before asking AI to author field-based Dataset tiles.');
+  }
+  const initialPage = draft.pages[0];
+  if (!initialPage) throw new Error('The App draft needs a page before AI can compose it.');
+  type PlannedPageState = {
+    planId: string;
+    pageId: string;
+    page: DashboardDocument;
+    structuralItems: DashboardGridItem[];
+    plannedItems: DashboardGridItem[];
+    reservedItems: DashboardGridItem[];
+    datasetBindings: DashboardDatasetBinding[];
+    datasetBindingBySource: Map<string, DashboardDatasetBinding>;
+  };
+  const existingPageIds = new Set(draft.pages.map((candidate) => candidate.id));
+  const assignedExistingPageIds = new Set<string>();
+  const pageIdForPlan = (preferred: string, index: number): string => {
+    const direct = draft.pages.find((candidate) => candidate.id === preferred && !assignedExistingPageIds.has(candidate.id));
+    const first = index === 0 && !assignedExistingPageIds.has(initialPage.id) ? initialPage : undefined;
+    const existing = direct ?? first;
+    if (existing) {
+      assignedExistingPageIds.add(existing.id);
+      return existing.id;
+    }
+    const base = slugify(preferred) || `page-${index + 1}`;
+    if (!existingPageIds.has(base)) {
+      existingPageIds.add(base);
+      return base;
+    }
+    for (let suffix = 2; suffix < 10_000; suffix += 1) {
+      const candidate = `${base}-${suffix}`;
+      if (!existingPageIds.has(candidate)) {
+        existingPageIds.add(candidate);
+        return candidate;
+      }
+    }
+    throw new Error('APP_BUILD_PAGE_LIMIT: the App Builder could not allocate a unique page id.');
+  };
+  const pageStates = brief.pages.map((plannedPage, index): PlannedPageState => {
+    const pageId = pageIdForPlan(plannedPage.id, index);
+    const existing = draft.pages.find((candidate) => candidate.id === pageId);
+    const base: DashboardDocument = existing ?? {
+      version: 3,
+      id: pageId,
+      metadata: {
+        title: plannedPage.title,
+        description: brief.frame.decision || brief.frame.goal,
+        ...(initialPage.metadata.domain ? { domain: initialPage.metadata.domain } : {}),
+        ...(brief.frame.audience ? { audience: brief.frame.audience } : {}),
+      },
+      datasets: [],
+      layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [] },
+    };
+    const structuralItems = base.layout.items.filter((item) => Boolean(item.text));
+    const datasetBindings = [...(base.datasets ?? [])];
+    return {
+      planId: plannedPage.id,
+      pageId,
+      page: {
+        ...base,
+        ...(datasetBindings.length > 0 ? { version: 3 as const, datasets: datasetBindings } : {}),
+        metadata: { ...base.metadata, title: plannedPage.title, description: brief.frame.decision || brief.frame.goal },
+      },
+      structuralItems,
+      plannedItems: [],
+      reservedItems: [...structuralItems],
+      datasetBindings,
+      datasetBindingBySource: new Map(datasetBindings.map((binding) => [binding.sourceId, binding])),
+    };
   });
-  const sourceOperations: AppBuildDraftOperation[] = plannedSources.map((source) => ({
-    type: 'upsert_source',
-    source: appDraftSourceFromCatalog(source),
-  }));
-  const page = draft.pages[0];
-  if (!page) throw new Error('The App draft needs a page before AI can compose it.');
-  const structuralItems = page.layout.items.filter((item) => Boolean(item.text));
-  const baseY = structuralItems.reduce((max, item) => Math.max(max, item.y + item.h), 0);
-  const reservedItems = [...structuralItems];
+  const pageStateByPlanId = new Map(pageStates.map((state) => [state.planId, state]));
+  const plannedPageForComponent = new Map(brief.pages.flatMap((plannedPage) => plannedPage.componentIds.map((componentId) => [componentId, plannedPage.id] as const)));
   const componentTileIdById = new Map<string, string>();
-  const plannedItems = brief.components.flatMap((component, index): DashboardGridItem[] => {
+  const componentPageIdById = new Map<string, string>();
+  const emittedComponents: typeof brief.components = [];
+  const warnings = [...brief.warnings];
+  for (const component of brief.components) {
     const source = byId.get(component.sourceId);
-    if (!source) return [];
+    const pageState = pageStateByPlanId.get(plannedPageForComponent.get(component.id) ?? brief.pages[0]?.id ?? '');
+    if (!source || !pageState) continue;
     const certified = source.lifecycle === 'certified';
-    const tileId = uniqueTileId(reservedItems, component.id || `component-${index + 1}`);
+    const descriptor = source.capabilities.dataset;
+    let query: TileQuery | undefined;
+    if (descriptor) {
+      const normalized = normalizeTileQuery(component.query);
+      const validation = normalized ? validateTileQuery(descriptor, normalized) : undefined;
+      if (!normalized || validation?.outcome !== 'covered') {
+        const detail = validation?.diagnostics.map((diagnostic) => diagnostic.message).join(' ') || 'The proposed Dataset field query is malformed or not approved.';
+        warnings.push(`${component.title} was not added because its Dataset query is not covered by the current source contract: ${detail}`);
+        continue;
+      }
+      const visualization = datasetTileVisualizationCompatibility(normalized, component.view);
+      if (!visualization.compatible) {
+        warnings.push(`${component.title} was not added because ${visualization.message}`);
+        continue;
+      }
+      query = normalized;
+      const existing = pageState.datasetBindingBySource.get(source.sourceId);
+      if (existing && (existing.sourceRevision !== source.sourceRevision || existing.contractFingerprint !== descriptor.contractRef.fingerprint)) {
+        throw new Error(`APP_BUILD_SOURCE_DRIFT: ${source.title} changed revision or contract; refresh or replace the existing Dataset binding before adding an AI tile.`);
+      }
+      if (!existing) {
+        const binding: DashboardDatasetBinding = {
+          id: `dataset_${createHash('sha256').update(source.sourceId).digest('hex').slice(0, 16)}`,
+          sourceId: source.sourceId,
+          sourceRevision: source.sourceRevision,
+          snapshotId: source.snapshotId,
+          contractFingerprint: descriptor.contractRef.fingerprint,
+        };
+        pageState.datasetBindings.push(binding);
+        pageState.datasetBindingBySource.set(source.sourceId, binding);
+      }
+    }
+    const itemIndex = pageState.plannedItems.length;
+    const tileId = uniqueTileId(pageState.reservedItems, component.id || `component-${itemIndex + 1}`);
     componentTileIdById.set(component.id, tileId);
+    componentPageIdById.set(component.id, pageState.pageId);
+    const plannedPage = brief.pages.find((candidate) => candidate.id === pageState.planId);
+    const sectionId = plannedPage?.sections.find((section) => section.componentIds.includes(component.id))?.id;
     const tile: DashboardGridItem = {
       i: tileId,
-      x: (index % 2) * 6,
-      y: baseY + Math.floor(index / 2) * 4,
+      x: (itemIndex % 2) * 6,
+      y: pageState.structuralItems.reduce((max, item) => Math.max(max, item.y + item.h), 0) + Math.floor(itemIndex / 2) * 4,
       w: component.view === 'kpi' ? 3 : 6,
       h: component.view === 'kpi' ? 2 : 4,
       sourceId: source.sourceId,
       sourceRevision: source.sourceRevision,
-      block: { ref: source.executionRef },
+      ...(query ? { query } : { block: { ref: source.executionRef } }),
       viz: { type: component.view },
       title: component.title,
-      sourceClass: certified ? 'certified_block' : 'exploratory_analysis',
+      sourceClass: source.kind === 'semantic' ? 'governed_semantic' : certified ? 'certified_block' : 'exploratory_analysis',
       filterBindings: source.capabilities.filters.map((filter) => ({
         filter,
         binding: filter,
@@ -2954,21 +4150,156 @@ export async function proposeAppBuildDraftOperations(
       review: { status: certified ? 'not_required' : 'required', sourceFingerprint: source.sourceRevision },
       trustState: certified ? 'certified' : 'review_required',
       reviewStatus: certified ? 'certified' : 'review_required',
+      ...(sectionId ? { sectionId } : {}),
     };
-    reservedItems.push(tile);
-    return [tile];
+    pageState.reservedItems.push(tile);
+    pageState.plannedItems.push(tile);
+    emittedComponents.push({ ...component, ...(query ? { query } : {}) });
+  }
+  const plannedSources = Array.from(new Set(emittedComponents.map((component) => component.sourceId))).flatMap((sourceId) => {
+    const source = byId.get(sourceId);
+    return source ? [source] : [];
   });
-  const nextPage: DashboardDocument = {
-    ...page,
-    metadata: { ...page.metadata, description: brief.frame.decision || brief.frame.goal },
-    layout: {
-      ...page.layout,
-      items: [...structuralItems, ...plannedItems],
-      responsive: responsiveLayoutsForDashboardItems([...structuralItems, ...plannedItems]),
-    },
-  };
+  const sourceOperations: AppBuildDraftOperation[] = plannedSources.map((source) => ({
+    type: 'upsert_source',
+    source: appDraftSourceFromCatalog(source),
+  }));
+  const nextPages = pageStates.map((state) => {
+    const items = [...state.structuralItems, ...state.plannedItems];
+    const plannedPage = brief.pages.find((candidate) => candidate.id === state.planId)!;
+    return {
+      ...state.page,
+      ...(state.datasetBindings.length > 0 ? { version: 3 as const, datasets: state.datasetBindings } : {}),
+      metadata: { ...state.page.metadata, title: plannedPage.title, description: brief.frame.decision || brief.frame.goal },
+      sections: plannedPage.sections.map((section, index) => ({
+        id: section.id,
+        title: section.title,
+        kind: section.kind,
+        order: index,
+      })),
+      story: {
+        version: 1 as const,
+        goal: brief.frame.goal,
+        ...(brief.frame.audience ? { audience: brief.frame.audience } : {}),
+        eligibleTileIds: state.plannedItems.map((item) => item.i),
+      },
+      layout: {
+        ...state.page.layout,
+        items,
+        responsive: responsiveLayoutsForDashboardItems(items),
+      },
+    };
+  });
+  const allPageIds = Array.from(new Set([...draft.pages.map((page) => page.id), ...nextPages.map((page) => page.id)]));
+  const filterIdsByPage = new Map(allPageIds.map((pageId) => [pageId, new Set(draft.pages.find((page) => page.id === pageId)?.filters?.map((filter) => filter.id) ?? [])]));
+  const filterOperations: AppBuildDraftOperation[] = [];
+  for (const filterPlan of brief.filters) {
+    const targetPages = filterPlan.scope === 'app'
+      ? allPageIds
+      : filterPlan.pageId ? [pageStateByPlanId.get(filterPlan.pageId)?.pageId].filter((id): id is string => Boolean(id)) : [];
+    for (const targetPageId of targetPages) {
+      const bindings: NonNullable<DashboardFilter['datasetBindings']> = {};
+      const tileIds: string[] = [];
+      for (const componentId of filterPlan.componentIds) {
+        if (componentPageIdById.get(componentId) !== targetPageId) continue;
+        const component = emittedComponents.find((candidate) => candidate.id === componentId);
+        const source = component ? byId.get(component.sourceId) : undefined;
+        const state = pageStates.find((candidate) => candidate.pageId === targetPageId);
+        const binding = source ? state?.datasetBindingBySource.get(source.sourceId) : undefined;
+        const field = source?.capabilities.dataset ? datasetPhysicalField(source.capabilities.dataset, filterPlan.field) : undefined;
+        const tileId = componentTileIdById.get(componentId);
+        if (!binding || !field || field.status !== 'approved' || !tileId) continue;
+        const current = bindings[binding.id] ?? { field: field.name, tileIds: [] };
+        current.tileIds = Array.from(new Set([...(current.tileIds ?? []), tileId]));
+        bindings[binding.id] = current;
+        tileIds.push(tileId);
+      }
+      const field = filterPlan.componentIds.flatMap((componentId) => {
+        const component = emittedComponents.find((candidate) => candidate.id === componentId);
+        const source = component ? byId.get(component.sourceId) : undefined;
+        const exact = source?.capabilities.dataset ? datasetPhysicalField(source.capabilities.dataset, filterPlan.field) : undefined;
+        return exact && exact.status === 'approved' ? [exact] : [];
+      })[0];
+      if (!field && filterPlan.scope !== 'app') continue;
+      const finalField = field?.name ?? filterPlan.field;
+      filterOperations.push({
+        type: 'set_filter',
+        pageId: targetPageId,
+        filter: {
+          id: filterPlan.id,
+          type: field ? datasetFieldFilterType(field) : 'select',
+          label: filterPlan.label,
+          field: { name: finalField },
+          scope: filterPlan.scope === 'app' ? { app: true } : { page: targetPageId, tileIds: Array.from(new Set(tileIds)) },
+          datasetBindings: bindings,
+        },
+      });
+      filterIdsByPage.get(targetPageId)?.add(filterPlan.id);
+    }
+  }
+  const interactionOperations: AppBuildDraftOperation[] = [];
+  for (const state of pageStates) {
+    let interactions = state.page.interactions ? structuredClone(state.page.interactions) : undefined;
+    let changed = false;
+    const pageCrossFilters = brief.crossFilters.filter((plan) => componentPageIdById.get(plan.fromComponentId) === state.pageId);
+    if (pageCrossFilters.length > 0) {
+      const mappings = [...(interactions?.crossFilter?.mappings ?? [])];
+      for (const plan of pageCrossFilters) {
+        const fromTileId = componentTileIdById.get(plan.fromComponentId);
+        const toTileId = componentTileIdById.get(plan.toComponentId);
+        const targetComponent = emittedComponents.find((component) => component.id === plan.toComponentId);
+        const targetSource = targetComponent ? byId.get(targetComponent.sourceId) : undefined;
+        const targetBinding = targetSource ? state.datasetBindingBySource.get(targetSource.sourceId) : undefined;
+        const targetField = targetSource?.capabilities.dataset ? datasetPhysicalField(targetSource.capabilities.dataset, plan.toField) : undefined;
+        if (!fromTileId || !toTileId || !targetBinding || !targetField || targetField.status !== 'approved') continue;
+        if (!mappings.some((mapping) => mapping.fromTileId === fromTileId && mapping.fromField === plan.fromField && mapping.toDataset === targetBinding.id && mapping.toField === targetField.name)) {
+          mappings.push({ fromTileId, fromField: plan.fromField, toDataset: targetBinding.id, toField: targetField.name });
+          changed = true;
+        }
+      }
+      if (changed) interactions = { ...interactions, crossFilter: { enabled: true, mappings } };
+    }
+    const pageNavigation = brief.navigation.filter((plan) => componentPageIdById.get(plan.fromComponentId) === state.pageId);
+    if (pageNavigation.length > 0) {
+      const navigate = [...(interactions?.navigate ?? [])];
+      for (const plan of pageNavigation) {
+        const fromTile = componentTileIdById.get(plan.fromComponentId);
+        const targetPage = pageStateByPlanId.get(plan.toPageId)?.pageId;
+        if (!fromTile || !targetPage) continue;
+        const carryFilters = Array.from(filterIdsByPage.get(state.pageId) ?? []).filter((id) => filterIdsByPage.get(targetPage)?.has(id));
+        const index = navigate.findIndex((candidate) => candidate.fromTile === fromTile);
+        const next = { fromTile, toPage: targetPage, carryFilters };
+        if (index >= 0) navigate[index] = next;
+        else navigate.push(next);
+        changed = true;
+      }
+      interactions = { ...interactions, navigate };
+    }
+    const detail = brief.detailDrills.find((plan) => pageStateByPlanId.get(plan.pageId)?.pageId === state.pageId);
+    if (detail) {
+      const component = emittedComponents.find((candidate) => candidate.id === detail.componentId);
+      const source = component ? byId.get(component.sourceId) : undefined;
+      const binding = source ? state.datasetBindingBySource.get(source.sourceId) : undefined;
+      const columns = source?.capabilities.dataset ? detail.fields.flatMap((field) => {
+        const exact = datasetPhysicalField(source.capabilities.dataset!, field);
+        return exact?.status === 'approved' ? [exact.name] : [];
+      }) : [];
+      if (binding && columns.length > 0) {
+        interactions = { ...interactions, detail: { dataset: binding.id, columns: Array.from(new Set(columns)) } };
+        changed = true;
+      }
+    }
+    if (changed) interactionOperations.push({ type: 'set_interactions', pageId: state.pageId, interactions });
+  }
   const coverage = brief.requirements.map((requirement) => {
-    const components = brief.components.filter((component) => component.requirementIds.includes(requirement.id));
+    const components = emittedComponents.filter((component) => {
+      if (!component.requirementIds.includes(requirement.id)) return false;
+      const source = byId.get(component.sourceId);
+      if (!source) return false;
+      return source.capabilities.dataset
+        ? Boolean(component.query && datasetPlannedQueryCoversRequirement(component.query, requirement, source.capabilities.dataset))
+        : catalogSourceSatisfiesRequirement(source, requirement);
+    });
     return {
       requirementId: requirement.id,
       status: components.length ? 'covered' as const : 'gap' as const,
@@ -2982,16 +4313,19 @@ export async function proposeAppBuildDraftOperations(
   const clarifications = brief.frame.clarificationQuestions ?? [];
   const reviewTasks: AppBuildDraftOperation[] = plannedSources
     .filter((source) => source.lifecycle !== 'certified')
-    .map((source) => ({
+    .map((source) => {
+      const firstComponent = emittedComponents.find((component) => component.sourceId === source.sourceId);
+      return {
       type: 'set_review_task',
       task: {
         id: `review-source-${createHash('sha256').update(source.sourceId).digest('hex').slice(0, 12)}`,
         message: `${source.title} is ${source.lifecycle} and must be certified, replaced, or removed before Project publication.`,
         status: 'open',
         sourceId: source.sourceId,
-        pageId: page.id,
+        pageId: firstComponent ? componentPageIdById.get(firstComponent.id) ?? initialPage.id : initialPage.id,
       },
-    }));
+      };
+    });
   const operations: AppBuildDraftOperation[] = [
     {
       type: 'set_frame',
@@ -3002,8 +4336,10 @@ export async function proposeAppBuildDraftOperations(
       requirements: brief.requirements,
       coverage,
     },
-    { type: 'upsert_page', page: nextPage },
     ...sourceOperations,
+    ...nextPages.map((page) => ({ type: 'upsert_page' as const, page })),
+    ...filterOperations,
+    ...interactionOperations,
     ...reviewTasks,
   ];
   return {
@@ -3011,13 +4347,14 @@ export async function proposeAppBuildDraftOperations(
     draftId: draft.id,
     baseRevision: draft.revision,
     baseProposalHash: draft.proposalHash,
+    plannerProvenance: brief.plannerProvenance,
     operations,
     defaultSelectedSourceIds: plannedSources
       .filter((source) => source.eligibility.localPreview)
       .map((source) => source.sourceId),
     clarifications,
     candidateSourceIds: brief.candidateSourceIds,
-    warnings: brief.warnings,
+    warnings,
     summary: {
       requirements: brief.requirements.length,
       covered: coverage.filter((item) => item.status === 'covered').length,
@@ -3431,8 +4768,10 @@ export async function commitAppAiBuild(
 
 interface AppAskSuccess {
   ok: true;
-  route: 'certified_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+  route: 'certified_answer' | 'dataset_chart_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
   answer: string;
+  /** Chart answers disclose deterministic fallback rather than claiming live AI. */
+  answerMode?: 'provider' | 'deterministic_context_summary' | 'out_of_context';
   trustState: 'certified' | 'review_required' | 'draft_ready';
   reviewStatus: 'certified' | 'review_required' | 'draft_ready';
   citations: Array<{ kind: string; name: string; path?: string }>;
@@ -3442,6 +4781,8 @@ interface AppAskSuccess {
   proposal?: unknown;
   /** Grounded ReAct research plan (P4): the decision, steps, and follow-up options. */
   researchPlan?: AppResearchPlan;
+  /** Server-owned chart context. It carries no browser-authored authority. */
+  analyticalContext?: AppAnalyticalContextV1;
 }
 
 type AppAskResult = AppAskSuccess | { ok: false; error: string };
@@ -3455,6 +4796,10 @@ type AppAskResult = AppAskSuccess | { ok: false; error: string };
 async function askAppQuestion(ctx: Ctx, appId: string, input: AppAskRequest): Promise<AppAskResult> {
   const routed = await routeAppAskQuestion(ctx, appId, input);
   if (!routed.ok) return routed;
+  // A chart answer is already grounded in an exact current local runtime
+  // receipt. Do not send it through the broader research planner, which could
+  // retrieve a different source or change the question's execution scope.
+  if (routed.route === 'dataset_chart_answer') return routed;
   // Blend in the app's own suggested questions (uncovered analysis gaps captured
   // at AI-build time) so follow-ups point at what the app can't answer yet.
   const appCopilotQuestions = loadAppById(ctx.projectRoot, appId)?.app.copilot?.suggestedQuestions ?? [];
@@ -3510,6 +4855,35 @@ async function routeAppAskQuestion(
     ...(dashboard ? [{ kind: 'dashboard', name: dashboard.metadata.title, path: `${loaded.appPath}/dashboards/${dashboard.id}.dqld` }] : []),
     ...(blockId ? [{ kind: 'block', name: blockId }] : []),
   ];
+
+  const runId = cleanString(input.runId);
+  const tileId = cleanString(input.tileId);
+  if (runId && tileId && dashboardId && ctx.answerDatasetChart) {
+    const chartAnswer = await ctx.answerDatasetChart({
+      appId,
+      dashboardId,
+      tileId,
+      runId,
+      question,
+    });
+    if (!chartAnswer.ok) return chartAnswer;
+    return {
+      ok: true,
+      route: 'dataset_chart_answer',
+      answer: chartAnswer.answer,
+      answerMode: chartAnswer.answerMode,
+      trustState: chartAnswer.trustState,
+      reviewStatus: chartAnswer.reviewStatus,
+      citations: chartAnswer.citations,
+      followUps: chartAnswer.followUps,
+      analyticalContext: chartAnswer.context,
+      decision: buildAppAskDecision('dataset_chart_answer', {
+        question,
+        selected: tile ? appAskTileContext(tile) : null,
+        appName: loaded.app.name,
+      }),
+    };
+  }
 
   if (isAppChangeQuestion(question)) {
     const decision = buildAppAskDecision('app_change_proposal', {
@@ -3685,7 +5059,7 @@ async function routeAppAskQuestion(
 }
 
 function buildAppAskDecision(
-  route: 'certified_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer',
+  route: 'certified_answer' | 'dataset_chart_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer',
   input: {
     question: string;
     blockId?: string;
@@ -3705,6 +5079,16 @@ function buildAppAskDecision(
       nextAction: 'Use the answer directly, or request deeper analysis when you need a new comparison, grain, or reusable logic.',
       requiresContext: false,
       usesCertifiedResult: true,
+      confidence: hasSelectedRows(selected) ? 0.9 : 0.74,
+    };
+  }
+  if (route === 'dataset_chart_answer') {
+    return {
+      mode: 'answer',
+      reason: `The question can be answered from the selected current Dataset result: ${sourceName}.`,
+      nextAction: 'Use the current chart answer directly, or rerun the chart before asking again after its source, query, filters, or persona changes.',
+      requiresContext: false,
+      usesCertifiedResult: false,
       confidence: hasSelectedRows(selected) ? 0.9 : 0.74,
     };
   }
@@ -4244,7 +5628,7 @@ export function promoteAppForStakeholders(
 export interface AppPublicationReadiness {
   ready: boolean;
   governedTiles: number;
-  blockers: Array<{ dashboardId: string; tileId: string; code: 'exploratory_source' | 'semantic_review' | 'semantic_preflight' | 'block_not_certified' | 'block_source_unversioned' | 'block_source_changed' | 'filter_not_preflighted'; message: string }>;
+  blockers: Array<{ dashboardId: string; tileId: string; code: 'exploratory_source' | 'semantic_review' | 'semantic_preflight' | 'block_not_certified' | 'block_source_unversioned' | 'block_source_changed' | 'filter_not_preflighted' | 'dataset_binding_missing'; message: string }>;
 }
 
 export function approveAppSemanticTiles(
@@ -4367,7 +5751,20 @@ function appPublicationReadiness(
           });
         }
       }
-      if (dashboard.version === 2 && (item.block || item.semantic || item.draftAnalysis)) {
+      if (item.query) {
+        governedTiles += 1;
+        const datasetBinding = dashboard.datasets?.find((binding) => binding.sourceId === item.sourceId
+          && binding.sourceRevision === item.sourceRevision);
+        if (!datasetBinding) {
+          blockers.push({
+            dashboardId: dashboard.id,
+            tileId: item.i,
+            code: 'dataset_binding_missing',
+            message: `${dashboard.id}/${item.i} has no matching Dataset binding for its field query.`,
+          });
+        }
+      }
+      if ((dashboard.version === 2 || dashboard.version === 3) && (item.block || item.semantic || item.draftAnalysis)) {
         for (const filter of dashboard.filters ?? []) {
           if (filter.scope?.tileIds && !filter.scope.tileIds.includes(item.i)) continue;
           const binding = item.filterBindings?.find((candidate) => candidate.filter === filter.id);
@@ -4433,134 +5830,811 @@ function loadAppBuildDraftAiProposal(
   }
 }
 
-async function generateExplicitAppBuildGap(
+const APP_AUTOPILOT_ACTIONS = new Set<AppAutopilotAction>([
+  'group_tile', 'change_visualization', 'rename_tile', 'add_tile', 'remove_tile',
+  'add_page', 'remove_page', 'add_filter', 'remove_filter', 'map_filter',
+  'add_cross_filter', 'add_navigation', 'add_detail_drill', 'arrange_layout',
+]);
+
+function appAutopilotKey(value: string): string {
+  return value.toLocaleLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function appAutopilotText(value: unknown, label: string, maximum = 160): string | undefined {
+  if (value === undefined) return undefined;
+  const text = cleanString(value);
+  if (!text || text.length > maximum
+    || /(?:;|--|\/\*|\*\/)|^\s*(?:select|with|insert|update|delete|drop|alter|create)\b/i.test(text)) {
+    throw new Error(`APP_AUTOPILOT_INTENT_INVALID: ${label} must be a short App identifier or presentation label, never SQL.`);
+  }
+  return text;
+}
+
+function normalizeAppAutopilotIntent(input: AppAutopilotIntent): AppAutopilotIntent {
+  const action = input?.action;
+  if (!APP_AUTOPILOT_ACTIONS.has(action)) {
+    throw new Error('APP_AUTOPILOT_INTENT_INVALID: the provider requested an unsupported App action.');
+  }
+  const request = appAutopilotText(input.request, 'request', 600);
+  if (!request) throw new Error('APP_AUTOPILOT_INTENT_INVALID: the App request is required.');
+  const visualization = input.visualization;
+  const allowedVisualizations: DashboardGridItem['viz']['type'][] = [
+    'single_value', 'grouped_bar', 'stacked_bar', 'line', 'bar', 'area', 'pie', 'donut',
+    'scatter', 'heatmap', 'histogram', 'waterfall', 'gauge', 'table', 'pivot', 'map',
+    'funnel', 'sankey', 'kpi',
+  ];
+  if (visualization !== undefined && !allowedVisualizations.includes(visualization)) {
+    throw new Error('APP_AUTOPILOT_INTENT_INVALID: choose one supported Dataset visualization.');
+  }
+  if (input.scope !== undefined && input.scope !== 'page' && input.scope !== 'app') {
+    throw new Error('APP_AUTOPILOT_INTENT_INVALID: filter scope must be page or app.');
+  }
+  return {
+    action,
+    request,
+    ...(appAutopilotText(input.summary, 'summary', 600) ? { summary: appAutopilotText(input.summary, 'summary', 600) } : {}),
+    ...(appAutopilotText(input.field, 'field') ? { field: appAutopilotText(input.field, 'field') } : {}),
+    ...(appAutopilotText(input.measure, 'measure') ? { measure: appAutopilotText(input.measure, 'measure') } : {}),
+    ...(visualization ? { visualization } : {}),
+    ...(appAutopilotText(input.title, 'title', 120) ? { title: appAutopilotText(input.title, 'title', 120) } : {}),
+    ...(appAutopilotText(input.targetField, 'target field') ? { targetField: appAutopilotText(input.targetField, 'target field') } : {}),
+    ...(appAutopilotText(input.targetPageId, 'target page') ? { targetPageId: appAutopilotText(input.targetPageId, 'target page') } : {}),
+    ...(appAutopilotText(input.targetTileId, 'target tile') ? { targetTileId: appAutopilotText(input.targetTileId, 'target tile') } : {}),
+    ...(appAutopilotText(input.filterId, 'filter') ? { filterId: appAutopilotText(input.filterId, 'filter') } : {}),
+    ...(input.scope ? { scope: input.scope } : {}),
+  };
+}
+
+function appAutopilotExactPhysicalField(
+  descriptor: DatasetDescriptor,
+  requested: string | undefined,
+  roles?: DatasetPhysicalField['role'][],
+): DatasetPhysicalField {
+  const value = appAutopilotText(requested, 'field');
+  if (!value) throw new Error('APP_AUTOPILOT_FIELD_REQUIRED: choose one exact approved Dataset field.');
+  const requestedKey = appAutopilotKey(value);
+  const matches = descriptor.fields.filter((field): field is DatasetPhysicalField => field.kind === 'physical'
+    && field.status === 'approved'
+    && (!roles || roles.includes(field.role)))
+    .filter((field) => {
+      const qualifiedTail = field.qualifiedId.split(/[.:/]/).at(-1) ?? field.qualifiedId;
+      return [field.name, field.qualifiedId, qualifiedTail].some((candidate) => appAutopilotKey(candidate) === requestedKey);
+    });
+  if (matches.length !== 1) {
+    throw new Error(`APP_AUTOPILOT_FIELD_UNAVAILABLE: ${value} is not one exact approved field for this Dataset tile.`);
+  }
+  return matches[0]!;
+}
+
+function appAutopilotExactMeasure(descriptor: DatasetDescriptor, requested: string | undefined) {
+  const value = appAutopilotText(requested, 'measure');
+  if (!value) throw new Error('APP_AUTOPILOT_MEASURE_REQUIRED: choose one exact approved Dataset measure.');
+  const requestedKey = appAutopilotKey(value);
+  const matches = descriptor.fields.filter((field) => field.kind === 'measure' && field.status === 'approved')
+    .filter((field) => {
+      const qualifiedTail = field.qualifiedId.split(/[.:/]/).at(-1) ?? field.qualifiedId;
+      return [field.name, field.qualifiedId, qualifiedTail].some((candidate) => appAutopilotKey(candidate) === requestedKey);
+    });
+  if (matches.length !== 1) {
+    throw new Error(`APP_AUTOPILOT_MEASURE_UNAVAILABLE: ${value} is not one exact approved Dataset measure for this tile.`);
+  }
+  return matches[0]!;
+}
+
+function appAutopilotRequestedDatasetDimension(
+  descriptor: DatasetDescriptor,
+  requested: string | undefined,
+): { field: DatasetPhysicalField; timeGrain?: string } {
+  const field = appAutopilotExactPhysicalField(descriptor, requested, ['dimension', 'attribute', 'time']);
+  const timeGrain = field.role === 'time'
+    ? field.time?.baseGrain ?? field.time?.grains[0]
+    : undefined;
+  return { field, ...(timeGrain ? { timeGrain } : {}) };
+}
+
+function appAutopilotDisplayName(value: string): string {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function appAutopilotProposalHash(
+  proposal: Omit<AppAutopilotChangeProposal, 'proposalHash' | 'appliedAt' | 'appliedRevision'>,
+): string {
+  return `sha256:${createHash('sha256').update(JSON.stringify(proposal)).digest('hex')}`;
+}
+
+function assertStoredAppAutopilotChange(proposal: AppAutopilotChangeProposal): void {
+  if (proposal.version !== 1
+    || !/^[a-z0-9_:-]+$/i.test(proposal.id)
+    || !/^[a-z0-9_:-]+$/i.test(proposal.runId)
+    || !/^[a-z0-9_:-]+$/i.test(proposal.artifactId)
+    || !/^[a-z0-9_:-]+$/i.test(proposal.draftId)
+    || !cleanString(proposal.pageId)
+    || !cleanString(proposal.tileId)
+    || !cleanString(proposal.request)
+    || !proposal.source
+    || !cleanString(proposal.source.sourceId)
+    || !cleanString(proposal.source.sourceRevision)
+    || !cleanString(proposal.source.contractFingerprint)
+    || proposal.planningMode !== 'universal_agent'
+    || !Array.isArray(proposal.operations)
+    || proposal.operations.length === 0
+    || proposal.operations.length > 12) {
+    throw new Error('APP_AUTOPILOT_CHANGE_INVALID: the stored App Autopilot change is malformed. Ask App Autopilot to prepare it again.');
+  }
+  const intent = normalizeAppAutopilotIntent(proposal.intent);
+  if (intent.action !== proposal.intent.action) {
+    throw new Error('APP_AUTOPILOT_CHANGE_INVALID: the stored App Autopilot intent is not normalized.');
+  }
+  const allowedTypes = new Set<AppBuildDraftOperation['type']>([
+    'update_tile', 'add_tile', 'remove_tile', 'upsert_page', 'remove_page',
+    'set_filter', 'remove_filter', 'set_interactions', 'set_layout',
+  ]);
+  for (const operation of proposal.operations) {
+    if (!operation || !allowedTypes.has(operation.type)) {
+      throw new Error('APP_AUTOPILOT_CHANGE_INVALID: the stored App Autopilot change includes an operation outside the bounded App editing lane.');
+    }
+    if (operation.type === 'update_tile') {
+      const allowedPatch = new Set(['query', 'viz', 'title', 'x', 'y', 'w', 'h', 'sectionId']);
+      if (Object.keys(operation.patch).some((key) => !allowedPatch.has(key))) {
+        throw new Error('APP_AUTOPILOT_CHANGE_INVALID: an App Autopilot tile update includes a forbidden source or execution field.');
+      }
+    }
+    if (operation.type === 'add_tile' && (!operation.tile.query || operation.tile.sourceId !== proposal.source.sourceId)) {
+      throw new Error('APP_AUTOPILOT_CHANGE_INVALID: an App Autopilot tile must be a field query over the selected Dataset source.');
+    }
+  }
+  const { proposalHash: _proposalHash, appliedAt: _appliedAt, appliedRevision: _appliedRevision, ...withoutHash } = proposal;
+  if (proposal.proposalHash !== appAutopilotProposalHash(withoutHash)) {
+    throw new Error('APP_AUTOPILOT_CHANGE_INVALID: the stored App Autopilot change no longer matches its immutable hash.');
+  }
+}
+
+async function assertAppAutopilotChangeDatasetSourceCurrent(
+  projectRoot: string,
+  current: AppBuildDraft,
+  proposal: AppAutopilotChangeProposal,
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
+): Promise<{ tile: DashboardGridItem; descriptor: DatasetDescriptor }> {
+  assertStoredAppAutopilotChange(proposal);
+  const page = current.pages.find((candidate) => candidate.id === proposal.pageId);
+  const tile = page?.layout.items.find((candidate) => candidate.i === proposal.tileId);
+  if (!page || !tile || !tile.query || !tile.sourceId || tile.sourceId !== proposal.source.sourceId) {
+    throw new Error('APP_AUTOPILOT_CHANGE_STALE: the selected Dataset tile changed or was removed. Ask App Autopilot to prepare it again.');
+  }
+  const stored = current.sources.find((source) => source.id === proposal.source.sourceId);
+  const records = await resolveCurrentDatasetSourceRecords(projectRoot, [proposal.source.sourceId], resolver);
+  const source = records.get(proposal.source.sourceId);
+  const descriptor = source?.capabilities.dataset;
+  const reference = datasetDraftReferences(current).find((candidate) => candidate.page.id === page.id && candidate.tile.i === tile.i);
+  const authorityIssue = reference ? datasetDraftAuthorityIssue(reference, stored, source) : 'APP_BUILD_DATASET_SOURCE_REPAIR_REQUIRED: this Dataset tile no longer has an exact page binding.';
+  if (authorityIssue || !descriptor
+    || source!.sourceRevision !== proposal.source.sourceRevision
+    || descriptor.contractRef.fingerprint !== proposal.source.contractFingerprint
+    || descriptor.binding.sourceRevision !== proposal.source.sourceRevision
+    || descriptor.binding.contractFingerprint !== proposal.source.contractFingerprint) {
+    throw new Error(`APP_AUTOPILOT_CHANGE_STALE: ${authorityIssue ?? 'the Dataset revision or contract changed after this App Autopilot review.'} Ask App Autopilot to prepare it again.`);
+  }
+  return { tile, descriptor };
+}
+
+function appAutopilotDatasetBinding(page: DashboardDocument, tile: DashboardGridItem): DashboardDatasetBinding {
+  const binding = page.datasets?.find((candidate) => candidate.sourceId === tile.sourceId
+    && candidate.sourceRevision === tile.sourceRevision);
+  if (!binding) {
+    throw new Error('APP_AUTOPILOT_DATASET_BINDING_REQUIRED: the selected tile no longer has an exact current Dataset page binding.');
+  }
+  return binding;
+}
+
+function datasetFieldFilterType(field: DatasetPhysicalField): DashboardFilter['type'] {
+  if (field.type === 'date' || field.type === 'timestamp') return 'daterange';
+  if (field.type === 'number') return 'number_range';
+  if (field.type === 'boolean') return 'boolean';
+  return 'select';
+}
+
+function appAutopilotPageId(title: string, pages: DashboardDocument[]): string {
+  const base = slugify(title) || 'page';
+  if (!pages.some((page) => page.id === base)) return base;
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const candidate = `${base}-${suffix}`;
+    if (!pages.some((page) => page.id === candidate)) return candidate;
+  }
+  throw new Error('APP_AUTOPILOT_PAGE_LIMIT: App Autopilot could not allocate a unique page id.');
+}
+
+function appAutopilotTargetPage(draft: AppBuildDraft, requested: string | undefined): DashboardDocument {
+  const target = appAutopilotText(requested, 'target page');
+  if (!target) throw new Error('APP_AUTOPILOT_TARGET_PAGE_REQUIRED: choose one exact existing App page id.');
+  const matches = draft.pages.filter((page) => page.id === target);
+  if (matches.length !== 1) {
+    throw new Error(`APP_AUTOPILOT_TARGET_PAGE_UNAVAILABLE: ${target} is not one exact existing App page id.`);
+  }
+  return matches[0]!;
+}
+
+function appAutopilotTargetTile(page: DashboardDocument, requested: string | undefined): DashboardGridItem {
+  const target = appAutopilotText(requested, 'target tile');
+  if (!target) throw new Error('APP_AUTOPILOT_TARGET_TILE_REQUIRED: choose one exact current-page Dataset tile id.');
+  const matches = page.layout.items.filter((tile) => tile.i === target);
+  if (matches.length !== 1 || !matches[0]!.query || !matches[0]!.sourceId) {
+    throw new Error(`APP_AUTOPILOT_TARGET_TILE_UNAVAILABLE: ${target} is not one exact current-page Dataset tile id.`);
+  }
+  return matches[0]!;
+}
+
+function appAutopilotCleanInteractions(interactions: DashboardInteractions): DashboardInteractions | undefined {
+  const crossFilter = interactions.crossFilter && interactions.crossFilter.mappings.length > 0
+    ? interactions.crossFilter
+    : undefined;
+  const detail = interactions.detail;
+  const navigate = interactions.navigate?.filter((candidate) => candidate.fromTile && candidate.toPage);
+  return crossFilter || detail || (navigate && navigate.length > 0)
+    ? {
+      ...(crossFilter ? { crossFilter } : {}),
+      ...(detail ? { detail } : {}),
+      ...(navigate && navigate.length > 0 ? { navigate } : {}),
+    }
+    : undefined;
+}
+
+function appAutopilotOutputDimension(tile: DashboardGridItem, requested: string | undefined): string {
+  const value = appAutopilotText(requested, 'field');
+  if (!value || !tile.query) throw new Error('APP_AUTOPILOT_FIELD_REQUIRED: choose one exact selected Dataset output field.');
+  const key = appAutopilotKey(value);
+  const matches = tileQueryOutputAliases(tile.query)
+    .filter((output) => output.kind === 'dimension' && appAutopilotKey(output.alias) === key);
+  if (matches.length !== 1) {
+    throw new Error(`APP_AUTOPILOT_OUTPUT_UNAVAILABLE: ${value} is not one exact dimension output on the selected tile.`);
+  }
+  return matches[0]!.alias;
+}
+
+function appAutopilotUniqueFilterId(page: DashboardDocument, requested: string | undefined, field: DatasetPhysicalField): string {
+  const raw = appAutopilotText(requested, 'filter id') ?? `filter-${slugify(field.name)}`;
+  const id = slugify(raw) || `filter-${slugify(field.name)}`;
+  if (page.filters?.some((filter) => filter.id === id)) {
+    throw new Error(`APP_AUTOPILOT_FILTER_EXISTS: ${id} already exists on this page. Choose its exact id to map or remove it.`);
+  }
+  return id;
+}
+
+/**
+ * Compile a provider-interpreted but untrusted App intent into a small set of
+ * server-owned AppBuildDraft operations. This is intentionally the only
+ * mutation boundary for the universal sidebar: the provider never writes SQL,
+ * a Dataset contract, a source, or arbitrary browser JSON.
+ */
+async function compileAppAutopilotChange(
   projectRoot: string,
   draft: AppBuildDraft,
-  previous: AppBuildDraftAiProposal,
-  requirementId: string,
-  generate: NonNullable<Ctx['generateGovernedAnswer']>,
-): Promise<AppBuildDraftAiProposal> {
-  const requirementOperation = previous.operations.find((operation) => operation.type === 'set_requirements');
-  const requirement = requirementOperation?.type === 'set_requirements'
-    ? requirementOperation.requirements.find((candidate) => candidate.id === requirementId)
-    : undefined;
-  const coverage = requirementOperation?.type === 'set_requirements'
-    ? requirementOperation.coverage?.find((candidate) => candidate.requirementId === requirementId)
-    : undefined;
-  if (!requirement || coverage?.status === 'covered') {
-    throw new Error('APP_BUILD_GAP_NOT_FOUND: choose an uncovered App requirement.');
+  input: { pageId: string; tileId: string; intent: AppAutopilotIntent; runId: string; artifactId: string },
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
+): Promise<AppAutopilotChangeProposal> {
+  const pageId = cleanString(input.pageId);
+  const tileId = cleanString(input.tileId);
+  const intent = normalizeAppAutopilotIntent(input.intent);
+  const runId = cleanString(input.runId);
+  const artifactId = cleanString(input.artifactId);
+  if (!/^[a-z0-9_:-]+$/i.test(runId) || !/^[a-z0-9_:-]+$/i.test(artifactId)) {
+    throw new Error('APP_AUTOPILOT_ARTIFACT_INVALID: the universal App Autopilot run is missing a durable artifact identity.');
   }
-  const answer = await generate(requirement.question);
-  const sql = cleanString(answer.sql);
-  if (!sql) throw new Error('APP_BUILD_GAP_NO_QUERY: the provider did not return executable review DQL.');
-  if (sql.includes('"""')) throw new Error('APP_BUILD_GAP_INVALID_QUERY: generated SQL contains an unsupported triple-quote delimiter.');
-  const proposalId = `proposal_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const key = slugify(requirement.id) || createHash('sha256').update(requirement.question).digest('hex').slice(0, 12);
-  const sourceRef = `proposals/${proposalId}/drafts/${key}.dql`;
-  const source = [
-    `block "app_${slugify(draft.appId)}_${key}" {`,
-    `  domain = "${escapeDqlString(draft.pages[0]?.metadata.domain ?? 'general')}"`,
-    '  type = "custom"',
-    '  status = "review"',
-    '  owner = "local-app-builder"',
-    `  description = "${escapeDqlString(answer.text?.slice(0, 240) || requirement.question)}"`,
-    `  llmContext = "${escapeDqlString(`Explicitly generated App gap: ${requirement.question}`)}"`,
-    '  caveats = ["AI-generated App gap. Validate joins, grain, filters, and interpretation before promotion."]',
-    '  tags = ["app-scoped", "ai-generated", "needs-review"]',
-    '',
-    '  query = """',
-    sql,
-    '  """',
-    '',
-    '  visualization {',
-    `    chart = "${escapeDqlString(normalizeGeneratedViz(answer.suggestedViz))}"`,
-    '  }',
-    '}',
-    '',
-  ].join('\n');
-  const fingerprint = `sha256:${createHash('sha256').update(source).digest('hex')}`;
-  const absolute = join(projectRoot, '.dql', 'local', 'app-builds', draft.id, sourceRef);
-  mkdirSync(dirname(absolute), { recursive: true });
-  writeFileSync(absolute, source, 'utf8');
-  const sourceId = `review-dql:gap:${createHash('sha256').update(`${proposalId}:${requirement.id}`).digest('hex').slice(0, 16)}`;
-  const pageOperation = previous.operations.find((operation) => operation.type === 'upsert_page');
-  if (!pageOperation || pageOperation.type !== 'upsert_page') throw new Error('APP_BUILD_PAGE_REQUIRED: the proposal has no App page.');
-  const tileId = uniqueTileId(pageOperation.page.layout.items, `gap-${requirement.id}`);
-  const y = pageOperation.page.layout.items.reduce((max, tile) => Math.max(max, tile.y + tile.h), 0);
-  const tile: DashboardGridItem = {
-    i: tileId,
-    x: 0,
-    y,
-    w: 6,
-    h: 4,
-    sourceId,
-    sourceRevision: fingerprint,
-    draftAnalysis: { ref: sourceRef, artifactFingerprint: fingerprint },
-    viz: { type: normalizeGeneratedViz(answer.suggestedViz) as DashboardGridItem['viz']['type'] },
-    title: titleForGapQuestion(requirement.question),
-    sourceClass: 'exploratory_analysis',
-    review: { status: 'required', sourceFingerprint: fingerprint },
-    trustState: 'review_required',
-    reviewStatus: 'review_required',
-  };
-  const operations = previous.operations.map((operation): AppBuildDraftOperation => {
-    if (operation === pageOperation && operation.type === 'upsert_page') {
-      const items = [...operation.page.layout.items, tile];
-      return { type: 'upsert_page', page: { ...operation.page, layout: { ...operation.page.layout, items, responsive: responsiveLayoutsForDashboardItems(items) } } };
+  const page = draft.pages.find((candidate) => candidate.id === pageId);
+  const tile = page?.layout.items.find((candidate) => candidate.i === tileId);
+  if (!page || !tile || !tile.query || !tile.sourceId) {
+    throw new Error('APP_AUTOPILOT_DATASET_TILE_REQUIRED: select one saved Dataset tile before asking App Autopilot to prepare a change.');
+  }
+  const stored = draft.sources.find((source) => source.id === tile.sourceId);
+  const records = await resolveCurrentDatasetSourceRecords(projectRoot, [tile.sourceId], resolver);
+  const source = records.get(tile.sourceId);
+  const descriptor = source?.capabilities.dataset;
+  const reference = datasetDraftReferences(draft).find((candidate) => candidate.page.id === page.id && candidate.tile.i === tile.i);
+  const authorityIssue = reference ? datasetDraftAuthorityIssue(reference, stored, source) : 'APP_BUILD_DATASET_SOURCE_REPAIR_REQUIRED: this Dataset tile has no exact page binding.';
+  if (authorityIssue || !descriptor || !source) {
+    throw new Error(authorityIssue ?? 'APP_AUTOPILOT_DATASET_TILE_REQUIRED: this tile no longer resolves to an approved Dataset contract.');
+  }
+  const currentAuthorityErrors = await datasetDraftCurrentAuthorityErrors(projectRoot, draft, 'local_preview', resolver);
+  if (currentAuthorityErrors.length > 0) throw new Error(currentAuthorityErrors[0]!);
+  const currentValidation = validateTileQuery(descriptor, tile.query);
+  if (currentValidation.outcome !== 'covered') {
+    throw new Error(`APP_AUTOPILOT_DATASET_TILE_INVALID: the saved Dataset query is no longer covered. ${currentValidation.diagnostics.map((diagnostic) => diagnostic.message).join(' ')}`);
+  }
+  const selectedBinding = appAutopilotDatasetBinding(page, tile);
+  const operations: AppBuildDraftOperation[] = [];
+  let summary = intent.summary ?? 'App Autopilot prepared a typed App change from the current governed Dataset contract.';
+
+  const validateQueryAndVisualization = (query: TileQuery, visualization: DashboardGridItem['viz']['type']): void => {
+    const validation = validateTileQuery(descriptor, query);
+    if (validation.outcome !== 'covered') {
+      throw new Error(`APP_AUTOPILOT_QUERY_INVALID: ${validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ')}`);
     }
-    if (operation.type === 'set_requirements') {
+    const compatibility = datasetTileVisualizationCompatibility(query, visualization);
+    if (!compatibility.compatible) {
+      throw new Error(`APP_AUTOPILOT_VISUALIZATION_INVALID: ${compatibility.message ?? 'the proposed visualization cannot show this Dataset query.'}`);
+    }
+  };
+
+  switch (intent.action) {
+    case 'group_tile': {
+      if (tile.query.detail) {
+        throw new Error('APP_AUTOPILOT_REQUEST_UNSUPPORTED: bounded detail tiles cannot be regrouped. Create a chart or table tile first.');
+      }
+      const requestedDimension = appAutopilotRequestedDatasetDimension(descriptor, intent.field);
+      if (tile.query.dimensions.some((dimension) => dimension.field.toLocaleLowerCase() === requestedDimension.field.name.toLocaleLowerCase())) {
+        throw new Error(`APP_AUTOPILOT_NO_CHANGE: ${appAutopilotDisplayName(requestedDimension.field.name)} is already selected on this tile.`);
+      }
+      const query = normalizeTileQuery({
+        ...tile.query,
+        dimensions: [...tile.query.dimensions, {
+          field: requestedDimension.field.name,
+          ...(requestedDimension.timeGrain ? { timeGrain: requestedDimension.timeGrain } : {}),
+        }],
+      });
+      if (!query) throw new Error('APP_AUTOPILOT_QUERY_INVALID: App Autopilot could not form a valid bounded Dataset query.');
+      const visualization = intent.visualization ?? 'bar';
+      validateQueryAndVisualization(query, visualization);
+      const measureLabel = tile.query.measures.length === 1
+        ? appAutopilotDisplayName(tile.query.measures[0]!.alias ?? tile.query.measures[0]!.measure)
+        : tile.title || 'Dataset result';
+      const fieldLabel = appAutopilotDisplayName(requestedDimension.field.name);
+      const title = intent.title ?? `${measureLabel} by ${fieldLabel}`;
+      operations.push({ type: 'update_tile', pageId, tileId, patch: { query, viz: { type: visualization }, ...(title !== tile.title ? { title } : {}) } });
+      summary = intent.summary ?? `Group ${measureLabel} by the approved ${fieldLabel} Dataset field.`;
+      break;
+    }
+    case 'change_visualization': {
+      if (!intent.visualization) throw new Error('APP_AUTOPILOT_VISUALIZATION_REQUIRED: choose one supported visualization.');
+      validateQueryAndVisualization(tile.query, intent.visualization);
+      const title = intent.title ? appAutopilotText(intent.title, 'tile title', 120) : undefined;
+      const visualizationChanged = tile.viz.type !== intent.visualization;
+      const titleChanged = Boolean(title && title !== tile.title);
+      if (!visualizationChanged && !titleChanged) {
+        throw new Error('APP_AUTOPILOT_NO_CHANGE: the selected tile already uses that visualization and title.');
+      }
+      operations.push({
+        type: 'update_tile',
+        pageId,
+        tileId,
+        patch: {
+          ...(visualizationChanged ? { viz: { type: intent.visualization } } : {}),
+          ...(titleChanged ? { title } : {}),
+        },
+      });
+      summary = intent.summary ?? (titleChanged && visualizationChanged
+        ? `Rename ${tile.title || tile.i} to ${title} and change its visualization to ${appAutopilotDisplayName(intent.visualization)}.`
+        : titleChanged
+          ? `Rename ${tile.title || tile.i} to ${title}.`
+          : `Change ${tile.title || tile.i} to ${appAutopilotDisplayName(intent.visualization)}.`);
+      break;
+    }
+    case 'rename_tile': {
+      const title = appAutopilotText(intent.title, 'tile title', 120);
+      if (!title) throw new Error('APP_AUTOPILOT_TITLE_REQUIRED: provide a short presentation title for the selected tile.');
+      const visualization = intent.visualization;
+      if (visualization) validateQueryAndVisualization(tile.query, visualization);
+      const titleChanged = title !== tile.title;
+      const visualizationChanged = Boolean(visualization && tile.viz.type !== visualization);
+      if (!titleChanged && !visualizationChanged) {
+        throw new Error('APP_AUTOPILOT_NO_CHANGE: the selected tile already has that title and visualization.');
+      }
+      operations.push({
+        type: 'update_tile',
+        pageId,
+        tileId,
+        patch: {
+          ...(titleChanged ? { title } : {}),
+          ...(visualizationChanged && visualization ? { viz: { type: visualization } } : {}),
+        },
+      });
+      summary = intent.summary ?? (visualizationChanged && visualization
+        ? `Rename ${tile.i} to ${title} and change its visualization to ${appAutopilotDisplayName(visualization)}.`
+        : `Rename ${tile.i} to ${title}.`);
+      break;
+    }
+    case 'add_tile': {
+      const measure = appAutopilotExactMeasure(descriptor, intent.measure);
+      const dimension = intent.field ? appAutopilotRequestedDatasetDimension(descriptor, intent.field) : undefined;
+      const query = normalizeTileQuery({
+        dimensions: dimension ? [{ field: dimension.field.name, ...(dimension.timeGrain ? { timeGrain: dimension.timeGrain } : {}) }] : [],
+        measures: [{ measure: measure.name }],
+        respectsGlobalFilters: true,
+      });
+      if (!query) throw new Error('APP_AUTOPILOT_QUERY_INVALID: App Autopilot could not form a new Dataset tile query.');
+      const visualization = intent.visualization ?? (dimension ? 'bar' : 'kpi');
+      validateQueryAndVisualization(query, visualization);
+      const tileIdForAdd = uniqueTileId(page.layout.items, intent.title ?? `${measure.name}-${dimension?.field.name ?? 'kpi'}`);
+      const y = page.layout.items.reduce((maximum, item) => Math.max(maximum, item.y + item.h), 0);
+      const title = intent.title ?? (dimension
+        ? `${appAutopilotDisplayName(measure.name)} by ${appAutopilotDisplayName(dimension.field.name)}`
+        : appAutopilotDisplayName(measure.name));
+      operations.push({
+        type: 'add_tile',
+        pageId,
+        tile: {
+          i: tileIdForAdd,
+          x: 0,
+          y,
+          w: visualization === 'kpi' || visualization === 'single_value' ? 3 : 6,
+          h: visualization === 'kpi' || visualization === 'single_value' ? 2 : 4,
+          sourceId: source.sourceId,
+          sourceRevision: source.sourceRevision,
+          query,
+          viz: { type: visualization },
+          title,
+        },
+      });
+      summary = intent.summary ?? `Add ${title} from the selected approved Dataset source.`;
+      break;
+    }
+    case 'remove_tile': {
+      if (page.layout.items.length <= 1) {
+        throw new Error('APP_AUTOPILOT_LAST_TILE_DENIED: keep at least one tile on the page; add a replacement before removing the selected tile.');
+      }
+      operations.push({ type: 'remove_tile', pageId, tileId });
+      summary = intent.summary ?? `Remove ${tile.title || tile.i} from this local App draft.`;
+      break;
+    }
+    case 'add_page': {
+      const title = appAutopilotText(intent.title, 'page title', 120) ?? 'New page';
+      const newPage: DashboardDocument = {
+        version: 3,
+        id: appAutopilotPageId(title, draft.pages),
+        metadata: {
+          title,
+          description: draft.frame.goal,
+          ...(page.metadata.domain ? { domain: page.metadata.domain } : {}),
+          ...(draft.frame.audience ? { audience: draft.frame.audience } : {}),
+        },
+        datasets: [],
+        layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [] },
+      };
+      operations.push({ type: 'upsert_page', page: newPage });
+      summary = intent.summary ?? `Add the ${title} App page. App-scoped controls will be inherited as explicit unbound controls.`;
+      break;
+    }
+    case 'remove_page': {
+      if (draft.pages.length <= 1) throw new Error('APP_AUTOPILOT_LAST_PAGE_DENIED: keep at least one App page.');
+      const target = intent.targetPageId ? appAutopilotTargetPage(draft, intent.targetPageId) : page;
+      const cleanup = draft.pages.filter((candidate) => candidate.id !== target.id).flatMap((candidate) => {
+        const navigate = candidate.interactions?.navigate?.filter((item) => item.toPage !== target.id) ?? [];
+        if ((candidate.interactions?.navigate?.length ?? 0) === navigate.length) return [];
+        return [{
+          type: 'set_interactions' as const,
+          pageId: candidate.id,
+          interactions: appAutopilotCleanInteractions({ ...candidate.interactions, navigate }),
+        }];
+      });
+      if (cleanup.length > 11) throw new Error('APP_AUTOPILOT_PAGE_CHANGE_LIMIT: remove page navigation in smaller reviewable changes.');
+      operations.push(...cleanup, { type: 'remove_page', pageId: target.id });
+      summary = intent.summary ?? `Remove ${target.metadata.title} and its incoming App navigation links.`;
+      break;
+    }
+    case 'add_filter': {
+      const field = appAutopilotExactPhysicalField(descriptor, intent.field);
+      const id = appAutopilotUniqueFilterId(page, intent.filterId, field);
+      if (intent.scope === 'app' && draft.pages.some((candidate) => candidate.filters?.some((filter) => filter.id === id))) {
+        throw new Error(`APP_AUTOPILOT_FILTER_EXISTS: ${id} already exists in this App. Choose the existing filter to map or remove it.`);
+      }
+      const filter: DashboardFilter = {
+        id,
+        type: datasetFieldFilterType(field),
+        label: appAutopilotDisplayName(field.name),
+        field: { name: field.name },
+        scope: intent.scope === 'app' ? { app: true } : { page: pageId, tileIds: [tileId] },
+        datasetBindings: { [selectedBinding.id]: { field: field.name, tileIds: [tileId] } },
+      };
+      if (intent.scope === 'app') {
+        for (const candidate of draft.pages) {
+          operations.push({
+            type: 'set_filter',
+            pageId: candidate.id,
+            filter: candidate.id === pageId ? filter : { ...filter, datasetBindings: {} },
+          });
+        }
+      } else {
+        operations.push({ type: 'set_filter', pageId, filter });
+      }
+      summary = intent.summary ?? `Add an explicit ${intent.scope === 'app' ? 'App-wide' : 'page'} ${appAutopilotDisplayName(field.name)} filter mapped only to the selected Dataset tile.`;
+      break;
+    }
+    case 'remove_filter': {
+      const filterId = appAutopilotText(intent.filterId, 'filter id');
+      if (!filterId) throw new Error('APP_AUTOPILOT_FILTER_REQUIRED: choose one exact existing filter id.');
+      const filter = page.filters?.find((candidate) => candidate.id === filterId);
+      if (!filter) throw new Error(`APP_AUTOPILOT_FILTER_UNAVAILABLE: ${filterId} is not on the selected page.`);
+      const targets = filter.scope?.app === true
+        ? draft.pages.filter((candidate) => candidate.filters?.some((item) => item.id === filterId))
+        : [page];
+      operations.push(...targets.map((candidate) => ({ type: 'remove_filter' as const, pageId: candidate.id, filterId })));
+      summary = intent.summary ?? `Remove the ${filter.label ?? filter.id} filter from ${filter.scope?.app === true ? 'every App page' : 'this page'}.`;
+      break;
+    }
+    case 'map_filter': {
+      const filterId = appAutopilotText(intent.filterId, 'filter id');
+      if (!filterId) throw new Error('APP_AUTOPILOT_FILTER_REQUIRED: choose one exact existing filter id.');
+      const filter = page.filters?.find((candidate) => candidate.id === filterId);
+      if (!filter) throw new Error(`APP_AUTOPILOT_FILTER_UNAVAILABLE: ${filterId} is not on the selected page.`);
+      const field = appAutopilotExactPhysicalField(descriptor, intent.field);
+      const current = filter.datasetBindings?.[selectedBinding.id];
+      const tileIds = Array.from(new Set([...(current?.tileIds ?? []), tileId]));
+      operations.push({
+        type: 'set_filter',
+        pageId,
+        filter: { ...filter, datasetBindings: { ...(filter.datasetBindings ?? {}), [selectedBinding.id]: { field: field.name, tileIds } } },
+      });
+      summary = intent.summary ?? `Map ${filter.label ?? filter.id} to the approved ${appAutopilotDisplayName(field.name)} field on ${tile.title || tile.i}.`;
+      break;
+    }
+    case 'add_cross_filter': {
+      const fromField = appAutopilotOutputDimension(tile, intent.field);
+      const targetTile = appAutopilotTargetTile(page, intent.targetTileId);
+      if (targetTile.i === tile.i) throw new Error('APP_AUTOPILOT_TARGET_TILE_UNAVAILABLE: choose a different target tile for a cross-filter.');
+      const targetBinding = appAutopilotDatasetBinding(page, targetTile);
+      const targetSource = targetTile.sourceId ? records.get(targetTile.sourceId) : undefined;
+      // The selected page may include a second Dataset source. Resolve it only
+      // now, and require its current binding before its field can be targeted.
+      const targetRecords = targetSource ? records : await resolveCurrentDatasetSourceRecords(projectRoot, [targetTile.sourceId!], resolver);
+      const targetDescriptor = targetSource?.capabilities.dataset ?? targetRecords.get(targetTile.sourceId!)?.capabilities.dataset;
+      if (!targetDescriptor) throw new Error('APP_AUTOPILOT_TARGET_TILE_UNAVAILABLE: the target tile no longer resolves to a current Dataset contract.');
+      const targetField = appAutopilotExactPhysicalField(targetDescriptor, intent.targetField ?? intent.field);
+      const mappings = page.interactions?.crossFilter?.mappings ?? [];
+      if (mappings.some((mapping) => mapping.fromTileId === tileId && mapping.fromField === fromField && mapping.toDataset === targetBinding.id && mapping.toField === targetField.name)) {
+        throw new Error('APP_AUTOPILOT_NO_CHANGE: that explicit cross-filter mapping already exists.');
+      }
+      operations.push({
+        type: 'set_interactions',
+        pageId,
+        interactions: {
+          ...page.interactions,
+          crossFilter: { enabled: true, mappings: [...mappings, { fromTileId: tileId, fromField, toDataset: targetBinding.id, toField: targetField.name }] },
+        },
+      });
+      summary = intent.summary ?? `Connect ${tile.title || tile.i}.${fromField} to ${targetTile.title || targetTile.i}.${targetField.name} with an explicit Dataset mapping.`;
+      break;
+    }
+    case 'add_navigation': {
+      const target = appAutopilotTargetPage(draft, intent.targetPageId);
+      if (target.id === pageId) throw new Error('APP_AUTOPILOT_TARGET_PAGE_UNAVAILABLE: choose a different page for tile navigation.');
+      const carryFilters = (page.filters ?? []).filter((filter) => target.filters?.some((candidate) => candidate.id === filter.id)).map((filter) => filter.id);
+      const navigate = [...(page.interactions?.navigate ?? []).filter((candidate) => candidate.fromTile !== tileId), {
+        fromTile: tileId,
+        toPage: target.id,
+        carryFilters,
+      }];
+      operations.push({ type: 'set_interactions', pageId, interactions: { ...page.interactions, navigate } });
+      summary = intent.summary ?? `Navigate from ${tile.title || tile.i} to ${target.metadata.title} and carry only the controls both pages explicitly own.`;
+      break;
+    }
+    case 'add_detail_drill': {
+      const field = appAutopilotExactPhysicalField(descriptor, intent.field);
+      const columns = Array.from(new Set([
+        ...descriptor.grain.keyFields.flatMap((key) => {
+          const keyField = datasetPhysicalField(descriptor, key);
+          return keyField?.status === 'approved' ? [keyField.name] : [];
+        }),
+        field.name,
+      ])).slice(0, 8);
+      if (columns.length === 0) throw new Error('APP_AUTOPILOT_DETAIL_UNAVAILABLE: this Dataset contract has no approved detail column.');
+      operations.push({ type: 'set_interactions', pageId, interactions: { ...page.interactions, detail: { dataset: selectedBinding.id, columns } } });
+      summary = intent.summary ?? `Add a bounded detail drill using the approved Dataset grain keys and ${appAutopilotDisplayName(field.name)}.`;
+      break;
+    }
+    case 'arrange_layout': {
+      const items = packDashboardLayoutItems(page.layout.items, page.layout.cols);
+      const unchanged = JSON.stringify(items.map(({ i, x, y, w, h }) => ({ i, x, y, w, h })))
+        === JSON.stringify(page.layout.items.map(({ i, x, y, w, h }) => ({ i, x, y, w, h })));
+      if (unchanged) throw new Error('APP_AUTOPILOT_NO_CHANGE: the current page already has a compact non-overlapping layout.');
+      operations.push({ type: 'set_layout', pageId, layout: { ...page.layout, items } });
+      summary = intent.summary ?? 'Pack the current page into a compact non-overlapping layout while preserving reading order.';
+      break;
+    }
+  }
+  if (operations.length === 0 || operations.length > 12) {
+    throw new Error('APP_AUTOPILOT_CHANGE_LIMIT: App Autopilot must prepare between one and twelve bounded operations for review.');
+  }
+  const base: Omit<AppAutopilotChangeProposal, 'proposalHash' | 'appliedAt' | 'appliedRevision'> = {
+    version: 1,
+    id: `autopilot_${randomUUID().replace(/-/g, '')}`,
+    runId,
+    artifactId,
+    draftId: draft.id,
+    baseRevision: draft.revision,
+    baseProposalHash: draft.proposalHash,
+    pageId,
+    tileId,
+    request: intent.request,
+    intent,
+    source: { sourceId: source.sourceId, sourceRevision: source.sourceRevision, contractFingerprint: descriptor.contractRef.fingerprint },
+    planningMode: 'universal_agent',
+    operations,
+    diagnostics: [{ code: 'APP_AUTOPILOT_SERVER_COMPILED', severity: 'info', message: `${summary} Review it before applying the local App draft change.` }],
+    createdAt: new Date().toISOString(),
+  };
+  return { ...base, proposalHash: appAutopilotProposalHash(base) };
+}
+
+function appAutopilotProposalDir(projectRoot: string, draftId: string): string {
+  return join(appBuildProposalDir(projectRoot, draftId), 'autopilot');
+}
+
+function writeAppAutopilotChange(projectRoot: string, proposal: AppAutopilotChangeProposal): void {
+  assertStoredAppAutopilotChange(proposal);
+  const { appliedAt: _appliedAt, appliedRevision: _appliedRevision, ...immutableProposal } = proposal;
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    storage.saveAppAutopilotChange({
+      id: immutableProposal.id,
+      draftId: immutableProposal.draftId,
+      proposalHash: immutableProposal.proposalHash,
+      runId: immutableProposal.runId,
+      artifactId: immutableProposal.artifactId,
+      payload: immutableProposal,
+      createdAt: immutableProposal.createdAt,
+    });
+  } finally {
+    storage.close();
+  }
+}
+
+function loadAppAutopilotChange(
+  projectRoot: string,
+  draftId: string,
+  proposalId: string,
+): AppAutopilotChangeProposal | null {
+  if (!/^[a-z0-9_:-]+$/i.test(draftId) || !/^[a-z0-9_:-]+$/i.test(proposalId)) return null;
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    const stored = storage.getAppAutopilotChange(draftId, proposalId);
+    if (stored) {
+      const proposal = stored.payload as AppAutopilotChangeProposal;
+      assertStoredAppAutopilotChange(proposal);
+      if (proposal.draftId !== draftId || proposal.id !== proposalId
+        || proposal.proposalHash !== stored.proposalHash
+        || proposal.runId !== stored.runId
+        || proposal.artifactId !== stored.artifactId) {
+        return null;
+      }
       return {
-        ...operation,
-        coverage: (operation.coverage ?? []).map((item) => item.requirementId === requirement.id
-          ? { ...item, status: 'covered', sourceIds: [sourceId], componentIds: [tileId], reasons: ['Covered by explicitly generated review-required App DQL.'] }
-          : item),
+        ...proposal,
+        ...(stored.appliedAt ? { appliedAt: stored.appliedAt } : {}),
+        ...(stored.appliedRevision !== undefined ? { appliedRevision: stored.appliedRevision } : {}),
       };
     }
-    return operation;
-  });
-  operations.push({
-    type: 'upsert_source',
-    source: {
-      id: sourceId,
-      kind: 'review_dql',
-      sourceRef,
-      qualifiedIdentity: tile.title,
-      sourceRevision: fingerprint,
-      sourceFingerprint: fingerprint,
-      lifecycle: 'review',
-      capabilities: { measures: requirement.measures, dimensions: requirement.dimensions, outputs: [], filters: requirement.filters, allowedVisualizations: [tile.viz.type], parameters: [] },
-      trustState: 'review_required',
-      reviewStatus: 'required',
-    },
-  });
-  operations.push({
-    type: 'set_review_task',
-    task: {
-      id: `review-gap-${key}`,
-      message: `Validate the joins, grain, filters, and business interpretation for ${tile.title}.`,
-      status: 'open',
-      sourceId,
-      pageId: pageOperation.page.id,
-      tileId,
-    },
-  });
-  return {
-    ...previous,
-    id: proposalId,
-    operations,
-    warnings: Array.from(new Set([...(previous.warnings ?? []), 'Generated gap remains review-required and local-only.'])),
-    summary: {
-      ...previous.summary,
-      covered: previous.summary.covered + 1,
-      gaps: Math.max(0, previous.summary.gaps - 1),
-    },
-  };
+  } finally {
+    storage.close();
+  }
+  // Compatibility migration for a proposal prepared by an earlier local
+  // runtime. New proposals live in SQLite so the draft and Apply decision can
+  // commit in one transaction; a legacy file is accepted once and immediately
+  // copied into that durable record.
+  const path = join(appAutopilotProposalDir(projectRoot, draftId), `${proposalId}.json`);
+  if (!existsSync(path)) return null;
+  try {
+    const proposal = JSON.parse(readFileSync(path, 'utf8')) as AppAutopilotChangeProposal;
+    assertStoredAppAutopilotChange(proposal);
+    if (proposal.draftId !== draftId || proposal.id !== proposalId) return null;
+    writeAppAutopilotChange(projectRoot, proposal);
+    return proposal;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Server-only entry for the universal App Autopilot executor. It loads the
+ * current draft itself, so browser context is limited to opaque ids and the
+ * actual App mutation cannot be smuggled through the agent request.
+ */
+export async function prepareAppAutopilotChange(
+  projectRoot: string,
+  input: {
+    draftId: string;
+    pageId: string;
+    tileId: string;
+    intent: AppAutopilotIntent;
+    runId: string;
+    artifactId: string;
+  },
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
+): Promise<AppAutopilotChangeProposal> {
+  const draftId = cleanString(input.draftId);
+  const draft = loadStoredAppBuildDraft(projectRoot, draftId);
+  if (!draft) {
+    throw new Error('APP_AUTOPILOT_DRAFT_NOT_FOUND: the App draft is no longer available. Reopen App Studio and try again.');
+  }
+  const proposal = await compileAppAutopilotChange(projectRoot, draft, {
+    pageId: cleanString(input.pageId),
+    tileId: cleanString(input.tileId),
+    intent: input.intent,
+    runId: cleanString(input.runId),
+    artifactId: cleanString(input.artifactId),
+  }, resolver);
+  writeAppAutopilotChange(projectRoot, proposal);
+  return proposal;
+}
+
+/**
+ * Apply is intentionally separate from preparation and validates the
+ * immutable AgentRun artifact link, draft revision, current Dataset identity,
+ * query coverage, and visualization again. The stored applied marker makes a
+ * repeated Apply safe after a lost browser response.
+ */
+export async function applyAppAutopilotChange(
+  projectRoot: string,
+  input: {
+    draftId: string;
+    proposalId: string;
+    runId: string;
+    artifactId: string;
+    expectedRevision: number;
+    expectedProposalHash: string;
+    proposalHash: string;
+  },
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
+): Promise<{ draft: AppBuildDraft; proposalId: string; deduped: boolean }> {
+  const draftId = cleanString(input.draftId);
+  const proposalId = cleanString(input.proposalId);
+  const current = loadStoredAppBuildDraft(projectRoot, draftId);
+  const proposal = current ? loadAppAutopilotChange(projectRoot, draftId, proposalId) : null;
+  if (!current || !proposal) {
+    throw new Error('APP_AUTOPILOT_CHANGE_NOT_FOUND: the App Autopilot review artifact is unavailable. Ask App Autopilot to prepare it again.');
+  }
+  if (proposal.runId !== cleanString(input.runId) || proposal.artifactId !== cleanString(input.artifactId)) {
+    throw new Error('APP_AUTOPILOT_ARTIFACT_MISMATCH: this change does not belong to the selected universal App Autopilot run.');
+  }
+  if (proposal.proposalHash !== cleanString(input.proposalHash)) {
+    throw new Error('APP_AUTOPILOT_CHANGE_INVALID: the reviewed change hash does not match the stored artifact.');
+  }
+  if (proposal.appliedRevision !== undefined) {
+    return { draft: current, proposalId: proposal.id, deduped: true };
+  }
+  if (input.expectedRevision !== current.revision
+    || cleanString(input.expectedProposalHash) !== current.proposalHash
+    || proposal.baseRevision !== current.revision
+    || proposal.baseProposalHash !== current.proposalHash) {
+    throw new Error('APP_AUTOPILOT_CHANGE_STALE: the App draft changed after review. Ask App Autopilot to prepare a new change.');
+  }
+  await assertAppAutopilotChangeDatasetSourceCurrent(projectRoot, current, proposal, resolver);
+  const operations = await bindServerResolvedDatasetSourceOperations(projectRoot, current, proposal.operations, resolver);
+  const next = applyAppBuildDraftOperations(current, current.revision, operations);
+  try {
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      const applied = storage.applyAppBuildDraftWithAutopilotChange(next, {
+        expectedRevision: current.revision,
+        operations,
+        proposal: {
+          id: proposal.id,
+          draftId: proposal.draftId,
+          proposalHash: proposal.proposalHash,
+          runId: proposal.runId,
+          artifactId: proposal.artifactId,
+        },
+        appliedAt: new Date().toISOString(),
+      });
+      return { draft: applied.draft, proposalId: proposal.id, deduped: applied.deduped };
+    } finally {
+      storage.close();
+    }
+  } catch (error) {
+    // If a concurrent Apply won and marked this exact immutable proposal, the
+    // caller gets the durable result rather than a misleading conflict.
+    const applied = loadAppAutopilotChange(projectRoot, draftId, proposalId);
+    const reloaded = loadStoredAppBuildDraft(projectRoot, draftId);
+    if (applied?.appliedRevision !== undefined && reloaded) {
+      return { draft: reloaded, proposalId: applied.id, deduped: true };
+    }
+    throw error;
+  }
 }
 
 async function composeStoredAppBuildDraft(
   projectRoot: string,
   current: AppBuildDraft,
   request: AppBuildComposeRequest,
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
 ): Promise<{ draft: AppBuildDraft; pageIds: string[]; tileIds: string[] }> {
   if (request.mode === 'ai') {
     const proposal = loadAppBuildDraftAiProposal(projectRoot, current.id, cleanString(request.proposalId));
@@ -4580,7 +6654,19 @@ async function composeStoredAppBuildDraft(
         throw new Error(`APP_BUILD_REVIEW_POLICY_REQUIRED: enable review-required sources before adding ${source.qualifiedIdentity ?? source.sourceRef}.`);
       }
     }
-    const operations = operationsForSelectedAppBuildSources(proposal.operations, selected);
+    const selectedOperations = operationsForSelectedAppBuildSources(proposal.operations, selected);
+    // The plan is immutable intent, not source authority. Re-resolving a
+    // source protects against provider-supplied capabilities, but it must not
+    // silently upgrade a server-issued proposal to a newer Dataset revision or
+    // contract. Require a fresh proposal when the source changed after the
+    // author reviewed this one.
+    await assertAiProposalDatasetSourcePinsCurrent(projectRoot, selectedOperations, resolver);
+    const operations = await bindServerResolvedDatasetSourceOperations(
+      projectRoot,
+      current,
+      selectedOperations,
+      resolver,
+    );
     const next = applyAppBuildDraftOperations(current, current.revision, operations);
     writeStoredAppBuildDraft(projectRoot, next, { expectedRevision: current.revision, operations });
     const pages = operations.flatMap((operation) => operation.type === 'upsert_page' ? [operation.page] : []);
@@ -4608,7 +6694,10 @@ async function composeStoredAppBuildDraft(
     throw new Error(`APP_BUILD_SOURCE_DRIFT: these sources no longer resolve: ${resolved.missingSourceIds.join(', ')}`);
   }
   const byId = new Map(resolved.items.map((source) => [source.sourceId, source]));
-  const workingItems = new Map(current.pages.map((page) => [page.id, [...page.layout.items]]));
+  // Field-based composition edits a complete v3 page in memory, then persists
+  // it through one existing `upsert_page` operation. This keeps the dataset
+  // registry and its query tiles atomic inside the local draft revision.
+  const workingPages = new Map(current.pages.map((page) => [page.id, structuredClone(page)]));
   const operations: AppBuildDraftOperation[] = request.enableReviewRequired === true
     && current.sourcePolicy !== 'include_review_required'
     ? [{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }]
@@ -4622,15 +6711,57 @@ async function composeStoredAppBuildDraft(
     if (!source.eligibility.localPreview) {
       throw new Error(`APP_BUILD_REVIEW_POLICY_REQUIRED: ${source.title} is ${source.lifecycle}; enable review-required sources to add it locally.`);
     }
-    const page = current.pages.find((candidate) => candidate.id === cleanString(selection.pageId)) ?? current.pages[0];
+    const selectedPage = current.pages.find((candidate) => candidate.id === cleanString(selection.pageId)) ?? current.pages[0];
+    const page = selectedPage ? workingPages.get(selectedPage.id) : undefined;
     if (!page) throw new Error('APP_BUILD_PAGE_REQUIRED: add a page before adding a source.');
-    const pageItems = workingItems.get(page.id) ?? [...page.layout.items];
+    const pageItems = page.layout.items;
     const tileId = uniqueTileId(pageItems, `${source.name}-${selection.view}`);
     const y = pageItems.reduce((max, item) => Math.max(max, item.y + item.h), 0);
-    const certified = source.lifecycle === 'certified';
+    const certified = source.trust === 'certified';
     const view = selection.view === 'chart'
       ? normalizeVizType(source.capabilities.chartType ?? source.capabilities.allowedVisualizations?.[0] ?? 'bar')
       : selection.view === 'kpi' ? 'kpi' : 'table';
+    const dataset = source.capabilities.dataset;
+    const datasetId = dataset ? `dataset_${createHash('sha256').update(source.sourceId).digest('hex').slice(0, 16)}` : undefined;
+    const existingDatasetBinding = page.datasets?.find((binding) => binding.sourceId === source.sourceId);
+    if (existingDatasetBinding && existingDatasetBinding.sourceRevision !== source.sourceRevision) {
+      throw new Error(`APP_BUILD_SOURCE_DRIFT: ${source.title} changed revision; refresh or replace the existing Dataset binding before adding another tile.`);
+    }
+    if (dataset && !existingDatasetBinding) {
+      page.version = 3;
+      page.datasets = [
+        ...(page.datasets ?? []),
+        {
+          id: datasetId!,
+          sourceId: source.sourceId,
+          sourceRevision: source.sourceRevision,
+          snapshotId: source.snapshotId,
+          contractFingerprint: dataset.contractRef.fingerprint,
+        },
+      ];
+    }
+    if (!dataset && selection.query !== undefined) {
+      throw new Error(`APP_BUILD_DATASET_QUERY_SOURCE_REQUIRED: ${source.title} does not expose a field-based Dataset.`);
+    }
+    const requestedQuery = selection.query === undefined ? undefined : normalizeTileQuery(selection.query);
+    if (selection.query !== undefined && !requestedQuery) {
+      throw new Error(`APP_BUILD_DATASET_QUERY_INVALID: ${source.title} has an unsupported or malformed field query.`);
+    }
+    const defaultQuery = dataset ? requestedQuery ?? defaultTileQueryForDataset(dataset, selection.view) : undefined;
+    if (dataset && !defaultQuery) {
+      throw new Error(`APP_BUILD_DATASET_NO_APPROVED_MEASURE: ${source.title} has no approved measure for a field-based tile.`);
+    }
+    if (dataset && defaultQuery) {
+      const validation = validateTileQuery(dataset, defaultQuery);
+      if (validation.outcome !== 'covered') {
+        const detail = validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ') || 'The selected Dataset operations are not covered.';
+        throw new Error(`APP_BUILD_DATASET_QUERY_${validation.outcome.toUpperCase()}: ${detail}`);
+      }
+      const visualization = datasetTileVisualizationCompatibility(defaultQuery, view);
+      if (!visualization.compatible) {
+        throw new Error(`APP_BUILD_DATASET_VISUALIZATION_INVALID: ${visualization.message}`);
+      }
+    }
     const tile: DashboardGridItem = {
       i: tileId,
       x: (index % 2) * 6,
@@ -4639,19 +6770,18 @@ async function composeStoredAppBuildDraft(
       h: selection.view === 'kpi' ? 2 : 4,
       sourceId: source.sourceId,
       sourceRevision: source.sourceRevision,
-      block: { ref: source.executionRef },
+      ...(defaultQuery ? { query: defaultQuery } : { block: { ref: source.executionRef } }),
       viz: { type: view },
-      title: source.title,
-      sourceClass: certified ? 'certified_block' : 'exploratory_analysis',
+      title: cleanString(selection.title) || source.title,
+      sourceClass: source.kind === 'semantic' ? 'governed_semantic' : certified ? 'certified_block' : 'exploratory_analysis',
       filterBindings: source.capabilities.filters.map((filter) => ({ filter, binding: filter, mode: 'predicate', capability: 'preflight_required' })),
       review: { status: certified ? 'not_required' : 'required', sourceFingerprint: source.sourceRevision },
       trustState: certified ? 'certified' : 'review_required',
       reviewStatus: certified ? 'certified' : 'review_required',
     };
     pageItems.push(tile);
-    workingItems.set(page.id, pageItems);
+    workingPages.set(page.id, page);
     operations.push({ type: 'upsert_source', source: appDraftSourceFromCatalog(source) });
-    operations.push({ type: 'add_tile', pageId: page.id, tile });
     if (!certified) {
       operations.push({
         type: 'set_review_task',
@@ -4674,6 +6804,10 @@ async function composeStoredAppBuildDraft(
       addition.componentIds.push(tileId);
       coverageAdditions.set(requirement.id, addition);
     }
+  }
+  for (const pageId of pageIds) {
+    const page = workingPages.get(pageId);
+    if (page) operations.push({ type: 'upsert_page', page });
   }
   if (current.requirements.length > 0) {
     const existingByRequirement = new Map(current.coverage.map((item) => [item.requirementId, item]));
@@ -4759,15 +6893,153 @@ function operationsForSelectedAppBuildSources(
   });
 }
 
+type PublishedDatasetSourceResolution = {
+  snapshotId: string;
+  items: AppSourceCatalogRecord[];
+  missingSourceIds: string[];
+};
+
 /**
- * Rehydrate the canonical v3 source registry when a Git-owned App is opened in
- * Studio. Published dashboard documents intentionally keep the immutable
- * source binding on each tile; the mutable local draft must restore that
- * registry before core aggregate validation runs. This is metadata-only and
- * performs no request-time block scan. Current lifecycle/fingerprint checks
- * remain the responsibility of preview and publication preflight.
+ * Supplied only by the HTTP App-edit route after it has refreshed the active
+ * immutable metadata snapshot. Keeping the resolver synchronous preserves the
+ * existing direct/local draft API, while preventing the published document
+ * from being used as an authority for Dataset capabilities or trust.
  */
-function rehydratePublishedAppSources(pages: DashboardDocument[]): {
+export type CreateStoredAppBuildDraftOptions = {
+  resolvePublishedDatasetSources?: (
+    sourceIds: string[],
+    sourcePolicy: AppBuildSourcePolicy,
+  ) => PublishedDatasetSourceResolution;
+  /** A catalog refresh failed before rehydration. Persist a repairable source
+   * placeholder instead of treating stale published metadata as current. */
+  datasetCatalogError?: string;
+};
+
+type PublishedDatasetSourceReference = {
+  pageId: string;
+  tileId: string;
+  title: string;
+  sourceId: string;
+  sourceRevision?: string;
+  binding?: DashboardDatasetBinding;
+  bindingMatchesTile: boolean;
+};
+
+function publishedDatasetSourceReferences(pages: DashboardDocument[]): PublishedDatasetSourceReference[] {
+  return pages.flatMap((page) => page.layout.items.flatMap((tile) => {
+    if (!tile.query || !tile.sourceId) return [];
+    const sourceId = tile.sourceId.trim();
+    const sourceRevision = tile.sourceRevision?.trim();
+    if (!sourceId) return [];
+    const exactBinding = sourceRevision
+      ? page.datasets?.find((binding) => binding.sourceId === sourceId && binding.sourceRevision === sourceRevision)
+      : undefined;
+    const sourceBinding = exactBinding ?? page.datasets?.find((binding) => binding.sourceId === sourceId);
+    return [{
+      pageId: page.id,
+      tileId: tile.i,
+      title: tile.title || tile.i,
+      sourceId,
+      ...(sourceRevision ? { sourceRevision } : {}),
+      ...(sourceBinding ? { binding: sourceBinding } : {}),
+      bindingMatchesTile: Boolean(exactBinding),
+    }];
+  }));
+}
+
+function publishedDatasetPlaceholder(
+  reference: PublishedDatasetSourceReference,
+): AppBuildDraftSource {
+  const sourceRevision = reference.sourceRevision;
+  return {
+    id: reference.sourceId,
+    kind: reference.sourceId.startsWith('app:semantic:') ? 'governed_semantic' : 'block',
+    // This is an opaque persisted identity for repair only. It is deliberately
+    // not an executionRef/sourcePath and carries no inferred Dataset contract.
+    sourceRef: reference.sourceId,
+    qualifiedIdentity: reference.title || reference.sourceId,
+    ...(sourceRevision ? { sourceRevision, sourceFingerprint: sourceRevision } : {}),
+    lifecycle: 'unknown',
+    trustState: 'review_required',
+    reviewStatus: 'required',
+  };
+}
+
+function publishedDatasetReviewTask(
+  reference: PublishedDatasetSourceReference,
+  message: string,
+): AppBuildDraft['reviewTasks'][number] {
+  return {
+    id: `published-dataset-${createHash('sha256')
+      .update(`${reference.sourceId}\0${reference.pageId}\0${reference.tileId}\0${message}`)
+      .digest('hex')
+      .slice(0, 12)}`,
+    message,
+    status: 'open',
+    sourceId: reference.sourceId,
+    pageId: reference.pageId,
+    tileId: reference.tileId,
+  };
+}
+
+function publishedDatasetRestoreIssue(
+  references: PublishedDatasetSourceReference[],
+  source: AppSourceCatalogRecord | undefined,
+  catalogError: string | undefined,
+): string | undefined {
+  const first = references[0];
+  const binding = first.binding;
+  if (!binding || !first.bindingMatchesTile) {
+    return `${first.title} is missing its exact published Dataset binding. Select a current Dataset before previewing or publishing.`;
+  }
+  if (!first.sourceRevision) {
+    return `${first.title} has no published Dataset source revision. Select a current Dataset before previewing or publishing.`;
+  }
+  const signatures = new Set(references.map((reference) => reference.bindingMatchesTile && reference.binding
+    ? `${reference.binding.sourceRevision}\0${reference.binding.contractFingerprint}`
+    : 'missing'));
+  if (signatures.size > 1) {
+    return `${first.title} has conflicting published Dataset bindings. Refresh or reselect the Dataset before previewing or publishing.`;
+  }
+  if (catalogError) {
+    return `${first.title} could not be verified against the current governed source catalog. Refresh or reselect the Dataset before previewing or publishing.`;
+  }
+  if (!source) {
+    return `${first.title} no longer resolves in the current governed source catalog. Select a replacement Dataset before previewing or publishing.`;
+  }
+  if (source.sourceRevision !== binding.sourceRevision) {
+    return `${first.title} changed Dataset source revision after publication. Refresh or reselect the Dataset before previewing or publishing.`;
+  }
+  const dataset = source.capabilities.dataset;
+  if (!dataset) {
+    return `${first.title} no longer exposes a field-based Dataset contract. Select a replacement Dataset before previewing or publishing.`;
+  }
+  if (dataset.sourceRevision !== binding.sourceRevision
+    || dataset.binding.sourceRevision !== binding.sourceRevision) {
+    return `${first.title} has an inconsistent current Dataset source revision. Refresh or reselect the Dataset before previewing or publishing.`;
+  }
+  if (dataset.contractRef.fingerprint !== binding.contractFingerprint) {
+    return `${first.title} changed its approved Dataset field contract after publication. Refresh or reselect the Dataset before previewing or publishing.`;
+  }
+  if (dataset.binding.contractFingerprint !== binding.contractFingerprint) {
+    return `${first.title} has an inconsistent current Dataset field contract. Refresh or reselect the Dataset before previewing or publishing.`;
+  }
+  return undefined;
+}
+
+/**
+ * Rehydrate the canonical source registry when a Git-owned App is opened in
+ * Studio. Page Dataset bindings are historical intent/provenance. Current
+ * catalog records are the only authority for source capabilities and trust.
+ * A missing, stale, or unreachable current record becomes a non-executable
+ * review placeholder so the local draft remains repairable without silently
+ * changing its selected source revision or field contract.
+ */
+function rehydratePublishedAppSources(
+  pages: DashboardDocument[],
+  sourcePolicy: AppBuildSourcePolicy,
+  options: CreateStoredAppBuildDraftOptions = {},
+): {
   pages: DashboardDocument[];
   sources: AppBuildDraftSource[];
   reviewTasks: AppBuildDraft['reviewTasks'];
@@ -4776,11 +7048,55 @@ function rehydratePublishedAppSources(pages: DashboardDocument[]): {
   const sources = new Map<string, AppBuildDraftSource>();
   const reviewTasks = new Map<string, AppBuildDraft['reviewTasks'][number]>();
   let requiresReviewPolicy = false;
+  const datasetReferences = publishedDatasetSourceReferences(pages);
+  const datasetReferencesBySourceId = new Map<string, PublishedDatasetSourceReference[]>();
+  for (const reference of datasetReferences) {
+    const values = datasetReferencesBySourceId.get(reference.sourceId) ?? [];
+    values.push(reference);
+    datasetReferencesBySourceId.set(reference.sourceId, values);
+  }
+  let resolution: PublishedDatasetSourceResolution | undefined;
+  let catalogError = options.datasetCatalogError;
+  if (datasetReferencesBySourceId.size > 0 && options.resolvePublishedDatasetSources && !catalogError) {
+    try {
+      resolution = options.resolvePublishedDatasetSources(Array.from(datasetReferencesBySourceId.keys()), sourcePolicy);
+    } catch (error) {
+      catalogError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  const recordsBySourceId = new Map((resolution?.items ?? []).map((source) => [source.sourceId, source]));
+  for (const [sourceId, references] of datasetReferencesBySourceId) {
+    const source = recordsBySourceId.get(sourceId);
+    const issue = publishedDatasetRestoreIssue(references, source, catalogError);
+    const restored = issue ? publishedDatasetPlaceholder(references[0]) : appDraftSourceFromCatalog(source!);
+    sources.set(sourceId, restored);
+    if (issue) {
+      requiresReviewPolicy = true;
+      for (const reference of references) {
+        const task = publishedDatasetReviewTask(reference, issue);
+        reviewTasks.set(task.id, task);
+      }
+      continue;
+    }
+    if (source!.trust !== 'certified') {
+      requiresReviewPolicy = true;
+      for (const reference of references) {
+        const task = publishedDatasetReviewTask(
+          reference,
+          `${source!.title} is currently ${source!.lifecycle}. Resolve its governed review state before Project publication.`,
+        );
+        reviewTasks.set(task.id, task);
+      }
+    }
+  }
   const normalizedPages = pages.map((page) => ({
     ...page,
     layout: {
       ...page.layout,
       items: page.layout.items.map((tile) => {
+        // Field-based tiles use the page Dataset binding above. Never rebuild
+        // a Dataset source from serialized tile display metadata.
+        if (tile.query) return tile;
         const hasDataSource = Boolean(tile.block || tile.semantic || tile.draftAnalysis || tile.aiPin);
         if (!hasDataSource) return tile;
         const blockRef = tile.block ? ('ref' in tile.block ? tile.block.ref : tile.block.blockId) : undefined;
@@ -4889,6 +7205,7 @@ export function createStoredAppBuildDraft(
     template?: 'executive_brief' | 'operational_dashboard' | 'investigation' | 'blank';
     entrypoint?: 'studio' | 'ask';
   },
+  options: CreateStoredAppBuildDraftOptions = {},
 ): AppBuildDraft {
   const baseAppId = cleanString(input.baseAppId);
   const base = baseAppId ? loadAppById(projectRoot, baseAppId) : null;
@@ -4924,7 +7241,11 @@ export function createStoredAppBuildDraft(
       .filter((page): page is DashboardDocument => Boolean(page))
     : [];
   const template = input.template ?? 'blank';
-  const published = rehydratePublishedAppSources(basePages);
+  const published = rehydratePublishedAppSources(
+    basePages,
+    input.sourcePolicy ?? 'governed_only',
+    options,
+  );
   const pages = published.pages.length ? published.pages : [applyAppStudioTemplate(blankPage, template, name)];
   const draft = createAppBuildDraft({
     id,
@@ -5180,7 +7501,7 @@ function applyAppStudioTemplate(
   };
 }
 
-function loadStoredAppBuildDraft(projectRoot: string, id: string): AppBuildDraft | null {
+export function loadStoredAppBuildDraft(projectRoot: string, id: string): AppBuildDraft | null {
   const clean = cleanString(id);
   if (!clean || !/^[a-z0-9_:-]+$/i.test(clean)) return null;
   const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
@@ -5509,7 +7830,14 @@ export function preflightStoredAppBuildDraft(projectRoot: string, draft: AppBuil
       }
     }
     if (source.kind === 'governed_semantic' || source.kind === 'semantic_query') {
-      if (source.reviewStatus !== 'approved' || !source.snapshotId || !source.receiptId) {
+      if (source.capabilities?.dataset) {
+        if (source.lifecycle !== 'certified' || source.trustState !== 'certified') {
+          errors.push(`Dataset source ${source.qualifiedIdentity ?? source.id} is ${source.lifecycle ?? 'unknown'} and cannot be published to the Project.`);
+        }
+        if (!source.sourceRevision) {
+          errors.push(`Dataset source ${source.qualifiedIdentity ?? source.id} has no bound semantic source revision; refresh it before Project publication.`);
+        }
+      } else if (source.reviewStatus !== 'approved' || !source.snapshotId || !source.receiptId) {
         errors.push(`Source ${source.id} requires snapshot-bound semantic approval before Project publication.`);
       }
     }
@@ -5520,22 +7848,77 @@ export function preflightStoredAppBuildDraft(projectRoot: string, draft: AppBuil
       errors.push(`Source ${source.id} requires include_review_required policy.`);
     }
   }
+  for (const page of draft.pages) {
+    for (const tile of page.layout.items) {
+      if (!tile.query) continue;
+      const source = tile.sourceId ? draft.sources.find((candidate) => candidate.id === tile.sourceId) : undefined;
+      if (!source || !tile.sourceRevision) {
+        errors.push(`${page.id}/${tile.i} has no exact Dataset source binding.`);
+        continue;
+      }
+      const dataset = source.capabilities?.dataset;
+      if (!dataset) {
+        errors.push(`${page.id}/${tile.i} points to ${source.id}, which no longer exposes a field-based Dataset contract.`);
+        continue;
+      }
+      const pageDataset = page.datasets?.find((binding) => binding.sourceId === tile.sourceId
+        && binding.sourceRevision === tile.sourceRevision);
+      if (!pageDataset) {
+        errors.push(`${page.id}/${tile.i} is missing the matching page Dataset binding.`);
+      } else if (pageDataset.contractFingerprint !== dataset.contractRef.fingerprint) {
+        errors.push(`${page.id}/${tile.i} was authored against an older Dataset field contract.`);
+      }
+      if (source.sourceRevision !== tile.sourceRevision) {
+        errors.push(`${page.id}/${tile.i} changed Dataset source revision after the tile was authored.`);
+      }
+      if (source.lifecycle !== 'certified' || source.trustState !== 'certified') {
+        errors.push(`${page.id}/${tile.i} uses a ${source.lifecycle ?? 'unknown'} Dataset source and cannot be published to the Project.`);
+      }
+      const validation = validateTileQuery(dataset, tile.query);
+      if (validation.outcome !== 'covered') {
+        errors.push(`${page.id}/${tile.i} has a Dataset field selection that is not fully covered by its approved contract.`);
+      }
+      const visualization = datasetTileVisualizationCompatibility(tile.query, tile.viz.type);
+      if (!visualization.compatible) {
+        errors.push(`${page.id}/${tile.i} has an incompatible Dataset visualization: ${visualization.message}`);
+      }
+      if (source.kind === 'block' || source.kind === 'certified_block') {
+        const block = blocks.find((candidate) => candidate.path === source.executionRef || candidate.path === source.sourceRef);
+        if (!block || block.status !== 'certified' || block.fingerprint !== source.sourceRevision) {
+          errors.push(`${page.id}/${tile.i} does not resolve to its current certified Dataset block.`);
+        }
+      } else if (source.kind === 'governed_semantic' || source.kind === 'semantic_query') {
+        if (dataset.kind !== 'semantic' || Object.keys(source.capabilities?.metricCapabilities ?? {}).length === 0) {
+          errors.push(`${page.id}/${tile.i} no longer has exact per-measure semantic authority.`);
+        }
+      } else {
+        errors.push(`${page.id}/${tile.i} uses a non-governed Dataset source kind.`);
+      }
+    }
+  }
   const settledPageIds = new Set(receipts.filter((receipt) => receipt.revision === draft.revision).map((receipt) => receipt.pageId));
   const readiness = appPublicationReadiness(projectRoot, draft.pages, { settledPageIds });
   errors.push(...readiness.blockers.map((blocker) => blocker.message));
   return Array.from(new Set(errors));
 }
 
-function preflightAppBuildRequestErrors(
+async function preflightAppBuildRequestErrors(
   projectRoot: string,
   draft: AppBuildDraft,
   verifyPreview: Ctx['verifyAppBuildPreview'],
-): string[] {
+  resolver?: Ctx['resolveDatasetSourceAuthority'],
+): Promise<string[]> {
   const errors = preflightStoredAppBuildDraft(projectRoot, draft);
+  // Local draft state is not authority for Dataset lifecycle. Re-resolve the
+  // active catalog before a preflight or publish request so a source that was
+  // downgraded after an earlier run cannot publish through a forged source
+  // card, a removed review task, or an otherwise matching old receipt.
+  errors.push(...await datasetDraftCurrentAuthorityErrors(projectRoot, draft, 'project_publish', resolver));
   const analysisPages = draft.pages
     .map((page) => ({
       pageId: page.id,
       tileIds: page.layout.items.filter((tile) => !tile.text && !tile.aiPin).map((tile) => tile.i),
+      datasetTileIds: page.layout.items.filter((tile) => Boolean(tile.query)).map((tile) => tile.i),
     }))
     .filter((page) => page.tileIds.length > 0);
   const receipts = draft.previewReceipts ?? (draft.previewReceipt ? [draft.previewReceipt] : []);
@@ -5545,14 +7928,24 @@ function preflightAppBuildRequestErrors(
   for (const page of analysisPages) {
     const receipt = receipts.find((candidate) => candidate.pageId === page.pageId);
     if (!receipt || !verifyPreview) continue;
-    const verified = verifyPreview({
+    const intentFingerprint = appBuildPreviewIntentFingerprint(draft, page.pageId);
+    if (!receipt.intentFingerprint || receipt.intentFingerprint !== intentFingerprint) {
+      errors.push(`The saved preview receipt for ${page.pageId} was produced by different App content. Run the current draft again before publication.`);
+      continue;
+    }
+    const verified = await verifyPreview({
       runId: receipt.id,
       draftId: draft.id,
       dashboardId: page.pageId,
       tileIds: page.tileIds,
+      ...(page.datasetTileIds.length ? { datasetTileIds: page.datasetTileIds } : {}),
+      intentFingerprint,
+      purpose: 'project_publish',
     });
     if (!verified.ok
       || verified.snapshotId !== receipt.snapshotId
+      || verified.filterFingerprint !== receipt.filterFingerprint
+      || verified.intentFingerprint !== receipt.intentFingerprint
       || verified.resultFingerprint !== receipt.resultFingerprint) {
       errors.push(verified.ok
         ? `The saved preview receipt for ${page.pageId} no longer matches the settled run.`
@@ -5560,6 +7953,62 @@ function preflightAppBuildRequestErrors(
     }
   }
   return Array.from(new Set(errors));
+}
+
+/**
+ * Preview receipts are server evidence, never a browser assertion. Before a
+ * client can attach a run to its local draft, bind it to the exact current
+ * page content and verify every result/fingerprint against the server's local
+ * evidence registry. This rejects the dangerous A-run -> edit-to-B -> save-A
+ * replay even when source IDs and the project filesystem snapshot match.
+ */
+async function bindServerIssuedPreviewReceipts(
+  draft: AppBuildDraft,
+  operations: AppBuildDraftOperation[],
+  verifyPreview: Ctx['verifyAppBuildPreview'],
+): Promise<AppBuildDraftOperation[]> {
+  if (operations.some((operation) => operation.type === 'clear_preview_receipt')) {
+    throw new Error('APP_BUILD_PREVIEW_RECEIPT_INVALID: receipt invalidation is issued only by the active App runtime.');
+  }
+  // A PATCH may try to edit query A into query B and attach A's run in the
+  // same request.  Bind against the resulting authored content, not merely
+  // the stored draft that existed before this PATCH.
+  const contentOperations = operations.filter((operation) => operation.type !== 'set_preview_receipt');
+  const receiptBindingDraft = contentOperations.length > 0
+    ? applyAppBuildDraftOperations(draft, draft.revision, contentOperations)
+    : draft;
+  return Promise.all(operations.map(async (operation) => {
+    if (operation.type !== 'set_preview_receipt') return operation;
+    const receipt = operation.receipt;
+    if (!receipt || typeof receipt.id !== 'string' || !receipt.id.trim() || typeof receipt.pageId !== 'string' || !receipt.pageId.trim()) {
+      throw new Error('APP_BUILD_PREVIEW_RECEIPT_INVALID: a preview receipt needs a run ID and page ID.');
+    }
+    const page = receiptBindingDraft.pages.find((candidate) => candidate.id === receipt.pageId);
+    if (!page) throw new Error(`APP_BUILD_PREVIEW_RECEIPT_INVALID: page ${receipt.pageId} is not in this local draft.`);
+    if (!verifyPreview) throw new Error('APP_BUILD_PREVIEW_UNVERIFIABLE: run the current local draft from an active DQL runtime before saving its receipt.');
+    const tileIds = page.layout.items.filter((tile) => !tile.text && !tile.aiPin).map((tile) => tile.i);
+    const datasetTileIds = page.layout.items.filter((tile) => Boolean(tile.query)).map((tile) => tile.i);
+    const intentFingerprint = appBuildPreviewIntentFingerprint(receiptBindingDraft, page.id);
+    const verified = await verifyPreview({
+      runId: receipt.id,
+      draftId: receiptBindingDraft.id,
+      dashboardId: page.id,
+      tileIds,
+      ...(datasetTileIds.length ? { datasetTileIds } : {}),
+      intentFingerprint,
+      purpose: 'local_preview',
+    });
+    if (!verified.ok) throw new Error(`APP_BUILD_PREVIEW_RECEIPT_REJECTED: ${verified.error}`);
+    if (receipt.snapshotId !== verified.snapshotId
+      || receipt.filterFingerprint !== verified.filterFingerprint
+      || receipt.resultFingerprint !== verified.resultFingerprint) {
+      throw new Error('APP_BUILD_PREVIEW_RECEIPT_REJECTED: the submitted receipt does not match the server-owned settled run.');
+    }
+    return {
+      ...operation,
+      receipt: { ...receipt, intentFingerprint: verified.intentFingerprint },
+    };
+  }));
 }
 
 function appBuildRequirementBlocksPublication(draft: AppBuildDraft, requirement: AppBuildDraft['requirements'][number]): boolean {
@@ -5617,6 +8066,7 @@ function appBuildSourceFingerprint(draft: AppBuildDraft): string {
       sourceFingerprint: source.sourceFingerprint,
       receiptId: source.receiptId,
       reviewStatus: source.reviewStatus,
+      datasetContractFingerprint: source.capabilities?.dataset?.contractRef.fingerprint,
     }));
   return `sha256:${createHash('sha256').update(JSON.stringify(sources)).digest('hex')}`;
 }
@@ -5641,9 +8091,15 @@ export function publishStoredAppBuildDraft(
   const owner = `${process.env.USER ?? 'owner'}@local`;
   const domain = draft.pages[0]?.metadata.domain || 'general';
   const name = draft.name.trim() || draft.appId;
-  const containsSemantic = draft.sources.some((source) => source.kind === 'governed_semantic' || source.kind === 'semantic_query');
-  const hasCertifiedAnalysis = draft.sources.some((source) => (source.kind === 'block' || source.kind === 'certified_block') && source.trustState === 'certified');
-  const lifecycle = hasCertifiedAnalysis && !containsSemantic ? 'certified' as const : 'review' as const;
+  const hasCertifiedAnalysis = draft.sources.some((source) => (
+    (source.kind === 'block' || source.kind === 'certified_block')
+    || ((source.kind === 'governed_semantic' || source.kind === 'semantic_query') && Boolean(source.capabilities?.dataset))
+  ) && source.trustState === 'certified' && source.lifecycle === 'certified');
+  const hasReviewRequiredSource = draft.sources.some((source) => source.trustState !== 'certified'
+    || ((source.kind === 'governed_semantic' || source.kind === 'semantic_query')
+      && !source.capabilities?.dataset
+      && source.reviewStatus !== 'approved'));
+  const lifecycle = hasCertifiedAnalysis && !hasReviewRequiredSource ? 'certified' as const : 'review' as const;
   const app: AppDocument = {
     version: 1,
     id: draft.appId,
@@ -5675,7 +8131,10 @@ export function publishStoredAppBuildDraft(
   };
   const committedPages = draft.pages.map((page) => ({
     ...page,
-    version: 2 as const,
+    // Dataset field tiles are a v3 document feature. Preserve their grammar
+    // version on publication so the generated App remains readable without a
+    // lossy conversion to the legacy dashboard shape.
+    version: page.version === 3 ? 3 as const : 2 as const,
     metadata: { ...page.metadata, visibility: 'shared' as const, lifecycle },
   }));
   mkdirSync(dashboardDir, { recursive: true });

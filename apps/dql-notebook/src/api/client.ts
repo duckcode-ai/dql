@@ -1,6 +1,7 @@
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
 import { normalizeDqlArtifactReference, type DqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
+import type { DatasetDescriptor, MetricCapabilityContract, SemanticTileConversionProvenanceV1, TileQuery } from '@duckcodeailabs/dql-core';
 import type {
   ManifestDbtFirstModeling,
   ManifestModelRelationship,
@@ -907,7 +908,7 @@ export type AgentRunStopReason =
   | 'human_review_required'
   | 'cancelled'
   | 'blocked';
-export type AgentRunArtifactKind = 'answer' | 'research_run' | 'sql_cell' | 'dql_block_draft' | 'app_draft' | 'app_proposal' | 'modeling_change_proposal' | 'skill_change_proposal';
+export type AgentRunArtifactKind = 'answer' | 'research_run' | 'sql_cell' | 'dql_block_draft' | 'app_draft' | 'app_proposal' | 'app_autopilot_change' | 'modeling_change_proposal' | 'skill_change_proposal';
 
 export interface MixedSourceNotebookPlan {
   datasetId?: string;
@@ -1700,7 +1701,7 @@ export interface AgentRun {
   repairCapability?: AnalyticalRepairCapabilityV1;
   providerEgressReceipts?: ProviderEgressReceiptV1[];
   derivation?: {
-    version: 1 | 2;
+    version: 1 | 2 | 3;
     kind: 'analytical_repair' | 'authoring_revision';
     sourceRunId: string;
     sourceFailureId?: string;
@@ -2168,7 +2169,7 @@ export interface NotebookExecutionContext {
 export interface DashboardDocumentResponse {
   app: AppDocumentSummary['app'];
   dashboard: {
-    version: 1 | 2;
+    version: 1 | 2 | 3;
     id: string;
     metadata: {
       title: string;
@@ -2198,7 +2199,12 @@ export interface DashboardDocumentResponse {
       field?: { name: string; relation?: string; semanticModel?: string; provider?: string };
       required?: boolean;
       multiple?: boolean;
-      scope?: { page?: string; tileIds?: string[] };
+      scope?: { app?: boolean; page?: string; tileIds?: string[] };
+      /** v3 maps a global field explicitly to each Dataset; matching names
+       * across unrelated sources never create a binding. `tileIds` keeps an
+       * author-selected component subset when tiles share one Dataset;
+       * omitted retains legacy all-tile behavior while [] excludes all. */
+      datasetBindings?: Record<string, { field: string; tileIds?: string[] }>;
       optionSource?: { mode: 'static' | 'distinct_query'; sourceRef?: string; field?: string; snapshotId?: string; limit?: number };
       dependsOn?: string[];
     }>;
@@ -2217,6 +2223,25 @@ export interface DashboardDocumentResponse {
       eligibleTileIds?: string[];
       driverTileIds?: string[];
       vocabulary?: string[];
+    };
+    /** v3 field-builder source registry retained with the Git-owned page. */
+    datasets?: Array<{
+      id: string;
+      sourceId: string;
+      sourceRevision: string;
+      snapshotId: string;
+      contractFingerprint: string;
+    }>;
+    /** Field-bound, source-qualified interactions. They are authored in the
+     * Studio and interpreted by the local runtime; result display names never
+     * create a mapping by themselves. */
+    interactions?: {
+      crossFilter?: {
+        enabled?: boolean;
+        mappings: Array<{ fromTileId: string; fromField: string; toDataset: string; toField: string }>;
+      };
+      detail?: { dataset: string; columns: string[] };
+      navigate?: Array<{ fromTile: string; toPage: string; carryFilters: string[] }>;
     };
     layout: {
       kind: 'grid';
@@ -2252,6 +2277,8 @@ export interface DashboardDocumentResponse {
           snapshotId?: string;
           executionReceiptId?: string;
         };
+        /** Declarative, server-validated Dataset field selection. */
+        query?: TileQuery;
         viz: { type: string; options?: Record<string, unknown> };
         display?: DashboardDisplayMetadata;
         filterBindings?: DashboardTileFilterBinding[];
@@ -2304,14 +2331,115 @@ export interface AppExecutionRepairTrace {
 
 export interface DashboardTileArtifact {
   version: 1;
-  sourceKind: 'certified_block' | 'review_block' | 'semantic_query' | 'draft_analysis' | 'ai_pin';
+  sourceKind: 'certified_block' | 'review_block' | 'semantic_query' | 'dataset_query' | 'draft_analysis' | 'ai_pin';
   name: string;
   sourcePath?: string;
+  /**
+   * A redacted, declarative Dataset TileQuery specification for inspection.
+   * It is not DQL source and it never carries bound parameter values.
+   */
+  authoredQuerySpec?: string;
   dql?: string;
   sql?: string;
   trustState: 'certified' | 'review_required';
   explanation?: string[];
   executionTarget?: { target: 'local' } | { target: 'connection'; connectionName?: string };
+}
+
+/**
+ * Complete-source declared-grain evidence returned by the App runtime. The
+ * counts remain nested under `uniqueness`, matching the server-side receipt.
+ * Tile result rows must never be used to infer this proof.
+ */
+export interface DashboardDatasetGrainRuntimeEvidence {
+  status?: 'passed' | 'failed';
+  uniqueness?: {
+    rowCount: number;
+    distinctKeyCount: number;
+    nullKeyCount: number;
+    duplicateKeyCount: number;
+  };
+  /** Transitional fields for a previously serialized receipt shape. */
+  rowCount?: number;
+  distinctKeyCount?: number;
+  duplicateKeyGroups?: number;
+  nullKeyRows?: number;
+  targetFingerprint?: string;
+  parameterFingerprint?: string;
+  checkedAt?: string;
+}
+
+/** Safe parameter-binding evidence. Values remain server-side and are never serialized to an App viewer. */
+export interface DashboardDatasetParameterEvidence {
+  name: string;
+  kind: 'null' | 'string' | 'number' | 'boolean' | 'array' | 'object';
+  valueCount?: number;
+  valueFingerprint: string;
+}
+
+/**
+ * Server-derived execution lineage for a Dataset tile. This is useful evidence
+ * for a block-backed Dataset, but is deliberately distinct from a provider
+ * execution receipt. Semantic Dataset runs may additionally expose
+ * `semanticReceipt` below.
+ */
+export interface DashboardDatasetExecutionProvenance {
+  version: 1;
+  kind: 'block_runtime' | 'semantic_runtime';
+  sourceId: string;
+  sourceRevision: string;
+  contractFingerprint: string;
+  queryFingerprint: string;
+  filterFingerprint: string;
+  executionFingerprint: string;
+  parameterFingerprint: string;
+  compiledSqlFingerprint?: string;
+  executedSqlFingerprint?: string;
+  resultFingerprint?: string;
+  targetFingerprint?: string;
+}
+
+/**
+ * A local cache delivery is distinct from fresh execution provenance. It
+ * preserves the original receipt reference without exposing SQL or result
+ * rows, and cannot become App publication or replacement authority.
+ */
+export interface DashboardDatasetCacheDeliveryReceipt {
+  version: 1;
+  kind: 'dataset_cache_delivery';
+  cacheKey: string;
+  originalReceiptId: string;
+  sourceRevision: string;
+  contractFingerprint: string;
+  targetFingerprint: string;
+  cachedAt: string;
+  expiresAt: string;
+}
+
+/**
+ * A server-applied dashboard filter. Legacy block executions identify the
+ * dashboard filter by `filter`; Dataset executions identify the approved
+ * physical field and operator instead. Raw values are never displayed by the
+ * App evidence UI.
+ */
+export interface DashboardRunAppliedFilter {
+  filter?: string;
+  field?: string;
+  op?: string;
+  values?: unknown[];
+  placement?: 'where' | 'having';
+  binding?: string;
+  mode?: 'parameter' | 'predicate';
+  paramNames?: string[];
+}
+
+/** A legacy skipped filter or a Dataset mapping issue returned by the runtime. */
+export interface DashboardRunFilterIssue {
+  filter?: string;
+  filterId?: string;
+  reason?: string;
+  code?: string;
+  message?: string;
 }
 
 export interface DashboardRunResponse {
@@ -2323,6 +2451,23 @@ export interface DashboardRunResponse {
   filterFingerprint: string;
   resultFingerprint: string;
   personaFingerprint: string;
+  /** A bounded visible/affected-tile refresh has no reusable dashboard receipt. */
+  partial?: boolean;
+  executedTileIds?: string[];
+  /** The runtime discarded this response before it could become current evidence. */
+  stale?: boolean;
+  staleReason?: string;
+  /**
+   * A full run can return current safe component results alongside failures.
+   * It is deliberately not a receipt candidate: no combined story or Project
+   * publication may use it until every authored executable component settles.
+   */
+  incomplete?: {
+    failedTileIds: string[];
+    message: string;
+    /** The server cleared only the receipt captured when this run began. */
+    priorPreviewReceiptInvalidated?: boolean;
+  };
   facts: DashboardStoryFact[];
   story: DashboardStoryBrief;
   /**
@@ -2339,8 +2484,8 @@ export interface DashboardRunResponse {
   }>;
   tiles: Array<{
     tileId: string;
-    status: 'ok' | 'unauthorized' | 'error' | 'unresolved';
-    tileType?: 'block' | 'text' | 'aiPin' | 'semantic' | 'draftAnalysis';
+    status: 'ok' | 'unauthorized' | 'error' | 'unresolved' | 'stale';
+    tileType?: 'block' | 'text' | 'aiPin' | 'semantic' | 'dataset' | 'draftAnalysis';
     blockId?: string;
     blockPath?: string;
     certificationStatus?: string | null;
@@ -2358,8 +2503,12 @@ export interface DashboardRunResponse {
      */
     filterableColumns?: Array<{ column: string; predicateTarget: string }>;
     filters?: {
-      applied: Array<{ filter: string; binding?: string; mode: 'parameter' | 'predicate'; paramNames: string[] }>;
-      skipped: Array<{ filter: string; reason: string }>;
+      /** Present for both legacy and Dataset executions, with source-specific identity fields. */
+      applied?: DashboardRunAppliedFilter[];
+      /** Legacy block filter application issues. */
+      skipped?: DashboardRunFilterIssue[];
+      /** Dataset filters intentionally unmapped from this tile's source. */
+      unbound?: DashboardRunFilterIssue[];
     };
     invocation?: {
       resolvedParameters: Array<{
@@ -2373,7 +2522,143 @@ export interface DashboardRunResponse {
     citation?: { kind: string; name: string; path?: string };
     repair?: AppExecutionRepairTrace;
     artifact?: DashboardTileArtifact;
+    /** Field-builder receipt. The browser displays it; it does not infer trust. */
+    executionFingerprint?: string;
+    dataset?: {
+      sourceId?: string;
+      sourceRevision?: string;
+      contractFingerprint?: string;
+      trust?: 'certified' | 'review_required';
+      lifecycle?: string;
+      binding?: DatasetDescriptor['binding'];
+      proofState?: string;
+      /** Hash of the authored TileQuery that this evidence executed. */
+      authoredQueryFingerprint?: string;
+      /** Effective ephemeral hierarchy interaction query, when one ran. */
+      interactionQueryFingerprint?: string;
+      queryFingerprint?: string;
+      filterFingerprint?: string;
+      executionFingerprint?: string;
+      parameterEvidence?: DashboardDatasetParameterEvidence[];
+      executionProvenance?: DashboardDatasetExecutionProvenance;
+      cacheDelivery?: DashboardDatasetCacheDeliveryReceipt;
+      appliedFilters?: Array<unknown>;
+      unboundFilters?: Array<{ filterId: string; code: string; message: string }>;
+      grainRuntimeEvidence?: DashboardDatasetGrainRuntimeEvidence;
+      semanticTargetBinding?: unknown;
+      semanticReceipt?: unknown;
+      /** Server-derived choices for a declared hierarchy on this effective query. */
+      hierarchy?: {
+        activeSteps: DashboardDatasetHierarchyDrill['steps'];
+        candidates: Array<{
+          hierarchyId: string;
+          fromField: string;
+          fromAlias: string;
+          toField: string;
+        }>;
+        interactionQueryFingerprint?: string;
+      };
+      errors?: string[];
+    };
     error?: string;
+  }>;
+}
+
+/** Response from the server-owned review-draft save path. SQL and rows never
+ * cross this App Studio boundary. */
+export type DatasetTileSaveAsBlockResponse =
+  | {
+    ok: true;
+    path: string;
+    status: 'draft';
+    provenanceFingerprint: string;
+    replacementEligible: boolean;
+    replacementMessage?: string;
+  }
+  | { ok: false; code: string; error: string };
+
+/** Server-issued only after a fresh same-read-scope equivalence proof. */
+export type DatasetTileReplaceWithBlockResponse =
+  | {
+    ok: true;
+    draft: AppStudioBuildDraft;
+    blockPath: string;
+    equivalenceProofFingerprint: string;
+  }
+  | { ok: false; code: string; error: string };
+
+/**
+ * M4-CONV-01 is deliberately a server-owned review proposal.  The browser
+ * receives the mapped field query and durable lineage for review, but never
+ * sends SQL, rows, source capabilities, or an equivalence receipt back.
+ */
+export type SemanticTileConversionPreviewResponse =
+  | {
+    ok: true;
+    proposalId: string;
+    candidate: {
+      sourceId: string;
+      sourceRevision: string;
+      contractFingerprint: string;
+      query: TileQuery;
+      queryFingerprint: string;
+      provenance: SemanticTileConversionProvenanceV1;
+    };
+    equivalenceProofFingerprint: string;
+  }
+  | { ok: false; code: string; error: string };
+
+export type SemanticTileConversionAcceptResponse =
+  | { ok: true; draft: AppStudioBuildDraft; equivalenceProofFingerprint: string }
+  | { ok: false; code: string; error: string };
+
+/**
+ * A result-mark selection is source-qualified before it leaves the browser.
+ * The runtime resolves it only through an authored Dashboard v3 mapping; a
+ * rendered label or matching field name is never sufficient authority.
+ */
+export interface DashboardDatasetCrossFilter {
+  fromTileId: string;
+  fromSourceId: string;
+  fromSourceRevision: string;
+  field: string;
+  values: unknown[];
+}
+
+/**
+ * Ephemeral execution controls. `runScope` is generated per mounted viewer so
+ * a newer interaction only supersedes work from that viewer, never another
+ * browser tab. Tile lists are advisory scheduling bounds; server-side source,
+ * filter, and receipt validation remains authoritative.
+ */
+export interface DashboardRunOptions {
+  runScope?: string;
+  /** Bypass the optional local Dataset delivery cache for a fresh live run. */
+  refresh?: boolean;
+  /** A preview/publish candidate must execute every authored tile. */
+  fullRun?: boolean;
+  tileId?: string;
+  visibleTileIds?: string[];
+  affectedTileIds?: string[];
+  /**
+   * Ephemeral, server-validated Dataset hierarchy exploration. The saved page
+   * query is never replaced by these steps; a full preview/publication receipt
+   * cannot be created from an interaction run.
+   */
+  datasetDrills?: DashboardDatasetHierarchyDrill[];
+}
+
+/**
+ * A browser carries only a value selected from a settled result and a declared
+ * hierarchy transition. The server reloads the authored TileQuery and current
+ * Dataset descriptor before applying every step.
+ */
+export interface DashboardDatasetHierarchyDrill {
+  tileId: string;
+  steps: Array<{
+    hierarchyId: string;
+    fromField: string;
+    values: unknown[];
   }>;
 }
 
@@ -2431,6 +2716,9 @@ export interface AppBlockRecommendation {
     grain?: string;
     chartType?: string;
     allowedVisualizations?: string[];
+    dataset?: DatasetDescriptor;
+    metricCapabilities?: Record<string, MetricCapabilityContract>;
+    semanticModelId?: string;
     parameters: Array<{ name: string; type?: string; required: boolean; hasDefault: boolean }>;
   };
   eligibility?: {
@@ -2444,6 +2732,10 @@ export interface AppBlockRecommendation {
 export interface AppSourceCandidatePage {
   version: 1;
   snapshotId: string;
+  /** Server-owned App feature availability for this local project. */
+  features?: {
+    datasets: boolean;
+  };
   items: AppBlockRecommendation[];
   nextCursor?: string;
   total: number;
@@ -2460,7 +2752,7 @@ interface AppSourceCandidateWire {
   qualifiedIdentity: string;
   sourceRevision: string;
   snapshotId: string;
-  kind: 'block';
+  kind: 'block' | 'semantic';
   lifecycle: NonNullable<AppBlockRecommendation['lifecycle']>;
   trust: NonNullable<AppBlockRecommendation['trust']>;
   executable: boolean;
@@ -2786,6 +3078,7 @@ export type AppStudioDraftOperation =
   | { type: 'remove_tile'; pageId: string; tileId: string }
   | { type: 'set_filter'; pageId: string; filter: NonNullable<AppStudioBuildDraft['pages'][number]['filters']>[number] }
   | { type: 'remove_filter'; pageId: string; filterId: string }
+  | { type: 'set_interactions'; pageId: string; interactions?: AppStudioBuildDraft['pages'][number]['interactions'] }
   | { type: 'set_layout'; pageId: string; layout: AppStudioBuildDraft['pages'][number]['layout'] }
   | { type: 'set_review_task'; task: AppStudioBuildDraft['reviewTasks'][number] }
   | { type: 'remove_review_task'; taskId: string }
@@ -2796,6 +3089,16 @@ export interface AppStudioAiProposal {
   draftId: string;
   baseRevision: number;
   baseProposalHash: string;
+  /**
+   * Server-owned provenance for the dedicated initial App generator. It is
+   * absent only on proposals persisted before this local schema was added.
+   */
+  plannerProvenance?: {
+    version: 1;
+    mode: 'ai' | 'deterministic';
+    providerInvocation: 'succeeded' | 'not_attempted';
+    providerId?: string;
+  };
   operations: AppStudioDraftOperation[];
   defaultSelectedSourceIds?: string[];
   candidateSourceIds?: string[];
@@ -2808,6 +3111,65 @@ export interface AppStudioAiProposal {
     certifiedSources: number;
     semanticSources: number;
   };
+}
+
+/**
+ * A server-issued, immutable App Autopilot change carried by a universal
+ * AgentRun artifact. The browser may only present it and invoke the guarded
+ * artifact Apply endpoint; it never supplies operations, SQL, source
+ * revisions, or Dataset capabilities.
+ */
+export interface AppAutopilotChangeProposal {
+  version: 1;
+  id: string;
+  runId: string;
+  artifactId: string;
+  draftId: string;
+  baseRevision: number;
+  baseProposalHash: string;
+  pageId: string;
+  tileId: string;
+  request: string;
+  intent: {
+    action:
+      | 'group_tile'
+      | 'change_visualization'
+      | 'rename_tile'
+      | 'add_tile'
+      | 'remove_tile'
+      | 'add_page'
+      | 'remove_page'
+      | 'add_filter'
+      | 'remove_filter'
+      | 'map_filter'
+      | 'add_cross_filter'
+      | 'add_navigation'
+      | 'add_detail_drill'
+      | 'arrange_layout';
+    request: string;
+    summary?: string;
+    field?: string;
+    measure?: string;
+    visualization?: AppStudioBuildDraft['pages'][number]['layout']['items'][number]['viz']['type'];
+    title?: string;
+    targetField?: string;
+    targetPageId?: string;
+    targetTileId?: string;
+    filterId?: string;
+    scope?: 'page' | 'app';
+  };
+  source: {
+    sourceId: string;
+    sourceRevision: string;
+    contractFingerprint: string;
+  };
+  planningMode: 'universal_agent';
+  operations: AppStudioDraftOperation[];
+  diagnostics: Array<{ code: string; severity: 'info' | 'blocking'; message: string }>;
+  createdAt: string;
+  proposalHash: string;
+  appliedAt?: string;
+  appliedRevision?: number;
 }
 
 export interface AppAiBuildSession {
@@ -2852,8 +3214,10 @@ export interface AppAiBuildSession {
 export type AppAskResponse =
   | {
       ok: true;
-      route: 'certified_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+      route: 'certified_answer' | 'dataset_chart_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
       answer: string;
+      /** The chart lane discloses when its exact-result summary did not use an AI provider. */
+      answerMode?: 'provider' | 'deterministic_context_summary' | 'out_of_context';
       trustState: DashboardDisplayMetadata['trustState'];
       reviewStatus: DashboardDisplayMetadata['reviewStatus'];
       citations: Array<{ kind: string; name: string; path?: string }>;
@@ -2868,6 +3232,37 @@ export type AppAskResponse =
       };
       investigation?: LocalAppInvestigation;
       proposal?: unknown;
+      /** Server-owned, exact current Dataset chart context. */
+      analyticalContext?: {
+        version: 1;
+        appId: string;
+        dashboardId: string;
+        tileId: string;
+        runId: string;
+        evidenceScope: 'full_dashboard' | 'interaction' | 'incomplete';
+        snapshotId: string;
+        dashboardFingerprint: string;
+        source: {
+          sourceId: string;
+          sourceRevision: string;
+          contractFingerprint: string;
+          lifecycle: string;
+          trust: string;
+          targetFingerprint?: string;
+          label?: string;
+          path?: string;
+        };
+        authoredQueryFingerprint: string;
+        interactionQueryFingerprint?: string;
+        executionQueryFingerprint: string;
+        filterFingerprint: string;
+        parameterFingerprint: string;
+        interactionFingerprint: string;
+        executionFingerprint: string;
+        resultFingerprint: string;
+        schemaFingerprint: string;
+        personaPolicyFingerprint: string;
+      };
       /** Grounded ReAct research plan (P4): the decision, steps, and follow-up options. */
       researchPlan?: {
         decision: 'answer' | 'clarify' | 'investigate' | 'compose_app';
@@ -3993,10 +4388,37 @@ export interface WarehouseMetadataDiscovery {
 export type ContextAuthoringOrigin = 'manual' | 'yaml_import' | 'dbt_discovery' | 'ai' | 'correction';
 export interface ContextAuthoringPatchV1 { path: string; before: string; after: string; changed: boolean; owner: 'dql' | 'dbt'; operationId: string }
 export interface ContextAuthoringDiagnosticV1 { code: string; severity: 'info' | 'warning' | 'blocking'; message: string; operationId?: string }
+/** Browser transport shape for a source-owned Dataset declaration patch. */
+export interface DatasetAuthoringChange {
+  targetQualifiedId: string;
+  targetPath: string;
+  expectedSourceHash: string;
+  patch: {
+    grain?: Record<string, unknown>;
+    fields?: Array<Record<string, unknown>>;
+    measures?: Array<Record<string, unknown>>;
+  };
+}
+/** Typed, review-required new Dataset declaration. The server owns its path,
+ * DQL rendering, lifecycle, and compile gate; this transport shape never
+ * carries free SQL or proof/certification authority. */
+export interface DatasetDraftAuthoringChange {
+  domain: string;
+  slug: string;
+  sourceRelation: string;
+  name: string;
+  description: string;
+  grain: Record<string, unknown>;
+  fields: Array<Record<string, unknown>>;
+  measures: Array<Record<string, unknown>>;
+  sourceEvidence: string[];
+}
 export type ContextAuthoringOperation =
   | { id: string; kind: 'modeling_change'; change: ModelingAuthoringChange; dependsOn?: string[]; evidence?: string[] }
   | { id: string; kind: 'skill_change'; operation: 'create' | 'update' | 'move'; value: Skill; targetQualifiedId?: string; expectedSourceHash?: string; dependsOn?: string[]; evidence?: string[] }
-  | { id: string; kind: 'dbt_source_change'; change: DbtSourceAuthoringInput; dependsOn?: string[]; evidence?: string[] };
+  | { id: string; kind: 'dbt_source_change'; change: DbtSourceAuthoringInput; dependsOn?: string[]; evidence?: string[] }
+  | { id: string; kind: 'dataset_change'; change: DatasetAuthoringChange; dependsOn?: string[]; evidence?: string[] }
+  | { id: string; kind: 'dataset_draft'; change: DatasetDraftAuthoringChange; dependsOn?: string[]; evidence?: string[] };
 export interface ContextAuthoringProposalV1 {
   version: 1;
   id: string;
@@ -4009,7 +4431,7 @@ export interface ContextAuthoringProposalV1 {
   operations: ContextAuthoringOperation[];
   patches: ContextAuthoringPatchV1[];
   diagnostics: ContextAuthoringDiagnosticV1[];
-  impact: { files: number; modelingChanges: number; skillChanges: number; dbtSourceChanges: number };
+  impact: { files: number; modelingChanges: number; skillChanges: number; dbtSourceChanges: number; datasetChanges: number };
   proposalHash: string;
   sourceRunId?: string;
   sourceArtifactId?: string;
@@ -6769,7 +7191,12 @@ export const api = {
     return { ...response, items: response.items.map(appSourceCandidateToRecommendation) };
   },
 
-  async resolveAppSourceCandidates(id: string, sourceIds: string[]): Promise<{
+  /**
+   * Exact, current catalog resolution for an already-pinned App source. A
+   * review-required card may be read so Studio can show an explicit policy
+   * choice; read access alone never grants preview or publication authority.
+   */
+  async resolveAppSourceCandidates(id: string, sourceIds: string[], options: { includeReviewRequired?: boolean } = {}): Promise<{
     ok: true;
     snapshotId: string;
     items: AppBlockRecommendation[];
@@ -6777,7 +7204,7 @@ export const api = {
   }> {
     const response = await request<{ ok: true; snapshotId: string; items: AppSourceCandidateWire[]; missingSourceIds: string[] }>(
       `/api/app-builds/${encodeURIComponent(id)}/source-candidates`,
-      { method: 'POST', body: JSON.stringify({ sourceIds }) },
+      { method: 'POST', body: JSON.stringify({ sourceIds, ...(options.includeReviewRequired ? { includeReviewRequired: true } : {}) }) },
     );
     return { ...response, items: response.items.map(appSourceCandidateToRecommendation) };
   },
@@ -6835,8 +7262,23 @@ export const api = {
     expectedRevision: number;
     expectedProposalHash: string;
     requirementId: string;
-  }): Promise<{ ok: true; proposal: AppStudioAiProposal }> {
+    /** Optional relation selected by the author; the server still owns DQL rendering. */
+    sourceRelation?: string;
+    /** Optional existing Domain id for the review draft. */
+    domain?: string;
+  }): Promise<{ ok: true; contextProposal: ContextAuthoringProposalV1; requirementId: string }> {
     return request(`/api/app-builds/${encodeURIComponent(id)}/ai-proposals/${encodeURIComponent(proposalId)}/gaps`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async applyAppAutopilotChange(runId: string, proposalId: string, input: {
+    expectedRevision: number;
+    expectedProposalHash: string;
+    proposalHash: string;
+  }): Promise<{ ok: true; draft: AppStudioBuildDraft; proposalId: string; deduped: boolean }> {
+    return request(`/api/agent-runs/${encodeURIComponent(runId)}/app-autopilot-changes/${encodeURIComponent(proposalId)}/apply`, {
       method: 'POST',
       body: JSON.stringify(input),
     });
@@ -6849,12 +7291,87 @@ export const api = {
     });
   },
 
+  /**
+   * Create a separate Domain review draft from a settled, representable
+   * Dataset result. The server reloads all Dataset, policy, target, and
+   * execution authority; the browser never sends SQL, result rows, or a
+   * source contract.
+   */
+  async saveDatasetTileAsBlock(
+    draftId: string,
+    dashboardId: string,
+    tileId: string,
+    input: {
+      runId: string;
+      expectedRevision: number;
+      expectedProposalHash: string;
+      name?: string;
+      domain?: string;
+      description?: string;
+    },
+  ): Promise<DatasetTileSaveAsBlockResponse> {
+    return request<DatasetTileSaveAsBlockResponse>(
+      `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/tiles/${encodeURIComponent(tileId)}/save-as-block`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+
+  /**
+   * Replace only a current static Dataset tile with its separately saved
+   * review draft. The route owns SQL, source authority, and equivalence; this
+   * client sends identifiers and optimistic guards only.
+   */
+  async replaceDatasetTileWithBlock(
+    draftId: string,
+    dashboardId: string,
+    tileId: string,
+    input: {
+      runId: string;
+      expectedRevision: number;
+      expectedProposalHash: string;
+      blockPath: string;
+      enableReviewRequired?: boolean;
+    },
+  ): Promise<DatasetTileReplaceWithBlockResponse> {
+    return request<DatasetTileReplaceWithBlockResponse>(
+      `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/tiles/${encodeURIComponent(tileId)}/replace-with-block`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+
+  /** Preview one explicit, bounded legacy semantic-to-Dataset conversion. */
+  async previewSemanticTileConversion(
+    draftId: string,
+    dashboardId: string,
+    tileId: string,
+    input: { expectedRevision: number; expectedProposalHash: string },
+  ): Promise<SemanticTileConversionPreviewResponse> {
+    return request<SemanticTileConversionPreviewResponse>(
+      `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/tiles/${encodeURIComponent(tileId)}/preview-semantic-conversion`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+
+  /** Accept only a still-current server-issued conversion proposal. */
+  async acceptSemanticTileConversion(
+    draftId: string,
+    dashboardId: string,
+    tileId: string,
+    proposalId: string,
+    input: { expectedRevision: number; expectedProposalHash: string },
+  ): Promise<SemanticTileConversionAcceptResponse> {
+    return request<SemanticTileConversionAcceptResponse>(
+      `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/tiles/${encodeURIComponent(tileId)}/semantic-conversions/${encodeURIComponent(proposalId)}/accept`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  },
+
   async composeAppBuild(id: string, input: {
     expectedRevision: number;
     expectedProposalHash: string;
   } & (
     | { mode: 'ai'; proposalId: string; selectedSourceIds: string[] }
-    | { mode: 'manual'; enableReviewRequired?: boolean; selections: Array<{ sourceId: string; pageId?: string; view: 'kpi' | 'chart' | 'table' }> }
+    | { mode: 'manual'; enableReviewRequired?: boolean; selections: Array<{ sourceId: string; pageId?: string; view: 'kpi' | 'chart' | 'table'; query?: TileQuery; title?: string }> }
   )): Promise<{ ok: true; draft: AppStudioBuildDraft; pageIds: string[]; tileIds: string[] }> {
     return request(`/api/app-builds/${encodeURIComponent(id)}/compose`, {
       method: 'POST',
@@ -7294,6 +7811,8 @@ export const api = {
     variables?: Record<string, unknown>;
     context?: unknown;
     runInvestigation?: boolean;
+    /** Required for the server-grounded Dataset chart answer lane. */
+    runId?: string;
   }): Promise<AppAskResponse> {
     try {
       return await request(
@@ -7476,29 +7995,68 @@ export const api = {
     }
   },
 
-  async runDashboard(appId: string, dashboardId: string, variables?: Record<string, unknown>): Promise<DashboardRunResponse | null> {
+  async runDashboard(
+    appId: string,
+    dashboardId: string,
+    variables?: Record<string, unknown>,
+    crossFilters?: DashboardDatasetCrossFilter[],
+    options?: DashboardRunOptions,
+  ): Promise<DashboardRunResponse | null> {
     try {
       return await request<DashboardRunResponse>(
         `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
-        { method: 'POST', body: JSON.stringify({ variables: variables ?? {} }) },
+        { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}) }) },
       );
     } catch {
       return null;
     }
   },
 
-  async runAppBuildPreview(draftId: string, dashboardId: string, variables?: Record<string, unknown>): Promise<DashboardRunResponse> {
+  async runAppBuildPreview(
+    draftId: string,
+    dashboardId: string,
+    variables?: Record<string, unknown>,
+    crossFilters?: DashboardDatasetCrossFilter[],
+    options?: DashboardRunOptions,
+  ): Promise<DashboardRunResponse> {
     return request<DashboardRunResponse>(
       `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
-      { method: 'POST', body: JSON.stringify({ variables: variables ?? {} }) },
+      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}) }) },
     );
   },
 
-  async retryDashboardTile(appId: string, dashboardId: string, tileId: string, variables?: Record<string, unknown>): Promise<DashboardRunResponse | null> {
+  /** Validate a Dataset's declared physical grain against the active local target.
+   * The receipt stays under `.dql/local`; this never changes source trust. */
+  async validateDatasetGrain(input: {
+    sourceId: string;
+    sourceRevision?: string;
+    parameters?: Record<string, unknown>;
+  }): Promise<{
+    ok: boolean;
+    eligible?: boolean;
+    localPath?: string;
+    error?: string;
+    evidence?: { status?: 'passed' | 'failed'; uniqueness?: { rowCount: number; distinctKeyCount: number; nullKeyCount: number; duplicateKeyCount: number } };
+  }> {
+    try {
+      return await request('/api/datasets/validate-grain', { method: 'POST', body: JSON.stringify(input) });
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+
+  async retryDashboardTile(
+    appId: string,
+    dashboardId: string,
+    tileId: string,
+    variables?: Record<string, unknown>,
+    crossFilters?: DashboardDatasetCrossFilter[],
+    options?: Omit<DashboardRunOptions, 'tileId'>,
+  ): Promise<DashboardRunResponse | null> {
     try {
       return await request<DashboardRunResponse>(
         `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
-        { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, tileId }) },
+        { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, tileId, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}) }) },
       );
     } catch {
       return null;

@@ -369,6 +369,7 @@ export function parseMetricDefinition(raw: Record<string, unknown>): MetricDefin
     typeParams: parseRecord(raw.typeParams ?? raw.type_params),
     filter: parseSemanticFilter(raw.filter),
     aggTimeDimension: raw.aggTimeDimension ? String(raw.aggTimeDimension) : raw.agg_time_dimension ? String(raw.agg_time_dimension) : undefined,
+    displayFormat: parseSemanticDisplayFormat(raw),
     source: parseSourceMetadata(raw.source),
   };
 }
@@ -389,6 +390,56 @@ export function parseDimensionDefinition(raw: Record<string, unknown>): Dimensio
     expr: raw.expr ? String(raw.expr) : undefined,
     isTimeDimension: Boolean(raw.isTimeDimension ?? raw.is_time_dimension ?? false),
     typeParams: parseRecord(raw.typeParams ?? raw.type_params),
+    source: parseSourceMetadata(raw.source),
+  };
+}
+
+/**
+ * Parse an entity authored in DQL's native semantic layer. Native models need
+ * the same explicit entity declaration as imported dbt models: a model name or
+ * a physical key name alone is not grain authority.
+ */
+export function parseEntityDefinition(raw: Record<string, unknown>): EntityDefinition {
+  const type = String(raw.type ?? 'primary').trim() || 'primary';
+  return {
+    name: String(raw.name ?? ''),
+    label: String(raw.label ?? raw.name ?? ''),
+    description: String(raw.description ?? ''),
+    domain: raw.domain != null ? String(raw.domain) : undefined,
+    type,
+    expr: raw.expr != null ? String(raw.expr) : undefined,
+    table: String(raw.table ?? ''),
+    cube: raw.cube != null ? String(raw.cube) : undefined,
+    role: raw.role != null ? String(raw.role) : undefined,
+    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
+    owner: raw.owner != null ? String(raw.owner) : undefined,
+    source: parseSourceMetadata(raw.source),
+  };
+}
+
+/**
+ * Parse a native semantic model declaration. This is a small model inventory:
+ * execution still resolves fields and measures from the referenced cube and
+ * exact metric capability rather than from display names.
+ */
+export function parseSemanticModelDefinition(raw: Record<string, unknown>): SemanticModelDefinition {
+  const strings = (value: unknown): string[] => Array.isArray(value)
+    ? value.flatMap((item) => typeof item === 'string' && item.trim() ? [item.trim()] : [])
+    : [];
+  return {
+    name: String(raw.name ?? ''),
+    label: String(raw.label ?? raw.name ?? ''),
+    description: String(raw.description ?? ''),
+    domain: raw.domain != null ? String(raw.domain) : undefined,
+    model: raw.model != null ? String(raw.model) : undefined,
+    table: String(raw.table ?? raw.name ?? ''),
+    defaults: parseRecord(raw.defaults),
+    entities: strings(raw.entities),
+    measures: strings(raw.measures),
+    dimensions: strings(raw.dimensions),
+    timeDimensions: strings(raw.timeDimensions ?? raw.time_dimensions),
+    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
+    owner: raw.owner != null ? String(raw.owner) : undefined,
     source: parseSourceMetadata(raw.source),
   };
 }
@@ -507,6 +558,12 @@ export function parseBlockCompanionDefinition(raw: Record<string, unknown>): Blo
  */
 export class SemanticLayer {
   private metrics: Map<string, MetricDefinition> = new Map();
+  /**
+   * A metric local name may occur on more than one semantic model. The flat
+   * map remains for legacy bare-name callers; model-qualified execution refs
+   * resolve through this exact model-owned index.
+   */
+  private metricVariants: Map<string, MetricDefinition[]> = new Map();
   private dimensions: Map<string, DimensionDefinition> = new Map();
   /**
    * A dbt project may legitimately declare the same dimension name on many
@@ -565,7 +622,9 @@ export class SemanticLayer {
     // overrides any measure-derived entry of the same name (dbt emits both a
     // measure and a metric when `create_metric: true`). Default the tag to
     // 'metric' so the de-conflation filter treats untagged entries as metrics.
-    this.metrics.set(metric.name, { ...metric, objectKind: metric.objectKind ?? 'metric' });
+    const normalized = { ...metric, objectKind: metric.objectKind ?? 'metric' };
+    this.metrics.set(metric.name, normalized);
+    this.registerMetricVariant(normalized);
   }
 
   addDimension(dimension: DimensionDefinition): void {
@@ -581,7 +640,36 @@ export class SemanticLayer {
     // them back out (a real dbt metric of the same name, added later via
     // addMetric, overrides with 'metric'). We must NOT stop populating the map —
     // canComposeMetric/composeQuery/listCompatibleDimensions all read it.
-    for (const m of cube.measures) this.metrics.set(m.name, { ...m, objectKind: m.objectKind ?? 'measure', cube: m.cube ?? cube.name, domain: m.domain || cube.domain, owner: m.owner ?? cube.owner, source: m.source ?? cube.source });
+    for (const m of cube.measures) {
+      const measure = { ...m, objectKind: m.objectKind ?? 'measure', cube: m.cube ?? cube.name, domain: m.domain || cube.domain, owner: m.owner ?? cube.owner, source: m.source ?? cube.source };
+      // A metric file may be loaded before its owning cube. Preserve that real
+      // metric definition (including its ratio/custom expression) while still
+      // registering the cube measure below. This keeps directory traversal
+      // order from changing what a semantic Dataset executes.
+      const existingMetric = this.metrics.get(measure.name);
+      if (!existingMetric || existingMetric.objectKind === 'measure') {
+        this.metrics.set(measure.name, measure);
+      }
+      this.registerMetricVariant(measure);
+      // Native cube measures are the governed inputs used by a declared
+      // metric. Keep them in the explicit registry so capability projection
+      // verifies aggregation and additivity without guessing from a label.
+      this.measures.set(measure.name, {
+        name: measure.name,
+        label: measure.label,
+        description: measure.description,
+        domain: measure.domain,
+        agg: measure.aggregation ?? measure.type,
+        expr: measure.sql,
+        table: measure.table,
+        cube: measure.cube,
+        aggTimeDimension: measure.aggTimeDimension,
+        displayFormat: measure.displayFormat,
+        tags: measure.tags,
+        owner: measure.owner,
+        source: measure.source,
+      });
+    }
     for (const d of cube.dimensions) this.registerDimension({ ...d, cube: d.cube ?? cube.name, domain: d.domain ?? cube.domain, owner: d.owner ?? cube.owner, source: d.source ?? cube.source });
     for (const td of cube.timeDimensions) this.registerDimension({ ...td, cube: td.cube ?? cube.name, domain: td.domain ?? cube.domain, owner: td.owner ?? cube.owner, source: td.source ?? cube.source });
     for (const segment of cube.segments) this.segments.set(segment.name, { ...segment, cube: segment.cube || cube.name, domain: segment.domain ?? cube.domain, owner: segment.owner ?? cube.owner, source: segment.source ?? cube.source });
@@ -601,6 +689,41 @@ export class SemanticLayer {
   addMeasure(measure: MeasureDefinition): void {
     this.compatibilityCache.clear();
     this.measures.set(measure.name, measure);
+  }
+
+  private registerMetricVariant(metric: MetricDefinition): void {
+    const variants = this.metricVariants.get(metric.name) ?? [];
+    const identity = [
+      metric.cube ?? '',
+      metric.objectKind ?? 'metric',
+      metric.source?.objectId ?? '',
+      metric.source?.objectType ?? '',
+    ].join('\u0000');
+    const existingIndex = variants.findIndex((candidate) => [
+      candidate.cube ?? '',
+      candidate.objectKind ?? 'metric',
+      candidate.source?.objectId ?? '',
+      candidate.source?.objectType ?? '',
+    ].join('\u0000') === identity);
+    if (existingIndex >= 0) variants[existingIndex] = metric;
+    else variants.push(metric);
+    this.metricVariants.set(metric.name, variants);
+  }
+
+  /**
+   * Resolve a legacy bare metric name or an exact `<semantic-model>.<metric>`
+   * provider reference. The qualified branch never falls back to a leaf name:
+   * that would make a selected model-A metric execute model B after catalog
+   * ordering changes.
+   */
+  private metricForReference(reference: string): MetricDefinition | undefined {
+    const direct = this.metrics.get(reference);
+    if (direct) return direct;
+    const exact = Array.from(this.metricVariants.values()).flat()
+      .filter((candidate) => candidate.cube && `${candidate.cube}.${candidate.name}` === reference);
+    const realMetrics = exact.filter((candidate) => candidate.objectKind !== 'measure');
+    if (realMetrics.length === 1) return realMetrics[0];
+    return exact.length === 1 ? exact[0] : undefined;
   }
 
   private registerDimension(dimension: DimensionDefinition): void {
@@ -1066,7 +1189,7 @@ export class SemanticLayer {
    * columns, but governed values format from the contract, not the guess.
    */
   displayFormatFor(name: string): SemanticDisplayFormat | undefined {
-    const metric = this.metrics.get(name);
+    const metric = this.metricForReference(name);
     if (metric?.displayFormat) return metric.displayFormat;
     const measure = this.measures.get(name);
     if (measure?.displayFormat) return measure.displayFormat;
@@ -1087,7 +1210,7 @@ export class SemanticLayer {
    * native composition; derived/ratio/cumulative metrics remain MetricFlow-only.
    */
   private resolveComposableMetric(name: string): MetricDefinition | undefined {
-    const metric = this.metrics.get(name);
+    const metric = this.metricForReference(name);
     if (!metric) return undefined;
     if (metric.table) return metric;
     if (metric.metricType && metric.metricType !== 'simple') return undefined;
@@ -1297,7 +1420,7 @@ export class SemanticLayer {
   }
 
   getMetric(name: string): MetricDefinition | undefined {
-    return this.metrics.get(name);
+    return this.metricForReference(name);
   }
 
   getDimension(name: string): DimensionDefinition | undefined {
@@ -1339,8 +1462,10 @@ export class SemanticLayer {
    * Pass `{ includeMeasures: false }` to exclude measure-derived entries so the
    * UI metric picker and the agent's metric matcher see only real metrics.
    */
-  listMetrics(domain?: string, opts?: { includeMeasures?: boolean }): MetricDefinition[] {
-    let all = Array.from(this.metrics.values());
+  listMetrics(domain?: string, opts?: { includeMeasures?: boolean; includeVariants?: boolean }): MetricDefinition[] {
+    let all = opts?.includeVariants
+      ? Array.from(this.metricVariants.values()).flat()
+      : Array.from(this.metrics.values());
     if (opts?.includeMeasures === false) {
       all = all.filter((m) => m.objectKind !== 'measure');
     }
@@ -1439,7 +1564,7 @@ export class SemanticLayer {
    */
   resolveDimension(reference: string, metricNames: string[] = []): DimensionDefinition | undefined {
     const metrics = metricNames
-      .map((name) => this.resolveComposableMetric(name) ?? this.metrics.get(name))
+      .map((name) => this.resolveComposableMetric(name) ?? this.metricForReference(name))
       .filter((metric): metric is MetricDefinition => Boolean(metric));
     return metrics.length > 0
       ? this.resolveDimensionForMetrics(reference, metrics)
@@ -1678,9 +1803,9 @@ export class SemanticLayer {
     incompatible: Array<{ name: string; qualifiedName?: string; reason: 'no_join_path' | 'not_shared_across_metrics' | 'metric_unresolved' }>;
   } {
     const resolvedMetrics = metricNames
-      .map((name) => this.metrics.get(name))
+      .map((name) => this.metricForReference(name))
       .filter((metric): metric is MetricDefinition => Boolean(metric));
-    const unresolved = metricNames.filter((name) => !this.metrics.get(name));
+    const unresolved = metricNames.filter((name) => !this.metricForReference(name));
     if (resolvedMetrics.length === 0) {
       return {
         compatible: [],
@@ -1756,7 +1881,7 @@ export class SemanticLayer {
         for (const name of frontier) {
           if (visited.has(name)) continue;
           visited.add(name);
-          const referenced = this.metrics.get(name);
+          const referenced = this.metricForReference(name);
           if (!referenced) continue;
           collectMeasureNames(referenced, measureNames);
           if (referenced.table) reachableTables.add(referenced.table);
@@ -1892,7 +2017,7 @@ export class SemanticLayer {
         h.levels.some((level) => level.name === ref),
       );
       if (
-        this.metrics.has(ref) ||
+        Boolean(this.metricForReference(ref)) ||
         Boolean(this.resolveGroupBy(ref)) ||
         this.hierarchies.has(ref) ||
         this.measures.has(ref) ||
@@ -1914,7 +2039,7 @@ export class SemanticLayer {
    * Delegates to composeQuery() to leverage the join graph when cubes are available.
    */
   generateMetricSQL(metricName: string, groupBy?: string[]): string | null {
-    const metric = this.metrics.get(metricName);
+    const metric = this.metricForReference(metricName);
     if (!metric) return null;
 
     // If we have cubes registered, use composeQuery for cross-table JOIN support

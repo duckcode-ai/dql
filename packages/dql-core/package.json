@@ -31,6 +31,30 @@
       "types": "./dist/blocks/index.d.ts",
       "import": "./dist/blocks/index.js"
     },
+    "./apps/tile-query": {
+      "types": "./dist/apps/tile-query.d.ts",
+      "import": "./dist/apps/tile-query.js"
+    },
+    "./datasets/descriptor": {
+      "types": "./dist/datasets/descriptor.d.ts",
+      "import": "./dist/datasets/descriptor.js"
+    },
+    "./datasets/aggregate-expression": {
+      "types": "./dist/datasets/aggregate-expression.d.ts",
+      "import": "./dist/datasets/aggregate-expression.js"
+    },
+    "./datasets/aggregate-expression.node": {
+      "types": "./dist/datasets/aggregate-expression.node.d.ts",
+      "import": "./dist/datasets/aggregate-expression.node.js"
+    },
+    "./datasets/component-proof.node": {
+      "types": "./dist/datasets/component-proof.node.d.ts",
+      "import": "./dist/datasets/component-proof.node.js"
+    },
+    "./datasets/source-authoring.node": {
+      "types": "./dist/datasets/source-authoring.node.d.ts",
+      "import": "./dist/datasets/source-authoring.node.js"
+    },
     "./modeling-ids": {
       "types": "./dist/manifest/model-area-id.d.ts",
       "import": "./dist/manifest/model-area-id.js"

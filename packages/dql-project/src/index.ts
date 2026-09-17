@@ -42,7 +42,9 @@ export type {
   LocalAiPinReviewStatus,
   LocalAppStateArchive,
   LocalAppBuildOperationRecord,
+  LocalAppAutopilotChangeRecord,
   LocalAppPreviewEvidence,
+  LocalAppPreviewDatasetBindingEvidence,
   LocalAppVisibility,
 } from './local-app-storage.js';
 export {

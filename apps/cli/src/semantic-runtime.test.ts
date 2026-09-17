@@ -11,6 +11,7 @@ import {
   compileSemanticRuntimeQuery,
   getSemanticRuntimeStatus,
   normalizeSemanticRuntimeQueryRequest,
+  semanticRuntimeAdapterSupportsHaving,
   semanticMetricExecutionCapability,
   selectSemanticRuntimeAdapters,
 } from './semantic-runtime.js';
@@ -225,6 +226,42 @@ describe('shared semantic runtime selector', () => {
     });
     expect(result?.engine).toBe('native');
     expect(result?.sql).toContain('analytics.orders');
+  });
+
+  it('APP-062 applies a native governed total filter after aggregation and refuses adapters that do not advertise it', async () => {
+    const status = await getSemanticRuntimeStatus(root);
+    expect(semanticRuntimeAdapterSupportsHaving(status, 'native')).toBe(true);
+    expect(semanticRuntimeAdapterSupportsHaving(status, 'metricflow-cli')).toBe(false);
+    expect(semanticRuntimeAdapterSupportsHaving(status, 'dbt-cloud')).toBe(false);
+
+    const native = await compileSemanticRuntimeQuery({
+      metrics: ['revenue'],
+      dimensions: [],
+      having: [{ metric: 'revenue', operator: 'gt', values: ['50'] }],
+      orderBy: [{ name: 'revenue', direction: 'desc' }],
+      limit: 5,
+    }, {
+      projectRoot: root,
+      projectConfig: {},
+      semanticLayer: layer(),
+      tableMapping: { orders: 'analytics.orders' },
+    });
+    expect(native).toMatchObject({ engine: 'native' });
+    expect(native?.sql).toContain('FROM (');
+    expect(native?.sql).toMatch(/WHERE\s+"dql_semantic_aggregate"\."revenue"\s*>\s*50/);
+    expect(native?.sql).toMatch(/ORDER BY\s+"dql_semantic_aggregate"\."revenue" DESC/);
+    expect(native?.sql).toContain('LIMIT 5');
+
+    await expect(compileSemanticRuntimeQuery({
+      metrics: ['revenue'],
+      dimensions: [],
+      having: [{ metric: 'revenue', operator: 'gt', values: ['50'] }],
+      engine: 'metricflow-cli',
+    }, {
+      projectRoot: root,
+      projectConfig: {},
+      semanticLayer: layer(),
+    })).rejects.toMatchObject({ code: 'SEMANTIC_HAVING_UNSUPPORTED' });
   });
 
   it('uses a detected local MetricFlow runtime for derived metrics without an AI planning call', async () => {

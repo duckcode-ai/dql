@@ -1,4 +1,5 @@
 import type { SourceSpan } from '../errors/diagnostic.js';
+import type { DatasetTileProvenanceV1, SemanticTileConversionProvenanceV1 } from '../datasets/provenance.js';
 
 // ---- Node Kinds ----
 
@@ -301,6 +302,15 @@ export interface BlockDeclNode extends BaseNode {
   termRefs?: string[];
   /** Enterprise reusable-widget metadata: declared output grain, entities, outputs, filters, and replacement path. */
   pattern?: string;
+  /**
+   * Field-based App dataset grain. `grain?: string` stays below for legacy
+   * manifest consumers; object grain source is represented here instead.
+   */
+  datasetGrain?: BlockDatasetGrain;
+  /** Reviewed physical field declarations for a dataset block. */
+  datasetFields?: BlockDatasetFieldEntry[];
+  /** Reviewed measures for a dataset block. Physical and measure names may overlap. */
+  datasetMeasures?: BlockDatasetMeasureEntry[];
   grain?: string;
   entities?: string[];
   outputs?: string[];
@@ -383,6 +393,57 @@ export interface BlockDeclNode extends BaseNode {
   orderBy?: string[];
   limit?: number;
   validationWarnings?: string[];
+  /** M4 App Dataset tile lineage retained on a review draft block. */
+  datasetTileProvenance?: DatasetTileProvenanceV1;
+  /** The same lineage retained after an explicit later certification. */
+  derivedFrom?: DatasetTileProvenanceV1;
+  /** Exact, user-invoked legacy semantic conversion lineage. */
+  semanticTileConversionProvenance?: SemanticTileConversionProvenanceV1;
+}
+
+export interface BlockDatasetGrain {
+  entities: string[];
+  keys: string[];
+  /** Reference to a reviewed uniqueness/fanout proof; never inferred from a preview. */
+  keyEvidence?: string;
+  description?: string;
+  timeGrain?: string;
+  /** Exact approved physical time bucket emitted by an aggregate Dataset source. */
+  timeBucketBy?: string;
+  aggregate?: boolean;
+}
+
+export interface BlockDatasetFieldEntry {
+  name: string;
+  role: 'dimension' | 'key' | 'time' | 'attribute';
+  type?: 'string' | 'number' | 'boolean' | 'date' | 'timestamp';
+  grains?: string[];
+  primary?: boolean;
+  hierarchy?: string;
+  level?: number;
+  status?: 'approved' | 'suggested';
+}
+
+export interface BlockDatasetMeasureEntry {
+  name: string;
+  aggregation: 'sum' | 'count' | 'count_distinct' | 'ratio' | 'avg' | 'min' | 'max';
+  from?: string;
+  numerator?: string;
+  denominator?: string;
+  /** Canonical bounded aggregate expression for a calculated Dataset measure. */
+  expression?: string;
+  /**
+   * Exact physical time field that supplies a time-additivity assertion for
+   * this measure.  It is meaningful for a distinct entity only when a
+   * current, full-source proof also binds the Dataset grain.
+   */
+  timeBucketBy?: string;
+  additive: 'additive' | 'semi_additive' | 'non_additive';
+  entityAdditive?: 'additive' | 'semi_additive' | 'non_additive';
+  allowedAggs?: Array<'sum' | 'count' | 'count_distinct' | 'ratio' | 'avg' | 'min' | 'max'>;
+  format?: 'number' | 'currency' | 'percent';
+  currency?: string;
+  status?: 'approved' | 'suggested';
 }
 
 // ---- Domain Declaration ----

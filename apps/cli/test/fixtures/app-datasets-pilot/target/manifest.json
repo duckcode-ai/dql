@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "project_name": "app_datasets_pilot"
+  },
+  "nodes": {
+    "model.app_datasets_pilot.order_lines": {
+      "unique_id": "model.app_datasets_pilot.order_lines",
+      "resource_type": "model",
+      "name": "order_lines",
+      "alias": "order_lines",
+      "original_file_path": "models/commerce/order_lines.sql",
+      "description": "Live order-line relation used by the App Builder Dataset pilot.",
+      "columns": {
+        "order_line_id": {
+          "name": "order_line_id",
+          "tests": ["unique", "not_null"]
+        },
+        "order_id": { "name": "order_id" },
+        "customer_id": { "name": "customer_id" },
+        "region": { "name": "region" },
+        "order_date": { "name": "order_date" },
+        "net_amount": { "name": "net_amount" },
+        "margin_amount": { "name": "margin_amount" }
+      },
+      "depends_on": { "nodes": [] }
+    }
+  },
+  "sources": {}
+}

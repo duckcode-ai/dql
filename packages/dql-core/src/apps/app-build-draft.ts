@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { DashboardDocument, DashboardFilter, DashboardGridItem, DashboardGridLayout } from './dashboard-document.js';
+import { datasetTileVisualizationCompatibility } from './tile-query.js';
+import type { DatasetDescriptor } from '../datasets/descriptor.js';
+import type { MetricCapabilityContract } from '../contracts/analytical.js';
 
 export type AppBuildAuthoringMode = 'ai' | 'manual';
 export type AppBuildSourcePolicy = 'governed_only' | 'include_review_required';
@@ -74,6 +77,16 @@ export interface AppBuildSourceCapabilities {
   grain?: string;
   chartType?: string;
   allowedVisualizations?: string[];
+  /** Field-based dataset projection. Omitted for legacy whole-block sources. */
+  dataset?: DatasetDescriptor;
+  /**
+   * Exact immutable semantic capabilities keyed by metricId.  A model-scoped
+   * Dataset may expose several measures; callers must select from this map
+   * rather than treating the source-wide Dataset operations as per-metric
+   * authority.
+   */
+  metricCapabilities?: Record<string, MetricCapabilityContract>;
+  semanticModelId?: string;
   parameters: Array<{
     name: string;
     type?: string;
@@ -117,6 +130,12 @@ export interface AppBuildRunReceipt {
   snapshotId: string;
   filterFingerprint: string;
   resultFingerprint: string;
+  /**
+   * Server-issued fingerprint of the executable local-draft content that
+   * produced this run. Legacy receipts may omit it for reading only; new
+   * receipts cannot preflight or publish without an exact match.
+   */
+  intentFingerprint?: string;
   createdAt: string;
 }
 
@@ -177,10 +196,19 @@ export type AppBuildDraftOperation =
   | { type: 'remove_tile'; pageId: string; tileId: string }
   | { type: 'set_filter'; pageId: string; filter: DashboardFilter }
   | { type: 'remove_filter'; pageId: string; filterId: string }
+  /** Persist a field-bound interaction on the local page draft. It is a
+   * content edit because the next preview must use the new mapping. */
+  | { type: 'set_interactions'; pageId: string; interactions?: DashboardDocument['interactions'] }
   | { type: 'set_layout'; pageId: string; layout: DashboardGridLayout & { responsive?: DashboardDocument['layout']['responsive'] } }
   | { type: 'set_review_task'; task: AppBuildReviewTask }
   | { type: 'remove_review_task'; taskId: string }
-  | { type: 'set_preview_receipt'; receipt: AppBuildRunReceipt };
+  | { type: 'set_preview_receipt'; receipt: AppBuildRunReceipt }
+  /**
+   * Server-issued invalidation for a page whose latest full preview was
+   * incomplete. It deliberately carries the receipt observed when that run
+   * began so a late result cannot erase a newer successful preview.
+   */
+  | { type: 'clear_preview_receipt'; pageId: string; expectedReceiptId?: string };
 
 export function createAppBuildDraft(input: {
   id: string;
@@ -238,7 +266,9 @@ export function applyAppBuildDraftOperations(
   let next: AppBuildDraft = structuredClone(draft);
   for (const operation of operations) next = applyOperation(next, operation);
   next = reconcileCoverageReferences(next);
-  const contentChanged = operations.some((operation) => operation.type !== 'set_preview_receipt');
+  const contentChanged = operations.some((operation) => (
+    operation.type !== 'set_preview_receipt' && operation.type !== 'clear_preview_receipt'
+  ));
   const settledDataChanged = operations.some((operation) => !operationPreservesSettledData(draft, operation));
   next.updatedAt = now;
   if (contentChanged) {
@@ -285,7 +315,7 @@ function reconcileCoverageReferences(draft: AppBuildDraft): AppBuildDraft {
 }
 
 function operationPreservesSettledData(draft: AppBuildDraft, operation: AppBuildDraftOperation): boolean {
-  if (operation.type === 'set_preview_receipt') return true;
+  if (operation.type === 'set_preview_receipt' || operation.type === 'clear_preview_receipt') return true;
   if (operation.type === 'update_tile') {
     const presentationKeys = new Set(['title', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
     return Object.keys(operation.patch).every((key) => presentationKeys.has(key));
@@ -309,6 +339,46 @@ export function appBuildDraftHash(value: unknown): string {
   return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 }
 
+/**
+ * Bind a preview to the full server-owned draft content for one page.
+ *
+ * This intentionally includes the field query, filters, interactions,
+ * parameter bindings, source revisions/contracts, and all other authored
+ * content. Receipt/preflight/publication bookkeeping is excluded because it
+ * changes after a successful preview without changing what was executed.
+ * Arrays retain their authored order; object keys are canonicalized so a JSON
+ * transport cannot mint a different digest for equivalent object content.
+ */
+export function appBuildPreviewIntentFingerprint(draft: AppBuildDraft, pageId: string): string {
+  const page = draft.pages.find((candidate) => candidate.id === pageId);
+  if (!page) throw new Error(`App Build page not found: ${pageId}`);
+  const content = {
+    version: 1,
+    draftId: draft.id,
+    appId: draft.appId,
+    name: draft.name,
+    baseApp: draft.baseApp,
+    authoringMode: draft.authoringMode,
+    template: draft.template,
+    sourcePolicy: draft.sourcePolicy,
+    frame: draft.frame,
+    requirements: draft.requirements,
+    coverage: draft.coverage,
+    sources: draft.sources,
+    page,
+  };
+  return `sha256:${createHash('sha256').update(JSON.stringify(canonicalAppBuildPreviewContent(content))).digest('hex')}`;
+}
+
+function canonicalAppBuildPreviewContent(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalAppBuildPreviewContent);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => [key, canonicalAppBuildPreviewContent(entry)]));
+}
+
 function applyOperation(draft: AppBuildDraft, operation: AppBuildDraftOperation): AppBuildDraft {
   switch (operation.type) {
     case 'set_name': {
@@ -327,7 +397,19 @@ function applyOperation(draft: AppBuildDraft, operation: AppBuildDraftOperation)
       sources: draft.sources.filter((source) => source.id !== operation.sourceId),
       coverage: draft.coverage.map((item) => ({ ...item, sourceIds: item.sourceIds.filter((id) => id !== operation.sourceId) })),
     };
-    case 'upsert_page': return { ...draft, pages: upsertById(draft.pages, normalizeEditedPage(operation.page)) };
+    case 'upsert_page': {
+      const normalized = normalizeEditedPage(operation.page);
+      // `upsert_page` is the public mutation used by Studio and API callers.
+      // A page created after an App filter exists must not silently become an
+      // unfiltered escape hatch merely because it has no Dataset tile yet.
+      if (draft.pages.some((page) => page.id === normalized.id)) {
+        return { ...draft, pages: upsertById(draft.pages, normalized) };
+      }
+      return {
+        ...draft,
+        pages: [...draft.pages, inheritAppScopedFiltersForNewPage(draft.pages, normalized)],
+      };
+    }
     case 'remove_page': return { ...draft, pages: draft.pages.filter((page) => page.id !== operation.pageId) };
     case 'set_review_task': return { ...draft, reviewTasks: upsertById(draft.reviewTasks, operation.task) };
     case 'remove_review_task': return { ...draft, reviewTasks: draft.reviewTasks.filter((task) => task.id !== operation.taskId) };
@@ -339,6 +421,7 @@ function applyOperation(draft: AppBuildDraft, operation: AppBuildDraftOperation)
         operation.receipt,
       ),
     };
+    case 'clear_preview_receipt': return clearPreviewReceiptForPage(draft, operation);
     default:
       return updatePage(draft, operation.pageId, (page) => {
         if (operation.type === 'add_tile') {
@@ -356,6 +439,9 @@ function applyOperation(draft: AppBuildDraft, operation: AppBuildDraftOperation)
         }
         if (operation.type === 'remove_filter') {
           return { ...page, filters: (page.filters ?? []).filter((filter) => filter.id !== operation.filterId) };
+        }
+        if (operation.type === 'set_interactions') {
+          return { ...page, ...(operation.interactions ? { interactions: operation.interactions } : { interactions: undefined }) };
         }
         return { ...page, layout: operation.layout };
       });
@@ -376,14 +462,63 @@ function updatePage(draft: AppBuildDraft, pageId: string, update: (page: Dashboa
 /** A v1 page is upgraded only when an explicit App Studio edit reaches it. */
 function normalizeEditedPage(page: DashboardDocument): DashboardDocument {
   const items = packDashboardLayoutItems(page.layout.items, 12);
+  const fieldBased = page.version === 3 || Boolean(page.datasets?.length) || items.some((item) => Boolean(item.query));
   return {
     ...page,
-    version: 2,
+    // Preserve v3 field bindings through ordinary local-draft edits. Legacy
+    // v1/v2 pages remain readable until an explicit edit, as before.
+    version: fieldBased ? 3 : 2,
     layout: {
       ...page.layout,
       items,
       responsive: projectResponsiveLayouts(items, page.layout.rowHeight),
     },
+  };
+}
+
+/**
+ * App-level filters are one logical control with page-qualified Dataset
+ * bindings.  Copy the control into a new page through the server/reducer,
+ * but start every Dataset binding as an explicit empty object.  The author
+ * must later choose a real source/field/tile mapping; no field-name fallback
+ * or inherited tile inclusion is permitted.
+ *
+ * Existing v1/v2 pages are deliberately left alone until an explicit edit
+ * makes them v3. A newly created page is not legacy state, so a Dataset-bound
+ * App filter upgrades it to v3 to retain its explicit empty binding across
+ * persisted document parsing.
+ */
+function inheritAppScopedFiltersForNewPage(
+  existingPages: DashboardDocument[],
+  page: DashboardDocument,
+): DashboardDocument {
+  const appScoped = new Map<string, DashboardFilter>();
+  for (const existing of existingPages) {
+    for (const filter of existing.filters ?? []) {
+      if (filter.scope?.app === true && !appScoped.has(filter.id)) appScoped.set(filter.id, filter);
+    }
+  }
+  if (appScoped.size === 0) return page;
+
+  const inheritedIds = new Set(appScoped.keys());
+  const pageLocal = (page.filters ?? []).filter((filter) => !inheritedIds.has(filter.id));
+  let requiresV3 = page.version === 3;
+  const inherited = [...appScoped.values()].map((filter) => {
+    const { datasetBindings: _datasetBindings, scope: _scope, ...logical } = filter;
+    // `{}` is an explicit Dataset exclusion on a page that has not yet been
+    // bound. Presence, rather than a populated mapping, is the authority.
+    const isDatasetBound = filter.datasetBindings !== undefined;
+    requiresV3 ||= isDatasetBound;
+    return {
+      ...logical,
+      scope: { app: true },
+      ...(isDatasetBound ? { datasetBindings: {} } : {}),
+    };
+  });
+  return {
+    ...page,
+    ...(requiresV3 ? { version: 3 } : {}),
+    filters: [...pageLocal, ...inherited],
   };
 }
 
@@ -453,6 +588,28 @@ function upsertReceiptByPage(values: AppBuildRunReceipt[], next: AppBuildRunRece
     : [...values, next];
 }
 
+function clearPreviewReceiptForPage(
+  draft: AppBuildDraft,
+  operation: Extract<AppBuildDraftOperation, { type: 'clear_preview_receipt' }>,
+): AppBuildDraft {
+  const receipts = draft.previewReceipts ?? (draft.previewReceipt ? [draft.previewReceipt] : []);
+  const existing = receipts.find((receipt) => receipt.pageId === operation.pageId);
+  if (operation.expectedReceiptId !== undefined && existing?.id !== operation.expectedReceiptId) {
+    throw new Error(`APP_BUILD_PREVIEW_RECEIPT_CONFLICT: page ${operation.pageId} no longer has the receipt observed by this preview.`);
+  }
+  if (!existing) return draft;
+  const remaining = receipts.filter((receipt) => receipt.pageId !== operation.pageId);
+  const next: AppBuildDraft = { ...draft };
+  if (remaining.length > 0) next.previewReceipts = remaining;
+  else delete next.previewReceipts;
+  if (draft.previewReceipt?.pageId === operation.pageId) {
+    const replacement = remaining.at(-1);
+    if (replacement) next.previewReceipt = replacement;
+    else delete next.previewReceipt;
+  }
+  return next;
+}
+
 function assertAppBuildDraftPolicy(draft: Omit<AppBuildDraft, 'proposalHash'> | AppBuildDraft): void {
   if (!draft.id.trim() || !draft.appId.trim()) throw new Error('App Build Draft requires id and appId');
   if (!draft.name.trim()) throw new Error('App Build Draft requires a name');
@@ -470,10 +627,20 @@ function assertAppBuildDraftPolicy(draft: Omit<AppBuildDraft, 'proposalHash'> | 
       if (!sourceIds.has(sourceId)) throw new Error(`Coverage ${coverage.requirementId} references missing source ${sourceId}`);
     }
   }
+  assertAppScopedFilterConsistency(draft.pages);
   for (const page of draft.pages) {
     for (const tile of page.layout.items) {
       if (tile.sourceId && !sourceIds.has(tile.sourceId)) {
         throw new Error(`Tile ${page.id}/${tile.i} references missing source ${tile.sourceId}`);
+      }
+      // Dataset field tiles are a v3-only contract. Existing v1/v2 drafts
+      // retain their historic renderer semantics; new or edited v3 tiles
+      // cannot persist a scalar visualization that would hide a selection.
+      if (page.version === 3 && tile.query) {
+        const visualization = datasetTileVisualizationCompatibility(tile.query, tile.viz.type);
+        if (!visualization.compatible) {
+          throw new Error(`Dataset tile ${page.id}/${tile.i} is incompatible with ${tile.viz.type}: ${visualization.message}`);
+        }
       }
     }
   }
@@ -485,4 +652,65 @@ function assertAppBuildDraftPolicy(draft: Omit<AppBuildDraft, 'proposalHash'> | 
       || source.kind === 'exploratory_sql');
     if (reviewSource) throw new Error(`Source ${reviewSource.id} requires include_review_required policy`);
   }
+}
+
+/**
+ * App-scoped dashboard filters are stored once per page so each page can keep
+ * its own exact Dataset bindings and explicit exclusions. Their logical
+ * control, however, is one App-owned contract. Reject shadowing or diverging
+ * definitions here, after every non-UI as well as Studio mutation, rather
+ * than relying on a browser to keep matching IDs aligned.
+ */
+function assertAppScopedFilterConsistency(pages: DashboardDocument[]): void {
+  const byId = new Map<string, Array<{ pageId: string; filter: DashboardFilter }>>();
+  for (const page of pages) {
+    for (const filter of page.filters ?? []) {
+      const entries = byId.get(filter.id) ?? [];
+      entries.push({ pageId: page.id, filter });
+      byId.set(filter.id, entries);
+    }
+  }
+  for (const [id, entries] of byId) {
+    if (!entries.some((entry) => entry.filter.scope?.app === true)) continue;
+    if (entries.some((entry) => entry.filter.scope?.app !== true)) {
+      throw new Error(`App-scoped filter ${id} cannot be shadowed by a page-local filter with the same id.`);
+    }
+    const expected = appScopedFilterDefinition(entries[0]!.filter);
+    for (const entry of entries.slice(1)) {
+      if (appScopedFilterDefinition(entry.filter) !== expected) {
+        throw new Error(`App-scoped filter ${id} has conflicting definitions on pages ${entries[0]!.pageId} and ${entry.pageId}.`);
+      }
+    }
+    // Older v1/v2 pages remain readable without a conversion on open. Every
+    // v3 page, however, is a current Dataset-capable authoring surface and
+    // must carry the App control so a direct operation cannot omit it.
+    for (const page of pages) {
+      if (page.version !== 3) continue;
+      const pageFilter = page.filters?.find((filter) => filter.id === id);
+      if (!pageFilter) {
+        throw new Error(`App-scoped filter ${id} is missing from v3 page ${page.id}. Add the page through the governed App draft operation so it starts explicitly excluded.`);
+      }
+      if (pageFilter.scope?.app !== true) {
+        throw new Error(`App-scoped filter ${id} cannot be shadowed by a page-local filter on v3 page ${page.id}.`);
+      }
+    }
+  }
+}
+
+/** Dataset bindings are intentionally omitted: they are page-qualified. */
+function appScopedFilterDefinition(filter: DashboardFilter): string {
+  return JSON.stringify(canonicalAppBuildPreviewContent({
+    id: filter.id,
+    type: filter.type,
+    label: filter.label,
+    default: filter.default,
+    options: filter.options,
+    bindsTo: filter.bindsTo,
+    field: filter.field,
+    required: filter.required,
+    multiple: filter.multiple,
+    timezone: filter.timezone,
+    optionSource: filter.optionSource,
+    dependsOn: filter.dependsOn,
+  }));
 }

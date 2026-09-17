@@ -1,0 +1,9 @@
+name: order_lines
+label: Order lines semantic model
+description: Model-scoped native semantic Dataset used for App Builder parity tests.
+domain: commerce
+table: order_lines
+entities: [order_line]
+measures: [semantic_revenue, semantic_margin_amount, semantic_order_count, semantic_customer_count, semantic_margin_rate]
+dimensions: [order_id, customer_id, region]
+time_dimensions: [order_date]

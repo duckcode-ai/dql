@@ -248,7 +248,30 @@ export {
   resolveAppSourceCatalogRecords,
   shortlistAppSources,
 } from './app-source-catalog.js';
-export { planAppBuildBrief } from './app-builder-orchestrator.js';
+export {
+  planAppBuildBrief,
+  deterministicDatasetQuery,
+  datasetPlannedQueryCoversRequirement,
+} from './app-builder-orchestrator.js';
+export {
+  DATASET_PROOF_RELATIVE_PATH,
+  LOCAL_DATASET_PROOF_RELATIVE_PATH,
+  datasetBlockProofMaterial,
+  datasetDescriptorFromSemanticMetrics,
+  datasetDescriptorFromManifestBlock,
+  datasetBindingAuthorityForManifestBlock,
+  buildDatasetComparisonPlan,
+  executeDatasetComparisonPlan,
+  loadDatasetGrainProofs,
+} from './datasets/index.js';
+export type {
+  DatasetBindingAuthority,
+  DatasetBlockProofMaterial,
+  DatasetCatalogDescriptorResult,
+  DatasetComparisonPlanResult,
+  SemanticDatasetMeasureProjection,
+  SemanticMetricsDatasetProjectionInput,
+} from './datasets/index.js';
 export type {
   AppBuilderBuildBrief,
   AppBuilderComponentRole,
@@ -256,6 +279,8 @@ export type {
   AppBuilderPlannedComponent,
   AppBuilderPlannerCompletion,
   AppBuilderPlannerCompletionInput,
+  AppBuilderPlannerCompletionResult,
+  AppBuilderPlannerProvenance,
   PlanAppBuildBriefInput,
 } from './app-builder-orchestrator.js';
 export type {
@@ -284,6 +309,8 @@ export {
 } from './context-authoring.js';
 export type {
   ContextAuthoringDiagnosticV1,
+  DatasetAuthoringChange,
+  DatasetDraftAuthoringChange,
   ContextAuthoringOperation,
   ContextAuthoringOrigin,
   ContextAuthoringPatchV1,

@@ -31,6 +31,7 @@ export interface LocalAppStateArchive {
     conversationMessages: Record<string, unknown>[];
     buildDrafts: Record<string, unknown>[];
     buildOperations: Record<string, unknown>[];
+    autopilotChanges?: Record<string, unknown>[];
     previewEvidence?: Record<string, unknown>[];
   };
 }
@@ -43,17 +44,73 @@ export interface LocalAppBuildOperationRecord {
   createdAt: string;
 }
 
+/**
+ * Local durable state for one immutable App Autopilot review artifact.
+ *
+ * The App API owns the proposal shape and validates it before calling this
+ * store. Keeping the payload opaque here avoids a project -> CLI dependency
+ * while SQLite still atomically advances the draft and its Apply decision.
+ */
+export interface LocalAppAutopilotChangeRecord {
+  id: string;
+  draftId: string;
+  proposalHash: string;
+  runId: string;
+  artifactId: string;
+  payload: unknown;
+  createdAt: string;
+  appliedAt?: string;
+  appliedRevision?: number;
+}
+
 export interface LocalAppPreviewEvidence {
   runId: string;
   draftId: string;
   dashboardId: string;
+  /** Server-issued executable draft/page content binding for receipt replay. */
+  intentFingerprint: string;
   snapshotId: string;
   filterFingerprint: string;
   resultFingerprint: string;
   personaFingerprint: string;
   successfulTileIds: string[];
   semanticApprovalEligibleTileIds: string[];
+  /** Field tiles whose current source/target binding was positively verified. */
+  datasetBindingEligibleTileIds: string[];
+  /**
+   * Per-tile server evidence needed to rebind a persisted Dataset receipt after
+   * a runtime restart.  These records deliberately contain only identifiers
+   * and fingerprints: result rows and browser-supplied trust flags are never
+   * publication authority.
+   */
+  datasetBindings: LocalAppPreviewDatasetBindingEvidence[];
   createdAt: string;
+}
+
+export interface LocalAppPreviewDatasetBindingEvidence {
+  tileId: string;
+  kind: 'block' | 'semantic';
+  sourceId: string;
+  sourceRevision: string;
+  contractFingerprint: string;
+  /** Actual warehouse identity observed while this preview executed. */
+  targetFingerprint: string;
+  /** Server-resolvable target selection used to re-observe the identity. */
+  executionTarget: { target: 'local' } | { target: 'connection'; connectionName?: string };
+  /**
+   * Physical Dataset sources must retain the exact declared grain proof and
+   * declaration scope. Semantic sources bind through their target receipt and
+   * therefore omit this field.
+   */
+  grainProof?: {
+    id: string;
+    sourceSqlFingerprint: string;
+    parameterFingerprint: string;
+    queryFingerprint: string;
+    keyFingerprint: string;
+    scopeSnapshotId: string;
+    scopeSnapshotFingerprint: string;
+  };
 }
 export type LocalAppInvestigationIntent =
   | 'diagnose_change'
@@ -287,7 +344,7 @@ export class LocalAppStorage {
    */
   saveAppBuildDraft(
     draft: AppBuildDraft,
-    input: { expectedRevision?: number; operations?: AppBuildDraftOperation[] } = {},
+    input: { expectedRevision?: number; operations?: AppBuildDraftOperation[]; deletePreviewEvidenceRunId?: string } = {},
   ): AppBuildDraft {
     const run = this.db.transaction(() => {
       const current = this.db.prepare('SELECT revision FROM app_build_drafts WHERE id = ?').get(draft.id) as { revision?: number } | undefined;
@@ -336,7 +393,153 @@ export class LocalAppStorage {
           VALUES (?, ?, ?, ?)
         `).run(draft.id, draft.revision, JSON.stringify(operations), draft.updatedAt);
       }
+      if (input.deletePreviewEvidenceRunId) {
+        this.db.prepare('DELETE FROM app_preview_evidence WHERE run_id = ? AND draft_id = ?').run(
+          input.deletePreviewEvidenceRunId,
+          draft.id,
+        );
+      }
       return draft;
+    });
+    return run();
+  }
+
+  /**
+   * Store a prepared immutable review artifact. The same identifier can be
+   * stored again only when every durable identity and its payload match. This
+   * prevents one proposal id from being reused for different reviewed work.
+   */
+  saveAppAutopilotChange(input: Omit<LocalAppAutopilotChangeRecord, 'appliedAt' | 'appliedRevision'>): LocalAppAutopilotChangeRecord {
+    const payload = JSON.stringify(input.payload);
+    const run = this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM app_autopilot_changes WHERE id = ?').get(input.id) as Record<string, unknown> | undefined;
+      if (existing) {
+        const exact = String(existing.draft_id) === input.draftId
+          && String(existing.proposal_hash) === input.proposalHash
+          && String(existing.run_id) === input.runId
+          && String(existing.artifact_id) === input.artifactId
+          && String(existing.payload) === payload;
+        if (!exact) {
+          throw new Error('APP_AUTOPILOT_CHANGE_CONFLICT: this App Autopilot proposal id is already bound to different reviewed content.');
+        }
+        return rowToAppAutopilotChange(existing);
+      }
+      this.db.prepare(`
+        INSERT INTO app_autopilot_changes (
+          id, draft_id, proposal_hash, run_id, artifact_id, payload, created_at,
+          applied_at, applied_revision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+      `).run(
+        input.id,
+        input.draftId,
+        input.proposalHash,
+        input.runId,
+        input.artifactId,
+        payload,
+        input.createdAt,
+      );
+      return { ...input, payload: parseJson(payload) };
+    });
+    return run();
+  }
+
+  getAppAutopilotChange(draftId: string, id: string): LocalAppAutopilotChangeRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM app_autopilot_changes
+      WHERE draft_id = ? AND id = ?
+    `).get(draftId, id) as Record<string, unknown> | undefined;
+    return row ? rowToAppAutopilotChange(row) : null;
+  }
+
+  /**
+   * Atomically persist a reviewed App mutation and its Apply decision. A
+   * failed marker write rolls back the draft and typed operation record too;
+   * an identical retry after reopening SQLite returns the durable prior result.
+   */
+  applyAppBuildDraftWithAutopilotChange(
+    draft: AppBuildDraft,
+    input: {
+      expectedRevision: number;
+      operations: AppBuildDraftOperation[];
+      proposal: Pick<LocalAppAutopilotChangeRecord, 'id' | 'draftId' | 'proposalHash' | 'runId' | 'artifactId'>;
+      appliedAt: string;
+    },
+  ): { draft: AppBuildDraft; deduped: boolean } {
+    const run = this.db.transaction(() => {
+      const record = this.db.prepare(`
+        SELECT * FROM app_autopilot_changes
+        WHERE draft_id = ? AND id = ?
+      `).get(input.proposal.draftId, input.proposal.id) as Record<string, unknown> | undefined;
+      if (!record) {
+        throw new Error('APP_AUTOPILOT_CHANGE_NOT_FOUND: the App Autopilot review artifact is unavailable. Ask App Autopilot to prepare it again.');
+      }
+      const identityMatches = String(record.proposal_hash) === input.proposal.proposalHash
+        && String(record.run_id) === input.proposal.runId
+        && String(record.artifact_id) === input.proposal.artifactId;
+      if (!identityMatches) {
+        throw new Error('APP_AUTOPILOT_CHANGE_CONFLICT: this App Autopilot proposal id is bound to different reviewed content.');
+      }
+      if (typeof record.applied_revision === 'number') {
+        const current = this.getAppBuildDraft(draft.id);
+        if (!current) {
+          throw new Error('APP_AUTOPILOT_CHANGE_CONFLICT: the applied App Autopilot change no longer has its local draft.');
+        }
+        return { draft: current, deduped: true };
+      }
+      const current = this.db.prepare('SELECT revision FROM app_build_drafts WHERE id = ?').get(draft.id) as { revision?: number } | undefined;
+      if (current?.revision !== input.expectedRevision) {
+        throw new Error(`APP_BUILD_REVISION_CONFLICT: expected ${input.expectedRevision}, current ${current?.revision ?? 'missing'}`);
+      }
+      this.db.prepare(`
+        INSERT INTO app_build_drafts (
+          id, app_id, name, base_app_id, base_fingerprint, revision,
+          proposal_hash, state, authoring_mode, source_policy, template, payload,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          app_id = excluded.app_id,
+          name = excluded.name,
+          base_app_id = excluded.base_app_id,
+          base_fingerprint = excluded.base_fingerprint,
+          revision = excluded.revision,
+          proposal_hash = excluded.proposal_hash,
+          state = excluded.state,
+          authoring_mode = excluded.authoring_mode,
+          source_policy = excluded.source_policy,
+          template = excluded.template,
+          payload = excluded.payload,
+          updated_at = excluded.updated_at
+      `).run(
+        draft.id,
+        draft.appId,
+        draft.name,
+        draft.baseApp?.appId ?? null,
+        draft.baseApp?.fingerprint ?? null,
+        draft.revision,
+        draft.proposalHash,
+        draft.state,
+        draft.authoringMode,
+        draft.sourcePolicy,
+        draft.template,
+        JSON.stringify(draft),
+        draft.createdAt,
+        draft.updatedAt,
+      );
+      if (input.operations.length) {
+        this.db.prepare(`
+          INSERT INTO app_build_operations (draft_id, revision, operations, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(draft.id, draft.revision, JSON.stringify(input.operations), draft.updatedAt);
+      }
+      const marked = this.db.prepare(`
+        UPDATE app_autopilot_changes
+        SET applied_at = ?, applied_revision = ?
+        WHERE draft_id = ? AND id = ? AND applied_revision IS NULL
+      `).run(input.appliedAt, draft.revision, input.proposal.draftId, input.proposal.id);
+      if (marked.changes !== 1) {
+        throw new Error('APP_AUTOPILOT_CHANGE_CONFLICT: the App Autopilot Apply decision changed before it could be recorded.');
+      }
+      return { draft, deduped: false };
     });
     return run();
   }
@@ -377,20 +580,23 @@ export class LocalAppStorage {
   saveAppPreviewEvidence(evidence: LocalAppPreviewEvidence): void {
     this.db.prepare(`
       INSERT OR REPLACE INTO app_preview_evidence (
-        run_id, draft_id, dashboard_id, snapshot_id, filter_fingerprint,
+        run_id, draft_id, dashboard_id, intent_fingerprint, snapshot_id, filter_fingerprint,
         result_fingerprint, persona_fingerprint, successful_tile_ids,
-        semantic_approval_tile_ids, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        semantic_approval_tile_ids, dataset_binding_tile_ids, dataset_bindings, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       evidence.runId,
       evidence.draftId,
       evidence.dashboardId,
+      evidence.intentFingerprint,
       evidence.snapshotId,
       evidence.filterFingerprint,
       evidence.resultFingerprint,
       evidence.personaFingerprint,
       JSON.stringify(evidence.successfulTileIds),
       JSON.stringify(evidence.semanticApprovalEligibleTileIds),
+      JSON.stringify(evidence.datasetBindingEligibleTileIds),
+      JSON.stringify(evidence.datasetBindings),
       evidence.createdAt,
     );
   }
@@ -402,12 +608,15 @@ export class LocalAppStorage {
       runId: String(row.run_id),
       draftId: String(row.draft_id),
       dashboardId: String(row.dashboard_id),
+      intentFingerprint: typeof row.intent_fingerprint === 'string' ? row.intent_fingerprint : '',
       snapshotId: String(row.snapshot_id),
       filterFingerprint: String(row.filter_fingerprint),
       resultFingerprint: String(row.result_fingerprint),
       personaFingerprint: String(row.persona_fingerprint),
       successfulTileIds: (parseJson(row.successful_tile_ids) as string[] | undefined) ?? [],
       semanticApprovalEligibleTileIds: (parseJson(row.semantic_approval_tile_ids) as string[] | undefined) ?? [],
+      datasetBindingEligibleTileIds: (parseJson(row.dataset_binding_tile_ids) as string[] | undefined) ?? [],
+      datasetBindings: parsePreviewDatasetBindings(row.dataset_bindings),
       createdAt: String(row.created_at),
     };
   }
@@ -418,6 +627,7 @@ export class LocalAppStorage {
     const operations = this.listAppBuildOperations(id);
     const run = this.db.transaction(() => {
       this.db.prepare('DELETE FROM app_preview_evidence WHERE draft_id = ?').run(id);
+      this.db.prepare('DELETE FROM app_autopilot_changes WHERE draft_id = ?').run(id);
       this.db.prepare('DELETE FROM app_build_operations WHERE draft_id = ?').run(id);
       this.db.prepare('DELETE FROM app_build_drafts WHERE id = ?').run(id);
     });
@@ -776,6 +986,10 @@ export class LocalAppStorage {
             SELECT * FROM app_build_operations
             WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
           `).all(appId, appId) as Record<string, unknown>[],
+          autopilotChanges: this.db.prepare(`
+            SELECT * FROM app_autopilot_changes
+            WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
+          `).all(appId, appId) as Record<string, unknown>[],
           previewEvidence: this.db.prepare(`
             SELECT * FROM app_preview_evidence
             WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
@@ -786,6 +1000,10 @@ export class LocalAppStorage {
         this.db.prepare(`DELETE FROM app_conversation_messages WHERE conversation_id IN (${conversationIds.map(() => '?').join(',')})`).run(...conversationIds);
       }
       this.db.prepare('DELETE FROM app_conversations WHERE app_id = ?').run(appId);
+      this.db.prepare(`
+        DELETE FROM app_autopilot_changes
+        WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
+      `).run(appId, appId);
       this.db.prepare(`
         DELETE FROM app_build_operations
         WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
@@ -816,6 +1034,7 @@ export class LocalAppStorage {
       this.insertArchivedRows('app_conversation_messages', archive.rows.conversationMessages);
       this.insertArchivedRows('app_build_drafts', archive.rows.buildDrafts ?? []);
       this.insertArchivedRows('app_build_operations', archive.rows.buildOperations ?? []);
+      this.insertArchivedRows('app_autopilot_changes', archive.rows.autopilotChanges ?? []);
       this.insertArchivedRows('app_preview_evidence', archive.rows.previewEvidence ?? []);
     });
     run();
@@ -961,21 +1180,37 @@ export class LocalAppStorage {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS app_autopilot_changes (
+        id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL,
+        proposal_hash TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        applied_at TEXT,
+        applied_revision INTEGER
+      );
+
       CREATE TABLE IF NOT EXISTS app_preview_evidence (
         run_id TEXT PRIMARY KEY,
         draft_id TEXT NOT NULL,
         dashboard_id TEXT NOT NULL,
+        intent_fingerprint TEXT NOT NULL DEFAULT '',
         snapshot_id TEXT NOT NULL,
         filter_fingerprint TEXT NOT NULL,
         result_fingerprint TEXT NOT NULL,
         persona_fingerprint TEXT NOT NULL,
         successful_tile_ids TEXT NOT NULL,
         semantic_approval_tile_ids TEXT NOT NULL,
+        dataset_binding_tile_ids TEXT NOT NULL DEFAULT '[]',
+        dataset_bindings TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_app_build_drafts_app ON app_build_drafts(app_id, updated_at);
       CREATE INDEX IF NOT EXISTS idx_app_build_operations_draft ON app_build_operations(draft_id, id);
+      CREATE INDEX IF NOT EXISTS idx_app_autopilot_changes_draft ON app_autopilot_changes(draft_id, id);
       CREATE INDEX IF NOT EXISTS idx_app_preview_evidence_draft ON app_preview_evidence(draft_id, dashboard_id, created_at);
     `);
     this.ensureColumn('ai_pins', 'question', 'TEXT');
@@ -992,6 +1227,9 @@ export class LocalAppStorage {
     this.ensureColumn('app_investigations', 'report_sections', 'TEXT');
     this.ensureColumn('app_conversations', 'context', 'TEXT');
     this.ensureColumn('app_build_drafts', 'template', "TEXT NOT NULL DEFAULT 'blank'");
+    this.ensureColumn('app_preview_evidence', 'dataset_binding_tile_ids', "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('app_preview_evidence', 'dataset_bindings', "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('app_preview_evidence', 'intent_fingerprint', "TEXT NOT NULL DEFAULT ''");
   }
 
   private insertArchivedRows(table: string, rows: Record<string, unknown>[]): void {
@@ -1075,6 +1313,23 @@ export class LocalAppStorage {
 function normalizeConversationContext(value: unknown): LocalAppConversationContext | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   return value as LocalAppConversationContext;
+}
+
+function rowToAppAutopilotChange(row: Record<string, unknown>): LocalAppAutopilotChangeRecord {
+  const appliedRevision = typeof row.applied_revision === 'number'
+    ? row.applied_revision
+    : undefined;
+  return {
+    id: String(row.id),
+    draftId: String(row.draft_id),
+    proposalHash: String(row.proposal_hash),
+    runId: String(row.run_id),
+    artifactId: String(row.artifact_id),
+    payload: parseJson(row.payload),
+    createdAt: String(row.created_at),
+    ...(optionalString(row.applied_at) ? { appliedAt: optionalString(row.applied_at) } : {}),
+    ...(appliedRevision !== undefined ? { appliedRevision } : {}),
+  };
 }
 
 function rowToAiPin(row: Record<string, unknown>): LocalAiPin {
@@ -1282,4 +1537,49 @@ function parseJson(value: unknown): unknown {
   } catch {
     return undefined;
   }
+}
+
+/** Older or malformed persisted Dataset evidence is intentionally unusable. */
+function parsePreviewDatasetBindings(value: unknown): LocalAppPreviewDatasetBindingEvidence[] {
+  const raw = parseJson(value);
+  if (!Array.isArray(raw)) return [];
+  const bindings: LocalAppPreviewDatasetBindingEvidence[] = [];
+  for (const candidate of raw) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+    const record = candidate as Record<string, unknown>;
+    const executionTarget = record.executionTarget;
+    if (!executionTarget || typeof executionTarget !== 'object' || Array.isArray(executionTarget)) return [];
+    const target = executionTarget as Record<string, unknown>;
+    const kind = record.kind;
+    const required = ['tileId', 'sourceId', 'sourceRevision', 'contractFingerprint', 'targetFingerprint'];
+    if ((kind !== 'block' && kind !== 'semantic')
+      || !required.every((key) => typeof record[key] === 'string' && Boolean(String(record[key]).trim()))
+      || (target.target !== 'local' && target.target !== 'connection')
+      || (target.target === 'connection' && target.connectionName !== undefined && typeof target.connectionName !== 'string')) return [];
+    let grainProof: LocalAppPreviewDatasetBindingEvidence['grainProof'];
+    if (record.grainProof !== undefined) {
+      if (!record.grainProof || typeof record.grainProof !== 'object' || Array.isArray(record.grainProof)) return [];
+      const proof = record.grainProof as Record<string, unknown>;
+      const proofFields = [
+        'id', 'sourceSqlFingerprint', 'parameterFingerprint', 'queryFingerprint', 'keyFingerprint',
+        'scopeSnapshotId', 'scopeSnapshotFingerprint',
+      ];
+      if (!proofFields.every((key) => typeof proof[key] === 'string' && Boolean(String(proof[key]).trim()))) return [];
+      grainProof = Object.fromEntries(proofFields.map((key) => [key, String(proof[key])])) as LocalAppPreviewDatasetBindingEvidence['grainProof'];
+    }
+    if ((kind === 'block') !== Boolean(grainProof)) return [];
+    bindings.push({
+      tileId: String(record.tileId),
+      kind,
+      sourceId: String(record.sourceId),
+      sourceRevision: String(record.sourceRevision),
+      contractFingerprint: String(record.contractFingerprint),
+      targetFingerprint: String(record.targetFingerprint),
+      executionTarget: target.target === 'local'
+        ? { target: 'local' }
+        : { target: 'connection', ...(typeof target.connectionName === 'string' ? { connectionName: target.connectionName } : {}) },
+      ...(grainProof ? { grainProof } : {}),
+    });
+  }
+  return bindings;
 }

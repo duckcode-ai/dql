@@ -13,6 +13,8 @@ import {
   SemanticLayer,
   parseMetricDefinition,
   parseDimensionDefinition,
+  parseEntityDefinition,
+  parseSemanticModelDefinition,
   parseHierarchyDefinition,
   parseCubeDefinition,
   parseSegmentDefinition,
@@ -43,6 +45,14 @@ export function loadSemanticLayerFromConfig(
       } else if (pathLower.includes('/dimensions/') || pathLower.includes('\\dimensions\\')) {
         for (const item of expandDefinitions(raw, ['dimensions'])) {
           addIfNamed(parseDimensionDefinition(item), (parsed) => layer.addDimension(parsed));
+        }
+      } else if (pathLower.includes('/entities/') || pathLower.includes('\\entities\\')) {
+        for (const item of expandDefinitions(raw, ['entities'])) {
+          addIfNamed(parseEntityDefinition(item), (parsed) => layer.addEntity(parsed));
+        }
+      } else if (pathLower.includes('/semantic_models/') || pathLower.includes('\\semantic_models\\')) {
+        for (const item of expandDefinitions(raw, ['semantic_models', 'semanticModels'])) {
+          addIfNamed(parseSemanticModelDefinition(item), (parsed) => layer.addSemanticModel(parsed));
         }
       } else if (pathLower.includes('/hierarchies/') || pathLower.includes('\\hierarchies\\')) {
         for (const item of expandDefinitions(raw, ['hierarchies'])) {

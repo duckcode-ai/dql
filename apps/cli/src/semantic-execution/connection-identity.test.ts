@@ -102,4 +102,13 @@ describe('semantic execution connection identity', () => {
       schema: 'ANALYTICS',
     });
   });
+
+  it('binds local database targets without exposing their filesystem paths', () => {
+    const first = configuredWarehouseTargetIdentity({ driver: 'duckdb', filepath: '/private/tmp/warehouse-a.duckdb' });
+    const second = configuredWarehouseTargetIdentity({ driver: 'duckdb', filepath: '/private/tmp/warehouse-b.duckdb' });
+
+    expect(first.identityFingerprint).not.toBe(second.identityFingerprint);
+    expect(first.redactedContext.catalog).toMatch(/^LOCAL_[A-F0-9]{24}$/);
+    expect(JSON.stringify(first)).not.toContain('warehouse-a.duckdb');
+  });
 });

@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
-import type { AppBuildProposal, AppBuildProposalTile, DashboardDocumentResponse } from '../../api/client';
+import { describe, expect, it, vi } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import type { AppBuildProposal, AppBuildProposalTile, DashboardDocumentResponse, DashboardRunResponse } from '../../api/client';
 import { unbuildableSelectedTiles } from './AppBuildProposalPanel';
 import {
   addDashboardFilterToDocument,
@@ -70,6 +72,75 @@ describe('App dashboard filter wiring (UI-001, E2E-001)', () => {
     expect(filter).toMatchObject({ id: 'customer_name', sourceBlockId: 'Customer profile' });
   });
 
+  it('keeps a persisted v3 App Dataset filter with a distinct option source visible in a saved viewer', async () => {
+    // This is the persisted published-App shape: no static options or legacy
+    // sourceBlockId, an exact Dataset binding for Revenue by Region, and an
+    // explicit empty binding that leaves the monthly tile at its full scope.
+    const dashboard = {
+      version: 3,
+      id: 'overview',
+      metadata: { title: 'Overview' },
+      datasets: [
+        { id: 'dataset_orders', sourceId: 'source.orders', sourceRevision: 'source-v1', snapshotId: 'snapshot-v1', contractFingerprint: 'contract-orders' },
+        { id: 'dataset_monthly', sourceId: 'source.monthly', sourceRevision: 'source-v1', snapshotId: 'snapshot-v1', contractFingerprint: 'contract-monthly' },
+      ],
+      filters: [{
+        id: 'region', label: 'Region', type: 'select', bindsTo: 'region', field: { name: 'region' },
+        scope: { app: true },
+        datasetBindings: {
+          dataset_orders: { field: 'region', tileIds: ['revenue-by-region'] },
+          dataset_monthly: { field: 'region', tileIds: [] },
+        },
+        optionSource: { mode: 'distinct_query', field: 'region', limit: 100 },
+      }],
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [
+          {
+            i: 'revenue-by-region', x: 0, y: 0, w: 6, h: 4, title: 'Revenue by Region',
+            sourceId: 'source.orders', sourceRevision: 'source-v1',
+            query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] }, viz: { type: 'bar' },
+          },
+          {
+            i: 'monthly-revenue', x: 6, y: 0, w: 6, h: 4, title: 'Monthly Revenue',
+            sourceId: 'source.monthly', sourceRevision: 'source-v1',
+            query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }] }, viz: { type: 'bar' },
+          },
+        ],
+      },
+    } as unknown as DashboardDocumentResponse['dashboard'];
+
+    const filters = deriveDashboardFilters(dashboard);
+    expect(filters).toEqual([expect.objectContaining({
+      id: 'region',
+      scope: { app: true },
+      optionSource: { mode: 'distinct_query', field: 'region', limit: 100 },
+      datasetBindings: expect.objectContaining({
+        dataset_orders: { field: 'region', tileIds: ['revenue-by-region'] },
+        dataset_monthly: { field: 'region', tileIds: [] },
+      }),
+    })]);
+    // AppWorkspaceSurface calls this exact helper before it renders the saved
+    // viewer control. A persisted Dataset filter must reach the control row
+    // even without static options or a legacy block id.
+    vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
+    const { DashboardFilterControls } = await import('./app-dashboard-filters');
+    const markup = renderToStaticMarkup(createElement(DashboardFilterControls, {
+      filters,
+      values: {},
+      onChange: () => undefined,
+    }));
+    expect(markup).toContain('aria-label="Region"');
+    expect(markup).toContain('placeholder="Region"');
+    expect(dashboardFilterCoverage(dashboard, 'region')).toMatchObject({
+      applied: ['revenue-by-region'],
+      unaffected: [expect.objectContaining({
+        tileId: 'monthly-revenue',
+        reason: 'Excluded by this filter’s linked-component selection.',
+      })],
+    });
+  });
+
   it('adds and removes a manual page filter together with its proven tile binding', () => {
     const dashboard = dashboardWithItem({
       i: 'customer-tile', x: 0, y: 0, w: 6, h: 4,
@@ -95,6 +166,71 @@ describe('App dashboard filter wiring (UI-001, E2E-001)', () => {
     const removed = removeDashboardFilterFromDocument(added, 'customer_type');
     expect(removed.filters).toEqual([]);
     expect(removed.layout.items[0].filterBindings).toEqual([]);
+  });
+});
+
+describe('Published Dataset filter presentation (APP-066)', () => {
+  it('uses settled Dataset runtime scope instead of legacy binding inference', async () => {
+    vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
+    const { canAskDatasetChart, dashboardTileFilterNotices } = await import('./DashboardRenderer');
+    const sourceId = 'app:block:commerce:a04df7dc095ea53854d5';
+    const sourceRevision = 'sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609';
+    const linkedItem = {
+      i: 'component-1', title: 'Revenue by Region', x: 0, y: 0, w: 6, h: 4,
+      sourceId, sourceRevision,
+      query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
+      viz: { type: 'bar' },
+      // Persisted Dataset mappings live on dashboard.filters.datasetBindings,
+      // so this deliberate empty legacy list must not imply an unfiltered tile.
+      filterBindings: [],
+    } as DashboardDocumentResponse['dashboard']['layout']['items'][number];
+    const linkedTile = {
+      tileId: 'component-1', tileType: 'dataset', status: 'ok',
+      result: { columns: ['region', 'revenue'], rows: [{ region: 'CA', revenue: 60 }], rowCount: 1 },
+      dataset: {
+        sourceId, sourceRevision,
+        appliedFilters: [{ field: 'region', op: 'eq', values: ['CA'] }],
+        unboundFilters: [],
+      },
+    } as DashboardRunResponse['tiles'][number];
+    const linked = dashboardTileFilterNotices({
+      item: linkedItem,
+      tile: linkedTile,
+      activeVariables: { region: ['CA'] },
+    });
+    expect(linked).toEqual({ unfilteredNotice: null, datasetUnboundNotices: [] });
+    // The filter run still has a real settled Dataset envelope and its
+    // server-issued run id, so the existing Ask affordance stays available.
+    expect(canAskDatasetChart(linkedTile, false, 'app_run_ca', true)).toBe(true);
+
+    const excluded = dashboardTileFilterNotices({
+      item: {
+        ...linkedItem,
+        i: 'order-lines-dataset-chart',
+        title: 'Monthly Revenue',
+        query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }] },
+      },
+      tile: {
+        ...linkedTile,
+        tileId: 'order-lines-dataset-chart',
+        result: { columns: ['order_date_month', 'revenue'], rows: [{ order_date_month: '2026-01-01', revenue: 60 }], rowCount: 3 },
+        dataset: {
+          ...(linkedTile.dataset ?? {}),
+          appliedFilters: [],
+          unboundFilters: [{
+            filterId: 'region',
+            code: 'DATASET_TILE_EXCLUDED',
+            message: 'Region is excluded from Monthly Revenue by this filter’s linked-component selection.',
+          }],
+        },
+      } as never,
+      activeVariables: { region: ['CA'] },
+    });
+    expect(excluded.unfilteredNotice).toBeNull();
+    expect(excluded.datasetUnboundNotices).toEqual([expect.objectContaining({
+      filterId: 'region',
+      code: 'DATASET_TILE_EXCLUDED',
+    })]);
   });
 });
 
@@ -126,6 +262,51 @@ describe('App semantic repair approval (AGT-023, UI-018)', () => {
       tiles: [{ tileId: 'semantic-revenue', status: 'ok', tileType: 'semantic' }],
     } as never;
     expect(semanticApprovalState(['semantic-revenue'], unrepairedRun)).toEqual({ ready: true, repairedTileIds: [] });
+  });
+});
+
+describe('Dataset chart answer presentation (APP-066)', () => {
+  it('renders an exact current-chart answer and keeps interaction evidence non-publishable', async () => {
+    vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
+    const { DatasetChartAnswerPanel, datasetChartAnswerRequest } = await import('./AppsView');
+    const onAsk = vi.fn();
+    // The form helper is used by the panel itself, so a caller can vary only
+    // the question — never the selected server-issued chart identity.
+    expect(datasetChartAnswerRequest(
+      { runId: 'app_run_current', tileId: 'monthly-revenue' },
+      '  What was the highest month?  ',
+    )).toEqual({
+      runId: 'app_run_current',
+      tileId: 'monthly-revenue',
+      question: 'What was the highest month?',
+    });
+    const markup = renderToStaticMarkup(createElement(DatasetChartAnswerPanel, {
+      answer: {
+        runId: 'app_run_current', tileId: 'monthly-revenue', state: 'ready',
+        answer: {
+          ok: true,
+          route: 'dataset_chart_answer',
+          answerMode: 'deterministic_context_summary',
+          answer: 'Monthly revenue is a certified Dataset chart. It returned 3 rows; the first row is revenue = 60. Its effective scope is the full Dataset result. Region is explicitly excluded from this tile, so that filter does not narrow these rows. This is a scoped interaction result and cannot be used as App publication evidence.',
+          trustState: 'certified', reviewStatus: 'certified', citations: [{ kind: 'dataset_query', name: 'Orders Dataset' }], followUps: [],
+          decision: { mode: 'answer', reason: 'current result', nextAction: 'rerun', requiresContext: false, usesCertifiedResult: false, confidence: 0.9 },
+          analyticalContext: {
+            version: 1, appId: 'commerce', dashboardId: 'overview', tileId: 'monthly-revenue', runId: 'app_run_current', evidenceScope: 'interaction', snapshotId: 'snapshot', dashboardFingerprint: 'sha256:dashboard',
+            source: { sourceId: 'source.orders', sourceRevision: 'sha256:source', contractFingerprint: 'sha256:contract', lifecycle: 'certified', trust: 'certified', label: 'Orders Dataset' },
+            authoredQueryFingerprint: 'sha256:authored', executionQueryFingerprint: 'sha256:query', filterFingerprint: 'sha256:filter', parameterFingerprint: 'sha256:params', interactionFingerprint: 'sha256:interaction', executionFingerprint: 'sha256:execution', resultFingerprint: 'sha256:result', schemaFingerprint: 'sha256:schema', personaPolicyFingerprint: 'sha256:persona',
+          },
+        },
+      },
+      onAsk,
+      onClose: () => undefined,
+    }));
+    expect(markup).toContain('About this chart');
+    expect(markup).toContain('Region is explicitly excluded');
+    expect(markup).toContain('Scoped interaction evidence');
+    expect(markup).toContain('not publishable');
+    expect(markup).toContain('Orders Dataset');
+    expect(markup).toContain('Ask about this chart');
+    expect(markup).toContain('Deterministic context summary');
   });
 });
 
@@ -200,6 +381,33 @@ describe('Global filters: coverage and candidates', () => {
     const coverage = dashboardFilterCoverage(dashboard, 'region');
     expect(coverage.filterable).toBe(1);
     expect(coverage.unaffected).toEqual([]);
+  });
+
+  it('keeps an explicitly excluded Dataset component in coverage with its exclusion reason', () => {
+    const dashboard = dash([
+      {
+        i: 'revenue', title: 'Revenue', sourceId: 'source:orders', sourceRevision: 'source-v1', viz: { type: 'kpi' },
+        query: { dimensions: [], measures: [{ measure: 'revenue' }] },
+      },
+      {
+        i: 'monthly-revenue', title: 'Monthly Revenue', sourceId: 'source:orders', sourceRevision: 'source-v1', viz: { type: 'bar' },
+        query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }] },
+      },
+    ], [{
+      id: 'region', type: 'select', scope: { app: true },
+      datasetBindings: { orders: { field: 'region', tileIds: ['revenue'] } },
+    }]);
+    (dashboard as { datasets?: unknown[] }).datasets = [{
+      id: 'orders', sourceId: 'source:orders', sourceRevision: 'source-v1', snapshotId: 'snapshot-v1', contractFingerprint: 'contract-v1',
+    }];
+
+    const coverage = dashboardFilterCoverage(dashboard, 'region');
+    expect(coverage.applied).toEqual(['revenue']);
+    expect(coverage.unaffected).toEqual([{
+      tileId: 'monthly-revenue',
+      title: 'Monthly Revenue',
+      reason: 'Excluded by this filter’s linked-component selection.',
+    }]);
   });
 
   it('offers only the columns the server proved filterable, ranked by reach', () => {
@@ -278,6 +486,24 @@ describe('the app header badge is a rollup of the tiles, not a count of blocks',
     expect(appCertificationRollup(withSemantic).allCertified).toBe(false);
     const withTrust = [...certified, tile('g', { block: { blockId: 'b4' }, trustState: 'review_required' })];
     expect(appCertificationRollup(withTrust).allCertified).toBe(false);
+    const certifiedDatasetTiles = [
+      tile('dataset-block', {
+        sourceId: 'source.order-lines', sourceRevision: 'sha256:block-source',
+        query: { dimensions: [], measures: [{ measure: 'revenue' }] } as never,
+        sourceClass: 'certified_block', trustState: 'certified', reviewStatus: 'certified',
+      }),
+      tile('dataset-semantic', {
+        sourceId: 'semantic.commerce', sourceRevision: 'sha256:semantic-source',
+        query: { dimensions: [], measures: [{ measure: 'revenue' }] } as never,
+        sourceClass: 'governed_semantic', trustState: 'certified', reviewStatus: 'certified',
+      }),
+    ];
+    // The document's saved trust and source class are the only Dataset input
+    // to this rollup; execution success never participates.
+    expect(appCertificationRollup(certifiedDatasetTiles)).toEqual({ certified: 2, total: 2, allCertified: true });
+    expect(appCertificationRollup([
+      { ...certifiedDatasetTiles[0], trustState: 'review_required', reviewStatus: 'review_required' },
+    ])).toEqual({ certified: 0, total: 1, allCertified: false });
     // A pending draft in the app is a review state of its own.
     expect(appCertificationRollup(certified, 1).allCertified).toBe(false);
     // An empty dashboard certifies nothing.

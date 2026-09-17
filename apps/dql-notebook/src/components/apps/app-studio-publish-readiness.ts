@@ -1,6 +1,9 @@
-import type { AppStudioBuildDraft } from '../../api/client';
+import type { AppStudioBuildDraft, AppStudioDraftOperation, DashboardRunResponse } from '../../api/client';
 
 export type AppPublicationStepKind = 'questions' | 'review' | 'preview' | 'sources';
+
+type AppStudioSource = AppStudioBuildDraft['sources'][number];
+type AppStudioTile = AppStudioBuildDraft['pages'][number]['layout']['items'][number];
 
 export interface AppPublicationStep {
   id: AppPublicationStepKind;
@@ -92,10 +95,170 @@ export function pagesNeedingSettledPreview(draft: AppStudioBuildDraft): AppStudi
   });
 }
 
+function isSemanticSource(source: AppStudioSource): boolean {
+  return source.kind === 'governed_semantic' || source.kind === 'semantic_query';
+}
+
+/** A field Dataset is governed by its source lifecycle/contract, rather than
+ * the legacy per-result semantic approval flow. */
+export function isDatasetBackedAppSource(source: AppStudioSource): boolean {
+  return Boolean(source.capabilities?.dataset);
+}
+
+export function isLegacySemanticAppSource(source: AppStudioSource): boolean {
+  return isSemanticSource(source) && !isDatasetBackedAppSource(source);
+}
+
+/** Legacy serialized semantic tiles may not have a source id. A field Dataset
+ * tile always has one, and can only be approved through its Dataset contract. */
+export function tileUsesLegacySemanticApproval(
+  draft: AppStudioBuildDraft,
+  tile: AppStudioTile,
+): boolean {
+  if (!tile.semantic) return false;
+  if (!tile.sourceId) return true;
+  const source = draft.sources.find((candidate) => candidate.id === tile.sourceId);
+  return Boolean(source && isLegacySemanticAppSource(source));
+}
+
+/** Resolve a legacy source only through an exact persisted tile binding, or a
+ * unique historical semantic reference. Ambiguous legacy records remain
+ * unapproved instead of borrowing a receipt from another page. */
+export function legacySemanticSourceForTile(
+  draft: AppStudioBuildDraft,
+  tile: AppStudioTile,
+): AppStudioSource | undefined {
+  if (!tile.semantic) return undefined;
+  if (tile.sourceId) {
+    const source = draft.sources.find((candidate) => candidate.id === tile.sourceId);
+    return source && isLegacySemanticAppSource(source) ? source : undefined;
+  }
+  const candidates = draft.sources.filter((source) => isLegacySemanticAppSource(source)
+    && (source.id === tile.semantic!.id
+      || source.sourceRef === tile.semantic!.id
+      || source.executionRef === tile.semantic!.id));
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+export interface LegacySemanticPendingTile {
+  page: AppStudioBuildDraft['pages'][number];
+  tile: AppStudioTile;
+  source?: AppStudioSource;
+}
+
+/**
+ * Legacy semantic approval is a tile-level proof. Source metadata is useful
+ * provenance, but a source shared by two pages cannot carry Page A's review
+ * receipt into Page B. This mirrors the publish gate: each semantic tile
+ * needs its own approved review, semantic snapshot, and preflight receipt.
+ */
+export function legacySemanticTileNeedsApproval(
+  draft: AppStudioBuildDraft,
+  tile: AppStudioTile,
+): boolean {
+  if (!tileUsesLegacySemanticApproval(draft, tile)) return false;
+  return tile.review?.status !== 'approved'
+    || !tile.semantic?.snapshotId
+    || !tile.review?.preflightReceiptId;
+}
+
+/** The common tile predicate drives readiness, action presentation, and the
+ * active-page approval plan. */
+export function legacySemanticTilesNeedingApproval(draft: AppStudioBuildDraft): LegacySemanticPendingTile[] {
+  return draft.pages.flatMap((page) => page.layout.items.flatMap((tile) => {
+    if (!legacySemanticTileNeedsApproval(draft, tile)) return [];
+    return [{ page, tile, source: legacySemanticSourceForTile(draft, tile) }];
+  }));
+}
+
+export function legacySemanticPendingPageIds(draft: AppStudioBuildDraft): string[] {
+  return Array.from(new Set(legacySemanticTilesNeedingApproval(draft).map(({ page }) => page.id)));
+}
+
+/** Source rows are deduplicated for presentation only. Their mutable approval
+ * fields never determine whether another tile remains pending. */
+export function legacySemanticSourcesNeedingApproval(draft: AppStudioBuildDraft): AppStudioSource[] {
+  const sources = new Map<string, AppStudioSource>();
+  for (const { source } of legacySemanticTilesNeedingApproval(draft)) {
+    if (source) sources.set(source.id, source);
+  }
+  return Array.from(sources.values());
+}
+
+export interface LegacySemanticApprovalPlan {
+  operations: AppStudioDraftOperation[];
+  /** Pages that still have a legacy semantic source awaiting a page-local
+   * settled preview. The Studio uses this for a direct recovery message. */
+  pendingPageIds: string[];
+}
+
+/**
+ * Create approval mutations only for successful legacy semantic tiles on the
+ * page that produced this run. In particular, a Dataset-only run on Page A
+ * cannot stamp Page B's legacy source with Page A's snapshot and receipt.
+ */
+export function planLegacySemanticApproval(
+  draft: AppStudioBuildDraft,
+  activePage: AppStudioBuildDraft['pages'][number],
+  previewRun: DashboardRunResponse,
+  reviewedAt = new Date().toISOString(),
+): LegacySemanticApprovalPlan {
+  const pendingTiles = legacySemanticTilesNeedingApproval(draft);
+  const pendingPageIds = legacySemanticPendingPageIds(draft);
+  if (previewRun.dashboardId !== activePage.id) return { operations: [], pendingPageIds };
+
+  const successfulTileIds = new Set(previewRun.tiles
+    .filter((runTile) => runTile.status === 'ok')
+    .map((runTile) => runTile.tileId));
+  const approvedTiles = pendingTiles
+    .filter(({ page, tile }) => page.id === activePage.id && successfulTileIds.has(tile.i));
+  if (approvedTiles.length === 0) return { operations: [], pendingPageIds };
+
+  const sourcesById = new Map(approvedTiles.flatMap(({ source }) => source ? [[source.id, source] as const] : []));
+  return {
+    pendingPageIds,
+    operations: [
+      ...Array.from(sourcesById.values()).map((source): AppStudioDraftOperation => ({
+        type: 'upsert_source',
+        source: {
+          ...source,
+          snapshotId: previewRun.snapshotId,
+          receiptId: previewRun.runId,
+          reviewStatus: 'approved',
+        },
+      })),
+      ...approvedTiles.map(({ tile }): AppStudioDraftOperation => ({
+        type: 'update_tile',
+        pageId: activePage.id,
+        tileId: tile.i,
+        patch: {
+          semantic: { ...tile.semantic!, snapshotId: previewRun.snapshotId },
+          review: {
+            status: 'approved',
+            sourceFingerprint: tile.semantic!.definitionFingerprint,
+            preflightReceiptId: previewRun.runId,
+            reviewedAt,
+            reviewedBy: 'local-author',
+          },
+        },
+      })),
+    ],
+  };
+}
+
 export function publicationBlockingSources(draft: AppStudioBuildDraft): AppStudioBuildDraft['sources'] {
+  const pendingLegacySourceIds = new Set(legacySemanticSourcesNeedingApproval(draft).map((source) => source.id));
   return draft.sources.filter((source) => {
-    if (source.kind === 'governed_semantic' || source.kind === 'semantic_query') {
-      return source.reviewStatus !== 'approved' || !source.snapshotId || !source.receiptId;
+    if (isSemanticSource(source)) {
+      if (isDatasetBackedAppSource(source)) {
+        // A successful preview never certifies a Dataset. Its governed source
+        // must already be certified and publication-eligible; the server
+        // repeats this check against the current catalog.
+        return source.lifecycle !== 'certified'
+          || source.trustState !== 'certified'
+          || source.reviewStatus === 'required';
+      }
+      return pendingLegacySourceIds.has(source.id);
     }
     if (source.kind === 'block') {
       return source.lifecycle !== 'certified' || source.trustState !== 'certified' || source.reviewStatus === 'required';
@@ -110,11 +273,15 @@ export function publicationBlockingSources(draft: AppStudioBuildDraft): AppStudi
 export function publicationBlockerCount(draft: AppStudioBuildDraft, serverIssues: string[] = []): number {
   const clarifications = (draft.frame.clarificationQuestions ?? [])
     .filter((question) => question.required && !question.answerId);
+  const pendingLegacySourceIds = new Set(legacySemanticSourcesNeedingApproval(draft).map((source) => source.id));
+  const nonLegacyBlockingSources = publicationBlockingSources(draft)
+    .filter((source) => !pendingLegacySourceIds.has(source.id));
   return unresolvedPublicationRequirements(draft).length
     + clarifications.length
     + blockingPublicationReviewTasks(draft).length
     + pagesNeedingSettledPreview(draft).length
-    + publicationBlockingSources(draft).length
+    + legacySemanticTilesNeedingApproval(draft).length
+    + nonLegacyBlockingSources.length
     + publicationIssueSummaries(serverIssues).length;
 }
 
@@ -124,7 +291,10 @@ export function localPublicationSteps(draft: AppStudioBuildDraft): AppPublicatio
   const unresolvedRequirements = unresolvedPublicationRequirements(draft);
   const reviewTasks = blockingPublicationReviewTasks(draft);
   const previewPages = pagesNeedingSettledPreview(draft);
-  const sources = publicationBlockingSources(draft);
+  const pendingLegacyTiles = legacySemanticTilesNeedingApproval(draft);
+  const pendingLegacySourceIds = new Set(legacySemanticSourcesNeedingApproval(draft).map((source) => source.id));
+  const nonLegacyBlockingSources = publicationBlockingSources(draft)
+    .filter((source) => !pendingLegacySourceIds.has(source.id));
   const steps: AppPublicationStep[] = [];
 
   if (unansweredClarifications.length || unresolvedRequirements.length) {
@@ -152,12 +322,13 @@ export function localPublicationSteps(draft: AppStudioBuildDraft): AppPublicatio
       count: previewPages.length,
     });
   }
-  if (sources.length) {
+  const sourceReviewCount = pendingLegacyTiles.length + nonLegacyBlockingSources.length;
+  if (sourceReviewCount) {
     steps.push({
       id: 'sources',
       title: 'Finish source review',
-      detail: `${sources.length} ${sources.length === 1 ? 'source needs' : 'sources need'} approval, replacement, or removal.`,
-      count: sources.length,
+      detail: `${sourceReviewCount} ${sourceReviewCount === 1 ? 'source or tile needs' : 'sources or tiles need'} approval, replacement, or removal.`,
+      count: sourceReviewCount,
     });
   }
   return steps;

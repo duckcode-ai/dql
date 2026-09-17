@@ -88,6 +88,13 @@ import {
 } from './dashboard-filters';
 import { semanticApprovalState } from './app-semantic-approval';
 import { appCertificationRollup } from './app-certification';
+import { beginPersistedAppWorkspaceLoad, resolvePersistedWorkspaceMetadata, type WorkspaceDashboardSummary } from './app-workspace-loader';
+import {
+  isAppScopedDashboardFilter,
+  readPersistedAppFilterValues,
+  valuesForDashboardPage,
+  writePersistedAppFilterValues,
+} from './app-dashboard-filter-scope';
 import { authoredDomainOptions, resolveAuthoredDomainId, type AuthoredDomainOption } from '../domains/authored-domain-options';
 import { useOperations } from '../../operations/OperationsProvider';
 import { appLibraryLaunchExpanded, type AppLibraryLaunchPreference } from './app-library-launch';
@@ -104,8 +111,13 @@ type AppSection = AppWorkspaceSection;
 type LibraryFilter = 'all' | 'drafts' | 'private' | 'shared' | 'fav';
 type DashboardFilter = NonNullable<DashboardDocumentResponse['dashboard']['filters']>[number];
 type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
+type DashboardNavigationEntry = {
+  dashboardId: string;
+  draftValues: Record<string, unknown>;
+  appliedValues: Record<string, unknown>;
+};
 type AppAskDecision = Extract<AppAskResponse, { ok: true }>['decision'];
-type AppCopilotRoute = 'certified_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
+type AppCopilotRoute = 'certified_answer' | 'dataset_chart_answer' | 'generated_answer' | 'investigation' | 'app_change_proposal' | 'metadata_answer';
 type AppCopilotBlockTile = { blockId: string; title: string; viz: string; tileId: string };
 
 
@@ -123,6 +135,7 @@ interface AgentSkillCard {
 
 const DEFAULT_PROMPT = 'Build an analytics app from my certified DQL blocks and available warehouse tables.';
 const ACTIVE_APP_BUILD_STORAGE_KEY = 'dql.apps.active-ai-build.v1';
+const APP_DASHBOARD_FILTER_VALUES_STORAGE_PREFIX = 'dql.apps.dashboard-filter-values.v1:';
 
 interface PersistedAppBuild {
   sessionId: string;
@@ -247,6 +260,8 @@ export function AppsView(): JSX.Element {
   const [appDoc, setAppDoc] = useState<AppDocumentSummary | null>(null);
   const [dashboardDoc, setDashboardDoc] = useState<DashboardDocumentResponse | null>(null);
   const [appLoading, setAppLoading] = useState(false);
+  const [dashboardLoadError, setDashboardLoadError] = useState<string | null>(null);
+  const [workspaceLoadAttempt, setWorkspaceLoadAttempt] = useState(0);
   const [builderMode, setBuilderMode] = useState<BuilderMode>('ai');
   const [builderExploreGaps, setBuilderExploreGaps] = useState(false);
   const [builderTemplate, setBuilderTemplate] = useState<AppStudioLaunchConfig['template']>('operational_dashboard');
@@ -285,8 +300,15 @@ export function AppsView(): JSX.Element {
   const [deletingApp, setDeletingApp] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteUndo, setDeleteUndo] = useState<{ appName: string; recoveryId: string } | null>(null);
-  const [dashboardFilterValues, setDashboardFilterValues] = useState<Record<string, unknown>>({});
-  const [appliedDashboardFilterValues, setAppliedDashboardFilterValues] = useState<Record<string, unknown>>({});
+  // Page-local filter values remain keyed by page.  App-owned filters have a
+  // second, explicit store keyed by the App so a same-named page control never
+  // leaks through navigation merely because it shares an id.
+  const [dashboardFilterValuesByPage, setDashboardFilterValuesByPage] = useState<Record<string, Record<string, unknown>>>({});
+  const [appliedDashboardFilterValuesByPage, setAppliedDashboardFilterValuesByPage] = useState<Record<string, Record<string, unknown>>>({});
+  const [appScopedDashboardFilterValues, setAppScopedDashboardFilterValues] = useState<Record<string, unknown>>({});
+  const [appliedAppScopedDashboardFilterValues, setAppliedAppScopedDashboardFilterValues] = useState<Record<string, unknown>>({});
+  const [dashboardFilterPersistenceAppId, setDashboardFilterPersistenceAppId] = useState<string | null>(null);
+  const [dashboardNavigationStack, setDashboardNavigationStack] = useState<DashboardNavigationEntry[]>([]);
   const [explainOpen, setExplainOpen] = useState(false);
   const [explainExpanded, setExplainExpanded] = useState(false);
   const handleExplainChange = useCallback((open: boolean) => {
@@ -438,25 +460,41 @@ export function AppsView(): JSX.Element {
     if (!state.activeAppId || surface !== 'workspace') {
       setAppDoc(null);
       setDashboardDoc(null);
+      setDashboardLoadError(null);
+      setAppLoading(false);
       return;
     }
-    let cancelled = false;
+    if (!state.activeDashboardId) {
+      setDashboardDoc(null);
+      setDashboardLoadError(null);
+      setAppLoading(false);
+      return;
+    }
     setAppLoading(true);
-    const appRequest = api.getApp(state.activeAppId).then((doc) => {
-      if (!cancelled) setAppDoc(doc);
+    setDashboardLoadError(null);
+    setDashboardDoc(null);
+    setAppDoc((current) => current?.app.id === state.activeAppId ? current : null);
+    return beginPersistedAppWorkspaceLoad({
+      appId: state.activeAppId,
+      dashboardId: state.activeDashboardId,
+      loadApp: api.getApp,
+      loadDashboard: api.getDashboard,
+      onApp: (document) => setAppDoc(document),
+      onDashboard: (document) => {
+        setDashboardDoc(document);
+        setAppLoading(false);
+      },
+      onDashboardError: (message) => {
+        setDashboardDoc(null);
+        setDashboardLoadError(message);
+        setAppLoading(false);
+      },
     });
-    const dashboardRequest = state.activeDashboardId
-      ? api.getDashboard(state.activeAppId, state.activeDashboardId).then((doc) => {
-          if (!cancelled) setDashboardDoc(doc);
-        })
-      : Promise.resolve().then(() => { if (!cancelled) setDashboardDoc(null); });
-    void Promise.allSettled([appRequest, dashboardRequest]).finally(() => {
-      if (!cancelled) setAppLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [state.activeAppId, state.activeDashboardId, surface]);
+  }, [state.activeAppId, state.activeDashboardId, surface, workspaceLoadAttempt]);
+
+  const retryWorkspaceLoad = useCallback(() => {
+    setWorkspaceLoadAttempt((attempt) => attempt + 1);
+  }, []);
 
   const dashboardFilterKey = useMemo(
     () => JSON.stringify(deriveDashboardFilters(dashboardDoc?.dashboard ?? null)),
@@ -467,21 +505,129 @@ export function AppsView(): JSX.Element {
     [dashboardDoc?.dashboard, dashboardFilterKey],
   );
 
+  const activeDashboardFilterPageId = dashboardDoc?.dashboard.id ?? null;
+  const dashboardFilterValues = useMemo(
+    () => activeDashboardFilterPageId ? dashboardFilterValuesByPage[activeDashboardFilterPageId] ?? {} : {},
+    [activeDashboardFilterPageId, dashboardFilterValuesByPage],
+  );
+  const appliedDashboardFilterValues = useMemo(
+    () => activeDashboardFilterPageId ? appliedDashboardFilterValuesByPage[activeDashboardFilterPageId] ?? {} : {},
+    [activeDashboardFilterPageId, appliedDashboardFilterValuesByPage],
+  );
+
+  // An App-scoped control represents a reader's current business scope. Keep
+  // it across an App reopen, but reapply it only where the persisted page
+  // declares that same control as App-scoped. Values never become a saved
+  // dashboard mutation or a source binding.
   useEffect(() => {
-    const filters = dashboardFilters;
-    setDashboardFilterValues((current) => {
-      const next: Record<string, unknown> = {};
-      for (const filter of filters) {
-        next[filter.id] = current[filter.id] ?? defaultDashboardFilterValue(filter);
-      }
-      return shallowEqualRecords(current, next) ? current : next;
+    const appId = state.activeAppId;
+    setDashboardFilterValuesByPage({});
+    setAppliedDashboardFilterValuesByPage({});
+    if (!appId) {
+      setAppScopedDashboardFilterValues({});
+      setAppliedAppScopedDashboardFilterValues({});
+      setDashboardFilterPersistenceAppId(null);
+      return;
+    }
+    try {
+      const persisted = readPersistedAppFilterValues(
+        window.localStorage,
+        `${APP_DASHBOARD_FILTER_VALUES_STORAGE_PREFIX}${appId}`,
+      );
+      setAppScopedDashboardFilterValues(persisted.draft);
+      setAppliedAppScopedDashboardFilterValues(persisted.applied);
+    } catch {
+      setAppScopedDashboardFilterValues({});
+      setAppliedAppScopedDashboardFilterValues({});
+    }
+    setDashboardFilterPersistenceAppId(appId);
+  }, [state.activeAppId]);
+
+  useEffect(() => {
+    if (!state.activeAppId || dashboardFilterPersistenceAppId !== state.activeAppId) return;
+    try {
+      writePersistedAppFilterValues(
+        window.localStorage,
+        `${APP_DASHBOARD_FILTER_VALUES_STORAGE_PREFIX}${state.activeAppId}`,
+        { draft: appScopedDashboardFilterValues, applied: appliedAppScopedDashboardFilterValues },
+      );
+    } catch {
+      // Browser storage is not execution authority. The current App still
+      // receives its in-memory scope when persistence is unavailable.
+    }
+  }, [appScopedDashboardFilterValues, appliedAppScopedDashboardFilterValues, dashboardFilterPersistenceAppId, state.activeAppId]);
+
+  useEffect(() => {
+    if (!activeDashboardFilterPageId) return;
+    setDashboardFilterValuesByPage((current) => {
+      const pageValues = valuesForDashboardPage({
+        filters: dashboardFilters,
+        pageValues: current[activeDashboardFilterPageId] ?? {},
+        appValues: appScopedDashboardFilterValues,
+        defaultValue: defaultDashboardFilterValue,
+      });
+      if (shallowEqualRecords(current[activeDashboardFilterPageId] ?? {}, pageValues)) return current;
+      return { ...current, [activeDashboardFilterPageId]: pageValues };
     });
-    setAppliedDashboardFilterValues((current) => {
-      const next: Record<string, unknown> = {};
-      for (const filter of filters) next[filter.id] = current[filter.id] ?? defaultDashboardFilterValue(filter);
-      return shallowEqualRecords(current, next) ? current : next;
+    setAppliedDashboardFilterValuesByPage((current) => {
+      const pageValues = valuesForDashboardPage({
+        filters: dashboardFilters,
+        pageValues: current[activeDashboardFilterPageId] ?? {},
+        appValues: appliedAppScopedDashboardFilterValues,
+        defaultValue: defaultDashboardFilterValue,
+      });
+      if (shallowEqualRecords(current[activeDashboardFilterPageId] ?? {}, pageValues)) return current;
+      return { ...current, [activeDashboardFilterPageId]: pageValues };
     });
-  }, [dashboardDoc?.dashboard.id, dashboardFilterKey, dashboardFilters]);
+  }, [activeDashboardFilterPageId, appScopedDashboardFilterValues, appliedAppScopedDashboardFilterValues, dashboardFilterKey, dashboardFilters]);
+
+  /**
+   * Dataset detail navigation carries only explicitly named filters that the
+   * destination page declares. Mark selections deliberately stay on their
+   * source page: they are source/revision-scoped result interactions, not a
+   * global field-name convention.
+   */
+  const navigateDashboard = useCallback(async (input: {
+    fromDashboardId: string;
+    toDashboardId: string;
+    carryFilterIds: string[];
+    variables: Record<string, unknown>;
+  }): Promise<{ ok: boolean; error?: string }> => {
+    if (!state.activeAppId || state.activeDashboardId !== input.fromDashboardId) {
+      return { ok: false, error: 'The source page changed before its detail navigation could be opened.' };
+    }
+    if (input.toDashboardId === input.fromDashboardId) {
+      return { ok: false, error: 'A detail navigation must target a different page.' };
+    }
+    const target = await api.getDashboard(state.activeAppId, input.toDashboardId);
+    if (!target?.dashboard) return { ok: false, error: 'The configured detail page is unavailable.' };
+    const targetFilterIds = new Set((target.dashboard.filters ?? []).map((filter) => filter.id));
+    const carried = Object.fromEntries(input.carryFilterIds
+      .filter((filterId) => targetFilterIds.has(filterId) && input.variables[filterId] !== undefined)
+      .map((filterId) => [filterId, input.variables[filterId]]));
+    setDashboardNavigationStack((current) => [...current, {
+      dashboardId: input.fromDashboardId,
+      draftValues: { ...dashboardFilterValues },
+      appliedValues: { ...appliedDashboardFilterValues },
+    }]);
+    setDashboardFilterValuesByPage((current) => ({ ...current, [input.toDashboardId]: carried }));
+    setAppliedDashboardFilterValuesByPage((current) => ({ ...current, [input.toDashboardId]: carried }));
+    dispatch({ type: 'OPEN_DASHBOARD', dashboardId: input.toDashboardId });
+    return { ok: true };
+  }, [appliedDashboardFilterValues, dashboardFilterValues, dispatch, state.activeAppId, state.activeDashboardId]);
+
+  const navigateDashboardBack = useCallback(() => {
+    const previous = dashboardNavigationStack.at(-1);
+    if (!previous) return;
+    setDashboardNavigationStack((current) => current.slice(0, -1));
+    setDashboardFilterValuesByPage((current) => ({ ...current, [previous.dashboardId]: previous.draftValues }));
+    setAppliedDashboardFilterValuesByPage((current) => ({ ...current, [previous.dashboardId]: previous.appliedValues }));
+    dispatch({ type: 'OPEN_DASHBOARD', dashboardId: previous.dashboardId });
+  }, [dashboardNavigationStack, dispatch]);
+
+  useEffect(() => {
+    setDashboardNavigationStack([]);
+  }, [state.activeAppId]);
 
   const refreshApps = async (
     openAppId?: string | null,
@@ -525,6 +671,17 @@ export function AppsView(): JSX.Element {
   const activeApp = useMemo(
     () => state.apps.find((app) => app.id === state.activeAppId) ?? null,
     [state.apps, state.activeAppId],
+  );
+  // A persisted dashboard has its own server-resolved App identity. That is
+  // sufficient for a read-only canvas if the broader App metadata endpoint is
+  // delayed, while a matching library summary remains necessary for writes.
+  const workspaceMetadata = useMemo(
+    () => resolvePersistedWorkspaceMetadata({
+      dashboard: dashboardDoc,
+      appDocument: appDoc,
+      libraryApp: activeApp,
+    }),
+    [activeApp, appDoc, dashboardDoc],
   );
   const handleInvestigationsChanged = useCallback((investigations: LocalAppInvestigation[]) => {
     setAppDoc((current) => {
@@ -817,19 +974,45 @@ export function AppsView(): JSX.Element {
   const dashboardVariables = useMemo(() => ({ ...appliedDashboardFilterValues }), [appliedDashboardFilterValues]);
 
   const handleDashboardFilterChange = useCallback((filter: DashboardFilter, value: unknown) => {
-    setDashboardFilterValues((current) => ({
+    if (!activeDashboardFilterPageId) return;
+    const nextValue = coerceDashboardFilterValue(filter, value);
+    setDashboardFilterValuesByPage((current) => ({
       ...current,
-      [filter.id]: coerceDashboardFilterValue(filter, value),
+      [activeDashboardFilterPageId]: {
+        ...(current[activeDashboardFilterPageId] ?? {}),
+        [filter.id]: nextValue,
+      },
     }));
-  }, []);
+    if (isAppScopedDashboardFilter(filter)) {
+      setAppScopedDashboardFilterValues((current) => ({ ...current, [filter.id]: nextValue }));
+    }
+  }, [activeDashboardFilterPageId]);
   const applyDashboardFilters = useCallback(() => {
-    setAppliedDashboardFilterValues({ ...dashboardFilterValues });
-  }, [dashboardFilterValues]);
+    if (!activeDashboardFilterPageId) return;
+    setAppliedDashboardFilterValuesByPage((current) => ({
+      ...current,
+      [activeDashboardFilterPageId]: { ...dashboardFilterValues },
+    }));
+    setAppliedAppScopedDashboardFilterValues((current) => ({
+      ...current,
+      ...Object.fromEntries(dashboardFilters
+        .filter(isAppScopedDashboardFilter)
+        .map((filter) => [filter.id, dashboardFilterValues[filter.id]])),
+    }));
+  }, [activeDashboardFilterPageId, dashboardFilterValues, dashboardFilters]);
   const resetDashboardFilters = useCallback(() => {
     const defaults = Object.fromEntries(dashboardFilters.map((filter) => [filter.id, defaultDashboardFilterValue(filter)]));
-    setDashboardFilterValues(defaults);
-    setAppliedDashboardFilterValues(defaults);
-  }, [dashboardFilters]);
+    if (!activeDashboardFilterPageId) return;
+    setDashboardFilterValuesByPage((current) => ({ ...current, [activeDashboardFilterPageId]: defaults }));
+    setAppliedDashboardFilterValuesByPage((current) => ({ ...current, [activeDashboardFilterPageId]: defaults }));
+    const appDefaults = Object.fromEntries(dashboardFilters
+      .filter(isAppScopedDashboardFilter)
+      .map((filter) => [filter.id, defaults[filter.id]]));
+    if (Object.keys(appDefaults).length > 0) {
+      setAppScopedDashboardFilterValues((current) => ({ ...current, ...appDefaults }));
+      setAppliedAppScopedDashboardFilterValues((current) => ({ ...current, ...appDefaults }));
+    }
+  }, [activeDashboardFilterPageId, dashboardFilters]);
 
   const confirmDeleteApp = async () => {
     if (!deleteTarget || deletingApp) return;
@@ -945,10 +1128,13 @@ export function AppsView(): JSX.Element {
         />
       ) : (
         <AppWorkspaceSurface
-          app={activeApp}
+          app={workspaceMetadata.writableLibraryApp}
+          metadataApp={workspaceMetadata.app}
+          dashboardPages={workspaceMetadata.dashboards}
           appDoc={appDoc}
           dashboardDoc={dashboardDoc}
           loading={appLoading}
+          dashboardLoadError={dashboardLoadError}
           experience={experience}
           section={section}
           explainOpen={explainOpen}
@@ -958,9 +1144,13 @@ export function AppsView(): JSX.Element {
           themeMode={state.themeMode}
           variables={dashboardVariables}
           onBack={returnToAppLibrary}
+          onRetryDashboardLoad={retryWorkspaceLoad}
           onExperienceChange={(nextExperience) => {
-            if (nextExperience === 'build' && activeApp) openApp(activeApp, 'build');
-            else setExperience(nextExperience);
+            if (nextExperience === 'build') {
+              if (workspaceMetadata.writableLibraryApp) openApp(workspaceMetadata.writableLibraryApp, 'build');
+              return;
+            }
+            setExperience(nextExperience);
           }}
           onSectionChange={setSection}
           onDashboardFilterChange={handleDashboardFilterChange}
@@ -969,10 +1159,17 @@ export function AppsView(): JSX.Element {
           onExplainChange={handleExplainChange}
           onExplainExpandedChange={setExplainExpanded}
           onAddPage={() => {
+            if (!workspaceMetadata.writableLibraryApp) return;
             setAddPageExploreGaps(false);
             setAddPageOpen(true);
           }}
-          onOpenDashboard={(dashboardId) => dispatch({ type: 'OPEN_DASHBOARD', dashboardId })}
+          onOpenDashboard={(dashboardId) => {
+            setDashboardNavigationStack([]);
+            dispatch({ type: 'OPEN_DASHBOARD', dashboardId });
+          }}
+          onNavigateDashboard={navigateDashboard}
+          navigationCanGoBack={dashboardNavigationStack.length > 0}
+          onNavigationBack={navigateDashboardBack}
           onOpenApp={(appId, dashboardId, draftId) => {
             if (draftId) {
               setBuilderDraftId(draftId);
@@ -1868,9 +2065,12 @@ async function dashboardDocumentFingerprint(value: unknown): Promise<string> {
 
 function AppWorkspaceSurface({
   app,
+  metadataApp,
+  dashboardPages,
   appDoc,
   dashboardDoc,
   loading,
+  dashboardLoadError,
   experience,
   section,
   explainOpen,
@@ -1880,6 +2080,7 @@ function AppWorkspaceSurface({
   themeMode,
   variables,
   onBack,
+  onRetryDashboardLoad,
   onExperienceChange,
   onRenameApp,
   onSectionChange,
@@ -1890,15 +2091,23 @@ function AppWorkspaceSurface({
   onExplainExpandedChange,
   onAddPage,
   onOpenDashboard,
+  onNavigateDashboard,
+  navigationCanGoBack,
+  onNavigationBack,
   onOpenApp,
   onDashboardChanged,
   onInvestigationsChanged,
   onOpenLineageNode,
 }: {
+  /** Matching local-library entry; its presence is required for writes. */
   app: AppSummary | null;
+  /** Server-resolved identity from the current persisted dashboard. */
+  metadataApp: AppDocumentSummary['app'] | null;
+  dashboardPages: WorkspaceDashboardSummary[];
   appDoc: AppDocumentSummary | null;
   dashboardDoc: DashboardDocumentResponse | null;
   loading: boolean;
+  dashboardLoadError: string | null;
   experience: AppExperience;
   section: AppSection;
   explainOpen: boolean;
@@ -1908,6 +2117,7 @@ function AppWorkspaceSurface({
   themeMode: ThemeMode;
   variables: Record<string, unknown>;
   onBack: () => void;
+  onRetryDashboardLoad: () => void;
   onExperienceChange: (experience: AppExperience) => void;
   onRenameApp: (name: string, dashboardId?: string) => void;
   onSectionChange: (section: AppSection) => void;
@@ -1918,12 +2128,26 @@ function AppWorkspaceSurface({
   onExplainExpandedChange: (value: boolean) => void;
   onAddPage: () => void;
   onOpenDashboard: (dashboardId: string) => void;
+  onNavigateDashboard: (input: {
+    fromDashboardId: string;
+    toDashboardId: string;
+    carryFilterIds: string[];
+    variables: Record<string, unknown>;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  navigationCanGoBack: boolean;
+  onNavigationBack: () => void;
   onOpenApp: (appId: string, dashboardId?: string, draftId?: string) => void;
   onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
   onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
   onOpenLineageNode: (nodeId: string) => void;
 }) {
   const dispatch = useDispatch();
+  const workspaceAppId = metadataApp?.id ?? app?.id ?? null;
+  const workspaceAppName = metadataApp?.name ?? app?.name ?? null;
+  // Dashboard metadata establishes what can be shown. Mutations still require
+  // a same-App library record with its local write identity.
+  const canWriteApp = Boolean(app && metadataApp && app.id === metadataApp.id);
+  const isEditable = experience === 'build' && canWriteApp;
   const draftCount = appDoc?.drafts?.length ?? 0;
   const certification = appCertificationRollup(dashboardDoc?.dashboard.layout.items, draftCount);
   const certifiedCount = certification.certified;
@@ -1933,6 +2157,16 @@ function AppWorkspaceSurface({
   const dashboardBlockKey = dashboardBlockIds.join('|');
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(dashboardBlockIds[0] ?? null);
   const [dashboardRun, setDashboardRun] = useState<DashboardRunResponse | null>(null);
+  const [chartAnswer, setChartAnswer] = useState<{
+    runId: string;
+    tileId: string;
+    state: 'loading' | 'ready' | 'error';
+    answer?: Extract<AppAskResponse, { ok: true }>;
+    error?: string;
+  } | null>(null);
+  // The same settled chart can receive more than one question. A slower older
+  // answer must never replace the newer question's answer in this panel.
+  const chartAnswerRequestRef = useRef(0);
   const [askSeed, setAskSeed] = useState<{ text: string; nonce: number } | null>(null);
   const [researchSeed, setResearchSeed] = useState<AppResearchSeed | null>(null);
   const [activeInvestigation, setActiveInvestigation] = useState<LocalAppInvestigation | null>(null);
@@ -1944,6 +2178,13 @@ function AppWorkspaceSurface({
   const { ready: semanticRunReady, repairedTileIds: repairedSemanticTileIds } = semanticApprovalState(semanticTileIds, dashboardRun);
   const handleDashboardRunChange = useCallback((run: DashboardRunResponse | null) => {
     setDashboardRun(run);
+    // Never display an answer grounded in a previous run as current after a
+    // filter, query, interaction, or source-driven rerun settles.
+    setChartAnswer((current) => {
+      if (current?.runId === run?.runId) return current;
+      chartAnswerRequestRef.current += 1;
+      return null;
+    });
   }, []);
 
   const [filterBusy, setFilterBusy] = useState(false);
@@ -2034,16 +2275,16 @@ function AppWorkspaceSurface({
     // Stakeholder view: route tile follow-up through the governed agent loop in the
     // global right rail (deep research, repair, escalation). Build/analyst keeps the
     // in-app copilot shim.
-    if (experience === 'view') {
+    if (!isEditable) {
       dispatch({
         type: 'OPEN_GLOBAL_AI',
         audience: 'stakeholder',
         context: {
           title: 'App copilot',
-          scopeHint: tidyTitle(app?.name) ? `Follow up on ${tidyTitle(app?.name)}` : 'Follow up on this tile',
+          scopeHint: tidyTitle(workspaceAppName) ? `Follow up on ${tidyTitle(workspaceAppName)}` : 'Follow up on this tile',
           selectedObject: { kind: 'block', id: blockId, title: dashboardDoc?.dashboard.metadata.title },
           workspaceContext: {
-            appId: app?.id,
+            appId: workspaceAppId ?? undefined,
             dashboardId: dashboardDoc?.dashboard.id,
             blockId,
           },
@@ -2056,14 +2297,44 @@ function AppWorkspaceSurface({
     }
     onExplainChange(true);
     setAskSeed({ text: question, nonce: Date.now() });
-  }, [dispatch, experience, app?.id, app?.name, dashboardDoc?.dashboard.id, dashboardDoc?.dashboard.metadata.title, onExplainChange]);
+  }, [dispatch, isEditable, workspaceAppId, workspaceAppName, dashboardDoc?.dashboard.id, dashboardDoc?.dashboard.metadata.title, onExplainChange]);
+
+  const handleAskChart = useCallback(async ({ tileId, runId, question }: { tileId: string; runId: string; question: string }) => {
+    if (!workspaceAppId || !dashboardDoc) return;
+    const requestToken = chartAnswerRequestRef.current + 1;
+    chartAnswerRequestRef.current = requestToken;
+    setChartAnswer({ runId, tileId, state: 'loading' });
+    try {
+      const response = await api.askApp(workspaceAppId, {
+        question,
+        dashboardId: dashboardDoc.dashboard.id,
+        tileId,
+        runId,
+      });
+      setChartAnswer((current) => {
+        // A late response cannot overwrite a newer question, dashboard run,
+        // or an answer panel that has since been closed.
+        if (chartAnswerRequestRef.current !== requestToken
+          || !current || current.runId !== runId || current.tileId !== tileId) return current;
+        return response.ok
+          ? { ...current, state: 'ready', answer: response }
+          : { ...current, state: 'error', error: response.error };
+      });
+    } catch (error) {
+      setChartAnswer((current) => {
+        if (chartAnswerRequestRef.current !== requestToken
+          || !current || current.runId !== runId || current.tileId !== tileId) return current;
+        return { ...current, state: 'error', error: error instanceof Error ? error.message : String(error) };
+      });
+    }
+  }, [workspaceAppId, dashboardDoc]);
 
   useEffect(() => {
-    if (experience !== 'view') return;
+    if (isEditable) return;
     if (section === 'notebooks' || section === 'ai' || section === 'drafts' || section === 'settings') {
       onSectionChange('dashboards');
     }
-  }, [experience, section, onSectionChange]);
+  }, [isEditable, section, onSectionChange]);
 
   useEffect(() => {
     if (dashboardBlockIds.length === 0) {
@@ -2076,16 +2347,17 @@ function AppWorkspaceSurface({
   }, [dashboardBlockIds, dashboardBlockKey, selectedBlockId]);
   useEffect(() => {
     setDashboardRun(null);
+    setChartAnswer(null);
     setActiveInvestigation(null);
-  }, [app?.id, dashboardDoc?.dashboard.id]);
-  const copilotAvailable = Boolean(app && dashboardDoc && (section === 'dashboards' || section === 'research'));
+  }, [workspaceAppId, dashboardDoc?.dashboard.id]);
+  const copilotAvailable = Boolean(workspaceAppId && dashboardDoc && (section === 'dashboards' || section === 'research'));
   const copilotVisible = copilotAvailable && explainOpen;
   const markAction = (status: 'copied' | 'downloaded' | 'ready') => {
     setShareStatus(status);
     if (status !== 'ready') window.setTimeout(() => setShareStatus('idle'), 1800);
   };
   const copyShareLink = async () => {
-    const text = buildAppShareText(app, appDoc, dashboardDoc);
+    const text = buildAppShareText(app, appDoc, dashboardDoc, metadataApp);
     setShareText(text);
     let copied = false;
     try {
@@ -2110,12 +2382,12 @@ function AppWorkspaceSurface({
     markAction(copied ? 'copied' : 'ready');
   };
   const downloadBrief = () => {
-    const markdown = buildAppBriefMarkdown(app, appDoc, dashboardDoc);
+    const markdown = buildAppBriefMarkdown(app, appDoc, dashboardDoc, metadataApp);
     const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${app?.id ?? appDoc?.app.id ?? 'dql-app'}-brief.md`;
+    anchor.download = `${workspaceAppId ?? appDoc?.app.id ?? 'dql-app'}-brief.md`;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
@@ -2123,7 +2395,7 @@ function AppWorkspaceSurface({
     markAction('downloaded');
   };
   const promoteApp = async () => {
-    if (!app?.id) return;
+    if (!canWriteApp || !app?.id) return;
     setPromoteStatus('running');
     setPromoteMessage('');
     const result = await api.publishAppToProject(app.id, { lifecycle: 'review' });
@@ -2137,7 +2409,7 @@ function AppWorkspaceSurface({
     window.setTimeout(() => setPromoteStatus('idle'), 2400);
   };
   const approveSemanticResults = async () => {
-    if (!app?.id || !dashboardDoc || !dashboardRun || semanticTileIds.length === 0) return;
+    if (!canWriteApp || !app?.id || !dashboardDoc || !dashboardRun || semanticTileIds.length === 0) return;
     setPromoteStatus('running');
     setPromoteMessage('');
     const expectedDashboardFingerprint = await dashboardDocumentFingerprint(dashboardDoc.dashboard);
@@ -2163,7 +2435,7 @@ function AppWorkspaceSurface({
           <ArrowLeft size={14} />
           <span>Apps</span>
         </button>
-        <span className="dql-app-crumb"><b>{app?.id ?? 'app'}</b></span>
+        <span className="dql-app-crumb"><b>{workspaceAppId ?? 'app'}</b></span>
         <StatusSeal tone={certification.allCertified ? 'certified' : 'draft'}>
           {certification.allCertified ? 'All certified' : `${certifiedCount} of ${certification.total} certified`}
         </StatusSeal>
@@ -2174,7 +2446,7 @@ function AppWorkspaceSurface({
         <div className="dql-app-modeseg" role="group" aria-label="App mode">
           <button
             type="button"
-            className={experience === 'view' ? 'on' : ''}
+            className={!isEditable ? 'on' : ''}
             onClick={() => onExperienceChange('view')}
             title="Clean stakeholder view"
           >
@@ -2182,17 +2454,18 @@ function AppWorkspaceSurface({
           </button>
           <button
             type="button"
-            className={experience === 'build' ? 'on' : ''}
+            className={isEditable ? 'on' : ''}
             onClick={() => onExperienceChange('build')}
-            title="Rearrange tiles and edit this app"
+            title={canWriteApp ? 'Rearrange tiles and edit this app' : 'Editing is unavailable until matching local App metadata is loaded.'}
+            disabled={!canWriteApp}
           >
             <Pencil size={12} /> Edit
           </button>
         </div>
 
         <div className="dql-app-view-actions">
-          <PersonaSwitcher app={appDoc?.app ?? null} />
-          {experience === 'build' ? (
+          <PersonaSwitcher app={metadataApp} />
+          {isEditable ? (
             semanticTileIds.length > 0 ? (
               <button
                 type="button"
@@ -2209,7 +2482,7 @@ function AppWorkspaceSurface({
               </button>
             ) : null
           ) : null}
-          {experience === 'build' ? (
+          {isEditable ? (
             <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void promoteApp()} disabled={promoteStatus === 'running'}>
               <ShieldCheck size={14} /> {promoteStatus === 'running' ? 'Checking' : 'Publish to Project'}
             </button>
@@ -2238,11 +2511,11 @@ function AppWorkspaceSurface({
         <div className="dql-app-title-row">
           <div className="dql-app-title-copy">
             <div className="dql-app-title-meta">
-              <span><LayoutDashboard size={14} /> {app?.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'DQL App'}</span>
+              <span><LayoutDashboard size={14} /> {metadataApp?.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'DQL App'}</span>
               {onDashboards ? (
                 // While on a page the heading below edits the PAGE title, so
                 // this is the only place the App's own name can be renamed.
-                experience === 'build' && app ? (
+                isEditable && app ? (
                   <span className="dql-app-title-context">
                     <AppTitleInput
                       key={`${app.id}:name`}
@@ -2252,13 +2525,13 @@ function AppWorkspaceSurface({
                       onCommit={(next) => void onRenameApp(next)}
                     />
                   </span>
-                ) : <span className="dql-app-title-context">{tidyTitle(app?.name) || 'App'}</span>
+                ) : <span className="dql-app-title-context">{tidyTitle(workspaceAppName) || 'App'}</span>
               ) : null}
-              {experience === 'build' ? <StatusSeal tone="draft">Customizing</StatusSeal> : null}
+              {isEditable ? <StatusSeal tone="draft">Customizing</StatusSeal> : null}
             </div>
             {/* Editable in place while customizing: `dql.app.json` and the page
                 title previously had no writer after creation at all. */}
-            {experience === 'build' && app ? (
+            {isEditable && app ? (
               <AppTitleInput
                 key={`${app.id}:${onDashboards ? dashboardDoc?.dashboard.id ?? '' : 'app'}`}
                 value={tidyTitle(onDashboards ? dashboardDoc?.dashboard.metadata.title : app.name) || 'App'}
@@ -2266,22 +2539,23 @@ function AppWorkspaceSurface({
                 onCommit={(next) => void onRenameApp(next, onDashboards ? dashboardDoc?.dashboard.id : undefined)}
               />
             ) : (
-              <h1>{tidyTitle(onDashboards ? dashboardDoc?.dashboard.metadata.title : app?.name) || 'App'}</h1>
+              <h1>{tidyTitle(onDashboards ? dashboardDoc?.dashboard.metadata.title : workspaceAppName) || 'App'}</h1>
             )}
-            <p>{cleanStakeholderCopy((onDashboards ? dashboardDoc?.dashboard.metadata.description : app?.description) ?? 'Local DQL App')}</p>
+            <p>{cleanStakeholderCopy((onDashboards ? dashboardDoc?.dashboard.metadata.description : metadataApp?.description) ?? 'Local DQL App')}</p>
           </div>
           <div className="dql-app-nav-row">
             <AppWorkspaceTabs
               appDoc={appDoc}
               section={section}
-              experience={experience}
+              experience={isEditable ? 'build' : 'view'}
+              dashboardCount={dashboardPages.length}
               onChange={onSectionChange}
             />
-            {section === 'dashboards' && appDoc?.dashboards.length ? (
+            {section === 'dashboards' && dashboardPages.length ? (
               <DashboardPagePicker
-                dashboards={appDoc.dashboards}
+                dashboards={dashboardPages}
                 activeDashboardId={dashboardDoc?.dashboard.id}
-                isBuild={experience === 'build'}
+                isBuild={isEditable}
                 onOpen={onOpenDashboard}
                 onAdd={onAddPage}
               />
@@ -2302,7 +2576,7 @@ function AppWorkspaceSurface({
                   type="button"
                   className="dql-apps-btn dql-apps-btn-line dql-apps-btn-icon"
                   title="Open dashboard lineage"
-                  onClick={() => { if (app && dashboardDoc) onOpenLineageNode(`dashboard:${app.id}/${dashboardDoc.dashboard.id}`); }}
+                  onClick={() => { if (workspaceAppId && dashboardDoc) onOpenLineageNode(`dashboard:${workspaceAppId}/${dashboardDoc.dashboard.id}`); }}
                 >
                   <GitBranch size={15} />
                 </button>
@@ -2319,7 +2593,7 @@ function AppWorkspaceSurface({
                 and `deriveDashboardFilters` also drops a declared filter it
                 considers unusable, which hid the row on pages that had one. */}
             {section === 'dashboards' && dashboardDoc
-              && (dashboardFilters.length > 0 || filterCandidates.length > 0 || experience === 'build') ? (
+              && (dashboardFilters.length > 0 || filterCandidates.length > 0 || isEditable) ? (
               <section className="dql-app-filter-row" aria-label="Dashboard filters">
                 <div className="dql-app-filter-row-copy">
                   <b>Filters</b>
@@ -2365,7 +2639,7 @@ function AppWorkspaceSurface({
                 {sessionFilters.length > 0 ? (
                   <div className="dql-app-filter-session">
                     <span>Your filters, this session only.</span>
-                    {experience === 'build'
+                    {isEditable
                       ? sessionFilters.map((entry) => (
                           <button
                             key={entry.id}
@@ -2380,7 +2654,7 @@ function AppWorkspaceSurface({
                       : null}
                   </div>
                 ) : null}
-                {experience === 'build' ? (
+                {isEditable ? (
                   <DashboardFilterEditor
                     filters={dashboardDoc.dashboard.filters ?? []}
                     candidates={filterCandidates}
@@ -2395,22 +2669,50 @@ function AppWorkspaceSurface({
             ) : null}
             {loading ? (
               <EmptyPanel title="Loading app..." detail="Reading dashboard files and running local blocks." />
-            ) : section === 'dashboards' && dashboardDoc && app ? (
-              <DashboardRenderer
-                appId={app.id}
-                dashboard={dashboardDoc.dashboard}
-                editable={experience === 'build'}
-                embeddedHeader
-                variables={variables}
-                selectedBlockId={selectedBlockId}
-                onBlockFocus={setSelectedBlockId}
-                onAskBlock={handleAskBlock}
-                onOpenLineageNode={onOpenLineageNode}
-                copilotOpen={explainOpen}
-                onCopilotChange={onExplainChange}
-                onDashboardChanged={onDashboardChanged}
-                onRunChange={handleDashboardRunChange}
-              />
+            ) : section === 'dashboards' && dashboardLoadError ? (
+              <div role="alert" style={{ display: 'grid', justifyItems: 'start', gap: 10 }}>
+                <EmptyPanel title="Dashboard could not be loaded" detail={dashboardLoadError} />
+                <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onRetryDashboardLoad}>Retry loading dashboard</button>
+              </div>
+            ) : section === 'dashboards' && dashboardDoc && metadataApp ? (
+              <>
+                {navigationCanGoBack ? (
+                  <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onNavigationBack} style={{ marginBottom: 8 }}>
+                    <ArrowLeft size={14} /> Back to previous page
+                  </button>
+                ) : null}
+                <DashboardRenderer
+                  appId={metadataApp.id}
+                  dashboard={dashboardDoc.dashboard}
+                  editable={isEditable}
+                  embeddedHeader
+                  variables={variables}
+                  selectedBlockId={selectedBlockId}
+                  onBlockFocus={setSelectedBlockId}
+                  onAskBlock={handleAskBlock}
+                  onAskChart={handleAskChart}
+                  onOpenLineageNode={onOpenLineageNode}
+                  copilotOpen={explainOpen}
+                  onCopilotChange={onExplainChange}
+                  onDashboardChanged={onDashboardChanged}
+                  onRunChange={handleDashboardRunChange}
+                  onNavigateDashboard={onNavigateDashboard}
+                />
+                {chartAnswer ? (
+                  <DatasetChartAnswerPanel
+                    answer={chartAnswer}
+                    onAsk={(question) => void handleAskChart({
+                      tileId: chartAnswer.tileId,
+                      runId: chartAnswer.runId,
+                      question,
+                    })}
+                    onClose={() => {
+                      chartAnswerRequestRef.current += 1;
+                      setChartAnswer(null);
+                    }}
+                  />
+                ) : null}
+              </>
             ) : section === 'notebooks' ? (
               <NotebookListPanel appDoc={appDoc} />
             ) : section === 'research' ? (
@@ -2561,15 +2863,17 @@ function AppWorkspaceTabs({
   appDoc,
   section,
   experience,
+  dashboardCount,
   onChange,
 }: {
   appDoc: AppDocumentSummary | null;
   section: AppSection;
   experience: AppExperience;
+  dashboardCount: number;
   onChange: (section: AppSection) => void;
 }) {
   const reportCount = appDoc?.investigations?.length ?? 0;
-  const appTab = { id: 'dashboards' as const, label: 'Canvas', count: appDoc?.dashboards.length ?? 0, icon: <LayoutDashboard size={14} /> };
+  const appTab = { id: 'dashboards' as const, label: 'Canvas', count: dashboardCount, icon: <LayoutDashboard size={14} /> };
   const contextItems: Array<{ id: AppSection; label: string; count?: number; icon: ReactNode }> = [
     { id: 'research', label: 'Analysis & evidence', count: reportCount, icon: <Search size={14} /> },
     { id: 'notebooks', label: 'Source notebooks', count: appDoc?.notebooks?.length ?? appDoc?.app.notebooks?.length ?? 0, icon: <BookOpenText size={14} /> },
@@ -2605,7 +2909,7 @@ function DashboardPagePicker({
   onOpen,
   onAdd,
 }: {
-  dashboards: AppDocumentSummary['dashboards'];
+  dashboards: WorkspaceDashboardSummary[];
   activeDashboardId?: string | null;
   isBuild: boolean;
   onOpen: (dashboardId: string) => void;
@@ -2622,7 +2926,7 @@ function DashboardPagePicker({
       >
         {dashboards.map((dashboard) => (
           <option key={dashboard.id} value={dashboard.id}>
-            {dashboard.title} ({dashboard.itemCount})
+            {dashboard.title}{dashboard.itemCount === undefined ? '' : ` (${dashboard.itemCount})`}
           </option>
         ))}
       </select>
@@ -2905,6 +3209,7 @@ function sampleDashboardRows(rows?: Array<Record<string, unknown>>, columns?: st
 
 function formatCopilotRouteLabel(route: AppCopilotRoute): string {
   if (route === 'certified_answer') return 'Answered from trusted logic';
+  if (route === 'dataset_chart_answer') return 'Answered from this chart';
   if (route === 'generated_answer') return 'Generated — review required';
   if (route === 'investigation') return 'Needs analysis';
   if (route === 'app_change_proposal') return 'App change idea';
@@ -2927,16 +3232,17 @@ function buildAppShareText(
   app: AppSummary | null,
   appDoc: AppDocumentSummary | null,
   dashboardDoc: DashboardDocumentResponse | null,
+  dashboardApp?: AppDocumentSummary['app'] | null,
 ): string {
-  const appId = app?.id ?? appDoc?.app.id ?? 'app';
-  const appName = app?.name ?? appDoc?.app.name ?? 'DQL App';
+  const appId = app?.id ?? dashboardApp?.id ?? appDoc?.app.id ?? 'app';
+  const appName = app?.name ?? dashboardApp?.name ?? appDoc?.app.name ?? 'DQL App';
   const dashboard = dashboardDoc?.dashboard.metadata.title ?? appDoc?.dashboards[0]?.title ?? 'Overview';
   const origin = typeof window !== 'undefined' ? window.location.origin : 'local DQL';
   return [
     appName,
     `App ID: ${appId}`,
     `Dashboard: ${dashboard}`,
-    `Domain: ${app?.domain ?? appDoc?.app.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'unknown'}`,
+    `Domain: ${app?.domain ?? dashboardApp?.domain ?? appDoc?.app.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'unknown'}`,
     `Open locally: ${origin}`,
   ].join('\n');
 }
@@ -2945,8 +3251,9 @@ function buildAppBriefMarkdown(
   app: AppSummary | null,
   appDoc: AppDocumentSummary | null,
   dashboardDoc: DashboardDocumentResponse | null,
+  dashboardApp?: AppDocumentSummary['app'] | null,
 ): string {
-  const appModel = appDoc?.app;
+  const appModel = appDoc?.app ?? dashboardApp;
   const title = app?.name ?? appModel?.name ?? 'DQL App';
   const dashboards = appDoc?.dashboards ?? [];
   const notebooks = appDoc?.notebooks ?? appModel?.notebooks ?? [];
@@ -3045,6 +3352,110 @@ function AddPageDialog({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Keep the form's selected run and tile server-issued. The free-form question
+ * can change, but the panel cannot retarget a request to another chart.
+ */
+export function datasetChartAnswerRequest(
+  answer: { runId: string; tileId: string },
+  question: string,
+): { runId: string; tileId: string; question: string } | null {
+  const normalized = question.trim();
+  return normalized ? { runId: answer.runId, tileId: answer.tileId, question: normalized } : null;
+}
+
+/**
+ * This deliberately small panel is fed only by the Dataset chart-answer
+ * endpoint. It does not turn displayed rows into generic Ask context or reuse
+ * an answer after the renderer reports a different run id.
+ */
+export function DatasetChartAnswerPanel({
+  answer,
+  onClose,
+  onAsk,
+}: {
+  answer: {
+    runId: string;
+    tileId: string;
+    state: 'loading' | 'ready' | 'error';
+    answer?: Extract<AppAskResponse, { ok: true }>;
+    error?: string;
+  };
+  onClose: () => void;
+  onAsk?: (question: string) => void;
+}) {
+  const context = answer.answer?.analyticalContext;
+  const [question, setQuestion] = useState('');
+  const request = datasetChartAnswerRequest(answer, question);
+  return (
+    <section
+      aria-live="polite"
+      aria-label="Dataset chart answer"
+      style={{
+        marginTop: 12,
+        border: '1px solid var(--border-default, var(--border-color, rgba(0,0,0,0.12)))',
+        background: 'var(--bg-1, var(--dql-app-surface, rgba(0,0,0,0.02)))',
+        borderRadius: 10,
+        padding: 14,
+        display: 'grid',
+        gap: 8,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <strong>About this chart</strong>
+        <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onClose}>Close</button>
+      </div>
+      {answer.state === 'loading' ? <span>Checking the current Dataset result…</span> : null}
+      {answer.state === 'error' ? <div role="alert">{answer.error}</div> : null}
+      {answer.state === 'ready' && answer.answer ? (
+        <>
+          <p style={{ margin: 0, lineHeight: 1.55 }}>{answer.answer.answer}</p>
+          <small style={{ color: 'var(--text-secondary, var(--dql-app-text-muted, #64748b))' }}>
+            {context?.evidenceScope === 'interaction'
+              ? 'Scoped interaction evidence · not publishable'
+              : context?.evidenceScope === 'incomplete'
+                ? 'Current tile evidence · page preview incomplete'
+                : 'Current full-dashboard evidence'}
+            {context?.source.label ? ` · ${context.source.label}` : ''}
+            {context?.source.trust ? ` · ${context.source.trust}` : ''}
+          </small>
+          {answer.answer.answerMode === 'deterministic_context_summary' ? (
+            <small style={{ color: 'var(--text-secondary, var(--dql-app-text-muted, #64748b))' }}>
+              Deterministic context summary · no configured AI provider
+            </small>
+          ) : null}
+        </>
+      ) : null}
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (request && answer.state !== 'loading') onAsk?.(request.question);
+        }}
+        style={{ display: 'flex', gap: 8, alignItems: 'center' }}
+      >
+        <label style={{ display: 'grid', gap: 4, flex: 1 }}>
+          <span className="sr-only">Ask about this chart</span>
+          <input
+            aria-label="Ask about this chart"
+            type="text"
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            placeholder="Ask about this chart"
+            disabled={answer.state === 'loading' || !onAsk}
+          />
+        </label>
+        <button
+          type="submit"
+          className="dql-apps-btn dql-apps-btn-primary"
+          disabled={!request || answer.state === 'loading' || !onAsk}
+        >
+          Ask
+        </button>
+      </form>
+    </section>
   );
 }
 

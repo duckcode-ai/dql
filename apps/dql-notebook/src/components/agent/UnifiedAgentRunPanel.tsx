@@ -117,6 +117,42 @@ export function replacePresentedAgentRun(items: ThreadItem[], sourceRunId: strin
 }
 
 /**
+ * A surface may keep one durable thread while presenting only the turns that
+ * still match its current server-reconstructed context. This is deliberately a
+ * presentation boundary: no history is deleted, and callers opt in with an
+ * artifact value written by the server rather than a browser trust claim.
+ */
+function runMatchesPresentationContext(run: AgentRun, contextKey: string): boolean {
+  return run.artifacts.some((artifact) => {
+    const payload = artifact.payload;
+    return Boolean(payload
+      && typeof payload === 'object'
+      && !Array.isArray(payload)
+      && (payload as Record<string, unknown>).contextScope === contextKey);
+  });
+}
+
+export function presentThreadItemsForContext(items: ThreadItem[], contextKey: string | undefined): ThreadItem[] {
+  if (!contextKey) return items;
+  const presented: ThreadItem[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    if (item.kind === 'run') {
+      if (runMatchesPresentationContext(item.run, contextKey)) presented.push(item);
+      continue;
+    }
+    const next = items[index + 1];
+    // Keep a new question while its matching server run is pending. Historic
+    // orphaned user bubbles are not current context and remain in the durable
+    // thread rather than being rendered as a new App Autopilot exchange.
+    if (!next || (next.kind === 'run' && runMatchesPresentationContext(next.run, contextKey))) {
+      presented.push(item);
+    }
+  }
+  return presented;
+}
+
+/**
  * Build the compact client history used when a persisted server thread is not
  * available. Clarification turns must carry the actual question in `answer`;
  * the generic run summary ("Needs clarification...") cannot resolve a reply.
@@ -198,6 +234,11 @@ interface UnifiedAgentRunPanelProps {
   notebookPath?: string;
   selectedObject?: AgentRunSelectedObject;
   workspaceContext?: Record<string, unknown>;
+  /**
+   * Optional server-issued artifact context key for surfaces that retain one
+   * durable thread while showing only the current contextual exchange.
+   */
+  presentationContextKey?: string;
   initialMode?: AgentRunRequestedMode;
   initialInput?: string;
   /** Seed the thread (for resuming a saved conversation). */
@@ -233,6 +274,14 @@ interface UnifiedAgentRunPanelProps {
   onArtifactReady?: (payload: InsertDqlPayload, run: AgentRun) => void;
   /** Explicit handoff for immutable Modeling/Skills authoring proposals. */
   onReviewAuthoringProposal?: (artifact: AgentRun['artifacts'][number], run: AgentRun) => void;
+  /**
+   * Explicit handoff for an App Autopilot review artifact. The shared AgentRun
+   * owns the conversation and lifecycle; the App host owns the one guarded
+   * local-draft Apply control.
+   */
+  onReviewAppAutopilotChange?: (artifact: AgentRun['artifacts'][number], run: AgentRun) => void;
+  /** Focus the host's explicit Dataset-tile picker after a bounded App refusal. */
+  onSelectAppAutopilotTile?: () => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string, sourceAskRunId?: string) => void;
   /** Navigate into an app/dashboard (used by the "Added to app" success link). */
@@ -298,6 +347,7 @@ export function UnifiedAgentRunPanel({
   notebookPath,
   selectedObject,
   workspaceContext,
+  presentationContextKey,
   initialMode = 'auto',
   initialInput = '',
   initialItems,
@@ -311,6 +361,8 @@ export function UnifiedAgentRunPanel({
   onReplaceDql,
   onArtifactReady,
   onReviewAuthoringProposal,
+  onReviewAppAutopilotChange,
+  onSelectAppAutopilotTile,
   onOpenBlock,
   onOpenResearch,
   onOpenApp,
@@ -445,13 +497,23 @@ export function UnifiedAgentRunPanel({
   const askScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    // Do not leave an inspector pointed at a turn which a surface has just
+    // marked historical by changing its presentation context.
+    setInspector(null);
+  }, [presentationContextKey]);
+
+  useEffect(() => {
     if (!initialInput || running) return;
     if (initialInput === lastInitialInputRef.current) return;
     lastInitialInputRef.current = initialInput;
     setInput(initialInput);
   }, [initialInput, running]);
 
-  const history = useMemo(() => agentRunHistoryFromItems(items), [items]);
+  const presentedItems = useMemo(
+    () => presentThreadItemsForContext(items, presentationContextKey),
+    [items, presentationContextKey],
+  );
+  const history = useMemo(() => agentRunHistoryFromItems(presentedItems), [presentedItems]);
 
   // Report thread changes to a host (for conversation persistence) without
   // re-subscribing when the callback identity changes each render.
@@ -459,9 +521,27 @@ export function UnifiedAgentRunPanel({
   onItemsChangeRef.current = onItemsChange;
   const onArtifactReadyRef = useRef(onArtifactReady);
   onArtifactReadyRef.current = onArtifactReady;
+  const onReviewAppAutopilotChangeRef = useRef(onReviewAppAutopilotChange);
+  onReviewAppAutopilotChangeRef.current = onReviewAppAutopilotChange;
+  const onSelectAppAutopilotTileRef = useRef(onSelectAppAutopilotTile);
+  onSelectAppAutopilotTileRef.current = onSelectAppAutopilotTile;
+  const deliveredAppAutopilotArtifactsRef = useRef(new Set<string>());
   useEffect(() => {
     onItemsChangeRef.current?.(items);
   }, [items]);
+  useEffect(() => {
+    const callback = onReviewAppAutopilotChangeRef.current;
+    if (!callback) return;
+    for (const item of presentedItems) {
+      if (item.kind !== 'run') continue;
+      const artifact = item.run.artifacts.find((candidate) => candidate.kind === 'app_autopilot_change');
+      if (!artifact) continue;
+      const key = `${item.run.id}:${artifact.id}`;
+      if (deliveredAppAutopilotArtifactsRef.current.has(key)) continue;
+      deliveredAppAutopilotArtifactsRef.current.add(key);
+      callback(artifact, item.run);
+    }
+  }, [presentedItems]);
 
   // Server-side conversation thread: created lazily on the first question (unless
   // the host passed one), then sent with every run so the server injects prior
@@ -741,7 +821,7 @@ export function UnifiedAgentRunPanel({
         }
       }
       const priorAuthoringRun = (activeMode === 'modeling' || activeMode === 'skill')
-        ? [...items].reverse().find((item): item is Extract<ThreadItem, { kind: 'run' }> => item.kind === 'run' && item.run.artifacts.some((artifact) => artifact.kind === (activeMode === 'modeling' ? 'modeling_change_proposal' : 'skill_change_proposal')))?.run
+        ? [...presentedItems].reverse().find((item): item is Extract<ThreadItem, { kind: 'run' }> => item.kind === 'run' && item.run.artifacts.some((artifact) => artifact.kind === (activeMode === 'modeling' ? 'modeling_change_proposal' : 'skill_change_proposal')))?.run
         : undefined;
       const priorAuthoringArtifact = priorAuthoringRun?.artifacts.find((artifact) => artifact.kind === (activeMode === 'modeling' ? 'modeling_change_proposal' : 'skill_change_proposal'));
       const runInput = {
@@ -770,7 +850,7 @@ export function UnifiedAgentRunPanel({
             revision: (priorAuthoringRun.derivation?.revision ?? 1) + 1,
           } : {}),
         },
-        conversationContext: buildConversationContext(items),
+        conversationContext: buildConversationContext(presentedItems),
         history,
         thinkingMode,
         researchResultRowsOptIn: resultRowsOptInForRun,
@@ -919,6 +999,21 @@ export function UnifiedAgentRunPanel({
   };
 
   const handleNextAction = (run: AgentRun, action: AgentRun['nextActions'][number]) => {
+    if (action.id === 'select-app-dataset-tile') {
+      const selectTile = onSelectAppAutopilotTileRef.current;
+      if (selectTile) selectTile();
+      else setError('Select a saved Dataset tile in App Studio before asking App Autopilot to make a change.');
+      return;
+    }
+    if (action.id === 'review-app-autopilot-change') {
+      const artifact = run.artifacts.find((candidate) => candidate.kind === 'app_autopilot_change');
+      if (!artifact) {
+        setError('This App Autopilot run does not include a reviewable change.');
+        return;
+      }
+      onReviewAppAutopilotChangeRef.current?.(artifact, run);
+      return;
+    }
     if (action.id === 'review-modeling-proposal' || action.id === 'review-skill-proposal') {
       const expectedKind = action.id === 'review-modeling-proposal'
         ? 'modeling_change_proposal'
@@ -1075,7 +1170,7 @@ export function UnifiedAgentRunPanel({
 
           <div ref={askScrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', display: 'flex', flexDirection: 'column' }}>
             <div style={{ width: 'min(720px, 100% - 48px)', margin: '0 auto', padding: '26px 0 12px', display: 'flex', flexDirection: 'column', gap: 26 }}>
-              {items.length === 0 && !running ? (
+              {presentedItems.length === 0 && !running ? (
                 <div style={{ margin: 'auto 0', display: 'grid', gap: 14, justifyItems: 'center', textAlign: 'center', color: t.textSecondary, paddingTop: 40 }}>
                   <div style={largeIconShellStyle(t)}><Sparkles size={20} /></div>
                   <div style={{ fontSize: 13.5, lineHeight: 1.5, maxWidth: 400, color: t.textSecondary }}>{emptyHint ?? DEFAULT_EMPTY_HINT}</div>
@@ -1087,7 +1182,7 @@ export function UnifiedAgentRunPanel({
                 </div>
               ) : null}
 
-              {items.map((item) => item.kind === 'user' ? (
+              {presentedItems.map((item) => item.kind === 'user' ? (
                 <div key={item.id} style={askUserBubbleStyle(t)}>{item.text}</div>
               ) : (
                 <AskRunCard
@@ -1233,7 +1328,7 @@ export function UnifiedAgentRunPanel({
       `}</style>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {items.length === 0 && !running ? (
+        {presentedItems.length === 0 && !running ? (
           <div style={{ margin: 'auto 0', display: 'grid', gap: 14, justifyItems: 'center', textAlign: 'center', color: t.textSecondary }}>
             <div style={largeIconShellStyle(t)}><Sparkles size={20} /></div>
             <div style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 380, color: t.textSecondary }}>
@@ -1249,7 +1344,7 @@ export function UnifiedAgentRunPanel({
           </div>
         ) : null}
 
-        {items.map((item) => item.kind === 'user' ? (
+        {presentedItems.map((item) => item.kind === 'user' ? (
           <div key={item.id} style={userBubbleStyle(t)}>{item.text}</div>
         ) : answerFirstCards ? (
           <AskRunCard

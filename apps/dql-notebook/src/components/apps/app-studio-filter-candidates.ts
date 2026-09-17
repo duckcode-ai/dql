@@ -13,6 +13,12 @@ export type StudioFilterTileMapping = {
   supported: boolean;
   binding?: string;
   mode?: 'parameter' | 'predicate' | 'semantic';
+  /** Exact v3 binding. A Dataset filter is never inferred from a matching
+   * field name on another source. */
+  datasetId?: string;
+  datasetField?: string;
+  sourceId?: string;
+  sourceRevision?: string;
   reason?: string;
 };
 
@@ -27,6 +33,37 @@ export type StudioRuntimeFilterFields = Record<string, Record<string, Array<{
   column: string;
   predicateTarget: string;
 }>>>;
+
+/**
+ * Persist field-query filter reach by exact Dataset tile id. A Dataset can
+ * back several components, so a bare Dataset-to-field map loses an author's
+ * deliberate exclusion when the editor is reopened. An empty tileIds list is
+ * meaningful: it records that this Dataset has no selected component.
+ */
+export function datasetFilterBindingsForSelection(
+  mappings: StudioFilterTileMapping[],
+  selectedMappingKeys: ReadonlySet<string>,
+): Record<string, { field: string; tileIds: string[] }> {
+  const groups = new Map<string, { field: string; tileIds: Set<string> }>();
+  for (const mapping of mappings) {
+    if (!mapping.supported || !mapping.datasetId || !mapping.datasetField) continue;
+    const current = groups.get(mapping.datasetId);
+    if (current) {
+      if (selectedMappingKeys.has(mapping.key)) current.tileIds.add(mapping.tileId);
+    } else {
+      groups.set(mapping.datasetId, {
+        field: mapping.datasetField,
+        tileIds: selectedMappingKeys.has(mapping.key) ? new Set([mapping.tileId]) : new Set(),
+      });
+    }
+  }
+  return Object.fromEntries([...groups.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([datasetId, binding]) => [datasetId, {
+      field: binding.field,
+      tileIds: [...binding.tileIds].sort(),
+    }]));
+}
 
 export function defaultStudioFilterType(fieldId: string): 'daterange' | 'number' | 'select' {
   if (/date|time|month|week|quarter|year|created|updated|ordered|(_at|_on)$/i.test(fieldId)) return 'daterange';
@@ -91,6 +128,37 @@ export function filterTileMappingsForField(
   boundSources: AppStudioBuildDraft['sources'] = [],
 ): StudioFilterTileMapping[] {
   return pages.flatMap((page) => dataTiles(page).map((tile) => {
+    const datasetMapping = datasetMappingForTile(page, tile, fieldId, boundSources);
+    if (tile.query) {
+      const sourceName = sourceNameForTile(tile, catalog, boundSources);
+      if (datasetMapping) {
+        return {
+          key: studioFilterMappingKey(page.id, tile.i),
+          pageId: page.id,
+          pageTitle: page.metadata.title,
+          tileId: tile.i,
+          tileTitle: tile.title || tile.i,
+          sourceName,
+          supported: true,
+          binding: datasetMapping.field,
+          mode: 'predicate' as const,
+          datasetId: datasetMapping.datasetId,
+          datasetField: datasetMapping.field,
+          sourceId: tile.sourceId,
+          sourceRevision: tile.sourceRevision,
+        };
+      }
+      return {
+        key: studioFilterMappingKey(page.id, tile.i),
+        pageId: page.id,
+        pageTitle: page.metadata.title,
+        tileId: tile.i,
+        tileTitle: tile.title || tile.i,
+        sourceName,
+        supported: false,
+        reason: `${fieldId.replace(/_/g, ' ')} is not an approved physical field on this Dataset source.`,
+      };
+    }
     const fields = governedFieldsForTile(tile, catalog, boundSources);
     const runtimeField = (runtimeFields[page.id]?.[tile.i] ?? []).find((field) => sameStudioFilterField(field.column, fieldId));
     const existing = (tile.filterBindings ?? []).find((binding) =>
@@ -134,7 +202,7 @@ export function studioFilterMappingKey(pageId: string, tileId: string): string {
 }
 
 function dataTiles(page: StudioPage): StudioTile[] {
-  return page.layout.items.filter((tile) => Boolean(tile.block || tile.semantic || tile.draftAnalysis));
+  return page.layout.items.filter((tile) => Boolean(tile.block || tile.semantic || tile.draftAnalysis || tile.query));
 }
 
 function governedFieldsForTile(
@@ -143,6 +211,14 @@ function governedFieldsForTile(
   boundSources: AppStudioBuildDraft['sources'],
 ): string[] {
   const bound = tile.sourceId ? boundSources.find((source) => source.id === tile.sourceId) : undefined;
+  if (tile.query && bound?.capabilities?.dataset) {
+    return bound.capabilities.dataset.fields
+      .filter((field) => field.kind === 'physical' && field.status === 'approved')
+      // The field picker uses one clear display identity. The retained
+      // Dataset descriptor resolves this name to its qualified identity at
+      // validation time, so the UI never presents duplicate field rows.
+      .map((field) => field.name);
+  }
   if (bound?.capabilities) {
     return [...new Set([...bound.capabilities.filters, ...bound.capabilities.dimensions])];
   }
@@ -154,6 +230,33 @@ function governedFieldsForTile(
   return (tile.filterBindings ?? [])
     .filter((binding) => binding.capability !== 'unsupported' && Boolean(binding.binding))
     .map((binding) => binding.binding!);
+}
+
+function datasetMappingForTile(
+  page: StudioPage,
+  tile: StudioTile,
+  fieldId: string,
+  boundSources: AppStudioBuildDraft['sources'],
+): { datasetId: string; field: string } | null {
+  if (!tile.query || !tile.sourceId || !tile.sourceRevision) return null;
+  const source = boundSources.find((candidate) => candidate.id === tile.sourceId);
+  const descriptor = source?.capabilities?.dataset;
+  const binding = page.datasets?.find((candidate) => (
+    candidate.sourceId === tile.sourceId
+    && candidate.sourceRevision === tile.sourceRevision
+  ));
+  if (!descriptor || !binding) return null;
+  const normalized = normalizeFieldId(fieldId);
+  const physical = descriptor.fields.find((field) => (
+    field.kind === 'physical'
+    && field.status === 'approved'
+    && (normalizeFieldId(field.name) === normalized || normalizeFieldId(field.qualifiedId) === normalized)
+  ));
+  return physical ? { datasetId: binding.id, field: physical.name } : null;
+}
+
+function normalizeFieldId(value: string): string {
+  return value.trim().toLowerCase().replace(/["`\[\]]/g, '').split('.').at(-1)?.replace(/[^a-z0-9]/g, '') ?? '';
 }
 
 function sourceNameForTile(

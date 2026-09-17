@@ -148,7 +148,15 @@ function printBlockDecl(node: BlockDeclNode, indent: number): string {
   if (node.tags) result += `${prefix}  tags = [${node.tags.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.termRefs) result += `${prefix}  terms = [${node.termRefs.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.pattern) result += `${prefix}  pattern = "${node.pattern}"\n`;
-  if (node.grain) result += `${prefix}  grain = "${node.grain}"\n`;
+  if (node.datasetGrain) {
+    result += `${prefix}  grain = { entities = [${node.datasetGrain.entities.map(value => `"${value}"`).join(', ')}], keys = [${node.datasetGrain.keys.map(value => `"${value}"`).join(', ')}]${node.datasetGrain.timeGrain ? `, timeGrain = "${node.datasetGrain.timeGrain}"` : ''}${node.datasetGrain.timeBucketBy ? `, timeBucketBy = "${node.datasetGrain.timeBucketBy}"` : ''} }\n`;
+  } else if (node.grain) result += `${prefix}  grain = "${node.grain}"\n`;
+  if (node.datasetFields) {
+    for (const field of node.datasetFields) result += `${prefix}  field ${field.name} (${field.role})\n`;
+  }
+  if (node.datasetMeasures) {
+    for (const measure of node.datasetMeasures) result += `${prefix}  measure ${measure.name} (${measure.aggregation})\n`;
+  }
   if (node.entities) result += `${prefix}  entities = [${node.entities.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.outputs) result += `${prefix}  outputs = [${node.outputs.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.dimensions) result += `${prefix}  dimensions = [${node.dimensions.map(t => `"${t}"`).join(', ')}]\n`;

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { planAppBuildBrief } from './app-builder-orchestrator.js';
 import type { AppSourceCatalogRecord } from './app-source-catalog.js';
+import type { DatasetDescriptor } from '@duckcodeailabs/dql-core';
 
 const candidates: AppSourceCatalogRecord[] = [
   source('app:block:sales:revenue', 'Revenue trend', 'certified'),
@@ -9,13 +10,16 @@ const candidates: AppSourceCatalogRecord[] = [
 
 describe('App Builder orchestrator', () => {
   it('AGT-026 uses one bounded provider call and rejects invented source ids', async () => {
-    const complete = vi.fn(async () => JSON.stringify({
-      frame: { goal: 'Executive sales', metrics: ['revenue'], dimensions: ['region'], filters: ['date'] },
-      requirements: [{ id: 'r1', question: 'Revenue trend', role: 'trend', required: true, measures: ['revenue'], dimensions: ['date'], filters: [] }],
-      components: [
-        { id: 'c1', title: 'Revenue trend', sourceId: 'app:block:sales:revenue', requirementIds: ['r1'], role: 'trend', view: 'line', rationale: 'Exact capability match' },
-        { id: 'invented', title: 'Invented', sourceId: 'app:block:missing', requirementIds: ['r1'], role: 'detail', view: 'table', rationale: 'Not supplied' },
-      ],
+    const complete = vi.fn(async () => ({
+      content: JSON.stringify({
+        frame: { goal: 'Executive sales', metrics: ['revenue'], dimensions: ['region'], filters: ['date'] },
+        requirements: [{ id: 'r1', question: 'Revenue trend', role: 'trend', required: true, measures: ['revenue'], dimensions: ['date'], filters: [] }],
+        components: [
+          { id: 'c1', title: 'Revenue trend', sourceId: 'app:block:sales:revenue', requirementIds: ['r1'], role: 'trend', view: 'line', rationale: 'Exact capability match' },
+          { id: 'invented', title: 'Invented', sourceId: 'app:block:missing', requirementIds: ['r1'], role: 'detail', view: 'table', rationale: 'Not supplied' },
+        ],
+      }),
+      providerId: 'claude-code',
     }));
 
     const brief = await planAppBuildBrief({
@@ -28,20 +32,24 @@ describe('App Builder orchestrator', () => {
 
     expect(complete).toHaveBeenCalledTimes(1);
     expect(brief.planningMode).toBe('ai');
+    expect(brief.plannerProvenance).toEqual({
+      version: 1,
+      mode: 'ai',
+      providerInvocation: 'succeeded',
+      providerId: 'claude-code',
+    });
     expect(brief.components.map((component) => component.sourceId)).toEqual(['app:block:sales:revenue']);
     expect(complete.mock.calls[0]?.[0].user).not.toContain('SELECT');
   });
 
-  it('falls back deterministically while preserving draft trust and supplied ids', async () => {
-    const brief = await planAppBuildBrief({
+  it('surfaces malformed configured planner output while offline planning stays deterministic', async () => {
+    await expect(planAppBuildBrief({
       prompt: 'Build revenue and regional orders',
       candidates,
       requiredSourceIds: [],
       sourcePolicy: 'include_review_required',
       complete: async () => 'not json',
-    });
-    expect(brief.planningMode).toBe('deterministic_fallback');
-    expect(brief.selectedSourceIds).toEqual(candidates.map((candidate) => candidate.sourceId));
+    })).rejects.toThrow('APP_BUILD_PLANNER_OUTPUT_INVALID');
 
     const generic = await planAppBuildBrief({
       prompt: 'Build an analytics app from my certified DQL blocks and available warehouse tables.',
@@ -53,13 +61,13 @@ describe('App Builder orchestrator', () => {
     expect(generic.selectedSourceIds).toEqual(candidates.map((candidate) => candidate.sourceId));
   });
 
-  it('derives offline requirements from the request instead of shortlist descriptions', async () => {
+  it('surfaces configured planner failures and derives offline requirements only when no planner is configured', async () => {
     const allCandidates = [
       ...candidates,
       source('app:block:customers:growth', 'New customer growth', 'draft'),
       source('app:block:runtime:acceptance', 'Runtime parameter acceptance', 'certified'),
     ];
-    const brief = await planAppBuildBrief({
+    await expect(planAppBuildBrief({
       prompt: 'Build an executive sales App showing revenue trend, orders by region, and new-customer growth for the last 90 days.',
       candidates: allCandidates,
       requiredSourceIds: [],
@@ -67,9 +75,21 @@ describe('App Builder orchestrator', () => {
       complete: async () => {
         throw new Error('provider unavailable');
       },
+    })).rejects.toThrow('APP_BUILD_PLANNER_PROVIDER_FAILED');
+
+    const brief = await planAppBuildBrief({
+      prompt: 'Build an executive sales App showing revenue trend, orders by region, and new-customer growth for the last 90 days.',
+      candidates: allCandidates,
+      requiredSourceIds: [],
+      sourcePolicy: 'include_review_required',
     });
 
     expect(brief.planningMode).toBe('deterministic_fallback');
+    expect(brief.plannerProvenance).toEqual({
+      version: 1,
+      mode: 'deterministic',
+      providerInvocation: 'not_attempted',
+    });
     expect(brief.requirements.map((requirement) => requirement.question)).toEqual([
       'Revenue trend',
       'Orders by region',
@@ -174,7 +194,130 @@ describe('App Builder orchestrator', () => {
     expect(brief.components).toEqual([expect.objectContaining({ sourceId: revenueOrders.sourceId, requirementIds: [] })]);
     expect(brief.warnings).toEqual([expect.stringContaining('unsupported requirement coverage was removed')]);
   });
+
+  it('AGT-026 plans several source-bound Dataset tiles, falls back from invented query authority, and keeps coverage query-specific', async () => {
+    const descriptor = datasetDescriptor('app:block:commerce:orders');
+    const candidate: AppSourceCatalogRecord = {
+      ...source('app:block:commerce:orders', 'Order Lines Dataset', 'certified'),
+      sourceRevision: 'sha256:server-authoritative-source-revision',
+      capabilities: {
+        measures: ['revenue', 'margin'], dimensions: ['customer_id', 'order_date'], outputs: ['revenue', 'margin'], filters: ['region'],
+        allowedVisualizations: ['kpi', 'line', 'bar', 'table'], parameters: [], dataset: descriptor,
+      },
+    };
+    const complete = vi.fn(async () => JSON.stringify({
+      frame: { goal: 'Commerce overview' },
+      requirements: [
+        { id: 'revenue-kpi', question: 'Revenue', role: 'kpi', required: true, measures: ['revenue'], dimensions: [], filters: [] },
+        { id: 'monthly-revenue', question: 'Monthly revenue', role: 'trend', required: true, measures: ['revenue'], dimensions: ['order_date'], filters: [] },
+        { id: 'customer-revenue', question: 'Revenue by customer', role: 'breakdown', required: true, measures: ['revenue'], dimensions: ['customer_id'], filters: [] },
+        { id: 'profit-margin', question: 'Profit margin', role: 'kpi', required: true, measures: ['margin'], dimensions: [], filters: [] },
+      ],
+      components: [
+        { id: 'revenue-kpi', title: 'Revenue', sourceId: candidate.sourceId, requirementIds: ['revenue-kpi'], role: 'kpi', view: 'kpi', rationale: 'KPI', query: { dimensions: [], measures: [{ measure: 'revenue' }] } },
+        { id: 'monthly-revenue', title: 'Monthly revenue', sourceId: candidate.sourceId, requirementIds: ['monthly-revenue'], role: 'trend', view: 'line', rationale: 'Trend', query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }] } },
+        { id: 'customer-revenue', title: 'Revenue by customer', sourceId: candidate.sourceId, requirementIds: ['customer-revenue'], role: 'breakdown', view: 'bar', rationale: 'Breakdown', query: { dimensions: [{ field: 'customer_id' }], measures: [{ measure: 'revenue' }] } },
+        // The provider cannot add an authority field. The normalized fallback
+        // must select the matching approved margin measure instead.
+        { id: 'forged-margin', title: 'Profit margin', sourceId: candidate.sourceId, requirementIds: ['profit-margin'], role: 'kpi', view: 'kpi', rationale: 'Forged', query: { dimensions: [], measures: [{ measure: 'revenue' }], sourceRevision: 'forged' } },
+        // A syntactically valid revenue query still cannot claim that it
+        // covers the separate margin requirement.
+        { id: 'revenue-not-margin', title: 'Revenue is not margin', sourceId: candidate.sourceId, requirementIds: ['profit-margin'], role: 'kpi', view: 'kpi', rationale: 'Wrong coverage', query: { dimensions: [], measures: [{ measure: 'revenue' }] } },
+      ],
+    }));
+
+    const brief = await planAppBuildBrief({
+      prompt: 'Build a commerce overview', candidates: [candidate], requiredSourceIds: [], sourcePolicy: 'governed_only', complete,
+    });
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(brief.components.map((component) => component.id)).toEqual(['revenue-kpi', 'monthly-revenue', 'customer-revenue', 'forged-margin', 'revenue-not-margin']);
+    expect(brief.components.map((component) => component.sourceId)).toEqual([candidate.sourceId, candidate.sourceId, candidate.sourceId, candidate.sourceId, candidate.sourceId]);
+    expect(brief.components.find((component) => component.id === 'monthly-revenue')?.query).toEqual({
+      dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }],
+    });
+    expect(brief.components.find((component) => component.id === 'forged-margin')?.query).toEqual({
+      dimensions: [], measures: [{ measure: 'margin' }],
+    });
+    expect(brief.components.find((component) => component.id === 'forged-margin')?.requirementIds).toEqual(['profit-margin']);
+    expect(brief.components.find((component) => component.id === 'revenue-not-margin')?.requirementIds).toEqual([]);
+    expect(complete.mock.calls[0]?.[0].user).not.toContain(candidate.sourceRevision);
+    expect(complete.mock.calls[0]?.[0].user).not.toContain('contractFingerprint');
+  });
+
+  it('AGT-026 normalizes a multi-page story with exact Dataset filters, navigation, cross-filter, and detail drill contracts', async () => {
+    const descriptor = datasetDescriptor('app:block:commerce:orders');
+    const candidate: AppSourceCatalogRecord = {
+      ...source('app:block:commerce:orders', 'Order Lines Dataset', 'certified'),
+      capabilities: {
+        measures: ['revenue', 'margin'], dimensions: ['customer_id', 'order_date'], outputs: ['revenue', 'margin'], filters: ['customer_id', 'order_date'],
+        allowedVisualizations: ['kpi', 'line', 'bar', 'table'], parameters: [], dataset: descriptor,
+      },
+    };
+    const brief = await planAppBuildBrief({
+      prompt: 'Build a commerce leadership App with an overview and customer detail.',
+      candidates: [candidate],
+      requiredSourceIds: [],
+      sourcePolicy: 'governed_only',
+      complete: async () => JSON.stringify({
+        frame: { goal: 'Commerce leadership' },
+        requirements: [
+          { id: 'revenue', question: 'Revenue', role: 'kpi', required: true, measures: ['revenue'], dimensions: [], filters: [] },
+          { id: 'monthly', question: 'Monthly revenue', role: 'trend', required: true, measures: ['revenue'], dimensions: ['order_date'], filters: [] },
+          { id: 'customer', question: 'Revenue by customer', role: 'detail', required: true, measures: ['revenue'], dimensions: ['customer_id'], filters: [] },
+          { id: 'margin', question: 'Margin', role: 'kpi', required: true, measures: ['margin'], dimensions: [], filters: [] },
+        ],
+        components: [
+          { id: 'revenue-kpi', title: 'Revenue', sourceId: candidate.sourceId, requirementIds: ['revenue'], role: 'kpi', view: 'kpi', rationale: 'KPI', query: { dimensions: [], measures: [{ measure: 'revenue' }] } },
+          { id: 'monthly-revenue', title: 'Monthly revenue', sourceId: candidate.sourceId, requirementIds: ['monthly'], role: 'trend', view: 'line', rationale: 'Trend', query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }, { field: 'customer_id' }], measures: [{ measure: 'revenue' }] } },
+          { id: 'customer-revenue', title: 'Revenue by customer', sourceId: candidate.sourceId, requirementIds: ['customer'], role: 'detail', view: 'bar', rationale: 'Detail', query: { dimensions: [{ field: 'customer_id' }], measures: [{ measure: 'revenue' }] } },
+          { id: 'margin-kpi', title: 'Margin', sourceId: candidate.sourceId, requirementIds: ['margin'], role: 'kpi', view: 'kpi', rationale: 'KPI', query: { dimensions: [], measures: [{ measure: 'margin' }] } },
+        ],
+        pages: [
+          { id: 'overview', title: 'Overview', componentIds: ['revenue-kpi', 'monthly-revenue', 'customer-revenue'], sections: [{ id: 'metrics', title: 'Key metrics', kind: 'kpi_band', componentIds: ['revenue-kpi'] }, { id: 'trend', title: 'Trend', kind: 'insight', componentIds: ['monthly-revenue', 'customer-revenue'] }] },
+          { id: 'details', title: 'Details', componentIds: ['margin-kpi'], sections: [{ id: 'detail', title: 'Details', kind: 'appendix', componentIds: ['margin-kpi'] }] },
+        ],
+        filters: [{ id: 'customer', label: 'Customer', field: 'customer_id', scope: 'app', componentIds: ['revenue-kpi', 'monthly-revenue', 'customer-revenue', 'margin-kpi'] }],
+        navigation: [{ fromComponentId: 'monthly-revenue', toPageId: 'details' }],
+        crossFilters: [{ fromComponentId: 'monthly-revenue', fromField: 'customer_id', toComponentId: 'customer-revenue', toField: 'customer_id' }],
+        detailDrills: [{ pageId: 'details', componentId: 'margin-kpi', fields: ['customer_id', 'invented_field'] }],
+      }),
+    });
+
+    expect(brief.pages.map((page) => ({ id: page.id, componentIds: page.componentIds }))).toEqual([
+      { id: 'overview', componentIds: ['revenue-kpi', 'monthly-revenue', 'customer-revenue'] },
+      { id: 'details', componentIds: ['margin-kpi'] },
+    ]);
+    expect(brief.filters).toEqual([expect.objectContaining({ id: 'customer', field: 'customer_id', scope: 'app' })]);
+    expect(brief.navigation).toEqual([{ fromComponentId: 'monthly-revenue', toPageId: 'details' }]);
+    expect(brief.crossFilters).toEqual([{ fromComponentId: 'monthly-revenue', fromField: 'customer_id', toComponentId: 'customer-revenue', toField: 'customer_id' }]);
+    expect(brief.detailDrills).toEqual([{ pageId: 'details', componentId: 'margin-kpi', fields: ['customer_id'] }]);
+  });
 });
+
+function datasetDescriptor(sourceId: string): DatasetDescriptor {
+  return {
+    version: 1,
+    id: `dataset:${sourceId}`,
+    kind: 'block',
+    sourceRevision: 'sha256:server-authoritative-source-revision',
+    snapshotId: 'server-snapshot',
+    contractRef: { kind: 'block_source', id: sourceId, fingerprint: 'contract-server' },
+    binding: { sourceQualifiedId: sourceId, sourceRevision: 'sha256:server-authoritative-source-revision', contractFingerprint: 'contract-server', state: 'target_required' },
+    label: 'Order Lines',
+    lifecycle: 'certified',
+    trust: 'certified',
+    grain: { entityIds: ['order_line'], keyFields: ['order_line_id'] },
+    fields: [
+      { kind: 'physical', name: 'customer_id', qualifiedId: `${sourceId}:customer_id`, type: 'string', role: 'dimension', status: 'approved' },
+      { kind: 'physical', name: 'order_date', qualifiedId: `${sourceId}:order_date`, type: 'date', role: 'time', status: 'approved', time: { grains: ['day', 'month'], primary: true } },
+      { kind: 'measure', name: 'revenue', qualifiedId: `${sourceId}:revenue`, aggregation: 'sum', from: 'net_amount', dependsOn: ['net_amount'], additivity: { entities: 'additive', time: 'additive' }, allowedAggs: ['sum'], status: 'approved' },
+      { kind: 'measure', name: 'margin', qualifiedId: `${sourceId}:margin`, aggregation: 'sum', from: 'margin_amount', dependsOn: ['margin_amount'], additivity: { entities: 'additive', time: 'additive' }, allowedAggs: ['sum'], status: 'approved' },
+    ],
+    operations: ['filter', 'group', 'trend'],
+    execution: { route: 'governed_sql' },
+  };
+}
 
 function source(sourceId: string, title: string, lifecycle: 'certified' | 'draft'): AppSourceCatalogRecord {
   return {

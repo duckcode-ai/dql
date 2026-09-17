@@ -104,6 +104,7 @@ export function ContextProposalReviewDrawer({
             <Summary label="Files" value={current.impact.files} theme={theme} />
             <Summary label="Modeling" value={current.impact.modelingChanges} theme={theme} />
             <Summary label="Skills" value={current.impact.skillChanges} theme={theme} />
+            <Summary label="Datasets" value={current.impact.datasetChanges} theme={theme} />
           </div>
           <div style={{ padding: '10px 12px', border: '1px solid var(--border-subtle)', borderRadius: 9, background: 'var(--bg-1)', color: theme.textSecondary, fontSize: 11, lineHeight: 1.5, marginBottom: 14 }}>
             <ShieldCheck size={14} style={{ verticalAlign: -3, marginRight: 7, color: theme.accent }} />
@@ -171,6 +172,12 @@ function describeOperation(operation: ContextAuthoringProposalV1['operations'][n
     return `${operation.operation === 'create' ? 'Create' : operation.operation === 'move' ? 'Move' : 'Update'} skill ${operation.value.id}`;
   }
   if (operation.kind === 'dbt_source_change') return 'Patch dbt source';
+  if (operation.kind === 'dataset_change') {
+    return `Update Dataset definition ${operation.change.targetPath}`;
+  }
+  if (operation.kind === 'dataset_draft') {
+    return `Create review-required Dataset draft ${operation.change.domain}/${operation.change.slug}`;
+  }
   const change = operation.change;
   const scope = (domain?: string, areaId?: string) => [domain, areaId].filter(Boolean).join(' / ');
   switch (change.operation) {

@@ -25,7 +25,10 @@ import { ManifestCache, type TrackedFile } from '@duckcodeailabs/dql-project';
 import { ensureMetadataCatalogFresh, isAgentProjectIndexReady } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 
-const MANIFEST_COMPILER_CACHE_VERSION = 'dql2-qualified-domain-context-v2';
+// APP-034 adds compile-time Dataset source/field drift diagnostics. Bump the
+// semantic cache key so an older manifest cannot hide a newly-detected page
+// contract error behind a warm cache entry.
+const MANIFEST_COMPILER_CACHE_VERSION = 'dql2-qualified-domain-context-v3';
 
 export function manifestCacheTrackedFiles(inputFiles: string[], dqlVersion: string): TrackedFile[] {
   return [
