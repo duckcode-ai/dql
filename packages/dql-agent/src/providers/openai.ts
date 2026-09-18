@@ -7,6 +7,7 @@ import type {
   ProviderToolLoopOptions,
   ProviderRunOptions,
 } from './types.js';
+import { DEFAULT_MAX_OUTPUT_TOKENS } from './types.js';
 import { consumeSse } from './claude.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
@@ -52,7 +53,7 @@ export class OpenAIProvider implements AgentProvider {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
     const model = options.model ?? this.defaultModel;
-    const completionTokenBudget = options.maxTokens ?? 1024;
+    const completionTokenBudget = options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     const bodyBase = {
       model,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
@@ -115,7 +116,7 @@ export class OpenAIProvider implements AgentProvider {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
     const model = options.model ?? this.defaultModel;
-    const completionTokenBudget = options.maxTokens ?? 1024;
+    const completionTokenBudget = options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
     const chatMessages: Array<Record<string, unknown>> = messages.map((message) => ({
       role: message.role,
@@ -434,7 +435,7 @@ export class OpenAIProvider implements AgentProvider {
     const body = {
       model: options.model ?? this.defaultModel,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
-      max_tokens: options.maxTokens ?? 1024,
+      max_tokens: options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       temperature: options.temperature ?? 0.2,
       stream: true,
       ...openaiReasoning(options.model ?? this.defaultModel, options),

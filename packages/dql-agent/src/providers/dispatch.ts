@@ -4,6 +4,7 @@ import type {
   ProviderName,
   ProviderRunOptions,
 } from './types.js';
+import { recordProviderUsage } from './usage-ledger.js';
 
 /**
  * The physical ceiling on sends from one provider call when the caller sets no
@@ -113,6 +114,8 @@ export async function fetchProviderHttpDispatch(input: {
       settlement: 'transport',
       httpStatus: response.status,
     });
+    const model = typeof dispatchedBody.model === 'string' ? dispatchedBody.model : /\/models\/([^/:?]+)/.exec(input.url)?.[1];
+    recordProviderUsage({ provider: input.provider, operation: input.operation, ...(model ? { model } : {}), response });
     return response;
   } catch (error) {
     completeProviderHttpDispatch(input, {

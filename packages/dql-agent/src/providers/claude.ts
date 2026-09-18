@@ -8,6 +8,7 @@ import type {
   ProviderRunOptions,
   ProviderDispatchOperation,
 } from './types.js';
+import { DEFAULT_MAX_OUTPUT_TOKENS } from './types.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
 import { fetchProviderHttpDispatch, providerDispatchLimit } from './dispatch.js';
@@ -195,7 +196,7 @@ export class ClaudeProvider implements AgentProvider {
       },
       {
         model,
-        max_tokens: options.maxTokens ?? 1024,
+        max_tokens: options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         temperature: options.temperature ?? 0.2,
         system: system || undefined,
         messages: turns,
@@ -261,7 +262,7 @@ export class ClaudeProvider implements AgentProvider {
       },
       {
         model,
-        max_tokens: options.maxTokens ?? 1024,
+        max_tokens: options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         temperature: options.temperature ?? 0.2,
         system: system || undefined,
         messages: turns,

@@ -12,6 +12,9 @@ import { OpenAIProvider } from './openai.js';
 import { GeminiProvider, normalizeGeminiBaseUrl } from './gemini.js';
 import { OllamaProvider } from './ollama.js';
 
+export { extractProviderUsage, recordProviderUsage, type ProviderUsage, type ProviderUsageLine } from './usage-ledger.js';
+export { DEFAULT_MAX_OUTPUT_TOKENS } from './types.js';
+
 export type {
   AgentProvider,
   AgentMessage,

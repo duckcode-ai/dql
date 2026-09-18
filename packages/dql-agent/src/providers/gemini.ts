@@ -3,6 +3,7 @@ import type {
   AgentMessage,
   ProviderRunOptions,
 } from './types.js';
+import { DEFAULT_MAX_OUTPUT_TOKENS } from './types.js';
 import { geminiReasoningStyle, effortToThinkingBudget } from './reasoning-effort.js';
 import { fetchProviderHttpDispatch } from './dispatch.js';
 
@@ -94,7 +95,7 @@ export class GeminiProvider implements AgentProvider {
         })),
         generationConfig: {
           temperature: options.temperature ?? 0.2,
-          maxOutputTokens: options.maxTokens ?? 1024,
+          maxOutputTokens: options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
           ...geminiThinkingConfig(model, options),
         },
       },

@@ -325,3 +325,12 @@ export async function streamOrGenerate(
   if (text) onDelta(text);
   return text;
 }
+
+/**
+ * The output ceiling of an API call whose caller named none. Reasoning models
+ * spend their thinking from the same budget as the reply: at the old 1,024 an
+ * Ask reading (a JSON intent) or a drafted statement with CTEs was cut off
+ * mid-way and failed to parse. A ceiling is not a cost: only tokens produced
+ * are billed.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
