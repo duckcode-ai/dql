@@ -2666,6 +2666,8 @@ export interface DashboardRunResponse {
       cacheDelivery?: DashboardDatasetCacheDeliveryReceipt;
       appliedFilters?: Array<unknown>;
       unboundFilters?: Array<{ filterId: string; code: string; message: string }>;
+      /** C8 outcome the tile ran under; adaptations are disclosed with the result. */
+      validation?: { outcome: 'covered' | 'adapted' | 'needs_review' | 'rejected'; adaptations: Array<{ kind: string; message: string }> };
       grainRuntimeEvidence?: DashboardDatasetGrainRuntimeEvidence;
       semanticTargetBinding?: unknown;
       semanticReceipt?: unknown;

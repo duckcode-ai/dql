@@ -1017,13 +1017,13 @@ export function UnifiedAgentRunPanel({
     if (action.id === 'select-app-dataset-tile') {
       const selectTile = onSelectAppAutopilotTileRef.current;
       if (selectTile) selectTile();
-      else setError('Select a saved Dataset tile in App Studio before asking App Autopilot to make a change.');
+      else setError('Choose “Edit with AI” on a saved Dataset tile in App Studio first.');
       return;
     }
     if (action.id === 'review-app-autopilot-change') {
       const artifact = run.artifacts.find((candidate) => candidate.kind === 'app_autopilot_change');
       if (!artifact) {
-        setError('This App Autopilot run does not include a reviewable change.');
+        setError('This AI run does not include a reviewable tile change.');
         return;
       }
       onReviewAppAutopilotChangeRef.current?.(artifact, run);

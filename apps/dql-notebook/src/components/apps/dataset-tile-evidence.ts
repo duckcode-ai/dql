@@ -9,6 +9,40 @@ type DashboardRunTile = DashboardRunResponse['tiles'][number];
 
 export type DatasetEvidenceRow = { label: string; value: string };
 
+/**
+ * What a reader must be told about one Dataset tile result, in order: page
+ * filters that did not reach it, and permitted adaptations of the Dataset
+ * grain (a rollup of an already-aggregated source). Studio and the published
+ * viewer render these the same way in substance; each keeps its own styling.
+ */
+export type DatasetTileNotice = {
+  key: string;
+  kind: 'excluded' | 'not_linked' | 'adapted';
+  label: string;
+  detail: string;
+};
+
+export function datasetTileNotices(tile: DashboardRunTile | undefined): DatasetTileNotice[] {
+  const notices: DatasetTileNotice[] = [];
+  for (const issue of tile?.dataset?.unboundFilters ?? []) {
+    const name = issue.filterId.replace(/[_-]+/g, ' ');
+    notices.push(issue.code === 'DATASET_TILE_EXCLUDED'
+      ? { key: `${issue.filterId}:${issue.code}`, kind: 'excluded', label: `Excluded from ${name}`, detail: issue.message }
+      : { key: `${issue.filterId}:${issue.code}`, kind: 'not_linked', label: `Not filtered by ${name}`, detail: issue.message });
+  }
+  if (tile?.dataset?.validation?.outcome === 'adapted') {
+    for (const adaptation of tile.dataset.validation.adaptations) {
+      notices.push({
+        key: `adaptation:${adaptation.kind}`,
+        kind: 'adapted',
+        label: adaptation.kind === 'aggregate_time_rollup' ? 'Rolled up over time' : 'Rolled up above Dataset grain',
+        detail: adaptation.message,
+      });
+    }
+  }
+  return notices;
+}
+
 export type DatasetTileEvidencePresentation = {
   authoredQuerySpec?: string;
   authoredQuerySpecUnavailable: string;

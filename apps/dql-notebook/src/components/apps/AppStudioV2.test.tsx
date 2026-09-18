@@ -343,7 +343,7 @@ describe('Studio universal App Autopilot review (APP-065)', () => {
         onApply={vi.fn()}
       />,
     );
-    expect(markup).toContain('UNIVERSAL APP AUTOPILOT');
+    expect(markup).toContain('AI TILE CHANGE');
     expect(markup).toContain('Proposed grouping: Region');
     expect(markup).toContain('This has not changed the draft or its source.');
     expect(markup).toContain('>Discard<');

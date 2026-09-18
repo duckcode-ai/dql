@@ -90,6 +90,7 @@ import {
   type RuntimeDatasetHierarchyDrillCandidate,
 } from './app-dataset-interactions';
 import {
+  datasetTileNotices,
   isCurrentDatasetTileEvidence,
   presentDatasetTileEvidence,
   type DatasetEvidenceRow,
@@ -198,9 +199,9 @@ function appAutopilotRepairShortcutHint(
     return 'The current preview is healthy, so there is no failed Dataset tile to repair. You can still change its title, layout, grouping, or visualization.';
   }
   if (repairAvailability === 'failed_tile') {
-    return 'The current preview contains a failed Dataset diagnostic for this tile. App Autopilot can prepare a governed repair for review.';
+    return 'This tile failed in the current preview. AI can prepare a governed repair for you to review.';
   }
-  return 'Run a current preview before asking App Autopilot to repair a failed Dataset tile.';
+  return 'Run a preview before asking AI to repair a failed tile.';
 }
 
 /** Runtime-only selection from an actual settled Dataset result. The source
@@ -424,6 +425,10 @@ export function AppStudioV2({
   const [datasetAuthoringProposal, setDatasetAuthoringProposal] = useState<ContextAuthoringProposalV1 | null>(null);
   const [datasetRebindPrompt, setDatasetRebindPrompt] = useState<{ sourceId: string; title: string } | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
+  /** One AI entry point: compose or revise the page, or change the selected tile. */
+  const [aiScope, setAiScope] = useState<'page' | 'tile'>('page');
+  /** The tile whose query and compiled SQL are shown inline on the canvas. */
+  const [dqlTileId, setDqlTileId] = useState<string | null>(null);
   const [copilotExpanded, setCopilotExpanded] = useState(false);
   const [copilotRunning, setCopilotRunning] = useState(false);
   const [autopilotTileSelectionRequested, setAutopilotTileSelectionRequested] = useState(false);
@@ -1063,10 +1068,10 @@ export function AppStudioV2({
       setRedoStack([]);
       setSelectedTileId(autopilotReview.tileId);
       setAutopilotReview(null);
-      setSavedMessage(`${result.deduped ? 'App Autopilot change was already applied locally' : 'App Autopilot change applied locally'} · run a fresh preview before publishing`);
+      setSavedMessage(`${result.deduped ? 'AI tile change was already applied locally' : 'AI tile change applied locally'} · run a fresh preview before publishing`);
     } catch (cause) {
       setError(messageOf(cause));
-      setSavedMessage('App Autopilot change needs a fresh review or preview');
+      setSavedMessage('AI tile change needs a fresh review or preview');
     } finally {
       setCopilotRunning(false);
     }
@@ -2274,7 +2279,7 @@ export function AppStudioV2({
             <button type="button" className={previewMode === 'medium' ? 'on' : ''} onClick={() => setPreviewMode('medium')} title="Tablet preview"><PanelRight size={15} /></button>
             <button type="button" className={previewMode === 'narrow' ? 'on' : ''} onClick={() => setPreviewMode('narrow')} title="Phone preview"><Smartphone size={15} /></button>
           </div>
-          <button type="button" className={`copilot ${copilotOpen ? 'on' : ''}`} onClick={() => setCopilotOpen((open) => !open)} aria-pressed={copilotOpen} aria-label="Open App Autopilot"><Bot size={14} /><span>App Autopilot</span></button>
+          <button type="button" className={`copilot ${copilotOpen ? 'on' : ''}`} onClick={() => { if (!copilotOpen) setAiScope(selectedDatasetTile ? 'tile' : 'page'); setCopilotOpen((open) => !open); }} aria-pressed={copilotOpen} aria-label="Ask AI"><Bot size={14} /><span>Ask AI</span></button>
           <button type="button" className="preview" onClick={() => void runPreview()} disabled={previewing || busy} aria-label={previewing ? 'Running preview' : 'Run preview'}><Play size={13} /><span>{previewing ? 'Running…' : 'Run preview'}</span></button>
           <button type="button" className="publish" onClick={() => void publish(false)} disabled={busy} aria-label={`Review and publish to Project${publishStepCount ? `, ${publishStepCount} ${publishStepCount === 1 ? 'fix' : 'fixes'} needed` : ''}`}><Upload size={13} /><span>Publish to Project</span>{publishStepCount ? <small>{publishStepCount} {publishStepCount === 1 ? 'fix' : 'fixes'}</small> : null}</button>
           <button type="button" className="icon overflow-button" aria-label="More draft actions" aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)}><MoreHorizontal size={17} /></button>
@@ -2335,15 +2340,16 @@ export function AppStudioV2({
               <span>{previewRun.incomplete.message}</span>
             </div> : null}
             {autopilotTileSelectionRequested && !selectedDatasetTile ? <div className="studio-autopilot-selection-hint" role="status">
-              <strong>Select a Dataset tile for App Autopilot</strong>
-              <span>Use the visible “Select for App Autopilot” control on a Dataset tile. Chart interactions keep their own behavior and do not select a tile.</span>
+              <strong>Choose a tile to change with AI</strong>
+              <span>Use “Edit with AI” on a Dataset tile. Clicking a chart keeps its own behavior and does not select the tile.</span>
             </div> : null}
             <div className="studio-page-grid">
               {visibleItems.map((tile) => (
                 <article key={tile.i} role="group" aria-label={`App component: ${tile.title || humanize(tile.i)}`} draggable className={`studio-component-card ${selectedTileId === tile.i ? 'selected' : ''} ${draggingTileId === tile.i ? 'dragging' : ''}`} style={{ '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties} onDragStart={() => { draggingTileIdRef.current = tile.i; setDraggingTileId(tile.i); }} onDragEnd={() => { draggingTileIdRef.current = null; setDraggingTileId(null); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void moveTileBefore(tile.i); }} onClick={() => setSelectedTileId(tile.i)}>
-                  <header><span className="drag-handle" aria-hidden="true">⠿</span><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /> <strong>{tile.title || humanize(tile.i)}</strong>{tile.sourceId && tile.query ? <button type="button" className={`studio-autopilot-target ${selectedDatasetTile?.i === tile.i ? 'on' : ''}`} aria-pressed={selectedDatasetTile?.i === tile.i} onClick={(event) => { event.stopPropagation(); selectAppAutopilotTile(tile.i); }}>{selectedDatasetTile?.i === tile.i ? 'App Autopilot target' : 'Select for App Autopilot'}</button> : null}<small>{tile.viz.type.replace(/_/g, ' ')}</small></header>
+                  <header><span className="drag-handle" aria-hidden="true">⠿</span><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /> <strong>{tile.title || humanize(tile.i)}</strong>{tile.sourceId && tile.query ? <button type="button" className={`studio-autopilot-target ${selectedDatasetTile?.i === tile.i ? 'on' : ''}`} aria-pressed={selectedDatasetTile?.i === tile.i} onClick={(event) => { event.stopPropagation(); selectAppAutopilotTile(tile.i); setAiScope('tile'); setCopilotOpen(true); }}>{selectedDatasetTile?.i === tile.i ? 'Editing with AI' : 'Edit with AI'}</button> : null}{tile.query ? <button type="button" className={`studio-tile-dql-toggle ${dqlTileId === tile.i ? 'on' : ''}`} aria-pressed={dqlTileId === tile.i} onClick={(event) => { event.stopPropagation(); setDqlTileId((current) => current === tile.i ? null : tile.i); }}>View DQL</button> : null}<small>{tile.viz.type.replace(/_/g, ' ')}</small></header>
                   {unsupportedTileFilters(tile).map((binding) => <div key={binding.filter} className="tile-filter-notice"><Filter size={11} /><span>{binding.unsupportedReason ?? `${humanize(binding.filter)} does not affect this component.`}</span></div>)}
-                  {previewRun?.tiles.find((item) => item.tileId === tile.i)?.dataset?.unboundFilters?.map((issue) => <div key={`${issue.filterId}:${issue.code}`} className="tile-filter-notice"><Filter size={11} /><span>{issue.message}</span></div>)}
+                  {datasetTileNotices(previewRun?.tiles.find((item) => item.tileId === tile.i)).map((notice) => <div key={notice.key} className={`tile-filter-notice ${notice.kind}`} title={notice.detail}><Filter size={11} /><span><strong>{notice.label}</strong> · {notice.detail}</span></div>)}
+                  {dqlTileId === tile.i ? <div className="studio-tile-dql" onClick={(event) => event.stopPropagation()}>{(() => { const runTile = previewRun?.tiles.find((item) => item.tileId === tile.i); const evidence = runTile && tile.query && isCurrentDatasetTileEvidence(tile, runTile) ? presentDatasetTileEvidence(runTile) : undefined; return evidence ? <DatasetTileExecutionEvidence presentation={evidence} /> : <p>Run a preview to see the Dataset query and the SQL it compiled to.</p>; })()}</div> : null}
                   {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} /></div>}
                 </article>
               ))}
@@ -2382,13 +2388,13 @@ export function AppStudioV2({
             onDelete={() => void mutate([{ type: 'remove_tile', pageId: activePage.id, tileId: selectedTile.i }]).then(() => setSelectedTileId(null))}
           />
         ) : (
-          <BuildFrameInspector draft={draft} prompt={prompt} previewRun={previewRun} onPrompt={setPrompt} onAskAi={() => void requestAiProposal()} onSourcePolicy={(nextPolicy) => void mutate([{ type: 'set_source_policy', sourcePolicy: nextPolicy }])} onResolveTask={(task) => void resolveReviewTask(task)} onApproveSemantic={() => void approveSemanticPreview()} />
+          <BuildFrameInspector draft={draft} prompt={prompt} previewRun={previewRun} onPrompt={setPrompt} onAskAi={() => { setAiScope('page'); setCopilotOpen(true); }} onSourcePolicy={(nextPolicy) => void mutate([{ type: 'set_source_policy', sourcePolicy: nextPolicy }])} onResolveTask={(task) => void resolveReviewTask(task)} onApproveSemantic={() => void approveSemanticPreview()} />
         )}
       </aside> : null}
 
       {copilotOpen && !proposal ? <AiSidePanel
         t={themes[themeMode]}
-        title="App Autopilot"
+        title="Ask AI"
         subtitle={draft.name}
         dock="overlay"
         expanded={copilotExpanded}
@@ -2402,30 +2408,40 @@ export function AppStudioV2({
         resizable
         minResizeWidth={390}
         maxResizeWidth={1100}
-        ariaLabel="App Autopilot"
+        ariaLabel="Ask AI"
         className="studio-copilot-panel"
         style={{ top: 58, bottom: 0, height: 'auto' }}
       >
-        {autopilotReview ? <AppAutopilotReviewCard
+        <div className="studio-ai-scope" role="tablist" aria-label="What should AI work on?">
+          <button type="button" role="tab" aria-selected={aiScope === 'page'} className={aiScope === 'page' ? 'on' : ''} onClick={() => setAiScope('page')}>Whole page</button>
+          <button type="button" role="tab" aria-selected={aiScope === 'tile'} className={aiScope === 'tile' ? 'on' : ''} onClick={() => setAiScope('tile')}>Selected tile{selectedDatasetTile ? `: ${selectedDatasetTile.title || humanize(selectedDatasetTile.i)}` : ''}</button>
+        </div>
+        {aiScope === 'page' ? <section className="studio-ai-page-scope">
+          <label htmlFor="studio-ai-page-prompt">Describe the page or the change you want</label>
+          <textarea id="studio-ai-page-prompt" value={prompt} rows={5} onChange={(event) => setPrompt(event.target.value)} placeholder="Revenue and order trends by region for the weekly business review" />
+          <small>AI plans tiles from governed Datasets only. You review the plan before anything changes.</small>
+          <button type="button" className="primary" disabled={busy || previewing} onClick={() => void requestAiProposal()}><Sparkles size={13} /> Propose page changes</button>
+        </section> : null}
+        {aiScope === 'tile' && autopilotReview ? <AppAutopilotReviewCard
           proposal={autopilotReview}
           running={copilotRunning}
           onDiscard={() => {
             setAutopilotReview(null);
-            setSavedMessage('App Autopilot change discarded · the draft is unchanged');
+            setSavedMessage('AI tile change discarded · the draft is unchanged');
           }}
           onApply={() => void applyAutopilotChange()}
         /> : null}
-        <Suspense fallback={<div className="studio-copilot-loading">Loading App Autopilot…</div>}>
+        {aiScope === 'tile' ? <Suspense fallback={<div className="studio-copilot-loading">Loading…</div>}>
           <UnifiedAgentRunPanel
             themeMode={themeMode}
-            title="App Autopilot"
+            title="Edit tile with AI"
             scopeHint={selectedDatasetTile
               ? `Draft · ${activePage?.metadata.title ?? 'Overview'} · ${selectedDatasetTile.title || humanize(selectedDatasetTile.i)}${autopilotRepairAvailability === 'healthy' ? ' · preview healthy' : autopilotRepairAvailability === 'failed_tile' ? ' · failed tile' : ''}`
               : `Draft · ${activePage?.metadata.title ?? 'Overview'} · select a Dataset tile`}
-            composerPlaceholder="Ask App Autopilot to explain, repair, or change this App…"
+            composerPlaceholder="Explain, repair, or change the selected tile…"
             emptyHint={selectedDatasetTile
-              ? `App Autopilot rebuilds context from the saved App draft and selected Dataset tile (${selectedDatasetTile.title || humanize(selectedDatasetTile.i)}) before it responds. ${appAutopilotRepairShortcutHint(autopilotRepairAvailability)}`
-              : 'Select a Dataset tile on the App canvas before asking App Autopilot to make a tile change.'}
+              ? `AI reads the saved draft and ${selectedDatasetTile.title || humanize(selectedDatasetTile.i)} before it answers, and proposes a change for you to review. ${appAutopilotRepairShortcutHint(autopilotRepairAvailability)}`
+              : 'Choose “Edit with AI” on a Dataset tile first.'}
             audience="analyst"
             initialMode="app"
             selectedObject={{ kind: 'app', id: draft.appId, title: draft.name }}
@@ -2436,22 +2452,22 @@ export function AppStudioV2({
             onRunningChange={setCopilotRunning}
             onSelectAppAutopilotTile={() => {
               setAutopilotTileSelectionRequested(true);
-              setSavedMessage('Select a Dataset tile on the App canvas to continue with App Autopilot');
+              setSavedMessage('Choose “Edit with AI” on a Dataset tile to continue');
               workspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }}
             onReviewAppAutopilotChange={(artifact, run) => {
               const proposal = appAutopilotProposalFromArtifact(artifact.payload);
               if (!proposal || proposal.id !== artifact.ref || proposal.artifactId !== artifact.id || proposal.runId !== run.id) {
-                setError('App Autopilot returned an invalid review artifact. Ask it to prepare the change again.');
+                setError('AI returned a change that could not be reviewed. Ask it to prepare the change again.');
                 return;
               }
               setAutopilotReview(proposal);
-              setSavedMessage('App Autopilot change ready for review · the draft is unchanged');
+              setSavedMessage('AI tile change ready for review · the draft is unchanged');
             }}
             answerFirstCards
             examplePrompts={appAutopilotExamplePrompts(autopilotRepairAvailability)}
           />
-        </Suspense>
+        </Suspense> : null}
       </AiSidePanel> : null}
       {publishReviewOpen ? <PublishReadinessDialog
         draft={draft}
@@ -2793,7 +2809,7 @@ export function AppAutopilotReviewCard({
   const grouping = query?.dimensions.map((dimension) => humanize(dimension.alias ?? dimension.field)).join(', ');
   const action = humanize(proposal.intent.action);
   return <section className="studio-copilot-change" aria-label="Typed App change">
-    <header><div><small>UNIVERSAL APP AUTOPILOT</small><strong>Review a typed App change</strong></div><span>Draft only</span></header>
+    <header><div><small>AI TILE CHANGE</small><strong>Review before it changes the draft</strong></div><span>Draft only</span></header>
     <div className="studio-copilot-change-summary">
       <strong>{humanize(proposal.tileId)}</strong>
       <span>{grouping ? `Proposed grouping: ${grouping}` : `${action}: ${proposal.operations.length} typed App operation${proposal.operations.length === 1 ? '' : 's'} prepared`}</span>
@@ -3353,7 +3369,7 @@ function TemplatesPanel({ current, onApply }: { current: StudioTemplate; onApply
 function BuildFrameInspector({ draft, prompt, previewRun, onPrompt, onAskAi, onSourcePolicy, onResolveTask, onApproveSemantic }: { draft: AppStudioBuildDraft; prompt: string; previewRun: DashboardRunResponse | null; onPrompt: (value: string) => void; onAskAi: () => void; onSourcePolicy: (value: AppStudioBuildDraft['sourcePolicy']) => void; onResolveTask: (task: AppStudioBuildDraft['reviewTasks'][number]) => void; onApproveSemantic: () => void }): JSX.Element {
   const openTasks = blockingPublicationReviewTasks(draft);
   const semanticNeedsApproval = legacySemanticTilesNeedingApproval(draft).length > 0;
-  return <div className="inspector-body"><section><label>Business decision</label><textarea value={prompt} onChange={(event) => onPrompt(event.target.value)} rows={5} /></section><section><label>Source policy</label><select value={draft.sourcePolicy} onChange={(event) => onSourcePolicy(event.target.value as AppStudioBuildDraft['sourcePolicy'])}><option value="governed_only">Governed sources only</option><option value="include_review_required">Include review-required analysis</option></select><small className="field-help">Review-required sources stay local and block Project publication until replaced or promoted.</small></section><section className="frame-facts"><label>Build Frame</label><div><span>Audience</span><strong>{draft.frame.audience || 'Stakeholders'}</strong></div><div><span>Metrics</span><strong>{draft.frame.metrics.join(', ') || 'Needs clarification'}</strong></div><div><span>Dimensions</span><strong>{draft.frame.dimensions.join(', ') || 'Automatic'}</strong></div><div><span>Source policy</span><strong>{draft.sourcePolicy === 'governed_only' ? 'Governed only' : 'Includes review lane'}</strong></div></section>{semanticNeedsApproval ? <section><label>Semantic review</label><button type="button" className="review-action" onClick={onApproveSemantic} disabled={!previewRun}><ShieldCheck size={14} /> {previewRun ? 'Approve this settled result' : 'Run preview to approve'}</button></section> : null}{openTasks.length ? <section className="review-task-list"><label>Review tasks</label>{openTasks.map((task) => <div key={task.id}><span>{task.message}</span><button type="button" onClick={() => onResolveTask(task)}><Check size={12} /> Resolve</button></div>)}</section> : null}<button type="button" className="ask-ai" onClick={onAskAi}><Bot size={16} /> Ask AI to compose or revise</button><section className="trust-summary"><ShieldCheck size={17} /><div><strong>Nothing publishes silently</strong><p>AI changes are typed diffs. Project publication revalidates live source trust and filter bindings.</p></div></section></div>;
+  return <div className="inspector-body"><section><label>Business decision</label><textarea value={prompt} onChange={(event) => onPrompt(event.target.value)} rows={5} /></section><section><label>Source policy</label><select value={draft.sourcePolicy} onChange={(event) => onSourcePolicy(event.target.value as AppStudioBuildDraft['sourcePolicy'])}><option value="governed_only">Governed sources only</option><option value="include_review_required">Include review-required analysis</option></select><small className="field-help">Review-required sources stay local and block Project publication until replaced or promoted.</small></section><section className="frame-facts"><label>Build Frame</label><div><span>Audience</span><strong>{draft.frame.audience || 'Stakeholders'}</strong></div><div><span>Metrics</span><strong>{draft.frame.metrics.join(', ') || 'Needs clarification'}</strong></div><div><span>Dimensions</span><strong>{draft.frame.dimensions.join(', ') || 'Automatic'}</strong></div><div><span>Source policy</span><strong>{draft.sourcePolicy === 'governed_only' ? 'Governed only' : 'Includes review lane'}</strong></div></section>{semanticNeedsApproval ? <section><label>Semantic review</label><button type="button" className="review-action" onClick={onApproveSemantic} disabled={!previewRun}><ShieldCheck size={14} /> {previewRun ? 'Approve this settled result' : 'Run preview to approve'}</button></section> : null}{openTasks.length ? <section className="review-task-list"><label>Review tasks</label>{openTasks.map((task) => <div key={task.id}><span>{task.message}</span><button type="button" onClick={() => onResolveTask(task)}><Check size={12} /> Resolve</button></div>)}</section> : null}<button type="button" className="ask-ai" onClick={onAskAi}><Bot size={16} /> Ask AI to build or revise this page</button><section className="trust-summary"><ShieldCheck size={17} /><div><strong>Nothing publishes silently</strong><p>AI changes are typed diffs. Project publication revalidates live source trust and filter bindings.</p></div></section></div>;
 }
 
 function DatasetTileQueryInspector({

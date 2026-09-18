@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { tileQueryHash, type TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
 import type { DashboardRunResponse } from '../../api/client';
 import {
+  datasetTileNotices,
   isCurrentDatasetTileEvidence,
   presentDatasetTileEvidence,
 } from './dataset-tile-evidence';
@@ -135,5 +136,31 @@ describe('Dataset execution evidence presentation (APP-030)', () => {
     });
     expect(noSql?.executedSql).toBeUndefined();
     expect(noSql?.executedSqlUnavailable).toContain('Provider SQL was unavailable');
+  });
+});
+
+describe('dataset tile notices shared by Studio and the viewer', () => {
+  it('names excluded and unlinked page filters and discloses grain adaptations', () => {
+    const notices = datasetTileNotices({
+      tileId: 't1', status: 'ok', tileType: 'dataset',
+      dataset: {
+        unboundFilters: [
+          { filterId: 'region', code: 'DATASET_TILE_EXCLUDED', message: 'Region is excluded from Revenue by month.' },
+          { filterId: 'sales_channel', code: 'FILTER_MAPPING_MISSING', message: 'Sales channel is not mapped to Orders.' },
+        ],
+        validation: { outcome: 'adapted', adaptations: [{ kind: 'aggregate_time_rollup', message: "Rolled up from the Dataset's day grain to month." }] },
+      },
+    } as never);
+    expect(notices.map((notice) => [notice.kind, notice.label])).toEqual([
+      ['excluded', 'Excluded from region'],
+      ['not_linked', 'Not filtered by sales channel'],
+      ['adapted', 'Rolled up over time'],
+    ]);
+    expect(notices[2]?.detail).toContain('day grain to month');
+  });
+
+  it('says nothing for a covered tile with every filter applied', () => {
+    expect(datasetTileNotices({ tileId: 't1', status: 'ok', dataset: { unboundFilters: [], validation: { outcome: 'covered', adaptations: [] } } } as never)).toEqual([]);
+    expect(datasetTileNotices(undefined)).toEqual([]);
   });
 });

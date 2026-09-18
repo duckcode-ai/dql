@@ -59,6 +59,7 @@ import {
 } from './app-dataset-interactions';
 import { formatDatasetGrainEvidenceDetail } from './dataset-grain-evidence';
 import {
+  datasetTileNotices,
   isCurrentDatasetTileEvidence,
   presentDashboardTileRunEvidence,
   presentDatasetTileEvidence,
@@ -1654,13 +1655,13 @@ function DashboardTile({
               </span>
             </div>
           ) : null}
-          {datasetUnboundNotices.map((notice) => (
-            <div key={`${notice.filterId}:${notice.code}`} style={{ marginTop: 5 }}>
-              <span style={generatedMetaPillStyle} title={notice.message}>
-                <Filter size={9} /> Excluded from {formatGenUiLabel(notice.filterId)}
+          {datasetUnboundNotices.length || tile?.dataset?.validation?.outcome === 'adapted' ? datasetTileNotices(tile).map((notice) => (
+            <div key={notice.key} style={{ marginTop: 5 }}>
+              <span style={generatedMetaPillStyle} title={notice.detail}>
+                {notice.kind === 'adapted' ? <Activity size={9} /> : <Filter size={9} />} {notice.label}
               </span>
             </div>
-          ))}
+          )) : null}
           {comparisonSummary ? (
             <div style={{ marginTop: 5 }}>
               <span style={generatedMetaPillStyle} title={comparisonSummary}>

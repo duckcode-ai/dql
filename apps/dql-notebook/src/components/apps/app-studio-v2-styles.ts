@@ -660,6 +660,20 @@ export const APP_STUDIO_V2_STYLES = `
 .studio-ai-plan > footer button.primary { border-color:var(--accent); background:var(--accent); color:var(--accent-fg); display:flex; align-items:center; gap:6px; }
 .studio-ai-plan > footer button:disabled { opacity:.45; cursor:default; }
 .studio-copilot-panel { top:58px !important; bottom:0 !important; height:auto !important; }
+.studio-tile-dql-toggle { margin-left:6px; border:1px solid var(--border-subtle); border-radius:999px; background:var(--bg-1); color:var(--text-secondary); font:inherit; font-size:10.5px; padding:1px 8px; cursor:pointer; }
+.studio-tile-dql-toggle.on { border-color:var(--accent); color:var(--accent); }
+.studio-tile-dql { margin:6px 0; max-height:260px; overflow:auto; border:1px solid var(--border-subtle); border-radius:8px; background:var(--bg-1); padding:8px; font-size:11px; }
+.studio-tile-dql pre { white-space:pre-wrap; word-break:break-word; font-size:10.5px; margin:4px 0 8px; }
+.tile-filter-notice.adapted { color:var(--text-secondary); }
+.studio-ai-scope { display:flex; gap:4px; margin:10px 12px 0; padding:3px; border:1px solid var(--border-subtle); border-radius:9px; background:var(--bg-1); }
+.studio-ai-scope button { flex:1; min-width:0; border:0; border-radius:7px; background:none; color:var(--text-secondary); font:inherit; font-size:12px; padding:6px 8px; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.studio-ai-scope button.on { background:var(--bg-0); color:var(--text-primary); font-weight:650; box-shadow:0 1px 2px color-mix(in srgb,var(--text-primary) 12%,transparent); }
+.studio-ai-page-scope { display:grid; gap:8px; margin:12px; }
+.studio-ai-page-scope label { color:var(--text-primary); font-size:12.5px; font-weight:650; }
+.studio-ai-page-scope textarea { width:100%; box-sizing:border-box; resize:vertical; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-0); color:var(--text-primary); font:inherit; font-size:12.5px; padding:8px; }
+.studio-ai-page-scope small { color:var(--text-tertiary); font-size:11.5px; }
+.studio-ai-page-scope .primary { justify-self:start; display:inline-flex; align-items:center; gap:6px; border:0; border-radius:8px; background:var(--accent); color:var(--accent-fg); font:inherit; font-size:12.5px; font-weight:650; padding:7px 12px; cursor:pointer; }
+.studio-ai-page-scope .primary:disabled { opacity:.55; cursor:default; }
 .studio-copilot-loading { padding:18px; color:var(--text-tertiary); font-size:11px; }
 .studio-copilot-change { margin:12px; display:grid; gap:10px; border:1px solid var(--border-default); border-radius:12px; background:var(--bg-1); padding:12px; }
 .studio-copilot-change > header { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
