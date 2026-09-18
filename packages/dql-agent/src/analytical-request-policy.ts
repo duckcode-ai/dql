@@ -32,8 +32,21 @@ const EXPLICIT_SYSTEM_POLICY_OR_CAPABILITY_QUESTION_RE = /^(?:(?:does|can|will|d
 const DISCLOSURE_ACTION_RE = /\b(?:show(?:ing)?|give|giving|list(?:ing)?|retrieve|retrieving|get(?:ting)?|reveal(?:ing)?|display(?:ing)?|provide|providing|disclose|disclosing|return(?:ing)?|output(?:ting)?|expose|exposing|fetch(?:ing)?|look\s*up|lookup|tell\s+me|need)\b/i;
 const VALUE_REQUEST_SEMANTICS_RE = /\b(?:actual|full|specific|individual)\s+(?:value|values|number|numbers|record|records|details?|information)|\b(?:value|values|number|numbers|record|records|details?|information)\s+(?:for|of)\b/i;
 
-/** Direct literal categories that the value-probe deny policy also protects. */
-const SENSITIVE_PERSONAL_DATA_RE = /\b(?:credit\s*card|debit\s*card|card\s*(?:number|no\.?|details?)|cvv|cvc|iban|swift|bic|routing\s*(?:number|no\.?)|bank\s*account|account\s*(?:number|no\.?)|sort\s*code|medical|diagnosis|patient|health\s*(?:condition|record|information|data)?|insurance|prescription|disability|biometric|fingerprint|home\s*address|street(?:\s*(?:address|name))?|postal\s*code|post\s*code|zip\s*code|zipcode|phone(?:\s*(?:number|no\.?))?|mobile(?:\s*(?:number|no\.?))?|telephone|email(?:\s*address)?|race|ethnicity|religion|gender|sexual\s*orientation)\b/i;
+/**
+ * Direct literal categories that the value-probe deny policy also protects.
+ * These words only ever describe a person: payment instruments, health
+ * records and personal contact details.
+ */
+const SENSITIVE_PERSONAL_DATA_RE = /\b(?:credit\s*card|debit\s*card|card\s*(?:number|no\.?|details?)|cvv|cvc|iban|swift|bic|routing\s*(?:number|no\.?)|bank\s*account|account\s*(?:number|no\.?)|sort\s*code|medical|diagnosis|patient|health\s*(?:condition|record|information|data)?|prescription|disability|biometric|fingerprint|home\s*address|phone(?:\s*(?:number|no\.?))?|mobile(?:\s*(?:number|no\.?))?|telephone|email(?:\s*address)?|sexual\s*orientation)\b/i;
+/**
+ * Words that are personal data only when they describe a person. A street, a
+ * zip code or a postal code is also where an insured building, a store or a
+ * warehouse stands, and a race is also a motor race; the same guard that
+ * refused a customer's zip code used to refuse an insurer's question about its
+ * insured properties. These are refused when the question is about people.
+ */
+const PERSONAL_WHEN_ABOUT_A_PERSON_RE = /\b(?:street(?:\s*(?:address|name))?|postal\s*code|post\s*code|zip\s*code|zipcode|race|ethnicity|religion|gender)\b/i;
+const PERSON_POPULATION_RE = /\b(?:customers?|clients?|policy\s*holders?|policyholders?|members?|people|persons?|individuals?|employees?|staff|users?|residents?|applicants?|claimants?|patients?|students?|citizens?|voters?|tenants?)\b/i;
 
 const COMPENSATION_RE = /\b(?:salary|compensation|pay|wage|bonus|earnings)\b/i;
 const INDIVIDUAL_SUBJECT_RE = /\b(?:ceo|cfo|coo|cto|chief\s+\w+\s+officer|founder|employee|person|individual|manager|director|executive|their|his|her)\b/i;
@@ -59,6 +72,17 @@ function isExplicitSystemPolicyOrCapabilityQuestion(question: string): boolean {
 
 function isExplicitPopulationAggregate(question: string): boolean {
   return AGGREGATE_OPERATION_RE.test(question) && AGGREGATE_POPULATION_OR_GROUPING_RE.test(question);
+}
+
+/**
+ * A question about people: a named person, a person's role, or a population
+ * of people. "Their" alone does not count here: "stores with their postal
+ * code" is about stores.
+ */
+function isAboutPeople(question: string): boolean {
+  return NAMED_INDIVIDUAL_REFERENCE_RE.test(question)
+    || /\b(?:his|her|ceo|cfo|coo|cto|chief\s+\w+\s+officer|founder|manager|director|executive)\b/i.test(question)
+    || PERSON_POPULATION_RE.test(question);
 }
 
 function namesAnIndividual(question: string): boolean {
@@ -89,7 +113,9 @@ export function evaluateAnalyticalRequestPolicy(question: string): AnalyticalReq
     };
   }
 
-  if (SENSITIVE_PERSONAL_DATA_RE.test(normalized) && !isSystemPolicyQuestion && !isPopulationAggregate) {
+  const sensitive = SENSITIVE_PERSONAL_DATA_RE.test(normalized)
+    || (PERSONAL_WHEN_ABOUT_A_PERSON_RE.test(normalized) && isAboutPeople(normalized));
+  if (sensitive && !isSystemPolicyQuestion && !isPopulationAggregate) {
     return {
       allowed: false,
       code: 'SENSITIVE_PERSONAL_DATA_REQUEST',

@@ -42,6 +42,10 @@ describe('analytical request ingress policy', () => {
     'Show Jessica Richard\'s medical diagnosis',
     'What is Jessica Richard\'s home address?',
     'What is Jessica Richard\'s religion?',
+    'What is Jessica Richard\'s zip code?',
+    'List customers with their street address',
+    'Show each employee\'s gender',
+    'What is the health insurance plan of Jessica Richard?',
   ])('blocks direct sensitive personal data: %s', (question) => {
     expect(evaluateAnalyticalRequestPolicy(question)).toMatchObject({
       allowed: false,
@@ -66,6 +70,19 @@ describe('analytical request ingress policy', () => {
     'How does DQL handle date-of-birth masking?',
     'What is DQL\'s data retention policy for SSN?',
   ])('allows aggregate or policy questions through governed planning: %s', (question) => {
+    expect(evaluateAnalyticalRequestPolicy(question)).toEqual({ allowed: true });
+  });
+
+  // An industry, a place or an event is not a person: an insurer asks about
+  // its insurance business, the street an insured building stands on, a race.
+  it.each([
+    'Which insurance agents sold the most policies?',
+    'List the insurance policies with their premium',
+    'What is the street address of each insured property?',
+    'Return all insured objects by zip code',
+    'Which driver won each race?',
+    'List stores with their postal code',
+  ])('allows business questions that share words with personal data: %s', (question) => {
     expect(evaluateAnalyticalRequestPolicy(question)).toEqual({ allowed: true });
   });
 });
