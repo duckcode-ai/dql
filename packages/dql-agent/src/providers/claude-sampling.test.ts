@@ -35,10 +35,11 @@ describe('sampling fields alongside extended thinking', () => {
     expect(bodies[0]!.thinking).toMatchObject({ type: 'enabled' });
   });
 
+  // A model that still accepts temperature: Claude 5 models retired it (see retiresSampling).
   it('keeps temperature when thinking is disabled, which is the ordinary case', async () => {
     const bodies = captureFetch();
     await postMessages('https://api.anthropic.com/v1/messages', {}, {
-      model: 'claude-sonnet-5',
+      model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       temperature: 0.2,
       messages: [],
@@ -49,7 +50,7 @@ describe('sampling fields alongside extended thinking', () => {
   it('keeps temperature when no reasoning config is sent at all', async () => {
     const bodies = captureFetch();
     await postMessages('https://api.anthropic.com/v1/messages', {}, {
-      model: 'claude-sonnet-5',
+      model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       temperature: 0.2,
       messages: [],
@@ -130,5 +131,13 @@ describe('remembering a retired sampling control', () => {
     // first ever carried the field.
     expect(bodies).toHaveLength(4);
     expect(bodies.filter((sent) => 'temperature' in sent)).toHaveLength(1);
+  });
+});
+
+describe('models that retired temperature are known before the first call', () => {
+  it('Opus 4.7+ and every Claude 5 model; not Opus 4.6, Sonnet 4.6 or Haiku 4.5', async () => {
+    const { retiresSampling } = await import('./claude.js');
+    for (const model of ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-opus-4-7', 'claude-opus-4-8']) expect(retiresSampling(model)).toBe(true);
+    for (const model of ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-haiku-4-5-20251001', 'gpt-5']) expect(retiresSampling(model)).toBe(false);
   });
 });

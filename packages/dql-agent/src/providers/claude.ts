@@ -51,6 +51,26 @@ function isEffortRejection(status: number, body: string): boolean {
  */
 const MODELS_REJECTING_SAMPLING = new Set<string>();
 
+/**
+ * Models known to have retired `temperature` (checked against the Messages API
+ * on 2026-09-18: Opus 4.7, Opus 4.8 and every Claude 5 model answer 400
+ * "`temperature` is deprecated for this model"; Opus 4.6, Sonnet 4.6 and Haiku
+ * 4.5 accept it). Knowing it up front matters: learning it from the 400 costs a
+ * second physical attempt, and a call allowed one (the Ask reading) failed —
+ * the first question after every server start stopped with "the AI model did
+ * not respond". A model not listed here is still learned from its 400.
+ */
+export function retiresSampling(model: string): boolean {
+  if (MODELS_REJECTING_SAMPLING.has(model)) return true;
+  const match = /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?/i.exec(model);
+  if (!match) return false;
+  const major = Number(match[2]);
+  // A dated suffix (claude-haiku-4-5-20251001) is not a minor version.
+  const minor = match[3] && match[3].length <= 2 ? Number(match[3]) : 0;
+  if (major >= 5) return true;
+  return match[1]!.toLowerCase() === 'opus' && major === 4 && minor >= 7;
+}
+
 /** Every optional sampling control, removed together. */
 function withoutSamplingFields(body: Record<string, unknown>): Record<string, unknown> {
   const { temperature, top_p: topP, top_k: topK, ...rest } = body;
@@ -106,7 +126,7 @@ export async function postMessages(
     });
   };
   const model = typeof baseBody.model === 'string' ? baseBody.model : '';
-  const opening = MODELS_REJECTING_SAMPLING.has(model)
+  const opening = retiresSampling(model)
     ? withoutSamplingFields(baseBody)
     : withoutConflictingSampling(baseBody, reasoning);
   const res = await send({ ...opening, ...reasoning });
