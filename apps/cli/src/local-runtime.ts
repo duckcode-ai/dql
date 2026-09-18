@@ -96,6 +96,11 @@ import {
   buildLineageGraph,
   buildManifest,
   collectInputFiles,
+  modelingModeOf,
+  isWarehouseNodeId,
+  loadWarehouseNodeAuthoringDetail,
+  readWarehouseCatalog,
+  type ManifestModelingMode,
   findAppDocuments,
   findDashboardsForApp,
   isBlockIdRef,
@@ -608,6 +613,7 @@ import {
   type ConnectionMetadataScopeInput,
   type ConnectionMetadataScopeV1,
 } from './warehouse-metadata.js';
+import { syncWarehouseCatalog } from './warehouse-catalog-sync.js';
 import {
   NotebookDatasetWorkspace,
   type DatasetSource,
@@ -622,7 +628,7 @@ const NOTEBOOK_FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0
 export interface ProjectConfig {
   project?: string;
   manifestVersion?: 1 | 2 | 3;
-  modeling?: { mode?: 'dbt-first' };
+  modeling?: { mode?: ManifestModelingMode };
   layout?: { version?: number; mode?: string; skillsPath?: string };
   defaultConnection?: ConnectionConfig;
   defaultConnectionName?: string;
@@ -4753,6 +4759,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const nodeDetailWithColumns = async (snapshotId: string, uniqueId: string): Promise<DbtNodeAuthoringDetail | undefined> => {
     const cacheKey = `${snapshotId}:${uniqueId}`;
     if (dbtNodeDetailCache.has(cacheKey)) return dbtNodeDetailCache.get(cacheKey);
+    if (isWarehouseNodeId(uniqueId)) {
+      // The warehouse catalog snapshot already holds the relation's columns.
+      const warehouseDetail = loadWarehouseNodeAuthoringDetail(projectRoot, uniqueId);
+      dbtNodeDetailCache.set(cacheKey, warehouseDetail);
+      return warehouseDetail;
+    }
     const dbtManifestPath = resolveDbtManifestPath(projectRoot);
     let detail = dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined;
     const sql = detail?.relation ? buildNamedRelationProbeSql([detail.relation], 1) : null;
@@ -10860,7 +10872,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           artifactState: manifestFound ? 'ready' : 'missing',
         },
         modeling: {
-          enabled: projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'dbt-first',
+          enabled: modelingModeOf(projectConfig) !== undefined,
           manifestVersion: projectConfig.manifestVersion ?? 2,
           mode: projectConfig.modeling?.mode,
           snapshotState,
@@ -10940,7 +10952,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const nextConfig: ProjectConfig = {
           ...projectConfig,
           manifestVersion: 3,
-          modeling: { mode: 'dbt-first' },
+          // A warehouse-first project that adds dbt keeps its relation-bound
+          // entities working beside the new dbt models (RFC 0007).
+          modeling: { mode: modelingModeOf(projectConfig) === 'warehouse-first' || modelingModeOf(projectConfig) === 'hybrid' ? 'hybrid' : 'dbt-first' },
           dbt: {
             projectDir: preview.projectDir,
             manifestPath: preview.manifestPath,
@@ -11267,7 +11281,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // provenance references and the sparse DQL overlay, never copied dbt YAML.
     if (req.method === 'GET' && path === '/api/modeling/dbt-first') {
       const requestId = apiRequestId('modeling-dbt-first');
-      const modelingEnabled = projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'dbt-first';
+      const modelingMode = modelingModeOf(projectConfig);
+      const modelingEnabled = modelingMode !== undefined;
       if (!modelingEnabled) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({
@@ -11286,7 +11301,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const dbtProjectDir = findDbtProjectPath(projectRoot, projectConfig);
       const configuredManifestPath = projectConfig.dbt?.manifestPath ?? 'target/manifest.json';
       const expectedManifestPath = resolve(dbtProjectDir, configuredManifestPath);
-      if (!existsSync(expectedManifestPath)) {
+      // Only dbt-first modeling needs a dbt manifest; warehouse-first and
+      // hybrid modeling compile from the warehouse catalog snapshot.
+      if (modelingMode === 'dbt-first' && !existsSync(expectedManifestPath)) {
         res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({
           requestId,
@@ -11361,7 +11378,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/modeling/dbt-first/inventory') {
       const requestId = apiRequestId('modeling-inventory');
       const physicalOnly = url.searchParams.get('physicalOnly') === 'true';
-      const modelingEnabled = projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'dbt-first';
+      const modelingMode = modelingModeOf(projectConfig);
+      const modelingEnabled = modelingMode !== undefined;
       if (physicalOnly && !modelingEnabled) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({
@@ -11375,7 +11393,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const dbtProjectDir = findDbtProjectPath(projectRoot, projectConfig);
       const configuredManifestPath = projectConfig.dbt?.manifestPath ?? 'target/manifest.json';
       const expectedManifestPath = resolve(dbtProjectDir, configuredManifestPath);
-      if (physicalOnly && !existsSync(expectedManifestPath)) {
+      if (physicalOnly && modelingMode === 'dbt-first' && !existsSync(expectedManifestPath)) {
         res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({
           requestId,
@@ -11428,9 +11446,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const queryTokens = query.split(/[^a-z0-9]+/).filter(Boolean);
       const domain = (url.searchParams.get('domain') ?? '').trim();
       const boundByDbtId = new Map(Object.values(manifest.modeling?.entities ?? {}).map((entity) => [entity.dbtUniqueId, entity]));
-      const physicalIds = physicalOnly ? physicalDbtRelationIds(expectedManifestPath) : undefined;
+      const physicalIds = physicalOnly && existsSync(expectedManifestPath) ? physicalDbtRelationIds(expectedManifestPath) : undefined;
       const nodes = Object.values(manifest.dbtProvenance?.nodes ?? {})
-        .filter((node) => !physicalOnly || (Boolean(node.relation) && (!physicalIds || physicalIds.has(node.uniqueId))))
+        // A warehouse relation is physical by construction.
+        .filter((node) => !physicalOnly || (Boolean(node.relation) && (node.resourceType === 'warehouse' || !physicalIds || physicalIds.has(node.uniqueId))))
         .filter((node) => {
           if (!queryTokens.length) return true;
           const haystack = `${node.name} ${node.uniqueId} ${node.relation ?? ''} ${node.sourcePath ?? ''}`.toLowerCase();
@@ -11461,7 +11480,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...(physicalOnly ? {
           manifestPath: manifest.dbtProvenance!.manifestPath,
           projectName: manifest.dbtProvenance!.projectName,
-          scope: 'dbt_relations',
+          scope: modelingMode === 'dbt-first' ? 'dbt_relations' : 'warehouse_relations',
         } : {}),
       }));
       return;
@@ -18972,10 +18991,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           configuredMetadataScopeInput(cfg, connectionId),
           metadataScopeDbtDefaults(projectRoot, cfg),
         );
+        const warehouseCatalog = warehouseCatalogStatus(projectRoot, cfg, connectionId);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           scope,
           status: warehouseMetadataStatus(projectRoot, scope.scopeFingerprint, connectionId),
+          ...(warehouseCatalog ? { warehouseCatalog } : {}),
         }));
       } catch (error) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -19005,10 +19026,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         });
         persistConnectionMetadataScope(projectRoot, connectionId, scope);
         projectConfig = loadProjectConfig(projectRoot);
+        const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, projectConfig, executor, selectedConnection, connectionId, synced.scope);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           scope: synced.scope,
           status: warehouseMetadataStatus(projectRoot, synced.scope.scopeFingerprint, connectionId),
+          ...(warehouseCatalog ? { warehouseCatalog } : {}),
         }));
       } catch (error) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -19035,10 +19058,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           connection: selectedConnection,
           scope,
         });
+        const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, cfg, executor, selectedConnection, connectionId, synced.scope);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           scope: synced.scope,
           status: warehouseMetadataStatus(projectRoot, synced.scope.scopeFingerprint, connectionId),
+          ...(warehouseCatalog ? { warehouseCatalog } : {}),
         }));
       } catch (error) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -26086,6 +26111,109 @@ function metadataScopeDbtDefaults(
   }
 }
 
+/** What the Settings page and `dql sync warehouse` show about the warehouse catalog snapshot. */
+export interface WarehouseCatalogSummary {
+  path: string;
+  relations?: number;
+  fingerprint?: string;
+  capturedAt?: string;
+  connectionId?: string;
+  warnings?: string[];
+  /** Why this sync did not refresh the snapshot. */
+  skipped?: string;
+  error?: string;
+}
+
+function warehouseCatalogModeling(config: ProjectConfig): boolean {
+  const mode = modelingModeOf(config);
+  return mode === 'warehouse-first' || mode === 'hybrid';
+}
+
+/** The project's modeling connection: the one whose catalog entities bind to. */
+function warehouseCatalogConnectionId(config: ProjectConfig): string {
+  const connections = getProjectConnectionsForApi(config);
+  return resolveDefaultConnectionKey(config as unknown as Record<string, unknown>, connections) ?? Object.keys(connections)[0] ?? 'default';
+}
+
+/**
+ * RFC 0007: in warehouse-first and hybrid modeling a schema sync also
+ * refreshes the warehouse catalog snapshot the manifest builder reads. A
+ * dbt-first project, or a sync of another connection, is left untouched.
+ */
+async function refreshWarehouseCatalogAfterSync(
+  projectRoot: string,
+  config: ProjectConfig,
+  executor: QueryExecutor,
+  connection: ConnectionConfig,
+  connectionId: string,
+  scope: ConnectionMetadataScopeV1,
+): Promise<WarehouseCatalogSummary | undefined> {
+  if (!warehouseCatalogModeling(config)) return undefined;
+  const path = readWarehouseCatalog(projectRoot).path;
+  const modelingConnectionId = warehouseCatalogConnectionId(config);
+  if (connectionId !== modelingConnectionId) {
+    return { path, skipped: `modeling reads connection "${modelingConnectionId}"; this sync did not change its catalog` };
+  }
+  try {
+    const { snapshot, warnings } = await syncWarehouseCatalog({ projectRoot, executor, connection, scope });
+    return { path, relations: snapshot.relations.length, fingerprint: snapshot.fingerprint, capturedAt: snapshot.capturedAt, connectionId, warnings };
+  } catch (error) {
+    return { path, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * `dql sync warehouse`: the same work as Settings → Sync schema, without a
+ * running server. With `schemas`, the schema selection is saved first.
+ */
+export async function syncProjectWarehouse(projectRoot: string, options: {
+  connectionId?: string;
+  database?: string;
+  schemas?: string[];
+  executor: QueryExecutor;
+}): Promise<{ connectionId: string; scope: ConnectionMetadataScopeV1; metadataRelations: number; warehouseCatalog?: WarehouseCatalogSummary }> {
+  const cfg = loadProjectConfig(projectRoot);
+  const connectionId = options.connectionId || warehouseCatalogConnectionId(cfg);
+  const selectedConnection = projectConnectionById(projectRoot, cfg, connectionId);
+  if (!selectedConnection) throw new Error(`Unknown connection "${connectionId}". Add it in Settings → Connections or dql.config.json.`);
+  const configured = configuredMetadataScopeInput(cfg, connectionId);
+  let input: ConnectionMetadataScopeInput | undefined = configured;
+  if (options.schemas?.length) {
+    const database = options.database
+      ?? selectedConnection.catalog
+      ?? selectedConnection.database
+      ?? await databaseHoldingSchemas(options.executor, selectedConnection, connectionId, options.schemas);
+    input = { mode: 'selected_scopes', scopes: [{ catalogOrDatabase: database, schemas: options.schemas }] };
+  }
+  const scope = normalizeConnectionMetadataScope(connectionId, selectedConnection, input, metadataScopeDbtDefaults(projectRoot, cfg));
+  const synced = await syncWarehouseMetadata({ projectRoot, executor: options.executor, connection: selectedConnection, scope });
+  if (options.schemas?.length) persistConnectionMetadataScope(projectRoot, connectionId, scope);
+  const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, loadProjectConfig(projectRoot), options.executor, selectedConnection, connectionId, synced.scope);
+  const metadataRelations = warehouseMetadataStatus(projectRoot, synced.scope.scopeFingerprint, connectionId).relationCount;
+  return { connectionId, scope: synced.scope, metadataRelations, ...(warehouseCatalog ? { warehouseCatalog } : {}) };
+}
+
+/** The one database/catalog that holds every named schema, found by asking the warehouse. */
+async function databaseHoldingSchemas(executor: QueryExecutor, connection: ConnectionConfig, connectionId: string, schemas: string[]): Promise<string> {
+  const discovery = await discoverWarehouseMetadataScopes({ connectionId, executor, connection });
+  const wanted = schemas.map((schema) => schema.toLowerCase());
+  const holders = discovery.scopes.filter((scope) => {
+    const names = new Set(scope.schemas.map((schema) => schema.name.toLowerCase()));
+    return wanted.every((schema) => names.has(schema));
+  });
+  if (holders.length === 1) return holders[0]!.catalogOrDatabase;
+  if (holders.length === 0) throw new Error(`No database on this connection has schema(s) ${schemas.join(', ')}. Check the names, or pass --database.`);
+  throw new Error(`Schema(s) ${schemas.join(', ')} exist in ${holders.map((scope) => scope.catalogOrDatabase).join(', ')}; pass --database to choose one.`);
+}
+
+function warehouseCatalogStatus(projectRoot: string, config: ProjectConfig, connectionId: string): WarehouseCatalogSummary | undefined {
+  if (!warehouseCatalogModeling(config) || connectionId !== warehouseCatalogConnectionId(config)) return undefined;
+  const { snapshot, path, error } = readWarehouseCatalog(projectRoot);
+  if (error) return { path, error };
+  if (!snapshot) return { path, relations: 0 };
+  return { path, relations: snapshot.relations.length, fingerprint: snapshot.fingerprint, capturedAt: snapshot.capturedAt, connectionId: snapshot.connectionId };
+}
+
 function configuredMetadataScopeInput(
   config: ProjectConfig,
   connectionId: string,
@@ -26189,6 +26317,9 @@ const CONNECTOR_INSTALLS: Record<string, Omit<ConnectorInstallStatus, 'installed
 function connectorInstallRoot(projectRoot: string): string {
   return join(projectRoot, '.dql', 'connectors');
 }
+
+/** The CLI package's own directory, whose dependencies include better-sqlite3. */
+const CLI_PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function connectorModuleSearchPaths(projectRoot: string): string[] {
   return [connectorInstallRoot(projectRoot), projectRoot];
@@ -27990,6 +28121,13 @@ export function normalizeProjectConnection(connection: ConnectionConfig, project
 
   if (normalized.driver === 'sqlite' && normalized.database && normalized.database !== ':memory:' && !isAbsoluteLikePath(normalized.database)) {
     normalized.database = resolve(projectRoot, normalized.database);
+  }
+  if (normalized.driver === 'sqlite') {
+    if (normalized.filepath && normalized.filepath !== ':memory:' && !isAbsoluteLikePath(normalized.filepath)) {
+      normalized.filepath = resolve(projectRoot, normalized.filepath);
+    }
+    // better-sqlite3 ships with the CLI itself.
+    normalized.moduleSearchPaths = [...connectorModuleSearchPaths(projectRoot), CLI_PACKAGE_ROOT];
   }
 
   return normalized;

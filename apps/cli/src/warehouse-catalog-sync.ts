@@ -1,0 +1,281 @@
+/**
+ * Warehouse catalog extraction (RFC 0007, warehouse-first modeling).
+ *
+ * Reads the selected schemas' tables, views, columns, comments, declared
+ * primary/foreign keys and view definitions, and writes the project's warehouse
+ * catalog snapshot (.dql/warehouse-catalog.json). Metadata only: no statement
+ * here reads a row of user data. The column read is required; comments, keys
+ * and view definitions are best effort, so a warehouse or role that does not
+ * expose one still syncs, with a warning naming what was skipped.
+ *
+ * Per driver: DuckDB, SQLite, Postgres and Snowflake read keys and comments;
+ * every other driver reads tables, views and columns from information_schema.
+ */
+
+import {
+  warehouseRelationId,
+  writeWarehouseCatalog,
+  type WarehouseCatalogRelationV1,
+  type WarehouseCatalogSnapshotV1,
+} from '@duckcodeailabs/dql-core';
+import type { ConnectionConfig, QueryExecutor } from '@duckcodeailabs/dql-connectors';
+import type { ConnectionMetadataScopeV1 } from './warehouse-metadata.js';
+
+const MAX_ROWS = 50_000;
+const QUERY_OPTIONS = { maxRows: MAX_ROWS, maxBytes: 32 * 1024 * 1024, batchSize: 1_000, deadlineMs: 60_000 };
+
+type Row = Record<string, unknown>;
+interface CatalogQuery { kind: 'columns' | 'tables' | 'views' | 'keys' | 'primary_keys' | 'foreign_keys'; sql: string; catalogOrDatabase: string }
+
+export interface WarehouseCatalogSyncResult {
+  snapshot: WarehouseCatalogSnapshotV1;
+  /** Optional reads that failed (keys, comments, views), in plain words. */
+  warnings: string[];
+}
+
+/** `'a'` with quotes doubled: a string literal for a metadata filter. */
+const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+/** A double-quoted identifier. */
+const ident = (value: string) => `"${value.replace(/"/g, '""')}"`;
+const inList = (values: string[]) => values.map((value) => `UPPER(${literal(value)})`).join(', ');
+
+/** The queries that read one scope's catalog, per driver. */
+export function buildWarehouseCatalogQueries(driver: string, scope: { catalogOrDatabase: string; schemas: string[] }): CatalogQuery[] {
+  const db = scope.catalogOrDatabase;
+  const schemas = scope.schemas.length ? scope.schemas : [];
+  const schemaFilter = (column: string) => (schemas.length ? `UPPER(${column}) IN (${inList(schemas)})` : `UPPER(${column}) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')`);
+  const d = driver.toLowerCase();
+  if (d === 'duckdb') {
+    return [
+      { kind: 'columns', catalogOrDatabase: db, sql: `SELECT database_name AS table_catalog, schema_name AS table_schema, table_name, column_name, data_type, is_nullable, comment FROM duckdb_columns() WHERE ${schemaFilter('schema_name')} AND NOT internal ORDER BY schema_name, table_name, column_index LIMIT ${MAX_ROWS}` },
+      { kind: 'tables', catalogOrDatabase: db, sql: `SELECT database_name AS table_catalog, schema_name AS table_schema, table_name, 'BASE TABLE' AS table_type, comment, estimated_size AS row_count FROM duckdb_tables() WHERE ${schemaFilter('schema_name')} AND NOT internal` },
+      { kind: 'views', catalogOrDatabase: db, sql: `SELECT database_name AS table_catalog, schema_name AS table_schema, view_name AS table_name, comment, sql AS view_definition FROM duckdb_views() WHERE ${schemaFilter('schema_name')} AND NOT internal` },
+      { kind: 'keys', catalogOrDatabase: db, sql: `SELECT schema_name AS table_schema, table_name, constraint_type, constraint_column_names, referenced_table, referenced_column_names FROM duckdb_constraints() WHERE ${schemaFilter('schema_name')} AND constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')` },
+    ];
+  }
+  if (d === 'sqlite') {
+    return [
+      { kind: 'columns', catalogOrDatabase: db, sql: `SELECT 'main' AS table_schema, m.name AS table_name, p.name AS column_name, p.type AS data_type, CASE WHEN p."notnull" = 1 THEN 'NO' ELSE 'YES' END AS is_nullable, p.pk AS pk_position FROM sqlite_master m JOIN pragma_table_info(m.name) p WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%' ORDER BY m.name, p.cid LIMIT ${MAX_ROWS}` },
+      { kind: 'tables', catalogOrDatabase: db, sql: `SELECT 'main' AS table_schema, name AS table_name, CASE WHEN type = 'view' THEN 'VIEW' ELSE 'BASE TABLE' END AS table_type, CASE WHEN type = 'view' THEN sql END AS view_definition FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'` },
+      { kind: 'foreign_keys', catalogOrDatabase: db, sql: `SELECT 'main' AS table_schema, m.name AS table_name, f.id AS constraint_name, f.seq AS position, f."from" AS column_name, f."table" AS ref_table, f."to" AS ref_column FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f WHERE m.type = 'table' ORDER BY m.name, f.id, f.seq` },
+    ];
+  }
+  if (d === 'postgres' || d === 'postgresql' || d === 'redshift') {
+    const rel = `format('%I.%I', c.table_schema, c.table_name)::regclass`;
+    return [
+      { kind: 'columns', catalogOrDatabase: db, sql: `SELECT c.table_catalog, c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, col_description(${rel}, c.ordinal_position) AS comment FROM information_schema.columns c WHERE ${schemaFilter('c.table_schema')} ORDER BY c.table_schema, c.table_name, c.ordinal_position LIMIT ${MAX_ROWS}` },
+      { kind: 'tables', catalogOrDatabase: db, sql: `SELECT c.table_catalog, c.table_schema, c.table_name, c.table_type, obj_description(${rel}, 'pg_class') AS comment FROM information_schema.tables c WHERE ${schemaFilter('c.table_schema')}` },
+      { kind: 'views', catalogOrDatabase: db, sql: `SELECT table_catalog, table_schema, table_name, view_definition FROM information_schema.views WHERE ${schemaFilter('table_schema')}` },
+      { kind: 'keys', catalogOrDatabase: db, sql: `SELECT tc.constraint_type, tc.constraint_name, kcu.table_schema, kcu.table_name, kcu.column_name, kcu.ordinal_position AS position, ref.table_schema AS ref_schema, ref.table_name AS ref_table, ref.column_name AS ref_column FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = tc.constraint_name AND kcu.constraint_schema = tc.constraint_schema LEFT JOIN information_schema.referential_constraints rc ON tc.constraint_type = 'FOREIGN KEY' AND rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.constraint_schema LEFT JOIN information_schema.key_column_usage ref ON ref.constraint_name = rc.unique_constraint_name AND ref.constraint_schema = rc.unique_constraint_schema AND ref.ordinal_position = kcu.position_in_unique_constraint WHERE tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY') AND ${schemaFilter('kcu.table_schema')} ORDER BY kcu.table_schema, kcu.table_name, tc.constraint_name, kcu.ordinal_position` },
+    ];
+  }
+  if (d === 'snowflake') {
+    const is = `${ident(db)}.INFORMATION_SCHEMA`;
+    return [
+      { kind: 'columns', catalogOrDatabase: db, sql: `SELECT table_catalog, table_schema, table_name, column_name, data_type, is_nullable, comment FROM ${is}.COLUMNS WHERE ${schemaFilter('table_schema')} ORDER BY table_schema, table_name, ordinal_position LIMIT ${MAX_ROWS}` },
+      { kind: 'tables', catalogOrDatabase: db, sql: `SELECT table_catalog, table_schema, table_name, table_type, comment, row_count FROM ${is}.TABLES WHERE ${schemaFilter('table_schema')}` },
+      { kind: 'views', catalogOrDatabase: db, sql: `SELECT table_catalog, table_schema, table_name, view_definition FROM ${is}.VIEWS WHERE ${schemaFilter('table_schema')}` },
+      // Snowflake reports declared (informational) keys only through SHOW.
+      { kind: 'primary_keys', catalogOrDatabase: db, sql: `SHOW PRIMARY KEYS IN DATABASE ${ident(db)}` },
+      { kind: 'foreign_keys', catalogOrDatabase: db, sql: `SHOW IMPORTED KEYS IN DATABASE ${ident(db)}` },
+    ];
+  }
+  // Every other driver: tables, views and columns from information_schema.
+  return [
+    { kind: 'columns', catalogOrDatabase: db, sql: `SELECT table_catalog, table_schema, table_name, column_name, data_type, is_nullable FROM information_schema.columns WHERE ${schemaFilter('table_schema')} ORDER BY table_schema, table_name, ordinal_position LIMIT ${MAX_ROWS}` },
+    { kind: 'tables', catalogOrDatabase: db, sql: `SELECT table_catalog, table_schema, table_name, table_type FROM information_schema.tables WHERE ${schemaFilter('table_schema')}` },
+  ];
+}
+
+/** A row field by any of its spellings (drivers differ in case). */
+function field(row: Row, ...names: string[]): unknown {
+  for (const name of names) {
+    for (const key of [name, name.toUpperCase(), name.toLowerCase()]) if (row[key] !== undefined && row[key] !== null) return row[key];
+  }
+  return undefined;
+}
+const text = (row: Row, ...names: string[]) => {
+  const value = field(row, ...names);
+  return value === undefined ? undefined : String(value);
+};
+const list = (value: unknown): string[] => {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === 'string') return value.replace(/^\[|\]$/g, '').split(',').map((item) => item.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+  return [];
+};
+const key = (schema: string | undefined, name: string) => `${(schema ?? '').toLowerCase()}.${name.toLowerCase()}`;
+
+/** Fold the rows of every query into catalog relations. Exported for tests. */
+export function assembleWarehouseCatalog(driver: string, results: Array<{ query: CatalogQuery; rows: Row[] }>): WarehouseCatalogRelationV1[] {
+  const includeCatalog = ['snowflake', 'databricks', 'bigquery'].includes(driver.toLowerCase());
+  const relations = new Map<string, WarehouseCatalogRelationV1>();
+  const ensure = (row: Row, catalogOrDatabase: string): WarehouseCatalogRelationV1 | undefined => {
+    const schema = text(row, 'table_schema');
+    const name = text(row, 'table_name');
+    if (!name) return undefined;
+    const k = key(schema, name);
+    let relation = relations.get(k);
+    if (!relation) {
+      const database = text(row, 'table_catalog') ?? catalogOrDatabase;
+      relation = {
+        id: warehouseRelationId({ database: includeCatalog ? database : undefined, schema, name }),
+        ...(includeCatalog && database ? { database } : {}),
+        ...(schema ? { schema } : {}),
+        name,
+        relation: [includeCatalog ? database : undefined, schema, name].filter(Boolean).join('.'),
+        kind: 'table',
+        columns: [],
+      };
+      relations.set(k, relation);
+    }
+    return relation;
+  };
+  const byKey = (schema: string | undefined, name: string | undefined) => (name ? relations.get(key(schema, name)) : undefined);
+  const pkPositions = new Map<string, Array<{ column: string; position: number }>>();
+  const fkGroups = new Map<string, { relationKey: string; columns: Array<{ column: string; position: number; refColumn?: string }>; refRelation?: string; name?: string }>();
+  const addPk = (relationKey: string, column: string, position: number) => {
+    const current = pkPositions.get(relationKey) ?? [];
+    if (!current.some((item) => item.column === column)) current.push({ column, position });
+    pkPositions.set(relationKey, current);
+  };
+  const addFk = (groupKey: string, relationKey: string, column: string, position: number, refRelation: string | undefined, refColumn: string | undefined, name?: string) => {
+    const group = fkGroups.get(groupKey) ?? { relationKey, columns: [], refRelation, name };
+    group.columns.push({ column, position, refColumn });
+    if (!group.refRelation && refRelation) group.refRelation = refRelation;
+    fkGroups.set(groupKey, group);
+  };
+
+  // Columns first: they define which relations exist.
+  for (const { query, rows } of results.filter((item) => item.query.kind === 'columns')) {
+    for (const row of rows) {
+      const relation = ensure(row, query.catalogOrDatabase);
+      const name = text(row, 'column_name');
+      if (!relation || !name || relation.columns.some((column) => column.name.toLowerCase() === name.toLowerCase())) continue;
+      // 'YES'/'NO' from information_schema, a boolean from DuckDB.
+      const nullableValue = field(row, 'is_nullable');
+      const nullable = nullableValue === undefined ? undefined : typeof nullableValue === 'boolean' ? (nullableValue ? 'YES' : 'NO') : /^(yes|true|1)$/i.test(String(nullableValue)) ? 'YES' : 'NO';
+      const comment = text(row, 'comment');
+      relation.columns.push({ name, ...(text(row, 'data_type') ? { type: text(row, 'data_type') } : {}), ...(comment ? { comment } : {}), ...(nullable ? { nullable: nullable.toUpperCase() === 'YES' } : {}) });
+      const pk = Number(field(row, 'pk_position'));
+      if (Number.isFinite(pk) && pk > 0) addPk(key(relation.schema, relation.name), name, pk);
+    }
+  }
+  for (const { rows } of results.filter((item) => item.query.kind === 'tables' || item.query.kind === 'views')) {
+    for (const row of rows) {
+      const relation = byKey(text(row, 'table_schema'), text(row, 'table_name'));
+      if (!relation) continue;
+      const type = (text(row, 'table_type') ?? '').toUpperCase();
+      const view = text(row, 'view_definition');
+      if (view || type.includes('VIEW')) relation.kind = type.includes('MATERIALIZED') ? 'materialized_view' : 'view';
+      if (view) relation.viewSql = view;
+      const comment = text(row, 'comment');
+      if (comment && !relation.comment) relation.comment = comment;
+      const rows = Number(field(row, 'row_count'));
+      if (Number.isFinite(rows) && rows >= 0 && relation.rowCountEstimate === undefined) relation.rowCountEstimate = rows;
+    }
+  }
+  for (const { rows } of results.filter((item) => item.query.kind === 'keys')) {
+    rows.forEach((row, index) => {
+      const schema = text(row, 'table_schema');
+      const table = text(row, 'table_name');
+      const relation = byKey(schema, table);
+      if (!relation) return;
+      const type = (text(row, 'constraint_type') ?? '').toUpperCase();
+      const columnList = list(field(row, 'constraint_column_names'));
+      const single = text(row, 'column_name');
+      const columns = columnList.length ? columnList : single ? [single] : [];
+      const position = Number(field(row, 'position')) || 1;
+      if (type === 'PRIMARY KEY') columns.forEach((column, i) => addPk(key(relation.schema, relation.name), column, columnList.length ? i + 1 : position));
+      if (type === 'FOREIGN KEY') {
+        const refColumns = list(field(row, 'referenced_column_names'));
+        const refTable = text(row, 'referenced_table', 'ref_table');
+        const refSchema = text(row, 'ref_schema') ?? schema;
+        const refRelation = refTable ? [refSchema, refTable].filter(Boolean).join('.') : undefined;
+        const groupKey = `${key(schema, table ?? '')}#${text(row, 'constraint_name') ?? `duckdb-${index}`}`;
+        columns.forEach((column, i) => addFk(groupKey, key(relation.schema, relation.name), column, columnList.length ? i + 1 : position, refRelation, refColumns[i] ?? text(row, 'ref_column'), text(row, 'constraint_name')));
+      }
+    });
+  }
+  for (const { query, rows } of results.filter((item) => item.query.kind === 'primary_keys')) {
+    // Snowflake SHOW PRIMARY KEYS: schema_name, table_name, column_name, key_sequence.
+    for (const row of rows) {
+      const relation = byKey(text(row, 'schema_name'), text(row, 'table_name'));
+      const column = text(row, 'column_name');
+      if (relation && column) addPk(key(relation.schema, relation.name), column, Number(field(row, 'key_sequence')) || 1);
+    }
+    void query;
+  }
+  for (const { rows } of results.filter((item) => item.query.kind === 'foreign_keys')) {
+    for (const row of rows) {
+      // Snowflake SHOW IMPORTED KEYS names both sides; SQLite pragma rows name the local side.
+      const schema = text(row, 'fk_schema_name', 'table_schema');
+      const table = text(row, 'fk_table_name', 'table_name');
+      const relation = byKey(schema, table);
+      const column = text(row, 'fk_column_name', 'column_name');
+      if (!relation || !column) continue;
+      const refTable = text(row, 'pk_table_name', 'ref_table');
+      const refSchema = text(row, 'pk_schema_name') ?? schema;
+      const refDatabase = text(row, 'pk_database_name');
+      const refRelation = refTable ? [includeCatalog ? refDatabase : undefined, refSchema, refTable].filter(Boolean).join('.') : undefined;
+      const name = text(row, 'fk_name', 'constraint_name');
+      addFk(`${key(schema, table ?? '')}#${name ?? refRelation ?? ''}`, key(relation.schema, relation.name), column, Number(field(row, 'key_sequence', 'position')) || 1, refRelation, text(row, 'pk_column_name', 'ref_column'), name);
+    }
+  }
+  for (const [relationKey, columns] of pkPositions) {
+    const relation = relations.get(relationKey);
+    if (relation) relation.primaryKey = columns.sort((a, b) => a.position - b.position).map((item) => item.column);
+  }
+  for (const group of fkGroups.values()) {
+    const relation = relations.get(group.relationKey);
+    if (!relation || !group.refRelation) continue;
+    const ordered = group.columns.sort((a, b) => a.position - b.position);
+    (relation.foreignKeys ??= []).push({
+      columns: ordered.map((item) => item.column),
+      references: { relation: group.refRelation, columns: ordered.map((item) => item.refColumn ?? '').filter(Boolean) },
+      ...(group.name && !/^duckdb-\d+$/.test(group.name) ? { name: group.name } : {}),
+    });
+  }
+  return [...relations.values()].filter((relation) => relation.columns.length > 0);
+}
+
+/**
+ * Read the scope's catalog from the warehouse and write the project's
+ * warehouse catalog snapshot. Throws when no relation could be read.
+ */
+export async function syncWarehouseCatalog(input: {
+  projectRoot: string;
+  executor: QueryExecutor;
+  connection: ConnectionConfig;
+  scope: ConnectionMetadataScopeV1;
+}): Promise<WarehouseCatalogSyncResult> {
+  const warnings: string[] = [];
+  const results: Array<{ query: CatalogQuery; rows: Row[] }> = [];
+  for (const scope of input.scope.scopes) {
+    for (const query of buildWarehouseCatalogQueries(input.connection.driver, scope)) {
+      try {
+        const result = await input.executor.executePositional(query.sql, [], input.connection, QUERY_OPTIONS);
+        if (query.kind === 'columns' && (result.truncated || result.rows.length >= MAX_ROWS)) {
+          throw new Error('the selected schemas have more columns than one sync reads; narrow the schema selection');
+        }
+        results.push({ query, rows: result.rows as Row[] });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (query.kind === 'columns') throw new Error(`Reading columns of ${scope.catalogOrDatabase} failed: ${message}`);
+        warnings.push(`${query.kind.replace('_', ' ')} of ${scope.catalogOrDatabase} not read: ${message.split('\n')[0]!.slice(0, 200)}`);
+      }
+    }
+  }
+  const relations = assembleWarehouseCatalog(input.connection.driver, results);
+  if (relations.length === 0) {
+    throw new Error('The warehouse catalog sync found no tables in the selected schemas. Check the schema selection and the connection role\'s permissions.');
+  }
+  const snapshot = writeWarehouseCatalog(input.projectRoot, {
+    version: 1,
+    driver: input.connection.driver,
+    connectionId: input.scope.connectionId,
+    scopes: input.scope.scopes.map((scope) => ({ catalogOrDatabase: scope.catalogOrDatabase, schemas: [...scope.schemas] })),
+    capturedAt: new Date().toISOString(),
+    relations,
+  });
+  return { snapshot, warnings };
+}

@@ -42,6 +42,8 @@ export {
   previewDbtSourcePatch,
   applyDbtSourcePatch,
   loadDbtNodeAuthoringDetail,
+  loadWarehouseNodeAuthoringDetail,
+  isWarehouseNodeId,
   resetDbtArtifactReadCount,
   dbtArtifactReadCount,
   type DomainPackageAuthoringInput,

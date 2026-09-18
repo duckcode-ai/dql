@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import type { DQLManifest, SemanticLayer } from '@duckcodeailabs/dql-core';
+import { join } from 'node:path';
+import type { DQLManifest, SemanticLayer, WarehouseCatalogSnapshotV1 } from '@duckcodeailabs/dql-core';
 import { buildVocabularyIndex, extractBlockContract, parsePhysicalIdentifier, physicalRelationBinding, physicalRelationIdentity, physicalRelationText, mergePhysicalRelationBinding, renderPhysicalIdentifier, type PhysicalRelationBindingV1, type VocabularyEntry, type VocabularyIndex, type VocabularySource } from '@duckcodeailabs/dql-agent';
 
 /**
@@ -146,9 +147,64 @@ export function resetDbtArtifactCache(): void {
   dbtArtifactCache.clear();
 }
 
-export function embeddedManifestRelations(manifest: DQLManifest | undefined): NonNullable<VocabularySourceInput['relations']> {
+const warehouseCatalogCache = new Map<string, { key: string; snapshot?: WarehouseCatalogSnapshotV1 }>();
+
+function warehouseCatalogSnapshot(path: string): WarehouseCatalogSnapshotV1 | undefined {
+  let key: string;
+  try {
+    const stat = statSync(path);
+    key = `${stat.mtimeMs}|${stat.size}`;
+  } catch {
+    return undefined;
+  }
+  const cached = warehouseCatalogCache.get(path);
+  if (cached?.key === key) return cached.snapshot;
+  let snapshot: WarehouseCatalogSnapshotV1 | undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as WarehouseCatalogSnapshotV1;
+    snapshot = parsed?.version === 1 && Array.isArray(parsed.relations) ? parsed : undefined;
+  } catch {
+    snapshot = undefined;
+  }
+  warehouseCatalogCache.clear();
+  warehouseCatalogCache.set(path, { key, snapshot });
+  return snapshot;
+}
+
+/**
+ * RFC 0007: in warehouse-first and hybrid modeling the warehouse catalog
+ * snapshot plays the dbt artifact's part — table and column comments become
+ * relation search metadata, exactly as dbt descriptions do.
+ */
+function warehouseCatalogRelations(manifest: DQLManifest | undefined, projectRoot: string | undefined): NonNullable<VocabularySourceInput['relations']> {
+  const catalogPath = manifest?.dbtProvenance?.warehouseCatalogPath;
+  if (!catalogPath || !projectRoot) return [];
+  const snapshot = warehouseCatalogSnapshot(join(projectRoot, catalogPath));
+  if (!snapshot) return [];
+  const admitted = new Set(Object.keys(manifest?.dbtProvenance?.nodes ?? {}));
+  return snapshot.relations
+    .filter((relation) => admitted.has(relation.id))
+    .map((relation) => ({
+      ...(relation.database ? { database: relation.database } : {}),
+      ...(relation.schema ? { schema: relation.schema } : {}),
+      name: relation.name,
+      ...(relation.comment ? { description: relation.comment } : {}),
+      columns: [],
+      ...(relation.columns.length ? {
+        embeddedColumns: relation.columns.slice(0, MAX_EMBEDDED_MANIFEST_COLUMNS).map((column) => ({
+          name: column.name,
+          ...(column.type ? { dataType: column.type } : {}),
+          ...(column.comment ? { description: column.comment } : {}),
+        })),
+      } : {}),
+      columnCompleteness: 'partial' as const,
+    }));
+}
+
+export function embeddedManifestRelations(manifest: DQLManifest | undefined, projectRoot?: string): NonNullable<VocabularySourceInput['relations']> {
+  const warehouse = warehouseCatalogRelations(manifest, projectRoot);
   const nodes = dbtArtifactNodes(manifest?.dbtProvenance?.manifestPath);
-  if (nodes.length === 0) return [];
+  if (nodes.length === 0) return warehouse;
   const admitted = new Set(Object.keys(manifest?.dbtProvenance?.nodes ?? {}));
   const result: NonNullable<VocabularySourceInput['relations']> = [];
   for (const node of nodes) {
@@ -170,7 +226,7 @@ export function embeddedManifestRelations(manifest: DQLManifest | undefined): No
       columnCompleteness: 'partial',
     });
   }
-  return result;
+  return [...result, ...warehouse];
 }
 
 const AGGREGATES = new Set(['sum', 'avg', 'count', 'count_distinct', 'min', 'max', 'median']);

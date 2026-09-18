@@ -5,6 +5,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as yaml from 'js-yaml';
 import { domainFolderSlug, renderDomainDeclaration, type DomainInput } from './domain-writer.js';
 import { loadDomainPackageRegistry } from './domain-package-registry.js';
+import { readWarehouseCatalog } from './warehouse-catalog.js';
 import type {
   ManifestFanoutPolicy,
   ManifestModelLifecycle,
@@ -214,7 +215,7 @@ export interface ModelingChangesPreview {
 export interface DbtNodeAuthoringDetail {
   uniqueId: string;
   name: string;
-  resourceType: 'model' | 'source';
+  resourceType: 'model' | 'source' | 'warehouse';
   relation?: string;
   sourcePath?: string;
   description?: string;
@@ -451,6 +452,32 @@ export function applyModelingChange(
   return preview;
 }
 
+/** Whether a provenance id names a warehouse relation rather than a dbt node. */
+export function isWarehouseNodeId(uniqueId: string): boolean {
+  return uniqueId.startsWith('warehouse.');
+}
+
+/** A warehouse relation's authoring detail, from the project's catalog snapshot. */
+export function loadWarehouseNodeAuthoringDetail(projectRoot: string, uniqueId: string): DbtNodeAuthoringDetail | undefined {
+  const relation = readWarehouseCatalog(projectRoot).snapshot?.relations.find((item) => item.id === uniqueId);
+  if (!relation) return undefined;
+  return {
+    uniqueId,
+    name: relation.name,
+    resourceType: 'warehouse',
+    relation: relation.relation,
+    ...(relation.comment ? { description: relation.comment } : {}),
+    columns: relation.columns.map((column) => ({
+      name: column.name,
+      ...(column.type ? { type: column.type } : {}),
+      ...(column.comment ? { description: column.comment } : {}),
+      tests: [],
+    })),
+    tests: [],
+    ...(relation.primaryKey?.length ? { dqlMeta: { grain: relation.primaryKey.join(', '), keys: relation.primaryKey } } : {}),
+  };
+}
+
 export function loadDbtNodeAuthoringDetail(manifestPath: string, uniqueId: string): DbtNodeAuthoringDetail | undefined {
   const manifest = readJson(manifestPath);
   const raw = asRecord(asRecord(manifest.nodes)[uniqueId] ?? asRecord(manifest.sources)[uniqueId]);
@@ -547,9 +574,14 @@ function previewEntity(projectRoot: string, value: EntityBindingAuthoringInput):
   const domain = requiredId(value.domain, 'domain');
   const dbtModel = requiredId(value.dbtModel, 'dbt model');
   const path = modelingSourceFile(projectRoot, domain, 'entities.dql.yaml', 'entities', 'id', id, value.areaId);
+  // A warehouse relation (warehouse-first or hybrid modeling) is bound with
+  // `relation:` as the warehouse spells it; a dbt node keeps `dbt_model:`.
+  const binding: UnknownRecord = isWarehouseNodeId(dbtModel)
+    ? { relation: readWarehouseCatalog(projectRoot).snapshot?.relations.find((relation) => relation.id === dbtModel)?.relation ?? dbtModel }
+    : { dbt_model: dbtModel };
   const entity: UnknownRecord = {
     id,
-    dbt_model: dbtModel,
+    ...binding,
     ...(value.businessName?.trim() ? { business_name: value.businessName.trim() } : {}),
     ...(value.businessContext?.trim() ? { business_context: value.businessContext.trim() } : {}),
     ...(cleanStrings(value.conceptRefs).length > 0 ? { concept_refs: cleanStrings(value.conceptRefs) } : {}),

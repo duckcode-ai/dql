@@ -1,25 +1,40 @@
-import { createRequire } from 'node:module';
-import type Database from 'better-sqlite3';
 import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryResult, ColumnMeta, Row } from '../result-types.js';
+import { importConnectorDependency } from '../optional-dependency.js';
 
-const require = createRequire(import.meta.url);
-let databaseCtor: typeof Database | null = null;
+/** The part of better-sqlite3 this connector uses; the package is loaded at runtime. */
+interface SQLiteStatement {
+  readonly reader: boolean;
+  all(...params: unknown[]): unknown[];
+  get(...params: unknown[]): unknown;
+  run(...params: unknown[]): { changes: number };
+}
+interface SQLiteDatabase {
+  prepare(sql: string): SQLiteStatement;
+  close(): void;
+}
+type SQLiteDatabaseConstructor = new (filename: string, options?: { readonly?: boolean; fileMustExist?: boolean }) => SQLiteDatabase;
 
-function loadDatabase(): typeof Database {
-  databaseCtor ??= require('better-sqlite3') as typeof Database;
+let databaseCtor: SQLiteDatabaseConstructor | null = null;
+
+async function loadDatabase(config: ConnectionConfig): Promise<SQLiteDatabaseConstructor> {
+  if (!databaseCtor) {
+    const loaded = await importConnectorDependency('better-sqlite3', config) as { default?: SQLiteDatabaseConstructor };
+    databaseCtor = (loaded.default ?? loaded) as SQLiteDatabaseConstructor;
+  }
   return databaseCtor;
 }
 
 export class SQLiteConnector implements DatabaseConnector {
   readonly driverName = 'sqlite';
-  private db: Database.Database | null = null;
+  private db: SQLiteDatabase | null = null;
 
   async connect(config: ConnectionConfig): Promise<void> {
     const filepath = config.filepath ?? config.database ?? ':memory:';
-    const Database = loadDatabase();
-    this.db = new Database(filepath);
-    this.db.pragma('journal_mode = WAL');
+    const Database = await loadDatabase(config);
+    // A warehouse file is read, never changed: opening it read-only also
+    // leaves its journal mode and sidecar files alone.
+    this.db = filepath === ':memory:' ? new Database(filepath) : new Database(filepath, { readonly: true, fileMustExist: true });
   }
 
   async execute(sql: string, params?: unknown[]): Promise<QueryResult> {

@@ -794,7 +794,8 @@ function cleanEvaluationChecks(value: HintEvaluationCheck[]): HintEvaluationChec
 export function requiresEvaluatedApproval(projectRoot: string): boolean {
   try {
     const config = loadProjectConfig(projectRoot) as { manifestVersion?: number; modeling?: { mode?: string } };
-    return config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first';
+    const mode = config.modeling?.mode;
+    return config.manifestVersion === 3 && (mode === 'dbt-first' || mode === 'warehouse-first' || mode === 'hybrid');
   } catch {
     return false;
   }

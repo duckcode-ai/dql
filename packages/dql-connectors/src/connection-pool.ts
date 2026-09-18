@@ -3,6 +3,7 @@ import { SnowflakeConnector } from './drivers/snowflake.js';
 import { DuckDBConnector } from './drivers/duckdb.js';
 import { FileConnector } from './drivers/file.js';
 import { DatabricksConnector } from './drivers/databricks.js';
+import { SQLiteConnector } from './drivers/sqlite.js';
 import { createHash } from 'node:crypto';
 
 function stableSerialize(value: unknown): string {
@@ -160,9 +161,11 @@ export class ConnectionPoolManager {
         return new FileConnector();
       case 'databricks':
         return new DatabricksConnector();
+      case 'sqlite':
+        return new SQLiteConnector();
       default:
         throw new Error(
-          `Unsupported database driver: ${config.driver}. This lightweight DQL package includes DuckDB, Snowflake, and Databricks connectors.`,
+          `Unsupported database driver: ${config.driver}. This lightweight DQL package includes DuckDB, SQLite, Snowflake, and Databricks connectors.`,
         );
     }
   }

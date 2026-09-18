@@ -182,7 +182,7 @@ export function loadWarehouseModeling(
   const nodeFacts = dbt?.nodeFacts ?? new Map<string, DbtNodeFacts>();
   const nodes: Record<string, ManifestDbtNodeProvenance> = { ...(dbt?.provenance.nodes ?? {}) };
   if (!options.catalog) {
-    diagnostics.push({ kind: 'config', severity: 'warning', message: 'no warehouse catalog snapshot yet: run `dql catalog sync` (or Sync schema in Settings) so entities can bind to warehouse relations' });
+    diagnostics.push({ kind: 'config', severity: 'warning', message: 'no warehouse catalog snapshot yet: run `dql sync warehouse` (or Sync schema in Settings) so entities can bind to warehouse relations' });
   }
   for (const relation of options.catalog?.relations ?? []) {
     const facts = warehouseNodeFacts(relation);
@@ -404,7 +404,7 @@ function compileModeling(
           if (!found.relation) {
             diagnostics.push(modelingError(relPath, found.ambiguous
               ? `entity "${id}" relation "${authoredRelation}" matches ${found.ambiguous.length} warehouse relations (${found.ambiguous.slice(0, 3).map((item) => item.relation).join(', ')}); qualify it with its schema or database`
-              : `entity "${id}" references unknown warehouse relation "${authoredRelation}"${options.catalog ? '' : ' (no warehouse catalog snapshot yet: run `dql catalog sync`)'}`));
+              : `entity "${id}" references unknown warehouse relation "${authoredRelation}"${options.catalog ? '' : ' (no warehouse catalog snapshot yet: run `dql sync warehouse`)'}`));
             continue;
           }
           // ONE BINDING PER RELATION: in hybrid mode a relation dbt already

@@ -3,12 +3,59 @@
 | Field | Value |
 |---|---|
 | **Author(s)** | @KKranthi6881 |
-| **Status** | Draft |
+| **Status** | Accepted — Phase 1 implemented |
 | **Created** | 2026-09-18 |
 | **Targets** | DQL 1.18.x |
 | **Discussion** | — |
-| **Implementation** | — |
+| **Implementation** | Phase 1: `packages/dql-core/src/manifest/warehouse-catalog.ts`, `apps/cli/src/warehouse-catalog-sync.ts` (see *As built*) |
 | **Supersedes** | — |
+
+## As built (Phase 1, 2026-09-18)
+
+The implementation keeps the design's intent and reuses more of what exists.
+Where it differs from the sections below, this list is authoritative:
+
+1. **Schema selection reuses `metadataScopes`.** There is no
+   `modeling.sources` key: the schemas a project models are the connection's
+   existing `metadataScopes` entry, the same selection Settings → Sync schema
+   already edits.
+2. **One command: `dql sync warehouse`** (beside `dql sync dbt`), not
+   `dql catalog sync` or `dql model sources add`.
+   `dql sync warehouse --schemas a,b [--database X] [--connection name]`
+   saves the selection and syncs; with no flags it re-syncs the saved one.
+   Settings → Sync schema (`PUT /api/connections/:id/metadata-scope`,
+   `POST …/metadata-sync`) does the same work through the same function.
+3. **The catalog is one file, `.dql/warehouse-catalog.json`**
+   (`WarehouseCatalogSnapshotV1`): sorted, fingerprinted without its capture
+   time, metadata only. The manifest builder reads it as an input file, so a
+   sync invalidates the project snapshot exactly as a new dbt
+   `manifest.json` does.
+4. **No separate `warehouseProvenance`.** Warehouse relations are provenance
+   nodes in `dbtProvenance.nodes` with `resourceType: 'warehouse'` and ids
+   `warehouse.<database>.<schema>.<name>`, and `dbtProvenance` gains
+   `warehouseCatalogPath` / `warehouseCatalogFingerprint`. Every reader that
+   resolves an entity's relation through `dbtProvenance.nodes` therefore
+   works unchanged, and the knowledge graph records these nodes as
+   `source_table` objects with `warehouse::` ids.
+5. **`dql init` does not switch modes on its own.** A folder without dbt
+   keeps today's configuration; `dql init --warehouse-first` writes
+   `manifestVersion: 3` and `modeling.mode: "warehouse-first"`, and plain
+   `dql init` mentions the option. Adding a dbt project to a warehouse-first
+   project in Settings makes it `hybrid`, so relation-bound entities keep
+   working.
+6. **Drivers.** Catalog extractors exist for DuckDB, SQLite, PostgreSQL /
+   Redshift and Snowflake, with an information_schema fallback for other
+   drivers (tables, views and columns only). Schema discovery for the
+   Settings picker now also lists DuckDB, PostgreSQL, Redshift, MySQL and
+   SQL Server schemas, and SQLite databases, falling back to the connection's
+   own database and schema as before. The SQLite connector is enabled in the
+   default package. It uses the CLI's own `better-sqlite3` and opens a
+   database file read-only.
+
+Compatibility was checked the way *Backward compatibility* requires: every
+CLI fixture's compiled manifest and compile output are byte-identical to the
+build before this work, and the golden Ask replays pass without
+re-recording.
 
 ## Summary
 
@@ -146,7 +193,7 @@ Per-driver extraction, all metadata only:
     as they already read runtime-probed relations.
 - **Freshness:**
   - the snapshot fingerprint is a hash of the extracted schema;
-  - `dql catalog sync` (CLI), "Sync schema" (Settings), or a scheduled refresh
+  - `dql sync warehouse` (CLI), "Sync schema" (Settings), or a scheduled refresh
     re-extracts;
   - a dropped column or table marks the entities and relationships that use
     it **stale**, exactly as dbt freshness does today (`dbt-freshness.ts`);
@@ -264,7 +311,7 @@ check are unchanged.
   today's flow, and Settings shows the dbt source as it does now.
 - **CLI:**
   - `dql init` (detects and prints the mode);
-  - `dql catalog sync`;
+  - `dql sync warehouse`;
   - `dql model discover [--schema …]`;
   - `dql model sources add|list`.
 
@@ -339,7 +386,7 @@ backed by a test:
 
 | Phase | Scope | Effort |
 |---|---|---|
-| 1. Foundation | Modes and detection; `WarehouseCatalogSnapshotV1` and extractors for DuckDB, Snowflake, Postgres, SQLite; `warehouseProvenance`; `relation:` entities; `entityRelation()` in all readers; `dql catalog sync`; fixture, compatibility lane and golden lane | ~1 week |
+| 1. Foundation | Modes and detection; `WarehouseCatalogSnapshotV1` and extractors for DuckDB, Snowflake, Postgres, SQLite; `warehouseProvenance`; `relation:` entities; `entityRelation()` in all readers; `dql sync warehouse`; fixture, compatibility lane and golden lane | ~1 week |
 | 2. Drafting and UI | `dql model discover` (declared keys, naming, view joins, validation, draft domains); setup wizard; Modeling review of drafts; Settings → Data sources | ~1 week |
 | 3. Depth | BigQuery and Databricks extractors; query-history evidence (opt-in); native metric authoring UI; drift notifications | ~1 week |
 

@@ -1435,7 +1435,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       ...(connection?.database ?? connection?.catalog ? { defaultDatabase: connection?.database ?? connection?.catalog } : {}),
       snapshotId,
       ...(connection ? { executionTargetFingerprint: fingerprintText(connectionKey(connection)) } : {}),
-      relations: [...embeddedManifestRelations(manifest), ...(relations ?? [])],
+      relations: [...embeddedManifestRelations(manifest, deps.projectRoot), ...(relations ?? [])],
     };
   };
   /** The base source: everything the host can bind physically, per snapshot and connection. Cached; the pack projects it per request. */

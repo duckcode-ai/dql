@@ -328,11 +328,20 @@ export async function discoverWarehouseMetadataScopes(input: {
       }
     }
   } else {
-    supported = false;
-    add(
-      input.connection.catalog ?? input.connection.database ?? defaultCatalogForDriver(input.connection.driver),
-      input.connection.schema ?? defaultSchemaForDriver(input.connection.driver),
-    );
+    // Other drivers: information_schema.schemata where the driver has it
+    // (DuckDB, PostgreSQL, Redshift, MySQL, SQL Server), SQLite's attached
+    // databases, else the connection's own database and schema.
+    const listed = await listSchemasGenerically(input.executor, input.connection).catch(() => undefined);
+    if (listed && listed.length > 0) {
+      queryCount += 1;
+      for (const row of listed) add(row.catalog, row.schema);
+    } else {
+      supported = false;
+      add(
+        input.connection.catalog ?? input.connection.database ?? defaultCatalogForDriver(input.connection.driver),
+        input.connection.schema ?? defaultSchemaForDriver(input.connection.driver),
+      );
+    }
   }
 
   const scopes = Array.from(discovered.values())
@@ -414,6 +423,21 @@ export function buildWarehouseMetadataQueries(
   );
   return scope.scopes.flatMap((selected) => {
     const catalogOrDatabase = selected.catalogOrDatabase;
+    if (connection.driver === 'sqlite') {
+      // SQLite has no information_schema: each attached database is one
+      // schema, read from its sqlite_master and pragma_table_info.
+      const literal = `'${catalogOrDatabase.replace(/'/g, "''")}'`;
+      return [{
+        catalogOrDatabase,
+        sql: [
+          `SELECT ${literal} AS table_catalog, ${literal} AS table_schema, m.name AS table_name, p.name AS column_name, p.type AS data_type, p.cid + 1 AS ordinal_position`,
+          `FROM "${catalogOrDatabase.replace(/"/g, '""')}".sqlite_master AS m JOIN pragma_table_info(m.name, ${literal}) AS p`,
+          `WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%'`,
+          'ORDER BY m.name, p.cid',
+          `LIMIT ${MAX_METADATA_ROWS_PER_QUERY}`,
+        ].join('\n'),
+      }];
+    }
     const exactRelations = relationsByScope.get(normalizeIdentifierKey(catalogOrDatabase)) ?? [];
     const exactPredicate = scope.mode !== 'selected_scopes' && exactRelations.length > 0
       ? buildExactRelationPredicate(exactRelations)
@@ -665,17 +689,47 @@ function scopeKey(catalogOrDatabase: string, schema: string): string {
   return `${normalizeIdentifierKey(catalogOrDatabase)}::${normalizeIdentifierKey(schema)}`;
 }
 
+const GENERIC_SCHEMA_DISCOVERY_DRIVERS = new Set(['duckdb', 'file', 'postgresql', 'postgres', 'redshift', 'mysql', 'sqlserver', 'mssql']);
+
+async function listSchemasGenerically(
+  executor: QueryExecutor,
+  connection: ConnectionConfig,
+): Promise<Array<{ catalog: string; schema: string }> | undefined> {
+  if (connection.driver === 'sqlite') {
+    const result = await executor.executePositional('SELECT name FROM pragma_database_list', [], connection, discoveryQueryOptions());
+    return result.rows
+      .map((row) => firstRowString(row, ['name']))
+      .filter((name): name is string => Boolean(name) && name !== 'temp')
+      .map((name) => ({ catalog: name, schema: name }));
+  }
+  if (!GENERIC_SCHEMA_DISCOVERY_DRIVERS.has(connection.driver)) return undefined;
+  const result = await executor.executePositional(
+    `SELECT catalog_name, schema_name FROM information_schema.schemata LIMIT ${MAX_DISCOVERY_SCHEMAS}`,
+    [],
+    connection,
+    discoveryQueryOptions(),
+  );
+  return result.rows.flatMap((row) => {
+    const catalog = firstRowString(row, ['catalog_name', 'CATALOG_NAME']);
+    const schema = firstRowString(row, ['schema_name', 'SCHEMA_NAME']);
+    // DuckDB's built-in catalogs hold no user tables.
+    if (!catalog || !schema || ((connection.driver === 'duckdb' || connection.driver === 'file') && (catalog === 'system' || catalog === 'temp'))) return [];
+    if (schema.toLowerCase().startsWith('pg_')) return [];
+    return [{ catalog, schema }];
+  });
+}
+
 function isSystemSchema(schema: string): boolean {
   return ['information_schema', 'pg_catalog', 'sys', 'system']
     .includes(normalizeIdentifierKey(schema));
 }
 
 function defaultCatalogForDriver(driver: string): string | undefined {
-  return driver === 'duckdb' || driver === 'file' ? 'memory' : undefined;
+  return driver === 'duckdb' || driver === 'file' ? 'memory' : driver === 'sqlite' ? 'main' : undefined;
 }
 
 function defaultSchemaForDriver(driver: string): string | undefined {
-  return driver === 'duckdb' || driver === 'file' ? 'main' : undefined;
+  return driver === 'duckdb' || driver === 'file' || driver === 'sqlite' ? 'main' : undefined;
 }
 
 function normalizeRelation(value: string): string | undefined {

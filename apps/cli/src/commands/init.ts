@@ -51,7 +51,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     // Resolve the local OSS owner up front (git user.email → $USER → guest@local)
     // and persist it as identity.owner so drafts are never born "Missing owner".
     const owner = resolveLocalOwner(targetDir, { persist: false });
-    const config = buildConfig(projectName, isDbt, duckdbPath, dbtProjectDir, targetDir, owner);
+    const config = buildConfig(projectName, isDbt, duckdbPath, dbtProjectDir, targetDir, owner, flags.warehouseFirst === true);
     writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   }
 
@@ -158,6 +158,8 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     } else {
       console.log(`    Modeling: preserved existing manifest v${projectConfig.manifestVersion ?? 2} configuration`);
     }
+  } else if (projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'warehouse-first') {
+    console.log('    Modeling: manifest v3, warehouse-first (entities bind to warehouse tables; no dbt needed)');
   }
   console.log('');
   console.log('  Created:');
@@ -182,6 +184,11 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   if (isDbt) {
     console.log(`    ${step + 3}. npx dql compile .`);
     console.log(`    ${step + 4}. npx dql sync dbt .`);
+  } else if (projectConfig.modeling?.mode === 'warehouse-first') {
+    console.log(`    ${step + 3}. npx dql sync warehouse --schemas <schema>   (reads tables, columns and keys)`);
+  } else {
+    console.log('');
+    console.log('  No dbt project? `dql init --warehouse-first` models your warehouse tables directly.');
   }
   console.log('');
 
@@ -237,6 +244,7 @@ function buildConfig(
   dbtProjectDir: string | null,
   projectRoot: string,
   owner?: string,
+  warehouseFirst = false,
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {
     project: projectName,
@@ -286,6 +294,12 @@ function buildConfig(
     config.semanticLayer = {
       provider: 'dql',
     };
+    if (warehouseFirst) {
+      // RFC 0007: model the warehouse's own tables. `dql sync warehouse`
+      // reads their columns and declared keys; entities bind with `relation:`.
+      config.manifestVersion = 3;
+      config.modeling = { mode: 'warehouse-first' };
+    }
   }
 
   return config;

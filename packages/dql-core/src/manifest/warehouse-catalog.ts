@@ -1,8 +1,8 @@
 /**
  * The warehouse catalog snapshot (RFC 0007, warehouse-first modeling).
  *
- * A team without a dbt project models its warehouse directly: `dql catalog
- * sync` reads the selected schemas' tables, views, columns, comments, declared
+ * A team without a dbt project models its warehouse directly: `dql sync
+ * warehouse` reads the selected schemas' tables, views, columns, comments, declared
  * keys and view definitions into one snapshot, and modeling entities bind to
  * those relations with `relation:`. The snapshot holds metadata only, never a
  * row value. It is written deterministically (sorted, and fingerprinted without
@@ -132,6 +132,8 @@ export function resolveWarehouseRelation(
   snapshot: Pick<WarehouseCatalogSnapshotV1, 'relations'>,
   reference: string,
 ): { relation?: WarehouseCatalogRelationV1; ambiguous?: WarehouseCatalogRelationV1[] } {
+  const byId = snapshot.relations.find((relation) => relation.id === reference.trim().toLowerCase());
+  if (byId) return { relation: byId };
   const parts = reference.split('.').map(lower).filter(Boolean);
   if (parts.length === 0) return {};
   const matches = snapshot.relations.filter((relation) => {

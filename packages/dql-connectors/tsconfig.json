@@ -15,7 +15,6 @@
     "src/drivers/mysql.ts",
     "src/drivers/postgresql.ts",
     "src/drivers/redshift.ts",
-    "src/drivers/sqlite.ts",
     "src/drivers/trino.ts"
   ]
 }

@@ -91,6 +91,7 @@ const HELP = `
     dql compile [path]              Generate project manifest (dql-manifest.json)
     dql sync dbt [path]             Diff, compile, and reindex dbt-backed DQL state
     dql sync dbt --check [path]     Report dbt/DQL drift without writing
+    dql sync warehouse [path]       Read warehouse schemas (tables, columns, keys) — no dbt needed
     dql model list|validate [path]  Inspect or validate dbt-first Domain Packages
     dql model discover [path]       Preview deterministic dbt domain proposals
     dql model apply-discovery [path] --apply

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildManifest, collectInputFiles, modelingModeOf } from './builder.js';
+import { isWarehouseNodeId, loadWarehouseNodeAuthoringDetail, previewModelingChange } from './dbt-first-authoring.js';
 import {
   WAREHOUSE_CATALOG_PATH,
   normalizeWarehouseCatalog,
@@ -57,6 +58,8 @@ describe('the warehouse catalog snapshot', () => {
     expect(resolveWarehouseRelation(CATALOG, 'customers').ambiguous).toHaveLength(2);
     expect(resolveWarehouseRelation(CATALOG, 'sales.customers').relation?.id).toBe('warehouse.acme.sales.customers');
     expect(resolveWarehouseRelation(CATALOG, 'missing').relation).toBeUndefined();
+    // The stable id resolves too: authoring tools pass it.
+    expect(resolveWarehouseRelation(CATALOG, 'warehouse.acme.archive.customers').relation?.relation).toBe('ACME.ARCHIVE.CUSTOMERS');
   });
 });
 
@@ -108,7 +111,7 @@ describe('warehouse-first modeling (RFC 0007)', () => {
     expect(messages).toMatch(/exactly one of `dbt_model` or `relation`/);
     rmSync(join(projectRoot, WAREHOUSE_CATALOG_PATH));
     const missing = (buildManifest({ projectRoot }).diagnostics ?? []).map((item) => item.message).join('\n');
-    expect(missing).toMatch(/run `dql catalog sync`/);
+    expect(missing).toMatch(/run `dql sync warehouse`/);
   });
 
   it('a dbt-first project that authors `relation:` gets a clear message and no warehouse binding', () => {
@@ -128,6 +131,25 @@ describe('warehouse-first modeling (RFC 0007)', () => {
     expect(modelingModeOf({ manifestVersion: 3, modeling: { mode: 'dbt-first' } })).toBe('dbt-first');
     expect(modelingModeOf({ manifestVersion: 2, modeling: { mode: 'warehouse-first' } })).toBeUndefined();
     expect(modelingModeOf({})).toBeUndefined();
+  });
+
+  it('authors a warehouse relation as `relation:` and describes it from the snapshot', () => {
+    expect(isWarehouseNodeId('warehouse.acme.sales.orders')).toBe(true);
+    expect(isWarehouseNodeId('model.acme.orders')).toBe(false);
+    const preview = previewModelingChange(projectRoot, { operation: 'upsert_entity', value: { id: 'archived_customer', domain: 'sales', dbtModel: 'warehouse.acme.archive.customers' } });
+    const after = preview.patches.map((patch) => patch.after).join('\n');
+    expect(after).toContain('relation: ACME.ARCHIVE.CUSTOMERS');
+    expect(after).not.toContain('dbt_model: warehouse.');
+    const dbtPreview = previewModelingChange(projectRoot, { operation: 'upsert_entity', value: { id: 'shipment', domain: 'sales', dbtModel: 'model.acme.shipments' } });
+    expect(dbtPreview.patches.map((patch) => patch.after).join('\n')).toContain('dbt_model: model.acme.shipments');
+    expect(loadWarehouseNodeAuthoringDetail(projectRoot, 'warehouse.acme.sales.orders')).toMatchObject({
+      resourceType: 'warehouse',
+      relation: 'ACME.SALES.ORDERS',
+      description: 'One row per order.',
+      dqlMeta: { keys: ['ORDER_ID'] },
+      columns: [{ name: 'ORDER_ID', type: 'VARCHAR', tests: [] }, { name: 'CUSTOMER_ID', type: 'VARCHAR', tests: [] }, { name: 'AMOUNT', type: 'VARCHAR', tests: [] }],
+    });
+    expect(loadWarehouseNodeAuthoringDetail(projectRoot, 'warehouse.acme.sales.missing')).toBeUndefined();
   });
 
   it('writes the snapshot where the builder reads it', () => {

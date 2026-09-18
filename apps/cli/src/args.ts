@@ -31,6 +31,8 @@ export interface CLIFlags {
   skipTests: boolean;
   save?: boolean;
   force?: boolean;
+  /** `dql init --warehouse-first`: model the warehouse directly, no dbt (RFC 0007). */
+  warehouseFirst?: boolean;
   http?: boolean;
   /** `dql certify --from-draft <path>` — promote a Tier-2 draft to certified. */
   fromDraft?: string;
@@ -223,6 +225,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.skipTests = true;
     } else if (arg === '--save') {
       flags.save = true;
+    } else if (arg === '--warehouse-first') {
+      flags.warehouseFirst = true;
     } else if (arg === '--force' || arg === '-f') {
       flags.force = true;
     } else if (arg === '--http') {

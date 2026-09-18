@@ -1,5 +1,6 @@
 /**
  * `dql sync dbt` — detect dbt manifest changes and refresh the DQL cache.
+ * `dql sync warehouse` — read the warehouse's schemas into DQL (no dbt needed).
  *
  * Usage:
  *   dql sync dbt [path]                   Sync dbt manifest for the project at path
@@ -46,8 +47,13 @@ export async function runSync(
   rest: string[],
   flags: CLIFlags,
 ): Promise<void> {
+  if (subcommand === 'warehouse') {
+    await runSyncWarehouse(rest, flags);
+    return;
+  }
   if (subcommand !== 'dbt') {
     console.error('Usage: dql sync dbt [path] [--watch] [--clear] [--dbt-manifest <path>]');
+    console.error('       dql sync warehouse [path] [--connection <name>] [--schemas a,b] [--database <name>]');
     process.exitCode = 1;
     return;
   }
@@ -172,6 +178,72 @@ export async function runSync(
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
   });
+}
+
+/**
+ * `dql sync warehouse [path] [--connection <name>] [--schemas a,b] [--database <name>]`
+ *
+ * Reads the selected schemas' tables, columns, comments, declared keys and
+ * view definitions — metadata only, never rows. In warehouse-first or hybrid
+ * modeling this writes `.dql/warehouse-catalog.json`, which Modeling binds
+ * entities to; in any project it refreshes the schema metadata Ask retrieves
+ * from. `--schemas` saves the selection, as Settings → Sync schema does.
+ */
+async function runSyncWarehouse(rest: string[], flags: CLIFlags): Promise<void> {
+  const valueOf = (name: string) => {
+    const index = rest.indexOf(name);
+    return index >= 0 ? rest[index + 1] : undefined;
+  };
+  const valueFlags = new Set(['--schemas', '--database', '--connection']);
+  const pathArg = rest.find((arg, index) => !arg.startsWith('-') && !valueFlags.has(rest[index - 1] ?? ''));
+  const projectRoot = resolve(pathArg ?? '.');
+  if (!existsSync(join(projectRoot, 'dql.config.json'))) {
+    console.error('No DQL project found (missing dql.config.json). Run from a project root or pass a path.');
+    process.exitCode = 1;
+    return;
+  }
+  const schemas = (valueOf('--schemas') ?? '').split(',').map((schema) => schema.trim()).filter(Boolean);
+  const connectionId = valueOf('--connection') ?? (flags.connection || undefined);
+  const { syncProjectWarehouse } = await import('../local-runtime.js');
+  const { QueryExecutor } = await import('@duckcodeailabs/dql-connectors');
+  const executor = new QueryExecutor();
+  try {
+    const result = await syncProjectWarehouse(projectRoot, {
+      ...(connectionId ? { connectionId } : {}),
+      ...(valueOf('--database') ? { database: valueOf('--database') } : {}),
+      ...(schemas.length ? { schemas } : {}),
+      executor,
+    });
+    const scopes = result.scope.scopes.map((scope) => `${scope.catalogOrDatabase}: ${scope.schemas.join(', ')}`).join('; ');
+    if (flags.format === 'json') {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`\n  DQL Sync — warehouse (connection "${result.connectionId}")`);
+      console.log('  ' + '='.repeat(50));
+      console.log(`  Schemas: ${scopes}`);
+      console.log(`  ✓ Schema metadata for Ask: ${result.metadataRelations} relation(s).`);
+      const catalog = result.warehouseCatalog;
+      if (!catalog) {
+        console.log('  Modeling reads dbt in this project, so no warehouse catalog was written.');
+        console.log('  To model the warehouse directly, set "manifestVersion": 3 and "modeling": { "mode": "warehouse-first" } in dql.config.json.');
+      } else if (catalog.error) {
+        console.error(`  ✗ Warehouse catalog: ${catalog.error}`);
+        process.exitCode = 1;
+      } else if (catalog.skipped) {
+        console.log(`  Warehouse catalog unchanged: ${catalog.skipped}.`);
+      } else {
+        console.log(`  ✓ Warehouse catalog: ${catalog.relations} relation(s) → ${relative(projectRoot, catalog.path)}`);
+        for (const warning of catalog.warnings ?? []) console.log(`    ! ${warning}`);
+        console.log('  Next: `dql model discover` drafts entities and relationships from it for review.');
+      }
+    }
+    if (result.warehouseCatalog?.error) process.exitCode = 1;
+  } catch (error) {
+    console.error(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  } finally {
+    await executor.disconnect().catch(() => undefined);
+  }
 }
 
 function reportDiff(opts: {
