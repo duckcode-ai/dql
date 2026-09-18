@@ -70,7 +70,7 @@ import {
   type RuntimeSchemaTable,
 } from '@duckcodeailabs/dql-agent';
 import { buildProjectVocabulary, buildVocabularySource, embeddedManifestRelations, normalizeRelationName, type VocabularySourceInput } from './vocabulary-source.js';
-import { certifiedJoinViolations, classifySqlJoins, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, modelingRelationshipEdges, sameRelation, type LedgerJoin } from './join-relationships.js';
+import { certifiedJoinViolations, classifySqlJoins, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, modelingRelationshipEdges, sameRelation, sharedParentShortcuts, type LedgerJoin } from './join-relationships.js';
 
 /**
  * THE ASK PIPELINE HOST.
@@ -2099,6 +2099,9 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         const joinUses = classifySqlJoins(joinKeyPairs(sql), relationshipEdges);
         const certifiedFailures = certifiedJoinViolations(sql, joinUses);
         failures.push(...certifiedFailures);
+        // Two tables linked only by a parent they both reference are not
+        // linked by it when the team modeled how they connect.
+        failures.push(...sharedParentShortcuts(joinUses, relationshipEdges));
         state.hostJoins = ledgerJoins(joinUses);
         const certifiedUses = joinUses.filter((use) => use.relationship?.level === 'certified');
         if (aggregatesRows(sql)) {
@@ -2122,7 +2125,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         }
         // The same verdicts, recorded as checks for the run views.
         const attempt = ++state.checkRound;
-        const joinFailure = failures.find((message) => /repeats the key on both sides|across its join to/.test(message));
+        const joinFailure = failures.find((message) => /repeats the key on both sides|across its join to|which both only reference/.test(message));
         const statedFailure = failures.find((message) => /from the question$/.test(message));
         state.hostChecks.push(
           { id: 'catalog_columns', label: 'Uses only tables and columns the project lists', passed: true, message: 'every table and column it reads was inspected', attempt },

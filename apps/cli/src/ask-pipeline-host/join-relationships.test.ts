@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { joinKeyPairs } from '@duckcodeailabs/dql-agent';
-import { certifiedJoinViolations, classifySqlJoins, joinableRelations, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, sameRelation, type ModelingRelationshipEdge } from './join-relationships.js';
+import { certifiedJoinViolations, classifySqlJoins, joinableRelations, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, sameRelation, sharedParentShortcuts, type ModelingRelationshipEdge } from './join-relationships.js';
 
 const certified: ModelingRelationshipEdge = {
   relationshipId: 'commerce::relationship::orders_to_customers', name: 'orders_to_customers',
@@ -140,5 +140,43 @@ describe('marker tables: a key-only side of a one-to-one relationship', () => {
     expect(onlyMarker.map((item) => item.base)).toEqual(['main.claim_amount']);
     expect(markerTables(['"db"."main"."policy"', '"db"."main"."policy_extra"'], [edge('policy_extra', 'policy', 'policy_id')], columnsOf)).toEqual([]);
     expect(markerTables(['"db"."main"."loss_payment"'], [edge('loss_payment', 'claim_amount', 'Claim_Amount_Identifier', 'many_to_one')], columnsOf)).toEqual([]);
+  });
+});
+
+describe('tables linked only by a parent they both reference', () => {
+  // A ticket is raised against a service contract through ticket_contracts (a
+  // bridge); tickets and contracts also both name the asset involved. Asset
+  // edges are declared first, so a search blind to direction would tie on them.
+  const edge = (from: string, to: string, keys: Array<{ from: string; to: string }>): ModelingRelationshipEdge => ({
+    relationshipId: `svc::relationship::${from}_to_${to}`, name: `${from}_to_${to}`, fromRelation: `dev.${from}`, toRelation: `dev.${to}`, keys, level: 'certified', cardinality: 'many_to_one',
+  });
+  const edges = [
+    edge('tickets', 'assets', [{ from: 'asset_id', to: 'asset_id' }]),
+    edge('contracts', 'assets', [{ from: 'asset_id', to: 'asset_id' }]),
+    edge('ticket_contracts', 'tickets', [{ from: 'ticket_id', to: 'ticket_id' }]),
+    edge('ticket_contracts', 'contracts', [{ from: 'contract_id', to: 'contract_id' }]),
+    edge('contracts', 'accounts', [{ from: 'account_id', to: 'account_id' }]),
+    edge('ticket_amounts', 'tickets', [{ from: 'ticket_id', to: 'ticket_id' }]),
+  ];
+
+  it('routes through the bridge, not up to the shared asset and back down', () => {
+    const { paths } = modeledJoinPaths(['dev.tickets', 'dev.accounts'], edges);
+    expect(paths[0]!.through).toEqual(['dev.ticket_contracts', 'dev.contracts']);
+  });
+
+  it('flags a join through the shared parent, and one on the two references directly, naming the modeled route', () => {
+    const through = 'SELECT a.account_id, SUM(m.amount) FROM dev.ticket_amounts m JOIN dev.tickets t ON m.ticket_id = t.ticket_id JOIN dev.assets s ON t.asset_id = s.asset_id JOIN dev.contracts c ON c.asset_id = s.asset_id JOIN dev.accounts a ON c.account_id = a.account_id GROUP BY 1';
+    const direct = 'SELECT a.account_id, SUM(m.amount) FROM dev.ticket_amounts m JOIN dev.tickets t ON m.ticket_id = t.ticket_id JOIN dev.contracts c ON c.asset_id = t.asset_id JOIN dev.accounts a ON c.account_id = a.account_id GROUP BY 1';
+    for (const sql of [through, direct]) {
+      const failures = sharedParentShortcuts(classifySqlJoins(joinKeyPairs(sql), edges), edges);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatch(/relates (tickets to contracts|contracts to tickets) through assets, which both only reference.*tickets -> ticket_contracts -> contracts|contracts -> ticket_contracts -> tickets/);
+    }
+  });
+
+  it('passes the modeled route, and a shared parent that is the only modeled connection', () => {
+    const modeled = 'SELECT a.account_id, SUM(m.amount) FROM dev.ticket_amounts m JOIN dev.tickets t ON m.ticket_id = t.ticket_id JOIN dev.ticket_contracts tc ON tc.ticket_id = t.ticket_id JOIN dev.contracts c ON c.contract_id = tc.contract_id JOIN dev.accounts a ON c.account_id = a.account_id GROUP BY 1';
+    // ticket_amounts and ticket_contracts both reference tickets, and nothing else connects them.
+    expect(sharedParentShortcuts(classifySqlJoins(joinKeyPairs(modeled), edges), edges)).toEqual([]);
   });
 });

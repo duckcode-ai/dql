@@ -193,6 +193,21 @@ export interface ModeledJoinPath {
 // a three-hop certified route, so certified knowledge wins whenever it reaches
 // within the hop limit. A stale certification counts as a draft.
 const HOP_COST: Record<RelationshipJoinLevel, number> = { certified: 1, validated: 1.5, stale: 3.5, draft: 3.5 };
+// A route that climbs to a table and comes back down (claim -> insurable object
+// <- coverage detail) relates the two ends only by a parent they share: every
+// claim on an object meets every coverage on it. It is kept as a last resort,
+// costlier than any route of direct links.
+const SHARED_PARENT_COST = 10;
+
+/** Walking an edge toward its "one" side climbs; toward its "many" side descends. */
+function stepDirection(edge: ModelingRelationshipEdge, forward: boolean): 'up' | 'down' | 'level' {
+  const cardinality = edge.cardinality.toLowerCase();
+  if (cardinality === 'one_to_one') return 'level';
+  if (cardinality === 'many_to_one') return forward ? 'up' : 'down';
+  if (cardinality === 'one_to_many') return forward ? 'down' : 'up';
+  if (cardinality === 'many_to_many') return 'down';
+  return 'level';
+}
 
 /**
  * THE TABLES BETWEEN. A question names the tables it is about (claims,
@@ -231,29 +246,7 @@ export function modeledJoinPaths(
   const chosenNodes = [...new Set(chosen.map(nodeOf).filter((node): node is string => Boolean(node)))];
   const isChosen = (node: string) => chosenNodes.includes(node);
 
-  const cheapest = (start: string, goal: string): { cost: number; nodes: string[]; edges: ModelingRelationshipEdge[] } | undefined => {
-    // Dijkstra over a small graph; ties keep the first-declared relationship.
-    const best = new Map<string, { cost: number; hops: number; nodes: string[]; edges: ModelingRelationshipEdge[] }>([[start, { cost: 0, hops: 0, nodes: [start], edges: [] }]]);
-    const open = [start];
-    while (open.length > 0) {
-      open.sort((a, b) => best.get(a)!.cost - best.get(b)!.cost);
-      const node = open.shift()!;
-      const here = best.get(node)!;
-      if (node === goal) return here;
-      if (here.hops >= maxHops) continue;
-      for (const { to, edge } of neighbours.get(node) ?? []) {
-        // A route runs through tables nobody chose; it never detours through another chosen table.
-        if (to !== goal && isChosen(to)) continue;
-        if (here.nodes.includes(to)) continue;
-        const cost = here.cost + HOP_COST[edge.level];
-        const known = best.get(to);
-        if (known && known.cost <= cost) continue;
-        best.set(to, { cost, hops: here.hops + 1, nodes: [...here.nodes, to], edges: [...here.edges, edge] });
-        if (!open.includes(to)) open.push(to);
-      }
-    }
-    return undefined;
-  };
+  const cheapest = (start: string, goal: string) => cheapestRoute(start, goal, neighbours, maxHops, (node) => node !== goal && isChosen(node));
 
   const routes: Array<{ cost: number; path: ModeledJoinPath }> = [];
   for (let i = 0; i < chosenNodes.length; i += 1) {
@@ -273,6 +266,111 @@ export function modeledJoinPaths(
     paths.push(path);
   }
   return { paths, added };
+}
+
+type Neighbours = Map<string, Array<{ to: string; edge: ModelingRelationshipEdge }>>;
+
+/**
+ * Dijkstra over a small graph; ties keep the first-declared relationship. The
+ * search state is the table and whether the route has climbed yet, so a route
+ * that climbs and then descends pays SHARED_PARENT_COST and loses to any route
+ * of direct links that reaches.
+ */
+function cheapestRoute(start: string, goal: string, neighbours: Neighbours, maxHops: number, blocked: (node: string) => boolean): { cost: number; nodes: string[]; edges: ModelingRelationshipEdge[]; sharedParent: boolean } | undefined {
+  type Here = { node: string; climbed: boolean; cost: number; hops: number; nodes: string[]; edges: ModelingRelationshipEdge[]; sharedParent: boolean };
+  const keyOf = (node: string, climbed: boolean) => `${node}|${climbed ? 1 : 0}`;
+  const best = new Map<string, Here>([[keyOf(start, false), { node: start, climbed: false, cost: 0, hops: 0, nodes: [start], edges: [], sharedParent: false }]]);
+  const open = [keyOf(start, false)];
+  while (open.length > 0) {
+    open.sort((a, b) => best.get(a)!.cost - best.get(b)!.cost);
+    const here = best.get(open.shift()!)!;
+    if (here.node === goal) return { cost: here.cost, nodes: here.nodes, edges: here.edges, sharedParent: here.sharedParent };
+    if (here.hops >= maxHops) continue;
+    for (const { to, edge } of neighbours.get(here.node) ?? []) {
+      // A route runs through tables nobody chose; it never detours through another chosen table.
+      if (blocked(to)) continue;
+      if (here.nodes.includes(to)) continue;
+      const direction = stepDirection(edge, edge.fromRelation === here.node);
+      const descendsAfterClimb = here.climbed && direction === 'down';
+      const cost = here.cost + HOP_COST[edge.level] + (descendsAfterClimb ? SHARED_PARENT_COST : 0);
+      const climbed = here.climbed || direction === 'up';
+      const key = keyOf(to, climbed);
+      const known = best.get(key);
+      if (known && known.cost <= cost) continue;
+      best.set(key, { node: to, climbed, cost, hops: here.hops + 1, nodes: [...here.nodes, to], edges: [...here.edges, edge], sharedParent: here.sharedParent || descendsAfterClimb });
+      if (!open.includes(key)) open.push(key);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * SHARED-PARENT SHORTCUTS. Two tables that both only reference a third (a
+ * claim and a coverage detail each name the insured object) are not linked by
+ * it: joined through it, or on the two references directly, every claim on
+ * an object meets every coverage on it, and totals land on coverages the claim
+ * was never made against. When the Modeling map connects the two tables by a
+ * route of certified or validated direct links, the statement must follow
+ * that route. One plain-language failure per such join; none when the shared
+ * parent is the only modeled connection (then it is what the team modeled).
+ */
+export function sharedParentShortcuts(uses: SqlJoinUse[], edges: ModelingRelationshipEdge[]): string[] {
+  // The parents a table references, with the columns it references them by.
+  const upTo = (relation: string) => edges.flatMap((edge) => {
+    const cardinality = edge.cardinality.toLowerCase();
+    if (cardinality === 'many_to_one' && sameRelation(edge.fromRelation, relation)) return [{ parent: edge.toRelation, columns: new Set(edge.keys.map((key) => bare(key.from))) }];
+    if (cardinality === 'one_to_many' && sameRelation(edge.toRelation, relation)) return [{ parent: edge.fromRelation, columns: new Set(edge.keys.map((key) => bare(key.to))) }];
+    return [];
+  });
+  const shortcuts: Array<{ left: string; right: string; parent: string }> = [];
+  const note = (left: string, right: string, parent: string) => {
+    if (sameRelation(left, right)) return;
+    if (!shortcuts.some((item) => (sameRelation(item.left, left) && sameRelation(item.right, right)) || (sameRelation(item.left, right) && sameRelation(item.right, left)))) shortcuts.push({ left, right, parent });
+  };
+  // On the two references directly: left.ref = right.ref, both keys of one parent.
+  for (const use of uses) {
+    if (use.matchesRelationship) continue;
+    const [left, right] = use.relations;
+    for (const leftParent of upTo(left)) {
+      for (const rightParent of upTo(right)) {
+        if (!sameRelation(leftParent.parent, rightParent.parent)) continue;
+        if (use.keys.some((key) => leftParent.columns.has(bare(key.from)) && rightParent.columns.has(bare(key.to)))) note(left, right, leftParent.parent);
+      }
+    }
+  }
+  // Through the parent itself: left -> parent <- right, each on its own reference.
+  const climbs = uses.flatMap((use) => {
+    const cardinality = use.relationship?.cardinality.toLowerCase();
+    if (!use.matchesRelationship || !use.relationship) return [];
+    if (cardinality === 'many_to_one') return [{ child: use.relationship.fromRelation, parent: use.relationship.toRelation, relations: use.relations }];
+    if (cardinality === 'one_to_many') return [{ child: use.relationship.toRelation, parent: use.relationship.fromRelation, relations: use.relations }];
+    return [];
+  });
+  for (let i = 0; i < climbs.length; i += 1) {
+    for (let j = i + 1; j < climbs.length; j += 1) {
+      if (sameRelation(climbs[i]!.parent, climbs[j]!.parent)) note(climbs[i]!.relations.find((relation) => sameRelation(relation, climbs[i]!.child)) ?? climbs[i]!.child, climbs[j]!.relations.find((relation) => sameRelation(relation, climbs[j]!.child)) ?? climbs[j]!.child, climbs[i]!.parent);
+    }
+  }
+  if (shortcuts.length === 0) return [];
+  const neighbours: Neighbours = new Map();
+  for (const edge of edges) {
+    if (edge.level !== 'certified' && edge.level !== 'validated') continue;
+    if (!neighbours.has(edge.fromRelation)) neighbours.set(edge.fromRelation, []);
+    if (!neighbours.has(edge.toRelation)) neighbours.set(edge.toRelation, []);
+    neighbours.get(edge.fromRelation)!.push({ to: edge.toRelation, edge });
+    neighbours.get(edge.toRelation)!.push({ to: edge.fromRelation, edge });
+  }
+  const nodeOf = (relation: string) => [...neighbours.keys()].find((node) => sameRelation(node, relation));
+  return shortcuts.flatMap(({ left, right, parent }) => {
+    const start = nodeOf(left);
+    const goal = nodeOf(right);
+    if (!start || !goal) return [];
+    const route = cheapestRoute(start, goal, neighbours, 3, () => false);
+    if (!route || route.sharedParent) return [];
+    const name = (relation: string) => relation.split('.').pop()!.replace(/["`\[\]]/g, '');
+    const shown = route.nodes.map(name).join(' -> ');
+    return [`it relates ${name(left)} to ${name(right)} through ${name(parent)}, which both only reference, so each ${name(left)} row meets every ${name(right)} row of the same ${name(parent)}; the Modeling map connects them as ${shown}: join along that route`];
+  });
 }
 
 /** A table that only marks rows of another: it holds nothing but the one-to-one key. */
