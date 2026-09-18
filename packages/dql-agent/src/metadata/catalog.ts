@@ -5278,19 +5278,32 @@ function addSemanticMetricDatasetSourceObjects(
   const metricObjects = [...objects.values()].filter((object) => object.objectType === 'semantic_metric');
   const dimensionObjects = [...objects.values()].filter((object) => object.objectType === 'semantic_dimension');
   const modelsByName = new Map(semanticLayer.listSemanticModels().map((model) => [model.name, model]));
+  // Index once, look up per object: a scan of every metric for every metric
+  // object is quadratic and took minutes on a 10,000-metric catalog.
+  const metricsByIdentity = new Map<string, Set<SemanticMetricListing>>();
+  for (const metric of semanticLayer.listMetrics(undefined, { includeMeasures: false, includeVariants: true })) {
+    for (const identity of semanticMetricIdentities(metric)) {
+      const bucket = metricsByIdentity.get(identity) ?? new Set<SemanticMetricListing>();
+      bucket.add(metric);
+      metricsByIdentity.set(identity, bucket);
+    }
+  }
+  const dimensionsByIdentity = indexMetadataObjectsByIdentity(dimensionObjects);
   const candidates: SemanticDatasetSourceCandidate[] = [];
   for (const metricObject of metricObjects) {
     const capability = normalizeMetricCapabilityContract(metricObject.payload?.analyticalCapability);
     if (!capability || !metricIdentityMatchesObject(capability.metricId, metricObject)) continue;
-    const layerMetrics = semanticLayer.listMetrics(undefined, { includeMeasures: false, includeVariants: true })
-      .filter((metric) => metadataObjectMatchesSemanticMetric(metricObject, metric));
-    if (layerMetrics.length !== 1) continue;
-    const metric = layerMetrics[0]!;
+    const layerMetrics = new Set<SemanticMetricListing>();
+    for (const identity of metadataObjectIdentities(metricObject)) {
+      for (const metric of metricsByIdentity.get(identity) ?? []) layerMetrics.add(metric);
+    }
+    if (layerMetrics.size !== 1) continue;
+    const metric = [...layerMetrics][0]!;
     const model = metric.cube ? modelsByName.get(metric.cube) : undefined;
     // A semantic metric without one exact model cannot be represented as a
     // field dataset. It remains available to Ask through its existing path.
     if (!model) continue;
-    const fields = semanticDatasetFieldsForCapability(capability, dimensionObjects);
+    const fields = semanticDatasetFieldsForCapability(capability, dimensionsByIdentity);
     const domain = metricObject.domain ?? metric.domain;
     const lifecycle = semanticSourceLifecycle(metricObject);
     const semanticRoute = capability.executionCapabilities.find((route) => route.route === 'semantic');
@@ -5359,13 +5372,22 @@ function splitCompatibleSemanticCandidates(
   candidates: SemanticDatasetSourceCandidate[],
 ): SemanticDatasetSourceCandidate[][] {
   const sorted = [...candidates].sort((left, right) => left.capability.metricId.localeCompare(right.capability.metricId));
-  const groups: SemanticDatasetSourceCandidate[][] = [];
+  // Every member of a group agrees on each field name it has, so the first
+  // field seen per name stands for the whole group. Checking a candidate
+  // against that merged map is the same test as checking it against every
+  // member, without the quadratic cost.
+  const groups: Array<{ members: SemanticDatasetSourceCandidate[]; fields: SemanticDatasetFieldProjection[] }> = [];
   for (const candidate of sorted) {
-    const compatible = groups.find((group) => group.every((existing) => semanticFieldsCompatible(existing.fields, candidate.fields)));
-    if (compatible) compatible.push(candidate);
-    else groups.push([candidate]);
+    const compatible = groups.find((group) => semanticFieldsCompatible(group.fields, candidate.fields));
+    if (compatible) {
+      compatible.members.push(candidate);
+      const known = new Set(compatible.fields.map((field) => field.name.trim().toLowerCase()));
+      for (const field of candidate.fields) if (!known.has(field.name.trim().toLowerCase())) compatible.fields.push(field);
+    } else {
+      groups.push({ members: [candidate], fields: [...candidate.fields] });
+    }
   }
-  return groups;
+  return groups.map((group) => group.members);
 }
 
 function semanticFieldsCompatible(
@@ -5525,7 +5547,7 @@ function datasetFormatForSemanticMetric(
 
 function semanticDatasetFieldsForCapability(
   capability: MetricCapabilityContract,
-  dimensionObjects: MetadataObject[],
+  dimensionsByIdentity: ReadonlyMap<string, MetadataObject[]>,
 ): SemanticDatasetFieldProjection[] {
   const fields: SemanticDatasetFieldProjection[] = [];
   const seenNames = new Set<string>();
@@ -5536,7 +5558,7 @@ function semanticDatasetFieldsForCapability(
     ...capability.timeDimensions.map((dimension) => ({ id: dimension.dimensionId, time: dimension })),
   ];
   for (const required of dimensions) {
-    const matches = dimensionObjects.filter((object) => metricIdentityMatchesObject(required.id, object));
+    const matches = dimensionsByIdentity.get(required.id.trim().toLowerCase()) ?? [];
     if (matches.length !== 1) continue;
     const object = matches[0]!;
     const payload = object.payload ?? {};
@@ -5574,6 +5596,43 @@ function metadataObjectMatchesSemanticMetric(
   const candidates = [metric.name, metric.cube ? `${metric.cube}.${metric.name}` : undefined, metric.source?.objectId]
     .filter((value): value is string => Boolean(value?.trim()));
   return candidates.some((candidate) => metricIdentityMatchesObject(candidate, object));
+}
+
+type SemanticMetricListing = ReturnType<SemanticLayer['listMetrics']>[number];
+
+/** Lower-cased identities a semantic layer metric answers to (see metadataObjectMatchesSemanticMetric). */
+function semanticMetricIdentities(metric: SemanticMetricListing): string[] {
+  return [metric.name, metric.cube ? `${metric.cube}.${metric.name}` : undefined, metric.source?.objectId]
+    .map((value) => value?.trim().toLowerCase())
+    .filter((value): value is string => Boolean(value));
+}
+
+/** Lower-cased identities a catalog object answers to (see metricIdentityMatchesObject). */
+function metadataObjectIdentities(object: MetadataObject): string[] {
+  const payload = object.payload ?? {};
+  return [
+    object.objectKey,
+    object.fullName,
+    object.name,
+    stringValue(payload.qualifiedId),
+    stringValue(payload.registryQualifiedId),
+    stringValue(payload.registryReference),
+    stringValue(payload.sourceNativeId),
+    stringValue(payload.localId),
+    ...stringArrayFromPayload(payload.aliases),
+  ].map((value) => value?.trim().toLowerCase()).filter((value): value is string => Boolean(value));
+}
+
+function indexMetadataObjectsByIdentity(objects: MetadataObject[]): Map<string, MetadataObject[]> {
+  const index = new Map<string, MetadataObject[]>();
+  for (const object of objects) {
+    for (const identity of new Set(metadataObjectIdentities(object))) {
+      const bucket = index.get(identity);
+      if (bucket) bucket.push(object);
+      else index.set(identity, [object]);
+    }
+  }
+  return index;
 }
 
 function metricIdentityMatchesObject(identity: string, object: MetadataObject): boolean {
