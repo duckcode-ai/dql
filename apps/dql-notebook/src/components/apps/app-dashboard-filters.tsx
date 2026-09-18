@@ -15,7 +15,7 @@ type DashboardFilter = NonNullable<DashboardDocumentResponse['dashboard']['filte
 type DashboardDatasetBinding = NonNullable<DashboardDocumentResponse['dashboard']['datasets']>[number];
 
 /** The Dataset field a filter's options come from: its first binding on this page. */
-function datasetOptionSource(filter: DashboardFilter, datasets: DashboardDatasetBinding[] | undefined): { sourceId: string; field: string } | undefined {
+export function datasetOptionSource(filter: DashboardFilter, datasets: DashboardDatasetBinding[] | undefined): { sourceId: string; field: string } | undefined {
   for (const [datasetId, binding] of Object.entries(filter.datasetBindings ?? {})) {
     const dataset = datasets?.find((candidate) => candidate.id === datasetId);
     if (dataset) return { sourceId: dataset.sourceId, field: binding.field };

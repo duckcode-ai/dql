@@ -14,7 +14,8 @@ describe('App Studio 2.0 styles (UI-022, E2E-020)', () => {
     expect(APP_STUDIO_V2_STYLES).toContain('.source-add-view');
     expect(APP_STUDIO_V2_STYLES).not.toContain('.studio-add-steps');
     expect(APP_STUDIO_V2_STYLES).not.toContain('.source-prompt');
-    expect(APP_STUDIO_V2_STYLES).toContain('.studio-canvas-label button');
+    expect(APP_STUDIO_V2_STYLES).toContain('.add-tile {');
+    expect(APP_STUDIO_V2_STYLES).not.toContain('.studio-canvas-label');
   });
 
   it('supports one responsive decision-first launcher without an overlapping policy row', () => {
@@ -75,12 +76,19 @@ describe('App Studio 2.0 styles (UI-022, E2E-020)', () => {
   });
 
   it('keeps the desktop inspector scrollable and shrink-safe without changing the compact overlay', () => {
-    expect(APP_STUDIO_V2_STYLES).toContain('grid-template-columns:300px minmax(0,1fr) clamp(280px,24vw,360px)');
-    expect(APP_STUDIO_V2_STYLES).toContain('overflow-y:auto; overflow-x:hidden;');
+    // Data panel · page · a right column that exists only for a selected tile or AI.
+    expect(APP_STUDIO_V2_STYLES).toContain('grid-template-columns:272px minmax(0,1fr) auto');
+    expect(APP_STUDIO_V2_STYLES).toContain('.studio-right > .inspector-body { flex:1; min-height:0; overflow-y:auto;');
+    expect(APP_STUDIO_V2_STYLES).toContain('.inspector-tabs {');
     expect(APP_STUDIO_V2_STYLES).toContain('.inspector-body { min-width:0; max-width:100%;');
     expect(APP_STUDIO_V2_STYLES).toContain('.inspector-body input, .inspector-body textarea, .inspector-body select, .inspector-body button { min-width:0; max-width:100%;');
     expect(APP_STUDIO_V2_STYLES).toContain('overflow-wrap:anywhere;');
     expect(APP_STUDIO_V2_STYLES).toContain('@media (max-width:1240px)');
-    expect(APP_STUDIO_V2_STYLES).toContain('.studio-right.has-selection { display:block; position:fixed;');
+    expect(APP_STUDIO_V2_STYLES).toContain('.studio-right, .dql-studio-v2 .studio-copilot-panel { position:fixed;');
+  });
+
+  it('keeps Studio text readable (no sub-11px type)', () => {
+    const sizes = [...APP_STUDIO_V2_STYLES.matchAll(/font-size:(\d+(?:\.\d+)?)px/g)].map((match) => Number(match[1]));
+    expect(Math.min(...sizes)).toBeGreaterThanOrEqual(11);
   });
 });

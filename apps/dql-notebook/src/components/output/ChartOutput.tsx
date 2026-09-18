@@ -1220,8 +1220,9 @@ function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; them
   const displayVal = formatKpiValue(yCol, row[yCol], result.rows.map((item) => item[yCol]), chartConfig?.format, metaFor(result, yCol));
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', minHeight: 54, padding: '8px 4px', boxSizing: 'border-box', minWidth: 0 }}>
+    <div className="dql-kpi-card" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', minHeight: 54, padding: '8px 4px', boxSizing: 'border-box', minWidth: 0 }}>
       <span
+        className="dql-kpi-value"
         title={String(row[yCol])}
         style={{
           // Viewers embedded in constrained containers did not consistently

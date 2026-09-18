@@ -1,9 +1,9 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties} from 'react';
 import {
-  ArrowLeft, BarChart3, Blocks, Bot, Check, ChevronDown, FileText, Filter,
-  Gauge, Heading, LayoutDashboard, Monitor, MoreHorizontal, PanelRight,
-  Play, Plus, Redo2, Search, Settings2, ShieldCheck, Smartphone, Sparkles, Table2,
+  ArrowLeft, ArrowRight, BarChart3, Blocks, Bot, Check, ChevronDown, Code2, FileText, Filter,
+  Gauge, Heading, LayoutDashboard, LineChart, Monitor, MoreHorizontal, PanelRight,
+  Play, Plus, Redo2, ScatterChart, Search, Settings2, ShieldCheck, Smartphone, Sparkles, Table2,
   Trash2, Type, Undo2, Upload, X,
 } from 'lucide-react';
 import {
@@ -37,7 +37,7 @@ import { DatasetSourceAuthoringDialog, DatasetSourceRebindReviewDialog } from '.
 import { DatasetTileBuilder } from './builder/DatasetTileBuilder';
 import { FiltersPanel, mergeStudioDateRanges, linkedComponentCount, type StudioFilterConfiguration } from './builder/GlobalFilterBar';
 import { DatasetInteractionInspector, DatasetTileQueryInspector } from './builder/InteractionLayer';
-import { humanize, messageOf, PanelTitle } from './builder/studio-ui';
+import { humanize, messageOf } from './builder/studio-ui';
 import { usePersistedAgentThreadId } from '../agent/usePersistedAgentThreadId';
 import { ContextProposalReviewDrawer } from '../modeling/ContextProposalReviewDrawer';
 import { ChartOutput } from '../output/ChartOutput';
@@ -74,6 +74,7 @@ import {
   pagesForDashboardFilterValue,
 } from './app-dashboard-filter-scope';
 import { formatDatasetGrainEvidenceKeyCheck } from './dataset-grain-evidence';
+import { datasetOptionSource } from './app-dashboard-filters';
 import {
   appendDatasetHierarchyDrill,
   datasetMarkActions,
@@ -398,6 +399,12 @@ export function AppStudioV2({
   const [datasetAuthoringProposal, setDatasetAuthoringProposal] = useState<ContextAuthoringProposalV1 | null>(null);
   const [datasetRebindPrompt, setDatasetRebindPrompt] = useState<{ sourceId: string; title: string } | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
+  /** Edit shows the build chrome; View shows the page exactly as a reader sees it. */
+  const [studioView, setStudioView] = useState<'edit' | 'view'>('edit');
+  /** The tile whose ⋯ menu is open. */
+  const [tileMenuId, setTileMenuId] = useState<string | null>(null);
+  /** App-level settings (decision, source policy, review tasks) open in the right column. */
+  const [settingsOpen, setSettingsOpen] = useState(false);
   /** One AI entry point: compose or revise the page, or change the selected tile. */
   const [aiScope, setAiScope] = useState<'page' | 'tile'>('page');
   /** The tile whose query and compiled SQL are shown inline on the canvas. */
@@ -559,6 +566,37 @@ export function AppStudioV2({
   const previewCrossFilters = activePage ? previewCrossFiltersByPage[activePage.id] ?? [] : [];
   const previewHierarchyDrills = activePage ? previewHierarchyDrillsByPage[activePage.id] ?? [] : [];
   const activeFilterOptions = activePage ? filterOptionsByPage[activePage.id] ?? {} : {};
+  // A preview run lists option values only for some filters. Dataset-bound
+  // choice filters fall back to the field's distinct values, the same lookup
+  // the published viewer uses, so a Region filter is never a blank text box.
+  const datasetFieldValueCacheRef = useRef<Record<string, string[]>>({});
+  useEffect(() => {
+    if (!activePage) return;
+    let cancelled = false;
+    for (const filter of activePage.filters ?? []) {
+      if (filter.type !== 'select' && filter.type !== 'multiselect') continue;
+      if (filter.options?.length || activeFilterOptions[filter.id]?.values.length) continue;
+      const source = datasetOptionSource(filter as never, (activePage as { datasets?: never }).datasets);
+      if (!source) continue;
+      const key = `${source.sourceId}:${source.field}`;
+      const apply = (values: string[]) => {
+        if (cancelled || values.length === 0) return;
+        setFilterOptionsByPage((current) => {
+          const pageOptions = current[activePage.id] ?? {};
+          if (pageOptions[filter.id]?.values.length) return current;
+          return { ...current, [activePage.id]: { ...pageOptions, [filter.id]: { values, truncated: false, valueCount: values.length } } };
+        });
+      };
+      const cached = datasetFieldValueCacheRef.current[key];
+      if (cached) { apply(cached); continue; }
+      void api.datasetFieldValues(source.sourceId, source.field).then((result) => {
+        if (!result.ok) return;
+        datasetFieldValueCacheRef.current[key] = result.values;
+        apply(result.values);
+      });
+    }
+    return () => { cancelled = true; };
+  }, [activePage, filterOptionsByPage]);
   const breakpoint: StudioBreakpoint = previewMode === 'auto'
     ? workspaceWidth < 720 ? 'narrow' : workspaceWidth < 1120 ? 'medium' : 'wide'
     : previewMode;
@@ -2243,45 +2281,80 @@ export function AppStudioV2({
     pageTitle: selectedSourceFeedback?.pageTitle,
   }) : '';
 
+  const editing = studioView === 'edit';
+  const rightPane: 'none' | 'inspector' | 'settings' | 'ai' = proposal
+    ? 'none'
+    : copilotOpen
+      ? 'ai'
+      : !editing
+        ? 'none'
+        : selectedTile
+          ? 'inspector'
+          : settingsOpen ? 'settings' : 'none';
+  const openAddTile = () => {
+    setStudioView('edit');
+    setSelectedTileId(null);
+    setPanel('sources');
+    setPanelOpen(true);
+    window.setTimeout(() => document.getElementById('studio-field-search')?.focus(), 0);
+  };
+  const askAiAboutTile = (tileId: string) => {
+    selectAppAutopilotTile(tileId);
+    setAiScope('tile');
+    setCopilotOpen(true);
+    setTileMenuId(null);
+  };
+  const deviceOptions: Array<[StudioPreviewMode, string, typeof Monitor]> = [
+    ['auto', 'Fit to window', LayoutDashboard],
+    ['wide', 'Desktop', Monitor],
+    ['medium', 'Tablet', PanelRight],
+    ['narrow', 'Phone', Smartphone],
+  ];
   return (
-    <div className={`dql-studio-v2 ${proposal ? 'proposal-focus' : ''}`}>
+    <div className={`dql-studio-v2 ${proposal ? 'proposal-focus' : ''} studio-${studioView} right-${rightPane}`}>
       <style>{APP_STUDIO_V2_STYLES}</style>
       <header className="studio-topbar">
-        <div className="studio-brand"><button type="button" className="icon" onClick={onBack}><ArrowLeft size={17} /></button><span className="mark"><LayoutDashboard size={16} /></span><div><input value={name || draft.name} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim() && name.trim() !== draft.name) void mutate([{ type: 'set_name', name: name.trim() }]); }} /><small>{savedMessage}</small></div></div>
+        <div className="studio-brand"><button type="button" className="ghost-icon" onClick={onBack} aria-label="Back to Apps" title="Back to Apps"><ArrowLeft size={16} /></button><span className="mark"><LayoutDashboard size={15} /></span><div><input aria-label="App name" value={name || draft.name} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim() && name.trim() !== draft.name) void mutate([{ type: 'set_name', name: name.trim() }]); }} /><small>{savedMessage}</small></div></div>
         {proposal ? <div className="proposal-focus-title"><small>AI APP BUILD · STEP 2</small><strong>Choose proposed sources</strong></div> : <nav className="page-nav" aria-label="App pages">
-          {draft.pages.map((page) => <button key={page.id} type="button" className={activePage?.id === page.id ? 'on' : ''} onClick={() => { setActivePageId(page.id); setSelectedTileId(null); }}>{page.metadata.title}</button>)}
-          <button type="button" className="icon" onClick={() => void addPage()} aria-label="Add page"><Plus size={15} /></button>
+          {draft.pages.map((page) => <button key={page.id} type="button" className={activePage?.id === page.id ? 'on' : ''} aria-current={activePage?.id === page.id ? 'page' : undefined} onClick={() => { setActivePageId(page.id); setSelectedTileId(null); setTileMenuId(null); }}>{page.metadata.title}</button>)}
+          {editing ? <button type="button" className="ghost-icon" onClick={() => void addPage()} aria-label="Add page" title="Add page"><Plus size={15} /></button> : null}
         </nav>}
         {proposal ? <div className="proposal-focus-status"><ShieldCheck size={14} /><span>Private draft · nothing generated yet</span></div> : <div className="studio-actions">
-          <button type="button" className="icon" disabled={!undoStack.length || busy} onClick={() => void undo()} title="Undo"><Undo2 size={16} /></button>
-          <button type="button" className="icon" disabled={!redoStack.length || busy} onClick={() => void redo()} title="Redo"><Redo2 size={16} /></button>
-          <div className="breakpoints">
-            <button type="button" className={previewMode === 'auto' ? 'on' : ''} onClick={() => setPreviewMode('auto')} title="Fit to available canvas"><LayoutDashboard size={15} /></button>
-            <button type="button" className={previewMode === 'wide' ? 'on' : ''} onClick={() => setPreviewMode('wide')} title="Wide preview"><Monitor size={15} /></button>
-            <button type="button" className={previewMode === 'medium' ? 'on' : ''} onClick={() => setPreviewMode('medium')} title="Tablet preview"><PanelRight size={15} /></button>
-            <button type="button" className={previewMode === 'narrow' ? 'on' : ''} onClick={() => setPreviewMode('narrow')} title="Phone preview"><Smartphone size={15} /></button>
+          {editing ? <div className="history">
+            <button type="button" className="ghost-icon" disabled={!undoStack.length || busy} onClick={() => void undo()} aria-label="Undo" title="Undo"><Undo2 size={15} /></button>
+            <button type="button" className="ghost-icon" disabled={!redoStack.length || busy} onClick={() => void redo()} aria-label="Redo" title="Redo"><Redo2 size={15} /></button>
+          </div> : null}
+          <div className="mode-toggle" role="group" aria-label="Studio mode">
+            <button type="button" className={editing ? 'on' : ''} aria-pressed={editing} onClick={() => setStudioView('edit')}>Edit</button>
+            <button type="button" className={!editing ? 'on' : ''} aria-pressed={!editing} onClick={() => { setStudioView('view'); setSelectedTileId(null); setSettingsOpen(false); setTileMenuId(null); }}>View</button>
           </div>
-          <button type="button" className={`copilot ${copilotOpen ? 'on' : ''}`} onClick={() => { if (!copilotOpen) setAiScope(selectedDatasetTile ? 'tile' : 'page'); setCopilotOpen((open) => !open); }} aria-pressed={copilotOpen} aria-label="Ask AI"><Bot size={14} /><span>Ask AI</span></button>
-          <button type="button" className="preview" onClick={() => void runPreview()} disabled={previewing || busy} aria-label={previewing ? 'Running preview' : 'Run preview'}><Play size={13} /><span>{previewing ? 'Running…' : 'Run preview'}</span></button>
-          <button type="button" className="publish" onClick={() => void publish(false)} disabled={busy} aria-label={`Review and publish to Project${publishStepCount ? `, ${publishStepCount} ${publishStepCount === 1 ? 'fix' : 'fixes'} needed` : ''}`}><Upload size={13} /><span>Publish to Project</span>{publishStepCount ? <small>{publishStepCount} {publishStepCount === 1 ? 'fix' : 'fixes'}</small> : null}</button>
-          <button type="button" className="icon overflow-button" aria-label="More draft actions" aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)}><MoreHorizontal size={17} /></button>
-          {actionsOpen ? <div className="studio-overflow-menu" role="menu"><button type="button" role="menuitem" onClick={() => { setActionsOpen(false); setDeleteConfirmOpen(true); }}><Trash2 size={14} /> Delete local draft</button></div> : null}
+          <button type="button" className="preview" onClick={() => void runPreview()} disabled={previewing || busy} aria-label={previewing ? 'Running preview' : 'Run preview'} title="Run every tile on this page again"><Play size={13} /><span>{previewing ? 'Running…' : 'Run'}</span></button>
+          <button type="button" className={`copilot ${copilotOpen ? 'on' : ''}`} onClick={() => { if (!copilotOpen) setAiScope(selectedDatasetTile ? 'tile' : 'page'); setCopilotOpen((open) => !open); }} aria-pressed={copilotOpen} aria-label="Ask AI"><Sparkles size={14} /><span>Ask AI</span></button>
+          <button type="button" className="publish" onClick={() => void publish(false)} disabled={busy} aria-label={`Review and publish to Project${publishStepCount ? `, ${publishStepCount} ${publishStepCount === 1 ? 'fix' : 'fixes'} needed` : ''}`}><span>Publish</span>{publishStepCount ? <small>{publishStepCount} {publishStepCount === 1 ? 'fix' : 'fixes'}</small> : null}</button>
+          <button type="button" className="ghost-icon overflow-button" aria-label="More draft actions" aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)}><MoreHorizontal size={17} /></button>
+          {actionsOpen ? <div className="studio-overflow-menu" role="menu">
+            <small>Preview size</small>
+            {deviceOptions.map(([id, label, Icon]) => <button key={id} type="button" role="menuitemradio" aria-checked={previewMode === id} className={previewMode === id ? 'on' : ''} onClick={() => { setPreviewMode(id); setActionsOpen(false); }}><Icon size={14} /> {label}{previewMode === id ? <Check size={13} className="menu-check" /> : null}</button>)}
+            <hr />
+            <button type="button" role="menuitem" disabled={!activePage?.layout.items.length || busy} onClick={() => { setActionsOpen(false); void arrangePage(); }}><LayoutDashboard size={14} /> Tidy page layout</button>
+            <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); setStudioView('edit'); setSelectedTileId(null); setCopilotOpen(false); setSettingsOpen(true); }}><Settings2 size={14} /> App settings</button>
+            <hr />
+            <button type="button" role="menuitem" className="danger" onClick={() => { setActionsOpen(false); setDeleteConfirmOpen(true); }}><Trash2 size={14} /> Delete local draft</button>
+          </div> : null}
         </div>}
       </header>
 
-      {!proposal ? <aside className="studio-left">
-        <nav>
+      {!proposal && editing ? <aside className="studio-left">
+        <nav role="tablist" aria-label="Build panel">
           {([
-            ['sources', Blocks, 'Sources'], ['pages', LayoutDashboard, 'Pages'],
-            ['filters', Filter, 'Filters'], ['templates', FileText, 'Design'],
-          ] as const).map(([id, Icon, label]) => <button key={id} type="button" className={panel === id && panelOpen ? 'on' : ''} onClick={() => { if (window.innerWidth <= 820 && panel === id) setPanelOpen((open) => !open); else { setPanel(id); setPanelOpen(true); } }}><Icon size={17} /><span>{label}</span></button>)}
+            ['sources', 'Data'], ['pages', 'Pages'], ['filters', 'Filters'],
+          ] as const).map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={panel === id} className={panel === id && panelOpen ? 'on' : ''} onClick={() => { if (window.innerWidth <= 820 && panel === id) setPanelOpen((open) => !open); else { setPanel(id); setPanelOpen(true); } }}>{label}</button>)}
         </nav>
         <section className={`left-content ${panelOpen ? 'open' : ''}`}>
           <button type="button" className="mobile-drawer-close" onClick={() => setPanelOpen(false)} aria-label="Close Studio drawer"><X size={16} /></button>
-          {panel === 'pages' ? <PagesPanel draft={draft} activePageId={activePage?.id} onOpen={setActivePageId} onAdd={() => void addPage()} /> : null}
+          {panel === 'pages' ? <PagesPanel draft={draft} activePageId={activePage?.id} onOpen={setActivePageId} onAdd={() => void addPage()} template={draft.template} onApplyTemplate={(nextTemplate) => void applyTemplate(nextTemplate)} /> : null}
           {panel === 'sources' ? <SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} datasetTilesEnabled={datasetTilesEnabled} enablingDatasets={enablingDatasets} onEnableDatasets={() => void enableDatasetTiles()} sourceFeedback={sourceFeedback} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddDataset={(item, kind, query, title) => void addComponent(kind, item, query, title)} onAuthorDataset={openDatasetAuthoring} onRefreshDatasetBinding={(sourceId) => void refreshDatasetBinding(sourceId)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /> : null}
           {panel === 'filters' ? <FiltersPanel draft={draft} activePageId={activePage?.id} catalog={catalog} candidates={filterCandidates} runtimeFilterFields={runtimeFilterFields} previewRunsByPage={previewRunsByPage} previewing={previewing} disabled={busy || previewing} onRunPreview={() => void runPreview()} onSave={(configuration) => void saveFilter(configuration)} onRemove={(id) => void removeFilter(id)} /> : null}
-          {panel === 'templates' ? <TemplatesPanel current={draft.template} onApply={(nextTemplate) => void applyTemplate(nextTemplate)} /> : null}
         </section>
       </aside> : null}
 
@@ -2311,10 +2384,12 @@ export function AppStudioV2({
           })}
         /> : null}
         {!proposal ? <div className={`studio-canvas-frame ${breakpoint} preview-mode-${previewMode}`}>
-          <div className="studio-canvas-label"><div><span>{previewMode === 'auto' ? 'Fit canvas' : `${breakpoint.charAt(0).toUpperCase() + breakpoint.slice(1)} preview`} · {breakpoint === 'wide' ? '12 columns' : breakpoint === 'medium' ? '6 columns' : '1 column'}</span><small>Drag components to reorder · saved instantly</small></div><button type="button" onClick={() => void arrangePage()} disabled={!activePage?.layout.items.length || busy} title="Compact gaps and restore a clean reading order"><LayoutDashboard size={13} /> Auto arrange</button></div>
-          <section className="studio-canvas" aria-label="App canvas">
-            <header className="studio-page-heading"><div><small>APP PAGE</small><span>{activePage?.metadata.title ?? 'Overview'}</span></div><small>{draft.frame.audience || 'Stakeholders'} · {draft.pages[0]?.metadata.domain || 'General'}</small></header>
-            {selectedSource && selectedSourceKind ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" disabled={busy || previewing} onClick={() => selectedSource.capabilities?.dataset ? (setPanel('sources'), setPanelOpen(true)) : void addComponent(selectedSourceKind, selectedSource)}>{selectedSource.capabilities?.dataset ? <><Settings2 size={14} /> Choose fields</> : <><Plus size={14} /> {selectedSourceAction}</>}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
+          <section className="studio-canvas" aria-label="App canvas" onClick={(event) => { if (event.target === event.currentTarget) { setSelectedTileId(null); setTileMenuId(null); } }}>
+            <header className="studio-page-heading">
+              <div><h1>{activePage?.metadata.title ?? 'Overview'}</h1>{activePage?.metadata.description ? <p>{activePage.metadata.description}</p> : null}</div>
+              {editing ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
+            </header>
+            {editing && selectedSource && selectedSourceKind ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" disabled={busy || previewing} onClick={() => selectedSource.capabilities?.dataset ? (setPanel('sources'), setPanelOpen(true)) : void addComponent(selectedSourceKind, selectedSource)}>{selectedSource.capabilities?.dataset ? <><Settings2 size={14} /> Choose fields</> : <><Plus size={14} /> {selectedSourceAction}</>}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
             {(activePage?.filters ?? []).length ? <div className="studio-page-filterbar">{activePage!.filters!.map((filter) => <StudioFilterControl key={filter.id} filter={filter} availability={activeFilterOptions[filter.id]} value={previewVariables[filter.id] ?? filter.default} applying={previewing} onChange={(value) => applyFilterValue(filter, value)} />)}</div> : null}
             {previewCrossFilters.length ? <div className="studio-mark-filterbar" role="status" aria-label="Selected Dataset result marks"><span>Selected marks</span>{previewCrossFilters.map((filter) => <button key={`${filter.fromTileId}:${filter.field}`} type="button" onClick={() => removeDatasetCrossFilter(filter.fromTileId, filter.field)}>{humanize(filter.field)}: {filter.values.map(String).join(', ')} <X size={11} /></button>)}<button type="button" className="clear" onClick={clearDatasetCrossFilters}>Reset marks</button></div> : null}
             {previewRun?.incomplete ? <div className="studio-preview-incomplete" role="status" aria-label="Incomplete preview">
@@ -2327,24 +2402,40 @@ export function AppStudioV2({
             </div> : null}
             <div className="studio-page-grid">
               {visibleItems.map((tile) => (
-                <article key={tile.i} role="group" aria-label={`App component: ${tile.title || humanize(tile.i)}`} draggable className={`studio-component-card ${selectedTileId === tile.i ? 'selected' : ''} ${draggingTileId === tile.i ? 'dragging' : ''}`} style={{ '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties} onDragStart={() => { draggingTileIdRef.current = tile.i; setDraggingTileId(tile.i); }} onDragEnd={() => { draggingTileIdRef.current = null; setDraggingTileId(null); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void moveTileBefore(tile.i); }} onClick={() => setSelectedTileId(tile.i)}>
-                  <header><span className="drag-handle" aria-hidden="true">⠿</span><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /> <strong>{tile.title || humanize(tile.i)}</strong>{tile.sourceId && tile.query ? <button type="button" className={`studio-autopilot-target ${selectedDatasetTile?.i === tile.i ? 'on' : ''}`} aria-pressed={selectedDatasetTile?.i === tile.i} onClick={(event) => { event.stopPropagation(); selectAppAutopilotTile(tile.i); setAiScope('tile'); setCopilotOpen(true); }}>Edit with AI</button> : null}{tile.query ? <button type="button" className={`studio-tile-dql-toggle ${dqlTileId === tile.i ? 'on' : ''}`} aria-pressed={dqlTileId === tile.i} onClick={(event) => { event.stopPropagation(); setDqlTileId((current) => current === tile.i ? null : tile.i); }}>View DQL</button> : null}<small>{tile.viz.type.replace(/_/g, ' ')}</small></header>
+                <article key={tile.i} role="group" aria-label={`App component: ${tile.title || humanize(tile.i)}`} draggable={editing} className={`studio-component-card ${editing && selectedTileId === tile.i ? 'selected' : ''} ${draggingTileId === tile.i ? 'dragging' : ''} ${tile.text ? 'text-tile' : ''}`} style={{ '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: tile.text ? undefined : breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties} onDragStart={() => { draggingTileIdRef.current = tile.i; setDraggingTileId(tile.i); }} onDragEnd={() => { draggingTileIdRef.current = null; setDraggingTileId(null); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void moveTileBefore(tile.i); }} onClick={() => { if (!editing) return; setSelectedTileId(tile.i); setSettingsOpen(false); setCopilotOpen(false); }}>
+                  <header>
+                    {editing ? <span className="drag-handle" aria-hidden="true">⠿</span> : null}
+                    <strong>{tile.title || humanize(tile.i)}</strong>
+                    <span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} title={tile.trustState === 'certified' ? 'Certified source' : tile.trustState === 'review_required' ? 'Needs review before publishing' : 'Draft'} />
+                    <div className="tile-tools" onClick={(event) => event.stopPropagation()}>
+                      {editing && tile.sourceId && tile.query ? <button type="button" className={`studio-autopilot-target ${selectedDatasetTile?.i === tile.i ? 'on' : ''}`} aria-pressed={selectedDatasetTile?.i === tile.i} aria-label="Edit with AI" title="Edit with AI" onClick={() => askAiAboutTile(tile.i)}><Sparkles size={13} /></button> : null}
+                      {tile.query ? <button type="button" className={`studio-tile-dql-toggle ${dqlTileId === tile.i ? 'on' : ''}`} aria-pressed={dqlTileId === tile.i} aria-label="View DQL" title="View DQL" onClick={() => setDqlTileId((current) => current === tile.i ? null : tile.i)}><Code2 size={13} /></button> : null}
+                      <button type="button" className="tile-more" aria-label="Tile actions" aria-haspopup="menu" aria-expanded={tileMenuId === tile.i} title="More" onClick={() => setTileMenuId((current) => current === tile.i ? null : tile.i)}><MoreHorizontal size={14} /></button>
+                      {tileMenuId === tile.i ? <div className="tile-menu" role="menu">
+                        {tile.query ? <button type="button" role="menuitem" onClick={() => { setDqlTileId(tile.i); setTileMenuId(null); }}><Code2 size={14} /> View DQL and SQL</button> : null}
+                        {tile.sourceId && tile.query ? <button type="button" role="menuitem" onClick={() => askAiAboutTile(tile.i)}><Sparkles size={14} /> {editing ? 'Change with AI' : 'Ask about this tile'}</button> : null}
+                        {editing ? <button type="button" role="menuitem" onClick={() => { setSelectedTileId(tile.i); setTileMenuId(null); setCopilotOpen(false); }}><Settings2 size={14} /> Tile settings</button> : null}
+                        {editing ? <><hr /><button type="button" role="menuitem" className="danger" onClick={() => { setTileMenuId(null); void mutate([{ type: 'remove_tile', pageId: activePage!.id, tileId: tile.i }]).then(() => setSelectedTileId((current) => current === tile.i ? null : current)); }}><Trash2 size={14} /> Remove tile</button></> : null}
+                      </div> : null}
+                    </div>
+                  </header>
                   {unsupportedTileFilters(tile).map((binding) => <div key={binding.filter} className="tile-filter-notice"><Filter size={11} /><span>{binding.unsupportedReason ?? `${humanize(binding.filter)} does not affect this component.`}</span></div>)}
                   {datasetTileNotices(previewRun?.tiles.find((item) => item.tileId === tile.i)).map((notice) => <div key={notice.key} className={`tile-filter-notice ${notice.kind}`} title={notice.detail}><Filter size={11} /><span><strong>{notice.label}</strong> · {notice.detail}</span></div>)}
                   {dqlTileId === tile.i ? <div className="studio-tile-dql" onClick={(event) => event.stopPropagation()}>{(() => { const runTile = previewRun?.tiles.find((item) => item.tileId === tile.i); const evidence = runTile && tile.query && isCurrentDatasetTileEvidence(tile, runTile) ? presentDatasetTileEvidence(runTile) : undefined; return evidence ? <DatasetTileExecutionEvidence presentation={evidence} /> : <p>Run a preview to see the Dataset query and the SQL it compiled to.</p>; })()}</div> : null}
                   {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} /></div>}
                 </article>
               ))}
-              {!visibleItems.length ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>Build this page</strong><p>Open Sources on the left, choose governed data, and add its recommended view. You can also add text or a heading.</p><button type="button" onClick={() => { setPanel('sources'); setPanelOpen(true); }}>Open Sources</button></div> : null}
+              {!visibleItems.length ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>This page is empty</strong><p>{editing ? 'Pick a governed Dataset in the Data panel, then choose the fields you want to see. You can also ask AI to draft the page.' : 'Switch to Edit to add tiles to this page.'}</p>{editing ? <div className="empty-actions"><button type="button" className="primary" onClick={openAddTile}><Plus size={14} /> Add tile</button><button type="button" onClick={() => { setAiScope('page'); setCopilotOpen(true); }}><Sparkles size={14} /> Draft with AI</button></div> : null}</div> : null}
             </div>
           </section>
         </div> : null}
       </main>
 
-      {!proposal ? <aside className={`studio-right ${selectedTile ? 'has-selection' : ''}`}>
-        <header><div><Settings2 size={16} /><strong>{selectedTile ? 'Component properties' : 'App Build Frame'}</strong></div><button type="button" className="icon" onClick={() => setSelectedTileId(null)} aria-label={selectedTile ? 'Close component properties' : 'More App settings'}>{selectedTile ? <X size={16} /> : <MoreHorizontal size={16} />}</button></header>
+      {rightPane === 'inspector' || rightPane === 'settings' ? <aside className={`studio-right ${selectedTile ? 'has-selection' : ''}`} aria-label={selectedTile ? 'Tile settings' : 'App settings'}>
+        <header><div><small>{selectedTile ? tileKindLabel(selectedTile) : 'APP'}</small><strong>{selectedTile ? 'Tile settings' : 'App settings'}</strong></div><button type="button" className="ghost-icon" onClick={() => { setSelectedTileId(null); setSettingsOpen(false); }} aria-label={selectedTile ? 'Close tile settings' : 'Close App settings'}><X size={16} /></button></header>
         {selectedTile && activePage ? (
           <ComponentInspector
+            key={selectedTile.i}
             tile={selectedTile}
             run={previewRun?.tiles.find((item) => item.tileId === selectedTile.i)}
             pageId={activePage.id}
@@ -2376,9 +2467,9 @@ export function AppStudioV2({
 
       {copilotOpen && !proposal ? <AiSidePanel
         t={themes[themeMode]}
-        title="Ask AI"
+        title="AI"
         subtitle={draft.name}
-        dock="overlay"
+        dock="column"
         expanded={copilotExpanded}
         onToggleExpanded={() => setCopilotExpanded((expanded) => !expanded)}
         onNewChat={() => {
@@ -2388,15 +2479,14 @@ export function AppStudioV2({
         onClose={() => setCopilotOpen(false)}
         running={copilotRunning}
         resizable
-        minResizeWidth={390}
-        maxResizeWidth={1100}
+        minResizeWidth={360}
+        maxResizeWidth={900}
         ariaLabel="Ask AI"
         className="studio-copilot-panel"
-        style={{ top: 58, bottom: 0, height: 'auto' }}
       >
         <div className="studio-ai-scope" role="tablist" aria-label="What should AI work on?">
-          <button type="button" role="tab" aria-selected={aiScope === 'page'} className={aiScope === 'page' ? 'on' : ''} onClick={() => setAiScope('page')}>Whole page</button>
-          <button type="button" role="tab" aria-selected={aiScope === 'tile'} className={aiScope === 'tile' ? 'on' : ''} onClick={() => setAiScope('tile')}>Selected tile{selectedDatasetTile ? `: ${selectedDatasetTile.title || humanize(selectedDatasetTile.i)}` : ''}</button>
+          <button type="button" role="tab" aria-selected={aiScope === 'page'} className={aiScope === 'page' ? 'on' : ''} onClick={() => setAiScope('page')}><FileText size={13} /> Page: {activePage?.metadata.title ?? 'Overview'}</button>
+          <button type="button" role="tab" aria-selected={aiScope === 'tile'} className={aiScope === 'tile' ? 'on' : ''} onClick={() => setAiScope('tile')}><LayoutDashboard size={13} /> {selectedDatasetTile ? `Tile: ${selectedDatasetTile.title || humanize(selectedDatasetTile.i)}` : 'A tile'}</button>
         </div>
         {aiScope === 'page' ? <section className="studio-ai-page-scope">
           <label htmlFor="studio-ai-page-prompt">Describe the page or the change you want</label>
@@ -2802,8 +2892,13 @@ export function AppAutopilotReviewCard({
   </section>;
 }
 
-function PagesPanel({ draft, activePageId, onOpen, onAdd }: { draft: AppStudioBuildDraft; activePageId?: string; onOpen: (id: string) => void; onAdd: () => void }): JSX.Element {
-  return <><PanelTitle title="Pages" detail="Organize the App story" action={<button type="button" onClick={onAdd}><Plus size={14} /></button>} /><div className="studio-list">{draft.pages.map((page, index) => <button key={page.id} type="button" className={page.id === activePageId ? 'on' : ''} onClick={() => onOpen(page.id)}><span>{index + 1}</span><div><strong>{page.metadata.title}</strong><small>{page.layout.items.length} components</small></div></button>)}</div></>;
+function PagesPanel({ draft, activePageId, onOpen, onAdd, template, onApplyTemplate }: { draft: AppStudioBuildDraft; activePageId?: string; onOpen: (id: string) => void; onAdd: () => void; template: StudioTemplate; onApplyTemplate: (id: StudioTemplate) => void }): JSX.Element {
+  return <>
+    <div className="studio-list">{draft.pages.map((page) => <button key={page.id} type="button" className={page.id === activePageId ? 'on' : ''} aria-current={page.id === activePageId ? 'page' : undefined} onClick={() => onOpen(page.id)}><div><strong>{page.metadata.title}</strong><small>{page.layout.items.length} {page.layout.items.length === 1 ? 'tile' : 'tiles'}{(page.filters?.length ?? 0) > 0 ? ` · ${page.filters!.length} ${page.filters!.length === 1 ? 'filter' : 'filters'}` : ''}</small></div></button>)}</div>
+    <button type="button" className="panel-add" onClick={onAdd}><Plus size={14} /> New page</button>
+    <div className="panel-section-label"><span>Page layout</span><small>Applies to this page</small></div>
+    <div className="template-list">{TEMPLATE_OPTIONS.map((item) => <button key={item.id} type="button" className={template === item.id ? 'on' : ''} onClick={() => onApplyTemplate(item.id)}><span>{templateIcon(item.id)}</span><div><strong>{item.title}</strong><small>{item.description}</small></div></button>)}</div>
+  </>;
 }
 
 function SourcesPanel({
@@ -2860,11 +2955,10 @@ function SourcesPanel({
   const usedIdentifiers = new Set(usedDataSources.flatMap((source) => [source.id, source.sourceRef]));
   const visibleItems = items.filter((item) => viewFilter === 'all' || recommendedComponentKind(item) === viewFilter);
   return <>
-    <PanelTitle title="Sources" detail="Choose a Dataset, then build a governed field tile" />
     {!datasetTilesEnabled ? <div className="source-catalog-empty" role="status"><strong>Build tiles from Dataset fields</strong><small>Pick measures and groupings from a governed Dataset instead of pinning a finished block. This writes <code>{'"apps": { "datasets": true }'}</code> to <code>dql.config.json</code>.</small>{onEnableDatasets ? <button type="button" className="primary" disabled={disabled || enablingDatasets} onClick={onEnableDatasets}>{enablingDatasets ? 'Turning on…' : 'Turn on field-based tiles'}</button> : null}</div> : null}
     <label className="source-search-primary">
       <Search size={15} />
-      <input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search blocks, metrics, or domains" aria-label="Search governed sources" />
+      <input id="studio-field-search" value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search Datasets, blocks, metrics" aria-label="Search governed sources" />
       {query ? <button type="button" onClick={() => onQuery('')} aria-label="Clear source search" title="Clear search"><X size={13} /></button> : null}
     </label>
     <details className="used-sources-disclosure">
@@ -2935,20 +3029,17 @@ function SourcesPanel({
   </>;
 }
 
-function TemplatesPanel({ current, onApply }: { current: StudioTemplate; onApply: (id: StudioTemplate) => void }): JSX.Element {
-  return <><PanelTitle title="Templates" detail="Professional analytical structures" /><div className="template-list">{TEMPLATE_OPTIONS.map((item) => <button key={item.id} type="button" className={current === item.id ? 'on' : ''} onClick={() => onApply(item.id)}><span>{templateIcon(item.id)}</span><div><strong>{item.title}</strong><small>{item.description}</small></div></button>)}</div></>;
-}
-
 function BuildFrameInspector({ draft, prompt, previewRun, onPrompt, onAskAi, onSourcePolicy, onResolveTask, onApproveSemantic }: { draft: AppStudioBuildDraft; prompt: string; previewRun: DashboardRunResponse | null; onPrompt: (value: string) => void; onAskAi: () => void; onSourcePolicy: (value: AppStudioBuildDraft['sourcePolicy']) => void; onResolveTask: (task: AppStudioBuildDraft['reviewTasks'][number]) => void; onApproveSemantic: () => void }): JSX.Element {
   const openTasks = blockingPublicationReviewTasks(draft);
   const semanticNeedsApproval = legacySemanticTilesNeedingApproval(draft).length > 0;
   return <div className="inspector-body"><section><label>Business decision</label><textarea value={prompt} onChange={(event) => onPrompt(event.target.value)} rows={5} /></section><section><label>Source policy</label><select value={draft.sourcePolicy} onChange={(event) => onSourcePolicy(event.target.value as AppStudioBuildDraft['sourcePolicy'])}><option value="governed_only">Governed sources only</option><option value="include_review_required">Include review-required analysis</option></select><small className="field-help">Review-required sources stay local and block Project publication until replaced or promoted.</small></section><section className="frame-facts"><label>Build Frame</label><div><span>Audience</span><strong>{draft.frame.audience || 'Stakeholders'}</strong></div><div><span>Metrics</span><strong>{draft.frame.metrics.join(', ') || 'Needs clarification'}</strong></div><div><span>Dimensions</span><strong>{draft.frame.dimensions.join(', ') || 'Automatic'}</strong></div><div><span>Source policy</span><strong>{draft.sourcePolicy === 'governed_only' ? 'Governed only' : 'Includes review lane'}</strong></div></section>{semanticNeedsApproval ? <section><label>Semantic review</label><button type="button" className="review-action" onClick={onApproveSemantic} disabled={!previewRun}><ShieldCheck size={14} /> {previewRun ? 'Approve this settled result' : 'Run preview to approve'}</button></section> : null}{openTasks.length ? <section className="review-task-list"><label>Review tasks</label>{openTasks.map((task) => <div key={task.id}><span>{task.message}</span><button type="button" onClick={() => onResolveTask(task)}><Check size={12} /> Resolve</button></div>)}</section> : null}<button type="button" className="ask-ai" onClick={onAskAi}><Bot size={16} /> Ask AI to build or revise this page</button><section className="trust-summary"><ShieldCheck size={17} /><div><strong>Nothing publishes silently</strong><p>AI changes are typed diffs. Project publication revalidates live source trust and filter bindings.</p></div></section></div>;
 }
 
-export function ComponentInspector({ tile, run, pageId, page, pages, sources, dataset, disabled, onOpenSources, onSaveDatasetTileAsBlock, savingDatasetTileAsBlock, savedDatasetReviewDraft, onReplaceDatasetTileWithBlock = () => undefined, replacingDatasetTileWithBlock = false, onPreviewLegacySemanticConversion = () => undefined, previewingLegacySemanticConversion = false, semanticTileConversionPreview, onAcceptLegacySemanticConversion = () => undefined, acceptingLegacySemanticConversion = false, onRefreshDatasetTile, onUpdate, onUpdateInteractions, onDelete }: { tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]; run?: DashboardRunResponse['tiles'][number]; pageId: string; page: AppStudioBuildDraft['pages'][number]; pages: AppStudioBuildDraft['pages']; sources: AppStudioBuildDraft['sources']; dataset?: DatasetDescriptor; disabled: boolean; onOpenSources: () => void; onSaveDatasetTileAsBlock: () => void; savingDatasetTileAsBlock: boolean; savedDatasetReviewDraft?: Extract<DatasetTileSaveAsBlockResponse, { ok: true }>; onReplaceDatasetTileWithBlock?: () => void; replacingDatasetTileWithBlock?: boolean; onPreviewLegacySemanticConversion?: () => void; previewingLegacySemanticConversion?: boolean; semanticTileConversionPreview?: Extract<SemanticTileConversionPreviewResponse, { ok: true }>; onAcceptLegacySemanticConversion?: () => void; acceptingLegacySemanticConversion?: boolean; onRefreshDatasetTile: () => void; onUpdate: (patch: Partial<typeof tile>) => void; onUpdateInteractions: (interactions: AppStudioBuildDraft['pages'][number]['interactions']) => void; onDelete: () => void }): JSX.Element {
+export function ComponentInspector({ initialTab = 'data', tile, run, pageId, page, pages, sources, dataset, disabled, onOpenSources, onSaveDatasetTileAsBlock, savingDatasetTileAsBlock, savedDatasetReviewDraft, onReplaceDatasetTileWithBlock = () => undefined, replacingDatasetTileWithBlock = false, onPreviewLegacySemanticConversion = () => undefined, previewingLegacySemanticConversion = false, semanticTileConversionPreview, onAcceptLegacySemanticConversion = () => undefined, acceptingLegacySemanticConversion = false, onRefreshDatasetTile, onUpdate, onUpdateInteractions, onDelete }: { initialTab?: 'data' | 'visual' | 'interactions'; tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]; run?: DashboardRunResponse['tiles'][number]; pageId: string; page: AppStudioBuildDraft['pages'][number]; pages: AppStudioBuildDraft['pages']; sources: AppStudioBuildDraft['sources']; dataset?: DatasetDescriptor; disabled: boolean; onOpenSources: () => void; onSaveDatasetTileAsBlock: () => void; savingDatasetTileAsBlock: boolean; savedDatasetReviewDraft?: Extract<DatasetTileSaveAsBlockResponse, { ok: true }>; onReplaceDatasetTileWithBlock?: () => void; replacingDatasetTileWithBlock?: boolean; onPreviewLegacySemanticConversion?: () => void; previewingLegacySemanticConversion?: boolean; semanticTileConversionPreview?: Extract<SemanticTileConversionPreviewResponse, { ok: true }>; onAcceptLegacySemanticConversion?: () => void; acceptingLegacySemanticConversion?: boolean; onRefreshDatasetTile: () => void; onUpdate: (patch: Partial<typeof tile>) => void; onUpdateInteractions: (interactions: AppStudioBuildDraft['pages'][number]['interactions']) => void; onDelete: () => void }): JSX.Element {
   const [title, setTitle] = useState(tile.title ?? '');
   const [markdown, setMarkdown] = useState(tile.text?.markdown ?? '');
   const [visualizationFeedback, setVisualizationFeedback] = useState<string | null>(null);
+  const [tab, setTab] = useState<'data' | 'visual' | 'interactions'>(initialTab);
   useEffect(() => setTitle(tile.title ?? ''), [tile.i, tile.title]);
   useEffect(() => setMarkdown(tile.text?.markdown ?? ''), [tile.i, tile.text?.markdown]);
   useEffect(() => setVisualizationFeedback(null), [tile.i]);
@@ -2982,18 +3073,34 @@ export function ComponentInspector({ tile, run, pageId, page, pages, sources, da
   const savedDatasetVisualization = tile.query && dataset
     ? datasetTileVisualizationCompatibility(tile.query, tile.viz.type)
     : undefined;
+  const dataTile = !tile.text;
+  const rowCount = run?.status === 'ok' ? run.result?.rowCount ?? run.result?.rows.length ?? 0 : undefined;
   return <div className="inspector-body">
-    <section><label>Title</label><input value={title} onChange={(event) => setTitle(event.target.value)} onBlur={() => { if (title.trim() !== (tile.title ?? '')) onUpdate({ title: title.trim() }); }} /></section>
+    <section className="inspector-title"><label htmlFor={`tile-title-${tile.i}`}>Title</label><input id={`tile-title-${tile.i}`} value={title} onChange={(event) => setTitle(event.target.value)} onBlur={() => { if (title.trim() !== (tile.title ?? '')) onUpdate({ title: title.trim() }); }} /></section>
+    {dataTile ? <div className="inspector-tabs" role="tablist" aria-label="Tile settings">{([['data', 'Data'], ['visual', 'Visual'], ['interactions', 'Interactions']] as const).map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>{label}</button>)}</div> : null}
+    {!dataTile ? <>
     {tile.text ? <section><label>Content</label><textarea rows={7} value={markdown} onChange={(event) => setMarkdown(event.target.value)} onBlur={() => { if (markdown !== tile.text?.markdown) onUpdate({ text: { markdown } }); }} /><small className="field-help">Safe Markdown only. Executable HTML and JavaScript are not supported.</small></section> : null}
+    <section><label>Responsive size</label><div className="size-buttons">{[['Compact', 3, 2], ['Standard', 6, 4], ['Wide', 12, 4], ['Tall', 6, 7]].map(([label, w, h]) => <button key={label} type="button" onClick={() => onUpdate({ w: Number(w), h: Number(h) })}>{label}</button>)}</div></section>
+    </> : null}
+    {dataTile && tab === 'data' ? <>
     {tile.query && dataset ? <DatasetTileQueryInspector descriptor={dataset} query={tile.query} visualization={tile.viz.type} disabled={disabled} onChange={updateDatasetQuery} onOpenSources={onOpenSources} /> : null}
-    {tile.query && dataset ? <DatasetInteractionInspector tile={tile} page={page} pages={pages} sources={sources} descriptor={dataset} disabled={disabled} onChange={onUpdateInteractions} /> : null}
-    <section><label>Visualization</label><select value={tile.viz.type} onChange={(event) => updateVisualization(event.target.value as typeof tile.viz.type)}>{['single_value', 'kpi', 'bar', 'line', 'area', 'scatter', 'heatmap', 'table', 'pivot', 'text', 'heading'].map((type) => <option key={type} value={type}>{humanize(type)}</option>)}</select>{savedDatasetVisualization && !savedDatasetVisualization.compatible ? <small className="dataset-builder-error" role="alert">{savedDatasetVisualization.message} Choose Table to keep all selected fields visible.</small> : null}{visualizationFeedback ? <small className="dataset-interaction-message" role="status">{visualizationFeedback}</small> : null}</section>
+    <section className="data-trust"><label>Data & trust</label><div><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /><strong>{humanize(tile.trustState ?? 'draft_ready')}</strong></div><p>{tile.query && dataset ? `Dataset: ${dataset.label} · ${dataset.kind === 'semantic' ? 'governed semantic source' : 'governed block source'}` : tile.block ? `${tile.trustState === 'certified' ? 'Certified' : 'Review-required'} block: ${'blockId' in tile.block ? tile.block.blockId : tile.block.ref}` : tile.semantic ? `Governed semantic query: ${tile.semantic.id}` : tile.draftAnalysis ? `Review-required DQL: ${tile.draftAnalysis.ref}` : 'Local narrative component'}</p>{tile.sourceEvidence?.slice(0, 2).map((evidence, index) => <small key={`${evidence.source}-${index}`}>{evidence.reason}</small>)}{run ? <small>{run.status === 'ok' ? `Settled on ${run.result?.rowCount ?? run.result?.rows.length ?? 0} rows` : run.error}</small> : null}{grainKeyCheck ? <small>Full-source key check: {grainKeyCheck}</small> : null}{run?.dataset?.cacheDelivery ? <div className="dataset-cache-delivery"><small>Cached {new Date(run.dataset.cacheDelivery.cachedAt).toLocaleString()} · this is not fresh publication or reusable-block evidence.</small><button type="button" disabled={disabled} onClick={onRefreshDatasetTile}>Refresh live data</button></div> : null}{tile.query ? <details className="dataset-dql-receipt"><summary>View execution evidence</summary>{currentDatasetEvidence ? <DatasetTileExecutionEvidence presentation={currentDatasetEvidence} /> : <p>{run ? 'This execution evidence no longer matches the selected Dataset source or query. Run a governed preview to inspect the current Dataset query, executed SQL, binding evidence, and provenance.' : 'Run a governed preview to inspect the current Dataset query, executed SQL, binding evidence, and provenance.'}</p>}</details> : null}{tile.query ? <div className="dataset-reusable-block"><strong>Reusable block</strong><p>Save this settled result as a separate review draft. This App tile stays unchanged and the new block is not certified.</p><button type="button" disabled={disabled || savingDatasetTileAsBlock || replacingDatasetTileWithBlock || !currentDatasetEvidence || Boolean(run?.dataset?.cacheDelivery)} onClick={onSaveDatasetTileAsBlock}>{savingDatasetTileAsBlock ? 'Saving review draft…' : 'Save as reusable review draft'}</button>{savedDatasetReviewDraft ? <div className="dataset-review-replacement"><small>Saved review draft: {savedDatasetReviewDraft.path}</small>{savedDatasetReviewDraft.replacementEligible ? <button type="button" disabled={disabled || savingDatasetTileAsBlock || replacingDatasetTileWithBlock || !currentDatasetEvidence || Boolean(run?.dataset?.cacheDelivery)} onClick={onReplaceDatasetTileWithBlock}>{replacingDatasetTileWithBlock ? 'Proving equivalence…' : 'Replace with this review draft'}</button> : <small>{savedDatasetReviewDraft.replacementMessage ?? 'This saved draft is fixed-value only and cannot replace the interactive Dataset tile.'}</small>}</div> : null}{!currentDatasetEvidence ? <small>Run the current Dataset tile before saving it.</small> : null}{run?.dataset?.cacheDelivery ? <small>Refresh live data before saving or replacing this tile.</small> : null}</div> : null}</section>
+    {tile.semantic && !tile.query ? <section className="dataset-reusable-block"><strong>Convert to Dataset query</strong><p>Preview an exact field-query mapping for this legacy semantic tile. DQL runs both paths in one fresh read scope before it can apply the change. The original semantic payload is retained as provenance; this does not certify the source.</p><button type="button" disabled={disabled || previewingLegacySemanticConversion || acceptingLegacySemanticConversion} onClick={onPreviewLegacySemanticConversion}>{previewingLegacySemanticConversion ? 'Proving conversion…' : 'Preview Dataset conversion'}</button>{semanticTileConversionPreview ? <div className="dataset-review-replacement"><small>Mapped source: {semanticTileConversionPreview.candidate.sourceId}</small><small>Mapped query: {semanticTileConversionPreview.candidate.query.measures.map((measure) => measure.measure).join(', ')}{semanticTileConversionPreview.candidate.query.dimensions.length ? ` by ${semanticTileConversionPreview.candidate.query.dimensions.map((dimension) => dimension.field).join(', ')}` : ''}</small><button type="button" disabled={disabled || previewingLegacySemanticConversion || acceptingLegacySemanticConversion} onClick={onAcceptLegacySemanticConversion}>{acceptingLegacySemanticConversion ? 'Rechecking and applying…' : 'Apply Dataset conversion'}</button></div> : <small>Preview first. Unsupported bindings, source drift, or an incomplete comparison stay with the original semantic tile.</small>}</section> : null}
+    </> : null}
+    {dataTile && tab === 'visual' ? <>
+    <section><label>Chart</label><div className="chart-type-grid" role="radiogroup" aria-label="Chart type">{CHART_TYPE_OPTIONS.map(([type, label]) => { const active = tile.viz.type === type || (type === 'single_value' && tile.viz.type === 'kpi'); return <button key={type} type="button" role="radio" aria-checked={active} className={active ? 'on' : ''} disabled={disabled} onClick={() => { if (!active) updateVisualization(type); }}>{chartTypeIcon(type)}<span>{label}</span></button>; })}</div>{savedDatasetVisualization && !savedDatasetVisualization.compatible ? <small className="dataset-builder-error" role="alert">{savedDatasetVisualization.message} Choose Table to keep all selected fields visible.</small> : null}{visualizationFeedback ? <small className="dataset-interaction-message" role="status">{visualizationFeedback}</small> : null}</section>
     {!tile.text ? <section className="field-mapping"><label>Field mapping</label><div><span>X / category</span><select value={String(options.x ?? '')} onChange={(event) => setOption('x', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><div><span>Y / value</span><select value={String(options.y ?? '')} onChange={(event) => setOption('y', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><small className="field-help">Run preview to load the exact result fields.</small></section> : null}
     {!tile.text ? <section className="format-grid"><label>Formatting</label><div><span>Number</span><select value={String(options.format ?? 'number')} onChange={(event) => setOption('format', event.target.value)}><option value="number">Number</option><option value="currency">Currency</option><option value="percent">Percent</option><option value="duration">Duration</option></select></div><div><span>Legend</span><select value={String(options.legendPosition ?? 'right')} onChange={(event) => setOption('legendPosition', event.target.value)}><option value="top">Top</option><option value="right">Right</option><option value="bottom">Bottom</option><option value="none">Hidden</option></select></div></section> : null}
     <section><label>Responsive size</label><div className="size-buttons">{[['Compact', 3, 2], ['Standard', 6, 4], ['Wide', 12, 4], ['Tall', 6, 7]].map(([label, w, h]) => <button key={label} type="button" onClick={() => onUpdate({ w: Number(w), h: Number(h) })}>{label}</button>)}</div></section>
-    <section className="data-trust"><label>Data & trust</label><div><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /><strong>{humanize(tile.trustState ?? 'draft_ready')}</strong></div><p>{tile.query && dataset ? `Dataset: ${dataset.label} · ${dataset.kind === 'semantic' ? 'governed semantic source' : 'governed block source'}` : tile.block ? `${tile.trustState === 'certified' ? 'Certified' : 'Review-required'} block: ${'blockId' in tile.block ? tile.block.blockId : tile.block.ref}` : tile.semantic ? `Governed semantic query: ${tile.semantic.id}` : tile.draftAnalysis ? `Review-required DQL: ${tile.draftAnalysis.ref}` : 'Local narrative component'}</p>{tile.sourceEvidence?.slice(0, 2).map((evidence, index) => <small key={`${evidence.source}-${index}`}>{evidence.reason}</small>)}{run ? <small>{run.status === 'ok' ? `Settled on ${run.result?.rowCount ?? run.result?.rows.length ?? 0} rows` : run.error}</small> : null}{grainKeyCheck ? <small>Full-source key check: {grainKeyCheck}</small> : null}{run?.dataset?.cacheDelivery ? <div className="dataset-cache-delivery"><small>Cached {new Date(run.dataset.cacheDelivery.cachedAt).toLocaleString()} · this is not fresh publication or reusable-block evidence.</small><button type="button" disabled={disabled} onClick={onRefreshDatasetTile}>Refresh live data</button></div> : null}{tile.query ? <details className="dataset-dql-receipt"><summary>View execution evidence</summary>{currentDatasetEvidence ? <DatasetTileExecutionEvidence presentation={currentDatasetEvidence} /> : <p>{run ? 'This execution evidence no longer matches the selected Dataset source or query. Run a governed preview to inspect the current Dataset query, executed SQL, binding evidence, and provenance.' : 'Run a governed preview to inspect the current Dataset query, executed SQL, binding evidence, and provenance.'}</p>}</details> : null}{tile.query ? <div className="dataset-reusable-block"><strong>Reusable block</strong><p>Save this settled result as a separate review draft. This App tile stays unchanged and the new block is not certified.</p><button type="button" disabled={disabled || savingDatasetTileAsBlock || replacingDatasetTileWithBlock || !currentDatasetEvidence || Boolean(run?.dataset?.cacheDelivery)} onClick={onSaveDatasetTileAsBlock}>{savingDatasetTileAsBlock ? 'Saving review draft…' : 'Save as reusable review draft'}</button>{savedDatasetReviewDraft ? <div className="dataset-review-replacement"><small>Saved review draft: {savedDatasetReviewDraft.path}</small>{savedDatasetReviewDraft.replacementEligible ? <button type="button" disabled={disabled || savingDatasetTileAsBlock || replacingDatasetTileWithBlock || !currentDatasetEvidence || Boolean(run?.dataset?.cacheDelivery)} onClick={onReplaceDatasetTileWithBlock}>{replacingDatasetTileWithBlock ? 'Proving equivalence…' : 'Replace with this review draft'}</button> : <small>{savedDatasetReviewDraft.replacementMessage ?? 'This saved draft is fixed-value only and cannot replace the interactive Dataset tile.'}</small>}</div> : null}{!currentDatasetEvidence ? <small>Run the current Dataset tile before saving it.</small> : null}{run?.dataset?.cacheDelivery ? <small>Refresh live data before saving or replacing this tile.</small> : null}</div> : null}</section>
-    {tile.semantic && !tile.query ? <section className="dataset-reusable-block"><strong>Convert to Dataset query</strong><p>Preview an exact field-query mapping for this legacy semantic tile. DQL runs both paths in one fresh read scope before it can apply the change. The original semantic payload is retained as provenance; this does not certify the source.</p><button type="button" disabled={disabled || previewingLegacySemanticConversion || acceptingLegacySemanticConversion} onClick={onPreviewLegacySemanticConversion}>{previewingLegacySemanticConversion ? 'Proving conversion…' : 'Preview Dataset conversion'}</button>{semanticTileConversionPreview ? <div className="dataset-review-replacement"><small>Mapped source: {semanticTileConversionPreview.candidate.sourceId}</small><small>Mapped query: {semanticTileConversionPreview.candidate.query.measures.map((measure) => measure.measure).join(', ')}{semanticTileConversionPreview.candidate.query.dimensions.length ? ` by ${semanticTileConversionPreview.candidate.query.dimensions.map((dimension) => dimension.field).join(', ')}` : ''}</small><button type="button" disabled={disabled || previewingLegacySemanticConversion || acceptingLegacySemanticConversion} onClick={onAcceptLegacySemanticConversion}>{acceptingLegacySemanticConversion ? 'Rechecking and applying…' : 'Apply Dataset conversion'}</button></div> : <small>Preview first. Unsupported bindings, source drift, or an incomplete comparison stay with the original semantic tile.</small>}</section> : null}
-    <button type="button" className="delete-component" onClick={onDelete}><Trash2 size={15} /> Remove component</button><small className="inspector-id">{pageId} / {tile.i}</small>
+    </> : null}
+    {dataTile && tab === 'interactions' ? (tile.query && dataset
+      ? <DatasetInteractionInspector tile={tile} page={page} pages={pages} sources={sources} descriptor={dataset} disabled={disabled} onChange={onUpdateInteractions} />
+      : <p className="field-help">Click actions, cross-filters and drill-downs are available for tiles built from Dataset fields.</p>) : null}
+    <footer className="inspector-footer">
+      <span className={`run-state ${run?.status === 'ok' ? 'ok' : run ? 'error' : ''}`}>{run ? run.status === 'ok' ? `Live · ${rowCount} ${rowCount === 1 ? 'row' : 'rows'}` : 'Last run failed' : 'Not run yet'}</span>
+      <button type="button" className="delete-component" onClick={onDelete}><Trash2 size={14} /> Remove</button>
+    </footer>
+    <small className="inspector-id">{pageId} / {tile.i}</small>
   </div>;
 }
 
@@ -3210,12 +3317,12 @@ export function StudioTilePreview({
       {chart === 'table' || chart === 'pivot'
         ? <TableOutput result={run.result} themeMode={themeMode} maxHeight={height} initialPageSize={10} onRowClick={onRowSelect} />
         : <ChartOutput result={run.result} themeMode={themeMode} chartConfig={{ ...chartConfig, title: undefined }} availableHeight={height} availableWidth={width} onMarkSelect={onRowSelect} />}
-      {selectableFields.length ? <div className="dataset-mark-controls" aria-label="Cross-filter selection">
+      {selectableFields.length ? <div className={`dataset-mark-controls marks ${selectedForTile.length ? 'has-selection' : ''}`} aria-label="Cross-filter selection">
         <span>Select a result mark</span>
         {selectableFields.flatMap((field) => uniquePreviewValues(run.result!.rows, field).slice(0, 6).map((value) => ({ field, value }))).map(({ field, value }) => <button key={`${field}:${String(value)}`} type="button" className={selectedForTile.some((filter) => filter.field === field && filter.values.some((candidate) => JSON.stringify(candidate) === JSON.stringify(value))) ? 'on' : ''} onClick={() => onSelectDatasetMark?.(field, [value])}>{humanize(field)}: {String(value)}</button>)}
         <small>{chart === 'table' ? 'You can also click a table row.' : 'Values come from this settled result.'}</small>
       </div> : null}
-      {hierarchy ? <div className="dataset-mark-controls" aria-label="Hierarchy exploration">
+      {hierarchy && (hierarchyCandidates.length > 0 || hierarchy.activeSteps.length > 0) ? <div className="dataset-mark-controls hierarchy" aria-label="Hierarchy exploration">
         <span>Explore hierarchy · unsaved</span>
         {markActions.length > 1 ? <label>Click action <select value={selectedMarkAction?.id ?? ''} onChange={(event) => setMarkActionId(event.target.value)}>
           {markActions.map((action) => <option key={action.id} value={action.id}>{action.kind === 'filter' ? 'Filter linked tiles' : `Drill to ${humanize(action.candidate.toField)}`}</option>)}
@@ -3227,7 +3334,7 @@ export function StudioTilePreview({
         <span>Clicking this {chart === 'table' ? 'table' : 'chart'} filters nothing yet.</span>
         <button type="button" onClick={onLinkField} title={`Map ${humanize(linkProposal.fieldLabel)} to: ${linkProposal.targetLabels.join(', ')}`}>Link {humanize(linkProposal.fieldLabel)} to {linkProposal.mappings.length === 1 ? linkProposal.targetLabels[0] : `${linkProposal.mappings.length} Datasets`}</button>
       </div> : null}
-      {hasNavigation ? <button type="button" className="dataset-detail-navigation" onClick={onNavigate}>Open configured details</button> : null}
+      {hasNavigation ? <button type="button" className="dataset-detail-navigation" onClick={onNavigate}>Open details <ArrowRight size={13} /></button> : null}
     </div>
   );
 }
@@ -3371,6 +3478,26 @@ function sourceCatalogKindLabel(source: AppBlockRecommendation): string {
   if (source.capabilities?.dataset) return 'Dataset';
   if (source.capabilities?.semanticModelId) return 'Governed semantic source';
   return 'Block source';
+}
+
+const CHART_TYPE_OPTIONS: Array<[AppStudioBuildDraft['pages'][number]['layout']['items'][number]['viz']['type'], string]> = [
+  ['single_value', 'KPI'], ['bar', 'Bar'], ['line', 'Line'], ['area', 'Area'],
+  ['table', 'Table'], ['pivot', 'Pivot'], ['scatter', 'Scatter'], ['heatmap', 'Heatmap'],
+];
+
+function chartTypeIcon(type: string): JSX.Element {
+  if (type === 'single_value' || type === 'kpi') return <Gauge size={16} />;
+  if (type === 'table' || type === 'pivot') return <Table2 size={16} />;
+  if (type === 'line' || type === 'area') return <LineChart size={16} />;
+  if (type === 'scatter' || type === 'heatmap') return <ScatterChart size={16} />;
+  return <BarChart3 size={16} />;
+}
+
+function tileKindLabel(tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]): string {
+  if (tile.viz.type === 'heading') return 'HEADING';
+  if (tile.text) return 'TEXT';
+  const labels: Record<string, string> = { single_value: 'KPI', kpi: 'KPI', bar: 'BAR CHART', line: 'LINE CHART', area: 'AREA CHART', scatter: 'SCATTER', heatmap: 'HEATMAP', table: 'TABLE', pivot: 'PIVOT TABLE' };
+  return labels[tile.viz.type] ?? humanize(tile.viz.type).toUpperCase();
 }
 
 function componentKindLabel(kind: 'kpi' | 'chart' | 'table'): 'KPI' | 'Chart' | 'Table' {
