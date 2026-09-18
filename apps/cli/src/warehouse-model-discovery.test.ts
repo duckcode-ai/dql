@@ -1,0 +1,132 @@
+import { describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import { normalizeWarehouseCatalog, warehouseRelationId, type DQLManifest, type WarehouseCatalogRelationV1 } from '@duckcodeailabs/dql-core';
+import { discoverWarehouseModel, validateWarehouseDiscovery, viewJoins, warehouseDiscoveryChanges } from './warehouse-model-discovery.js';
+
+const table = (schema: string, name: string, columns: string[], extra: Partial<WarehouseCatalogRelationV1> = {}): WarehouseCatalogRelationV1 => ({
+  id: warehouseRelationId({ schema, name }),
+  schema,
+  name,
+  relation: `${schema}.${name}`,
+  kind: 'table',
+  columns: columns.map((column) => ({ name: column, type: 'INTEGER' })),
+  ...extra,
+});
+
+const snapshot = normalizeWarehouseCatalog({
+  version: 1,
+  driver: 'sqlite',
+  connectionId: 'default',
+  scopes: [{ catalogOrDatabase: 'main', schemas: ['main'] }],
+  capturedAt: '2026-09-18T00:00:00.000Z',
+  relations: [
+    table('main', 'customers', ['customer_id', 'name'], { primaryKey: ['customer_id'], comment: 'One row per customer' }),
+    table('main', 'orders', ['order_id', 'customer_id', 'amount'], {
+      primaryKey: ['order_id'],
+      foreignKeys: [{ columns: ['customer_id'], references: { relation: 'main.customers', columns: ['customer_id'] } }],
+    }),
+    // No declared keys at all: only the names say how it joins.
+    table('main', 'products', ['id', 'title']),
+    table('main', 'order_items', ['order_id', 'line_no', 'product_id', 'quantity']),
+    table('main', 'stg_products', ['id', 'title']),
+    {
+      ...table('main', 'order_lines', ['order_id', 'title']),
+      kind: 'view',
+      viewSql: 'CREATE VIEW order_lines AS SELECT i.order_id, p.title FROM order_items AS i JOIN products p ON i.product_id = p.id',
+    },
+  ],
+});
+
+describe('drafting a model from the warehouse catalog', () => {
+  it('drafts entities with declared grains and joins with the evidence for each', () => {
+    const report = discoverWarehouseModel({ snapshot, projectName: 'Shop' });
+    expect(report.domains).toEqual([{ id: 'shop', name: 'Shop', existing: false }]);
+    const entity = (id: string) => report.entities.find((item) => item.id === id);
+    expect(entity('customer')).toMatchObject({ relation: 'main.customers', grain: 'customer_id', keys: ['customer_id'], grainSource: 'primary_key', description: 'One row per customer' });
+    expect(entity('product')).toMatchObject({ relation: 'main.products', keys: [], grainCandidate: 'id' });
+    expect(entity('product')?.grain).toBeUndefined();
+    // `stg_products` strips to "product" too; the second keeps its own name.
+    expect(entity('stg_products')).toMatchObject({ relation: 'main.stg_products' });
+
+    const joins = Object.fromEntries(report.relationships.map((item) => [item.id, item]));
+    expect(joins.order_to_customer).toMatchObject({
+      from: 'order', to: 'customer', keys: [{ from: 'customer_id', to: 'customer_id' }], cardinality: 'many_to_one', fanout: 'safe',
+    });
+    expect(joins.order_to_customer!.evidence.map((item) => item.source)).toEqual(['declared_foreign_key', 'same_name']);
+    // The view's join and the naming convention agree on order_items → products.
+    expect(joins.order_item_to_product).toMatchObject({ keys: [{ from: 'product_id', to: 'id' }], cardinality: 'unknown' });
+    expect(joins.order_item_to_product!.evidence.map((item) => item.source)).toEqual(['view_join', 'named_for_table']);
+    // order_items.order_id names orders.
+    expect(joins.order_item_to_order).toMatchObject({ keys: [{ from: 'order_id', to: 'order_id' }], cardinality: 'many_to_one' });
+  });
+
+  it('leaves relations already bound and joins already modeled alone', () => {
+    const manifest = {
+      modeling: {
+        entities: {
+          'sales::entity::buyer': { id: 'sales::entity::buyer', qualifiedId: 'sales::entity::buyer', localId: 'buyer', domain: 'sales', dbtUniqueId: 'warehouse.main.customers' },
+          'sales::entity::purchase': { id: 'sales::entity::purchase', qualifiedId: 'sales::entity::purchase', localId: 'purchase', domain: 'sales', dbtUniqueId: 'warehouse.main.orders' },
+        },
+        relationships: {
+          'sales::relationship::purchase_buyer': { from: 'sales::entity::purchase', to: 'sales::entity::buyer', keys: [{ from: 'customer_id', to: 'customer_id' }] },
+        },
+      },
+    } as unknown as DQLManifest;
+    const report = discoverWarehouseModel({ snapshot, manifest, projectName: 'shop', existingDomains: ['sales'] });
+    expect(report.entities.find((item) => item.relationId === 'warehouse.main.customers')).toMatchObject({ id: 'buyer', domain: 'sales', existing: 'sales::entity::buyer' });
+    expect(report.existingRelationships).toBe(1);
+    expect(report.relationships.some((item) => item.from === 'purchase' && item.to === 'buyer')).toBe(false);
+    // A new join to an existing entity crosses from the project domain into sales.
+    const crossDomain = report.relationships.find((item) => item.to === 'purchase');
+    expect(crossDomain).toMatchObject({ fromDomain: 'shop', toDomain: 'sales' });
+    const changes = warehouseDiscoveryChanges(report, { owner: 'owner@shop.test' });
+    expect(changes.filter((change) => change.operation === 'upsert_domain').map((change) => (change.value as { id: string }).id)).toEqual(['shop']);
+    expect(changes.some((change) => change.operation === 'upsert_entity' && (change.value as { dbtModel: string }).dbtModel === 'warehouse.main.customers')).toBe(false);
+    const relationship = changes.find((change) => change.operation === 'upsert_relationship' && (change.value as { to: string }).to === 'sales::entity::purchase');
+    expect(relationship?.value).toMatchObject({ from: 'order_item', crossDomain: true, status: 'draft' });
+  });
+
+  it('checks joins and naming-key grains on the warehouse, and proposes the cardinality it saw', async () => {
+    const db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE customers (customer_id INTEGER, name TEXT);
+      CREATE TABLE orders (order_id INTEGER, customer_id INTEGER, amount INTEGER);
+      CREATE TABLE products (id INTEGER, title TEXT);
+      CREATE TABLE order_items (order_id INTEGER, line_no INTEGER, product_id INTEGER, quantity INTEGER);
+      CREATE TABLE stg_products (id INTEGER, title TEXT);
+      INSERT INTO customers VALUES (1, 'a'), (2, 'b');
+      INSERT INTO orders VALUES (10, 1, 5), (11, 1, 6), (12, 2, 7);
+      INSERT INTO products VALUES (100, 'x'), (101, 'y');
+      INSERT INTO order_items VALUES (10, 1, 100, 1), (10, 2, 101, 1), (11, 1, 100, 3), (12, 1, 999, 1);
+      INSERT INTO stg_products VALUES (100, 'x'), (100, 'x again');
+    `);
+    const sql: string[] = [];
+    const execute = async (statement: string) => { sql.push(statement); return { rows: db.prepare(statement).all() as Array<Record<string, unknown>> }; };
+    const report = await validateWarehouseDiscovery(discoverWarehouseModel({ snapshot, projectName: 'shop' }), snapshot, execute, (identifier) => `"${identifier}"`);
+    expect(report.validated).toBe(true);
+    expect(report.entities.find((item) => item.id === 'product')).toMatchObject({ grain: 'id', keys: ['id'], grainSource: 'unique_column' });
+    // A repeated id is not a grain.
+    expect(report.entities.find((item) => item.id === 'stg_products')?.grain).toBeUndefined();
+    const joins = Object.fromEntries(report.relationships.map((item) => [item.id, item]));
+    expect(joins.order_item_to_product).toMatchObject({ cardinality: 'many_to_one', fanout: 'safe' });
+    expect(joins.order_item_to_product!.validation).toMatchObject({ unmatchedFrom: 1 });
+    expect(joins.order_to_customer!.validation).toMatchObject({ status: 'passed', unmatchedFrom: 0 });
+    // Aggregates only: no statement reads a row's values.
+    expect(sql.every((statement) => /COUNT\(/i.test(statement))).toBe(true);
+    db.close();
+  });
+});
+
+describe('reading joins out of view SQL', () => {
+  it('reads aliased equality joins and ignores what it cannot read', () => {
+    expect(viewJoins('select * from sales.orders o left join sales.customers as c on o.customer_id = c.id and o.region = c.region')).toEqual([
+      { left: { relation: 'sales.orders', column: 'customer_id' }, right: { relation: 'sales.customers', column: 'id' } },
+      { left: { relation: 'sales.orders', column: 'region' }, right: { relation: 'sales.customers', column: 'region' } },
+    ]);
+    expect(viewJoins('SELECT * FROM "A"."B" JOIN "A"."C" ON "B"."k" = "C"."k"')).toEqual([
+      { left: { relation: 'A.B', column: 'k' }, right: { relation: 'A.C', column: 'k' } },
+    ]);
+    expect(viewJoins('select a.x from a join (select * from b) s on a.id = s.id')).toEqual([]);
+    expect(viewJoins('select 1')).toEqual([]);
+  });
+});

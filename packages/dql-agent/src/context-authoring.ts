@@ -12,6 +12,8 @@ export type ContextAuthoringOrigin =
   | 'manual'
   | 'yaml_import'
   | 'dbt_discovery'
+  /** Drafted by the runtime from the warehouse catalog (RFC 0007). */
+  | 'warehouse_discovery'
   | 'ai'
   | 'correction';
 

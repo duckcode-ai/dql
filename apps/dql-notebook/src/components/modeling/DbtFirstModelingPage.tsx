@@ -192,6 +192,24 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
     }
   });
   const [notice, setNotice] = useState<string | null>(null);
+  const [draftingFromWarehouse, setDraftingFromWarehouse] = useState(false);
+  /**
+   * RFC 0007: draft domains, models and joins from the warehouse catalog,
+   * checked on the warehouse, and open them in the ordinary review drawer.
+   */
+  const draftFromWarehouse = async () => {
+    setDraftingFromWarehouse(true);
+    setNotice(null);
+    try {
+      const result = await api.draftWarehouseModel({ expectedSnapshotId: data?.snapshotId });
+      if (result.proposal) setProposal(result.proposal);
+      else setNotice(`Nothing new to draft: the ${result.report.relations} table${result.report.relations === 1 ? '' : 's'} in the warehouse catalog and their joins are already modeled.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDraftingFromWarehouse(false);
+    }
+  };
   useEffect(() => {
     if (!data || !relationshipHandoff) return;
     const { draft, missing } = relationshipDraftFromJoin(relationshipHandoff, data.modeling.entities, data.dbtProvenance.nodes);
@@ -266,8 +284,11 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
   if (loading && !data) return <EmptyState t={t} title="Loading Modeling…" detail="Reading your dbt project and the domains, relationships, terms and skills built on it." />;
   if (!data) {
     const state = unavailable ?? domainStudioUnavailableState(null);
-    return <EmptyState t={t} title={state.title} detail={state.detail} status={state.status} />;
+    return <EmptyState t={t} title={state.title} detail={state.detail} status={state.status} action={state.action === 'enable_warehouse' ? { label: 'Model my warehouse without dbt', run: async () => { await api.enableWarehouseModeling(); await refresh(); } } : undefined} />;
   }
+  const warehouseModeling = data.modeling.mode === 'warehouse-first' || data.modeling.mode === 'hybrid';
+  const warehouseRelationCount = Object.values(data.dbtProvenance.nodes).filter((node) => node.resourceType === 'warehouse').length;
+  const dbtNodeCount = Object.keys(data.dbtProvenance.nodes).length - warehouseRelationCount;
 
   const relationByDbtId = Object.fromEntries(Object.values(data.dbtProvenance.nodes).map((node) => [node.uniqueId, node.relation]));
   // Searchable models + (already-hydrated) columns for the diagram search dropdown.
@@ -390,6 +411,11 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
               <MessageCircle size={14} /> Ask about {authoredLabels.get(selectedDomain) ?? selectedDomain}
             </Button>
           )}
+          {warehouseModeling && (
+            <Button t={t} onClick={() => void draftFromWarehouse()} disabled={draftingFromWarehouse}>
+              <Boxes size={14} /> {draftingFromWarehouse ? 'Drafting…' : 'Draft from warehouse'}
+            </Button>
+          )}
           <Button t={t} onClick={() => setStartDrawer('yaml')}><FileSearch size={14} /> Import YAML</Button>
           <IconButton t={t} title="Recompile" onClick={() => void refresh()}>
             <RefreshCw size={15} />
@@ -413,7 +439,11 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
         })}
         <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 10.5, color: t.textMuted, whiteSpace: 'nowrap', paddingLeft: 12 }}>
           <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)', flexShrink: 0 }} />
-          dbt synced · {Object.keys(data.dbtProvenance.nodes).length} model{Object.keys(data.dbtProvenance.nodes).length === 1 ? '' : 's'}
+          {data.modeling.mode === 'warehouse-first'
+            ? <>warehouse catalog · {warehouseRelationCount} table{warehouseRelationCount === 1 ? '' : 's'}</>
+            : data.modeling.mode === 'hybrid'
+              ? <>dbt · {dbtNodeCount} model{dbtNodeCount === 1 ? '' : 's'} · warehouse · {warehouseRelationCount} table{warehouseRelationCount === 1 ? '' : 's'}</>
+              : <>dbt synced · {Object.keys(data.dbtProvenance.nodes).length} model{Object.keys(data.dbtProvenance.nodes).length === 1 ? '' : 's'}</>}
         </span>
         {tab === 'diagram' && <button ref={inspectorToggleRef} aria-expanded={inspectorOpen} aria-controls="domain-studio-inspector" aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'} title={inspectorOpen ? 'Hide inspector' : 'Show inspector'} onClick={toggleInspector} style={{ ...iconButtonStyle(t), marginLeft: 8 }}>
           {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
@@ -458,7 +488,7 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
                 {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  {domainEntities.length === 0 ? <ModelingEmptyWorkspace t={t} connectedModels={Object.keys(data.dbtProvenance.nodes).length} onDbt={() => setStartDrawer('models')} onYaml={() => setStartDrawer('yaml')} onManual={() => setEditor({ kind: 'entity' })} /> : <DomainModelingCanvas modeling={ghostView.modeling} ghostEntityIds={ghostView.ghostEntityIds} ghostRelationshipIds={ghostView.ghostRelationshipIds} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} focusRequest={focusRequest ?? undefined} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onEditRelationship={(recordKey) => { const relationship = data.modeling.relationships[recordKey]; if (relationship) setEditor({ kind: 'relationship', relationship }); }} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onAddModel={() => setStartDrawer('models')} onCreateDomain={() => setDomainSettings({ kind: 'create' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => {
+                  {domainEntities.length === 0 ? <ModelingEmptyWorkspace t={t} connectedModels={Object.keys(data.dbtProvenance.nodes).length} warehouse={warehouseModeling ? { tables: warehouseRelationCount, drafting: draftingFromWarehouse, onDraft: () => void draftFromWarehouse() } : undefined} onDbt={() => setStartDrawer('models')} onYaml={() => setStartDrawer('yaml')} onManual={() => setEditor({ kind: 'entity' })} /> : <DomainModelingCanvas modeling={ghostView.modeling} ghostEntityIds={ghostView.ghostEntityIds} ghostRelationshipIds={ghostView.ghostRelationshipIds} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} focusRequest={focusRequest ?? undefined} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onEditRelationship={(recordKey) => { const relationship = data.modeling.relationships[recordKey]; if (relationship) setEditor({ kind: 'relationship', relationship }); }} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onAddModel={() => setStartDrawer('models')} onCreateDomain={() => setDomainSettings({ kind: 'create' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => {
                     setSelectedId(id);
                     openAsk(id);
                   }} theme={t} />}
@@ -1222,16 +1252,18 @@ const viewMenuButton = (t: Theme, active = false): React.CSSProperties => ({ bor
 
 function DiagramLegend({ t }: { t: Theme }) { return <div style={{ display: 'flex', gap: 14, padding: '7px 12px', borderBottom: `1px solid ${t.headerBorder}`, background: t.headerBg, color: t.textSecondary, fontSize: 9.5 }}>{RELATIONSHIP_LEGEND.map(({ label, color }) => <span key={label} style={{ display: 'flex', gap: 5, alignItems: 'center' }}><i style={{ display: 'inline-block', width: 18, height: 3, background: color, borderRadius: 2 }} />{label}</span>)}<span style={{ marginLeft: 'auto' }}>1:1 · 1:N · N:1 · N:N</span></div>; }
 
-function ModelingEmptyWorkspace({ t, connectedModels, onDbt, onYaml, onManual }: { t: Theme; connectedModels: number; onDbt: () => void; onYaml: () => void; onManual: () => void }) {
+function ModelingEmptyWorkspace({ t, connectedModels, warehouse, onDbt, onYaml, onManual }: { t: Theme; connectedModels: number; warehouse?: { tables: number; drafting: boolean; onDraft: () => void }; onDbt: () => void; onYaml: () => void; onManual: () => void }) {
   // UI-019: all three doors are always live. A Domain and subject area are
   // prefilled and created as part of the proposal, so nothing here can
   // dead-end an author who has not set up governance objects yet.
   const actions = [
-    { icon: <Boxes size={20} />, title: 'Use connected dbt', detail: `${connectedModels} model${connectedModels === 1 ? '' : 's'} available. Search, multi-select, confirm where they belong, then review the bindings.`, action: onDbt },
+    // RFC 0007: a warehouse-first project starts from its own tables.
+    ...(warehouse ? [{ icon: <Boxes size={20} />, title: warehouse.drafting ? 'Drafting from the warehouse…' : 'Draft from your warehouse', detail: warehouse.tables > 0 ? `${warehouse.tables} table${warehouse.tables === 1 ? '' : 's'} synced. DQL drafts models from their keys and joins from declared foreign keys, view SQL and column names, checks each join on the warehouse, and shows you every change to review.` : 'Sync schema in Settings → Connections first, so DQL can read your tables, keys and comments.', action: warehouse.onDraft }] : []),
+    { icon: <Boxes size={20} />, title: warehouse ? 'Pick tables' : 'Use connected dbt', detail: warehouse ? `${connectedModels} table${connectedModels === 1 ? '' : 's'} or model${connectedModels === 1 ? '' : 's'} available. Search, multi-select, confirm where they belong, then review the bindings.` : `${connectedModels} model${connectedModels === 1 ? '' : 's'} available. Search, multi-select, confirm where they belong, then review the bindings.`, action: onDbt },
     { icon: <FileSearch size={20} />, title: 'Import modeling YAML', detail: 'Discover DQL modeling or dbt YAML from this project, a safe local path, an upload, or pasted content. Relationships declared in dbt tests come across as draft edges.', action: onYaml },
     { icon: <Plus size={20} />, title: 'Add one model by hand', detail: 'Pick a single dbt model and describe what one of its rows means. Connect it to others afterwards.', action: onManual },
   ];
-  return <div style={{ height: '100%', display: 'grid', placeItems: 'center', padding: 28 }}><div style={{ width: 'min(840px, 100%)' }}><div style={{ textAlign: 'center', marginBottom: 18 }}><h2 style={{ margin: 0, fontSize: 18 }}>Start modeling domain context</h2><p style={{ margin: '7px 0 0', color: t.textMuted, fontSize: 11.5 }}>Choose the source you already have. Every path shows you the exact source change before anything is written.</p></div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>{actions.map((item) => <button key={item.title} type="button" onClick={item.action} style={{ ...overviewCard(t), minHeight: 150, textAlign: 'left', cursor: 'pointer' }}><span style={{ width: 38, height: 38, borderRadius: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-dim)', color: t.accent }}>{item.icon}</span><b style={{ display: 'block', marginTop: 12 }}>{item.title}</b><span style={{ display: 'block', marginTop: 6, color: t.textSecondary, fontSize: 10.5, lineHeight: 1.5 }}>{item.detail}</span></button>)}</div></div></div>;
+  return <div style={{ height: '100%', display: 'grid', placeItems: 'center', padding: 28 }}><div style={{ width: 'min(840px, 100%)' }}><div style={{ textAlign: 'center', marginBottom: 18 }}><h2 style={{ margin: 0, fontSize: 18 }}>Start modeling domain context</h2><p style={{ margin: '7px 0 0', color: t.textMuted, fontSize: 11.5 }}>Choose the source you already have. Every path shows you the exact source change before anything is written.</p></div><div style={{ display: 'grid', gridTemplateColumns: `repeat(${actions.length}, minmax(0, 1fr))`, gap: 10 }}>{actions.map((item) => <button key={item.title} type="button" onClick={item.action} style={{ ...overviewCard(t), minHeight: 150, textAlign: 'left', cursor: 'pointer' }}><span style={{ width: 38, height: 38, borderRadius: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-dim)', color: t.accent }}>{item.icon}</span><b style={{ display: 'block', marginTop: 12 }}>{item.title}</b><span style={{ display: 'block', marginTop: 6, color: t.textSecondary, fontSize: 10.5, lineHeight: 1.5 }}>{item.detail}</span></button>)}</div></div></div>;
 }
 
 function exportDiagramSvg() {
@@ -1787,7 +1819,9 @@ export function Evidence({ evidence, t, onFixWithAi, fromName = 'source', toName
   );
 }
 
-function EmptyState({ t, title, detail, status }: { t: Theme; title: string; detail: string; status?: string }) {
+function EmptyState({ t, title, detail, status, action }: { t: Theme; title: string; detail: string; status?: string; action?: { label: string; run: () => Promise<void> } }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   return (
     <div
       style={{
@@ -1803,6 +1837,14 @@ function EmptyState({ t, title, detail, status }: { t: Theme; title: string; det
         <h1 style={{ fontSize: 20 }}>{title}</h1>
         <p style={{ color: t.textSecondary, lineHeight: 1.6 }}>{detail}</p>
         {status && <code style={{ fontSize: 12 }}>{status}</code>}
+        {action && (
+          <div style={{ marginTop: 16 }}>
+            <Button t={t} disabled={busy} onClick={() => { setBusy(true); setError(null); void action.run().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setBusy(false)); }}>
+              <Boxes size={14} /> {busy ? 'Setting up…' : action.label}
+            </Button>
+            {error && <p role="alert" style={{ color: 'var(--status-error)', fontSize: 11.5 }}>{error}</p>}
+          </div>
+        )}
       </div>
     </div>
   );

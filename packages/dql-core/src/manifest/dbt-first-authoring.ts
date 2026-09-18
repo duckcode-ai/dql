@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as yaml from 'js-yaml';
 import { domainFolderSlug, renderDomainDeclaration, type DomainInput } from './domain-writer.js';
 import { loadDomainPackageRegistry } from './domain-package-registry.js';
-import { readWarehouseCatalog } from './warehouse-catalog.js';
+import { WAREHOUSE_CATALOG_PATH, readWarehouseCatalog } from './warehouse-catalog.js';
 import type {
   ManifestFanoutPolicy,
   ManifestModelLifecycle,
@@ -362,6 +362,13 @@ export function previewModelingChanges(
     }
     const domains = join(root, 'domains');
     if (existsSync(domains)) cpSync(domains, join(shadow, 'domains'), { recursive: true, dereference: false });
+    // Warehouse-first and hybrid entities are written with the relation as the
+    // warehouse spells it, which the catalog snapshot supplies.
+    const warehouseCatalog = join(root, WAREHOUSE_CATALOG_PATH);
+    if (existsSync(warehouseCatalog)) {
+      mkdirSync(dirname(join(shadow, WAREHOUSE_CATALOG_PATH)), { recursive: true });
+      cpSync(warehouseCatalog, join(shadow, WAREHOUSE_CATALOG_PATH));
+    }
     const touched = new Set<string>();
     const patchPathsByChange: string[][] = [];
     for (const change of changes) {

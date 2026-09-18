@@ -10,6 +10,7 @@ import {
   type DbtOnboardingJob,
   type DbtProfileConnectionCandidate,
   type ProviderSettings,
+  type WarehouseCatalogSummary,
   type WarehouseMetadataDiscovery,
   type WarehouseMetadataStatus,
 } from '../../api/client';
@@ -49,6 +50,9 @@ interface ConnectionInfo {
   connectorStatus?: ConnectorInstallStatus[];
   metadataScope?: ConnectionMetadataScopeV1 | null;
   metadataStatus?: WarehouseMetadataStatus;
+  /** The modeling catalog of warehouse-first and hybrid projects (RFC 0007). */
+  warehouseCatalog?: WarehouseCatalogSummary;
+  modelingMode?: string;
 }
 
 interface ConnectorInstallStatus {
@@ -491,11 +495,13 @@ export function ConnectionPanel({
   const applyMetadataResponse = (response: {
     scope: ConnectionMetadataScopeV1;
     status: WarehouseMetadataStatus;
+    warehouseCatalog?: WarehouseCatalogSummary;
   }) => {
     setInfo((current) => current ? {
       ...current,
       metadataScope: response.scope,
       metadataStatus: response.status,
+      ...(response.warehouseCatalog ? { warehouseCatalog: response.warehouseCatalog } : {}),
     } : current);
     setMetadataMode(response.scope.mode);
     setMetadataScopeText(formatMetadataScopeEditor(
@@ -554,7 +560,8 @@ export function ConnectionPanel({
       setMetadataMessage(
         `Ready · ${response.status.relationCount.toLocaleString()} relations · `
         + `${response.status.columnCount.toLocaleString()} columns · `
-        + `${response.status.queryCount ?? 0} metadata queries`,
+        + `${response.status.queryCount ?? 0} metadata queries`
+        + warehouseCatalogMessage(response.warehouseCatalog),
       );
     } catch (error) {
       setMetadataMessage(error instanceof Error ? error.message : String(error));
@@ -572,7 +579,8 @@ export function ConnectionPanel({
       applyMetadataResponse(response);
       setMetadataMessage(
         `Refreshed · ${response.status.relationCount.toLocaleString()} relations · `
-        + `${response.status.columnCount.toLocaleString()} columns`,
+        + `${response.status.columnCount.toLocaleString()} columns`
+        + warehouseCatalogMessage(response.warehouseCatalog),
       );
     } catch (error) {
       setMetadataMessage(error instanceof Error ? error.message : String(error));
@@ -1291,6 +1299,8 @@ export function ConnectionPanel({
   const connected = Boolean(info && Object.values(info.connections ?? {}).some((connection) => !isPlaceholderLocalConnection(connection)));
   const metadataStatus = info?.metadataStatus;
   const selectedAdditionalMetadataScopes = parseMetadataScopeEditor(metadataScopeText);
+  // RFC 0007: without dbt, the selected schemas are the whole modeled warehouse.
+  const warehouseFirst = info?.modelingMode === 'warehouse-first';
   const metadataScopeEditor = connected ? (
     <div style={{ maxWidth: 640, border: `1px solid ${t.cellBorder}`, borderRadius: 12, background: t.cellBg, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
@@ -1301,8 +1311,17 @@ export function ConnectionPanel({
       </div>
       <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 9, padding: '11px 12px', background: t.editorBg, display: 'flex', flexDirection: 'column', gap: 9 }}>
         <div style={{ fontSize: 11.5, lineHeight: 1.5, color: t.textSecondary, fontFamily: t.font }}>
-          <strong style={{ color: t.textPrimary }}>Only add schemas outside the configured dbt project.</strong>
-          {' '}Relations already present in the current dbt manifest are indexed automatically and should not be selected again.
+          {warehouseFirst ? (
+            <>
+              <strong style={{ color: t.textPrimary }}>Choose the schemas to model.</strong>
+              {' '}DQL reads their tables, columns, declared keys and comments — never their rows — for Ask and Modeling.
+            </>
+          ) : (
+            <>
+              <strong style={{ color: t.textPrimary }}>Only add schemas outside the configured dbt project.</strong>
+              {' '}Relations already present in the current dbt manifest are indexed automatically and should not be selected again.
+            </>
+          )}
         </div>
         <div>
           <button
@@ -1317,8 +1336,10 @@ export function ConnectionPanel({
         {metadataDiscovery ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
-              {metadataDiscovery.dbtScopes.reduce((count, scope) => count + scope.schemas.length, 0).toLocaleString()} dbt-covered schema(s)
-              {' · '}{additionalDiscoveredSchemaCount(metadataDiscovery).toLocaleString()} additional schema(s) available
+              {warehouseFirst
+                ? <>{additionalDiscoveredSchemaCount(metadataDiscovery).toLocaleString()} schema(s) available</>
+                : <>{metadataDiscovery.dbtScopes.reduce((count, scope) => count + scope.schemas.length, 0).toLocaleString()} dbt-covered schema(s)
+                  {' · '}{additionalDiscoveredSchemaCount(metadataDiscovery).toLocaleString()} additional schema(s) available</>}
               {' · '}{metadataDiscovery.queryCount.toLocaleString()} discovery query(s)
             </div>
             {metadataDiscovery.scopes.map((scope) => (
@@ -1353,7 +1374,7 @@ export function ConnectionPanel({
                           <span style={{ fontFamily: t.fontMono }}>{schema.name}</span>
                           {schema.inDbtProject
                             ? ` · in dbt (${schema.dbtRelationCount} relation${schema.dbtRelationCount === 1 ? '' : 's'}), included automatically`
-                            : ' · outside dbt, select only if reporting needs it'}
+                            : warehouseFirst ? '' : ' · outside dbt, select only if reporting needs it'}
                         </span>
                       </label>
                     );
@@ -1394,7 +1415,7 @@ export function ConnectionPanel({
             style={{ resize: 'vertical', borderRadius: 7, border: `1px solid ${t.cellBorder}`, background: t.cellBg, color: t.textPrimary, padding: '8px 10px', fontFamily: t.fontMono, fontSize: 11.5, lineHeight: 1.5 }}
           />
           <span style={{ fontSize: 10.5, color: t.textMuted }}>
-            Only additional schemas outside dbt belong here. Discovery is explicit and setup-only; Ask AI never scans the warehouse for available schemas.
+            {warehouseFirst ? 'One line per database: DATABASE: SCHEMA, SCHEMA.' : 'Only additional schemas outside dbt belong here.'} Discovery is explicit and setup-only; Ask AI never scans the warehouse for available schemas.
           </span>
         </label>
       ) : null}
@@ -1410,6 +1431,15 @@ export function ConnectionPanel({
           {' · '}{metadataStatus.relationCount.toLocaleString()} indexed warehouse relations
           {' · '}{metadataStatus.columnCount.toLocaleString()} indexed warehouse columns
           {metadataStatus.capturedAt ? ` · ${new Date(metadataStatus.capturedAt).toLocaleString()}` : ''}
+        </div>
+      ) : null}
+      {info?.warehouseCatalog ? (
+        <div style={{ fontSize: 11.5, color: info.warehouseCatalog.error ? 'var(--status-error)' : info.warehouseCatalog.relations ? 'var(--status-success)' : 'var(--status-warning)', fontFamily: t.font }}>
+          {info.warehouseCatalog.error
+            ? `Modeling catalog could not be read · ${info.warehouseCatalog.error}`
+            : info.warehouseCatalog.relations
+              ? `Modeling catalog · ${info.warehouseCatalog.relations.toLocaleString()} tables and views with their keys and comments${info.warehouseCatalog.capturedAt ? ` · ${new Date(info.warehouseCatalog.capturedAt).toLocaleString()}` : ''}`
+              : 'Modeling catalog not synchronized · Apply and synchronize to read tables, keys and comments for Modeling'}
         </div>
       ) : null}
       {metadataStatus?.observedTarget ? (
@@ -1525,6 +1555,8 @@ export function ConnectionPanel({
       </button>
     );
 
+    // A warehouse-first project is set up once its warehouse catalog is synced (RFC 0007).
+    const projectReady = dbtConfigured || (info?.modelingMode === 'warehouse-first' && Boolean(info.warehouseCatalog?.relations));
     return (
       <>
         <style>{CONNECTION_PAGE_STYLES}</style>
@@ -1532,7 +1564,7 @@ export function ConnectionPanel({
           <nav aria-label="Settings sections" style={{ width: 'clamp(190px, 17vw, 240px)', flexShrink: 0, borderRight: `1px solid ${t.cellBorder}`, padding: '10px 10px 10px 0', display: 'flex', flexDirection: 'column', gap: 2, alignSelf: 'flex-start', position: 'sticky', top: 0 }}>
             {navItem(activeTab === 'overview', 'Overview', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'overview' }))}
             {navItem(activeTab === 'project', 'Project & dbt', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'project' }),
-              <span style={{ width: 7, height: 7, borderRadius: 999, background: dbtPreparation?.status === 'failed' ? 'var(--status-error)' : dbtPreparation?.status === 'running' || dbtPreparation?.status === 'queued' ? 'var(--status-info)' : dbtConfigured ? 'var(--status-success)' : 'var(--status-warning)' }} title={dbtPreparation?.status === 'failed' ? 'Needs attention' : dbtPreparation?.status === 'running' || dbtPreparation?.status === 'queued' ? 'Preparing' : dbtConfigured ? 'Ready' : 'Missing'} />)}
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: dbtPreparation?.status === 'failed' ? 'var(--status-error)' : dbtPreparation?.status === 'running' || dbtPreparation?.status === 'queued' ? 'var(--status-info)' : projectReady ? 'var(--status-success)' : 'var(--status-warning)' }} title={dbtPreparation?.status === 'failed' ? 'Needs attention' : dbtPreparation?.status === 'running' || dbtPreparation?.status === 'queued' ? 'Preparing' : projectReady ? 'Ready' : 'Missing'} />)}
             {navItem(activeTab === 'database', 'Database', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'database' }),
               <span style={{ width: 7, height: 7, borderRadius: 999, background: connected ? 'var(--status-success)' : 'var(--status-warning)' }} title={connected ? 'Configured' : 'Missing'} />)}
             {navItem(activeTab === 'ai', 'AI provider', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'ai' }),
@@ -1545,6 +1577,8 @@ export function ConnectionPanel({
           <div style={{ flex: 1, minWidth: 0, padding: '0 0 24px 20px' }}>
             {activeTab === 'overview' ? (
               <SettingsOverview
+                warehouseFirst={info?.modelingMode === 'warehouse-first'}
+                warehouseCatalog={info?.warehouseCatalog}
                 dbtConfigured={dbtConfigured}
                 dbtPreparation={dbtPreparation}
                 databaseConfigured={connected}
@@ -1586,12 +1620,17 @@ export function ConnectionPanel({
 }
 
 function SettingsOverview({
+  warehouseFirst = false,
+  warehouseCatalog,
   dbtConfigured,
   dbtPreparation,
   databaseConfigured,
   databaseTest,
   providers,
 }: {
+  /** The project models its warehouse directly, without dbt (RFC 0007). */
+  warehouseFirst?: boolean;
+  warehouseCatalog?: WarehouseCatalogSummary;
   dbtConfigured: boolean;
   dbtPreparation: DbtOnboardingJob | null;
   databaseConfigured: boolean;
@@ -1611,7 +1650,15 @@ function SettingsOverview({
     icon: React.ReactNode;
     optional?: boolean;
   }> = [
-    {
+    warehouseFirst ? {
+      title: 'Project',
+      detail: warehouseCatalog?.relations
+        ? `Warehouse modeling · ${warehouseCatalog.relations.toLocaleString()} tables and views synced. Add a dbt project here any time.`
+        : 'Warehouse modeling · sync schema in Database to read your tables, keys and comments.',
+      state: warehouseCatalog?.relations ? 'configured' : 'missing',
+      tab: 'project',
+      icon: <GitBranch size={18} />,
+    } : {
       title: 'Project & dbt',
       detail: dbtPreparation?.message ?? (dbtConfigured ? 'Project configuration, dbt artifacts, and governed search indexes are ready.' : 'Choose a local dbt project or Git repository.'),
       state: dbtPreparation?.status === 'failed' || dbtPreparation?.status === 'cancelled'
@@ -2190,4 +2237,13 @@ function StyledField({
       )}
     </label>
   );
+}
+
+/** The modeling catalog's part of a sync message (warehouse-first and hybrid modeling). */
+function warehouseCatalogMessage(catalog: WarehouseCatalogSummary | undefined): string {
+  if (!catalog) return '';
+  if (catalog.error) return ` · modeling catalog failed: ${catalog.error}`;
+  if (catalog.skipped) return ` · modeling catalog unchanged: ${catalog.skipped}`;
+  const warnings = catalog.warnings?.length ? ` (${catalog.warnings.length} part${catalog.warnings.length === 1 ? '' : 's'} not read: ${catalog.warnings[0]})` : '';
+  return ` · modeling catalog ${catalog.relations ?? 0} tables and views${warnings}`;
 }

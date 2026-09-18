@@ -811,7 +811,7 @@ export interface SchemaTable {
   objectType?: string;
   /** dbt identity for a relation loaded from the bounded dbt catalog. */
   dbtUniqueId?: string;
-  dbtResourceType?: 'model' | 'source';
+  dbtResourceType?: 'model' | 'source' | 'warehouse';
   dbtSourcePath?: string;
   datasetId?: string;
   fileFingerprint?: string;

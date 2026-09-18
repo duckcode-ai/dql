@@ -93,7 +93,7 @@ const HELP = `
     dql sync dbt --check [path]     Report dbt/DQL drift without writing
     dql sync warehouse [path]       Read warehouse schemas (tables, columns, keys) — no dbt needed
     dql model list|validate [path]  Inspect or validate dbt-first Domain Packages
-    dql model discover [path]       Preview deterministic dbt domain proposals
+    dql model discover [path]       Preview draft domains and joins (from dbt, or the warehouse catalog)
     dql model apply-discovery [path] --apply
                                     Write reviewed sparse Domain Package proposals
     dql model import <file-or-directory> --domain <id> --area <id> --dry-run|--apply

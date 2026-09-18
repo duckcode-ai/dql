@@ -165,17 +165,34 @@ export function catalogKeyTypes(
   manifest: DQLManifest | undefined,
   spec: Pick<RelationshipValidationSpec, 'fromRelation' | 'toRelation' | 'keys'>,
   readCatalog: (path: string) => Record<string, unknown> | undefined = readCatalogFile,
+  /** Resolves the warehouse catalog snapshot of warehouse-first and hybrid modeling (RFC 0007). */
+  projectRoot?: string,
 ): Array<{ from?: string; to?: string }> {
   const manifestPath = manifest?.dbtProvenance?.manifestPath;
-  if (!manifestPath) return spec.keys.map(() => ({}));
-  const catalog = readCatalog(join(dirname(manifestPath), 'catalog.json'));
-  if (!catalog) return spec.keys.map(() => ({}));
+  const catalog = manifestPath ? readCatalog(join(dirname(manifestPath), 'catalog.json')) : undefined;
+  // A warehouse relation's types come from the warehouse catalog snapshot, the
+  // same file the compiler reads them from.
+  const warehouseCatalogPath = manifest?.dbtProvenance?.warehouseCatalogPath;
+  const warehouseCatalog = warehouseCatalogPath && projectRoot ? readCatalog(join(projectRoot, warehouseCatalogPath)) : undefined;
+  if (!catalog && !warehouseCatalog) return spec.keys.map(() => ({}));
   const nodes = manifest?.dbtProvenance?.nodes ?? {};
-  const uniqueIdOf = (relation: string): string | undefined => Object.values(nodes)
-    .find((node) => node.relation?.toLowerCase() === relation.toLowerCase())?.uniqueId;
+  const nodeOf = (relation: string) => Object.values(nodes)
+    .find((node) => node.relation?.toLowerCase() === relation.toLowerCase());
   const typesOf = (relation: string): Map<string, string> | undefined => {
-    const uniqueId = uniqueIdOf(relation);
-    if (!uniqueId) return undefined;
+    const node = nodeOf(relation);
+    if (!node) return undefined;
+    if (node.resourceType === 'warehouse') {
+      const relations = (warehouseCatalog?.relations as Array<{ id?: string; columns?: Array<{ name?: unknown; type?: unknown }> }> | undefined) ?? [];
+      const found = relations.find((item) => item.id === node.uniqueId);
+      if (!found?.columns) return undefined;
+      const types = new Map<string, string>();
+      for (const column of found.columns) {
+        if (typeof column.name === 'string' && typeof column.type === 'string' && column.type) types.set(column.name.toLowerCase(), column.type.toLowerCase());
+      }
+      return types;
+    }
+    if (!catalog) return undefined;
+    const uniqueId = node.uniqueId;
     const entry = (catalog.nodes as Record<string, unknown> | undefined)?.[uniqueId] ?? (catalog.sources as Record<string, unknown> | undefined)?.[uniqueId];
     const columns = (entry as { columns?: Record<string, { type?: unknown }> } | undefined)?.columns;
     if (!columns) return undefined;

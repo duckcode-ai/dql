@@ -387,7 +387,8 @@ export interface RelationshipKeySuggestion {
 
 export interface DbtModelInventoryItem {
   uniqueId: string;
-  resourceType: 'model' | 'source';
+  /** `warehouse` is a table or view read from the warehouse catalog (warehouse-first and hybrid modeling). */
+  resourceType: 'model' | 'source' | 'warehouse';
   name: string;
   packageName?: string;
   relation?: string;
@@ -415,7 +416,31 @@ export interface DbtModelInventoryResponse {
   snapshotId: string;
   manifestPath?: string;
   projectName?: string;
-  scope?: 'dbt_relations';
+  scope?: 'dbt_relations' | 'warehouse_relations';
+}
+
+/** The warehouse catalog snapshot's state, as Settings and Modeling show it (RFC 0007). */
+export interface WarehouseCatalogSummary {
+  path: string;
+  relations?: number;
+  fingerprint?: string;
+  capturedAt?: string;
+  connectionId?: string;
+  warnings?: string[];
+  skipped?: string;
+  error?: string;
+}
+
+/** What `Draft from warehouse` found, before anything is written. */
+export interface WarehouseDiscoveryReport {
+  catalogFingerprint: string;
+  capturedAt: string;
+  relations: number;
+  domains: Array<{ id: string; name: string; existing: boolean }>;
+  entities: Array<{ id: string; domain: string; relation: string; grain?: string; existing?: string }>;
+  relationships: Array<{ id: string; domain: string; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality: string; evidence: Array<{ source: string; reason: string }> }>;
+  existingRelationships: number;
+  validated: boolean;
 }
 
 export interface DomainWorkspaceSummary {
@@ -4079,7 +4104,7 @@ export interface WarehouseMetadataDiscovery {
   message: string;
 }
 
-export type ContextAuthoringOrigin = 'manual' | 'yaml_import' | 'dbt_discovery' | 'ai' | 'correction';
+export type ContextAuthoringOrigin = 'manual' | 'yaml_import' | 'dbt_discovery' | 'warehouse_discovery' | 'ai' | 'correction';
 export interface ContextAuthoringPatchV1 { path: string; before: string; after: string; changed: boolean; owner: 'dql' | 'dbt'; operationId: string }
 export interface ContextAuthoringDiagnosticV1 { code: string; severity: 'info' | 'warning' | 'blocking'; message: string; operationId?: string }
 export type ContextAuthoringOperation =
@@ -4194,6 +4219,20 @@ export const api = {
   /** Read the compiled dbt-first overlay. dbt-owned details stay in dbt artifacts. */
   async getDbtFirstModeling(): Promise<DbtFirstModelingResponse> {
     return request<DbtFirstModelingResponse>('/api/modeling/dbt-first');
+  },
+
+  /** Turn on warehouse modeling: warehouse-first, or hybrid for a dbt project (RFC 0007). */
+  async enableWarehouseModeling(mode: 'warehouse-first' | 'hybrid' = 'warehouse-first'): Promise<{ mode: string; changed: boolean; connectionId: string; warehouseCatalog?: WarehouseCatalogSummary }> {
+    return request('/api/modeling/warehouse/enable', { method: 'POST', body: JSON.stringify({ mode }) });
+  },
+
+  /**
+   * Draft domains, models and joins from the warehouse catalog, checked on the
+   * warehouse, as a reviewable proposal. `proposal` is null when there is
+   * nothing new to draft.
+   */
+  async draftWarehouseModel(input: { expectedSnapshotId?: string; domain?: string; validate?: boolean } = {}): Promise<{ report: WarehouseDiscoveryReport; proposal: ContextAuthoringProposalV1 | null }> {
+    return request('/api/modeling/warehouse/discover/proposal', { method: 'POST', body: JSON.stringify({ validate: true, ...input }) });
   },
 
   async getDbtModelingNode(uniqueId: string): Promise<DbtNodeAuthoringDetail> {
@@ -6044,7 +6083,7 @@ export const api = {
   async previewConnectionMetadataScope(
     connectionId: string,
     input: ConnectionMetadataScopeInput = {},
-  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus }> {
+  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus; warehouseCatalog?: WarehouseCatalogSummary }> {
     return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-scope/preview`, {
       method: 'POST',
       body: JSON.stringify(input),
@@ -6061,14 +6100,14 @@ export const api = {
 
   async getConnectionMetadataScope(
     connectionId: string,
-  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus }> {
+  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus; warehouseCatalog?: WarehouseCatalogSummary }> {
     return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-scope`);
   },
 
   async applyConnectionMetadataScope(
     connectionId: string,
     input: ConnectionMetadataScopeInput,
-  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus }> {
+  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus; warehouseCatalog?: WarehouseCatalogSummary }> {
     return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-scope`, {
       method: 'PUT',
       body: JSON.stringify(input),
@@ -6077,7 +6116,7 @@ export const api = {
 
   async refreshConnectionMetadata(
     connectionId: string,
-  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus }> {
+  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus; warehouseCatalog?: WarehouseCatalogSummary }> {
     return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-sync`, {
       method: 'POST',
     });

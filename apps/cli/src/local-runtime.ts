@@ -141,6 +141,7 @@ import {
   type DiffReport,
   previewModelingChange,
   previewModelingChanges,
+  applyModelingChanges,
   applyModelingChange,
   previewDbtSourcePatch,
   applyDbtSourcePatch,
@@ -614,6 +615,12 @@ import {
   type ConnectionMetadataScopeV1,
 } from './warehouse-metadata.js';
 import { syncWarehouseCatalog } from './warehouse-catalog-sync.js';
+import {
+  discoverWarehouseModel,
+  validateWarehouseDiscovery,
+  warehouseDiscoveryChanges,
+  type WarehouseDiscoveryReport,
+} from './warehouse-model-discovery.js';
 import {
   NotebookDatasetWorkspace,
   type DatasetSource,
@@ -6311,7 +6318,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
       }
       if (operation.change.operation === 'upsert_entity'
-        && (input.origin === 'ai' || input.origin === 'yaml_import' || input.origin === 'dbt_discovery')
+        && (input.origin === 'ai' || input.origin === 'yaml_import' || input.origin === 'dbt_discovery' || input.origin === 'warehouse_discovery')
         && !operation.change.value.areaId) {
         // Every model still belongs to exactly one Domain and subject area. An
         // omitted area is filled with the default rather than blocking the
@@ -11834,6 +11841,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           manifest,
           (sql) => executor.executeQuery(sql, [], {}, activeConnection),
           (identifier) => getDialect(activeConnection.driver).quoteIdentifier(identifier),
+          projectRoot,
         );
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, evidence }));
@@ -11861,7 +11869,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const activeConnection = await resolveExecutionConnection(body as Record<string, unknown>);
         const spec = { fromRelation, toRelation, keys };
         const profile = await profileRelationshipOnWarehouse(
-          { ...spec, keyTypes: catalogKeyTypes(snapshot.manifest, spec) },
+          { ...spec, keyTypes: catalogKeyTypes(snapshot.manifest, spec, undefined, projectRoot) },
           (sql) => executor.executeQuery(sql, [], {}, activeConnection),
           (identifier) => getDialect(activeConnection.driver).quoteIdentifier(identifier),
         );
@@ -11871,6 +11879,147 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const code = apiErrorCode(error, 'RELATIONSHIP_PROFILE_FAILED');
         res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Check the matching columns or configure a warehouse connection, then check again.'] })));
+      }
+      return;
+    }
+
+    // Modeling → "Model my warehouse": turn on warehouse modeling (RFC 0007).
+    // A project without modeling becomes warehouse-first; a dbt-first one
+    // becomes hybrid only when asked to explicitly. Nothing else in
+    // dql.config.json changes.
+    if (req.method === 'POST' && path === '/api/modeling/warehouse/enable') {
+      const requestId = apiRequestId('modeling-warehouse-enable');
+      try {
+        const body = await readJSON(req).catch(() => ({})) as { mode?: string };
+        const current = modelingModeOf(loadProjectConfig(projectRoot));
+        const requested = body.mode === 'hybrid' ? 'hybrid' : 'warehouse-first';
+        if (current === 'dbt-first' && requested !== 'hybrid') {
+          throw Object.assign(new Error('This project models dbt. Choose hybrid to add warehouse tables that dbt does not cover.'), { code: 'MODELING_MODE_CONFLICT' });
+        }
+        const next = current === 'warehouse-first' || current === 'hybrid' ? current : requested;
+        if (next !== current) {
+          const configPath = join(projectRoot, 'dql.config.json');
+          const raw = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown> : {};
+          const modeling = raw.modeling && typeof raw.modeling === 'object' && !Array.isArray(raw.modeling) ? raw.modeling as Record<string, unknown> : {};
+          raw.manifestVersion = 3;
+          raw.modeling = { ...modeling, mode: next };
+          writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+          projectConfig = loadProjectConfig(projectRoot);
+          projectSnapshots.invalidate();
+        }
+        const cfg = loadProjectConfig(projectRoot);
+        const catalog = warehouseCatalogStatus(projectRoot, cfg, warehouseCatalogConnectionId(cfg));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, mode: next, changed: next !== current, connectionId: warehouseCatalogConnectionId(cfg), ...(catalog ? { warehouseCatalog: catalog } : {}) }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'MODELING_MODE_INVALID');
+        res.writeHead(code === 'MODELING_MODE_CONFLICT' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error) })));
+      }
+      return;
+    }
+
+    // Modeling → Draft from warehouse: the runtime drafts the map and opens it
+    // as an ordinary reviewable proposal. The operations, and any validation
+    // evidence on them, come from this server's own discovery run, never from
+    // the browser.
+    if (req.method === 'POST' && path === '/api/modeling/warehouse/discover/proposal') {
+      const requestId = apiRequestId('modeling-warehouse-proposal');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req).catch(() => ({})) as { validate?: boolean; domain?: string; expectedSnapshotId?: string };
+        if (body.expectedSnapshotId && body.expectedSnapshotId !== snapshot.snapshotId) {
+          throw Object.assign(new Error('Project sources changed. Refresh Modeling and draft again.'), { code: 'PROPOSAL_STALE' });
+        }
+        const report = await discoverProjectWarehouseModel(projectRoot, { manifest: snapshot.manifest, domain: body.domain, validate: body.validate === true, executor });
+        // New Domains and subject areas are created by the proposal's own scope
+        // step, as for dbt discovery, so the batch stays in dependency order.
+        // A drafted join lives in the subject area of the entity it starts
+        // from, as the Modeling editor writes it, so a later edit updates it
+        // in place instead of adding a second copy. New entities land in the
+        // default area.
+        const areaOfEntity = new Map(Object.values(snapshot.manifest.modeling?.entities ?? {}).map((entity) => [`${entity.domain}::${entity.localId ?? entity.id}`, entity.areaId?.split('::').pop()]));
+        const changes = warehouseDiscoveryChanges(report)
+          .filter((change) => change.operation !== 'upsert_domain')
+          .map((change): ModelingAuthoringChange => change.operation === 'upsert_relationship' && !change.value.areaId
+            ? { ...change, value: { ...change.value, areaId: areaOfEntity.get(`${change.value.domain}::${change.value.from}`) ?? DEFAULT_MODEL_AREA_ID } }
+            : change);
+        if (changes.length === 0) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ requestId, report, proposal: null }));
+          return;
+        }
+        const evidenceFor = (change: ModelingAuthoringChange): string[] => {
+          if (change.operation === 'upsert_entity') {
+            const entity = report.entities.find((item) => item.relationId === change.value.dbtModel);
+            return [`warehouse relation ${entity?.relation ?? change.value.dbtModel}`, ...(entity?.grainSource === 'primary_key' ? [`declared primary key ${entity.grain}`] : entity?.grainSource === 'unique_column' ? [`${entity.grain} is unique on the warehouse`] : [])];
+          }
+          if (change.operation === 'upsert_relationship') {
+            const relationship = report.relationships.find((item) => item.id === change.value.id && item.domain === change.value.domain);
+            return [...(relationship?.evidence.map((item) => item.reason) ?? []), ...(relationship?.validation ? [`warehouse check: ${relationship.validation.message}`] : [])];
+          }
+          return [`warehouse catalog ${report.catalogFingerprint.slice(0, 12)}`];
+        };
+        const operationId = (change: ModelingAuthoringChange): string => {
+          const value = change.value as { id: string; domain?: string };
+          return change.operation === 'upsert_domain' ? `warehouse:domain:${value.id}` : `warehouse:${change.operation.replace('upsert_', '')}:${value.domain}:${value.id}`;
+        };
+        const operations: ContextAuthoringOperation[] = changes.map((change) => ({
+          id: operationId(change),
+          kind: 'modeling_change',
+          change,
+          evidence: evidenceFor(change),
+        }));
+        const proposal = previewContextAuthoring({ origin: 'warehouse_discovery', operations, expectedSnapshotId: snapshot.snapshotId });
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, report, proposal }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'WAREHOUSE_DISCOVERY_FAILED');
+        const status = code === 'PROPOSAL_STALE' ? 409 : code === 'WAREHOUSE_MODELING_NOT_ENABLED' ? 404 : code === 'WAREHOUSE_CATALOG_MISSING' ? 409 : 400;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          snapshotId: snapshot.snapshotId,
+          code,
+          message: apiErrorMessage(error),
+          nextActions: code === 'WAREHOUSE_CATALOG_MISSING' ? ['Open Settings → Connections and Sync schema, or run `dql sync warehouse --schemas <schema>`.'] : [],
+        })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && (path === '/api/modeling/warehouse/discover' || path === '/api/modeling/warehouse/discover/apply')) {
+      const requestId = apiRequestId('modeling-warehouse-discover');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req).catch(() => ({})) as { validate?: boolean; domain?: string; expectedSnapshotId?: string; entityIds?: string[]; relationshipIds?: string[] };
+        const applying = path.endsWith('/apply');
+        if (applying && (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId)) {
+          throw Object.assign(new Error('Project sources changed after discovery. Review the refreshed drafts before adding them.'), { code: 'SOURCE_CHANGED' });
+        }
+        const report = await discoverProjectWarehouseModel(projectRoot, { manifest: snapshot.manifest, domain: body.domain, validate: body.validate === true, executor });
+        if (!applying) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, report }));
+          return;
+        }
+        const applied = applyProjectWarehouseDiscovery(projectRoot, report, { entityIds: body.entityIds, relationshipIds: body.relationshipIds });
+        projectSnapshots.invalidate();
+        const next = projectSnapshot();
+        await refreshUnifiedProjectIndexes(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: next.snapshotId, applied, modeling: next.manifest.modeling, diagnostics: next.manifest.diagnostics ?? [] }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'WAREHOUSE_DISCOVERY_FAILED');
+        const status = code === 'SOURCE_CHANGED' ? 409 : code === 'WAREHOUSE_MODELING_NOT_ENABLED' ? 404 : code === 'WAREHOUSE_CATALOG_MISSING' ? 409 : 400;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          snapshotId: snapshot.snapshotId,
+          code,
+          message: apiErrorMessage(error),
+          nextActions: code === 'WAREHOUSE_CATALOG_MISSING' ? ['Open Settings → Connections and Sync schema, or run `dql sync warehouse --schemas <schema>`.'] : [],
+        })));
       }
       return;
     }
@@ -19104,6 +19253,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         metadataStatus: metadataScope
           ? warehouseMetadataStatus(projectRoot, metadataScope.scopeFingerprint, defaultKey)
           : warehouseMetadataStatus(projectRoot),
+        // Present only in warehouse-first and hybrid modeling (RFC 0007).
+        ...(() => {
+          const warehouseCatalog = warehouseCatalogStatus(projectRoot, cfg, defaultKey);
+          return warehouseCatalog ? { warehouseCatalog, modelingMode: modelingModeOf(cfg) } : {};
+        })(),
       }));
       return;
     }
@@ -22311,13 +22465,14 @@ async function validateModelingRelationship(
   manifest: DQLManifest,
   execute: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }>,
   quoteIdentifier: (identifier: string) => string = quoteSqlIdentifier,
+  projectRoot?: string,
 ): Promise<ManifestRelationshipValidationEvidence> {
   const { fromRelation, toRelation } = relationshipRelations(manifest, relationship.from, relationship.to);
   if (!relationship.keys.length) throw new Error('At least one join key pair is required.');
   // ONE PROOF (REL-005): the builder's profile and this validation run the same
   // statement and write the same evidence.
   const spec = { fromRelation, toRelation, keys: relationship.keys, cardinality: relationship.cardinality, fanout: relationship.fanout };
-  return validateRelationshipOnWarehouse({ ...spec, keyTypes: catalogKeyTypes(manifest, spec) }, execute, quoteIdentifier);
+  return validateRelationshipOnWarehouse({ ...spec, keyTypes: catalogKeyTypes(manifest, spec, undefined, projectRoot) }, execute, quoteIdentifier);
 }
 
 function relatedProductsForDomain(
@@ -26191,6 +26346,70 @@ export async function syncProjectWarehouse(projectRoot: string, options: {
   const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, loadProjectConfig(projectRoot), options.executor, selectedConnection, connectionId, synced.scope);
   const metadataRelations = warehouseMetadataStatus(projectRoot, synced.scope.scopeFingerprint, connectionId).relationCount;
   return { connectionId, scope: synced.scope, metadataRelations, ...(warehouseCatalog ? { warehouseCatalog } : {}) };
+}
+
+/**
+ * `dql model discover` and Modeling → Build the map for warehouse-first and
+ * hybrid modeling: draft domains, entities and relationships from the
+ * warehouse catalog snapshot, optionally checked on the warehouse.
+ */
+export async function discoverProjectWarehouseModel(projectRoot: string, options: {
+  manifest?: DQLManifest;
+  domain?: string;
+  validate?: boolean;
+  executor?: QueryExecutor;
+}): Promise<WarehouseDiscoveryReport> {
+  const cfg = loadProjectConfig(projectRoot);
+  const mode = modelingModeOf(cfg);
+  if (mode !== 'warehouse-first' && mode !== 'hybrid') {
+    throw Object.assign(new Error('Warehouse discovery needs "manifestVersion": 3 and "modeling": { "mode": "warehouse-first" } (or "hybrid") in dql.config.json.'), { code: 'WAREHOUSE_MODELING_NOT_ENABLED' });
+  }
+  const { snapshot, error } = readWarehouseCatalog(projectRoot);
+  if (!snapshot) {
+    throw Object.assign(new Error(error ? `The warehouse catalog could not be read: ${error}` : 'No warehouse catalog yet. Run `dql sync warehouse --schemas <schema>` or Sync schema in Settings first.'), { code: 'WAREHOUSE_CATALOG_MISSING' });
+  }
+  const manifest = options.manifest ?? buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot, cfg) ?? undefined });
+  const report = discoverWarehouseModel({
+    snapshot,
+    manifest,
+    ...(options.domain ? { domain: options.domain } : {}),
+    ...(cfg.project ? { projectName: cfg.project } : {}),
+    existingDomains: loadDomainPackageRegistry(projectRoot).values().map((pkg) => pkg.id),
+  });
+  if (!options.validate) return report;
+  if (!options.executor) throw new Error('Validating discovery needs a warehouse connection.');
+  const connectionId = snapshot.connectionId || warehouseCatalogConnectionId(cfg);
+  const connection = projectConnectionById(projectRoot, cfg, connectionId);
+  if (!connection) throw new Error(`Unknown connection "${connectionId}" for the warehouse catalog.`);
+  const executor = options.executor;
+  return validateWarehouseDiscovery(
+    report,
+    snapshot,
+    (sql) => executor.executeQuery(sql, [], {}, connection),
+    (identifier) => getDialect(connection.driver).quoteIdentifier(identifier),
+  );
+}
+
+/** Write a discovery report's drafts (optionally only the chosen ones) through the reviewed modeling path. */
+export function applyProjectWarehouseDiscovery(projectRoot: string, report: WarehouseDiscoveryReport, selection: { entityIds?: string[]; relationshipIds?: string[] } = {}): { changes: number; paths: string[] } {
+  const relationships = selection.relationshipIds
+    ? report.relationships.filter((relationship) => selection.relationshipIds!.includes(relationship.id))
+    : report.relationships;
+  const wantedEntities = new Set(selection.entityIds ?? report.entities.map((entity) => `${entity.domain}::${entity.id}`));
+  // A chosen relationship brings the two entities it joins.
+  for (const relationship of relationships) {
+    wantedEntities.add(`${relationship.fromDomain}::${relationship.from}`);
+    wantedEntities.add(`${relationship.toDomain}::${relationship.to}`);
+  }
+  const entities = report.entities.filter((entity) => wantedEntities.has(`${entity.domain}::${entity.id}`) || (selection.entityIds ?? []).includes(entity.id));
+  const domains = report.domains.filter((domain) => entities.some((entity) => entity.domain === domain.id));
+  // Reading the owner must not write it: that would change the project's
+  // sources under the batch being applied.
+  const changes = warehouseDiscoveryChanges({ ...report, domains, entities, relationships }, { owner: resolveLocalOwner(projectRoot, { persist: false }) ?? undefined });
+  if (changes.length === 0) return { changes: 0, paths: [] };
+  const preview = previewModelingChanges(projectRoot, changes);
+  const applied = applyModelingChanges(projectRoot, changes, preview.fingerprint);
+  return { changes: changes.length, paths: [...new Set(applied.patches.map((patch) => patch.path))].sort() };
 }
 
 /** The one database/catalog that holds every named schema, found by asking the warehouse. */

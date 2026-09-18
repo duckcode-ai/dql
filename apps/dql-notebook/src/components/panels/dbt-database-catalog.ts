@@ -6,7 +6,8 @@ export const DBT_DATABASE_PAGE_SIZE = 25;
 
 export interface DbtDatabaseObject extends SchemaTable {
   dbtUniqueId: string;
-  dbtResourceType: 'model' | 'source';
+  /** `warehouse` for a table or view read from the warehouse catalog (RFC 0007). */
+  dbtResourceType: 'model' | 'source' | 'warehouse';
 }
 
 export type PhysicalDbtInventoryItem = DbtModelInventoryItem & { relation: string };
@@ -24,7 +25,7 @@ export function dbtInventoryItemToTable(item: PhysicalDbtInventoryItem): DbtData
     path: item.relation,
     columns: [],
     source: 'database',
-    objectType: item.resourceType === 'source' ? 'dbt_source' : 'dbt_model',
+    objectType: item.resourceType === 'source' ? 'dbt_source' : item.resourceType === 'warehouse' ? 'table' : 'dbt_model',
     dbtUniqueId: item.uniqueId,
     dbtResourceType: item.resourceType,
     dbtSourcePath: item.sourcePath,

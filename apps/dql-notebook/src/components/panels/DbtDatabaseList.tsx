@@ -191,7 +191,7 @@ export function DbtDatabaseList({
                 <span style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
                   <Database size={12.5} color={t.accent} style={{ flexShrink: 0 }} />
                   <strong style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono }}>{displayName}</strong>
-                  <span style={{ fontSize: 8.5, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '.04em', flexShrink: 0 }}>{table.dbtResourceType}</span>
+                  <span style={{ fontSize: 8.5, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '.04em', flexShrink: 0 }}>{table.dbtResourceType === 'warehouse' ? 'table' : table.dbtResourceType}</span>
                   {loadedColumns.has(table.dbtUniqueId) ? <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{table.columns.length}</span> : null}
                 </span>
                 {namespace ? <span style={{ paddingLeft: 19, color: t.textMuted, fontSize: 9.5, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{namespace}</span> : null}

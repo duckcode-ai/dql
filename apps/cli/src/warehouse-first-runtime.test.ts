@@ -112,6 +112,104 @@ describe('warehouse-first modeling in the local runtime', () => {
     });
     expect(validated.status).toBe(200);
     expect(validated.body.evidence).toMatchObject({ status: 'passed', fromRows: 3, joinedRows: 3, unmatchedFrom: 0 });
+
+    // A person certifies it with that evidence: the compiled join is then
+    // automatic for Ask, exactly as a certified dbt join is. The evidence
+    // must match the compiler's proof, key types included.
+    const certified = await apply({
+      operation: 'upsert_relationship',
+      value: {
+        id: 'order_to_customer', domain: 'sales', from: 'order', to: 'customer',
+        keys: [{ from: 'customer_id', to: 'customer_id' }], cardinality: 'many_to_one', fanout: 'safe', status: 'certified',
+        certifiedAgainst: { from: { grain: 'order_id', keys: ['order_id'] }, to: { grain: 'customer_id', keys: ['customer_id'] } },
+        validation: validated.body.evidence,
+      },
+    });
+    expect(certified.modeling.relationships['sales::relationship::order_to_customer']).toMatchObject({
+      status: 'certified',
+      staleCertification: false,
+      automaticJoinAllowed: true,
+      keyTypes: [{ from: 'integer', to: 'integer' }],
+    });
+    expect(certified.diagnostics.map((item: { message: string }) => item.message).join('\n')).not.toMatch(/no longer matches|cannot prove/);
+    await executor.disconnect();
+  }, 60_000);
+
+  it('drafts the map from the warehouse for review, and adds only the drafts a person keeps', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-warehouse-discover-runtime-'));
+    roots.push(projectRoot);
+    const db = new Database(join(projectRoot, 'shop.sqlite'));
+    db.exec(`
+      CREATE TABLE customers (customer_id INTEGER PRIMARY KEY, name TEXT);
+      CREATE TABLE orders (order_id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(customer_id));
+      CREATE TABLE products (id INTEGER, title TEXT);
+      CREATE TABLE order_items (order_id INTEGER, product_id INTEGER, quantity INTEGER);
+      INSERT INTO customers VALUES (1, 'Ann');
+      INSERT INTO orders VALUES (10, 1), (11, 1);
+      INSERT INTO products VALUES (100, 'x');
+      INSERT INTO order_items VALUES (10, 100, 2);
+    `);
+    db.close();
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'shop', manifestVersion: 3, modeling: { mode: 'warehouse-first' },
+      connections: { default: { driver: 'sqlite', filepath: './shop.sqlite' } },
+    }));
+    const executor = new QueryExecutor();
+    const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor, preferredPort: 0, captureServer: (created) => { server = created; } });
+    const post = async (path: string, body: unknown) => {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      return { status: response.status, body: await response.json() as any };
+    };
+
+    // Before a sync there is nothing to draft from, and the error says what to do.
+    const early = await post('/api/modeling/warehouse/discover', {});
+    expect(early.status).toBe(409);
+    expect(early.body.code).toBe('WAREHOUSE_CATALOG_MISSING');
+
+    const synced = await fetch(`http://127.0.0.1:${port}/api/connections/default/metadata-sync`, { method: 'POST' });
+    expect(((await synced.json()) as any).warehouseCatalog).toMatchObject({ relations: 4 });
+
+    const discovered = await post('/api/modeling/warehouse/discover', { validate: true });
+    expect(discovered.status).toBe(200);
+    const report = discovered.body.report;
+    expect(report.validated).toBe(true);
+    expect(report.relationships.map((item: { id: string }) => item.id).sort()).toEqual(['order_item_to_order', 'order_item_to_product', 'order_to_customer']);
+    expect(report.entities.find((item: { id: string }) => item.id === 'product')).toMatchObject({ grain: 'id', grainSource: 'unique_column' });
+
+    // Keep one join; its two entities come with it, nothing else is written.
+    const applied = await post('/api/modeling/warehouse/discover/apply', { validate: true, expectedSnapshotId: discovered.body.snapshotId, relationshipIds: ['order_to_customer'], entityIds: [] });
+    expect(applied.status).toBe(200);
+    expect(Object.keys(applied.body.modeling.entities).sort()).toEqual(['shop::entity::customer', 'shop::entity::order']);
+    expect(applied.body.modeling.relationships['shop::relationship::order_to_customer']).toMatchObject({ status: 'draft', cardinality: 'many_to_one', validation: { status: 'passed' } });
+
+    // A stale review is refused rather than applied over newer sources.
+    const stale = await post('/api/modeling/warehouse/discover/apply', { expectedSnapshotId: discovered.body.snapshotId });
+    expect(stale.status).toBe(409);
+
+    // Modeling → Draft from warehouse: the rest arrives as an ordinary
+    // reviewable proposal, committed through the same path as every other.
+    const configBefore = readFileSync(join(projectRoot, 'dql.config.json'), 'utf-8');
+    const drafted = await post('/api/modeling/warehouse/discover/proposal', { validate: true });
+    expect(drafted.status).toBe(201);
+    const proposal = drafted.body.proposal;
+    expect(proposal).toMatchObject({ origin: 'warehouse_discovery', trustState: 'review_required' });
+    expect(proposal.diagnostics.filter((item: { severity: string }) => item.severity === 'blocking')).toEqual([]);
+    const relationshipOps = proposal.operations.filter((operation: any) => operation.change?.operation === 'upsert_relationship');
+    expect(relationshipOps.map((operation: any) => operation.change.value.id).sort()).toEqual(['order_item_to_order', 'order_item_to_product']);
+    expect(relationshipOps[0].evidence.join(' ')).toMatch(/named for|warehouse check/);
+    // Drafting reads; it does not rewrite the project's configuration.
+    expect(readFileSync(join(projectRoot, 'dql.config.json'), 'utf-8')).toBe(configBefore);
+    const committed = await post(`/api/context-proposals/${encodeURIComponent(proposal.id)}/commit`, { expectedProposalHash: proposal.proposalHash, idempotencyKey: 'warehouse-draft-1' });
+    expect(committed.status).toBe(200);
+    const modeling = await (await fetch(`http://127.0.0.1:${port}/api/modeling/dbt-first`)).json() as any;
+    expect(Object.keys(modeling.modeling.relationships).sort()).toEqual(['shop::relationship::order_item_to_order', 'shop::relationship::order_item_to_product', 'shop::relationship::order_to_customer']);
+    expect(modeling.modeling.entities['shop::entity::product']).toMatchObject({ relation: 'main.products', grain: 'id', status: 'draft' });
+    // Drafted joins sit in their entity's subject area, where an edit writes them.
+    expect(modeling.modeling.relationships['shop::relationship::order_item_to_product'].sourcePath).toBe(modeling.modeling.entities['shop::entity::order_item'].sourcePath);
+    expect(modeling.diagnostics.map((item: { message: string }) => item.message).join('\n')).not.toMatch(/duplicate/);
+    // Nothing left to draft.
+    const again = await post('/api/modeling/warehouse/discover/proposal', {});
+    expect(again.body.proposal).toBeNull();
     await executor.disconnect();
   }, 60_000);
 });

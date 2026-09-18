@@ -9,9 +9,11 @@ describe('Domain Studio readiness copy (CFG-003, UI-007, E2E-003)', () => {
   it('does not describe disabled dbt-first modeling as a missing manifest', () => {
     const state = domainStudioUnavailableState(apiError('DBT_FIRST_NOT_ENABLED', 'dbt-first modeling is not enabled.'));
 
-    expect(state.title).toBe('Set up dbt-first modeling');
+    expect(state.title).toBe('Set up modeling');
     expect(state.status).toContain('Not enabled');
     expect(state.detail).toContain('Settings → Project & dbt');
+    // A project without dbt can model its warehouse instead (RFC 0007).
+    expect(state.action).toBe('enable_warehouse');
   });
 
   it('explains how to create a missing configured dbt manifest', () => {

@@ -69,4 +69,27 @@ describe('catalogKeyTypes', () => {
     expect(catalogKeyTypes(undefined, spec, () => catalog)).toEqual([{}]);
     expect(catalogKeyTypes(manifest, { ...spec, toRelation: 'analytics.marts.dim_products' }, () => catalog)).toEqual([{ from: 'integer', to: undefined }]);
   });
+  it('reads a warehouse relation\'s key types from the warehouse catalog snapshot (RFC 0007)', () => {
+    const warehouseManifest = {
+      dbtProvenance: {
+        manifestPath: '',
+        warehouseCatalogPath: '.dql/warehouse-catalog.json',
+        nodes: {
+          'warehouse.analytics.marts.fct_orders': { uniqueId: 'warehouse.analytics.marts.fct_orders', resourceType: 'warehouse', relation: 'analytics.marts.fct_orders' },
+          'warehouse.analytics.marts.dim_customers': { uniqueId: 'warehouse.analytics.marts.dim_customers', resourceType: 'warehouse', relation: 'ANALYTICS.MARTS.DIM_CUSTOMERS' },
+        },
+      },
+    } as unknown as DQLManifest;
+    const snapshot = {
+      relations: [
+        { id: 'warehouse.analytics.marts.fct_orders', columns: [{ name: 'CUSTOMER_ID', type: 'BIGINT' }] },
+        { id: 'warehouse.analytics.marts.dim_customers', columns: [{ name: 'customer_id', type: 'BIGINT' }] },
+      ],
+    };
+    const paths: string[] = [];
+    expect(catalogKeyTypes(warehouseManifest, spec, (path) => { paths.push(path); return snapshot; }, '/project')).toEqual([{ from: 'bigint', to: 'bigint' }]);
+    expect(paths).toEqual(['/project/.dql/warehouse-catalog.json']);
+    // Without the project root the snapshot cannot be found; nothing is guessed.
+    expect(catalogKeyTypes(warehouseManifest, spec, () => snapshot)).toEqual([{}]);
+  });
 });

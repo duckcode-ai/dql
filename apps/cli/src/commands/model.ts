@@ -5,6 +5,8 @@ import {
   buildManifest,
   discoverDbtDomains,
   loadDomainPackageRegistry,
+  loadProjectConfig,
+  modelingModeOf,
   renderDomainDeclaration,
   resolveDbtManifestPath,
   type DomainDiscoveryReport,
@@ -17,6 +19,10 @@ import { startLocalServer } from '../local-runtime.js';
 export async function runModel(file: string | null, rest: string[], flags: CLIFlags): Promise<void> {
   const subcommand = file ?? 'list';
   if (subcommand === 'discover' || subcommand === 'apply-discovery') {
+    if (usesWarehouseDiscovery(rest)) {
+      await runWarehouseDiscovery(subcommand, rest, flags);
+      return;
+    }
     runDomainDiscovery(subcommand, rest, flags);
     return;
   }
@@ -160,6 +166,102 @@ function modelImportError(flags: CLIFlags, code: string, message: string, detail
   if (flags.format === 'json') console.log(JSON.stringify({ code, message, ...(details === undefined ? {} : { details }) }, null, 2));
   else console.error(`${code}: ${message}`);
   process.exitCode = 1;
+}
+
+/**
+ * Warehouse-first projects discover from the warehouse catalog; hybrid ones
+ * do when asked (`--source warehouse`) or when they have no dbt manifest.
+ * dbt-first projects keep dbt discovery exactly as before.
+ */
+function usesWarehouseDiscovery(rest: string[]): boolean {
+  const sourceIndex = rest.indexOf('--source');
+  const source = sourceIndex >= 0 ? rest[sourceIndex + 1] : undefined;
+  const pathArg = rest.find((value, index) => !value.startsWith('-') && rest[index - 1] !== '--source' && rest[index - 1] !== '--dbt-manifest');
+  const projectRoot = resolve(pathArg ?? '.');
+  if (!existsSync(resolve(projectRoot, 'dql.config.json'))) return false;
+  let mode: ReturnType<typeof modelingModeOf>;
+  try {
+    mode = modelingModeOf(loadProjectConfig(projectRoot));
+  } catch {
+    return false;
+  }
+  if (source === 'dbt') return false;
+  if (mode === 'warehouse-first') return true;
+  if (mode !== 'hybrid') return false;
+  if (source === 'warehouse') return true;
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+  return !dbtManifestPath || !existsSync(dbtManifestPath);
+}
+
+/**
+ * `dql model discover [path] [--validate] [--domain <id>]` previews drafts
+ * from the warehouse catalog; `dql model apply-discovery [path] --apply`
+ * writes them as drafts. `--validate` checks each join and naming-key grain
+ * on the warehouse (aggregates only) and proposes the cardinality it saw.
+ */
+async function runWarehouseDiscovery(subcommand: 'discover' | 'apply-discovery', rest: string[], flags: CLIFlags): Promise<void> {
+  const pathArg = rest.find((value, index) => !value.startsWith('-') && rest[index - 1] !== '--source' && rest[index - 1] !== '--dbt-manifest');
+  const projectRoot = resolve(pathArg ?? '.');
+  const validate = rest.includes('--validate');
+  const { discoverProjectWarehouseModel, applyProjectWarehouseDiscovery } = await import('../local-runtime.js');
+  const { QueryExecutor } = await import('@duckcodeailabs/dql-connectors');
+  const executor = validate ? new QueryExecutor() : undefined;
+  try {
+    const report = await discoverProjectWarehouseModel(projectRoot, {
+      ...(flags.domain ? { domain: flags.domain } : {}),
+      validate,
+      ...(executor ? { executor } : {}),
+    });
+    const writing = subcommand === 'apply-discovery' && flags.apply === true && flags.dryRun !== true;
+    if (!writing) {
+      if (flags.format === 'json') {
+        console.log(JSON.stringify(subcommand === 'apply-discovery' ? { mode: 'preview', ...report } : report, null, 2));
+      } else {
+        printWarehouseDiscovery(report);
+        console.log(subcommand === 'apply-discovery'
+          ? 'No files written. Re-run with --apply to add these drafts.'
+          : 'Add them as drafts with: dql model apply-discovery --apply' + (validate ? ' --validate' : ''));
+      }
+      return;
+    }
+    const applied = applyProjectWarehouseDiscovery(projectRoot, report);
+    if (flags.format === 'json') {
+      console.log(JSON.stringify({ catalogFingerprint: report.catalogFingerprint, applied }, null, 2));
+    } else {
+      console.log('DQL warehouse discovery apply');
+      console.log(`  ${applied.changes} draft change(s) written:`);
+      for (const path of applied.paths) console.log(`    ${path}`);
+      console.log('  Everything is a draft. Review and certify on the Modeling page.');
+    }
+  } catch (error) {
+    const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'WAREHOUSE_DISCOVERY_FAILED';
+    discoveryError(flags, code, error instanceof Error ? error.message : String(error));
+  } finally {
+    await executor?.disconnect().catch(() => undefined);
+  }
+}
+
+function printWarehouseDiscovery(report: import('../warehouse-model-discovery.js').WarehouseDiscoveryReport): void {
+  const newEntities = report.entities.filter((entity) => !entity.existing);
+  console.log(`DQL warehouse discovery (draft only${report.validated ? ', checked on the warehouse' : ''})`);
+  console.log(`  catalog ${report.catalogFingerprint.slice(0, 12)} · ${report.relations} relations · ${newEntities.length} new entities · ${report.relationships.length} new relationships${report.existingRelationships ? ` · ${report.existingRelationships} already modeled` : ''}`);
+  console.log('Domains');
+  for (const domain of report.domains) console.log(`  ${domain.id}${domain.existing ? ' (exists)' : ''}`);
+  console.log('Entities');
+  for (const entity of report.entities) {
+    const grain = entity.grain ? `grain ${entity.grain} (${entity.grainSource === 'primary_key' ? 'primary key' : 'unique on the warehouse'})` : entity.grainCandidate ? `grain unset (candidate ${entity.grainCandidate}; --validate checks it)` : 'grain unset';
+    console.log(`  ${entity.domain}.${entity.id} ← ${entity.relation} · ${grain}${entity.existing ? ' · already bound' : ''}`);
+  }
+  console.log('Relationships');
+  if (report.relationships.length === 0) console.log('  none found');
+  for (const relationship of report.relationships) {
+    const keys = relationship.keys.map((pair) => `${pair.from} = ${pair.to}`).join(', ');
+    const check = relationship.validation
+      ? ` · warehouse: ${relationship.validation.status}${relationship.validation.status === 'passed' ? '' : ` (${relationship.validation.message})`}`
+      : relationship.validationError ? ` · not checked: ${relationship.validationError}` : '';
+    console.log(`  ${relationship.from} → ${relationship.to} on ${keys} · ${relationship.cardinality}${check}`);
+    for (const item of relationship.evidence) console.log(`      because ${item.reason}`);
+  }
 }
 
 function runDomainDiscovery(

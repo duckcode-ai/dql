@@ -2,6 +2,8 @@ export interface DomainStudioUnavailableState {
   title: string;
   detail: string;
   status: string;
+  /** Offer to model the warehouse's own tables, without dbt (RFC 0007). */
+  action?: 'enable_warehouse';
 }
 
 interface StructuredApiError extends Error {
@@ -27,9 +29,10 @@ export function domainStudioUnavailableState(error: unknown): DomainStudioUnavai
   const apiError = structuredApiError(error);
   if (apiError?.code === 'DBT_FIRST_NOT_ENABLED') {
     return {
-      title: 'Set up dbt-first modeling',
-      detail: 'Modeling requires a connected dbt project with manifest v3 and dbt-first modeling enabled. Open Settings → Project & dbt to connect and apply the project.',
+      title: 'Set up modeling',
+      detail: 'Model a dbt project: open Settings → Project & dbt to connect and apply it. No dbt? Model your warehouse\'s own tables instead — DQL reads their columns, keys and comments, and drafts the joins for you to review.',
       status: 'Modeling mode · Not enabled',
+      action: 'enable_warehouse',
     };
   }
 

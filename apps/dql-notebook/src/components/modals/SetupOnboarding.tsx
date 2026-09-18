@@ -47,6 +47,25 @@ export function SetupOnboarding({
   const [acknowledging, setAcknowledging] = useState(false);
   const [upgradeReapplied, setUpgradeReapplied] = useState(!launch?.requiresDbtReapply);
   const [acknowledgeError, setAcknowledgeError] = useState<string | null>(null);
+  // RFC 0007: a team without dbt models its warehouse's own tables.
+  const [warehouseChosen, setWarehouseChosen] = useState(false);
+  const [warehouseBusy, setWarehouseBusy] = useState(false);
+  const [warehouseError, setWarehouseError] = useState<string | null>(null);
+  const chooseWarehouse = async () => {
+    setWarehouseBusy(true);
+    setWarehouseError(null);
+    try {
+      await api.enableWarehouseModeling();
+      setWarehouseChosen(true);
+      setProjectState('configured');
+      setProjectDetail('Warehouse modeling · no dbt project');
+      setStep(2);
+    } catch (error) {
+      setWarehouseError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWarehouseBusy(false);
+    }
+  };
 
   const requiresUpgradeReapply = Boolean(
     launch?.reason === 'version_upgrade'
@@ -194,11 +213,22 @@ export function SetupOnboarding({
           {step === 1 ? (
             <SetupSection eyebrow="Step 1 of 4" title="Connect your dbt project" description="Preview a local project or Git repository, then apply it only after the manifest is valid." t={t}>
               <DbtProjectEditor compact reapplyRequired={requiresUpgradeReapply} onConfigured={onProjectConfigured} />
+              {projectState === 'missing' && !requiresUpgradeReapply ? (
+                <div style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: 10, padding: '12px 13px', display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div style={{ flex: 1, fontSize: 11.5, color: supportingText, lineHeight: 1.55 }}>
+                    <strong style={{ color: t.textPrimary }}>No dbt project?</strong> Model your warehouse directly. DQL reads your tables' columns, keys and comments — never their rows — and drafts models and joins for you to review.
+                    {warehouseError ? <div role="alert" style={{ color: 'var(--status-error)', marginTop: 6 }}>{warehouseError}</div> : null}
+                  </div>
+                  <button type="button" disabled={warehouseBusy} onClick={() => void chooseWarehouse()} style={{ ...secondaryButton, opacity: warehouseBusy ? 0.6 : 1 }}>
+                    {warehouseBusy ? 'Setting up…' : 'Use my warehouse'}
+                  </button>
+                </div>
+              ) : null}
             </SetupSection>
           ) : null}
 
           {step === 2 ? (
-            <SetupSection eyebrow="Step 2 of 4" title="Connect your database" description="Use the same profile import, enterprise authentication fields, test, and rollback flow available in Settings." t={t}>
+            <SetupSection eyebrow="Step 2 of 4" title="Connect your database" description={warehouseChosen ? 'Connect and test the warehouse, choose the schemas to model, then Apply and synchronize. DQL reads their tables, columns, keys and comments.' : 'Use the same profile import, enterprise authentication fields, test, and rollback flow available in Settings.'} t={t}>
               <ConnectionPanel
                 variant="setup"
                 onConfigured={(detail) => {
