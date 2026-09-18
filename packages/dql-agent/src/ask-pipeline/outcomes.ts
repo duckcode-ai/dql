@@ -44,7 +44,8 @@ export interface PipelineReceipt {
   /** Refs or words the question named that the whole inventory holds outside this envelope — explained, never read. */
   outOfScope?: Array<{ ref: string; domain?: string }>;
   /** What each uncovered word means: a restriction the reading did not apply, or a word it may cover under another name. */
-  coverage?: Array<{ word: string; state: 'unsatisfied' | 'uncertain' }>;
+  /** `names`: the kinds of governed object the word names exactly (a metric, an entity, a dimension …). */
+  coverage?: Array<{ word: string; state: 'unsatisfied' | 'uncertain'; names?: string[] }>;
   /** Member literals the host grounded against allowlisted columns before preparing (canonical value, or that none matched). */
   grounding?: string[];
   /** Why resolution or execution stopped, verbatim, when it did. */

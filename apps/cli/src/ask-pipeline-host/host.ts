@@ -1021,6 +1021,24 @@ export function joinScopeDecision(
  * provider, the relations of the entities its matching exports name.
  */
 /** The coverage evaluations of a receipt: UNSATISFIED words (a restriction the reading did not apply) warn; UNCERTAIN words (a lexical miss) inform. Neither is a passed check. */
+/**
+ * WHY A SEMANTIC ANSWER MAY NOT BE LABELLED GOVERNED. A question word the
+ * reading left unused that names a thing, a field or a business term
+ * ("premium" in "the total amount of premium", with a premium table on the
+ * map), or a restriction the reading did not apply, means the governed
+ * definitions answered a question near the one asked; so does a requested
+ * identity label the answer could not carry. A word that names only a measure
+ * is a choice between measures ("revenue including tax" is the order total, not
+ * the pre-tax revenue metric), and the listed-facets check compares words
+ * only, so neither decides the label.
+ */
+export function governedCoverageDoubt(receipt: Pick<PipelineReceipt, 'coverage' | 'unmet'>): { reasons: string[] } {
+  const measureKinds = new Set(['metric', 'measure']);
+  const words = (receipt.coverage ?? []).filter((item) => item.state === 'unsatisfied' || (item.names ?? []).some((kind) => !measureKinds.has(kind))).map((item) => `"${item.word}"`);
+  const labels = (receipt.unmet ?? []).filter((unmet) => unmet.obligation === 'display_label').map((unmet) => unmet.message);
+  return { reasons: [...words, ...labels] };
+}
+
 export function coverageEvaluations(receipt: Pick<PipelineReceipt, 'uncovered' | 'coverage'>): Array<{ id: string; label: string; passed: boolean; severity: 'warning' | 'info'; message: string }> {
   if (!receipt.uncovered?.length) return [];
   const states = new Map((receipt.coverage ?? []).map((item) => [item.word, item.state]));
@@ -2973,7 +2991,15 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
   // with identity is evidence: governed trust, the block as its source.
   const blockAsEvidence = candidate.tier === 'certified' && !certified;
   const route = certified ? { tier: 'certified_block', label: 'Certified block' } : blockAsEvidence ? { tier: 'certified_block', label: 'Certified block, served as evidence' } : reviewRequired ? { tier: 'generated_sql', label: 'AI-drafted SQL (review required)' } : { tier: 'semantic_metric', label: 'Semantic metric' };
-  const trustState = certified ? 'certified' : reviewRequired ? 'review_required' : 'governed';
+  // GOVERNED MEANS THE WHOLE QUESTION. A semantic answer is labelled governed
+  // only when its reading uses everything the question names and meets every
+  // obligation it recorded. A word the reading left unused ("premium" in "the
+  // total amount of premium") or an output it could not carry means the
+  // governed definitions answered a question near the one asked: the numbers
+  // are shown, labelled for review, with the reason.
+  const doubt = governedCoverageDoubt(receipt);
+  const coverageDoubt = !certified && !reviewRequired && doubt.reasons.length > 0;
+  const trustState = certified ? 'certified' : reviewRequired || coverageDoubt ? 'review_required' : 'governed';
   const payload = {
     kind: certified ? 'certified' : 'uncertified',
     route,
@@ -3017,6 +3043,7 @@ export function toExecutorResult(runId: string, outcome: PipelineOutcome, starte
       // A restriction the reading did not apply is a warning; a word it may
       // cover under another name is a question, never a claim of omission.
       ...coverageEvaluations(receipt),
+      ...(coverageDoubt ? [{ id: 'pipeline-governed-coverage', label: 'Governed label', passed: false, severity: 'warning' as const, message: `Computed from governed definitions, but labelled for review: the reading does not account for ${doubt.reasons.join('; ')}.` }] : []),
       ...(receipt.grounding ?? []).filter((note) => note.startsWith('identity:') && /share the name/.test(note)).map((note, index) => ({ id: `pipeline-identity-${index + 1}`, label: 'Identity', passed: true, severity: 'warning' as const, message: note.slice('identity:'.length).trim() })),
       // A certified block served as published with a label-only grouping
       // says so: the answer cannot keep two same-named entities apart.

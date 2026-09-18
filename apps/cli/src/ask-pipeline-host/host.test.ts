@@ -4,7 +4,7 @@ import type { AgentMessage, AgentProvider, AgentRunRequest } from '@duckcodeaila
 import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
 import { buildVocabularyIndex, classifyWarehouseError, createAgentRunBudget, parseIntent, physicalRelationBinding, type AnalyticalIntentV1 } from '@duckcodeailabs/dql-agent';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import { preferredJoinHints, preferredJoinLine, skillsForDraft, mentionsName, joinHintUsed, hintsForQuestion, joinsAnyRelation, sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
+import { preferredJoinHints, preferredJoinLine, skillsForDraft, mentionsName, joinHintUsed, hintsForQuestion, joinsAnyRelation, sharedKeyPair, relationsFromCatalogHits, missingFieldWords, relationsWithColumnWords, columnProbeBudgetMs, columnsForPhysicalEntry, connectionKey, physicalRelationName, relationColumnsProbeSql, relationDatabases, relationsFromProbeRows, relevantRelationsForQuestion, snowflakeShowColumnsRows, underAskedNames, coverageEvaluations, governedCoverageDoubt, createAskPipelineRouteExecutor, explainOutOfScope, explainOutOfScopeWords, gapPresentation, groundIntentLiterals, knownMissingRelation, memberCandidatesSql, normalizeExecutedRow, prepareBlockForAsk, recordRelationEvidence, resetRelationEvidence, runtimeSchemaForVocabulary, tracedProbes, vocabularyViewKey } from './host.js';
 
 function scripted(replies: string[]): AgentProvider & { calls: AgentMessage[][] } {
   const calls: AgentMessage[][] = [];
@@ -86,6 +86,17 @@ describe('a ref outside the envelope is explained as out of scope, never as none
     expect(evaluations[1]!.message).toContain('may cover it under another');
     expect(coverageEvaluations({ uncovered: ['x'] })[0]!.severity).toBe('info');
     expect(coverageEvaluations({})).toEqual([]);
+  });
+
+  it('a governed label needs every thing and condition the question names, not every measure name', () => {
+    // A thing the reading left out: the label goes.
+    expect(governedCoverageDoubt({ coverage: [{ word: 'premium', state: 'uncertain', names: ['relation', 'entity'] }] }).reasons).toEqual(['"premium"']);
+    // A restriction the reading did not apply: the label goes.
+    expect(governedCoverageDoubt({ coverage: [{ word: 'team_won', state: 'unsatisfied', names: ['column'] }] }).reasons).toEqual(['"team_won"']);
+    // A competing measure the reading chose not to use, and a listed facet: the label stays.
+    expect(governedCoverageDoubt({ coverage: [{ word: 'revenue', state: 'uncertain', names: ['metric'] }], unmet: [{ obligation: 'coverage', message: 'this answer carries nothing for "tax"' }] }).reasons).toEqual([]);
+    // A requested identity the answer could not carry: the label goes.
+    expect(governedCoverageDoubt({ unmet: [{ obligation: 'display_label', message: 'the rows carry no team name' }] }).reasons).toEqual(['the rows carry no team name']);
   });
 });
 

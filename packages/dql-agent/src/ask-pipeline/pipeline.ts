@@ -1191,7 +1191,15 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
   receipt.reading = intent.reading;
   recordSelection(intent);
   const uncovered = settled ? [] : uncoveredQuestionTerms(input.question, intent, input.vocabulary);
-  if (uncovered.length) { receipt.uncovered = uncovered; receipt.coverage = coverageStates(input.question, uncovered); }
+  if (uncovered.length) {
+    receipt.uncovered = uncovered;
+    // What each unused word names: a competing measure the reading chose not
+    // to use is a choice; a thing or a condition it left out is a gap.
+    receipt.coverage = coverageStates(input.question, uncovered).map((item) => ({
+      ...item,
+      names: [...new Set(input.vocabulary.lookup(item.word, { limit: 3, minScore: 0.97 }).filter((hit) => hit.matchedOn === 'name' || hit.matchedOn === 'alias').map((hit) => hit.entry.kind))],
+    }));
+  }
 
   // 2. Prepare (with cache and one bounded repair).
   const attempted = new Set<string>();
