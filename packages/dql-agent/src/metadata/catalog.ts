@@ -1376,6 +1376,7 @@ export async function retrieveMetadataSnapshotCandidates(
   const domains = domainContextSearchDomains(input.domainContext);
   const isEligible = (object: MetadataObject): boolean => (
     object.objectType !== 'skill'
+    && !isAppOnlySemanticDatasetSource(object)
     && (!input.objectTypes?.length || input.objectTypes.includes(object.objectType))
     && (domains.length === 0 || !object.domain || domains.includes(object.domain))
   );
@@ -1718,6 +1719,7 @@ export async function buildLocalContextPack(
     // eligibility simply because a word in its body matched the question.
     const retrievalObjects = (rows: MetadataObject[]) => scopeObjects(rows).filter((row) =>
       row.objectType !== 'skill'
+      && !isAppOnlySemanticDatasetSource(row)
       && (includeDraftBlocks || !isUncertifiedDqlBlock(row))
     );
     const snapshotRetrieval = await retrieveMetadataSnapshotCandidates(catalog, {
@@ -5169,7 +5171,11 @@ function addManifestBlockSourceObjects(
   const declarations = manifest.blockDeclarations ?? Object.values(manifest.blocks ?? {});
   const datasetProofs = loadDatasetGrainProofs(projectRoot);
   for (const block of declarations) {
-    if ((!block.sql?.trim() && block.blockType !== 'semantic') || !block.filePath) continue;
+    // A legacy semantic block has no SQL and is not an App source: semantic
+    // Datasets are projected below from exact metric capability contracts.
+    // Listing the block as well would add an App-only object to the shared
+    // catalog index and shift Ask retrieval for every question.
+    if (!block.sql?.trim() || !block.filePath) continue;
     // Migration rule: certified declarations remain available. Existing
     // hand-authored review/draft declarations have no generated provenance and
     // remain discoverable. Legacy Ask/research/generated drafts participate
@@ -5180,10 +5186,6 @@ function addManifestBlockSourceObjects(
     const sourceRevision = manifestBlockSourceRevision(projectRoot, block);
     const domain = block.domain?.trim() || undefined;
     const pathIdentity = sha256(`${block.filePath}\u0000${block.name}`).slice(0, 20);
-    // A legacy semantic block remains readable as a whole-block source. It is
-    // not a semantic-backed Dataset merely because its block type says
-    // "semantic"; those datasets are projected below from exact semantic
-    // metric capability contracts.
     const sourceKind = 'block';
     const sourceId = `app:${sourceKind}:${domain ?? 'global'}:${pathIdentity}`;
     const dataset = block.blockType === 'semantic'
@@ -5390,6 +5392,16 @@ function sameSemanticDatasetTimeContract(
   return left?.primary === right?.primary
     && leftGrains.length === rightGrains.length
     && leftGrains.every((grain, index) => grain === rightGrains[index]);
+}
+
+/**
+ * A semantic Dataset source is an App Studio projection of metrics Ask already
+ * retrieves as `semantic_metric`. Admitting the projection to Ask evidence
+ * would duplicate those metrics and, because it spans a model rather than a
+ * Domain, make an otherwise unambiguous Domain briefing ambiguous.
+ */
+export function isAppOnlySemanticDatasetSource(object: Pick<MetadataObject, 'objectType' | 'payload'>): boolean {
+  return object.objectType === 'dql_block_source' && object.payload?.kind === 'semantic';
 }
 
 function addSemanticDatasetSourceObject(
