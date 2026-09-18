@@ -56,6 +56,7 @@ import {
   aggregatesRows,
   appliedConditions,
   joinKeyPairs,
+  unusedLeftJoins,
   aggregatesColumnOf,
   missingRequiredFilters,
   missingStatedValues,
@@ -2102,6 +2103,21 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         // Two tables linked only by a parent they both reference are not
         // linked by it when the team modeled how they connect.
         failures.push(...sharedParentShortcuts(joinUses, relationshipEdges));
+        // A LEFT JOIN whose table is used nowhere else restricts nothing: the
+        // restriction it stood for was not applied. Judged only with the
+        // table's complete column list, so a bare column is never misread.
+        const completeColumnsOf = (relation: string): string[] | undefined => {
+          const entry = current.entries.find((item) => item.kind === 'relation' && entryPhysicalRelation(item) !== undefined && sameRelation(entryPhysicalRelation(item)!, relation));
+          const listed = entry && entry.physical?.binding?.columnCompleteness === 'complete'
+            ? current.entries.filter((item) => item.kind === 'column' && samePhysicalEntry(item, entry)).map((item) => item.physical?.column ?? item.name.split('.').pop()!)
+            : [];
+          const read = sourceColumns(relation);
+          return read.length ? read : listed.length ? listed : undefined;
+        };
+        for (const relation of unusedLeftJoins(sql, completeColumnsOf)) {
+          const name = relation.split('.').pop()!.replace(/"/g, '');
+          failures.push(`it LEFT JOINs ${name} but uses none of its columns, so the join restricts nothing (a LEFT JOIN keeps every row) and can only repeat rows; if ${name} marks which rows count, join it with an inner join, otherwise leave it out`);
+        }
         state.hostJoins = ledgerJoins(joinUses);
         const certifiedUses = joinUses.filter((use) => use.relationship?.level === 'certified');
         if (aggregatesRows(sql)) {
@@ -2125,7 +2141,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         }
         // The same verdicts, recorded as checks for the run views.
         const attempt = ++state.checkRound;
-        const joinFailure = failures.find((message) => /repeats the key on both sides|across its join to|which both only reference/.test(message));
+        const joinFailure = failures.find((message) => /repeats the key on both sides|across its join to|which both only reference|uses none of its columns/.test(message));
         const statedFailure = failures.find((message) => /from the question$/.test(message));
         state.hostChecks.push(
           { id: 'catalog_columns', label: 'Uses only tables and columns the project lists', passed: true, message: 'every table and column it reads was inspected', attempt },

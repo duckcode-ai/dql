@@ -160,6 +160,39 @@ export function joinKeyPairs(sql: string): JoinKeyPair[] {
 }
 
 /**
+ * LEFT JOINS THAT DO NOTHING. A LEFT JOIN keeps every row of the tables before
+ * it, so a table joined that way and never used again (no column selected,
+ * filtered, grouped, or joined on further) cannot restrict the answer: at best
+ * it changes nothing, at worst it repeats rows. It is almost always a
+ * restriction the statement meant to apply ("only the claim amounts that are
+ * expense reserves") and did not. Returns the unused relations as written.
+ * A join is judged only when its table's columns are known: none of them may
+ * appear outside its ON clause, qualified by the table or its alias, or bare.
+ */
+export function unusedLeftJoins(sql: string, columnsOf: (relation: string) => string[] | undefined): string[] {
+  const text = sql.replace(/--[^\n]*/g, ' ');
+  const joins = [...text.matchAll(new RegExp(String.raw`\bleft\s+(?:outer\s+)?join\s+${RELATION_TOKEN}(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?\s+on\b`, 'gi'))];
+  const unused: string[] = [];
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const join of joins) {
+    const relation = join[1]!;
+    const columns = columnsOf(relation);
+    if (!columns?.length) continue;
+    const alias = join[2] && !NOT_ALIAS.has(join[2].toLowerCase()) ? join[2] : relation.split('.').pop()!.replace(/"/g, '');
+    const start = join.index! + join[0].length;
+    const rest = text.slice(start);
+    const end = rest.search(/\b(?:left|right|inner|full|cross|join|where|group\s+by|order\s+by|limit|having|union|qualify|window)\b|\)/i);
+    const onClause = end >= 0 ? rest.slice(0, end) : rest;
+    const outside = text.slice(0, join.index!) + text.slice(start + onClause.length);
+    if (new RegExp(`(^|[^\\w$])"?${escape(alias)}"?\\.`, 'i').test(outside)) continue;
+    // A bare column of this table, anywhere else, may be read from it.
+    const bare = columns.some((column) => new RegExp(`(?<![\\w$."])"?${escape(column)}"?(?![\\w$])`, 'i').test(outside));
+    if (!bare) unused.push(relation);
+  }
+  return unused;
+}
+
+/**
  * Whether a statement sums, averages or counts (not distinct) a column of the
  * relation a qualifier names. Across a join that repeats the key on the other
  * side, such a total counts each of that relation's rows once per match.
