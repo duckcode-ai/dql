@@ -93,6 +93,6 @@ export function DatasetTileBuilder({
     </> : null}
     {sourceValidation.state === 'failed' && sourceValidation.message ? <small className="dataset-builder-error" role="alert">{sourceValidation.message}</small> : null}
     {blockingMessage ? <small className="dataset-builder-error" role="alert">{blockingMessage}</small> : null}
-    <button type="button" className="primary dataset-add-tile" disabled={disabled || Boolean(blockingMessage)} onClick={() => onAdd(source, effectiveView, query, title)}><Play size={13} /> Add tile</button>
+    <button type="button" className="primary dataset-add-tile" disabled={disabled || Boolean(blockingMessage)} onClick={() => onAdd(source, effectiveView, query, title.trim() || defaultTitle)}><Play size={13} /> Add tile</button>
   </section>;
 }
