@@ -22767,6 +22767,9 @@ function resolveRunReasoningEffort(
  * Settings ceiling caps the result. This is the rule the pre-pipeline runtime
  * applied per run; it was lost when that runtime was removed.
  */
+/** API providers whose Ask reading runs at low effort by default (see askDispatchReasoningEffort). */
+const API_READING_LOW_PROVIDERS = new Set<string>(['anthropic', 'openai', 'gemini', 'custom-openai']);
+
 export function askDispatchReasoningEffort(
   projectRoot: string,
   purpose: 'resolve' | 'correct' | 'repair' | 'draft' | 'research_select' | 'research_narrate',
@@ -22779,9 +22782,21 @@ export function askDispatchReasoningEffort(
   // effort apart from SQL drafting, which stays at the authoring effort:
   // DQL_ASK_READING_EFFORT=low|medium|high. The request's own choice and the
   // provider's Settings ceiling still apply.
-  const readingOverride = (purpose === 'resolve' || purpose === 'correct') && isReasoningEffortSetting(process.env.DQL_ASK_READING_EFFORT) && process.env.DQL_ASK_READING_EFFORT !== 'auto'
-    ? process.env.DQL_ASK_READING_EFFORT as ReasoningEffort
-    : undefined;
+  // On a configured API provider the reading defaults to low effort: measured on the
+  // Anthropic API over 3×41 questions, the median fell from 20.6 s to 15.3 s
+  // and stops from 11.4% to 6.5%, with no significant accuracy change
+  // (69.9% against 72.4%, paired p = 0.55). Subscription command-line
+  // providers keep the route effort.
+  const reading = purpose === 'resolve' || purpose === 'correct';
+  const envReading = process.env.DQL_ASK_READING_EFFORT;
+  const readingOverride = !reading
+    ? undefined
+    : isReasoningEffortSetting(envReading)
+      ? (envReading === 'auto' ? undefined : envReading as ReasoningEffort)
+      // The provider the project CONFIGURED, not the one a run fell back to:
+      // a project with no provider settings (a replayed golden suite, a key
+      // only in the environment) keeps the route effort.
+      : API_READING_LOW_PROVIDERS.has(getActiveProvider(projectRoot) ?? '') ? 'low' as ReasoningEffort : undefined;
   const requested = request.reasoningEffort
     ?? (request.thinkingMode ? resolveThinkingMode(request.thinkingMode).reasoningEffort : undefined)
     ?? readingOverride;

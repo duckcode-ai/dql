@@ -10,13 +10,13 @@ import { askDispatchReasoningEffort, startLocalServer } from './local-runtime.js
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-function projectWithCeiling(ceiling?: ReasoningEffort): string {
+function projectWithCeiling(ceiling?: ReasoningEffort, active = 'claude-code'): string {
   const root = mkdtempSync(join(tmpdir(), 'dql-ask-effort-'));
   mkdirSync(join(root, '.dql'), { recursive: true });
   writeFileSync(join(root, '.dql', 'provider-settings.json'), JSON.stringify({
     version: 1,
-    activeProvider: 'claude-code',
-    providers: { 'claude-code': { id: 'claude-code', enabled: true, ...(ceiling ? { reasoningEffort: ceiling } : {}) } },
+    activeProvider: active,
+    providers: { [active]: { id: active, enabled: true, ...(ceiling ? { reasoningEffort: ceiling } : {}) } },
   }));
   return root;
 }
@@ -59,6 +59,20 @@ describe('reasoning effort for Ask provider calls', () => {
       expect(askDispatchReasoningEffort(root, 'resolve', { reasoningEffort: 'medium' }, 'claude-code')).toBe('medium');
       process.env.DQL_ASK_READING_EFFORT = 'nonsense';
       expect(askDispatchReasoningEffort(root, 'resolve', {}, 'claude-code')).toBe('medium');
+      // A project CONFIGURED for an API provider reads at low effort by default;
+      // one that merely falls back to it (no settings) keeps the route effort;
+      // 'auto' restores the route effort.
+      delete process.env.DQL_ASK_READING_EFFORT;
+      const api = projectWithCeiling(undefined, 'anthropic');
+      roots.push(api);
+      expect(askDispatchReasoningEffort(api, 'resolve', {}, 'anthropic')).toBe('low');
+      expect(askDispatchReasoningEffort(api, 'draft', {}, 'anthropic')).toBe('high');
+      expect(askDispatchReasoningEffort(root, 'resolve', {}, 'anthropic')).toBe('medium');
+      const unconfigured = mkdtempSync(join(tmpdir(), 'dql-ask-effort-none-'));
+      roots.push(unconfigured);
+      expect(askDispatchReasoningEffort(unconfigured, 'resolve', {}, 'anthropic')).toBe('medium');
+      process.env.DQL_ASK_READING_EFFORT = 'auto';
+      expect(askDispatchReasoningEffort(api, 'resolve', {}, 'anthropic')).toBe('medium');
     } finally {
       if (previous === undefined) delete process.env.DQL_ASK_READING_EFFORT; else process.env.DQL_ASK_READING_EFFORT = previous;
     }
