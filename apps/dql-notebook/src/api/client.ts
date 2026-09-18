@@ -8282,6 +8282,18 @@ export const api = {
     }
   },
 
+  /**
+   * Distinct values of one approved Dataset field, for a Dataset-bound page
+   * filter's options. Runs as a governed field query; nothing is App evidence.
+   */
+  async datasetFieldValues(sourceId: string, field: string): Promise<{ ok: boolean; values: string[]; truncated?: boolean; error?: string }> {
+    try {
+      return await request('/api/app-datasets/field-values', { method: 'POST', body: JSON.stringify({ sourceId, field }) });
+    } catch (error) {
+      return { ok: false, values: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+
   /** Turn on field-based Dataset tiles for this project (writes `apps.datasets: true`). */
   async enableDatasetTiles(): Promise<{ ok: boolean; datasets?: boolean; error?: string }> {
     try {

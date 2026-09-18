@@ -149,6 +149,7 @@ import {
   tileQueryOutputAliases,
   normalizeTileQuery,
   tileQueryValidationRuns,
+  datasetPhysicalField,
   validateTileQuery,
   applyDatasetHierarchyDrill,
   datasetHierarchyFields,
@@ -17579,6 +17580,38 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
      * publication evidence, while source validation, target observation,
      * grain/component proofs, cancellation, and execution remain identical.
      */
+    /**
+     * Distinct values of one approved Dataset field, for a page filter's
+     * options. It is an ordinary governed field query (group by the field,
+     * count one approved measure) run through the same ephemeral Dataset
+     * runtime as MCP, so validation, proofs, and execution are identical and
+     * nothing becomes App evidence.
+     */
+    const datasetFieldValuesQuery = (raw: unknown) => {
+      const body = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+      const sourceId = typeof body.sourceId === 'string' ? body.sourceId.trim() : '';
+      const field = typeof body.field === 'string' ? body.field.trim() : '';
+      if (!sourceId || !field) throw new DashboardRunRequestError('Field values need an exact Dataset sourceId and field.');
+      const resolved = resolveAppSourceCatalogRecords(projectRoot, [sourceId], 'governed_only');
+      const descriptor = resolved.items[0]?.capabilities.dataset;
+      if (!descriptor) throw new DashboardRunRequestError(`Dataset source ${sourceId} is not a current approved governed Dataset.`);
+      const physical = datasetPhysicalField(descriptor, field);
+      if (!physical || physical.status !== 'approved' || !['dimension', 'key', 'attribute', 'time'].includes(physical.role)) {
+        throw new DashboardRunRequestError(`${field} is not an approved groupable field of ${descriptor.label}.`);
+      }
+      const measure = descriptor.fields.find((candidate) => candidate.kind === 'measure' && candidate.status === 'approved');
+      if (!measure) throw new DashboardRunRequestError(`${descriptor.label} has no approved measure to group ${field} by.`);
+      return {
+        sourceId,
+        query: {
+          dimensions: [{ field: physical.name }],
+          measures: [{ measure: measure.name }],
+          orderBy: [{ alias: physical.name, direction: 'asc' }],
+          limit: DATASET_FIELD_VALUE_LIMIT + 1,
+        },
+      };
+    };
+
     const resolveMcpDatasetRuntimeRequest = async (raw: unknown) => {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
         throw new DashboardRunRequestError('Dataset MCP input must be an object with sourceId, query, and optional parameters.');
@@ -17806,7 +17839,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     const appDashRun = path.match(/^\/api\/(apps|app-builds)\/([^/]+)\/dashboards\/([^/]+)\/run$/);
-    const mcpDatasetRun = req.method === 'POST' && path === '/api/app-datasets/run';
+    const datasetFieldValuesRun = req.method === 'POST' && path === '/api/app-datasets/field-values';
+    const mcpDatasetRun = (req.method === 'POST' && path === '/api/app-datasets/run') || datasetFieldValuesRun;
     if (req.method === 'POST' && (appDashRun || mcpDatasetRun)) {
       let activeDashboardRunKey: string | undefined;
       let activeDashboardRun: { generation: number; controller: AbortController } | undefined;
@@ -17814,7 +17848,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       let chartRunScopeGeneration: number | undefined;
       let dashboardRequestAbortHandler: (() => void) | undefined;
       try {
-        const mcpRequest = mcpDatasetRun ? await resolveMcpDatasetRuntimeRequest(await readJSON(req)) : undefined;
+        const mcpRequest = mcpDatasetRun
+          ? await resolveMcpDatasetRuntimeRequest(datasetFieldValuesRun
+            ? datasetFieldValuesQuery(await readJSON(req))
+            : await readJSON(req))
+          : undefined;
         const runSurface = mcpRequest ? 'dataset-mcp' as const : appDashRun![1] as 'apps' | 'app-builds';
         const appId = mcpRequest ? mcpRequest.app.id : decodeURIComponent(appDashRun![2]);
         const dashboardId = mcpRequest ? mcpRequest.dashboard.id : decodeURIComponent(appDashRun![3]);
@@ -20372,6 +20410,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (dashboardRequestAbortHandler) req.off('aborted', dashboardRequestAbortHandler);
         if (activeDashboardRunKey && activeDashboardRun && activeDashboardRuns.get(activeDashboardRunKey) === activeDashboardRun) {
           activeDashboardRuns.delete(activeDashboardRunKey);
+        }
+        if (mcpRequest && datasetFieldValuesRun) {
+          const tile = tilesWithFilters.find((candidate) => candidate.tileId === mcpRequest.tileId);
+          const field = mcpRequest.query.dimensions[0]?.field ?? '';
+          const result = tile?.status === 'ok' && !staleRun ? tile.result as { rows?: Array<Record<string, unknown>> } | undefined : undefined;
+          const values = Array.from(new Set((result?.rows ?? [])
+            .map((row) => row[field])
+            .filter((value) => value !== null && value !== undefined && value !== '')
+            .map(String)));
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(tile?.status === 'ok' && !staleRun
+            ? { ok: true, field, values: values.slice(0, DATASET_FIELD_VALUE_LIMIT), truncated: values.length > DATASET_FIELD_VALUE_LIMIT }
+            : { ok: false, field, values: [], error: tile?.error ?? 'The field values did not settle. Retry the page.' }));
+          return;
         }
         if (mcpRequest) {
           const tile = tilesWithFilters.find((candidate) => candidate.tileId === mcpRequest.tileId);
@@ -28651,6 +28703,9 @@ function bindScopedStatement(
     values: buildParamValues(expanded.params, expanded.variables),
   };
 }
+
+/** Options offered for one Dataset-bound page filter. */
+const DATASET_FIELD_VALUE_LIMIT = 200;
 
 function errorCodeForDatasetTile(error: unknown): string {
   if (error && typeof error === 'object' && 'code' in error && typeof (error as { code?: unknown }).code === 'string') {

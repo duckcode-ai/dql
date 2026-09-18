@@ -12,15 +12,28 @@ import { formatBusinessLabel } from './app-text';
  * `Record<string, unknown>` of filter values and knows nothing about the App.
  */
 type DashboardFilter = NonNullable<DashboardDocumentResponse['dashboard']['filters']>[number];
+type DashboardDatasetBinding = NonNullable<DashboardDocumentResponse['dashboard']['datasets']>[number];
+
+/** The Dataset field a filter's options come from: its first binding on this page. */
+function datasetOptionSource(filter: DashboardFilter, datasets: DashboardDatasetBinding[] | undefined): { sourceId: string; field: string } | undefined {
+  for (const [datasetId, binding] of Object.entries(filter.datasetBindings ?? {})) {
+    const dataset = datasets?.find((candidate) => candidate.id === datasetId);
+    if (dataset) return { sourceId: dataset.sourceId, field: binding.field };
+  }
+  return undefined;
+}
 
 export function DashboardFilterControls({
   filters,
   values,
   onChange,
+  datasets,
 }: {
   filters: DashboardFilter[];
   values: Record<string, unknown>;
   onChange: (filter: DashboardFilter, value: unknown) => void;
+  /** The page's Dataset bindings, so Dataset-bound filters can list their values. */
+  datasets?: DashboardDatasetBinding[];
 }) {
   if (filters.length === 0) {
     return <span className="dql-app-filter-empty">No filters</span>;
@@ -31,6 +44,7 @@ export function DashboardFilterControls({
         <DashboardFilterInput
           key={filter.id}
           filter={filter}
+          datasetSource={datasetOptionSource(filter, datasets)}
           value={values[filter.id] ?? defaultDashboardFilterValue(filter)}
           onChange={(value) => onChange(filter, value)}
         />
@@ -208,10 +222,12 @@ function DashboardFilterInput({
   filter,
   value,
   onChange,
+  datasetSource,
 }: {
   filter: DashboardFilter;
   value: unknown;
   onChange: (value: unknown) => void;
+  datasetSource?: { sourceId: string; field: string };
 }) {
   const label = filter.label?.trim() || formatBusinessLabel(filter.id);
   const valueText = filterInputValue(filter, value);
@@ -221,6 +237,16 @@ function DashboardFilterInput({
   const column = filter.bindsTo || filter.id;
   const wantsOptions = (filter.type === 'string' || filter.type === 'select' || filter.type === 'multiselect' || filter.type === 'search') && Boolean(sourceBlockId) && !filter.options?.length;
   const [fetchedOptions, setFetchedOptions] = useState<string[] | null>(null);
+  const wantsDatasetOptions = (filter.type === 'select' || filter.type === 'multiselect' || filter.type === 'string')
+    && Boolean(datasetSource) && !filter.options?.length;
+  useEffect(() => {
+    if (!wantsDatasetOptions || !datasetSource) return;
+    let cancelled = false;
+    void api.datasetFieldValues(datasetSource.sourceId, datasetSource.field).then((res) => {
+      if (!cancelled) setFetchedOptions(res.ok ? res.values : []);
+    });
+    return () => { cancelled = true; };
+  }, [datasetSource?.sourceId, datasetSource?.field, wantsDatasetOptions]);
   useEffect(() => {
     if (!wantsOptions || !sourceBlockId) return;
     let cancelled = false;

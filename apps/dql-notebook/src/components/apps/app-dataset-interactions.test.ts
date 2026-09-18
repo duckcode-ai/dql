@@ -12,6 +12,7 @@ import {
   appendDatasetHierarchyDrill,
   popDatasetHierarchyDrill,
   proposeDatasetCrossFilterLinks,
+  carriedNavigationVariables,
   replaceDatasetCrossFilter,
 } from './app-dataset-interactions';
 
@@ -240,5 +241,29 @@ describe('cross-filter link proposals', () => {
     expect(proposeDatasetCrossFilterLinks({ page, tile: monthly, descriptorFor: (binding) => byId[binding.id] as never })).toBeUndefined();
     const detail = { ...(tile as object), query: { dimensions: [], measures: [], detail: true, detailColumns: ['region'], limit: 10 } } as never;
     expect(proposeDatasetCrossFilterLinks({ page, tile: detail, descriptorFor: (binding) => byId[binding.id] as never })).toBeUndefined();
+  });
+});
+
+describe('carrying a clicked mark into a detail page', () => {
+  const page = {
+    id: 'overview',
+    datasets: [{ id: 'orders', sourceId: 's.orders', sourceRevision: 'r1' }],
+    filters: [
+      { id: 'region', type: 'multiselect', datasetBindings: { orders: { field: 'region' } } },
+      { id: 'channel', type: 'select', datasetBindings: { orders: { field: 'channel' } } },
+    ],
+    layout: { items: [] },
+  } as never;
+  const tile = { i: 'by-region', sourceId: 's.orders', sourceRevision: 'r1', query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] } } as never;
+  const mark = { fromTileId: 'by-region', fromSourceId: 's.orders', fromSourceRevision: 'r1', field: 'region', values: ['US'] };
+
+  it('uses the clicked values for a carried filter bound to the same field', () => {
+    expect(carriedNavigationVariables({ page, tile, carryFilterIds: ['region'], variables: {}, crossFilters: [mark] })).toEqual({ region: ['US'] });
+  });
+
+  it('keeps an explicit page value, ignores other fields, and ignores marks from other tiles', () => {
+    expect(carriedNavigationVariables({ page, tile, carryFilterIds: ['region'], variables: { region: ['CA'] }, crossFilters: [mark] })).toEqual({ region: ['CA'] });
+    expect(carriedNavigationVariables({ page, tile, carryFilterIds: ['channel'], variables: {}, crossFilters: [mark] })).toEqual({});
+    expect(carriedNavigationVariables({ page, tile, carryFilterIds: ['region'], variables: {}, crossFilters: [{ ...mark, fromTileId: 'other' }] })).toEqual({});
   });
 });

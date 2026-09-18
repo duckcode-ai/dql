@@ -78,6 +78,7 @@ import {
   appendDatasetHierarchyDrill,
   datasetMarkActions,
   datasetMarkSelectionForRow,
+  carriedNavigationVariables,
   popDatasetHierarchyDrill,
   proposeDatasetCrossFilterLinks,
   type DatasetCrossFilterLinkProposal,
@@ -2177,9 +2178,16 @@ export function AppStudioV2({
       setSavedMessage('No detail-page navigation is configured for this tile. Open its interaction settings to add one.');
       return;
     }
+    const withMarks = carriedNavigationVariables({
+      page: activePage,
+      tile,
+      carryFilterIds: navigation.carryFilters,
+      variables: previewVariables,
+      crossFilters: previewCrossFilters,
+    });
     const carried = Object.fromEntries(navigation.carryFilters
-      .filter((filterId) => previewVariables[filterId] !== undefined)
-      .map((filterId) => [filterId, previewVariables[filterId]]));
+      .filter((filterId) => withMarks[filterId] !== undefined)
+      .map((filterId) => [filterId, withMarks[filterId]]));
     const nextVariables = previewVariablesForPage(targetPage, {
       ...(previewVariablesByPage[targetPage.id] ?? {}),
       ...carried,

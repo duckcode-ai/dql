@@ -612,6 +612,16 @@ export function AppsView(): JSX.Element {
     }]);
     setDashboardFilterValuesByPage((current) => ({ ...current, [input.toDashboardId]: carried }));
     setAppliedDashboardFilterValuesByPage((current) => ({ ...current, [input.toDashboardId]: carried }));
+    // An App-scoped control has one value across pages, and that value wins
+    // when a page hydrates. A carried App-scoped value is therefore the new
+    // App value; otherwise the destination would silently drop it.
+    const carriedAppScoped = Object.fromEntries(Object.entries(carried).filter(([filterId]) => (
+      isAppScopedDashboardFilter(target.dashboard.filters?.find((filter) => filter.id === filterId))
+    )));
+    if (Object.keys(carriedAppScoped).length) {
+      setAppScopedDashboardFilterValues((current) => ({ ...current, ...carriedAppScoped }));
+      setAppliedAppScopedDashboardFilterValues((current) => ({ ...current, ...carriedAppScoped }));
+    }
     dispatch({ type: 'OPEN_DASHBOARD', dashboardId: input.toDashboardId });
     return { ok: true };
   }, [appliedDashboardFilterValues, dashboardFilterValues, dispatch, state.activeAppId, state.activeDashboardId]);
@@ -2605,6 +2615,7 @@ function AppWorkspaceSurface({
                       filters={dashboardFilters}
                       values={dashboardFilterValues}
                       onChange={onDashboardFilterChange}
+                      datasets={dashboardDoc?.dashboard.datasets}
                     />
                     {dashboardFilters.some((filter) => coverageFor(filter.id).unaffected.length > 0) ? (
                       <div className="dql-app-filter-runtime-coverage" aria-label="Filter coverage">

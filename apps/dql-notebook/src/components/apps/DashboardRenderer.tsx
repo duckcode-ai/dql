@@ -50,6 +50,7 @@ import type { InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
 import {
   buildDatasetCrossFilter,
   appendDatasetHierarchyDrill,
+  carriedNavigationVariables,
   datasetAffectedTileIds,
   datasetCrossFilterFields,
   datasetMarkActions,
@@ -390,6 +391,15 @@ export function DashboardRenderer({
   }, [dashboard.layout.items.length, effectiveCrossFilters, effectiveHierarchyDrills, runLatest, runVariables, state.activePersona?.userId]);
 
   useEffect(() => {
+    const rerun = () => {
+      pendingAffectedTileIdsRef.current = null;
+      void runLatest(runVariables, effectiveCrossFilters, effectiveHierarchyDrills);
+    };
+    window.addEventListener('dql-app-datasets-enabled', rerun);
+    return () => window.removeEventListener('dql-app-datasets-enabled', rerun);
+  }, [effectiveCrossFilters, effectiveHierarchyDrills, runLatest, runVariables]);
+
+  useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ appId?: string; dashboardId?: string }>).detail;
       if (detail?.appId !== appId || detail.dashboardId !== dashboard.id) return;
@@ -418,6 +428,7 @@ export function DashboardRenderer({
       const tile = tileResults.get(item.i);
       const blockRef = item.block
         ? ('blockId' in item.block ? item.block.blockId : item.block.ref)
+        : item.query ? `dataset:${item.sourceId ?? 'field query'}`
         : item.semantic ? `semantic:${item.semantic.id}`
           : item.draftAnalysis ? `draft:${item.draftAnalysis.ref}`
           : item.aiPin ? `aiPin:${item.aiPin.id}` : 'text';
@@ -733,14 +744,17 @@ export function DashboardRenderer({
       setCrossFilterNotice('No detail-page navigation is configured for this tile. Open its interaction settings to add one.');
       return;
     }
+    const tileItem = dashboard.layout.items.find((candidate) => candidate.i === tileId);
     const outcome = await onNavigateDashboard({
       fromDashboardId: dashboard.id,
       toDashboardId: navigation.toPage,
       carryFilterIds: navigation.carryFilters,
-      variables: runVariables,
+      variables: tileItem
+        ? carriedNavigationVariables({ page: dashboard, tile: tileItem, carryFilterIds: navigation.carryFilters, variables: runVariables, crossFilters: effectiveCrossFilters })
+        : runVariables,
     });
     if (outcome && !outcome.ok) setCrossFilterNotice(outcome.error ?? 'The configured detail page could not be opened.');
-  }, [dashboard.id, dashboard.interactions?.navigate, onNavigateDashboard, runVariables]);
+  }, [dashboard, effectiveCrossFilters, onNavigateDashboard, runVariables]);
 
   const openTileInNotebook = useCallback(async (item: DashboardLayoutItem, tile: DashboardRunTile) => {
     if (!canOpenTileInNotebook(tile)) return;
@@ -1305,6 +1319,8 @@ function DashboardTile({
   const canAsk = canAskChart || Boolean(!editable && blockId && onAskBlock);
   const blockRef = blockId
     ? `block:${blockId}`
+    : item.query
+      ? `dataset:${tile?.citation?.name ?? item.sourceId ?? 'field query'}`
     : item.semantic
       ? `semantic:${item.semantic.id}`
     : item.draftAnalysis
@@ -2178,6 +2194,38 @@ function defaultTileCopilotQuestion(title: string): string {
   return `/ask Explain ${title} for a stakeholder. Start with the business meaning, current result, active filters, caveats, and recommended next action.`;
 }
 
+/**
+ * A field-based tile in a project that has not turned the feature on. The
+ * runtime refuses it (APP-007); the reader gets the reason in plain words and
+ * one action, instead of an error code and a config file to edit.
+ */
+function DatasetsDisabledTileNotice(): JSX.Element {
+  const [state, setState] = useState<'idle' | 'enabling' | 'failed'>('idle');
+  return (
+    <div role="status" style={{ display: 'grid', gap: 8, justifyItems: 'center', textAlign: 'center', padding: 8 }}>
+      <span>Field-based tiles are turned off for this project.</span>
+      <small style={{ opacity: 0.72 }}>Turning them on sets <code>apps.datasets</code> in <code>dql.config.json</code>.</small>
+      <button
+        type="button"
+        disabled={state === 'enabling'}
+        onClick={async (event) => {
+          event.stopPropagation();
+          setState('enabling');
+          const result = await api.enableDatasetTiles();
+          if (!result.ok) { setState('failed'); return; }
+          setState('idle');
+          // Every field tile on the page was refused for the same reason.
+          window.dispatchEvent(new CustomEvent('dql-app-datasets-enabled'));
+        }}
+        style={tileRepairButtonStyle}
+      >
+        {state === 'enabling' ? 'Turning on…' : 'Turn on field-based tiles'}
+      </button>
+      {state === 'failed' ? <small>DQL could not update dql.config.json.</small> : null}
+    </div>
+  );
+}
+
 export function TileBody({
   item,
   tile,
@@ -2245,6 +2293,9 @@ export function TileBody({
   if (!tile) return <span>No run result.</span>;
   if (tile.status === 'unauthorized') return <span>Not authorized.</span>;
   if (tile.status === 'unresolved') return <span>{tile.error ?? 'Block reference unresolved.'}</span>;
+  if (tile.status === 'error' && tile.error?.startsWith('APP_DATASETS_FEATURE_DISABLED')) {
+    return <DatasetsDisabledTileNotice />;
+  }
   if (tile.status === 'error') return (
     <div style={{ display: 'grid', gap: 8, justifyItems: 'center', textAlign: 'center', padding: 8 }}>
       <span>{tile.error ?? 'Tile failed.'}</span>

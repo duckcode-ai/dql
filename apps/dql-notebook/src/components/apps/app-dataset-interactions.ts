@@ -334,3 +334,39 @@ export function proposeDatasetCrossFilterLinks(input: {
   }
   return undefined;
 }
+
+/**
+ * Values to carry into a detail page. A carried filter keeps its own page
+ * value when it has one. When it has none but the author clicked a mark on the
+ * navigating tile, and that filter is bound (on the tile's Dataset) to the same
+ * field the mark came from, the clicked values become the carried value — so
+ * "click US, open details" opens US details. Nothing is carried by name alone.
+ */
+export function carriedNavigationVariables(input: {
+  page: DashboardPage;
+  tile: DashboardTile;
+  carryFilterIds: string[];
+  variables: Record<string, unknown>;
+  crossFilters: DashboardDatasetCrossFilter[];
+}): Record<string, unknown> {
+  const next = { ...input.variables };
+  if (!input.tile.query) return next;
+  const binding = (input.page.datasets ?? []).find((candidate) => candidate.sourceId === input.tile.sourceId && candidate.sourceRevision === input.tile.sourceRevision);
+  if (!binding) return next;
+  const outputs = tileQueryOutputAliases(input.tile.query).filter((output) => output.kind === 'dimension');
+  for (const filterId of input.carryFilterIds) {
+    const current = next[filterId];
+    if (current !== undefined && current !== null && current !== '' && !(Array.isArray(current) && current.length === 0)) continue;
+    const filter = input.page.filters?.find((candidate) => candidate.id === filterId);
+    const boundField = filter?.datasetBindings?.[binding.id]?.field;
+    if (!filter || !boundField) continue;
+    for (const mark of input.crossFilters.filter((candidate) => candidate.fromTileId === input.tile.i)) {
+      const index = outputs.findIndex((output) => output.alias === mark.field);
+      const markField = index >= 0 ? input.tile.query.dimensions[index]?.field : undefined;
+      if (markField !== boundField || input.tile.query.dimensions[index]?.timeGrain) continue;
+      next[filterId] = filter.type === 'multiselect' || mark.values.length > 1 ? [...mark.values] : mark.values[0];
+      break;
+    }
+  }
+  return next;
+}
