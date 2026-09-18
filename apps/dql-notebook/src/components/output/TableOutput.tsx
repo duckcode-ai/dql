@@ -11,6 +11,9 @@ interface TableOutputProps {
   maxHeight?: CSSProperties['maxHeight'];
   /** App surfaces use a compact first page while retaining every row for paging and export. */
   initialPageSize?: number;
+  /** Optional App-level selection hook. It receives the actual settled row;
+   * callers remain responsible for matching it to an explicit field mapping. */
+  onRowClick?: (row: Record<string, unknown>) => void;
 }
 
 const PAGE_SIZES = [10, 25, 50, 100, 500] as const;
@@ -99,7 +102,7 @@ function SortArrow({ dir, color }: { dir: SortDir; color: string }) {
 
 // ─── TableOutput ──────────────────────────────────────────────────────────────
 
-export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSize = 50 }: TableOutputProps) {
+export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSize = 50, onRowClick }: TableOutputProps) {
   const t = themes[themeMode];
   const [hoveredRow, setHoveredRow] = useState<number | null>(null);
   const [sortCol, setSortCol] = useState<string | null>(null);
@@ -320,7 +323,8 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
                   key={rowIdx}
                   onMouseEnter={() => setHoveredRow(rowIdx)}
                   onMouseLeave={() => setHoveredRow(null)}
-                  style={{ transition: 'background 0.1s' }}
+                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                  style={{ transition: 'background 0.1s', cursor: onRowClick ? 'pointer' : undefined }}
                 >
                   {result.columns.map((col) => {
                     const value = row[col];

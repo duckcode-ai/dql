@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { mergeDashboardTileChartConfig, normalizeDashboardChartType, summarizeDashboardKpiResult } from './dashboard-chart-config';
 import { autoLayoutDashboardItems } from './dashboard-layout';
 import { formatDashboardValue } from './dashboard-format';
@@ -47,6 +49,255 @@ describe('Dashboard KPI display contract (UI-004)', () => {
 });
 
 describe('App dashboard interaction contract', () => {
+  it('APP-066 enables Ask about chart only for a settled published Dataset run', async () => {
+    const { canAskDatasetChart } = await dashboardHelpers();
+    const tile = {
+      tileId: 'revenue',
+      status: 'ok',
+      tileType: 'dataset',
+      result: { columns: ['revenue'], rows: [{ revenue: 60 }], rowCount: 1, executionTime: 1 },
+      dataset: {
+        sourceId: 'source.orders', sourceRevision: 'sha256:source', contractFingerprint: 'sha256:contract',
+        queryFingerprint: 'sha256:query', filterFingerprint: 'sha256:filter', executionFingerprint: 'sha256:execution',
+      },
+    } as any;
+    expect(canAskDatasetChart(tile, false, 'app_run_current', true)).toBe(true);
+    expect(canAskDatasetChart(tile, true, 'app_run_current', true)).toBe(false);
+    expect(canAskDatasetChart(tile, false, undefined, true)).toBe(false);
+    expect(canAskDatasetChart({ ...tile, status: 'error' }, false, 'app_run_current', true)).toBe(false);
+    expect(canAskDatasetChart({ ...tile, tileType: 'block' }, false, 'app_run_current', true)).toBe(false);
+  });
+
+  it('makes a published Dataset mark choose explicitly between its declared filter and hierarchy drill', async () => {
+    const { TileBody } = await dashboardHelpers();
+    const item = {
+      i: 'customer-revenue', x: 0, y: 0, w: 6, h: 4,
+      sourceId: 'source.orders', sourceRevision: 'sha256:orders',
+      query: { dimensions: [{ field: 'customer_id' }], measures: [{ measure: 'revenue' }] },
+      viz: { type: 'bar' },
+    } as any;
+    const markup = renderToStaticMarkup(createElement(TileBody, {
+      item,
+      tile: {
+        tileId: item.i, status: 'ok', tileType: 'dataset',
+        result: { columns: ['customer_id', 'revenue'], rows: [{ customer_id: 'C-001', revenue: 70 }], rowCount: 1, executionTime: 1 },
+        dataset: { hierarchy: { activeSteps: [], candidates: [{ hierarchyId: 'commerce_customer_orders', fromField: 'customer_id', fromAlias: 'customer_id', toField: 'order_id' }] } },
+      },
+      loading: false,
+      error: null,
+      themeMode: 'paper',
+      crossFilterFields: ['customer_id'],
+      onSelectDatasetMark: vi.fn(),
+      onDrillDatasetMark: vi.fn(),
+    } as any));
+    expect(markup).toContain('Click action');
+    expect(markup).toContain('Filter linked tiles');
+    expect(markup).toContain('Drill to Order Id');
+  });
+
+  it('keeps published Dataset scalar rendering actionable instead of hiding fields', async () => {
+    const { datasetTileVisualizationDisplayError } = await dashboardHelpers();
+    const base = {
+      i: 'revenue-kpi', x: 0, y: 0, w: 3, h: 2,
+      sourceId: 'source.orders', sourceRevision: 'source.v1',
+      viz: { type: 'single_value' },
+    } as any;
+
+    expect(datasetTileVisualizationDisplayError({
+      ...base,
+      query: { dimensions: [], measures: [{ measure: 'revenue' }, { measure: 'order_count' }] },
+    })).toContain('exactly one selected measure');
+    expect(datasetTileVisualizationDisplayError({
+      ...base,
+      query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
+    })).toContain('cannot group by a field');
+    expect(datasetTileVisualizationDisplayError({
+      ...base,
+      query: { dimensions: [], measures: [{ measure: 'revenue' }] },
+    })).toBeUndefined();
+    expect(datasetTileVisualizationDisplayError({
+      ...base,
+      query: { dimensions: [], measures: [], detail: true, detailColumns: ['order_id'], limit: 50 },
+      viz: { type: 'table' },
+    })).toBeUndefined();
+  });
+
+  it('renders redacted Dataset execution evidence in the published viewer without relabeling the authored spec as DQL', async () => {
+    const { TileEvidencePanel, canOpenTileInNotebook } = await dashboardHelpers();
+    const item = {
+      i: 'revenue-by-region', x: 0, y: 0, w: 6, h: 4,
+      sourceId: 'source.order-lines', sourceRevision: 'sha256:source-a',
+      query: {
+        dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }],
+        comparison: {
+          version: 1, timeField: 'order_date', timeRole: 'event_time', calendarId: 'calendar:gregorian', timezone: 'America/Chicago', grain: 'month', completenessPolicy: 'closed_period',
+          periods: [
+            { id: 'current_period', kind: 'absolute', start: '2026-03-01T06:00:00.000Z', end: '2026-04-01T05:00:00.000Z' },
+            { id: 'comparison_period', kind: 'absolute', start: '2026-02-01T06:00:00.000Z', end: '2026-03-01T06:00:00.000Z' },
+          ],
+          basePeriodId: 'current_period', comparisonPeriodIds: ['comparison_period'], alignment: 'calendar_period', outputs: ['value', 'absolute_delta', 'percent_delta'], zeroDenominatorPolicy: 'null',
+        },
+      },
+      viz: { type: 'bar' },
+    } as any;
+    const tile = {
+      tileId: item.i, status: 'ok', tileType: 'dataset',
+      result: { columns: ['region', 'revenue'], rows: [{ region: 'CA', revenue: 60 }], rowCount: 1, executionTime: 1 },
+      // This is the real Dataset runtime envelope, intentionally different
+      // from legacy `filter`/`skipped` output. Rendering the opened panel must
+      // not assume legacy fields are present.
+      filters: {
+        applied: [{ field: 'region', op: 'in', values: ['CA'], placement: 'where' }],
+        unbound: [{ filterId: 'period', code: 'DATASET_TILE_EXCLUDED', message: 'Period is explicitly excluded from this Dataset tile.' }],
+      },
+      artifact: {
+        version: 1, sourceKind: 'dataset_query', name: 'Revenue by region', trustState: 'certified',
+        authoredQuerySpec: '{"kind":"dataset_tile_query","boundParameterEvidence":[{"name":"as_of","valueFingerprint":"sha256:param"}]}',
+        sql: 'SELECT region, SUM(net_amount) AS revenue FROM order_lines WHERE region = ?',
+      },
+      dataset: {
+        sourceId: item.sourceId, sourceRevision: item.sourceRevision,
+        authoredQueryFingerprint: 'a4a1566bdc6e9caa98db35667a38443af1a7a4e33b921fc20f6049d2e326dc84',
+        parameterEvidence: [{ name: 'as_of', kind: 'string', valueFingerprint: 'sha256:param' }],
+        executionProvenance: {
+          version: 1, kind: 'block_runtime', sourceId: item.sourceId, sourceRevision: item.sourceRevision,
+          contractFingerprint: 'sha256:contract', queryFingerprint: 'sha256:query', filterFingerprint: 'sha256:filter',
+          executionFingerprint: 'sha256:execution', parameterFingerprint: 'sha256:params', targetFingerprint: 'sha256:target',
+        },
+      },
+    } as any;
+
+    // The concrete hash is supplied by the shared core helper rather than a
+    // field-name fallback. This mirrors the server's nested response shape.
+    const { tileQueryHash } = await import('@duckcodeailabs/dql-core/apps/tile-query');
+    tile.dataset.authoredQueryFingerprint = tileQueryHash(item.query);
+    const renderPanel = (tab: 'how' | 'dql' | 'sql') => renderToStaticMarkup(createElement(TileEvidencePanel, {
+      item,
+      tile,
+      tab,
+      onTab: () => undefined,
+      onClose: () => undefined,
+    }));
+    const dql = renderPanel('dql');
+    const sql = renderPanel('sql');
+    const how = renderPanel('how');
+
+    expect(dql).toContain('Authored query spec');
+    expect(dql).toContain('dataset_tile_query');
+    expect(dql).not.toContain('>DQL<');
+    expect(sql).toContain('Executed SQL');
+    expect(sql).toContain('SELECT region, SUM(net_amount)');
+    expect(how).toContain('Bound parameters');
+    expect(how).toContain('No provider execution receipt was returned');
+    expect(how).toContain('region (in)');
+    expect(how).toContain('1 explicitly unmapped dashboard filter');
+    expect(how).toContain('Period comparison');
+    expect(how).toContain('2026-03-01 to before 2026-04-01');
+    expect(how).toContain('Dataset queries cannot be opened in Notebook yet.');
+    expect(how).not.toContain('Open in Notebook');
+    // The same predicate guards the click handler, so direct callers cannot
+    // turn a declarative Dataset TileQuery into a fake sql_block handoff.
+    expect(canOpenTileInNotebook(tile)).toBe(false);
+    expect(canOpenTileInNotebook({
+      tileId: 'legacy', status: 'ok', result: { columns: ['revenue'], rows: [{ revenue: 60 }], rowCount: 1, executionTime: 1 },
+      artifact: { version: 1, sourceKind: 'certified_block', name: 'Revenue', trustState: 'certified', dql: 'block revenue {}' },
+    })).toBe(true);
+    expect(canOpenTileInNotebook({
+      tileId: 'semantic', status: 'ok', result: { columns: ['revenue'], rows: [{ revenue: 60 }], rowCount: 1, executionTime: 1 },
+      artifact: { version: 1, sourceKind: 'semantic_query', name: 'Revenue', trustState: 'certified', sql: 'SELECT 60 AS revenue' },
+    })).toBe(true);
+  });
+
+  it('renders opened legacy and semantic evidence panels with their own runtime filter envelopes', async () => {
+    const { TileEvidencePanel } = await dashboardHelpers();
+    const legacyItem = {
+      i: 'legacy-orders', x: 0, y: 0, w: 3, h: 2,
+      block: { blockId: 'orders' }, viz: { type: 'kpi' }, title: 'Orders',
+    } as any;
+    const legacy = renderToStaticMarkup(createElement(TileEvidencePanel, {
+      item: legacyItem,
+      tile: {
+        tileId: legacyItem.i, status: 'ok', tileType: 'block',
+        result: { columns: ['orders'], rows: [{ orders: 6 }], rowCount: 1, executionTime: 1 },
+        filters: {
+          applied: [{ filter: 'region', binding: 'region', mode: 'predicate', paramNames: [] }],
+          skipped: [{ filter: 'as_of', reason: 'not accepted by this saved block' }],
+        },
+        invocation: { resolvedParameters: [{ name: 'region', value: 'CA', source: 'surface' }], unresolvedParameters: [], auditId: 'legacy-run' },
+        artifact: { version: 1, sourceKind: 'certified_block', name: 'Orders', trustState: 'certified' },
+      } as any,
+      tab: 'how', onTab: () => undefined, onClose: () => undefined,
+    }));
+    expect(legacy).toContain('region');
+    expect(legacy).toContain('1 skipped');
+    expect(legacy).toContain('region (surface)');
+
+    const semanticItem = {
+      i: 'semantic-revenue', x: 0, y: 0, w: 3, h: 2,
+      sourceId: 'semantic.commerce', sourceRevision: 'sha256:semantic-a',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }] }, viz: { type: 'kpi' }, title: 'Semantic revenue',
+    } as any;
+    const { tileQueryHash } = await import('@duckcodeailabs/dql-core/apps/tile-query');
+    const semantic = renderToStaticMarkup(createElement(TileEvidencePanel, {
+      item: semanticItem,
+      tile: {
+        tileId: semanticItem.i, status: 'ok', tileType: 'dataset',
+        result: { columns: ['revenue'], rows: [{ revenue: 60 }], rowCount: 1, executionTime: 1 },
+        filters: { applied: [{ field: 'region', op: 'eq', values: ['CA'], placement: 'where' }], unbound: [] },
+        artifact: { version: 1, sourceKind: 'dataset_query', name: 'Semantic revenue', trustState: 'certified', sql: 'SELECT SUM(net_amount) AS revenue FROM order_lines' },
+        dataset: {
+          sourceId: semanticItem.sourceId, sourceRevision: semanticItem.sourceRevision,
+          authoredQueryFingerprint: tileQueryHash(semanticItem.query),
+          executionProvenance: {
+            version: 1, kind: 'semantic_runtime', sourceId: semanticItem.sourceId, sourceRevision: semanticItem.sourceRevision,
+            contractFingerprint: 'sha256:contract', queryFingerprint: 'sha256:query', filterFingerprint: 'sha256:filter',
+            executionFingerprint: 'sha256:execution', parameterFingerprint: 'sha256:parameters',
+          },
+          semanticReceipt: { receiptId: 'receipt-1', adapterId: 'native', outcome: 'succeeded' },
+        },
+      } as any,
+      tab: 'how', onTab: () => undefined, onClose: () => undefined,
+    }));
+    expect(semantic).toContain('Semantic Dataset execution');
+    expect(semantic).toContain('native');
+    expect(semantic).toContain('region (eq)');
+  });
+
+  it('merges an affected-tile refresh without retaining whole-dashboard evidence', async () => {
+    const { mergePartialDashboardRun } = await dashboardHelpers();
+    const previous = {
+      appId: 'commerce', dashboardId: 'overview', persona: null,
+      runId: 'run-full', snapshotId: 'snap', filterFingerprint: 'filter-a', resultFingerprint: 'result-a', personaFingerprint: 'persona',
+      facts: [{ id: 'fact', tileId: 'orders', kind: 'value', label: 'Revenue', value: 10, evidenceRef: 'run-full', trustState: 'certified' }],
+      story: { headline: 'Full story', paragraphs: [], claims: [], evidenceRefs: [], trustState: 'certified', generatedBy: 'deterministic' },
+      filterOptions: [{ filterId: 'region', values: ['CA'], truncated: false, sourceTileIds: ['orders'] }],
+      tiles: [
+        { tileId: 'orders', status: 'ok', result: { columns: ['revenue'], rows: [{ revenue: 10 }], rowCount: 1, executionTime: 1 } },
+        { tileId: 'customers', status: 'ok', result: { columns: ['customers'], rows: [{ customers: 3 }], rowCount: 1, executionTime: 1 } },
+      ],
+    } as any;
+    const partial = {
+      ...previous,
+      runId: 'run-partial', filterFingerprint: 'filter-b', resultFingerprint: 'result-b',
+      partial: true, executedTileIds: ['orders'], facts: [],
+      story: { headline: 'Partial dashboard refresh', paragraphs: [], claims: [], evidenceRefs: [], trustState: 'draft_ready', generatedBy: 'deterministic' },
+      tiles: [{ tileId: 'orders', status: 'ok', result: { columns: ['revenue'], rows: [{ revenue: 20 }], rowCount: 1, executionTime: 1 } }],
+    } as any;
+
+    const merged = mergePartialDashboardRun(previous, partial, [
+      { i: 'orders', x: 0, y: 0, w: 6, h: 3, viz: { type: 'kpi' } },
+      { i: 'customers', x: 6, y: 0, w: 6, h: 3, viz: { type: 'kpi' } },
+    ] as any);
+
+    expect(merged.partial).toBe(true);
+    expect(merged.tiles.map((tile) => [tile.tileId, tile.result?.rows[0]])).toEqual([
+      ['orders', { revenue: 20 }],
+      ['customers', { customers: 3 }],
+    ]);
+    expect(merged.facts).toEqual([]);
+    expect(merged.filterOptions).toBeUndefined();
+  });
+
   it('prepares a clean auto-layout without mutating the saved layout', async () => {
         const saved = [
       { i: 'chart', x: 7, y: 8, w: 2, h: 1, viz: { type: 'bar' }, title: 'Chart' },
@@ -103,6 +354,32 @@ describe('App dashboard interaction contract', () => {
       status: 'ok',
       result: { columns: ['type', 'revenue'], rows, rowCount: 2, executionTime: 4 },
     } as any)).toBe('food and drink leads Revenue at $9.8K (60%).');
+  });
+
+  it('keeps grouped Dataset insight at its displayed grain and uses governed percent metadata', async () => {
+    const { computeTileInsight } = await dashboardHelpers();
+    const insight = computeTileInsight({
+      status: 'ok',
+      tileType: 'dataset',
+      result: {
+        columns: ['order_month', 'margin_rate'],
+        columnsMeta: [{ name: 'margin_rate', kind: 'percent', unit: 'fraction', decimals: 1 }],
+        rows: [
+          { order_month: '2026-01-01', margin_rate: 0.6 },
+          { order_month: '2026-02-01', margin_rate: 0.5 },
+        ],
+        rowCount: 2,
+        executionTime: 4,
+      },
+    } as any, {
+      i: 'monthly-margin', x: 0, y: 0, w: 6, h: 4,
+      query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'margin_rate' }] },
+      viz: { type: 'bar' },
+    } as any);
+
+    expect(insight).toContain('60%');
+    expect(insight).toContain('grouped Dataset result');
+    expect(insight).not.toContain('(55%)');
   });
 });
 

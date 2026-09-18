@@ -13,6 +13,12 @@ interface ChartOutputProps {
   availableHeight?: number;
   /** Measured App-tile body width. Keeps SVG text legible in narrow containers. */
   availableWidth?: number;
+  /**
+   * Optional interaction hook for App tiles. It receives the original typed
+   * result row, never a formatted axis label, so consumers can keep governed
+   * field identities and values intact when applying a cross-filter.
+   */
+  onMarkSelect?: (row: Record<string, unknown>) => void;
 }
 
 export type ChartType =
@@ -186,6 +192,13 @@ function abbreviate(n: number, column = 'value', format?: CellChartConfig['forma
   return formatChartValue(column, n, format, meta);
 }
 
+/** A chart must distinguish an unavailable measure from the real number zero. */
+function chartNumericValue(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 /** The units contract for one column, when the result carries one. */
 function metaFor(result: QueryResult | undefined, column: string | undefined): ResultColumnMeta | undefined {
   return column ? result?.columnsMeta?.find((meta) => meta.name === column) : undefined;
@@ -235,7 +248,7 @@ type ThemeRef = ReturnType<typeof themes['dark'] extends infer T ? () => T : nev
 
 const DEFAULT_MAX_ITEMS = 20;
 
-function BarChart({ result, themeMode, chartConfig, availableHeight, availableWidth }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig; availableHeight?: number; availableWidth?: number }) {
+function BarChart({ result, themeMode, chartConfig, availableHeight, availableWidth, onMarkSelect }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig; availableHeight?: number; availableWidth?: number; onMarkSelect?: (row: Record<string, unknown>) => void }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
@@ -244,11 +257,12 @@ function BarChart({ result, themeMode, chartConfig, availableHeight, availableWi
 
   const data = result.rows.slice(0, maxItems).map((row) => ({
     label: String(row[labelCol] ?? ''),
-    value: Number(row[valueCol] ?? 0),
+    value: chartNumericValue(row[valueCol]),
+    row,
   }));
 
   const truncated = result.rows.length > maxItems;
-  const maxVal = Math.max(...data.map((d) => d.value), 1);
+  const maxVal = Math.max(...data.flatMap((d) => d.value === null ? [] : [d.value]), 1);
 
   const WIDTH = availableWidth && availableWidth > 0 ? Math.max(240, Math.min(720, availableWidth)) : 600;
   const LABEL_W = Math.min(132, Math.max(82, WIDTH * 0.32));
@@ -267,19 +281,33 @@ function BarChart({ result, themeMode, chartConfig, availableHeight, availableWi
         {data.map((item, i) => {
           const y = PADDING + i * slot;
           const barMaxW = WIDTH - LABEL_W - Math.min(84, WIDTH * 0.22);
-          const barW = Math.max((item.value / maxVal) * barMaxW, 2);
+          const barW = item.value === null ? 0 : Math.max((item.value / maxVal) * barMaxW, 2);
           const isHovered = hoveredIdx === i;
           // A two-field bar result is one series. Cycling colors per row implied
           // unrelated categories and made governed business charts look noisy.
           const color = palette[0] ?? t.accent;
           return (
-            <g key={i} onMouseEnter={() => setHoveredIdx(i)} onMouseLeave={() => setHoveredIdx(null)} style={{ cursor: 'default' }}>
+            <g
+              key={i}
+              onMouseEnter={() => setHoveredIdx(i)}
+              onMouseLeave={() => setHoveredIdx(null)}
+              onClick={onMarkSelect ? () => onMarkSelect(item.row) : undefined}
+              onKeyDown={onMarkSelect ? (event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                onMarkSelect(item.row);
+              } : undefined}
+              role={onMarkSelect ? 'button' : undefined}
+              tabIndex={onMarkSelect ? 0 : undefined}
+              aria-label={onMarkSelect ? `Select ${item.label}` : undefined}
+              style={{ cursor: onMarkSelect ? 'pointer' : 'default', outline: 'none' }}
+            >
               <text x={LABEL_W - 8} y={y + BAR_H / 2 + 4} textAnchor="end" fontSize={11} fontFamily={t.font} fill={t.textSecondary}>
                 {formatCategoryLabel(item.label, labelCol)}
               </text>
-              <rect x={LABEL_W} y={y} width={barW} height={BAR_H} rx={3} fill={color} opacity={isHovered ? 1 : 0.88} style={{ transition: 'opacity 0.15s' }} />
+              {item.value === null ? null : <rect x={LABEL_W} y={y} width={barW} height={BAR_H} rx={3} fill={color} opacity={isHovered ? 1 : 0.88} style={{ transition: 'opacity 0.15s' }} />}
               <text x={LABEL_W + barW + 6} y={y + BAR_H / 2 + 4} textAnchor="start" fontSize={11} fontFamily={t.fontMono} fill={t.textMuted}>
-                {abbreviate(item.value, valueCol, chartConfig?.format, metaFor(result, valueCol))}
+                {item.value === null ? '—' : abbreviate(item.value, valueCol, chartConfig?.format, metaFor(result, valueCol))}
               </text>
             </g>
           );
@@ -1296,7 +1324,7 @@ function ChartConfigPopover({
   );
 }
 
-export function ChartOutput({ result, themeMode, chartConfig, availableHeight, availableWidth, onConfigChange }: ChartOutputProps & { onConfigChange?: (updates: Partial<CellChartConfig>) => void }) {
+export function ChartOutput({ result, themeMode, chartConfig, availableHeight, availableWidth, onMarkSelect, onConfigChange }: ChartOutputProps & { onConfigChange?: (updates: Partial<CellChartConfig>) => void }) {
   const t = themes[themeMode];
   const resolvedType = resolveChartType(result, chartConfig);
   const [showConfig, setShowConfig] = useState(false);
@@ -1344,12 +1372,12 @@ export function ChartOutput({ result, themeMode, chartConfig, availableHeight, a
           t={t}
         />
       )}
-      {renderChart(resolvedType, result, themeMode, chartConfig, availableHeight, availableWidth)}
+      {renderChart(resolvedType, result, themeMode, chartConfig, availableHeight, availableWidth, onMarkSelect)}
     </div>
   );
 }
 
-export function renderChart(chartType: ChartType, result: QueryResult, themeMode: ThemeMode, chartConfig?: CellChartConfig, availableHeight?: number, availableWidth?: number): React.ReactElement | null {
+export function renderChart(chartType: ChartType, result: QueryResult, themeMode: ThemeMode, chartConfig?: CellChartConfig, availableHeight?: number, availableWidth?: number, onMarkSelect?: (row: Record<string, unknown>) => void): React.ReactElement | null {
   // Reorder columns based on explicit config
   const xCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : undefined;
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : undefined;
@@ -1361,7 +1389,7 @@ export function renderChart(chartType: ChartType, result: QueryResult, themeMode
     case 'area':
       return <LineChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} availableHeight={availableHeight} availableWidth={availableWidth} showArea />;
     case 'bar':
-      return <BarChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} availableHeight={availableHeight} availableWidth={availableWidth} />;
+      return <BarChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} availableHeight={availableHeight} availableWidth={availableWidth} onMarkSelect={onMarkSelect} />;
     case 'grouped-bar':
       return <GroupedBarChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} />;
     case 'stacked-bar':

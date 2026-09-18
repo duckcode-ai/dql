@@ -69,7 +69,8 @@ export function dashboardFilterCoverage(
   // reach has to come from the tiles that reported the column as filterable.
   // Reading only the document would report "reaches no tile" for every column a
   // viewer picks, immediately before the page filters correctly.
-  const declared = (dashboard?.filters ?? []).some((filter) => filter.id === filterId);
+  const declaredFilter = (dashboard?.filters ?? []).find((filter) => filter.id === filterId);
+  const declared = Boolean(declaredFilter);
   if (!declared && run) {
     const offering = new Set(
       (run.tiles ?? [])
@@ -91,6 +92,29 @@ export function dashboardFilterCoverage(
   const applied: string[] = [];
   const unaffected: DashboardFilterCoverage['unaffected'] = [];
   for (const item of items) {
+    // Field-query tiles use the exact Dataset binding rather than a matching
+    // result-column name. A selected component subset is a durable authored
+    // scope, so surface an exclusion instead of claiming page-wide coverage.
+    const dataset = item.query && item.sourceId && item.sourceRevision
+      ? dashboard?.datasets?.find((candidate) => (
+        candidate.sourceId === item.sourceId && candidate.sourceRevision === item.sourceRevision
+      ))
+      : undefined;
+    if (dataset) {
+      const datasetBinding = declaredFilter?.datasetBindings?.[dataset.id];
+      if (datasetBinding && (!datasetBinding.tileIds || datasetBinding.tileIds.includes(item.i))) {
+        applied.push(item.i);
+      } else {
+        unaffected.push({
+          tileId: item.i,
+          title: item.title,
+          reason: datasetBinding
+            ? 'Excluded by this filter’s linked-component selection.'
+            : 'This Dataset is not mapped to this filter.',
+        });
+      }
+      continue;
+    }
     const binding = (item.filterBindings ?? []).find((candidate) => candidate.filter === filterId)
       ?? (item.parameterBindings ?? []).find((candidate) => (candidate.filter || candidate.field || candidate.param) === filterId);
     const bound = Boolean(binding)
@@ -239,11 +263,22 @@ function isNarrativeTile(item: DashboardLayoutItem): boolean {
 }
 
 function isUsefulDashboardFilter(filter: DashboardFilter): boolean {
+  // A v3 Dataset field filter deliberately gets its options from the
+  // server-owned distinct-value route. It therefore has neither static
+  // `options` nor a legacy block predicate source. Dropping it here makes a
+  // valid saved App control disappear in the published viewer, including an
+  // explicit empty Dataset binding that truthfully leaves the current page
+  // unfiltered. Keep the authored control; execution still validates its
+  // exact Dataset binding and selected component ids on the server.
+  const hasDatasetBindings = filter.datasetBindings !== undefined;
+  const hasDistinctOptionSource = filter.optionSource?.mode === 'distinct_query';
   if (
     filter.type === 'select'
     && !filter.options?.length
     && filter.default === undefined
     && !(filter as { sourceBlockId?: string }).sourceBlockId
+    && !hasDatasetBindings
+    && !hasDistinctOptionSource
   ) return false;
   return true;
 }

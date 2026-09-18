@@ -44,6 +44,7 @@ describe('a declared units contract wins over the column name', () => {
     expect(formatDisplayValue('revenue_growth_mom', 10.84, [], { meta: { kind: 'percent', unit: 'percentage_points', decimals: 1 } })).toBe('10.8 pp');
     expect(formatDisplayValue('orders', 2085, [], { meta: { kind: 'count' } })).toBe('2,085');
     expect(formatDisplayValue('aov', 10.7364, [], { meta: { kind: 'currency', unit: 'USD' } })).toBe('$10.74');
+    expect(formatDisplayValue('eu_revenue', 10.7364, [], { meta: { kind: 'currency', unit: 'EUR' } })).toMatch(/€10\.74/);
     expect(formatDisplayValue('total_value', 42, [], { meta: { kind: 'count' } })).toBe('42');
     // Without meta the name heuristic still applies, exactly as before.
     expect(formatDisplayValue('total_value', 42, [])).toBe('$42.00');

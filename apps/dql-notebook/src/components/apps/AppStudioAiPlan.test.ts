@@ -4,6 +4,7 @@ import {
   appStudioProposalRequestSourceIds,
   appStudioProposalSourceAddMode,
   appStudioProposalRequiredSourceIds,
+  appStudioPlannerProvenanceLabel,
   availableAppStudioProposalSources,
   operationsForSelectedAppStudioSources,
   summarizeAppStudioAiPlan,
@@ -177,5 +178,26 @@ describe('App Studio AI plan review (AGT-025, UI-022)', () => {
     expect(appStudioProposalRequestSourceIds([], 'source:stale')).toEqual([]);
     expect(appStudioProposalRequestSourceIds(undefined, 'source:current')).toEqual(['source:current']);
     expect(appStudioProposalRequestSourceIds(undefined)).toBeUndefined();
+  });
+
+  it('renders only server-issued direct planner provenance, including an honest deterministic fallback', () => {
+    expect(appStudioPlannerProvenanceLabel({
+      plannerProvenance: {
+        version: 1,
+        mode: 'ai',
+        providerInvocation: 'succeeded',
+        providerId: 'claude-code',
+      },
+    })).toBe('AI planner response · claude-code');
+    expect(appStudioPlannerProvenanceLabel({
+      plannerProvenance: {
+        version: 1,
+        mode: 'deterministic',
+        providerInvocation: 'not_attempted',
+      },
+    })).toBe('Deterministic planner fallback');
+    // A failed planner creates no proposal and therefore cannot be presented
+    // as a configured-provider success or as a fallback.
+    expect(appStudioPlannerProvenanceLabel({})).toBeUndefined();
   });
 });

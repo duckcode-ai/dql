@@ -1,0 +1,550 @@
+import { renderToStaticMarkup } from 'react-dom/server';
+import { tileQueryHash } from '@duckcodeailabs/dql-core/apps/tile-query';
+import { describe, expect, it, vi } from 'vitest';
+
+async function studioTilePreview() {
+  vi.stubGlobal('window', { location: { origin: 'http://127.0.0.1:3000' } });
+  return (await import('./AppStudioV2')).StudioTilePreview;
+}
+
+async function datasetSourceAuthoringDialog() {
+  vi.stubGlobal('window', { location: { origin: 'http://127.0.0.1:3000' } });
+  return (await import('./AppStudioV2')).DatasetSourceAuthoringDialog;
+}
+
+async function datasetSourceRebindReviewDialog() {
+  vi.stubGlobal('window', { location: { origin: 'http://127.0.0.1:3000' } });
+  return (await import('./AppStudioV2')).DatasetSourceRebindReviewDialog;
+}
+
+async function datasetTileBuilder() {
+  vi.stubGlobal('window', { location: { origin: 'http://127.0.0.1:3000' } });
+  return (await import('./AppStudioV2')).DatasetTileBuilder;
+}
+
+async function appAutopilotReviewCard() {
+  vi.stubGlobal('window', { location: { origin: 'http://127.0.0.1:3000' } });
+  return (await import('./AppStudioV2')).AppAutopilotReviewCard;
+}
+
+async function appAutopilotRepairShortcut() {
+  vi.stubGlobal('window', { location: { origin: 'http://127.0.0.1:3000' } });
+  const module = await import('./AppStudioV2');
+  return {
+    availability: module.appAutopilotRepairShortcutAvailability,
+    examplePrompts: module.appAutopilotExamplePrompts,
+    context: module.appAutopilotContext,
+    presentationContextKey: module.appAutopilotPresentationContextKey,
+  };
+}
+
+async function componentInspector() {
+  vi.stubGlobal('window', { location: { origin: 'http://127.0.0.1:3000' } });
+  return (await import('./AppStudioV2')).ComponentInspector;
+}
+
+describe('Studio Dataset mark interaction (APP-041)', () => {
+  it('passes the source-qualified row callback into an interactive bar mark', async () => {
+    const onSelectDatasetMark = vi.fn();
+    const StudioTilePreview = await studioTilePreview();
+    const markup = renderToStaticMarkup(
+      <StudioTilePreview
+        tile={{
+          i: 'revenue-by-region', x: 0, y: 0, w: 6, h: 4,
+          sourceId: 'source.order-lines', sourceRevision: 'sha256:source-a',
+          query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
+          viz: { type: 'bar' },
+        } as any}
+        run={{
+          tileId: 'revenue-by-region', status: 'ok', tileType: 'dataset',
+          result: {
+            columns: ['region', 'revenue'],
+            rows: [{ region: 'CA', revenue: 60 }],
+            rowCount: 1,
+            executionTime: 1,
+          },
+        } as any}
+        loading={false}
+        themeMode="paper"
+        crossFilterFields={['region']}
+        onSelectDatasetMark={onSelectDatasetMark}
+      />,
+    );
+
+    expect(markup).toContain('role="button"');
+    expect(markup).toContain('aria-label="Select CA"');
+  });
+
+  it('shows the server-declared unsaved hierarchy drill and Back control on an actual Dataset result', async () => {
+    const StudioTilePreview = await studioTilePreview();
+    const markup = renderToStaticMarkup(
+      <StudioTilePreview
+        tile={{
+          i: 'revenue-by-customer', x: 0, y: 0, w: 6, h: 4,
+          sourceId: 'source.order-lines', sourceRevision: 'sha256:source-a',
+          query: { dimensions: [{ field: 'customer_id' }], measures: [{ measure: 'revenue' }] },
+          viz: { type: 'bar' },
+        } as any}
+        run={{
+          tileId: 'revenue-by-customer', status: 'ok', tileType: 'dataset',
+          result: { columns: ['customer_id', 'revenue'], rows: [{ customer_id: 'C-001', revenue: 70 }], rowCount: 1, executionTime: 1 },
+          dataset: {
+            hierarchy: {
+              activeSteps: [{ hierarchyId: 'commerce_customer_orders', fromField: 'customer_id', values: ['C-001'] }],
+              candidates: [{ hierarchyId: 'commerce_customer_orders', fromField: 'customer_id', fromAlias: 'customer_id', toField: 'order_id' }],
+            },
+          },
+        } as any}
+        loading={false}
+        themeMode="paper"
+        onDrillDatasetMark={vi.fn()}
+        onDrillBack={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('Explore hierarchy · unsaved');
+    expect(markup).toContain('Click a Customer Id mark to drill to Order Id.');
+    expect(markup).toContain('>Back<');
+    expect(markup).toContain('aria-label="Select C-001"');
+  });
+
+  it('keeps filter and hierarchy mark behavior as an explicit Studio choice when both are declared', async () => {
+    const StudioTilePreview = await studioTilePreview();
+    const markup = renderToStaticMarkup(
+      <StudioTilePreview
+        tile={{
+          i: 'customer-revenue', x: 0, y: 0, w: 6, h: 4,
+          sourceId: 'source.order-lines', sourceRevision: 'sha256:source-a',
+          query: { dimensions: [{ field: 'customer_id' }], measures: [{ measure: 'revenue' }] }, viz: { type: 'bar' },
+        } as any}
+        run={{
+          tileId: 'customer-revenue', status: 'ok', tileType: 'dataset',
+          result: { columns: ['customer_id', 'revenue'], rows: [{ customer_id: 'C-001', revenue: 70 }], rowCount: 1, executionTime: 1 },
+          dataset: { hierarchy: { activeSteps: [], candidates: [{ hierarchyId: 'commerce_customer_orders', fromField: 'customer_id', fromAlias: 'customer_id', toField: 'order_id' }] } },
+        } as any}
+        loading={false}
+        themeMode="paper"
+        crossFilterFields={['customer_id']}
+        onSelectDatasetMark={vi.fn()}
+        onDrillDatasetMark={vi.fn()}
+      />,
+    );
+    expect(markup).toContain('Click action');
+    expect(markup).toContain('Filter linked tiles');
+    expect(markup).toContain('Drill to Order Id');
+  });
+
+  it('shows an actionable scalar Dataset error for empty and one-row malformed results', async () => {
+    const StudioTilePreview = await studioTilePreview();
+    const tile = {
+      i: 'revenue-kpi', x: 0, y: 0, w: 3, h: 2,
+      sourceId: 'source.order-lines', sourceRevision: 'sha256:source-a',
+      query: { dimensions: [], measures: [{ measure: 'revenue' }, { measure: 'order_count' }] },
+      viz: { type: 'single_value' },
+    } as any;
+    const render = (rows: Array<Record<string, unknown>>) => renderToStaticMarkup(
+      <StudioTilePreview
+        tile={tile}
+        run={{
+          tileId: tile.i, status: 'ok', tileType: 'dataset',
+          result: { columns: ['revenue', 'order_count'], rows, rowCount: rows.length, executionTime: 1 },
+        } as any}
+        loading={false}
+        themeMode="paper"
+      />,
+    );
+
+    // Result cardinality never makes two selected measures safe for a scalar
+    // view; the author sees a repair path before a hidden value can render.
+    for (const markup of [render([]), render([{ revenue: 130, order_count: 6 }])]) {
+      expect(markup).toContain('Dataset visualization needs attention');
+      expect(markup).toContain('exactly one selected measure');
+      expect(markup).toContain('Choose Table');
+    }
+  });
+});
+
+describe('Studio Dataset source authoring (APP-055)', () => {
+  it('shows declared grain and reviewable exact-field candidates before it can create a source proposal', async () => {
+    const DatasetSourceAuthoringDialog = await datasetSourceAuthoringDialog();
+    const markup = renderToStaticMarkup(
+      <DatasetSourceAuthoringDialog
+        source={{
+          id: 'source.daily', sourceId: 'source.daily', qualifiedIdentity: 'commerce::block::Daily Dataset::abc',
+          sourceRevision: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', snapshotId: 'snapshot-a',
+          name: 'Daily Dataset', domain: 'commerce', status: 'certified', owner: null, tags: [], path: 'domains/commerce/blocks/daily.dql', fingerprint: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', lastModified: '', description: '', score: 1, reasons: [], lifecycle: 'certified', trust: 'certified',
+          capabilities: {
+            measures: ['revenue'], dimensions: ['order_date'], outputs: [], filters: [], parameters: [],
+            dataset: {
+              version: 1, id: 'source.daily', kind: 'block', sourceRevision: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', snapshotId: 'snapshot-a',
+              contractRef: { kind: 'block_source', id: 'commerce::block::Daily Dataset', fingerprint: 'sha256:contract' },
+              binding: { sourceQualifiedId: 'commerce::block::Daily Dataset', sourceRevision: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', contractFingerprint: 'sha256:contract', state: 'target_required' },
+              label: 'Daily Dataset', lifecycle: 'certified', trust: 'certified',
+              grain: { entityIds: ['customer_day'], keyFields: ['customer_day_id', 'order_date'], keyEvidence: 'proof.customer-day', timeGrain: 'day', timeBucketBy: 'order_date', aggregate: true },
+              fields: [
+                { kind: 'physical', name: 'customer_day_id', qualifiedId: 'field:key', type: 'string', role: 'key', status: 'approved' },
+                { kind: 'physical', name: 'order_date', qualifiedId: 'field:date', type: 'date', role: 'time', status: 'approved', time: { grains: ['day'] } },
+                { kind: 'physical', name: 'daily_revenue', qualifiedId: 'field:revenue', type: 'number', role: 'attribute', status: 'approved' },
+                { kind: 'physical', name: 'daily_margin', qualifiedId: 'field:margin', type: 'number', role: 'attribute', status: 'approved' },
+                { kind: 'measure', name: 'revenue', qualifiedId: 'measure:revenue', aggregation: 'sum', from: 'daily_revenue', dependsOn: ['daily_revenue'], additivity: { entities: 'additive', time: 'additive' }, allowedAggs: ['sum'], status: 'approved' },
+              ],
+              operations: ['filter', 'group'], execution: { route: 'governed_sql' },
+            },
+          },
+          eligibility: { discoverable: true, localPreview: true, projectPublish: true, reasonCodes: [] },
+        } as any}
+        disabled={false}
+        onClose={() => undefined}
+        onPreview={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('Native grain proposal');
+    expect(markup).toContain('Author Dataset definition');
+    expect(markup).toContain('proof.customer-day');
+    expect(markup).toContain('Physical field roles');
+    expect(markup).toContain('Dataset native time bucket');
+    expect(markup).toContain('order_date role');
+    expect(markup).toContain('Gross margin');
+    expect(markup).toContain('SUM(daily_revenue) - SUM(daily_margin)');
+    expect(markup).toContain('Aggregate formula');
+    expect(markup).toContain('Review source change');
+    expect(markup).toContain('does not change this App’s Dataset binding');
+  });
+
+  it('makes review-preview opt-in explicit before refreshing a changed Dataset binding', async () => {
+    const DatasetSourceRebindReviewDialog = await datasetSourceRebindReviewDialog();
+    const markup = renderToStaticMarkup(
+      <DatasetSourceRebindReviewDialog title="Order lines Dataset" disabled={false} onCancel={() => undefined} onConfirm={() => undefined} />,
+    );
+    expect(markup).toContain('Enable review preview &amp; refresh');
+    expect(markup).toContain('Project publication stays blocked');
+    expect(markup).toContain('does not certify the Dataset');
+  });
+});
+
+describe('Studio Dataset period comparison authoring (APP-060)', () => {
+  it('offers an explicit calendar-period control from an approved Dataset time field', async () => {
+    const DatasetTileBuilder = await datasetTileBuilder();
+    const markup = renderToStaticMarkup(
+      <DatasetTileBuilder
+        source={{
+          id: 'source.orders', sourceId: 'source.orders', sourceRevision: 'sha256:orders', name: 'Orders', domain: 'commerce',
+          capabilities: {
+            dataset: {
+              version: 1, id: 'source.orders', kind: 'block', sourceRevision: 'sha256:orders', snapshotId: 'snapshot-1',
+              contractRef: { kind: 'block_source', id: 'commerce::orders', fingerprint: 'sha256:contract' },
+              binding: { sourceQualifiedId: 'commerce::orders', sourceRevision: 'sha256:orders', contractFingerprint: 'sha256:contract', state: 'valid' },
+              label: 'Orders', lifecycle: 'certified', trust: 'certified',
+              grain: { entityIds: ['order_line'], keyFields: ['order_line_id'] },
+              fields: [
+                { kind: 'physical', name: 'order_date', qualifiedId: 'field:order_date', type: 'date', role: 'time', status: 'approved', time: { grains: ['day', 'month'], primary: true } },
+                { kind: 'measure', name: 'revenue', qualifiedId: 'measure:revenue', aggregation: 'sum', from: 'net_amount', dependsOn: ['net_amount'], additivity: { entities: 'additive', time: 'additive' }, allowedAggs: ['sum'], status: 'approved' },
+              ],
+              operations: ['filter', 'group', 'compare', 'having'], execution: { route: 'governed_sql' },
+            },
+          },
+        } as any}
+        disabled={false}
+        onAdd={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('Compare periods');
+    expect(markup).toContain('Compare two calendar periods');
+    expect(markup).toContain('Shows current, prior, difference, and change together.');
+    expect(markup).toContain('Filter totals');
+    expect(markup).toContain('Applies after the selected measures are aggregated.');
+  });
+});
+
+describe('Studio App Autopilot repair shortcut (APP-065)', () => {
+  it('shows repair only for a current API-shaped failed Dataset tile', async () => {
+    const { availability, examplePrompts, context, presentationContextKey } = await appAutopilotRepairShortcut();
+    const selectedTile = {
+      i: 'monthly-revenue', sourceId: 'source.order-lines', sourceRevision: 'sha256:orders',
+      query: { dimensions: [{ field: 'order_date', grain: 'month' }], measures: [{ measure: 'revenue' }] },
+      viz: { type: 'bar' },
+    } as any;
+    const preview = (status: 'ok' | 'error', extra: Record<string, unknown> = {}) => ({
+      appId: 'build_1', dashboardId: 'overview', persona: null, runId: 'app_run_1', snapshotId: 'snapshot_1',
+      filterFingerprint: 'sha256:filters', resultFingerprint: 'sha256:result', personaFingerprint: 'sha256:persona',
+      facts: [], story: { facts: [], narrative: '' },
+      tiles: [{ tileId: 'monthly-revenue', tileType: 'dataset', status, ...extra }],
+    } as any);
+
+    const healthy = availability(selectedTile, preview('ok'));
+    expect(healthy).toBe('healthy');
+    expect(examplePrompts(healthy).map((prompt) => prompt.label)).not.toContain('Repair selected tile');
+    // `incomplete` is a page-level summary, not a partial refresh. A failure
+    // on another tile does not make this selected settled tile repairable.
+    const healthyWithOtherFailure = {
+      ...preview('ok'),
+      incomplete: { failedTileIds: ['another-tile'], message: '1 component needs attention' },
+      tiles: [
+        { tileId: 'monthly-revenue', tileType: 'dataset', status: 'ok' },
+        { tileId: 'another-tile', tileType: 'dataset', status: 'error' },
+      ],
+    } as any;
+    expect(availability(selectedTile, healthyWithOtherFailure)).toBe('healthy');
+
+    // A full preview can be incomplete because this Dataset tile failed. It
+    // remains a current server-reported diagnostic, so the repair shortcut is
+    // available instead of being globally disabled.
+    const failedPreview = {
+      ...preview('error'),
+      runId: 'app_run_failed_1',
+      incomplete: { failedTileIds: ['monthly-revenue'], message: '1 component needs attention' },
+    };
+    const failed = availability(selectedTile, failedPreview);
+    expect(failed).toBe('failed_tile');
+    expect(examplePrompts(failed)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        label: 'Repair selected tile',
+        prompt: 'What is the smallest governed repair needed before this selected tile can answer its intended question?',
+      }),
+    ]));
+    const failedContext = context({ id: 'build_1', appId: 'app_1' } as any, { id: 'overview' } as any, selectedTile, failedPreview);
+    expect(failedContext).toMatchObject({
+      surface: 'app_autopilot', appBuildId: 'build_1', appId: 'app_1',
+      pageId: 'overview', tileId: 'monthly-revenue', previewRunId: 'app_run_failed_1',
+    });
+    expect(presentationContextKey({
+      draftId: 'build_1', pageId: 'overview', tileId: 'monthly-revenue', previewRunId: 'app_run_failed_1',
+    })).toBe('build_1:overview:monthly-revenue:app_run_failed_1');
+
+    const stale = availability(selectedTile, { ...preview('error'), stale: true });
+    expect(stale).toBe('preview_required');
+    expect(examplePrompts(stale).map((prompt) => prompt.label)).not.toContain('Repair selected tile');
+    expect(availability(selectedTile, null)).toBe('preview_required');
+  });
+});
+
+describe('Studio universal App Autopilot review (APP-065)', () => {
+  it('shows a universal AgentRun change separately from Apply, without implying an immediate draft change', async () => {
+    const AppAutopilotReviewCard = await appAutopilotReviewCard();
+    const markup = renderToStaticMarkup(
+      <AppAutopilotReviewCard
+        proposal={{
+          version: 1, id: 'autopilot_revenue_region', runId: 'run_app_autopilot', artifactId: 'app_autopilot:run_app_autopilot',
+          draftId: 'build_1', baseRevision: 3, baseProposalHash: 'sha256:draft',
+          pageId: 'overview', tileId: 'revenue-kpi', request: 'Group this tile by Region',
+          intent: { action: 'group_tile', request: 'Group this tile by Region', field: 'region' },
+          source: { sourceId: 'source.orders', sourceRevision: 'sha256:orders', contractFingerprint: 'sha256:contract' },
+          planningMode: 'universal_agent',
+          operations: [{ type: 'update_tile', pageId: 'overview', tileId: 'revenue-kpi', patch: {
+            query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] }, viz: { type: 'bar' }, title: 'Revenue by Region',
+          } }],
+          diagnostics: [{ code: 'APP_AUTOPILOT_SERVER_COMPILED', severity: 'info', message: 'Prepared from approved Dataset fields.' }],
+          createdAt: '2026-09-11T00:00:00.000Z', proposalHash: 'sha256:proposal',
+        } as any}
+        running={false}
+        onDiscard={vi.fn()}
+        onApply={vi.fn()}
+      />,
+    );
+    expect(markup).toContain('UNIVERSAL APP AUTOPILOT');
+    expect(markup).toContain('Proposed grouping: Region');
+    expect(markup).toContain('This has not changed the draft or its source.');
+    expect(markup).toContain('>Discard<');
+    expect(markup).toContain('>Apply change<');
+    expect(markup).not.toContain('Run SQL');
+  });
+});
+
+describe('Studio Dataset review-draft save (M4-PROM-01)', () => {
+  it('offers a separate review-draft save only for a current settled Dataset result', async () => {
+    const ComponentInspector = await componentInspector();
+    const query = { dimensions: [], measures: [{ measure: 'revenue' }] };
+    const tile = {
+      i: 'revenue-kpi', x: 0, y: 0, w: 3, h: 2,
+      title: 'Revenue', sourceId: 'source.orders', sourceRevision: 'sha256:orders',
+      query, viz: { type: 'kpi' },
+    } as any;
+    const markup = renderToStaticMarkup(
+      <ComponentInspector
+        tile={tile}
+        run={{
+          tileId: tile.i, tileType: 'dataset', status: 'ok',
+          result: { columns: ['revenue'], rows: [{ revenue: 130 }], rowCount: 1, executionTime: 1 },
+          artifact: { sourceKind: 'dataset_query', name: 'Revenue', trustState: 'certified' },
+          dataset: {
+            sourceId: 'source.orders', sourceRevision: 'sha256:orders',
+            authoredQueryFingerprint: tileQueryHash(query),
+          },
+        } as any}
+        pageId="overview"
+        page={{ id: 'overview', metadata: { title: 'Overview' }, layout: { items: [tile] } } as any}
+        pages={[] as any}
+        sources={[] as any}
+        disabled={false}
+        onOpenSources={vi.fn()}
+        onSaveDatasetTileAsBlock={vi.fn()}
+        savingDatasetTileAsBlock={false}
+        onRefreshDatasetTile={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdateInteractions={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('Save as reusable review draft');
+    expect(markup).toContain('This App tile stays unchanged');
+    expect(markup).toContain('not certified');
+    expect(markup).not.toContain('disabled=""');
+  });
+
+  it('labels a cache delivery as display-only and offers a live refresh before save evidence can exist', async () => {
+    const ComponentInspector = await componentInspector();
+    const query = { dimensions: [], measures: [{ measure: 'revenue' }] };
+    const tile = {
+      i: 'revenue-kpi', x: 0, y: 0, w: 3, h: 2,
+      title: 'Revenue', sourceId: 'source.orders', sourceRevision: 'sha256:orders',
+      query, viz: { type: 'kpi' },
+    } as any;
+    const markup = renderToStaticMarkup(
+      <ComponentInspector
+        tile={tile}
+        run={{
+          tileId: tile.i, tileType: 'dataset', status: 'ok',
+          result: { columns: ['revenue'], rows: [{ revenue: 130 }], rowCount: 1, executionTime: 1 },
+          artifact: { sourceKind: 'dataset_query', name: 'Revenue', trustState: 'certified' },
+          dataset: {
+            sourceId: 'source.orders', sourceRevision: 'sha256:orders',
+            authoredQueryFingerprint: tileQueryHash(query),
+            cacheDelivery: {
+              version: 1, kind: 'dataset_cache_delivery', cacheKey: 'sha256:cache',
+              originalReceiptId: 'app_run_live', sourceRevision: 'sha256:orders',
+              contractFingerprint: 'sha256:contract', targetFingerprint: 'sha256:target',
+              cachedAt: '2026-09-11T00:00:00.000Z', expiresAt: '2026-09-11T00:05:00.000Z',
+            },
+          },
+        } as any}
+        pageId="overview"
+        page={{ id: 'overview', metadata: { title: 'Overview' }, layout: { items: [tile] } } as any}
+        pages={[] as any}
+        sources={[] as any}
+        disabled={false}
+        onOpenSources={vi.fn()}
+        onSaveDatasetTileAsBlock={vi.fn()}
+        savingDatasetTileAsBlock={false}
+        onRefreshDatasetTile={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdateInteractions={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('Cached');
+    expect(markup).toContain('not fresh publication or reusable-block evidence');
+    expect(markup).toContain('Refresh live data');
+    expect(markup).toContain('Refresh live data before saving or replacing this tile.');
+    expect(markup).toContain('Save as reusable review draft</button>');
+    expect(markup).toContain('disabled=""');
+  });
+
+  it('offers an explicit proof-gated replacement only after the separate review draft exists', async () => {
+    const ComponentInspector = await componentInspector();
+    const query = { dimensions: [], measures: [{ measure: 'revenue' }] };
+    const tile = {
+      i: 'revenue-kpi', x: 0, y: 0, w: 3, h: 2,
+      title: 'Revenue', sourceId: 'source.orders', sourceRevision: 'sha256:orders',
+      query, viz: { type: 'kpi' },
+    } as any;
+    const markup = renderToStaticMarkup(
+      <ComponentInspector
+        tile={tile}
+        run={{
+          tileId: tile.i, tileType: 'dataset', status: 'ok',
+          result: { columns: ['revenue'], rows: [{ revenue: 130 }], rowCount: 1, executionTime: 1 },
+          artifact: { sourceKind: 'dataset_query', name: 'Revenue', trustState: 'certified' },
+          dataset: {
+            sourceId: 'source.orders', sourceRevision: 'sha256:orders',
+            authoredQueryFingerprint: tileQueryHash(query),
+          },
+        } as any}
+        pageId="overview"
+        page={{ id: 'overview', metadata: { title: 'Overview' }, layout: { items: [tile] } } as any}
+        pages={[] as any}
+        sources={[] as any}
+        disabled={false}
+        onOpenSources={vi.fn()}
+        onSaveDatasetTileAsBlock={vi.fn()}
+        savingDatasetTileAsBlock={false}
+        savedDatasetReviewDraft={{
+          ok: true, path: 'domains/commerce/blocks/_drafts/revenue.dql', status: 'draft',
+          provenanceFingerprint: 'sha256:provenance', replacementEligible: true,
+        }}
+        onReplaceDatasetTileWithBlock={vi.fn()}
+        replacingDatasetTileWithBlock={false}
+        onRefreshDatasetTile={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdateInteractions={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('Saved review draft: domains/commerce/blocks/_drafts/revenue.dql');
+    expect(markup).toContain('Replace with this review draft');
+    expect(markup).toContain('Save this settled result as a separate review draft');
+  });
+});
+
+describe('Studio legacy semantic conversion (M4-CONV-01)', () => {
+  it('offers only an explicit preview and proof-gated apply for a legacy semantic tile', async () => {
+    const ComponentInspector = await componentInspector();
+    const tile = {
+      i: 'legacy-revenue', x: 0, y: 0, w: 4, h: 2,
+      title: 'Legacy revenue',
+      semantic: {
+        id: 'legacy-revenue', provider: 'native', metrics: ['revenue'], dimensions: [],
+        semanticModelRefs: ['orders'], qualifiedMetricIds: ['semantic:commerce:metric:revenue'],
+        qualifiedModelIds: ['semantic:commerce:model:orders'], definitionFingerprint: 'sha256:legacy', snapshotId: 'snapshot-current',
+      },
+      viz: { type: 'kpi' },
+    } as any;
+    const markup = renderToStaticMarkup(
+      <ComponentInspector
+        tile={tile}
+        pageId="overview"
+        page={{ id: 'overview', metadata: { title: 'Overview' }, layout: { items: [tile] } } as any}
+        pages={[] as any}
+        sources={[] as any}
+        disabled={false}
+        onOpenSources={vi.fn()}
+        onSaveDatasetTileAsBlock={vi.fn()}
+        savingDatasetTileAsBlock={false}
+        onPreviewLegacySemanticConversion={vi.fn()}
+        previewingLegacySemanticConversion={false}
+        semanticTileConversionPreview={{
+          ok: true,
+          proposalId: 'semantic_conversion_1',
+          candidate: {
+            sourceId: 'app:semantic:commerce:orders', sourceRevision: 'sha256:source', contractFingerprint: 'sha256:contract',
+            query: { dimensions: [], measures: [{ measure: 'revenue' }] }, queryFingerprint: 'sha256:query',
+            provenance: {
+              version: 1, kind: 'semantic_tile_conversion_provenance', legacyIdentityFingerprint: 'sha256:legacy-identity',
+              legacyTileFingerprint: 'sha256:legacy-tile', legacyPayload: { semantic: { id: 'legacy-revenue' } },
+              datasetId: 'app:semantic:commerce:orders', sourceRevision: 'sha256:source', contractFingerprint: 'sha256:contract',
+              queryFingerprint: 'sha256:query', equivalenceProofFingerprint: 'sha256:equivalence', convertedAt: '2026-09-11T00:00:00.000Z',
+            },
+          },
+          equivalenceProofFingerprint: 'sha256:equivalence',
+        } as any}
+        onAcceptLegacySemanticConversion={vi.fn()}
+        acceptingLegacySemanticConversion={false}
+        onRefreshDatasetTile={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdateInteractions={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('Convert to Dataset query');
+    expect(markup).toContain('Preview Dataset conversion');
+    expect(markup).toContain('Mapped source: app:semantic:commerce:orders');
+    expect(markup).toContain('Apply Dataset conversion');
+    expect(markup).toContain('does not certify the source');
+    expect(markup).not.toContain('Run SQL');
+  });
+});

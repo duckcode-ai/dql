@@ -30,6 +30,7 @@ let analyticalRepairActionLabels: typeof UnifiedAgentRunPanelModule.analyticalRe
 let askInspectorTabsForState: typeof UnifiedAgentRunPanelModule.askInspectorTabsForState;
 let threadItemsFromTurns: typeof UnifiedAgentRunPanelModule.threadItemsFromTurns;
 let replacePresentedAgentRun: typeof UnifiedAgentRunPanelModule.replacePresentedAgentRun;
+let presentThreadItemsForContext: typeof UnifiedAgentRunPanelModule.presentThreadItemsForContext;
 let selectAgentExecutionConnection: typeof UnifiedAgentRunPanelModule.selectAgentExecutionConnection;
 let appPinDestinationLabel: typeof UnifiedAgentRunPanelModule.appPinDestinationLabel;
 let askAppDestinations: typeof UnifiedAgentRunPanelModule.askAppDestinations;
@@ -94,6 +95,7 @@ beforeAll(async () => {
     askInspectorTabsForState = module.askInspectorTabsForState;
     threadItemsFromTurns = module.threadItemsFromTurns;
     replacePresentedAgentRun = module.replacePresentedAgentRun;
+    presentThreadItemsForContext = module.presentThreadItemsForContext;
     selectAgentExecutionConnection = module.selectAgentExecutionConnection;
     appPinDestinationLabel = module.appPinDestinationLabel;
     askAppDestinations = module.askAppDestinations;
@@ -133,6 +135,53 @@ beforeAll(async () => {
 });
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
+
+  it('APP-065 keeps a matching App Autopilot tile-selection refusal visible in its current presentation context', () => {
+    const contextScope = 'build_1:overview:no-tile:no-preview';
+    const run = {
+      id: 'run_select_dataset_tile',
+      question: 'Show this as a bar chart.',
+      route: 'app_build',
+      status: 'blocked',
+      trustState: 'blocked',
+      stopReason: 'blocked',
+      summary: 'APP_AUTOPILOT_DATASET_TILE_REQUIRED: select one saved Dataset tile before asking App Autopilot to make a change.',
+      answer: 'APP_AUTOPILOT_DATASET_TILE_REQUIRED: select one saved Dataset tile before asking App Autopilot to make a change.',
+      artifacts: [{
+        id: 'answer:select-dataset-tile',
+        kind: 'answer',
+        title: 'Select a Dataset tile',
+        trustState: 'blocked',
+        payload: {
+          version: 1,
+          kind: 'app_autopilot_tile_required',
+          code: 'APP_AUTOPILOT_DATASET_TILE_REQUIRED',
+          contextScope,
+        },
+      }],
+      evaluations: [],
+      events: [],
+      nextActions: [{ id: 'select-app-dataset-tile', label: 'Select a Dataset tile' }],
+      steps: [],
+      repairAttempts: 0,
+    } as never;
+
+    const presented = presentThreadItemsForContext([
+      { kind: 'user', id: 'question', text: 'Show this as a bar chart.' },
+      { kind: 'run', id: 'run_select_dataset_tile', run },
+    ], contextScope);
+
+    expect(presented).toHaveLength(2);
+    expect(presented[0]).toMatchObject({ kind: 'user', text: 'Show this as a bar chart.' });
+    expect(presented[1]).toMatchObject({
+      kind: 'run',
+      run: {
+        artifacts: [expect.objectContaining({
+          payload: expect.objectContaining({ kind: 'app_autopilot_tile_required', contextScope }),
+        })],
+      },
+    });
+  });
 
   it('AGT-036 renders a successful independent Ask task beside a typed failed or dependency-blocked sibling', () => {
     const outcomes = [{

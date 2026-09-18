@@ -18,6 +18,26 @@ export interface AppStudioAiPlanSummary {
 
 export type AppStudioProposalSourceAddMode = 'select_existing' | 'enable_review_and_replan' | 'replan';
 
+/**
+ * Render only server-issued direct-planner provenance. In particular, never
+ * turn a configured provider setting into a claim that the planner ran.
+ */
+export function appStudioPlannerProvenanceLabel(
+  proposal: Pick<AppStudioAiProposal, 'plannerProvenance'>,
+): string | undefined {
+  const provenance = proposal.plannerProvenance;
+  if (!provenance) return undefined;
+  if (provenance.mode === 'ai' && provenance.providerInvocation === 'succeeded') {
+    return provenance.providerId
+      ? `AI planner response · ${provenance.providerId}`
+      : 'AI planner response';
+  }
+  if (provenance.mode === 'deterministic' && provenance.providerInvocation === 'not_attempted') {
+    return 'Deterministic planner fallback';
+  }
+  return undefined;
+}
+
 export function appStudioProposalRequiredSourceIds(
   selectedSourceIds: ReadonlySet<string>,
   addedSourceId?: string,

@@ -52,4 +52,41 @@ describe('App-sized chart rendering (UI-022)', () => {
     expect(markup).toContain('viewBox="0 0 252 216"');
     expect(markup).not.toContain('viewBox="0 0 560');
   });
+
+  it('exposes a keyboard-addressable bar mark only when an App supplies a typed selection callback', () => {
+    const result = {
+      columns: ['region', 'revenue'],
+      rows: [{ region: 'CA', revenue: 60 }],
+      rowCount: 1,
+      executionTime: 2,
+    };
+    const interactive = renderToStaticMarkup(renderChart('bar', result, 'light', { chart: 'bar' }, 180, undefined, () => undefined));
+    const passive = renderToStaticMarkup(renderChart('bar', result, 'light', { chart: 'bar' }, 180));
+
+    expect(interactive).toContain('role="button"');
+    expect(interactive).toContain('aria-label="Select CA"');
+    expect(passive).not.toContain('role="button"');
+  });
+
+  it('renders a null drilled measure as unavailable while retaining a real zero', () => {
+    const markup = renderToStaticMarkup(renderChart('bar', {
+      columns: ['order_id', 'revenue'],
+      columnsMeta: [
+        { name: 'order_id', kind: 'text', ref: 'dimension:order_id' },
+        { name: 'revenue', kind: 'currency', ref: 'measure:revenue' },
+      ],
+      rows: [
+        { order_id: 'O-100', revenue: 60 },
+        { order_id: 'O-101', revenue: null },
+        { order_id: 'O-103', revenue: 0 },
+      ],
+      rowCount: 3,
+      executionTime: 2,
+    }, 'light', { chart: 'bar', x: 'order_id', y: 'revenue' }, 180));
+
+    expect(markup).toContain('O-101');
+    expect(markup).toContain('>—</text>');
+    expect(markup).toContain('$0');
+    expect(markup).toContain('width="2"');
+  });
 });
