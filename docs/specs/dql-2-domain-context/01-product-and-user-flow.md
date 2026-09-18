@@ -82,12 +82,18 @@ misleading project-wide green check.
 
 ## Governed App Builder
 
-App Builder is a composition workflow, not another Ask surface. Its dedicated
-orchestrator owns requirements, source alternatives, pages, components,
-filters, preview coordination, and publication readiness. It shares Ask's
-configured provider adapter, immutable snapshot, meaning infrastructure,
-execution/repair boundary, trust vocabulary, and evidence primitives—not Ask's
-answer state machine (`AGT-007`, `AGT-026`).
+**Build with AI** is a composition workflow, not another Ask surface. Its
+dedicated App Builder orchestrator owns requirements, source alternatives,
+pages, components, filters, navigation, preview coordination, and publication
+readiness. It shares Ask's configured provider adapter, immutable snapshot,
+meaning infrastructure, execution/repair boundary, trust vocabulary, and
+evidence primitives—not Ask's answer state machine (`AGT-007`, `AGT-026`).
+
+**App Autopilot** is a separate right-side assistant for a saved App draft. It
+uses the universal Ask AgentRun lifecycle with server-reconstructed App/Dataset
+context, and can return review-required typed edits or context-limited
+explanation/repair guidance (`AGT-022`). It never replaces the dedicated
+initial Build with AI flow.
 
 Every AI and manual source choice comes from one snapshot-backed executable
 block catalog. Certified, review, and draft blocks are visible and labeled;
@@ -166,12 +172,12 @@ bounded evidence receipt survives a local runtime restart without persisting
 sample rows, and remains guarded by the draft revision, source fingerprints,
 filters, snapshot, and execution evidence (`PERF-003`, `E2E-021`).
 
-App Copilot is not the App planning orchestrator. It adapts the server-owned
-whole-App or focused-section context into the shared governed AgentRun used by
-Ask, Notebook, and Block AI for retrieval, semantic routing, execution, repair,
-and evidence. App-specific answers, investigations, and typed Add-to-App
-proposals remain explicit and cannot silently mutate App source (`AGT-007`,
-`AGT-022`).
+App Autopilot is not the App planning orchestrator. It adapts server-owned
+saved-App and selected-Dataset context into the shared governed AgentRun used
+by Ask, Notebook, and Block AI. Its typed App-change proposals remain explicit
+and cannot silently mutate App source. Initial Build with AI keeps its dedicated
+orchestration and structured page/tile composition (`AGT-007`, `AGT-022`,
+`AGT-026`).
 
 Ask AI's explicit **Add to App** action uses the same `AppBuildDraft` boundary.
 It adds certified answers as fingerprinted certified-block tiles, stores
