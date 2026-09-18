@@ -116,6 +116,22 @@ describe('semantic binding', () => {
     const bound = bindSemanticRequest(intent({ measures: [{ ref: 'metric:order_item.revenue', scope: [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [], source: 'question' }] }] }), vocabulary);
     expect(bound.refusal?.code).toBe('measure_scope_not_expressible');
   });
+  it('a second date breakdown is grouped too, never dropped; one at another grain refuses the tier', () => {
+    const byDay = bindSemanticRequest(intent({
+      measures: [{ ref: 'metric:order_item.revenue' }], expectedShape: 'table',
+      groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'day' }, { ref: 'dimension:orders.ordered_at', role: 'time', grain: 'day' }],
+    }), vocabulary);
+    expect(byDay.refusal).toBeUndefined();
+    expect(byDay.request?.timeDimension).toEqual({ name: 'order_item.ordered_at', granularity: 'day' });
+    expect(byDay.request?.dimensions).toEqual(['orders.ordered_at']);
+    const mixed = bindSemanticRequest(intent({
+      measures: [{ ref: 'metric:order_item.revenue' }], expectedShape: 'table',
+      groupBy: [{ ref: 'dimension:order_item.ordered_at', role: 'time', grain: 'day' }, { ref: 'dimension:orders.ordered_at', role: 'time', grain: 'month' }],
+    }), vocabulary);
+    expect(mixed.request).toBeUndefined();
+    expect(mixed.refusal).toMatchObject({ tier: 'semantic', code: 'not_semantic' });
+    expect(mixed.refusal?.message).toMatch(/one time axis.*orders\.ordered_at by month/);
+  });
 });
 
 describe('relational composition', () => {

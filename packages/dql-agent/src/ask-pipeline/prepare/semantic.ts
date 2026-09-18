@@ -103,8 +103,34 @@ export function bindSemanticRequest(intent: AnalyticalIntentV1, vocabulary: Voca
     if (!found || (found.kind !== 'dimension' && found.kind !== 'entity')) {
       return { refusal: { tier: 'semantic', code: 'not_semantic', message: `${group.ref} is not a semantic dimension or entity`, repairable: false } };
     }
-    if (group.role === 'time' && group.grain) timeDimension = { name: timeName(group.ref, found), granularity: group.grain };
-    else dimensions.push(semanticName(found));
+    if (group.role === 'time' && group.grain) {
+      // ONE TIME AXIS, OTHER DATES AS DIMENSIONS. The request carries one time
+      // dimension; a second date breakdown used to overwrite the first, and the
+      // answer silently lost a column the reading asked for while keeping its
+      // governed label. A further date at its own (day) grain is grouped as a
+      // plain dimension; at another grain it cannot be expressed here.
+      if (!timeDimension) {
+        timeDimension = { name: timeName(group.ref, found), granularity: group.grain };
+      } else if (group.grain === 'day' && timeName(group.ref, found) !== timeDimension.name) {
+        dimensions.push(semanticName(found));
+      } else {
+        return { refusal: { tier: 'semantic', code: 'not_semantic', message: `the semantic layer takes one time axis; ${group.ref} by ${group.grain} beside ${timeDimension.name} by ${timeDimension.granularity} cannot be grouped in the same query`, repairable: false } };
+      }
+    } else {
+      dimensions.push(semanticName(found));
+    }
+  }
+  // EVERY BREAKDOWN THE READING ASKED FOR IS IN THE REQUEST, or the semantic
+  // tier does not answer. A governed label on an answer that dropped one is the
+  // one outcome this product exists to prevent.
+  const grouped = new Set([...dimensions, ...(timeDimension ? [timeDimension.name] : [])]);
+  const lost = intent.groupBy.filter((group) => {
+    const found = entry(group.ref);
+    if (!found) return true;
+    return !grouped.has(semanticName(found)) && !(group.role === 'time' && timeDimension && timeName(group.ref, found) === timeDimension.name);
+  });
+  if (lost.length > 0) {
+    return { refusal: { tier: 'semantic', code: 'not_semantic', message: `the semantic request would not group by ${lost.map((group) => group.ref).join(', ')}, which the reading asks for`, repairable: false } };
   }
   for (const ref of intent.display) {
     const found = entry(ref);
