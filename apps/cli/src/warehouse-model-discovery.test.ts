@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { normalizeWarehouseCatalog, warehouseRelationId, type DQLManifest, type WarehouseCatalogRelationV1 } from '@duckcodeailabs/dql-core';
-import { discoverWarehouseModel, validateWarehouseDiscovery, viewJoins, warehouseDiscoveryChanges } from './warehouse-model-discovery.js';
+import { discoverWarehouseModel, observedJoinsFromQueries, queryHistorySql, validateWarehouseDiscovery, viewJoins, warehouseDiscoveryChanges } from './warehouse-model-discovery.js';
 
 const table = (schema: string, name: string, columns: string[], extra: Partial<WarehouseCatalogRelationV1> = {}): WarehouseCatalogRelationV1 => ({
   id: warehouseRelationId({ schema, name }),
@@ -114,6 +114,45 @@ describe('drafting a model from the warehouse catalog', () => {
     // Aggregates only: no statement reads a row's values.
     expect(sql.every((statement) => /COUNT\(/i.test(statement))).toBe(true);
     db.close();
+  });
+});
+
+describe('query-history evidence (opt-in)', () => {
+  it('counts the joins recent queries ran, once per statement, and keeps no query text', () => {
+    const observed = observedJoinsFromQueries([
+      'select * from main.customers c join main.orders o on o.customer_id = c.customer_id where c.name = \'Ann\'',
+      'SELECT count(*) FROM main.orders AS o JOIN main.customers AS c ON c.customer_id = o.customer_id AND c.customer_id = o.customer_id',
+      'select 1 from main.products p join main.order_items i on i.product_id = p.id',
+    ]);
+    expect(observed).toEqual([
+      { left: { relation: 'main.customers', column: 'customer_id' }, right: { relation: 'main.orders', column: 'customer_id' }, count: 2 },
+      { left: { relation: 'main.order_items', column: 'product_id' }, right: { relation: 'main.products', column: 'id' }, count: 1 },
+    ]);
+    expect(JSON.stringify(observed)).not.toContain('Ann');
+  });
+
+  it('adds a join seen often enough as evidence, and ignores one seen once', () => {
+    const bare = normalizeWarehouseCatalog({ ...snapshot, relations: snapshot.relations.map((relation) => ({ ...relation, foreignKeys: undefined, viewSql: undefined })) });
+    const report = discoverWarehouseModel({
+      snapshot: bare,
+      projectName: 'shop',
+      observedJoins: [
+        { left: { relation: 'main.customers', column: 'customer_id' }, right: { relation: 'main.orders', column: 'customer_id' }, count: 5 },
+        { left: { relation: 'main.stg_products', column: 'id' }, right: { relation: 'main.order_items', column: 'product_id' }, count: 1 },
+      ],
+    });
+    const join = report.relationships.find((item) => item.from === 'order' && item.to === 'customer');
+    expect(join?.evidence[0]).toEqual({ source: 'query_history', reason: 'recent queries joined orders.customer_id = customers.customer_id 5 times' });
+    expect(report.relationships.some((item) => item.to === 'stg_products')).toBe(false);
+  });
+
+  it('reads history only where the warehouse keeps it', () => {
+    expect(queryHistorySql('snowflake', { database: 'ACME' })).toContain('"ACME".INFORMATION_SCHEMA.QUERY_HISTORY');
+    expect(queryHistorySql('postgres')).toContain('pg_stat_statements');
+    expect(queryHistorySql('databricks')).toContain('system.query.history');
+    expect(queryHistorySql('bigquery', { location: 'EU' })).toContain('`region-eu`.INFORMATION_SCHEMA.JOBS_BY_PROJECT');
+    expect(queryHistorySql('duckdb')).toBeUndefined();
+    expect(queryHistorySql('sqlite')).toBeUndefined();
   });
 });
 

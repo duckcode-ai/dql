@@ -8,8 +8,9 @@
  * and view definitions are best effort, so a warehouse or role that does not
  * expose one still syncs, with a warning naming what was skipped.
  *
- * Per driver: DuckDB, SQLite, Postgres and Snowflake read keys and comments;
- * every other driver reads tables, views and columns from information_schema.
+ * Per driver: DuckDB, SQLite, Postgres/Redshift, Snowflake, Databricks (Unity
+ * Catalog) and BigQuery read keys and comments; every other driver reads
+ * tables, views and columns from information_schema.
  */
 
 import {
@@ -78,6 +79,33 @@ export function buildWarehouseCatalogQueries(driver: string, scope: { catalogOrD
       // Snowflake reports declared (informational) keys only through SHOW.
       { kind: 'primary_keys', catalogOrDatabase: db, sql: `SHOW PRIMARY KEYS IN DATABASE ${ident(db)}` },
       { kind: 'foreign_keys', catalogOrDatabase: db, sql: `SHOW IMPORTED KEYS IN DATABASE ${ident(db)}` },
+    ];
+  }
+  if (d === 'databricks') {
+    // Unity Catalog: one information_schema per catalog, informational keys included.
+    const tick = (value: string) => `\`${value.replace(/`/g, '``')}\``;
+    const is = `${tick(db)}.information_schema`;
+    return [
+      { kind: 'columns', catalogOrDatabase: db, sql: `SELECT table_catalog, table_schema, table_name, column_name, full_data_type AS data_type, is_nullable, comment FROM ${is}.columns WHERE ${schemaFilter('table_schema')} ORDER BY table_schema, table_name, ordinal_position LIMIT ${MAX_ROWS}` },
+      { kind: 'tables', catalogOrDatabase: db, sql: `SELECT table_catalog, table_schema, table_name, table_type, comment FROM ${is}.tables WHERE ${schemaFilter('table_schema')}` },
+      { kind: 'views', catalogOrDatabase: db, sql: `SELECT table_catalog, table_schema, table_name, view_definition FROM ${is}.views WHERE ${schemaFilter('table_schema')}` },
+      { kind: 'keys', catalogOrDatabase: db, sql: `SELECT tc.constraint_type, tc.constraint_name, kcu.table_schema, kcu.table_name, kcu.column_name, kcu.ordinal_position AS position, ref.table_catalog AS ref_catalog, ref.table_schema AS ref_schema, ref.table_name AS ref_table, ref.column_name AS ref_column FROM ${is}.table_constraints tc JOIN ${is}.key_column_usage kcu ON kcu.constraint_name = tc.constraint_name AND kcu.constraint_schema = tc.constraint_schema LEFT JOIN ${is}.referential_constraints rc ON tc.constraint_type = 'FOREIGN KEY' AND rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.constraint_schema LEFT JOIN ${is}.key_column_usage ref ON ref.constraint_name = rc.unique_constraint_name AND ref.constraint_schema = rc.unique_constraint_schema AND ref.ordinal_position = kcu.position_in_unique_constraint WHERE tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY') AND ${schemaFilter('kcu.table_schema')} ORDER BY kcu.table_schema, kcu.table_name, tc.constraint_name, kcu.ordinal_position` },
+    ];
+  }
+  if (d === 'bigquery') {
+    // BigQuery: the scope is a project and its datasets; each dataset has its
+    // own INFORMATION_SCHEMA, so each read is a UNION ALL over the datasets.
+    // Unenforced primary and foreign keys are read; a foreign key is read when
+    // it has one column, since CONSTRAINT_COLUMN_USAGE does not order columns.
+    const tick = (value: string) => `\`${value.replace(/`/g, '\\`')}\``;
+    const view = (dataset: string, name: string) => `${tick(db)}.${tick(dataset)}.INFORMATION_SCHEMA.${name}`;
+    const union = (build: (dataset: string) => string) => schemas.map(build).join(' UNION ALL ');
+    if (schemas.length === 0) return [{ kind: 'columns', catalogOrDatabase: db, sql: `SELECT ERROR('Choose the BigQuery datasets to model in the schema selection.')` }];
+    return [
+      { kind: 'columns', catalogOrDatabase: db, sql: `${union((dataset) => `SELECT c.table_catalog, c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, f.description AS comment, c.ordinal_position FROM ${view(dataset, 'COLUMNS')} c LEFT JOIN ${view(dataset, 'COLUMN_FIELD_PATHS')} f ON f.table_name = c.table_name AND f.column_name = c.column_name AND f.field_path = c.column_name`)} ORDER BY table_schema, table_name, ordinal_position LIMIT ${MAX_ROWS}` },
+      { kind: 'tables', catalogOrDatabase: db, sql: union((dataset) => `SELECT t.table_catalog, t.table_schema, t.table_name, t.table_type, JSON_VALUE(o.option_value) AS comment FROM ${view(dataset, 'TABLES')} t LEFT JOIN ${view(dataset, 'TABLE_OPTIONS')} o ON o.table_name = t.table_name AND o.option_name = 'description'`) },
+      { kind: 'views', catalogOrDatabase: db, sql: union((dataset) => `SELECT table_catalog, table_schema, table_name, view_definition FROM ${view(dataset, 'VIEWS')}`) },
+      { kind: 'keys', catalogOrDatabase: db, sql: union((dataset) => `SELECT tc.constraint_type, tc.constraint_name, kcu.table_schema, kcu.table_name, kcu.column_name, kcu.ordinal_position AS position, ccu.table_catalog AS ref_catalog, ccu.table_schema AS ref_schema, ccu.table_name AS ref_table, ccu.column_name AS ref_column FROM ${view(dataset, 'TABLE_CONSTRAINTS')} tc JOIN ${view(dataset, 'KEY_COLUMN_USAGE')} kcu ON kcu.constraint_name = tc.constraint_name LEFT JOIN ${view(dataset, 'CONSTRAINT_COLUMN_USAGE')} ccu ON tc.constraint_type = 'FOREIGN KEY' AND ccu.constraint_name = tc.constraint_name WHERE tc.constraint_type = 'PRIMARY KEY' OR (tc.constraint_type = 'FOREIGN KEY' AND (SELECT COUNT(*) FROM ${view(dataset, 'KEY_COLUMN_USAGE')} k WHERE k.constraint_name = tc.constraint_name) = 1)`) },
     ];
   }
   // Every other driver: tables, views and columns from information_schema.
@@ -190,7 +218,9 @@ export function assembleWarehouseCatalog(driver: string, results: Array<{ query:
         const refColumns = list(field(row, 'referenced_column_names'));
         const refTable = text(row, 'referenced_table', 'ref_table');
         const refSchema = text(row, 'ref_schema') ?? schema;
-        const refRelation = refTable ? [refSchema, refTable].filter(Boolean).join('.') : undefined;
+        // Catalog-qualified warehouses name the referenced catalog too.
+        const refCatalog = includeCatalog ? text(row, 'ref_catalog') : undefined;
+        const refRelation = refTable ? [refCatalog, refSchema, refTable].filter(Boolean).join('.') : undefined;
         const groupKey = `${key(schema, table ?? '')}#${text(row, 'constraint_name') ?? `duckdb-${index}`}`;
         columns.forEach((column, i) => addFk(groupKey, key(relation.schema, relation.name), column, columnList.length ? i + 1 : position, refRelation, refColumns[i] ?? text(row, 'ref_column'), text(row, 'constraint_name')));
       }

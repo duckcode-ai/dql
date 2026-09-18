@@ -132,6 +132,22 @@ describe('warehouse-first modeling in the local runtime', () => {
       keyTypes: [{ from: 'integer', to: 'integer' }],
     });
     expect(certified.diagnostics.map((item: { message: string }) => item.message).join('\n')).not.toMatch(/no longer matches|cannot prove/);
+
+    // The warehouse changes under the model: a re-sync names the drift and
+    // what it touches, and the certified join stops being automatic.
+    const writer = new Database(join(projectRoot, 'shop.sqlite'));
+    writer.exec('ALTER TABLE orders RENAME COLUMN customer_id TO buyer_id; CREATE TABLE returns (return_id INTEGER PRIMARY KEY);');
+    writer.close();
+    const resynced = await json('/api/connections/default/metadata-sync', { method: 'POST' });
+    expect(resynced.status).toBe(200);
+    expect(resynced.body.warehouseCatalog.drift).toMatchObject({
+      addedRelations: ['main.returns'],
+      removedColumns: ['main.orders.customer_id'],
+      addedColumns: ['main.orders.buyer_id'],
+      affected: ['sales::entity::order', 'sales::relationship::order_to_customer'],
+    });
+    const afterDrift = (await json('/api/modeling/dbt-first')).body;
+    expect(afterDrift.modeling.relationships['sales::relationship::order_to_customer'].automaticJoinAllowed).toBe(false);
     await executor.disconnect();
   }, 60_000);
 
@@ -210,6 +226,18 @@ describe('warehouse-first modeling in the local runtime', () => {
     // Nothing left to draft.
     const again = await post('/api/modeling/warehouse/discover/proposal', {});
     expect(again.body.proposal).toBeNull();
+
+    // Without dbt, metrics are DQL's own: Modeling → New metric writes one the
+    // semantic layer loads, and never silently replaces an existing one.
+    const metric = { name: 'Units sold', label: 'Units sold', description: 'Quantity: every order line', domain: 'shop', sql: 'quantity', type: 'sum', table: 'main.order_items', ifAbsent: true };
+    const created = await post('/api/semantic-layer/metric', metric);
+    expect(created.status).toBe(201);
+    expect(created.body.path).toBe('semantic-layer/metrics/units_sold.yaml');
+    expect((await post('/api/semantic-layer/metric', metric)).status).toBe(409);
+    await post('/api/semantic-layer/reload', {});
+    const layer = await (await fetch(`http://127.0.0.1:${port}/api/semantic-layer`)).json() as any;
+    expect(JSON.stringify(layer)).toContain('units_sold');
+    expect(readFileSync(join(projectRoot, 'semantic-layer', 'metrics', 'units_sold.yaml'), 'utf-8')).toContain("description: 'Quantity: every order line'");
     await executor.disconnect();
   }, 60_000);
 });

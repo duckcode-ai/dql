@@ -2245,5 +2245,16 @@ function warehouseCatalogMessage(catalog: WarehouseCatalogSummary | undefined): 
   if (catalog.error) return ` · modeling catalog failed: ${catalog.error}`;
   if (catalog.skipped) return ` · modeling catalog unchanged: ${catalog.skipped}`;
   const warnings = catalog.warnings?.length ? ` (${catalog.warnings.length} part${catalog.warnings.length === 1 ? '' : 's'} not read: ${catalog.warnings[0]})` : '';
-  return ` · modeling catalog ${catalog.relations ?? 0} tables and views${warnings}`;
+  const drift = catalog.drift;
+  const changes = drift
+    ? [
+      drift.removedRelations.length ? `${drift.removedRelations.length} table(s) removed` : '',
+      drift.removedColumns.length ? `${drift.removedColumns.length} column(s) removed` : '',
+      drift.changedColumnTypes.length ? `${drift.changedColumnTypes.length} type change(s)` : '',
+      drift.addedRelations.length ? `${drift.addedRelations.length} new table(s)` : '',
+      drift.addedColumns.length ? `${drift.addedColumns.length} new column(s)` : '',
+    ].filter(Boolean).join(', ')
+    : '';
+  const review = drift?.affected.length ? `; review ${drift.affected.length} modeled object(s) in Modeling` : '';
+  return ` · modeling catalog ${catalog.relations ?? 0} tables and views${warnings}${changes ? ` · changed since last sync: ${changes}${review}` : ''}`;
 }

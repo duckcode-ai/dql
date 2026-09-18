@@ -24,7 +24,14 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { profileRelationshipOnWarehouse, suggestRelationshipKeys } from '@duckcodeailabs/dql-agent';
 
-export type RelationshipEvidenceSource = 'declared_foreign_key' | 'view_join' | 'named_for_table' | 'same_name';
+export type RelationshipEvidenceSource = 'declared_foreign_key' | 'view_join' | 'query_history' | 'named_for_table' | 'same_name';
+
+/** A join seen in the warehouse's recent query history, and how often. */
+export interface ObservedJoin {
+  left: { relation: string; column: string };
+  right: { relation: string; column: string };
+  count: number;
+}
 
 export interface DiscoveredDomain {
   id: string;
@@ -80,9 +87,13 @@ export interface WarehouseDiscoveryReport {
   /** Relationships already modeled, left alone. */
   existingRelationships: number;
   validated: boolean;
+  /** Opt-in query-history evidence: how much was read, or why it could not be. */
+  queryHistory?: { statements: number; joins: number } | { error: string };
 }
 
-const EVIDENCE_ORDER: RelationshipEvidenceSource[] = ['declared_foreign_key', 'view_join', 'named_for_table', 'same_name'];
+const EVIDENCE_ORDER: RelationshipEvidenceSource[] = ['declared_foreign_key', 'view_join', 'query_history', 'named_for_table', 'same_name'];
+/** A join seen fewer times than this in query history is noise, not evidence. */
+const MIN_OBSERVED_JOINS = 2;
 const GENERIC_SCHEMAS = new Set(['main', 'public', 'dbo', 'default']);
 const TABLE_PREFIX = /^(stg|dim|fct|fact|int|base|raw|src|tbl|vw|v)_+/i;
 
@@ -120,6 +131,8 @@ export function discoverWarehouseModel(input: {
   projectName?: string;
   /** Existing Domain Package ids. */
   existingDomains?: Iterable<string>;
+  /** Opt-in: joins seen in recent query history. */
+  observedJoins?: ObservedJoin[];
 }): WarehouseDiscoveryReport {
   const { snapshot } = input;
   const existingDomains = new Set(input.existingDomains ?? []);
@@ -233,6 +246,21 @@ export function discoverWarehouseModel(input: {
         : [left, right, [{ from: leftKey, to: rightKey }]] as const;
       propose(from, to, [...keys], 'view_join', `view ${view.name} joins ${from.name}.${keys[0]!.from} = ${to.name}.${keys[0]!.to}`);
     }
+  }
+
+  // Query history (opt-in): joins people already run, seen often enough.
+  for (const observed of input.observedJoins ?? []) {
+    if (observed.count < MIN_OBSERVED_JOINS) continue;
+    const left = resolveWarehouseRelation(snapshot, observed.left.relation).relation;
+    const right = resolveWarehouseRelation(snapshot, observed.right.relation).relation;
+    if (!left || !right || left.id === right.id) continue;
+    const leftKey = columnNamed(left, observed.left.column);
+    const rightKey = columnNamed(right, observed.right.column);
+    if (!leftKey || !rightKey) continue;
+    const [from, to, keys] = identifyingKey(left, [leftKey]) && !identifyingKey(right, [rightKey])
+      ? [right, left, [{ from: rightKey, to: leftKey }]] as const
+      : [left, right, [{ from: leftKey, to: rightKey }]] as const;
+    propose(from, to, [...keys], 'query_history', `recent queries joined ${from.name}.${keys[0]!.from} = ${to.name}.${keys[0]!.to} ${observed.count} times`);
   }
 
   // Naming: `customer_id` on orders points at customers.
@@ -441,4 +469,48 @@ export function viewJoins(sql: string): ViewJoin[] {
     }
   }
   return joins;
+}
+
+/**
+ * The statement that lists recent query text a warehouse role can see, per
+ * driver; undefined where the warehouse keeps no readable history.
+ */
+export function queryHistorySql(driver: string, options: { database?: string; location?: string; limit?: number } = {}): string | undefined {
+  const limit = Math.max(1, Math.min(options.limit ?? 5_000, 20_000));
+  const d = driver.toLowerCase();
+  if (d === 'snowflake') {
+    const db = options.database ? `"${options.database.replace(/"/g, '""')}".` : '';
+    return `SELECT query_text FROM TABLE(${db}INFORMATION_SCHEMA.QUERY_HISTORY(RESULT_LIMIT => ${Math.min(limit, 10_000)})) WHERE execution_status = 'SUCCESS' AND query_type = 'SELECT' AND query_text ILIKE '%join%'`;
+  }
+  // pg_stat_statements keeps normalized text, with literals already replaced by $n.
+  if (d === 'postgres' || d === 'postgresql') return `SELECT query AS query_text FROM pg_stat_statements WHERE query ILIKE '%join%' ORDER BY calls DESC LIMIT ${limit}`;
+  if (d === 'databricks') return `SELECT statement_text AS query_text FROM system.query.history WHERE statement_type = 'SELECT' AND execution_status = 'FINISHED' AND lower(statement_text) LIKE '%join%' ORDER BY start_time DESC LIMIT ${limit}`;
+  if (d === 'bigquery') {
+    const region = `region-${(options.location ?? 'US').toLowerCase()}`;
+    return `SELECT query AS query_text FROM \`${region}\`.INFORMATION_SCHEMA.JOBS_BY_PROJECT WHERE statement_type = 'SELECT' AND state = 'DONE' AND error_result IS NULL AND creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY) AND LOWER(query) LIKE '%join%' LIMIT ${limit}`;
+  }
+  return undefined;
+}
+
+/**
+ * Count the equality joins in a set of query texts. The text is read in
+ * memory and dropped: only which columns were joined, and how often, is kept.
+ */
+export function observedJoinsFromQueries(texts: Iterable<string>): ObservedJoin[] {
+  const counts = new Map<string, ObservedJoin>();
+  for (const text of texts) {
+    const seen = new Set<string>();
+    for (const join of viewJoins(text)) {
+      const sides = [join.left, join.right].map((side) => ({ relation: side.relation.toLowerCase(), column: side.column.toLowerCase() }))
+        .sort((a, b) => `${a.relation}.${a.column}`.localeCompare(`${b.relation}.${b.column}`));
+      const signature = sides.map((side) => `${side.relation}.${side.column}`).join('=');
+      // A statement counts once per join, however often it repeats the join.
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      const current = counts.get(signature);
+      if (current) current.count += 1;
+      else counts.set(signature, { left: sides[0]!, right: sides[1]!, count: 1 });
+    }
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count);
 }

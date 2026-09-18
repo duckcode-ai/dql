@@ -234,6 +234,17 @@ async function runSyncWarehouse(rest: string[], flags: CLIFlags): Promise<void> 
       } else {
         console.log(`  ✓ Warehouse catalog: ${catalog.relations} relation(s) → ${relative(projectRoot, catalog.path)}`);
         for (const warning of catalog.warnings ?? []) console.log(`    ! ${warning}`);
+        if (catalog.drift) {
+          const drift = catalog.drift;
+          console.log('  Changed since the last sync:');
+          for (const [label, items] of [['new tables', drift.addedRelations], ['removed tables', drift.removedRelations], ['new columns', drift.addedColumns], ['removed columns', drift.removedColumns], ['changed types', drift.changedColumnTypes]] as const) {
+            if (items.length) console.log(`    ${label}: ${items.slice(0, 8).join(', ')}${items.length > 8 ? ` … and ${items.length - 8} more` : ''}`);
+          }
+          if (drift.affected.length) {
+            console.log(`  Modeled objects to review (${drift.affected.length}): ${drift.affected.slice(0, 8).join(', ')}${drift.affected.length > 8 ? ' …' : ''}`);
+            console.log('  `dql compile` names any join or grain that no longer holds; a certified join whose keys changed stops being automatic until it is validated again.');
+          }
+        }
         console.log('  Next: `dql model discover` drafts entities and relationships from it for review.');
       }
     }

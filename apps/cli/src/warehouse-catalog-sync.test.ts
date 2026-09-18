@@ -78,6 +78,59 @@ describe('assembling a warehouse catalog from metadata rows', () => {
     expect(relations[0]!.foreignKeys).toEqual([{ columns: ['order_id'], references: { relation: 'public.orders', columns: ['id'] }, name: 'line_items_order_fk' }]);
   });
 
+  it('Databricks: Unity Catalog information_schema, informational keys, catalog-qualified relations', () => {
+    const queries = buildWarehouseCatalogQueries('databricks', { catalogOrDatabase: 'main', schemas: ['sales'] });
+    expect(queries.map((query) => query.kind)).toEqual(['columns', 'tables', 'views', 'keys']);
+    expect(queries[0]!.sql).toContain('`main`.information_schema.columns');
+    const byKind = (kind: string) => queries.find((query) => query.kind === kind)!;
+    const relations = assembleWarehouseCatalog('databricks', [
+      { query: byKind('columns'), rows: [
+        { table_catalog: 'main', table_schema: 'sales', table_name: 'orders', column_name: 'order_id', data_type: 'bigint', is_nullable: 'NO', comment: 'Order number' },
+        { table_catalog: 'main', table_schema: 'sales', table_name: 'orders', column_name: 'customer_id', data_type: 'bigint', is_nullable: 'YES', comment: null },
+        { table_catalog: 'main', table_schema: 'sales', table_name: 'customers', column_name: 'customer_id', data_type: 'bigint', is_nullable: 'NO', comment: null },
+        { table_catalog: 'main', table_schema: 'sales', table_name: 'daily', column_name: 'day', data_type: 'date', is_nullable: 'YES', comment: null },
+      ] },
+      { query: byKind('tables'), rows: [
+        { table_catalog: 'main', table_schema: 'sales', table_name: 'orders', table_type: 'MANAGED', comment: 'All orders' },
+        { table_catalog: 'main', table_schema: 'sales', table_name: 'daily', table_type: 'MATERIALIZED_VIEW', comment: null },
+      ] },
+      { query: byKind('keys'), rows: [
+        { constraint_type: 'PRIMARY KEY', constraint_name: 'orders_pk', table_schema: 'sales', table_name: 'orders', column_name: 'order_id', position: 1 },
+        { constraint_type: 'FOREIGN KEY', constraint_name: 'orders_customer_fk', table_schema: 'sales', table_name: 'orders', column_name: 'customer_id', position: 1, ref_catalog: 'main', ref_schema: 'sales', ref_table: 'customers', ref_column: 'customer_id' },
+      ] },
+    ]);
+    const byName = Object.fromEntries(relations.map((relation) => [relation.name, relation]));
+    expect(byName.orders).toMatchObject({ id: 'warehouse.main.sales.orders', relation: 'main.sales.orders', kind: 'table', comment: 'All orders', primaryKey: ['order_id'] });
+    expect(byName.orders!.columns[0]).toEqual({ name: 'order_id', type: 'bigint', comment: 'Order number', nullable: false });
+    expect(byName.orders!.foreignKeys).toEqual([{ columns: ['customer_id'], references: { relation: 'main.sales.customers', columns: ['customer_id'] }, name: 'orders_customer_fk' }]);
+    expect(byName.daily).toMatchObject({ kind: 'materialized_view' });
+  });
+
+  it('BigQuery: one read per kind across the datasets, descriptions from options and field paths', () => {
+    const queries = buildWarehouseCatalogQueries('bigquery', { catalogOrDatabase: 'acme-prod', schemas: ['sales', 'crm'] });
+    expect(queries.map((query) => query.kind)).toEqual(['columns', 'tables', 'views', 'keys']);
+    expect(queries[0]!.sql).toContain('`acme-prod`.`sales`.INFORMATION_SCHEMA.COLUMNS');
+    expect(queries[0]!.sql).toContain('`acme-prod`.`crm`.INFORMATION_SCHEMA.COLUMNS');
+    expect(queries[0]!.sql.match(/UNION ALL/g)).toHaveLength(1);
+    expect(buildWarehouseCatalogQueries('bigquery', { catalogOrDatabase: 'acme-prod', schemas: [] })[0]!.sql).toMatch(/Choose the BigQuery datasets/);
+    const byKind = (kind: string) => queries.find((query) => query.kind === kind)!;
+    const relations = assembleWarehouseCatalog('bigquery', [
+      { query: byKind('columns'), rows: [
+        { table_catalog: 'acme-prod', table_schema: 'sales', table_name: 'orders', column_name: 'order_id', data_type: 'INT64', is_nullable: 'NO', comment: 'Order number' },
+        { table_catalog: 'acme-prod', table_schema: 'sales', table_name: 'orders', column_name: 'account_id', data_type: 'INT64', is_nullable: 'YES', comment: null },
+        { table_catalog: 'acme-prod', table_schema: 'crm', table_name: 'accounts', column_name: 'account_id', data_type: 'INT64', is_nullable: 'NO', comment: null },
+      ] },
+      { query: byKind('tables'), rows: [{ table_catalog: 'acme-prod', table_schema: 'sales', table_name: 'orders', table_type: 'BASE TABLE', comment: 'One row per order' }] },
+      { query: byKind('keys'), rows: [
+        { constraint_type: 'PRIMARY KEY', constraint_name: 'orders.pk$', table_schema: 'sales', table_name: 'orders', column_name: 'order_id', position: 1 },
+        { constraint_type: 'FOREIGN KEY', constraint_name: 'orders_account', table_schema: 'sales', table_name: 'orders', column_name: 'account_id', position: 1, ref_catalog: 'acme-prod', ref_schema: 'crm', ref_table: 'accounts', ref_column: 'account_id' },
+      ] },
+    ]);
+    const orders = relations.find((relation) => relation.name === 'orders')!;
+    expect(orders).toMatchObject({ id: 'warehouse.acme-prod.sales.orders', relation: 'acme-prod.sales.orders', comment: 'One row per order', primaryKey: ['order_id'] });
+    expect(orders.foreignKeys).toEqual([{ columns: ['account_id'], references: { relation: 'acme-prod.crm.accounts', columns: ['account_id'] }, name: 'orders_account' }]);
+  });
+
   it('another driver reads tables, views and columns from information_schema only', () => {
     expect(buildWarehouseCatalogQueries('mysql', { catalogOrDatabase: 'shop', schemas: ['shop'] }).map((query) => query.kind)).toEqual(['columns', 'tables']);
   });

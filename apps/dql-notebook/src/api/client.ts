@@ -429,6 +429,15 @@ export interface WarehouseCatalogSummary {
   warnings?: string[];
   skipped?: string;
   error?: string;
+  /** What changed since the previous sync, and the modeled objects it touches. */
+  drift?: {
+    addedRelations: string[];
+    removedRelations: string[];
+    addedColumns: string[];
+    removedColumns: string[];
+    changedColumnTypes: string[];
+    affected: string[];
+  };
 }
 
 /** What `Draft from warehouse` found, before anything is written. */
@@ -441,6 +450,7 @@ export interface WarehouseDiscoveryReport {
   relationships: Array<{ id: string; domain: string; from: string; to: string; keys: Array<{ from: string; to: string }>; cardinality: string; evidence: Array<{ source: string; reason: string }> }>;
   existingRelationships: number;
   validated: boolean;
+  queryHistory?: { statements: number; joins: number } | { error: string };
 }
 
 export interface DomainWorkspaceSummary {
@@ -4231,7 +4241,7 @@ export const api = {
    * warehouse, as a reviewable proposal. `proposal` is null when there is
    * nothing new to draft.
    */
-  async draftWarehouseModel(input: { expectedSnapshotId?: string; domain?: string; validate?: boolean } = {}): Promise<{ report: WarehouseDiscoveryReport; proposal: ContextAuthoringProposalV1 | null }> {
+  async draftWarehouseModel(input: { expectedSnapshotId?: string; domain?: string; validate?: boolean; queryHistory?: boolean } = {}): Promise<{ report: WarehouseDiscoveryReport; proposal: ContextAuthoringProposalV1 | null }> {
     return request('/api/modeling/warehouse/discover/proposal', { method: 'POST', body: JSON.stringify({ validate: true, ...input }) });
   },
 
@@ -6576,6 +6586,8 @@ export const api = {
     type: string;
     table: string;
     tags?: string[];
+    /** Refuse to replace an existing metric of the same name. */
+    ifAbsent?: boolean;
   }): Promise<{ ok: boolean; path?: string; error?: string }> {
     try {
       return await request<{ ok: boolean; path: string }>('/api/semantic-layer/metric', {

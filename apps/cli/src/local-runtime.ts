@@ -100,7 +100,9 @@ import {
   isWarehouseNodeId,
   loadWarehouseNodeAuthoringDetail,
   readWarehouseCatalog,
+  diffWarehouseCatalogs,
   type ManifestModelingMode,
+  type WarehouseCatalogDrift,
   findAppDocuments,
   findDashboardsForApp,
   isBlockIdRef,
@@ -176,7 +178,7 @@ import {
   modelAreaLocalId,
   DEFAULT_MODEL_AREA_ID,
 } from '@duckcodeailabs/dql-core';
-import { load as loadYaml } from 'js-yaml';
+import { dump as dumpYaml, load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
@@ -617,6 +619,8 @@ import {
 import { syncWarehouseCatalog } from './warehouse-catalog-sync.js';
 import {
   discoverWarehouseModel,
+  observedJoinsFromQueries,
+  queryHistorySql,
   validateWarehouseDiscovery,
   warehouseDiscoveryChanges,
   type WarehouseDiscoveryReport,
@@ -11927,11 +11931,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const requestId = apiRequestId('modeling-warehouse-proposal');
       const snapshot = projectSnapshot();
       try {
-        const body = await readJSON(req).catch(() => ({})) as { validate?: boolean; domain?: string; expectedSnapshotId?: string };
+        const body = await readJSON(req).catch(() => ({})) as { validate?: boolean; queryHistory?: boolean; domain?: string; expectedSnapshotId?: string };
         if (body.expectedSnapshotId && body.expectedSnapshotId !== snapshot.snapshotId) {
           throw Object.assign(new Error('Project sources changed. Refresh Modeling and draft again.'), { code: 'PROPOSAL_STALE' });
         }
-        const report = await discoverProjectWarehouseModel(projectRoot, { manifest: snapshot.manifest, domain: body.domain, validate: body.validate === true, executor });
+        const report = await discoverProjectWarehouseModel(projectRoot, { manifest: snapshot.manifest, domain: body.domain, validate: body.validate === true, queryHistory: body.queryHistory === true, executor });
         // New Domains and subject areas are created by the proposal's own scope
         // step, as for dbt discovery, so the batch stays in dependency order.
         // A drafted join lives in the subject area of the entity it starts
@@ -11992,12 +11996,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const requestId = apiRequestId('modeling-warehouse-discover');
       const snapshot = projectSnapshot();
       try {
-        const body = await readJSON(req).catch(() => ({})) as { validate?: boolean; domain?: string; expectedSnapshotId?: string; entityIds?: string[]; relationshipIds?: string[] };
+        const body = await readJSON(req).catch(() => ({})) as { validate?: boolean; queryHistory?: boolean; domain?: string; expectedSnapshotId?: string; entityIds?: string[]; relationshipIds?: string[] };
         const applying = path.endsWith('/apply');
         if (applying && (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId)) {
           throw Object.assign(new Error('Project sources changed after discovery. Review the refreshed drafts before adding them.'), { code: 'SOURCE_CHANGED' });
         }
-        const report = await discoverProjectWarehouseModel(projectRoot, { manifest: snapshot.manifest, domain: body.domain, validate: body.validate === true, executor });
+        const report = await discoverProjectWarehouseModel(projectRoot, { manifest: snapshot.manifest, domain: body.domain, validate: body.validate === true, queryHistory: body.queryHistory === true, executor });
         if (!applying) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, report }));
@@ -19167,6 +19171,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           body,
           metadataScopeDbtDefaults(projectRoot, cfg),
         );
+        // The model as it stands, so drift can name what a re-sync touches.
+        const modelBeforeSync = modelingModeOf(cfg) === 'warehouse-first' || modelingModeOf(cfg) === 'hybrid'
+          ? (() => { try { return projectSnapshot().manifest; } catch { return undefined; } })()
+          : undefined;
         const synced = await syncWarehouseMetadata({
           projectRoot,
           executor,
@@ -19175,7 +19183,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         });
         persistConnectionMetadataScope(projectRoot, connectionId, scope);
         projectConfig = loadProjectConfig(projectRoot);
-        const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, projectConfig, executor, selectedConnection, connectionId, synced.scope);
+        const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, projectConfig, executor, selectedConnection, connectionId, synced.scope, modelBeforeSync);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           scope: synced.scope,
@@ -19201,13 +19209,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           configuredMetadataScopeInput(cfg, connectionId),
           metadataScopeDbtDefaults(projectRoot, cfg),
         );
+        // The model as it stands, so drift can name what a re-sync touches.
+        const modelBeforeSync = modelingModeOf(cfg) === 'warehouse-first' || modelingModeOf(cfg) === 'hybrid'
+          ? (() => { try { return projectSnapshot().manifest; } catch { return undefined; } })()
+          : undefined;
         const synced = await syncWarehouseMetadata({
           projectRoot,
           executor,
           connection: selectedConnection,
           scope,
         });
-        const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, cfg, executor, selectedConnection, connectionId, synced.scope);
+        const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, cfg, executor, selectedConnection, connectionId, synced.scope, modelBeforeSync);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           scope: synced.scope,
@@ -22281,9 +22293,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const body = await readJSON(req);
-        const { name, label, description, domain, sql, type, table, tags } = body as {
+        const { name, label, description, domain, sql, type, table, tags, ifAbsent } = body as {
           name: string; label: string; description: string; domain: string;
           sql: string; type: string; table: string; tags?: string[];
+          /** Refuse to replace an existing metric of the same name. */
+          ifAbsent?: boolean;
         };
         if (!name || !sql || !type || !table) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -22294,17 +22308,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const metricsDir = join(projectRoot, 'semantic-layer', 'metrics');
         mkdirSync(metricsDir, { recursive: true });
         const filePath = join(metricsDir, `${slug}.yaml`);
-        const tagList = Array.isArray(tags) && tags.length > 0
-          ? `\ntags:\n${tags.map(t => `  - ${t}`).join('\n')}`
-          : '';
-        const yaml = `name: ${slug}
-label: ${label || name}
-description: ${description || ''}
-domain: ${domain || 'general'}
-sql: ${sql}
-type: ${type}
-table: ${table}${tagList}
-`;
+        if (ifAbsent === true && existsSync(filePath)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `A metric named "${slug}" already exists (semantic-layer/metrics/${slug}.yaml).` }));
+          return;
+        }
+        // Serialized, not interpolated: a colon or newline in a description
+        // or expression stays valid YAML.
+        const yaml = dumpYaml({
+          name: slug,
+          label: label || name,
+          description: description || '',
+          domain: domain || 'general',
+          sql,
+          type,
+          table,
+          ...(Array.isArray(tags) && tags.length > 0 ? { tags } : {}),
+        }, { lineWidth: -1 });
         writeFileSync(filePath, yaml, 'utf-8');
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true, path: `semantic-layer/metrics/${slug}.yaml` }));
@@ -26277,6 +26297,17 @@ export interface WarehouseCatalogSummary {
   /** Why this sync did not refresh the snapshot. */
   skipped?: string;
   error?: string;
+  /** What changed since the previous sync, and the modeled objects it touches. Absent when nothing changed. */
+  drift?: WarehouseCatalogDrift & { affected: string[] };
+}
+
+/** The entities and relationships bound to relations that changed. */
+function driftAffected(manifest: DQLManifest | undefined, drift: WarehouseCatalogDrift): string[] {
+  const changed = new Set(drift.changedRelationIds);
+  const entities = Object.values(manifest?.modeling?.entities ?? {}).filter((entity) => changed.has(entity.dbtUniqueId));
+  const entityIds = new Set(entities.map((entity) => entity.qualifiedId ?? entity.id));
+  const relationships = Object.values(manifest?.modeling?.relationships ?? {}).filter((relationship) => entityIds.has(relationship.from) || entityIds.has(relationship.to));
+  return [...entityIds, ...relationships.map((relationship) => relationship.qualifiedId ?? relationship.id)].sort();
 }
 
 function warehouseCatalogModeling(config: ProjectConfig): boolean {
@@ -26302,6 +26333,8 @@ async function refreshWarehouseCatalogAfterSync(
   connection: ConnectionConfig,
   connectionId: string,
   scope: ConnectionMetadataScopeV1,
+  /** The model before this sync, to name what drift touches. */
+  manifest?: DQLManifest,
 ): Promise<WarehouseCatalogSummary | undefined> {
   if (!warehouseCatalogModeling(config)) return undefined;
   const path = readWarehouseCatalog(projectRoot).path;
@@ -26310,8 +26343,19 @@ async function refreshWarehouseCatalogAfterSync(
     return { path, skipped: `modeling reads connection "${modelingConnectionId}"; this sync did not change its catalog` };
   }
   try {
+    const previous = readWarehouseCatalog(projectRoot).snapshot;
     const { snapshot, warnings } = await syncWarehouseCatalog({ projectRoot, executor, connection, scope });
-    return { path, relations: snapshot.relations.length, fingerprint: snapshot.fingerprint, capturedAt: snapshot.capturedAt, connectionId, warnings };
+    const drift = previous && previous.fingerprint !== snapshot.fingerprint ? diffWarehouseCatalogs(previous, snapshot) : undefined;
+    const changed = drift && (drift.addedRelations.length || drift.removedRelations.length || drift.addedColumns.length || drift.removedColumns.length || drift.changedColumnTypes.length);
+    return {
+      path,
+      relations: snapshot.relations.length,
+      fingerprint: snapshot.fingerprint,
+      capturedAt: snapshot.capturedAt,
+      connectionId,
+      warnings,
+      ...(drift && changed ? { drift: { ...drift, affected: driftAffected(manifest, drift) } } : {}),
+    };
   } catch (error) {
     return { path, error: error instanceof Error ? error.message : String(error) };
   }
@@ -26341,9 +26385,12 @@ export async function syncProjectWarehouse(projectRoot: string, options: {
     input = { mode: 'selected_scopes', scopes: [{ catalogOrDatabase: database, schemas: options.schemas }] };
   }
   const scope = normalizeConnectionMetadataScope(connectionId, selectedConnection, input, metadataScopeDbtDefaults(projectRoot, cfg));
+  const modelBeforeSync = warehouseCatalogModeling(cfg)
+    ? (() => { try { return buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot, cfg) ?? undefined }); } catch { return undefined; } })()
+    : undefined;
   const synced = await syncWarehouseMetadata({ projectRoot, executor: options.executor, connection: selectedConnection, scope });
   if (options.schemas?.length) persistConnectionMetadataScope(projectRoot, connectionId, scope);
-  const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, loadProjectConfig(projectRoot), options.executor, selectedConnection, connectionId, synced.scope);
+  const warehouseCatalog = await refreshWarehouseCatalogAfterSync(projectRoot, loadProjectConfig(projectRoot), options.executor, selectedConnection, connectionId, synced.scope, modelBeforeSync);
   const metadataRelations = warehouseMetadataStatus(projectRoot, synced.scope.scopeFingerprint, connectionId).relationCount;
   return { connectionId, scope: synced.scope, metadataRelations, ...(warehouseCatalog ? { warehouseCatalog } : {}) };
 }
@@ -26357,6 +26404,8 @@ export async function discoverProjectWarehouseModel(projectRoot: string, options
   manifest?: DQLManifest;
   domain?: string;
   validate?: boolean;
+  /** Opt-in: also learn joins from recent query history (text read in memory, only join pairs kept). */
+  queryHistory?: boolean;
   executor?: QueryExecutor;
 }): Promise<WarehouseDiscoveryReport> {
   const cfg = loadProjectConfig(projectRoot);
@@ -26369,18 +26418,38 @@ export async function discoverProjectWarehouseModel(projectRoot: string, options
     throw Object.assign(new Error(error ? `The warehouse catalog could not be read: ${error}` : 'No warehouse catalog yet. Run `dql sync warehouse --schemas <schema>` or Sync schema in Settings first.'), { code: 'WAREHOUSE_CATALOG_MISSING' });
   }
   const manifest = options.manifest ?? buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot, cfg) ?? undefined });
-  const report = discoverWarehouseModel({
+  const connectionId = snapshot.connectionId || warehouseCatalogConnectionId(cfg);
+  const connection = options.validate || options.queryHistory ? projectConnectionById(projectRoot, cfg, connectionId) : null;
+  if ((options.validate || options.queryHistory) && (!options.executor || !connection)) {
+    throw new Error(`Checking the warehouse needs the connection "${connectionId}" the catalog was read from.`);
+  }
+  let queryHistory: WarehouseDiscoveryReport['queryHistory'];
+  let observedJoins: ReturnType<typeof observedJoinsFromQueries> | undefined;
+  if (options.queryHistory && connection && options.executor) {
+    const sql = queryHistorySql(connection.driver, { database: connection.database ?? connection.catalog, location: (connection as { location?: string }).location });
+    if (!sql) {
+      queryHistory = { error: `${connection.driver} keeps no query history DQL can read.` };
+    } else {
+      try {
+        const result = await options.executor.executePositional(sql, [], connection, { maxRows: 20_000, maxBytes: 64 * 1024 * 1024, batchSize: 1_000, deadlineMs: 60_000 });
+        const texts = result.rows.map((row) => String((row as Record<string, unknown>).query_text ?? (row as Record<string, unknown>).QUERY_TEXT ?? ''));
+        observedJoins = observedJoinsFromQueries(texts);
+        queryHistory = { statements: texts.length, joins: observedJoins.length };
+      } catch (error) {
+        queryHistory = { error: `Query history could not be read: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}` };
+      }
+    }
+  }
+  const drafted = discoverWarehouseModel({
     snapshot,
     manifest,
     ...(options.domain ? { domain: options.domain } : {}),
     ...(cfg.project ? { projectName: cfg.project } : {}),
     existingDomains: loadDomainPackageRegistry(projectRoot).values().map((pkg) => pkg.id),
+    ...(observedJoins ? { observedJoins } : {}),
   });
-  if (!options.validate) return report;
-  if (!options.executor) throw new Error('Validating discovery needs a warehouse connection.');
-  const connectionId = snapshot.connectionId || warehouseCatalogConnectionId(cfg);
-  const connection = projectConnectionById(projectRoot, cfg, connectionId);
-  if (!connection) throw new Error(`Unknown connection "${connectionId}" for the warehouse catalog.`);
+  const report = queryHistory ? { ...drafted, queryHistory } : drafted;
+  if (!options.validate || !connection || !options.executor) return report;
   const executor = options.executor;
   return validateWarehouseDiscovery(
     report,

@@ -198,18 +198,22 @@ function usesWarehouseDiscovery(rest: string[]): boolean {
  * from the warehouse catalog; `dql model apply-discovery [path] --apply`
  * writes them as drafts. `--validate` checks each join and naming-key grain
  * on the warehouse (aggregates only) and proposes the cardinality it saw.
+ * `--query-history` (opt-in) also counts the joins recent queries ran.
  */
 async function runWarehouseDiscovery(subcommand: 'discover' | 'apply-discovery', rest: string[], flags: CLIFlags): Promise<void> {
   const pathArg = rest.find((value, index) => !value.startsWith('-') && rest[index - 1] !== '--source' && rest[index - 1] !== '--dbt-manifest');
   const projectRoot = resolve(pathArg ?? '.');
   const validate = rest.includes('--validate');
+  // Opt-in: read recent query text in memory and keep only which columns were joined.
+  const queryHistory = rest.includes('--query-history');
   const { discoverProjectWarehouseModel, applyProjectWarehouseDiscovery } = await import('../local-runtime.js');
   const { QueryExecutor } = await import('@duckcodeailabs/dql-connectors');
-  const executor = validate ? new QueryExecutor() : undefined;
+  const executor = validate || queryHistory ? new QueryExecutor() : undefined;
   try {
     const report = await discoverProjectWarehouseModel(projectRoot, {
       ...(flags.domain ? { domain: flags.domain } : {}),
       validate,
+      queryHistory,
       ...(executor ? { executor } : {}),
     });
     const writing = subcommand === 'apply-discovery' && flags.apply === true && flags.dryRun !== true;
@@ -245,6 +249,11 @@ function printWarehouseDiscovery(report: import('../warehouse-model-discovery.js
   const newEntities = report.entities.filter((entity) => !entity.existing);
   console.log(`DQL warehouse discovery (draft only${report.validated ? ', checked on the warehouse' : ''})`);
   console.log(`  catalog ${report.catalogFingerprint.slice(0, 12)} · ${report.relations} relations · ${newEntities.length} new entities · ${report.relationships.length} new relationships${report.existingRelationships ? ` · ${report.existingRelationships} already modeled` : ''}`);
+  if (report.queryHistory) {
+    console.log('error' in report.queryHistory
+      ? `  query history: ${report.queryHistory.error}`
+      : `  query history: ${report.queryHistory.statements} recent statements read in memory · ${report.queryHistory.joins} distinct joins seen (only join pairs kept)`);
+  }
   console.log('Domains');
   for (const domain of report.domains) console.log(`  ${domain.id}${domain.existing ? ' (exists)' : ''}`);
   console.log('Entities');

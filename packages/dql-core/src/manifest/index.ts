@@ -14,12 +14,14 @@ export {
 export { detectOutputDrift } from './output-drift.js';
 export {
   WAREHOUSE_CATALOG_PATH,
+  diffWarehouseCatalogs,
   normalizeWarehouseCatalog,
   readWarehouseCatalog,
   resolveWarehouseRelation,
   warehouseRelationId,
   writeWarehouseCatalog,
   type WarehouseCatalogColumnV1,
+  type WarehouseCatalogDrift,
   type WarehouseCatalogForeignKeyV1,
   type WarehouseCatalogRelationV1,
   type WarehouseCatalogSnapshotV1,

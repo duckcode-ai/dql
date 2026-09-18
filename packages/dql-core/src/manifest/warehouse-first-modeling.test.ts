@@ -6,6 +6,7 @@ import { buildManifest, collectInputFiles, modelingModeOf } from './builder.js';
 import { isWarehouseNodeId, loadWarehouseNodeAuthoringDetail, previewModelingChange } from './dbt-first-authoring.js';
 import {
   WAREHOUSE_CATALOG_PATH,
+  diffWarehouseCatalogs,
   normalizeWarehouseCatalog,
   readWarehouseCatalog,
   resolveWarehouseRelation,
@@ -60,6 +61,29 @@ describe('the warehouse catalog snapshot', () => {
     expect(resolveWarehouseRelation(CATALOG, 'missing').relation).toBeUndefined();
     // The stable id resolves too: authoring tools pass it.
     expect(resolveWarehouseRelation(CATALOG, 'warehouse.acme.archive.customers').relation?.relation).toBe('ACME.ARCHIVE.CUSTOMERS');
+  });
+});
+
+describe('warehouse catalog drift', () => {
+  it('names added and removed relations and columns, and type changes', () => {
+    const next = {
+      relations: [
+        relation('SALES', 'ORDERS', ['ORDER_ID', 'CUSTOMER_ID', 'CHANNEL'], { columns: [{ name: 'ORDER_ID', type: 'NUMBER' }, { name: 'CUSTOMER_ID', type: 'VARCHAR' }, { name: 'CHANNEL', type: 'VARCHAR' }] }),
+        relation('SALES', 'CUSTOMERS', ['CUSTOMER_ID', 'NAME']),
+        relation('SALES', 'RETURNS', ['RETURN_ID']),
+      ],
+    };
+    const previous = { relations: CATALOG.relations.map((item) => item.name === 'ORDERS' ? { ...item, columns: [{ name: 'ORDER_ID', type: 'NUMBER' }, { name: 'CUSTOMER_ID', type: 'NUMBER' }, { name: 'AMOUNT', type: 'NUMBER' }] } : item) };
+    const drift = diffWarehouseCatalogs(previous, next);
+    expect(drift).toEqual({
+      addedRelations: ['ACME.SALES.RETURNS'],
+      removedRelations: ['ACME.ARCHIVE.CUSTOMERS'],
+      addedColumns: ['ACME.SALES.ORDERS.CHANNEL'],
+      removedColumns: ['ACME.SALES.ORDERS.AMOUNT'],
+      changedColumnTypes: ['ACME.SALES.ORDERS.CUSTOMER_ID: NUMBER → VARCHAR'],
+      changedRelationIds: ['warehouse.acme.archive.customers', 'warehouse.acme.sales.orders'],
+    });
+    expect(diffWarehouseCatalogs(undefined, next).changedRelationIds).toEqual([]);
   });
 });
 

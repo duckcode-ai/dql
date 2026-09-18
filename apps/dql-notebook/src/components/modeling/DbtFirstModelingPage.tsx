@@ -193,6 +193,9 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
   });
   const [notice, setNotice] = useState<string | null>(null);
   const [draftingFromWarehouse, setDraftingFromWarehouse] = useState(false);
+  // Opt-in: learn joins from recent query history as well (RFC 0007).
+  const [draftWithQueryHistory, setDraftWithQueryHistory] = useState(false);
+  const [metricDrawerOpen, setMetricDrawerOpen] = useState(false);
   /**
    * RFC 0007: draft domains, models and joins from the warehouse catalog,
    * checked on the warehouse, and open them in the ordinary review drawer.
@@ -201,7 +204,9 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
     setDraftingFromWarehouse(true);
     setNotice(null);
     try {
-      const result = await api.draftWarehouseModel({ expectedSnapshotId: data?.snapshotId });
+      const result = await api.draftWarehouseModel({ expectedSnapshotId: data?.snapshotId, queryHistory: draftWithQueryHistory });
+      const history = result.report.queryHistory;
+      if (history && 'error' in history) setNotice(history.error);
       if (result.proposal) setProposal(result.proposal);
       else setNotice(`Nothing new to draft: the ${result.report.relations} table${result.report.relations === 1 ? '' : 's'} in the warehouse catalog and their joins are already modeled.`);
     } catch (error) {
@@ -412,8 +417,22 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
             </Button>
           )}
           {warehouseModeling && (
+            <label
+              title="Also count the joins in recent queries your warehouse role can see. Query text is read in memory and dropped; only which columns were joined, and how often, is kept."
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: t.textSecondary, cursor: 'pointer' }}
+            >
+              <input type="checkbox" checked={draftWithQueryHistory} onChange={(event) => setDraftWithQueryHistory(event.target.checked)} />
+              Use query history
+            </label>
+          )}
+          {warehouseModeling && (
             <Button t={t} onClick={() => void draftFromWarehouse()} disabled={draftingFromWarehouse}>
               <Boxes size={14} /> {draftingFromWarehouse ? 'Drafting…' : 'Draft from warehouse'}
+            </Button>
+          )}
+          {warehouseModeling && (
+            <Button t={t} onClick={() => setMetricDrawerOpen(true)}>
+              <Plus size={14} /> New metric
             </Button>
           )}
           <Button t={t} onClick={() => setStartDrawer('yaml')}><FileSearch size={14} /> Import YAML</Button>
@@ -631,6 +650,15 @@ export function DbtFirstModelingPage({ initialSection }: { initialSection?: Doma
             selectDomain(null);
             void refresh();
           }}
+        />
+      ) : null}
+      {metricDrawerOpen ? (
+        <NewMetricDrawer
+          data={data}
+          domain={selectedDomain}
+          t={t}
+          onClose={() => setMetricDrawerOpen(false)}
+          onSaved={(path) => { setMetricDrawerOpen(false); setNotice(`Metric saved to ${path}. Ask and Blocks can use it now.`); }}
         />
       ) : null}
       {startDrawer === 'models' ? <AddModelsDrawer data={data} domain={selectedDomain} areaId={selectedAreaId} theme={t} onClose={() => setStartDrawer(null)} onProposal={(next) => { setStartDrawer(null); setProposal(next); }} /> : null}
@@ -2287,3 +2315,89 @@ const flowStep = (t: Theme): React.CSSProperties => ({
   fontSize: 10,
   lineHeight: 1.35,
 });
+
+/**
+ * RFC 0007: without dbt, metrics live in DQL's own semantic layer
+ * (semantic-layer/metrics). A metric is an aggregation of a column of one
+ * table; the table and column come from the synced warehouse catalog.
+ */
+function NewMetricDrawer({ data, domain, t, onClose, onSaved }: { data: DbtFirstModelingResponse; domain: string | null; t: Theme; onClose: () => void; onSaved: (path: string) => void }) {
+  const tables = useMemo(() => Object.values(data.dbtProvenance.nodes)
+    .filter((node) => Boolean(node.relation))
+    .sort((a, b) => (a.relation ?? '').localeCompare(b.relation ?? '')), [data.dbtProvenance.nodes]);
+  const domains = Object.keys(data.modeling.packages ?? {});
+  const [nodeId, setNodeId] = useState('');
+  const [columns, setColumns] = useState<Array<{ name: string; type?: string }>>([]);
+  const [aggregation, setAggregation] = useState('sum');
+  const [column, setColumn] = useState('');
+  const [name, setName] = useState('');
+  const [label, setLabel] = useState('');
+  const [description, setDescription] = useState('');
+  const [metricDomain, setMetricDomain] = useState(domain ?? domains[0] ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setColumns([]);
+    setColumn('');
+    if (!nodeId) return;
+    let active = true;
+    void api.getDbtModelingNode(nodeId)
+      .then((detail) => { if (active) setColumns(detail.columns.map((item) => ({ name: item.name, type: item.type }))); })
+      .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : String(cause)); });
+    return () => { active = false; };
+  }, [nodeId]);
+  const relation = tables.find((node) => node.uniqueId === nodeId)?.relation ?? '';
+  const expression = aggregation === 'count' && !column ? '*' : column;
+  const slugName = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const ready = Boolean(relation && slugName && expression && metricDomain.trim());
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.createMetric({ name: slugName, label: label.trim() || titleCase(slugName), description: description.trim(), domain: metricDomain.trim(), sql: expression, type: aggregation, table: relation, ifAbsent: true });
+      if (!result.ok || !result.path) throw new Error(result.error ?? 'The metric could not be saved.');
+      await api.reloadSemanticLayer().catch(() => undefined);
+      onSaved(result.path);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div onClick={() => !busy && onClose()} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.34)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 130 }}>
+      <div role="dialog" aria-modal="true" aria-label="New metric" onClick={(event) => event.stopPropagation()} style={{ width: 'min(560px, calc(100vw - 32px))', maxHeight: 'calc(100vh - 48px)', overflow: 'auto', background: t.appBg, color: t.textPrimary, border: `1px solid ${t.headerBorder}`, borderRadius: 12, padding: 20, display: 'grid', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <b style={{ flex: 1, fontSize: 15 }}>New metric</b>
+          <IconButton t={t} title="Close" onClick={onClose}><XCircle size={15} /></IconButton>
+        </div>
+        <Message text="A metric aggregates one column of one table. It is saved to semantic-layer/metrics as a reviewable file, and Ask and Blocks can use it as soon as it is saved." t={t} />
+        <Field label="Table">
+          <Select value={nodeId} onChange={setNodeId} values={tables.map((node) => node.uniqueId)} labels={Object.fromEntries(tables.map((node) => [node.uniqueId, node.relation ?? node.name]))} t={t} />
+        </Field>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 10 }}>
+          <Field label="Aggregation">
+            <Select value={aggregation} onChange={(value) => setAggregation(value || 'sum')} values={['sum', 'count', 'count_distinct', 'avg', 'min', 'max']} labels={{ sum: 'Sum', count: 'Count rows', count_distinct: 'Count distinct', avg: 'Average', min: 'Minimum', max: 'Maximum' }} t={t} />
+          </Field>
+          <Field label={aggregation === 'count' ? 'Column (optional)' : 'Column'}>
+            <Select value={column} onChange={setColumn} values={columns.map((item) => item.name)} labels={Object.fromEntries(columns.map((item) => [item.name, item.type ? `${item.name} (${item.type})` : item.name]))} t={t} />
+          </Field>
+        </div>
+        <Field label="Metric name"><Input value={name} onChange={setName} t={t} placeholder="total_revenue" /></Field>
+        <Field label="Label"><Input value={label} onChange={setLabel} t={t} placeholder="Total revenue" /></Field>
+        <Field label="What it measures"><Input value={description} onChange={setDescription} t={t} placeholder="Sum of order amounts, before refunds." /></Field>
+        <Field label="Domain"><Input value={metricDomain} onChange={setMetricDomain} t={t} placeholder="sales" /></Field>
+        {relation && expression ? <code style={{ fontSize: 11, color: t.textSecondary }}>{`${aggregation === 'count_distinct' ? 'COUNT(DISTINCT ' : `${aggregation.toUpperCase()}(`}${expression}) FROM ${relation}`}</code> : null}
+        {error ? <p role="alert" style={{ margin: 0, color: 'var(--status-error)', fontSize: 11.5 }}>{error}</p> : null}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <Button t={t} onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button t={t} primary onClick={() => void save()} disabled={!ready || busy}>{busy ? 'Saving…' : 'Save metric'}</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function titleCase(value: string): string {
+  return value.split('_').filter(Boolean).map((part) => `${part[0]!.toUpperCase()}${part.slice(1)}`).join(' ');
+}

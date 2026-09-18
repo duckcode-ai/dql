@@ -3,14 +3,14 @@
 | Field | Value |
 |---|---|
 | **Author(s)** | @KKranthi6881 |
-| **Status** | Accepted — Phase 1 implemented |
+| **Status** | Accepted — Phases 1–3 implemented |
 | **Created** | 2026-09-18 |
 | **Targets** | DQL 1.18.x |
 | **Discussion** | — |
-| **Implementation** | Phase 1: `packages/dql-core/src/manifest/warehouse-catalog.ts`, `apps/cli/src/warehouse-catalog-sync.ts` (see *As built*) |
+| **Implementation** | `packages/dql-core/src/manifest/warehouse-catalog.ts`, `apps/cli/src/warehouse-catalog-sync.ts`, `apps/cli/src/warehouse-model-discovery.ts` (see *As built*) |
 | **Supersedes** | — |
 
-## As built (Phase 1, 2026-09-18)
+## As built (Phases 1–3, 2026-09-18)
 
 The implementation keeps the design's intent and reuses more of what exists.
 Where it differs from the sections below, this list is authoritative:
@@ -52,10 +52,53 @@ Where it differs from the sections below, this list is authoritative:
    default package. It uses the CLI's own `better-sqlite3` and opens a
    database file read-only.
 
-Compatibility was checked the way *Backward compatibility* requires: every
-CLI fixture's compiled manifest and compile output are byte-identical to the
-build before this work, and the golden Ask replays pass without
-re-recording.
+7. **Drafting (Phase 2)** — `dql model discover` / `apply-discovery`, and
+   Modeling → Draft from warehouse:
+   - entities: grain from a declared primary key, or from a naming key such
+     as `id` or `<table>_id` that `--validate` shows unique;
+   - joins: from declared foreign keys, view SQL and naming conventions,
+     with each piece of evidence cited;
+   - `--validate`: checks each join with Validate's one statement
+     (aggregates only) and proposes the cardinality it saw.
+
+   In the UI the drafts open as an ordinary reviewable proposal, with origin
+   `warehouse_discovery`. The runtime builds that proposal itself, so
+   warehouse evidence never comes from the browser. The setup wizard's step 1
+   and an unconfigured Modeling page offer "model my warehouse without dbt"
+   (`POST /api/modeling/warehouse/enable`).
+8. **Key types.** Relationship validation reads the key columns' types from
+   the warehouse catalog, the same source the compiler uses. Without this, a
+   certified warehouse join could never become automatic for Ask.
+9. **Depth (Phase 3):**
+   - *Extractors:* Databricks (Unity Catalog `information_schema`,
+     informational keys) and BigQuery (per-dataset `INFORMATION_SCHEMA`,
+     descriptions from `TABLE_OPTIONS` and `COLUMN_FIELD_PATHS`,
+     single-column foreign keys). Both are unit-tested against rows shaped
+     like their `information_schema` output, but not yet run against a live
+     account. BigQuery's connector is still outside the default connector
+     package, so its extractor takes effect when that connector ships.
+   - *Query-history evidence* is opt-in: `--query-history`, or "Use query
+     history" in Modeling. It reads Snowflake `QUERY_HISTORY`, PostgreSQL
+     `pg_stat_statements`, Databricks `system.query.history` and BigQuery
+     `JOBS_BY_PROJECT`. Query text is parsed in memory and dropped; only
+     join pairs and counts are kept, and a join seen fewer than twice is
+     ignored.
+   - *Drift:* each re-sync compares the new catalog with the previous one.
+     It reports added and removed tables and columns and type changes, and
+     names the entities and joins they touch (CLI, Settings). The compiler
+     already stops a changed certified join from being automatic.
+   - *Native metrics:* Modeling → New metric writes a DQL semantic-layer
+     metric: an aggregation of one catalog column. The endpoint now writes
+     YAML with a serializer and refuses to replace an existing metric when
+     asked.
+
+Compatibility was checked the way *Backward compatibility* requires, after
+each phase:
+- every CLI fixture's compiled manifest and compile output are byte-identical
+  to the build before this work;
+- the golden Ask replays pass without re-recording;
+- a dbt project's Modeling page and APIs show no warehouse controls or
+  fields (checked in the browser).
 
 ## Summary
 

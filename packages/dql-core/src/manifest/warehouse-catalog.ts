@@ -148,3 +148,67 @@ export function resolveWarehouseRelation(
   }
   return {};
 }
+
+/** What changed in the warehouse between two catalog snapshots. */
+export interface WarehouseCatalogDrift {
+  addedRelations: string[];
+  removedRelations: string[];
+  /** `relation.column` */
+  addedColumns: string[];
+  /** `relation.column` */
+  removedColumns: string[];
+  /** `relation.column: before → after` */
+  changedColumnTypes: string[];
+  /** Relation ids whose columns or existence changed. */
+  changedRelationIds: string[];
+}
+
+/**
+ * Compare two snapshots. Relations match by id and columns by name, both
+ * ignoring case; a column type change counts only when both sides report a
+ * type.
+ */
+export function diffWarehouseCatalogs(
+  previous: Pick<WarehouseCatalogSnapshotV1, 'relations'> | undefined,
+  next: Pick<WarehouseCatalogSnapshotV1, 'relations'>,
+): WarehouseCatalogDrift {
+  const drift: WarehouseCatalogDrift = { addedRelations: [], removedRelations: [], addedColumns: [], removedColumns: [], changedColumnTypes: [], changedRelationIds: [] };
+  if (!previous) return drift;
+  const before = new Map(previous.relations.map((relation) => [relation.id, relation]));
+  const after = new Map(next.relations.map((relation) => [relation.id, relation]));
+  const changed = new Set<string>();
+  for (const [id, relation] of after) {
+    const old = before.get(id);
+    if (!old) {
+      drift.addedRelations.push(relation.relation);
+      continue;
+    }
+    const oldColumns = new Map(old.columns.map((column) => [column.name.toLowerCase(), column]));
+    const newColumns = new Map(relation.columns.map((column) => [column.name.toLowerCase(), column]));
+    for (const [name, column] of newColumns) {
+      const was = oldColumns.get(name);
+      if (!was) {
+        drift.addedColumns.push(`${relation.relation}.${column.name}`);
+        changed.add(id);
+      } else if (was.type && column.type && was.type.toLowerCase() !== column.type.toLowerCase()) {
+        drift.changedColumnTypes.push(`${relation.relation}.${column.name}: ${was.type} → ${column.type}`);
+        changed.add(id);
+      }
+    }
+    for (const [name, column] of oldColumns) {
+      if (!newColumns.has(name)) {
+        drift.removedColumns.push(`${relation.relation}.${column.name}`);
+        changed.add(id);
+      }
+    }
+  }
+  for (const [id, relation] of before) {
+    if (!after.has(id)) {
+      drift.removedRelations.push(relation.relation);
+      changed.add(id);
+    }
+  }
+  drift.changedRelationIds = [...changed].sort();
+  for (const list of [drift.addedRelations, drift.removedRelations, drift.addedColumns, drift.removedColumns, drift.changedColumnTypes]) list.sort();
+  return drift;
+}
