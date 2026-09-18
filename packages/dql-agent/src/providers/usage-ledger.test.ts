@@ -32,3 +32,9 @@ describe('the provider usage ledger', () => {
     expect(JSON.stringify(lines[0])).not.toContain('SELECT 1');
   });
 });
+
+describe('local models', () => {
+  it('reads Ollama token counts', () => {
+    expect(extractProviderUsage('ollama', { prompt_eval_count: 11800, eval_count: 640 })).toEqual({ inputTokens: 11800, outputTokens: 640 });
+  });
+});

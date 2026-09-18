@@ -70,6 +70,12 @@ export function extractProviderUsage(provider: ProviderName, body: unknown): Pro
       ...(thoughts ? { reasoningTokens: thoughts } : {}),
     };
   }
+  if (provider === 'ollama') {
+    // A local model costs nothing per token; the counts still show whether a
+    // prompt fitted the context window.
+    if (count(reply.prompt_eval_count) === undefined) return undefined;
+    return { inputTokens: reply.prompt_eval_count, outputTokens: count(reply.eval_count) ?? 0 };
+  }
   return undefined;
 }
 

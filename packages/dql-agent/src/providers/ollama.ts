@@ -4,6 +4,23 @@ import type {
   ProviderRunOptions,
 } from './types.js';
 import { fetchProviderHttpDispatch } from './dispatch.js';
+import { DEFAULT_MAX_OUTPUT_TOKENS } from './types.js';
+
+/**
+ * THE CONTEXT WINDOW A CALL NEEDS. Ollama serves a model with its own default
+ * window (often 4k–8k tokens) unless the request names one, and a longer
+ * prompt is cut without an error: an Ask reading (about 12k tokens of
+ * governed vocabulary) lost its question. The window is sized from the prompt
+ * (about 3 characters per token, generous for code and identifiers) plus the
+ * reply budget, rounded up to 4k, at least 8k and at most
+ * OLLAMA_NUM_CTX_MAX (default 65,536), since a larger window costs memory.
+ */
+export function ollamaContextWindow(messages: AgentMessage[], numPredict: number, env: NodeJS.ProcessEnv = process.env): number {
+  const chars = messages.reduce((sum, message) => sum + message.content.length, 0);
+  const needed = Math.ceil(chars / 3) + numPredict + 512;
+  const ceiling = Number(env.OLLAMA_NUM_CTX_MAX) > 0 ? Number(env.OLLAMA_NUM_CTX_MAX) : 65_536;
+  return Math.min(ceiling, Math.max(8192, Math.ceil(needed / 4096) * 4096));
+}
 
 /**
  * Local Ollama provider — talks to a local Ollama daemon on
@@ -44,9 +61,13 @@ export class OllamaProvider implements AgentProvider {
             messages: messages.map((m) => ({ role: m.role, content: m.content })),
             stream: false,
             think: false,
+            // A caller that asks for a structured reply gets JSON mode, so a
+            // local model cannot answer in prose around the object.
+            ...(options.responseJsonSchema ? { format: 'json' } : {}),
             options: {
               temperature: options.temperature ?? 0.2,
-              num_predict: options.maxTokens ?? 1024,
+              num_predict: options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+              num_ctx: ollamaContextWindow(messages, options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS),
             },
           },
           url: `${baseUrl}/api/chat`,
@@ -92,7 +113,7 @@ export class OllamaProvider implements AgentProvider {
             messages: messages.map((m) => ({ role: m.role, content: m.content })),
             stream: true,
             think: false,
-            options: { temperature: options.temperature ?? 0.2, num_predict: options.maxTokens ?? 1024 },
+            options: { temperature: options.temperature ?? 0.2, num_predict: options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, num_ctx: ollamaContextWindow(messages, options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS) },
           },
           url: `${baseUrl}/api/chat`,
           init: {
