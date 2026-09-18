@@ -22774,8 +22774,17 @@ export function askDispatchReasoningEffort(
   provider: ProviderId | undefined,
 ): ReasoningEffort {
   const isRepair = purpose === 'repair';
+  // The reading is the slowest call of an Ask turn (on the Anthropic API about
+  // 17 s of a 27 s question, most of it thinking). An operator may set its
+  // effort apart from SQL drafting, which stays at the authoring effort:
+  // DQL_ASK_READING_EFFORT=low|medium|high. The request's own choice and the
+  // provider's Settings ceiling still apply.
+  const readingOverride = (purpose === 'resolve' || purpose === 'correct') && isReasoningEffortSetting(process.env.DQL_ASK_READING_EFFORT) && process.env.DQL_ASK_READING_EFFORT !== 'auto'
+    ? process.env.DQL_ASK_READING_EFFORT as ReasoningEffort
+    : undefined;
   const requested = request.reasoningEffort
-    ?? (request.thinkingMode ? resolveThinkingMode(request.thinkingMode).reasoningEffort : undefined);
+    ?? (request.thinkingMode ? resolveThinkingMode(request.thinkingMode).reasoningEffort : undefined)
+    ?? readingOverride;
   // Writing a SQL statement is authoring, the `sql_cell` effort: in the golden
   // suite a medium-effort draft joined order costs onto order items and
   // counted each cost once per item. Reading the question stays at the route's

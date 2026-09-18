@@ -46,6 +46,23 @@ describe('reasoning effort for Ask provider calls', () => {
     expect(askDispatchReasoningEffort(root, 'repair', {}, 'claude-code')).toBe('low');
     expect(askDispatchReasoningEffort(root, 'resolve', { reasoningEffort: 'high' }, 'claude-code')).toBe('low');
   });
+
+  it('DQL_ASK_READING_EFFORT sets the reading apart from SQL drafting; the request and the ceiling still win', () => {
+    const root = projectWithCeiling();
+    roots.push(root);
+    const previous = process.env.DQL_ASK_READING_EFFORT;
+    process.env.DQL_ASK_READING_EFFORT = 'low';
+    try {
+      expect(askDispatchReasoningEffort(root, 'resolve', {}, 'claude-code')).toBe('low');
+      expect(askDispatchReasoningEffort(root, 'correct', {}, 'claude-code')).toBe('low');
+      expect(askDispatchReasoningEffort(root, 'draft', {}, 'claude-code')).toBe('high');
+      expect(askDispatchReasoningEffort(root, 'resolve', { reasoningEffort: 'medium' }, 'claude-code')).toBe('medium');
+      process.env.DQL_ASK_READING_EFFORT = 'nonsense';
+      expect(askDispatchReasoningEffort(root, 'resolve', {}, 'claude-code')).toBe('medium');
+    } finally {
+      if (previous === undefined) delete process.env.DQL_ASK_READING_EFFORT; else process.env.DQL_ASK_READING_EFFORT = previous;
+    }
+  });
 });
 
 describe('an Ask request sends a reasoning effort on every provider call', () => {
