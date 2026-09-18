@@ -379,7 +379,13 @@ published run, App Autopilot, Ask about this chart, and MCP.
 2. **Filter scope.** A filter with `scope.app` keeps its value across pages
    only between pages that both declare that id with `scope.app`. A
    page-scoped filter does not travel. Navigation carries only the filter
-   ids named in `carryFilters`.
+   ids named in `carryFilters`. A carried filter with no page value takes
+   the values of a mark the reader clicked on the navigating tile, but only
+   when that filter is bound, on the tile's Dataset, to the field the mark
+   came from (`APP-078`); an App-scoped carried value becomes the App value.
+   Filter options for a Dataset-bound filter are the bound field's distinct
+   values, read through the governed Dataset runtime
+   (`POST /api/app-datasets/field-values`).
 3. **Unbound and incompatible filters.** A page filter with no
    `datasetBindings` entry for a tile's Dataset leaves that tile running and
    reports `FILTER_MAPPING_MISSING` ("<filter> is not mapped to <Dataset>").
@@ -462,8 +468,10 @@ Implementation notes:
   `include_review_required` source policy. Governed-only preview and Project
   publication refuse them (`APP-058`).
 - The runtime returns `{ outcome, adaptations }` on every Dataset tile
-  (`tile.dataset.validation`). App Studio does not yet show the adaptation
-  message or a "derived" trust label; that is tracked as an open item.
+  (`tile.dataset.validation`). Studio and the published viewer disclose each
+  adaptation next to the result through the shared `datasetTileNotices()`,
+  and the builder's live preview shows it before the tile is added. A
+  separate "derived" trust label is not shown yet.
 
 ### Ownership
 
@@ -671,6 +679,8 @@ New IDs for decisions this RFC locks:
 | `APP-075` | Parity with independent SQL and across block and semantic routes |
 | `APP-076` | Committed M1 pilot App compiles without drift and runs from a clean checkout |
 | `APP-077` | Apps published before Datasets run and republish unchanged |
+| `APP-078` | Detail navigation carries a clicked mark into a carried filter bound to the same field; Dataset filters list their bound field's values |
+| `APP-079` | Field tiles can be turned on from Studio or the viewer in one action (`POST /api/app-datasets/enable`); the `APP-007` gate is unchanged |
 
 All are recorded in
 [`00-decisions.md`](../specs/dql-2-domain-context/00-decisions.md) and

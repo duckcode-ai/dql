@@ -3556,6 +3556,15 @@ describe('Dataset App Builder real DuckDB pilot', () => {
       expect(lines.status, lines.error).toBe('ok');
       expect(lines.result.rows.map((row: any) => row.order_line_id)).toEqual(['OL-004', 'OL-006', 'OL-007']);
       expect(new Set(lines.result.rows.map((row: any) => row.region))).toEqual(new Set(['CA']));
+
+      // The shared filter's options come from the bound Dataset field through
+      // the governed runtime, not from whichever tiles happened to run.
+      const blockDataset = all.body.tiles.find((tile: any) => tile.title === 'Revenue').dataset;
+      const options = await request(base, '/api/app-datasets/field-values', 'POST', { sourceId: blockDataset.sourceId, field: 'region' });
+      expect(options.status, options.text).toBe(200);
+      expect(options.body).toMatchObject({ ok: true, values: ['CA', 'US'], truncated: false });
+      const unknownField = await request(base, '/api/app-datasets/field-values', 'POST', { sourceId: blockDataset.sourceId, field: 'net_amount_raw' });
+      expect(unknownField.status).toBe(400);
     } finally {
       await pilot.stop();
     }
@@ -3636,6 +3645,32 @@ describe('Dataset App Builder real DuckDB pilot', () => {
       await pilot.stop();
     }
   }, 120_000);
+
+  duckDbIt('APP-079 turns field tiles on with one action and keeps every other config key', async () => {
+    const pilot = await startPilotProject('dql-app-datasets-enable-');
+    try {
+      const { projectRoot } = pilot;
+      const configPath = join(projectRoot, 'dql.config.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+      delete config.apps.datasets;
+      writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+      // The runtime reads the flag it loaded; restart onto the edited config.
+      await pilot.restart();
+      const refused = await request(pilot.base, '/api/apps/commerce-pilot/dashboards/overview/run', 'POST', { fullRun: true });
+      expect(findTile(refused.body.tiles, 'Revenue')).toMatchObject({ status: 'error', error: expect.stringContaining('APP_DATASETS_FEATURE_DISABLED') });
+
+      const enabled = await request(pilot.base, '/api/app-datasets/enable', 'POST', {});
+      expect(enabled.status, enabled.text).toBe(200);
+      expect(enabled.body).toEqual({ ok: true, datasets: true });
+      const written = JSON.parse(readFileSync(configPath, 'utf-8'));
+      expect(written).toEqual({ ...config, apps: { ...config.apps, datasets: true } });
+
+      const ran = await request(pilot.base, '/api/apps/commerce-pilot/dashboards/overview/run', 'POST', { fullRun: true });
+      expect(findTile(ran.body.tiles, 'Revenue')).toMatchObject({ status: 'ok', result: { rows: [{ revenue: 130 }] } });
+    } finally {
+      await pilot.stop();
+    }
+  }, 120_000);
 });
 
 async function startPilotProject(prefix: string) {
@@ -3650,21 +3685,27 @@ async function startPilotProject(prefix: string) {
   mkdirSync(projectConnectorRoot, { recursive: true });
   symlinkSync(join(connectorRoot, 'node_modules'), join(projectConnectorRoot, 'node_modules'), 'dir');
   execFileSync(process.execPath, [seedWarehouse, '--seed', join(projectRoot, 'seeds', 'seed.json'), '--connector-root', connectorRoot, '--out', databasePath], { stdio: 'pipe' });
-  const port = await startLocalServer({
+  const start = async () => `http://127.0.0.1:${await startLocalServer({
     rootDir: projectRoot, projectRoot, executor, connection, preferredPort: 0,
     captureServer: (created) => { server = created; },
-  });
-  return {
-    base: `http://127.0.0.1:${port}`,
+  })}`;
+  const pilot = {
+    base: await start(),
     executor,
     connection,
     projectRoot,
+    restart: async () => {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+      await executor.disconnect();
+      pilot.base = await start();
+    },
     stop: async () => {
       await new Promise<void>((done) => server ? server.close(() => done()) : done());
       await executor.disconnect();
       rmSync(projectRoot, { recursive: true, force: true });
     },
   };
+  return pilot;
 }
 
 async function createDraftAndCandidates(base: string, name: string) {
