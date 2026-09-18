@@ -162,6 +162,45 @@ an acceptance-matrix update.
 | E2E-017 | Release proves App query-generation, semantic-execution, and draft-analysis repair parity with Ask/Notebook, including one-attempt bounds, same-target execution, immutable evidence, access/policy refusal, semantic trust downgrade, and unchanged successful paths in the built CLI. |
 | E2E-021 | Release proves all-draft AI and manual late-position search, duplicate-name identity, filters, restart-safe receipts, source drift, provider fallback, explicit gap review, and publication blocking through the built `dql notebook` CLI. |
 
+## App datasets and tile queries
+
+These decisions come from
+[RFC 0007](../../rfcs/0007-datasets-and-tile-queries.md). The code and tests
+already cite the `APP-0xx` and `M4-*` IDs; the `M4-*` spellings are kept as
+they are because the code cites them. `APP-068`–`APP-073` are new IDs for
+decisions that no earlier ID covered. `APP-018`, `APP-030`, and `APP-047` are
+presentation or recovery requirements, so they are recorded only in the
+acceptance matrix.
+
+| ID | Decision |
+| -- | -------- |
+| APP-007 | Field-based Dataset tiles are an explicit local project opt-in (`apps.datasets` in `dql.config.json`, off by default). The catalog reports the feature state, and compose, AI authoring, run, save-as-block, replace, and conversion refuse with a typed `*_DISABLED` error while it is off. |
+| APP-031 | An App tile may be a declarative `TileQuery` over exactly one block-backed or semantic-backed Dataset. It is persisted atomically with its `.dqld` v3 Dataset binding (source id, revision, snapshot, contract fingerprint). SQL is compiled on every run, and the tile engine never joins two Datasets. |
+| APP-034 | Dataset source and field drift is detected at compile time (`APP_DATASET_SOURCE_DRIFT`, `APP_DATASET_FIELD_DRIFT`) and again against the live source at run time. A drifted tile never runs against a changed contract. |
+| APP-041 | Page filters reach a Dataset only through `datasetBindings`, and cross-filters only through a declared mapping from an exact source-qualified tile output. Filters and cross-filters never match by field name. A v3 page's Dataset, filter, tile, and interaction references are validated when it is parsed and compiled. |
+| APP-055 | Dataset source authoring (native grain, keys, time roles, calculated measures) produces a hash-bound source proposal from exact approved physical fields. It never declares additivity silently, never changes source trust, and never changes an App's Dataset binding. |
+| APP-056 | Rebinding an App to a changed Dataset source revision or contract requires the explicit review source policy and current server authority. It rewrites the whole App binding graph atomically and marks rebound tiles `review_required`. |
+| APP-057 | Rolling an aggregate Dataset above its declared grain requires run-owned, target-bound component evidence computed in the same read scope as the tile query. An unsafe distinct rollup is refused, and superseded or late proofs never become current evidence. |
+| APP-058 | A review-lifecycle Dataset may produce local preview evidence only under the App's explicit `include_review_required` source policy. Governed-only preview and Project publication refuse it. |
+| APP-060 | A period comparison is explicit `TileQuery.comparison` state (time field, IANA timezone, calendar, grain, completeness policy, start-inclusive/end-exclusive periods). It executes through the governed period graph and is never inferred from a title or a date control. |
+| APP-061 | A hierarchy drill follows a declared Dataset hierarchy one level at a time as run-local view state. It never mutates the saved query, and returning restores the parent scope. |
+| APP-062 | Measure filters apply after aggregation (`HAVING`). On the semantic route, only adapters that advertise `having` support accept them; the others refuse. |
+| APP-064 | An explicit uncovered App requirement stays a visible gap. The explicit gap action routes it to an immutable, typed, review-required Dataset draft proposal and never to a SQL tile. |
+| APP-065 | App Autopilot prepares Dataset changes from one fresh server-held preview, pins them to the exact source, and applies them atomically under revision and hash guards. Stale, foreign, late, or post-restart context is refused. |
+| APP-066 | Ask about this chart is available only for a settled Dataset run. It uses server-issued current run context only (App, page, tile, run scope, source, fingerprints, persona). A newer run in that viewer scope, or an authored change, revokes the answer, and the answer is never publication evidence. |
+| APP-067 | MCP and HTTP Dataset tools run typed TileQueries through the governed App runtime. They accept only `sourceId`, `query`, and `parameters` (no raw SQL) and return ephemeral results that never become App run, story, or publication evidence. |
+| APP-068 | Every TileQuery validates to one C8 outcome (`covered`, `adapted`, `needs_review`, `rejected`) as tabled in RFC 0007. Only `covered` and `adapted` execute. The implemented adaptations are `aggregate_time_rollup` and `aggregate_entity_rollup`, and each is disclosed on the receipt. A derived tile inherits and displays its Dataset's trust and is never certified itself. Execution never changes an outcome or a lifecycle. |
+| APP-069 | Tile time grains are a closed vocabulary: `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`. Any other grain, in a query or in a Dataset's declared `timeGrain`, is rejected as `INVALID_TIME_GRAIN` and is never interpolated into SQL. |
+| APP-070 | Dataset tiles compile only for `duckdb`, `file`, `postgresql`, `redshift`, `snowflake`, and `bigquery`. Other drivers refuse with `DATASET_DIALECT_UNSUPPORTED`. A dialect is added only together with a golden SQL test. BigQuery `contains` escapes with a backslash because BigQuery has no `ESCAPE` clause. |
+| APP-071 | A `relative_date` preset (`last_N_days`, `today`, `yesterday`, `month_to_date`, `quarter_to_date`, `year_to_date`) resolves to an inclusive calendar range ending today in the filter's timezone and is then exactly a date range (start-inclusive, end-exclusive, local-midnight boundaries that stay correct across daylight saving). Timestamp fields require a declared IANA timezone; date fields default to UTC. |
+| APP-072 | Result-cache, promotion, and equivalence identities include the active persona policy fingerprint (App id, user id, roles, RLS context, attributes), not just the App id. A persona change refuses save, replace, conversion, and chart answers that rely on an earlier run. |
+| APP-073 | Save-as-block converts each positional parameter of the settled executed statement into a named `${…}` reference with a typed `params { }` default holding the value the result ran with. Anonymous placeholders, missing values, and non-scalar values refuse the save. |
+| M4-CACHE-01 | The Dataset result cache is local, opt-in (`apps.datasetResultCache.enabled`), bounded, and keyed by the complete identity: Dataset, revision, contract, snapshot, target, normalized query, filter, parameter, interaction, dialect, adapter, compiler, row bound, and persona. It stores only complete ordinary physical Dataset results and labels each delivery. |
+| M4-CACHE-02 | A cached delivery has no authority. It carries no executed SQL or execution provenance and cannot bind a preview or publication receipt, save, replace, or prove equivalence. Aggregate proofs, comparisons, and partial runs never use it, and Refresh always executes live. |
+| M4-PROM-01 | Saving a Dataset tile as a block needs a settled, complete, live result. It creates a `draft` block under `blocks/_drafts/` carrying `dataset_tile_provenance` and leaves the tile unchanged. A period comparison cannot be saved as one block. |
+| M4-REPL-01 | Replacing a tile with its saved review block is a separate explicit action. It requires current guards and a same-read-scope equivalence proof (DuckDB only today) and leaves a `review_required` block tile. |
+| M4-CONV-01 | Legacy semantic → Dataset conversion is an explicit, server-owned proposal. Preview and accept each prove equivalence in one fresh read scope and preserve identity and provenance. It never happens on open or on migration. |
+
 ## Amendments
 
 Recorded amendments to earlier locked decisions. Each states what changed, why,

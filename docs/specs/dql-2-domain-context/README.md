@@ -4,8 +4,9 @@ Status: **accepted for implementation**
 RFCs: [RFC 0002](../../rfcs/0002-dbt-first-domain-modeling.md),
 [RFC 0003](../../rfcs/0003-domain-context-and-shared-products.md), and
 [RFC 0004](../../rfcs/0004-plan-first-governed-answer-engine.md), amended by
-[RFC 0005](../../rfcs/0005-analytical-composition-and-transparent-repair.md)
-and [RFC 0006](../../rfcs/0006-ask-agent-runtime-v2.md)
+[RFC 0005](../../rfcs/0005-analytical-composition-and-transparent-repair.md),
+[RFC 0006](../../rfcs/0006-ask-agent-runtime-v2.md), and
+[RFC 0007](../../rfcs/0007-datasets-and-tile-queries.md) (App Datasets and tile queries)
 Integration branch: `codex/dql-2-dbt-first-modeling`
 
 This directory is the implementation truth for the unified DQL 2.0 domain
@@ -36,9 +37,12 @@ through review before continuing.
 ## Stable requirement IDs
 
 Requirements use these immutable prefixes: `SPEC`, `CFG`, `ID`, `DOM`, `PRD`,
-`REL`, `CONTRACT`, `SKILL`, `CTX`, `AGT`, `API`, `UI`, `MIG`, `PERF`, `SEC`, and
-`E2E`, and `OBS`. An ID is never reused or renumbered. Superseded requirements remain in
-the matrix with a pointer to their replacement.
+`REL`, `CONTRACT`, `SKILL`, `CTX`, `AGT`, `API`, `UI`, `MIG`, `PERF`, `SEC`,
+`E2E`, `OBS`, and `APP` (App Datasets and tile queries, RFC 0007). The
+milestone-scoped `M4-CACHE-*`, `M4-PROM-*`, `M4-REPL-*`, and `M4-CONV-*` IDs
+from RFC 0007 are kept as spelled because code and tests cite them; new App
+requirements use `APP-0xx`. An ID is never reused or renumbered. Superseded
+requirements remain in the matrix with a pointer to their replacement.
 
 ## Verification rule
 
