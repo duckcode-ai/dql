@@ -27,8 +27,10 @@ describe('App Studio 2.0 styles (UI-022, E2E-020)', () => {
   });
 
   it('uses one focused AI source review before the canvas is generated', () => {
-    expect(APP_STUDIO_V2_STYLES).toContain('.dql-studio-v2.proposal-focus');
-    expect(APP_STUDIO_V2_STYLES).toContain('.proposal-focus .studio-workspace');
+    // The plan docks beside the canvas, which draws the proposed tiles.
+    expect(APP_STUDIO_V2_STYLES).not.toContain('.proposal-focus');
+    expect(APP_STUDIO_V2_STYLES).toContain('.studio-plan-pane {');
+    expect(APP_STUDIO_V2_STYLES).toContain('.proposal-tile {');
     expect(APP_STUDIO_V2_STYLES).toContain('.studio-ai-plan {');
     expect(APP_STUDIO_V2_STYLES).toContain('.proposal-source-picker');
     expect(APP_STUDIO_V2_STYLES).toContain('.proposal-source-list');

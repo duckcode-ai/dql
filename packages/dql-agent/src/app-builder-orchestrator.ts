@@ -184,6 +184,14 @@ export async function planAppBuildBrief(input: PlanAppBuildBriefInput): Promise<
   } catch (error) {
     throw new Error(`APP_BUILD_PLANNER_PROVIDER_FAILED: the configured App Builder provider did not return a build brief. ${error instanceof Error ? error.message : String(error)}`);
   }
+  // A host hook that finds no configured provider declines with undefined.
+  // That is "no planner configured", not a malformed answer: plan offline.
+  if (completion === undefined) {
+    return ensureAppBuildStructure(
+      ensureRequiredSources(deterministicBrief(input, candidates), candidates, requiredSourceIds),
+      candidates,
+    );
+  }
   const raw = typeof completion === 'string' ? completion : completion?.content;
   const providerId = typeof completion === 'string'
     ? undefined

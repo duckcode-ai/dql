@@ -95,14 +95,6 @@ export const APP_STUDIO_V2_STYLES = `
 
 .dql-studio-v2 { position:relative; display:grid; grid-template-columns:272px minmax(0,1fr) auto; grid-template-rows:52px minmax(0,1fr); overflow:hidden; }
 .studio-topbar { grid-column:1/4; height:58px; border-bottom:1px solid var(--border-subtle); background:var(--bg-2); display:grid; grid-template-columns:300px minmax(200px,1fr) auto; align-items:center; z-index:6; }
-.dql-studio-v2.proposal-focus { grid-template-columns:minmax(0,1fr); }
-.proposal-focus .studio-topbar { grid-column:1; grid-template-columns:300px minmax(260px,1fr) 300px; }
-.proposal-focus .studio-workspace { grid-column:1; grid-row:2; padding:clamp(18px,3vw,42px); }
-.proposal-focus-title { min-width:0; display:grid; justify-items:center; gap:2px; }
-.proposal-focus-title small { color:var(--accent); font-size:11.5px; font-weight:800; letter-spacing:.1em; }
-.proposal-focus-title strong { font-size:13.5px; }
-.proposal-focus-status { justify-self:end; margin-right:16px; display:flex; align-items:center; gap:6px; color:var(--text-secondary); font-size:12.5px; }
-.proposal-focus-status svg { color:#15803d; }
 .studio-brand { height:100%; display:flex; align-items:center; gap:9px; padding:0 12px; border-right:1px solid var(--border-subtle); }
 .studio-brand .mark { width:29px; height:29px; border-radius:8px; background:var(--accent-dim); color:var(--accent); display:flex; align-items:center; justify-content:center; }
 .studio-brand > div { display:grid; min-width:0; }
@@ -1054,6 +1046,41 @@ export const APP_STUDIO_V2_STYLES = `
 .inspector-footer .primary { margin-left:auto; border:1px solid var(--accent); background:var(--accent); color:var(--accent-fg); font-weight:600; }
 .inspector-footer .primary:disabled { opacity:.45; cursor:not-allowed; }
 
+/* ── AI proposals drawn on the canvas ── */
+.proposal-banner { display:flex; align-items:flex-start; gap:8px; margin:0 0 14px; padding:10px 12px; border:1px solid color-mix(in srgb,var(--accent) 30%,var(--border-default)); border-radius:10px; background:var(--accent-dim); color:var(--text-secondary); font-size:13px; line-height:1.45; }
+.proposal-banner svg { flex:none; margin-top:2px; color:var(--accent); }
+.proposal-banner strong { color:var(--accent); font-weight:600; }
+.proposal-banner.warn { border-color:color-mix(in srgb,#d97706 45%,var(--border-default)); background:color-mix(in srgb,#d97706 7%,var(--bg-2)); }
+.proposal-tile { border:1.5px dashed var(--accent) !important; background:color-mix(in srgb,var(--accent-dim) 45%,var(--bg-2)) !important; cursor:default !important; }
+.proposal-badge { flex:none; padding:3px 7px; border-radius:5px; background:var(--accent); color:var(--accent-fg); font-size:11px; font-weight:700; letter-spacing:.05em; }
+.proposal-badge.updated, .proposal-badge.link { background:var(--accent-dim); color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent); }
+.proposal-badge.removed { background:color-mix(in srgb,#dc2626 10%,var(--bg-2)); color:#b91c1c; }
+.proposal-was { color:var(--text-tertiary); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.studio-component-card.proposal-linked { border:1.5px dashed var(--accent); }
+.studio-component-card.proposal-removed { opacity:.5; border-style:dashed; }
+.has-proposal .studio-component-card:not(.proposal-tile) { cursor:default; }
+.page-nav > button.proposed-page { border:1px dashed color-mix(in srgb,var(--accent) 50%,var(--border-default)); color:var(--accent); }
+.page-nav .change-dot { display:inline-block; width:6px; height:6px; margin-left:6px; border-radius:50%; background:var(--accent); vertical-align:middle; }
+.studio-plan-pane { width:420px; overflow-y:auto; }
+.studio-plan-pane .studio-ai-plan { border:0; border-radius:0; box-shadow:none; background:transparent; margin:0; max-width:none; }
+.studio-plan-pane .studio-ai-plan > header { padding:16px 16px 10px; grid-template-columns:28px minmax(0,1fr) 30px; gap:10px; }
+.studio-plan-pane .studio-ai-plan > header h1 { font-size:16px; margin:2px 0 4px; }
+.studio-plan-pane .studio-ai-plan > header p { font-size:13px; line-height:1.45; margin:0; }
+.studio-plan-pane .proposal-source-summary { padding:0 16px 10px; flex-wrap:wrap; gap:6px; }
+.studio-plan-pane .proposal-source-body { padding:0 16px 16px; }
+.studio-plan-pane .proposal-source-row, .studio-plan-pane .proposal-catalog-list > article { grid-template-columns:32px minmax(0,1fr); }
+.studio-plan-pane .proposal-source-row > button, .studio-plan-pane .proposal-catalog-list > article > button { grid-column:2; justify-self:start; }
+.studio-plan-pane .studio-ai-plan > footer { position:sticky; bottom:0; z-index:2; display:grid; grid-template-columns:1fr 2fr; gap:8px; padding:12px 16px; border-top:1px solid var(--border-subtle); background:var(--bg-2); }
+.studio-plan-pane .studio-ai-plan > footer > span { grid-column:1/-1; color:var(--text-tertiary); font-size:12px; }
+.studio-plan-pane .studio-ai-plan > footer button { justify-content:center; height:34px; }
+.studio-ai-activity-docked { padding:28px 20px; display:grid; justify-items:center; gap:10px; text-align:center; }
+.studio-ai-activity-docked > div { display:grid; justify-items:center; gap:8px; }
+.studio-ai-activity-docked .loading-mark { width:44px; height:44px; border-radius:13px; display:grid; place-items:center; color:var(--accent); background:var(--accent-dim); animation:studio-loading-pulse 1.4s ease-in-out infinite; }
+.studio-ai-activity-docked strong { font-size:15px; }
+.studio-ai-activity-docked small { color:var(--text-tertiary); font-size:12.5px; line-height:1.5; }
+.studio-ai-activity-docked .studio-ai-activity-actions button { height:32px; padding:0 12px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); font-size:12.5px; }
+.studio-ai-activity-docked .studio-ai-activity-actions button.primary { border-color:var(--accent); background:var(--accent); color:var(--accent-fg); }
+
 @media (max-width:1240px) {
   .dql-studio-v2 { grid-template-columns:240px minmax(0,1fr) auto; }
   .studio-brand { width:auto; }
@@ -1091,11 +1118,7 @@ export const APP_STUDIO_V2_STYLES = `
 @media (max-width:620px) {
   .dql-app-studio-home .dql-studio-v2-start-card { padding:16px; border-radius:15px; }
   .dql-app-studio-home .dql-studio-v2-intro h1 { font-size:34px; }
-  .proposal-focus .studio-topbar { grid-template-columns:58px minmax(0,1fr); }
-  .proposal-focus .proposal-focus-status { display:none; }
-  .proposal-focus-title { justify-items:start; padding-left:8px; }
-  .proposal-focus .studio-workspace { padding:10px; }
-  .studio-ai-plan { border-radius:14px; }
+          .studio-ai-plan { border-radius:14px; }
   .studio-ai-plan > header, .proposal-source-body, .studio-ai-plan > footer { padding-left:14px; padding-right:14px; }
   .studio-ai-plan > header h1 { font-size:18px; }
   .proposal-source-summary { padding-left:14px; padding-right:14px; }

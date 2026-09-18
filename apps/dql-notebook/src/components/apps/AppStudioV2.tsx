@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties} from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import {
   ArrowLeft, ArrowRight, BarChart3, Blocks, Bot, Check, ChevronDown, Code2, FileText, Filter,
   Gauge, Heading, LayoutDashboard, LineChart, Monitor, MoreHorizontal, PanelRight,
@@ -40,6 +40,8 @@ import { DatasetSourceAuthoringDialog, DatasetSourceRebindReviewDialog } from '.
 import { DatasetTileBuilder } from './builder/DatasetTileBuilder';
 import { DataPanel, type DataPanelTarget } from './builder/DataPanel';
 import { DraftTileCard, DraftTileInspector, type DraftTileState } from './builder/DraftTile';
+import { ProposedTileCard } from './builder/ProposedTile';
+import { projectProposal, type ProposedPage } from './builder/proposal-preview';
 import { EMPTY_TILE_QUERY, autoTileView, defaultTileTitle, tileVisualization, toggleFieldInQuery } from './builder/field-query';
 import { FiltersPanel, mergeStudioDateRanges, linkedComponentCount, type StudioFilterConfiguration } from './builder/GlobalFilterBar';
 import { DatasetInteractionInspector, DatasetTileQueryInspector } from './builder/InteractionLayer';
@@ -66,6 +68,7 @@ import {
   appStudioPlannerProvenanceLabel,
   availableAppStudioProposalSources,
   summarizeAppStudioAiPlan,
+  operationsForSelectedAppStudioSources,
   type AppStudioAiPlanSummary,
 } from './app-studio-ai-plan';
 import {
@@ -299,27 +302,30 @@ export function AppStudioLaunchSurface({
 }
 
 function AppStudioAiActivitySurface({
+  docked = false,
   activity,
   label,
   onBack,
   onReturn,
   onRetry,
 }: {
+  /** In the Studio's right column instead of full screen. */
+  docked?: boolean;
   activity: AppStudioAiActivity;
   label: string;
   onBack: () => void;
   onReturn?: () => void;
   onRetry: () => void;
 }): JSX.Element {
-  return <section className="dql-studio-v2-loading studio-ai-activity" aria-labelledby="studio-ai-activity-title" aria-busy={activity.status === 'running'}>
-    <style>{APP_STUDIO_V2_STYLES}</style>
-    <button type="button" className="icon" onClick={onBack} aria-label="Back to Apps"><ArrowLeft size={18} /></button>
+  return <section className={`${docked ? 'studio-ai-activity-docked' : 'dql-studio-v2-loading'} studio-ai-activity`} aria-labelledby="studio-ai-activity-title" aria-busy={activity.status === 'running'}>
+    {docked ? null : <style>{APP_STUDIO_V2_STYLES}</style>}
+    {docked ? null : <button type="button" className="icon" onClick={onBack} aria-label="Back to Apps"><ArrowLeft size={18} /></button>}
     <div>
       <span className="loading-mark"><Sparkles size={20} /></span>
       {activity.status === 'running' ? <>
-        <strong id="studio-ai-activity-title">Preparing your editable App proposal</strong>
+        <strong id="studio-ai-activity-title">{docked ? 'Drafting a plan' : 'Preparing your editable App proposal'}</strong>
         <small className="studio-ai-activity-label" role="status" aria-live="polite">{label}</small>
-        <small>Sources remain governed or review-required exactly as cataloged. You will review them before the canvas is generated.</small>
+        <small>{docked ? 'Proposed tiles appear on the canvas for you to apply or discard. Sources keep their catalog trust.' : 'Sources remain governed or review-required exactly as cataloged. You will review them before the canvas is generated.'}</small>
       </> : <>
         <strong id="studio-ai-activity-title">The source proposal needs another try</strong>
         <small role="alert">{activity.error ?? 'App Studio could not prepare the source proposal.'}</small>
@@ -417,6 +423,8 @@ export function AppStudioV2({
   const [chosenDatasetKey, setChosenDatasetKey] = useState<string | null>(null);
   /** The Data tab shows one Dataset's fields, or the full governed source catalog. */
   const [dataView, setDataView] = useState<'fields' | 'sources'>('fields');
+  /** Page shown on the canvas while an AI proposal is open (it may be a proposed new page). */
+  const [proposalPageId, setProposalPageId] = useState<string | null>(null);
   /** One AI entry point: compose or revise the page, or change the selected tile. */
   const [aiScope, setAiScope] = useState<'page' | 'tile'>('page');
   /** The tile whose query and compiled SQL are shown inline on the canvas. */
@@ -651,6 +659,9 @@ export function AppStudioV2({
     [catalog, draft?.pages, draft?.sources, runtimeFilterFields],
   );
   const proposalSummary = useMemo(() => proposal ? summarizeAppStudioAiPlan(proposal) : null, [proposal]);
+  useEffect(() => {
+    if (!proposal && !autopilotReview) setProposalPageId(null);
+  }, [proposal, autopilotReview]);
   const publishStepCount = useMemo(
     () => draft ? publicationBlockerCount(draft, publishIssues) : 0,
     [draft, publishIssues],
@@ -2286,15 +2297,6 @@ export function AppStudioV2({
     </div>;
   }
 
-  if (aiActivity) {
-    return <AppStudioAiActivitySurface
-      activity={aiActivity}
-      label={APP_STUDIO_AI_ACTIVITY_LABELS[aiActivityIndex] ?? APP_STUDIO_AI_ACTIVITY_LABELS[0]}
-      onBack={onBack}
-      onReturn={aiActivity.returnToProposal && proposal ? () => setAiActivity(null) : undefined}
-      onRetry={() => retryAiActivity(aiActivity)}
-    />;
-  }
 
   const selectedSourceKind = selectedSource ? recommendedComponentKind(selectedSource) : null;
   const selectedSourceId = selectedSource?.sourceId ?? selectedSource?.id;
@@ -2308,8 +2310,8 @@ export function AppStudioV2({
   }) : '';
 
   const editing = studioView === 'edit';
-  const rightPane: 'none' | 'inspector' | 'settings' | 'ai' | 'draft' = proposal
-    ? 'none'
+  const rightPane: 'none' | 'inspector' | 'settings' | 'ai' | 'draft' | 'proposal' = proposal || aiActivity
+    ? 'proposal'
     : copilotOpen
       ? 'ai'
       : !editing
@@ -2320,6 +2322,21 @@ export function AppStudioV2({
             ? 'inspector'
             : settingsOpen ? 'settings' : 'none';
   const datasetItems = catalog.filter((item) => Boolean(item.capabilities?.dataset));
+  // An open AI proposal (page plan or tile change) is drawn on the canvas.
+  const proposalOperations = proposal
+    ? operationsForSelectedAppStudioSources(proposal, selectedProposalSourceIds)
+    : autopilotReview?.operations ?? null;
+  const projectedPages = proposalOperations ? projectProposal(draft.pages, proposalOperations) : null;
+  const projectedPage: ProposedPage | null = projectedPages
+    ? (proposalPageId ? projectedPages.find((page) => page.id === proposalPageId) : undefined)
+      ?? projectedPages.find((page) => page.id === activePage?.id && page.changeCount > 0)
+      ?? projectedPages.find((page) => page.changeCount > 0)
+      ?? projectedPages.find((page) => page.id === activePage?.id)
+      ?? projectedPages[0]
+      ?? null
+    : null;
+  const proposalChangeCount = projectedPages?.reduce((total, page) => total + page.changeCount, 0) ?? 0;
+  const gridColumns = breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12;
   const datasetItemForSource = (sourceId?: string) => sourceId
     ? datasetItems.find((item) => (item.sourceId ?? item.id) === sourceId) ?? null
     : null;
@@ -2419,16 +2436,42 @@ export function AppStudioV2({
     ['medium', 'Tablet', PanelRight],
     ['narrow', 'Phone', Smartphone],
   ];
+  const renderTile = (tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number], extraClass = '', badge: ReactNode = null) => (
+                <article key={tile.i} role="group" aria-label={`App component: ${tile.title || humanize(tile.i)}`} draggable={editing && !projectedPage} className={`studio-component-card ${extraClass} ${editing && selectedTileId === tile.i ? 'selected' : ''} ${draggingTileId === tile.i ? 'dragging' : ''} ${tile.text ? 'text-tile' : ''}`} style={{ '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: tile.text ? undefined : breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties} onDragStart={() => { draggingTileIdRef.current = tile.i; setDraggingTileId(tile.i); }} onDragEnd={() => { draggingTileIdRef.current = null; setDraggingTileId(null); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void moveTileBefore(tile.i); }} onClick={() => { if (!editing || projectedPage) return; setSelectedTileId(tile.i); setDraftTile(null); setSettingsOpen(false); setCopilotOpen(false); }}>
+                  <header>
+                    {editing ? <span className="drag-handle" aria-hidden="true">⠿</span> : null}
+                    {badge}
+                    <strong>{tile.title || humanize(tile.i)}</strong>
+                    <span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} title={tile.trustState === 'certified' ? 'Certified source' : tile.trustState === 'review_required' ? 'Needs review before publishing' : 'Draft'} />
+                    <div className="tile-tools" onClick={(event) => event.stopPropagation()}>
+                      {editing && tile.sourceId && tile.query ? <button type="button" className={`studio-autopilot-target ${selectedDatasetTile?.i === tile.i ? 'on' : ''}`} aria-pressed={selectedDatasetTile?.i === tile.i} aria-label="Edit with AI" title="Edit with AI" onClick={() => askAiAboutTile(tile.i)}><Sparkles size={13} /></button> : null}
+                      {tile.query ? <button type="button" className={`studio-tile-dql-toggle ${dqlTileId === tile.i ? 'on' : ''}`} aria-pressed={dqlTileId === tile.i} aria-label="View DQL" title="View DQL" onClick={() => setDqlTileId((current) => current === tile.i ? null : tile.i)}><Code2 size={13} /></button> : null}
+                      <button type="button" className="tile-more" aria-label="Tile actions" aria-haspopup="menu" aria-expanded={tileMenuId === tile.i} title="More" onClick={() => setTileMenuId((current) => current === tile.i ? null : tile.i)}><MoreHorizontal size={14} /></button>
+                      {tileMenuId === tile.i ? <div className="tile-menu" role="menu">
+                        {tile.query ? <button type="button" role="menuitem" onClick={() => { setDqlTileId(tile.i); setTileMenuId(null); }}><Code2 size={14} /> View DQL and SQL</button> : null}
+                        {tile.sourceId && tile.query ? <button type="button" role="menuitem" onClick={() => askAiAboutTile(tile.i)}><Sparkles size={14} /> {editing ? 'Change with AI' : 'Ask about this tile'}</button> : null}
+                        {editing ? <button type="button" role="menuitem" onClick={() => { setSelectedTileId(tile.i); setTileMenuId(null); setCopilotOpen(false); }}><Settings2 size={14} /> Tile settings</button> : null}
+                        {editing ? <><hr /><button type="button" role="menuitem" className="danger" onClick={() => { setTileMenuId(null); void mutate([{ type: 'remove_tile', pageId: activePage!.id, tileId: tile.i }]).then(() => setSelectedTileId((current) => current === tile.i ? null : current)); }}><Trash2 size={14} /> Remove tile</button></> : null}
+                      </div> : null}
+                    </div>
+                  </header>
+                  {unsupportedTileFilters(tile).map((binding) => <div key={binding.filter} className="tile-filter-notice"><Filter size={11} /><span>{binding.unsupportedReason ?? `${humanize(binding.filter)} does not affect this component.`}</span></div>)}
+                  {datasetTileNotices(previewRun?.tiles.find((item) => item.tileId === tile.i)).map((notice) => <div key={notice.key} className={`tile-filter-notice ${notice.kind}`} title={notice.detail}><Filter size={11} /><span><strong>{notice.label}</strong> · {notice.detail}</span></div>)}
+                  {dqlTileId === tile.i ? <div className="studio-tile-dql" onClick={(event) => event.stopPropagation()}>{(() => { const runTile = previewRun?.tiles.find((item) => item.tileId === tile.i); const evidence = runTile && tile.query && isCurrentDatasetTileEvidence(tile, runTile) ? presentDatasetTileEvidence(runTile) : undefined; return evidence ? <DatasetTileExecutionEvidence presentation={evidence} /> : <p>Run a preview to see the Dataset query and the SQL it compiled to.</p>; })()}</div> : null}
+                  {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} /></div>}
+                </article>
+  );
+
   return (
-    <div className={`dql-studio-v2 ${proposal ? 'proposal-focus' : ''} studio-${studioView} right-${rightPane}`}>
+    <div className={`dql-studio-v2 ${projectedPages ? 'has-proposal' : ''} studio-${studioView} right-${rightPane}`}>
       <style>{APP_STUDIO_V2_STYLES}</style>
       <header className="studio-topbar">
         <div className="studio-brand"><button type="button" className="ghost-icon" onClick={onBack} aria-label="Back to Apps" title="Back to Apps"><ArrowLeft size={16} /></button><span className="mark"><LayoutDashboard size={15} /></span><div><input aria-label="App name" value={name || draft.name} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim() && name.trim() !== draft.name) void mutate([{ type: 'set_name', name: name.trim() }]); }} /><small>{savedMessage}</small></div></div>
-        {proposal ? <div className="proposal-focus-title"><small>AI APP BUILD · STEP 2</small><strong>Choose proposed sources</strong></div> : <nav className="page-nav" aria-label="App pages">
-          {draft.pages.map((page) => <button key={page.id} type="button" className={activePage?.id === page.id ? 'on' : ''} aria-current={activePage?.id === page.id ? 'page' : undefined} onClick={() => { setActivePageId(page.id); setSelectedTileId(null); setTileMenuId(null); setDraftTile(null); }}>{page.metadata.title}</button>)}
-          {editing ? <button type="button" className="ghost-icon" onClick={() => void addPage()} aria-label="Add page" title="Add page"><Plus size={15} /></button> : null}
-        </nav>}
-        {proposal ? <div className="proposal-focus-status"><ShieldCheck size={14} /><span>Private draft · nothing generated yet</span></div> : <div className="studio-actions">
+        <nav className="page-nav" aria-label="App pages">
+          {projectedPages ? projectedPages.map((page) => <button key={page.id} type="button" className={`${projectedPage?.id === page.id ? 'on' : ''} ${page.isNew ? 'proposed-page' : ''}`} aria-current={projectedPage?.id === page.id ? 'page' : undefined} onClick={() => { setProposalPageId(page.id); if (!page.isNew) setActivePageId(page.id); }}>{page.title}{page.changeCount ? <span className="change-dot" aria-label={`${page.changeCount} proposed ${page.changeCount === 1 ? 'change' : 'changes'}`} /> : null}</button>) : draft.pages.map((page) => <button key={page.id} type="button" className={activePage?.id === page.id ? 'on' : ''} aria-current={activePage?.id === page.id ? 'page' : undefined} onClick={() => { setActivePageId(page.id); setSelectedTileId(null); setTileMenuId(null); setDraftTile(null); }}>{page.metadata.title}</button>)}
+          {editing && !projectedPages ? <button type="button" className="ghost-icon" onClick={() => void addPage()} aria-label="Add page" title="Add page"><Plus size={15} /></button> : null}
+        </nav>
+        <div className="studio-actions">
           {editing ? <div className="history">
             <button type="button" className="ghost-icon" disabled={!undoStack.length || busy} onClick={() => void undo()} aria-label="Undo" title="Undo"><Undo2 size={15} /></button>
             <button type="button" className="ghost-icon" disabled={!redoStack.length || busy} onClick={() => void redo()} aria-label="Redo" title="Redo"><Redo2 size={15} /></button>
@@ -2450,10 +2493,10 @@ export function AppStudioV2({
             <hr />
             <button type="button" role="menuitem" className="danger" onClick={() => { setActionsOpen(false); setDeleteConfirmOpen(true); }}><Trash2 size={14} /> Delete local draft</button>
           </div> : null}
-        </div>}
+        </div>
       </header>
 
-      {!proposal && editing ? <aside className="studio-left">
+      {editing ? <aside className="studio-left">
         <nav role="tablist" aria-label="Build panel">
           {([
             ['sources', 'Data'], ['pages', 'Pages'], ['filters', 'Filters'],
@@ -2470,34 +2513,11 @@ export function AppStudioV2({
 
       <main ref={workspaceRef} className="studio-workspace">
         {error ? <div className="studio-error floating" role="alert">{error}<button type="button" onClick={() => setError(null)}>×</button></div> : null}
-        {proposal && proposalSummary ? <AiPlanReview
-          proposal={proposal}
-          summary={proposalSummary}
-          catalog={catalog}
-          catalogQuery={catalogQuery}
-          sourcePolicy={draft.sourcePolicy}
-          selectedSourceIds={selectedProposalSourceIds}
-          addingSourceId={proposalAddingSourceId}
-          busy={busy}
-          onRevise={() => void requestAiProposal(draft, prompt, appStudioProposalRequiredSourceIds(selectedProposalSourceIds), true)}
-          onApply={() => void applyProposal()}
-          onDismiss={() => setProposal(null)}
-          onCatalogQuery={setCatalogQuery}
-          onAddSource={(source) => void addSourceToAiProposal(source.sourceId ?? source.id, source.eligibility?.localPreview === false, source)}
-          onAddProposalSource={(sourceId, reviewRequired) => void addSourceToAiProposal(sourceId, reviewRequired)}
-          onAnswerClarification={(questionId, answerId) => void reviseAiProposal({ [questionId]: answerId })}
-          onGenerateGap={(requirementId) => void generateAiGap(requirementId)}
-          onToggleSource={(sourceId) => setSelectedProposalSourceIds((current) => {
-            const next = new Set(current);
-            if (next.has(sourceId)) next.delete(sourceId); else next.add(sourceId);
-            return next;
-          })}
-        /> : null}
-        {!proposal ? <div className={`studio-canvas-frame ${breakpoint} preview-mode-${previewMode}`}>
+        <div className={`studio-canvas-frame ${breakpoint} preview-mode-${previewMode}`}>
           <section className="studio-canvas" aria-label="App canvas" onClick={(event) => { if (event.target === event.currentTarget) { setSelectedTileId(null); setTileMenuId(null); } }}>
             <header className="studio-page-heading">
-              <div><h1>{activePage?.metadata.title ?? 'Overview'}</h1>{activePage?.metadata.description ? <p>{activePage.metadata.description}</p> : null}</div>
-              {editing ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
+              <div><h1>{projectedPage?.title ?? activePage?.metadata.title ?? 'Overview'}</h1>{!projectedPage?.isNew && activePage?.metadata.description ? <p>{activePage.metadata.description}</p> : null}</div>
+              {editing && !projectedPages ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
             </header>
             {editing && (!fieldsAvailable || dataView === 'sources') && selectedSource && selectedSourceKind ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" disabled={busy || previewing} onClick={() => selectedSource.capabilities?.dataset ? (setPanel('sources'), setPanelOpen(true)) : void addComponent(selectedSourceKind, selectedSource)}>{selectedSource.capabilities?.dataset ? <><Settings2 size={14} /> Choose fields</> : <><Plus size={14} /> {selectedSourceAction}</>}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
             {(activePage?.filters ?? []).length ? <div className="studio-page-filterbar">{activePage!.filters!.map((filter) => <StudioFilterControl key={filter.id} filter={filter} availability={activeFilterOptions[filter.id]} value={previewVariables[filter.id] ?? filter.default} applying={previewing} onChange={(value) => applyFilterValue(filter, value)} />)}</div> : null}
@@ -2510,38 +2530,56 @@ export function AppStudioV2({
               <strong>Choose a tile to change with AI</strong>
               <span>Use “Edit with AI” on a Dataset tile. Clicking a chart keeps its own behavior and does not select the tile.</span>
             </div> : null}
+            {projectedPage ? <div className={`proposal-banner ${proposalSummaryText(projectedPage).removed ? 'warn' : ''}`} role="status"><Sparkles size={14} /><span><strong>AI proposal</strong> · {proposalSummaryText(projectedPage).text}. Nothing is saved until you apply.</span></div> : null}
             <div className="studio-page-grid">
               {editing && draftTile && activeDescriptor ? <DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /> : null}
-              {visibleItems.map((tile) => (
-                <article key={tile.i} role="group" aria-label={`App component: ${tile.title || humanize(tile.i)}`} draggable={editing} className={`studio-component-card ${editing && selectedTileId === tile.i ? 'selected' : ''} ${draggingTileId === tile.i ? 'dragging' : ''} ${tile.text ? 'text-tile' : ''}`} style={{ '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: tile.text ? undefined : breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties} onDragStart={() => { draggingTileIdRef.current = tile.i; setDraggingTileId(tile.i); }} onDragEnd={() => { draggingTileIdRef.current = null; setDraggingTileId(null); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void moveTileBefore(tile.i); }} onClick={() => { if (!editing) return; setSelectedTileId(tile.i); setDraftTile(null); setSettingsOpen(false); setCopilotOpen(false); }}>
-                  <header>
-                    {editing ? <span className="drag-handle" aria-hidden="true">⠿</span> : null}
-                    <strong>{tile.title || humanize(tile.i)}</strong>
-                    <span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} title={tile.trustState === 'certified' ? 'Certified source' : tile.trustState === 'review_required' ? 'Needs review before publishing' : 'Draft'} />
-                    <div className="tile-tools" onClick={(event) => event.stopPropagation()}>
-                      {editing && tile.sourceId && tile.query ? <button type="button" className={`studio-autopilot-target ${selectedDatasetTile?.i === tile.i ? 'on' : ''}`} aria-pressed={selectedDatasetTile?.i === tile.i} aria-label="Edit with AI" title="Edit with AI" onClick={() => askAiAboutTile(tile.i)}><Sparkles size={13} /></button> : null}
-                      {tile.query ? <button type="button" className={`studio-tile-dql-toggle ${dqlTileId === tile.i ? 'on' : ''}`} aria-pressed={dqlTileId === tile.i} aria-label="View DQL" title="View DQL" onClick={() => setDqlTileId((current) => current === tile.i ? null : tile.i)}><Code2 size={13} /></button> : null}
-                      <button type="button" className="tile-more" aria-label="Tile actions" aria-haspopup="menu" aria-expanded={tileMenuId === tile.i} title="More" onClick={() => setTileMenuId((current) => current === tile.i ? null : tile.i)}><MoreHorizontal size={14} /></button>
-                      {tileMenuId === tile.i ? <div className="tile-menu" role="menu">
-                        {tile.query ? <button type="button" role="menuitem" onClick={() => { setDqlTileId(tile.i); setTileMenuId(null); }}><Code2 size={14} /> View DQL and SQL</button> : null}
-                        {tile.sourceId && tile.query ? <button type="button" role="menuitem" onClick={() => askAiAboutTile(tile.i)}><Sparkles size={14} /> {editing ? 'Change with AI' : 'Ask about this tile'}</button> : null}
-                        {editing ? <button type="button" role="menuitem" onClick={() => { setSelectedTileId(tile.i); setTileMenuId(null); setCopilotOpen(false); }}><Settings2 size={14} /> Tile settings</button> : null}
-                        {editing ? <><hr /><button type="button" role="menuitem" className="danger" onClick={() => { setTileMenuId(null); void mutate([{ type: 'remove_tile', pageId: activePage!.id, tileId: tile.i }]).then(() => setSelectedTileId((current) => current === tile.i ? null : current)); }}><Trash2 size={14} /> Remove tile</button></> : null}
-                      </div> : null}
-                    </div>
-                  </header>
-                  {unsupportedTileFilters(tile).map((binding) => <div key={binding.filter} className="tile-filter-notice"><Filter size={11} /><span>{binding.unsupportedReason ?? `${humanize(binding.filter)} does not affect this component.`}</span></div>)}
-                  {datasetTileNotices(previewRun?.tiles.find((item) => item.tileId === tile.i)).map((notice) => <div key={notice.key} className={`tile-filter-notice ${notice.kind}`} title={notice.detail}><Filter size={11} /><span><strong>{notice.label}</strong> · {notice.detail}</span></div>)}
-                  {dqlTileId === tile.i ? <div className="studio-tile-dql" onClick={(event) => event.stopPropagation()}>{(() => { const runTile = previewRun?.tiles.find((item) => item.tileId === tile.i); const evidence = runTile && tile.query && isCurrentDatasetTileEvidence(tile, runTile) ? presentDatasetTileEvidence(runTile) : undefined; return evidence ? <DatasetTileExecutionEvidence presentation={evidence} /> : <p>Run a preview to see the Dataset query and the SQL it compiled to.</p>; })()}</div> : null}
-                  {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} /></div>}
-                </article>
-              ))}
-              {!visibleItems.length && !draftTile ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>This page is empty</strong><p>{editing ? 'Pick a governed Dataset in the Data panel, then choose the fields you want to see. You can also ask AI to draft the page.' : 'Switch to Edit to add tiles to this page.'}</p>{editing ? <div className="empty-actions"><button type="button" className="primary" onClick={openAddTile}><Plus size={14} /> Add tile</button><button type="button" onClick={() => { setAiScope('page'); setCopilotOpen(true); }}><Sparkles size={14} /> Draft with AI</button></div> : null}</div> : null}
+              {projectedPage ? projectedPage.items.map((item) => item.change === 'added' || item.change === 'updated'
+                ? <ProposedTileCard key={item.tile.i} tile={item.tile} change={item.change} before={item.before} descriptor={datasetItemForSource(item.tile.sourceId)?.capabilities?.dataset as DatasetDescriptor | undefined} columns={gridColumns} themeMode={themeMode} />
+                : renderTile(
+                  item.tile,
+                  item.change === 'removed' ? 'proposal-removed' : projectedPage.linkedTileIds.has(item.tile.i) ? 'proposal-linked' : '',
+                  item.change === 'removed' ? <span className="proposal-badge removed">WILL BE REMOVED</span> : projectedPage.linkedTileIds.has(item.tile.i) ? <span className="proposal-badge link">PROPOSED LINK</span> : null,
+                ))
+                : visibleItems.map((tile) => renderTile(tile))}
+              {!visibleItems.length && !draftTile && !projectedPage ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>This page is empty</strong><p>{editing ? 'Pick a governed Dataset in the Data panel, then choose the fields you want to see. You can also ask AI to draft the page.' : 'Switch to Edit to add tiles to this page.'}</p>{editing ? <div className="empty-actions"><button type="button" className="primary" onClick={openAddTile}><Plus size={14} /> Add tile</button><button type="button" onClick={() => { setAiScope('page'); setCopilotOpen(true); }}><Sparkles size={14} /> Draft with AI</button></div> : null}</div> : null}
             </div>
           </section>
-        </div> : null}
+        </div>
       </main>
 
+      {rightPane === 'proposal' ? <aside className="studio-right studio-plan-pane" aria-label="AI proposal">
+        {aiActivity ? <AppStudioAiActivitySurface
+          docked
+          activity={aiActivity}
+          label={APP_STUDIO_AI_ACTIVITY_LABELS[aiActivityIndex] ?? APP_STUDIO_AI_ACTIVITY_LABELS[0]}
+          onBack={onBack}
+          onReturn={aiActivity.returnToProposal && proposal ? () => setAiActivity(null) : undefined}
+          onRetry={() => retryAiActivity(aiActivity)}
+        /> : proposal && proposalSummary ? <AiPlanReview
+            proposal={proposal}
+          summary={proposalSummary}
+          catalog={catalog}
+          catalogQuery={catalogQuery}
+          sourcePolicy={draft.sourcePolicy}
+          selectedSourceIds={selectedProposalSourceIds}
+          addingSourceId={proposalAddingSourceId}
+          busy={busy}
+          onRevise={() => void requestAiProposal(draft, prompt, appStudioProposalRequiredSourceIds(selectedProposalSourceIds), true)}
+          changeCount={proposalChangeCount}
+          onApply={() => void applyProposal()}
+          onDismiss={() => { if (projectedPage && !projectedPage.isNew) setActivePageId(projectedPage.id); setProposal(null); setProposalPageId(null); }}
+          onCatalogQuery={setCatalogQuery}
+          onAddSource={(source) => void addSourceToAiProposal(source.sourceId ?? source.id, source.eligibility?.localPreview === false, source)}
+          onAddProposalSource={(sourceId, reviewRequired) => void addSourceToAiProposal(sourceId, reviewRequired)}
+          onAnswerClarification={(questionId, answerId) => void reviseAiProposal({ [questionId]: answerId })}
+          onGenerateGap={(requirementId) => void generateAiGap(requirementId)}
+          onToggleSource={(sourceId) => setSelectedProposalSourceIds((current) => {
+            const next = new Set(current);
+            if (next.has(sourceId)) next.delete(sourceId); else next.add(sourceId);
+            return next;
+          })}
+        /> : null}
+      </aside> : null}
       {rightPane === 'draft' && draftTile && activeDescriptor && activeDatasetItem ? <aside className="studio-right" aria-label="New tile">
         <header><div><small>NEW TILE</small><strong>Built from {humanize(activeDatasetItem.name)}</strong></div><button type="button" className="ghost-icon" onClick={() => setDraftTile(null)} aria-label="Cancel new tile"><X size={16} /></button></header>
         <DraftTileInspector descriptor={activeDescriptor} datasetLabel={humanize(activeDatasetItem.name)} draft={draftTile} disabled={busy} onChange={setDraftTile} onCancel={() => setDraftTile(null)} onAdd={() => void commitDraftTile()} />
@@ -2580,7 +2618,7 @@ export function AppStudioV2({
         )}
       </aside> : null}
 
-      {copilotOpen && !proposal ? <AiSidePanel
+      {rightPane === 'ai' ? <AiSidePanel
         t={themes[themeMode]}
         title="AI"
         subtitle={draft.name}
@@ -2812,6 +2850,7 @@ function AiPlanReview({
   addingSourceId,
   busy,
   onRevise,
+  changeCount = 0,
   onApply,
   onDismiss,
   onCatalogQuery,
@@ -2830,6 +2869,8 @@ function AiPlanReview({
   addingSourceId: string | null;
   busy: boolean;
   onRevise: () => void;
+  /** Tile, page, and link changes the canvas shows for the selected sources. */
+  changeCount?: number;
   onApply: () => void;
   onDismiss: () => void;
   onCatalogQuery: (query: string) => void;
@@ -2877,12 +2918,12 @@ function AiPlanReview({
     <header>
       <span><Sparkles size={18} /></span>
       <div>
-        <small>REVIEW BEFORE GENERATION</small>
-        <h1 id="proposal-source-title">Choose proposed sources</h1>
-        <p>AI understood: <strong>{summary.frame?.goal ?? 'Build a governed analytics App'}</strong>. Select the data you trust; DQL will generate the App only after you continue.</p>
+        <small>AI PROPOSAL</small>
+        <h1 id="proposal-source-title">Review the plan</h1>
+        <p>AI understood: <strong>{summary.frame?.goal ?? 'Build a governed analytics App'}</strong>. Proposed tiles are on the canvas. Remove any source you do not trust; nothing is saved until you apply.</p>
         {plannerProvenanceLabel ? <small className="proposal-planner-provenance">{plannerProvenanceLabel}</small> : null}
       </div>
-      <button type="button" onClick={onDismiss} aria-label="Back to App decision"><X size={16} /></button>
+      <button type="button" onClick={onDismiss} aria-label="Discard AI proposal"><X size={16} /></button>
     </header>
 
     <div className="proposal-source-summary" aria-label="AI proposal summary">
@@ -2925,7 +2966,7 @@ function AiPlanReview({
       {unresolved.length ? <section className="studio-ai-questions"><header><strong>AI needs one more decision</strong><small>{unresolved.length} required</small></header>{unresolved.map((item) => <fieldset key={item.id}><legend>{item.question}</legend>{item.choices.map((choice) => <button key={choice.id} type="button" onClick={() => onAnswerClarification(item.id, choice.id)} disabled={busy}><strong>{choice.label}</strong>{choice.description ? <small>{choice.description}</small> : null}</button>)}</fieldset>)}<button type="button" onClick={onRevise} disabled={busy}>{busy ? 'Updating…' : 'Re-run proposal'}</button></section> : null}
     </div>
 
-    <footer><span>{selectedSources.length} sources · {selectedComponents.length} views will be generated</span><button type="button" onClick={onDismiss}>Back to decision</button><button type="button" className="primary" onClick={onApply} disabled={busy || unresolved.length > 0 || selectedSources.length === 0}><Sparkles size={14} /> {busy ? 'Generating…' : `Generate App with ${selectedSources.length} ${selectedSources.length === 1 ? 'source' : 'sources'}`}</button></footer>
+    <footer><span>{selectedSources.length} {selectedSources.length === 1 ? 'source' : 'sources'} · {selectedComponents.length} {selectedComponents.length === 1 ? 'tile' : 'tiles'}</span><button type="button" onClick={onDismiss}>Discard</button><button type="button" className="primary" onClick={onApply} disabled={busy || unresolved.length > 0 || selectedSources.length === 0}><Sparkles size={14} /> {busy ? 'Applying…' : changeCount > 0 ? `Apply ${changeCount} ${changeCount === 1 ? 'change' : 'changes'}` : `Apply with ${selectedSources.length} ${selectedSources.length === 1 ? 'source' : 'sources'}`}</button></footer>
   </section>;
 }
 
@@ -3606,6 +3647,23 @@ function chartTypeIcon(type: string): JSX.Element {
   if (type === 'line' || type === 'area') return <LineChart size={16} />;
   if (type === 'scatter' || type === 'heatmap') return <ScatterChart size={16} />;
   return <BarChart3 size={16} />;
+}
+
+/** Plain-language count of what applying a proposal does to one page. */
+function proposalSummaryText(page: ProposedPage): { text: string; removed: number } {
+  const count = (change: string) => page.items.filter((item) => item.change === change).length;
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  const added = count('added');
+  const updated = count('updated');
+  const removed = count('removed');
+  const parts = [
+    page.isNew ? 'new page' : '',
+    added ? plural(added, 'new tile', 'new tiles') : '',
+    updated ? plural(updated, 'changed tile', 'changed tiles') : '',
+    page.linkedTileIds.size ? plural(page.linkedTileIds.size, 'new click link', 'new click links') : '',
+    removed ? `replaces ${plural(removed, 'existing tile', 'existing tiles')}` : '',
+  ].filter(Boolean);
+  return { text: parts.length ? parts.join(', ') : 'no changes on this page', removed };
 }
 
 function tileKindLabel(tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]): string {

@@ -85,6 +85,18 @@ describe('App Builder orchestrator', () => {
     });
 
     expect(brief.planningMode).toBe('deterministic_fallback');
+
+    // The CLI always passes a hook; it declines (undefined) when no provider
+    // is configured. That must plan offline, not report malformed output.
+    const declined = await planAppBuildBrief({
+      prompt: 'Build an executive sales App showing revenue trend, orders by region, and new-customer growth for the last 90 days.',
+      candidates: allCandidates,
+      requiredSourceIds: [],
+      sourcePolicy: 'include_review_required',
+      complete: async () => undefined,
+    });
+    expect(declined.plannerProvenance).toEqual({ version: 1, mode: 'deterministic', providerInvocation: 'not_attempted' });
+    expect(declined.components.map((component) => component.sourceId)).toEqual(brief.components.map((component) => component.sourceId));
     expect(brief.plannerProvenance).toEqual({
       version: 1,
       mode: 'deterministic',

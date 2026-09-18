@@ -67,28 +67,35 @@ export function draftTileBlocker(descriptor: DatasetDescriptor, draft: DraftTile
 }
 
 /**
- * The new tile on the canvas. It runs the field query through the governed
- * Dataset runtime as it changes (debounced; a newer edit cancels the older
- * request) and draws it the way the added tile will look. Nothing here is App
- * evidence — adding the tile runs a real page preview.
+ * Runs one Dataset field query through the governed Dataset runtime (the
+ * ephemeral /api/app-datasets/run path) and draws it as the tile will look.
+ * Edits are debounced and a newer query cancels the older request. Nothing
+ * here is App evidence — applying or adding a tile runs a real page preview.
  */
-export function DraftTileCard({
+export function DatasetQueryPreview({
   sourceId,
   descriptor,
-  draft,
+  query,
+  visualization,
   themeMode,
+  runnable = true,
+  height = 260,
+  onStatus,
 }: {
   sourceId?: string;
-  descriptor: DatasetDescriptor;
-  draft: DraftTileState;
+  descriptor?: DatasetDescriptor;
+  query: TileQuery;
+  visualization: string;
   themeMode: ThemeMode;
+  runnable?: boolean;
+  height?: number;
+  onStatus?: (status: string, tone: 'ok' | 'error' | 'idle') => void;
 }): JSX.Element {
   const [preview, setPreview] = useState<PreviewState>({ state: 'idle' });
   const latest = useRef(0);
-  const blocker = draftTileBlocker(descriptor, draft);
-  const key = JSON.stringify(draft.query);
+  const key = JSON.stringify(query);
   useEffect(() => {
-    if (!sourceId || blocker) {
+    if (!sourceId || !runnable) {
       setPreview({ state: 'idle' });
       return;
     }
@@ -97,7 +104,7 @@ export function DraftTileCard({
     const timer = window.setTimeout(() => {
       setPreview({ state: 'running' });
       const started = performance.now();
-      void api.previewDatasetTileQuery({ sourceId, query: draft.query }, controller.signal).then((response: DatasetTileQueryPreview) => {
+      void api.previewDatasetTileQuery({ sourceId, query }, controller.signal).then((response: DatasetTileQueryPreview) => {
         if (ticket !== latest.current) return;
         if (!response.ok) {
           setPreview({ state: 'failed', message: response.error || 'This field query did not return a result.' });
@@ -109,7 +116,7 @@ export function DraftTileCard({
         setPreview({
           state: 'ready',
           ms: Math.round(performance.now() - started),
-          result: { columns, rows, rowCount: response.result?.rowCount ?? rows.length, columnsMeta: draftColumnsMeta(descriptor, draft.query, columns) },
+          result: { columns, rows, rowCount: response.result?.rowCount ?? rows.length, ...(descriptor ? { columnsMeta: draftColumnsMeta(descriptor, query, columns) } : {}) },
         });
       }).catch(() => {
         // Superseded by a newer edit.
@@ -119,33 +126,50 @@ export function DraftTileCard({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [sourceId, key, blocker]);
+  }, [sourceId, key, runnable]);
+  useEffect(() => {
+    if (!onStatus) return;
+    if (preview.state === 'ready') {
+      const count = preview.result.rowCount ?? preview.result.rows.length;
+      onStatus(`Live · ${count} ${count === 1 ? 'row' : 'rows'} · ${preview.ms} ms`, 'ok');
+    } else if (preview.state === 'running') onStatus('Running…', 'idle');
+    else if (preview.state === 'failed') onStatus('Run failed', 'error');
+  }, [preview]);
+  if (preview.state === 'failed') return <div className="draft-empty warn"><strong>This query did not run</strong><span>{preview.message}</span></div>;
+  if (preview.state !== 'ready') return <div className="draft-empty loading"><span>{sourceId ? 'Running against live data…' : 'Runs when applied'}</span></div>;
+  if (visualization === 'table' || visualization === 'pivot') return <TableOutput result={preview.result} themeMode={themeMode} maxHeight={height + 20} initialPageSize={10} />;
+  return <ChartOutput result={preview.result} themeMode={themeMode} chartConfig={{ chart: visualization === 'single_value' || visualization === 'kpi' ? 'kpi' : visualization } as CellChartConfig} availableHeight={height} />;
+}
 
+/** The new tile on the canvas, drawn live as fields are picked. */
+export function DraftTileCard({
+  sourceId,
+  descriptor,
+  draft,
+  themeMode,
+}: {
+  sourceId?: string;
+  descriptor: DatasetDescriptor;
+  draft: DraftTileState;
+  themeMode: ThemeMode;
+}): JSX.Element {
+  const [status, setStatus] = useState<{ text: string; tone: 'ok' | 'error' | 'idle' }>({ text: 'Starting…', tone: 'idle' });
+  const blocker = draftTileBlocker(descriptor, draft);
   const visualization = tileVisualization(draft.query, draft.view);
   const title = draft.title.trim() || defaultTileTitle(draft.query, humanize);
-  const status = blocker
-    ? (draft.query.measures.length ? 'Not runnable yet' : 'Waiting for a value')
-    : preview.state === 'running' ? 'Running…'
-      : preview.state === 'ready' ? `Live · ${preview.result.rowCount ?? preview.result.rows.length} ${(preview.result.rowCount ?? preview.result.rows.length) === 1 ? 'row' : 'rows'} · ${preview.ms} ms`
-        : preview.state === 'failed' ? 'Run failed' : 'Starting…';
+  const shownStatus = blocker ? (draft.query.measures.length ? 'Not runnable yet' : 'Waiting for a value') : status.text;
   return <article className="studio-component-card draft-tile" aria-label={`New tile: ${title}`} style={{ '--studio-tile-width': 12 } as React.CSSProperties}>
     <header>
       <span className="draft-badge">NEW TILE</span>
       <strong>{title}</strong>
-      <span className={`draft-status ${preview.state === 'ready' && !blocker ? 'ok' : preview.state === 'failed' ? 'error' : ''}`} aria-live="polite">{status}</span>
+      <span className={`draft-status ${!blocker ? status.tone : ''}`} aria-live="polite">{shownStatus}</span>
     </header>
     <div className="draft-body">
       {!draft.query.measures.length && !draft.query.detail
         ? <div className="draft-empty"><Plus size={20} /><strong>Pick a measure to start</strong><span>Click a measure in the Data panel. The tile runs as soon as it has one value.</span></div>
         : blocker
           ? <div className="draft-empty warn"><strong>Not runnable yet</strong><span>{blocker}</span></div>
-          : preview.state === 'failed'
-            ? <div className="draft-empty warn"><strong>This query did not run</strong><span>{preview.message}</span></div>
-            : preview.state === 'ready'
-              ? visualization === 'table'
-                ? <TableOutput result={preview.result} themeMode={themeMode} maxHeight={280} initialPageSize={10} />
-                : <ChartOutput result={preview.result} themeMode={themeMode} chartConfig={{ chart: visualization === 'single_value' ? 'kpi' : visualization } as CellChartConfig} availableHeight={260} />
-              : <div className="draft-empty loading"><span>Running against live data…</span></div>}
+          : <DatasetQueryPreview sourceId={sourceId} descriptor={descriptor} query={draft.query} visualization={visualization} themeMode={themeMode} onStatus={(text, tone) => setStatus({ text, tone })} />}
     </div>
   </article>;
 }
