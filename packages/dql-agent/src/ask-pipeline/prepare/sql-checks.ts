@@ -57,7 +57,10 @@ export function statedValues(question: string, intent?: AnalyticalIntentV1): Sta
       ...intent.filters.flatMap((filter) => filter.values),
       ...intent.measures.flatMap((measure) => (measure.scope ?? []).flatMap((scope) => scope.values)),
     ];
-    for (const literal of literals) if (typeof literal === 'string' && /[A-Za-z]/.test(literal) && literal.length <= 80 && !NOT_VALUES.has(literal.toLowerCase())) add(literal, 'text');
+    // A flag value the reading chose ("has_premium is true") is not a value
+    // the question stated: the statement may apply it as a join, `= 1` or
+    // the bare column, none of which spells the word.
+    for (const literal of literals) if (typeof literal === 'string' && /[A-Za-z]/.test(literal) && literal.length <= 80 && !NOT_VALUES.has(literal.toLowerCase()) && !/^(true|false|yes|no|y|n|t|f)$/i.test(literal.trim())) add(literal, 'text');
     for (const clause of intent.unresolved) for (const word of properNouns(`x ${clause.clause}`)) add(word, 'text');
   }
   return values;

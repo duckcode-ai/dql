@@ -8,6 +8,10 @@ describe('the checks an AI-drafted statement passes before it runs', () => {
     expect(statedValues(office)).toEqual([{ value: 'FY26', kind: 'fiscal_year' }, { value: 'Splunk', kind: 'text' }]);
     expect(statedValues('What share of orders were placed on a weekend in 2017?')).toEqual([{ value: '2017', kind: 'year' }]);
     expect(statedValues('Top customers by "beverage" revenue in Q2')).toEqual([{ value: 'Q2', kind: 'quarter' }, { value: 'beverage', kind: 'text' }]);
+    // A flag value the reading chose is not a value the question stated: the
+    // statement may apply it as a join or `= 1`. A text literal still counts.
+    const reading = { filters: [{ ref: 'dimension:orders.has_refund', op: 'eq', values: ['true'] }, { ref: 'dimension:orders.status', op: 'eq', values: ['shipped'] }], measures: [], unresolved: [] } as unknown as Parameters<typeof statedValues>[1];
+    expect(statedValues('What is the average order size of refunded orders?', reading)).toEqual([{ value: 'shipped', kind: 'text' }]);
     expect(statedValues('how many opportunities did we lose to splunk', { version: 1, kind: 'analytics', reading: 'x', measures: [], groupBy: [], display: [], filters: [{ ref: 'column:a.b.c', op: 'eq', values: ['Splunk'], source: 'question' }], unresolved: [], provenance: {}, expectedShape: 'scalar' } as never)).toEqual([{ value: 'Splunk', kind: 'text' }]);
   });
 
