@@ -741,7 +741,10 @@ export async function runAskPipeline(input: RunAskPipelineInput): Promise<Pipeli
         // guesses are about field names, not about the value that was dropped.
         const message = failedCheck.message.replace(/[.\s]+$/, '');
         receipt.intent = reading; receipt.reading = reading.reading;
-        return { kind: 'gap', gap: 'not_modeled', message, nearest: [], text: `No query was run because the AI-drafted SQL failed a check: ${message}. Name the field that holds it, and Ask will use it.`, receipt, intent: reading, offerExploration: false };
+        // "Name the field" helps only when a stated value was left out; a join
+        // the check refused is fixed by rephrasing, not by naming a field.
+        const advice = /from the question$|required filter/.test(message) ? ' Name the field that holds it, and Ask will use it.' : ' Rephrase the question, or name the tables it should use.';
+        return { kind: 'gap', gap: 'not_modeled', message, nearest: [], text: `No query was run because the AI-drafted SQL failed a check: ${message}.${advice}`, receipt, intent: reading, offerExploration: false };
       }
       const declined = drafted.refusals.find((refusal) => refusal.code === 'exploration_declined');
       if (declined) {

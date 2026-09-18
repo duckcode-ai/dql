@@ -510,6 +510,17 @@ describe('a concept is discovery, not an identity (A-005)', () => {
     expect(validation.intent.unresolved[0]!.question).toContain('known under several keys');
     expect(validation.intent.unresolved[0]!.question).toContain('customer_id, commerce');
   });
+  it('a concept with one binding is not a choice: no options, and its definition goes with the clause instead of "which of them"', () => {
+    const single = buildVocabularyIndex({ ...source, concepts: [{ id: 'member', domain: 'commerce', name: 'Loyalty member', description: 'A customer with an active loyalty enrolment.', bindings: [{ entityRef: 'relation:dev.customers', domain: 'commerce', role: 'canonical', grain: 'customer_id' }] }] });
+    const validation = validateIntentRefs(parseIntent({
+      version: 1, kind: 'analytics', reading: 'revenue by loyalty member', measures: [{ ref: 'metric:order_item.revenue' }],
+      groupBy: [{ ref: 'concept:commerce.member', role: 'key' }], display: [], filters: [], unresolved: [], provenance: {}, expectedShape: 'grouped',
+    }).intent!, single);
+    expect(validation.intent.groupBy).toEqual([]);
+    expect(validation.intent.unresolved).toEqual([expect.objectContaining({ clause: 'Loyalty member', material: true, options: [] })]);
+    expect(validation.intent.unresolved[0]!.question).not.toMatch(/several keys|which of them/i);
+    expect(validation.intent.unresolved[0]!.question).toContain('active loyalty enrolment');
+  });
 });
 
 describe('a part the policy or a concept answered for is covered (item 6 of the NBA validation)', () => {

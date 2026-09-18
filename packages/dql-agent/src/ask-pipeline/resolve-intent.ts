@@ -408,10 +408,23 @@ export function validateIntentRefs(input: AnalyticalIntentV1, vocabulary: Vocabu
     const bindings = (entry.bindings ?? []).filter((binding) => vocabulary.get(binding.entityRef));
     if (!conceptClauses.some((clause) => clause.clause === entry.name)) {
       const described = (entry.bindings ?? []).map((binding) => `${binding.entityRef}${binding.grain ? ` (${binding.grain}${binding.domain ? `, ${binding.domain}` : ''})` : binding.domain ? ` (${binding.domain})` : ''}`).join(', ');
-      conceptClauses.push({
-        clause: entry.name, material: true, options: bindings.map((binding) => binding.entityRef),
-        question: `"${entry.name}" is a business concept known under several keys — ${described}. Which of them should this ${where} use?`,
-      });
+      // ONE BINDING IS NOT A CHOICE. Asking "which of them" with one option
+      // stopped the question, and the SQL drafter handed that sentence as its
+      // reason declined too. The concept still is not an identity (the binding
+      // alone does not say WHICH rows are, say, policy holders), so the clause
+      // stays material, with no options, and carries the concept's own
+      // definition: the pipeline then asks the tables through a reviewable
+      // AI-drafted statement before it says anything is not modeled.
+      const definition = (entry.description ?? '').replace(/\s+/g, ' ').trim();
+      conceptClauses.push(bindings.length > 1
+        ? {
+          clause: entry.name, material: true, options: bindings.map((binding) => binding.entityRef),
+          question: `"${entry.name}" is a business concept known under several keys — ${described}. Which of them should this ${where} use?`,
+        }
+        : {
+          clause: entry.name, material: true, options: [],
+          question: `"${entry.name}" is a business concept${described ? ` bound to ${described}` : ''}${definition ? ` (${definition.slice(0, 240)})` : ''}; no governed field says which rows are ${entry.name.toLowerCase()} for this ${where}`,
+        });
     }
     return true;
   };
