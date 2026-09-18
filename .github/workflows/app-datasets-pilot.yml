@@ -41,6 +41,21 @@ jobs:
         env:
           CONNECTOR_ROOT: ${{ runner.temp }}/app-datasets-connectors
 
+      - name: Run the DuckDB connector lifetime tests
+        # The pilot reconnects DuckDB mid-case. These force the moment a closed
+        # native instance is garbage-collected, which used to delete the WAL
+        # holding commits made after the reconnect.
+        working-directory: packages/dql-connectors
+        shell: bash
+        run: |
+          npx vitest run src/drivers/duckdb.test.ts --reporter=verbose | tee "$RUNNER_TEMP/connector.log"
+          if grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/connector.log"; then
+            echo "The DuckDB connector tests skipped cases although a DuckDB connector root was configured." >&2
+            exit 1
+          fi
+        env:
+          DQL_APP_DATASETS_DUCKDB_CONNECTOR_ROOT: ${{ runner.temp }}/app-datasets-connectors
+
       - name: Run the pilot suite
         working-directory: apps/cli
         # An explicit bash shell runs with pipefail, so a failing vitest is not

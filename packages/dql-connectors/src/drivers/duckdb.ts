@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryExecutionOptions, QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 import { importConnectorDependency } from '../optional-dependency.js';
@@ -23,23 +25,39 @@ export class DuckDBConnector implements DatabaseConnector {
   readonly driverName = 'duckdb';
   private db: any = null;
   private connection: any = null;
+  private releaseDatabase: (() => Promise<void>) | null = null;
+  private readonly openScopes = new Set<() => Promise<void>>();
 
   async connect(config: ConnectionConfig): Promise<void> {
+    await this.disconnect();
     const duckdbModule = await importConnectorDependency('duckdb', config);
     const duckdb = resolveDuckDBModule(duckdbModule);
 
     const dbPath = config.filepath ?? ':memory:';
-
-    return new Promise((resolve, reject) => {
-      this.db = new duckdb.Database(dbPath, (err: Error | null) => {
-        if (err) {
-          reject(new Error(`DuckDB connection failed: ${err.message}`));
-          return;
-        }
-        this.connection = this.db.connect();
-        resolve();
+    const { db, release } = await acquireDuckDBDatabase(duckDBDatabaseKey(dbPath), async () => {
+      const database = await new Promise<any>((resolve, reject) => {
+        const opened = new duckdb.Database(dbPath, (err: Error | null) => {
+          if (err) {
+            reject(new Error(`DuckDB connection failed: ${err.message}`));
+            return;
+          }
+          resolve(opened);
+        });
       });
+      const setup = database.connect();
+      try {
+        await executeDuckDBConnection(setup, database, 'PRAGMA disable_checkpoint_on_shutdown');
+      } catch (error) {
+        await closeDuckDBConnection(setup);
+        await closeDuckDBDatabase(database, false);
+        throw error;
+      }
+      await closeDuckDBConnection(setup);
+      return database;
     });
+    this.db = db;
+    this.connection = db.connect();
+    this.releaseDatabase = release;
   }
 
   async execute(sql: string, params?: unknown[], options: QueryExecutionOptions = {}): Promise<QueryResult> {
@@ -59,8 +77,9 @@ export class DuckDBConnector implements DatabaseConnector {
     if (!this.db || !this.connection) {
       throw new Error('DuckDB connector not connected. Call connect() first.');
     }
-    const context = await readDuckDBSessionContext(this.connection, this.db);
-    const connection = this.db.connect();
+    const db = this.db;
+    const context = await readDuckDBSessionContext(this.connection, db);
+    const connection = db.connect();
     let closed = false;
     let pending = Promise.resolve();
     const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
@@ -69,46 +88,52 @@ export class DuckDBConnector implements DatabaseConnector {
       return task;
     };
     try {
-      if (context.schema) await executeDuckDBConnection(connection, this.db, `SET schema = ${quoteDuckDBString(context.schema)}`);
-      if (context.timeZone) await executeDuckDBConnection(connection, this.db, `SET TimeZone = ${quoteDuckDBString(context.timeZone)}`);
-      await executeDuckDBConnection(connection, this.db, 'BEGIN TRANSACTION');
+      if (context.schema) await executeDuckDBConnection(connection, db, `SET schema = ${quoteDuckDBString(context.schema)}`);
+      if (context.timeZone) await executeDuckDBConnection(connection, db, `SET TimeZone = ${quoteDuckDBString(context.timeZone)}`);
+      await executeDuckDBConnection(connection, db, 'BEGIN TRANSACTION');
     } catch (error) {
       await closeDuckDBConnection(connection);
       throw error;
     }
+    const close = async () => {
+      if (closed) return;
+      closed = true;
+      this.openScopes.delete(close);
+      await pending;
+      try {
+        await executeDuckDBConnection(connection, db, 'ROLLBACK');
+      } finally {
+        await closeDuckDBConnection(connection);
+      }
+    };
+    this.openScopes.add(close);
     return {
       id: `duckdb_scope_${randomUUID()}`,
       context,
       execute: (sql, params, options) => enqueue(async () => {
         if (closed) throw new Error('DuckDB consistent read scope is closed.');
-        return executeDuckDBConnection(connection, this.db, sql, params, options);
+        return executeDuckDBConnection(connection, db, sql, params, options);
       }),
-      close: async () => {
-        if (closed) return;
-        closed = true;
-        await pending;
-        try {
-          await executeDuckDBConnection(connection, this.db, 'ROLLBACK');
-        } finally {
-          await closeDuckDBConnection(connection);
-        }
-      },
+      close,
     };
   }
 
+  /**
+   * Close this connector's connections (including open read scopes, whose
+   * transactions would otherwise block the final checkpoint), then release its
+   * share of the file's Database. See `acquireDuckDBDatabase`.
+   */
   async disconnect(): Promise<void> {
-    if (this.db) {
-      return new Promise((resolve) => {
-        this.db.close((err: Error | null) => {
-          if (err) {
-            console.warn('DuckDB disconnect warning:', err.message);
-          }
-          this.db = null;
-          this.connection = null;
-          resolve();
-        });
-      });
-    }
+    const connection = this.connection;
+    const release = this.releaseDatabase;
+    const scopes = [...this.openScopes];
+    this.db = null;
+    this.connection = null;
+    this.releaseDatabase = null;
+    this.openScopes.clear();
+    await Promise.allSettled(scopes.map((close) => close()));
+    if (connection) await closeDuckDBConnection(connection);
+    await release?.();
   }
 
   async ping(): Promise<boolean> {
@@ -262,6 +287,114 @@ async function readDuckDBSessionContext(connection: any, database: any): Promise
 
 function quoteDuckDBString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+/**
+ * duckdb-node's `Database#close` only drops the Database handle. Every
+ * Connection and every Statement (`Statement#finalize` is a no-op in 1.1)
+ * still holds the native instance, which lives on until garbage collection.
+ * When it is finally destroyed, DuckDB's shutdown checkpoint writes the
+ * snapshot that instance last saw and then deletes the WAL, even if the
+ * instance wrote nothing. Commits made meanwhile through a newer instance on
+ * the same file (a reconnect, or another pool key naming that file) are
+ * lost at a GC-dependent moment, and readers see an older state.
+ *
+ * So: every connector on one file in this process shares one Database, each
+ * Database disables its shutdown checkpoint, and the last release checkpoints
+ * explicitly while it is still the only instance. A late destructor then has
+ * nothing to write and no WAL to delete.
+ */
+interface SharedDuckDBDatabase {
+  readonly database: Promise<any>;
+  refs: number;
+}
+
+const sharedDuckDBDatabases = new Map<string, SharedDuckDBDatabase>();
+const closingDuckDBDatabases = new Map<string, Promise<void>>();
+
+async function acquireDuckDBDatabase(
+  key: string | null,
+  open: () => Promise<any>,
+): Promise<{ db: any; release: () => Promise<void> }> {
+  if (key === null) {
+    const db = await open();
+    return { db, release: () => closeDuckDBDatabase(db, false) };
+  }
+  let entry = sharedDuckDBDatabases.get(key);
+  if (!entry) {
+    // Never open a file while its previous instance is still checkpointing.
+    const previousClose = closingDuckDBDatabases.get(key) ?? Promise.resolve();
+    const created: SharedDuckDBDatabase = { database: previousClose.then(open), refs: 0 };
+    created.database.catch(() => {
+      if (sharedDuckDBDatabases.get(key) === created) sharedDuckDBDatabases.delete(key);
+    });
+    sharedDuckDBDatabases.set(key, created);
+    entry = created;
+  }
+  const acquired = entry;
+  acquired.refs += 1;
+  let db: any;
+  try {
+    db = await acquired.database;
+  } catch (error) {
+    acquired.refs -= 1;
+    throw error;
+  }
+  let released = false;
+  return {
+    db,
+    release: async () => {
+      if (released) return;
+      released = true;
+      acquired.refs -= 1;
+      if (acquired.refs > 0) return;
+      if (sharedDuckDBDatabases.get(key) === acquired) sharedDuckDBDatabases.delete(key);
+      const closing: Promise<void> = closeDuckDBDatabase(db, true).finally(() => {
+        if (closingDuckDBDatabases.get(key) === closing) closingDuckDBDatabases.delete(key);
+      });
+      closingDuckDBDatabases.set(key, closing);
+      await closing;
+    },
+  };
+}
+
+/** In-memory databases are private to their connector; files are shared by real path. */
+function duckDBDatabaseKey(dbPath: string): string | null {
+  if (!dbPath || dbPath.startsWith(':memory:')) return null;
+  const absolute = resolvePath(dbPath);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    // Not created yet: resolve the directory so the key matches the file's
+    // real path once it exists (for example /var -> /private/var on macOS).
+    try {
+      return join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch {
+      return absolute;
+    }
+  }
+}
+
+async function closeDuckDBDatabase(db: any, checkpoint: boolean): Promise<void> {
+  if (checkpoint) {
+    const connection = db.connect();
+    try {
+      await executeDuckDBConnection(connection, db, 'CHECKPOINT');
+    } catch (error) {
+      // The WAL stays in place and is replayed by the next open.
+      console.warn('DuckDB checkpoint warning:', error instanceof Error ? error.message : String(error));
+    } finally {
+      await closeDuckDBConnection(connection);
+    }
+  }
+  await new Promise<void>((resolve) => {
+    db.close((err: Error | null) => {
+      if (err) {
+        console.warn('DuckDB disconnect warning:', err.message);
+      }
+      resolve();
+    });
+  });
 }
 
 async function closeDuckDBConnection(connection: any): Promise<void> {

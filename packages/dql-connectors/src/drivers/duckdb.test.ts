@@ -1,6 +1,8 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import { DuckDBConnector, normalizeDuckDBRow, normalizeDuckDBValue, resolveDuckDBModule } from './duckdb.js';
 
@@ -117,6 +119,97 @@ describe('DuckDB consistent App read scope', () => {
     } finally {
       await connector.disconnect();
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('DuckDB database lifetime', () => {
+  // duckdb-node frees a closed native instance only when its Connection and
+  // Statement objects are garbage-collected. Force that moment instead of
+  // waiting for it, which is when a stale instance used to delete the WAL.
+  const collectGarbage = async () => {
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc') as () => void;
+    for (let pass = 0; pass < 3; pass += 1) {
+      gc();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  const count = async (connector: DuckDBConnector) =>
+    (await connector.execute('SELECT COUNT(*)::INTEGER AS n, COUNT(value)::INTEGER AS keyed FROM lifetime_values')).rows[0];
+
+  duckDbIt('keeps commits made after a reconnect when the closed database is finally destroyed', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dql-duckdb-lifetime-'));
+    const filepath = join(directory, 'lifetime.duckdb');
+    const config = { driver: 'duckdb' as const, filepath, moduleSearchPaths: [configuredDuckDbConnectorRoot!] };
+    const first = new DuckDBConnector();
+    const second = new DuckDBConnector();
+    const third = new DuckDBConnector();
+    try {
+      await first.connect(config);
+      await first.execute('CREATE TABLE lifetime_values (value INTEGER)');
+      await first.execute('INSERT INTO lifetime_values VALUES (1), (1)');
+      expect(await count(first)).toEqual({ n: 2, keyed: 2 });
+      await first.disconnect();
+
+      await second.connect(config);
+      await second.execute('DELETE FROM lifetime_values');
+      await second.execute('INSERT INTO lifetime_values VALUES (1), (NULL)');
+      await second.disconnect();
+      await collectGarbage();
+
+      await third.connect(config);
+      expect(await count(third)).toEqual({ n: 2, keyed: 1 });
+    } finally {
+      await first.disconnect();
+      await second.disconnect();
+      await third.disconnect();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  duckDbIt('serves differently configured connectors on one file from one database until the last disconnect', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dql-duckdb-shared-'));
+    const filepath = join(directory, 'shared.duckdb');
+    // Pool keys differ (module search paths, path spelling) but the file is
+    // the same, so both connectors must read and write one native instance.
+    const writer = new DuckDBConnector();
+    const reader = new DuckDBConnector();
+    try {
+      await writer.connect({ driver: 'duckdb', filepath, moduleSearchPaths: [configuredDuckDbConnectorRoot!] });
+      await reader.connect({ driver: 'duckdb', filepath: join(directory, '.', 'shared.duckdb'), moduleSearchPaths: [configuredDuckDbConnectorRoot!, directory] });
+      await writer.execute('CREATE TABLE lifetime_values (value INTEGER)');
+      await writer.execute('INSERT INTO lifetime_values VALUES (1)');
+      expect(await count(reader)).toEqual({ n: 1, keyed: 1 });
+
+      const scope = await writer.openConsistentReadScope();
+      await writer.disconnect();
+      await expect(scope.execute('SELECT 1')).rejects.toThrow('DuckDB consistent read scope is closed.');
+      await reader.execute('INSERT INTO lifetime_values VALUES (NULL)');
+      expect(await count(reader)).toEqual({ n: 2, keyed: 1 });
+      await reader.disconnect();
+      await collectGarbage();
+
+      await writer.connect({ driver: 'duckdb', filepath, moduleSearchPaths: [configuredDuckDbConnectorRoot!] });
+      expect(await count(writer)).toEqual({ n: 2, keyed: 1 });
+    } finally {
+      await writer.disconnect();
+      await reader.disconnect();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  duckDbIt('keeps in-memory databases private to their connector', async () => {
+    const first = new DuckDBConnector();
+    const second = new DuckDBConnector();
+    try {
+      await first.connect({ driver: 'duckdb', moduleSearchPaths: [configuredDuckDbConnectorRoot!] });
+      await second.connect({ driver: 'duckdb', filepath: ':memory:', moduleSearchPaths: [configuredDuckDbConnectorRoot!] });
+      await first.execute('CREATE TABLE only_first (value INTEGER)');
+      await expect(second.execute('SELECT * FROM only_first')).rejects.toThrow();
+    } finally {
+      await first.disconnect();
+      await second.disconnect();
     }
   });
 });
