@@ -1,0 +1,996 @@
+{
+  "version": 3,
+  "id": "overview",
+  "metadata": {
+    "title": "Overview",
+    "description": "Revenue, orders, and margin by region and month, with order-line detail for a selected region.",
+    "domain": "commerce",
+    "audience": "stakeholders",
+    "visibility": "shared",
+    "lifecycle": "certified"
+  },
+  "layout": {
+    "kind": "grid",
+    "cols": 12,
+    "rowHeight": 80,
+    "items": [
+      {
+        "i": "order-lines-dataset-kpi",
+        "x": 0,
+        "y": 0,
+        "w": 3,
+        "h": 2,
+        "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+        "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+        "query": {
+          "dimensions": [],
+          "measures": [
+            {
+              "measure": "revenue"
+            }
+          ]
+        },
+        "viz": {
+          "type": "kpi"
+        },
+        "title": "Revenue",
+        "sourceClass": "certified_block",
+        "filterBindings": [],
+        "review": {
+          "status": "not_required",
+          "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+        },
+        "trustState": "certified",
+        "reviewStatus": "certified"
+      },
+      {
+        "i": "order-lines-dataset-kpi-2",
+        "x": 3,
+        "y": 0,
+        "w": 3,
+        "h": 2,
+        "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+        "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+        "query": {
+          "dimensions": [],
+          "measures": [
+            {
+              "measure": "order_count"
+            }
+          ]
+        },
+        "viz": {
+          "type": "kpi"
+        },
+        "title": "Orders",
+        "sourceClass": "certified_block",
+        "filterBindings": [],
+        "review": {
+          "status": "not_required",
+          "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+        },
+        "trustState": "certified",
+        "reviewStatus": "certified"
+      },
+      {
+        "i": "order-lines-dataset-kpi-3",
+        "x": 6,
+        "y": 0,
+        "w": 3,
+        "h": 2,
+        "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+        "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+        "query": {
+          "dimensions": [],
+          "measures": [
+            {
+              "measure": "margin_rate"
+            }
+          ]
+        },
+        "viz": {
+          "type": "kpi"
+        },
+        "title": "Margin rate",
+        "sourceClass": "certified_block",
+        "filterBindings": [],
+        "review": {
+          "status": "not_required",
+          "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+        },
+        "trustState": "certified",
+        "reviewStatus": "certified"
+      },
+      {
+        "i": "order-lines-dataset-chart",
+        "x": 0,
+        "y": 2,
+        "w": 6,
+        "h": 4,
+        "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+        "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+        "query": {
+          "dimensions": [
+            {
+              "field": "region"
+            }
+          ],
+          "measures": [
+            {
+              "measure": "revenue"
+            }
+          ],
+          "orderBy": [
+            {
+              "alias": "revenue",
+              "direction": "desc"
+            }
+          ]
+        },
+        "viz": {
+          "type": "bar"
+        },
+        "title": "Revenue by region",
+        "sourceClass": "certified_block",
+        "filterBindings": [],
+        "review": {
+          "status": "not_required",
+          "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+        },
+        "trustState": "certified",
+        "reviewStatus": "certified"
+      },
+      {
+        "i": "order-lines-dataset-chart-2",
+        "x": 6,
+        "y": 2,
+        "w": 6,
+        "h": 4,
+        "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+        "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+        "query": {
+          "dimensions": [
+            {
+              "field": "order_date",
+              "timeGrain": "month"
+            }
+          ],
+          "measures": [
+            {
+              "measure": "revenue"
+            }
+          ],
+          "orderBy": [
+            {
+              "alias": "order_date_month",
+              "direction": "asc"
+            }
+          ]
+        },
+        "viz": {
+          "type": "bar"
+        },
+        "title": "Revenue by month",
+        "sourceClass": "certified_block",
+        "filterBindings": [],
+        "review": {
+          "status": "not_required",
+          "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+        },
+        "trustState": "certified",
+        "reviewStatus": "certified"
+      },
+      {
+        "i": "order-lines-table",
+        "x": 0,
+        "y": 6,
+        "w": 6,
+        "h": 4,
+        "sourceId": "app:semantic:commerce:74ff4456be9ecc206456",
+        "sourceRevision": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb",
+        "query": {
+          "dimensions": [],
+          "measures": [
+            {
+              "measure": "semantic_revenue"
+            },
+            {
+              "measure": "semantic_customer_count"
+            }
+          ]
+        },
+        "viz": {
+          "type": "table"
+        },
+        "title": "Semantic commerce totals",
+        "sourceClass": "governed_semantic",
+        "filterBindings": [
+          {
+            "filter": "customer_id",
+            "binding": "customer_id",
+            "mode": "predicate",
+            "capability": "preflight_required"
+          },
+          {
+            "filter": "order_date",
+            "binding": "order_date",
+            "mode": "predicate",
+            "capability": "preflight_required"
+          },
+          {
+            "filter": "order_id",
+            "binding": "order_id",
+            "mode": "predicate",
+            "capability": "preflight_required"
+          },
+          {
+            "filter": "region",
+            "binding": "region",
+            "mode": "predicate",
+            "capability": "preflight_required"
+          }
+        ],
+        "review": {
+          "status": "not_required",
+          "sourceFingerprint": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb"
+        },
+        "trustState": "certified",
+        "reviewStatus": "certified"
+      }
+    ],
+    "responsive": {
+      "wide": {
+        "kind": "grid",
+        "cols": 12,
+        "rowHeight": 80,
+        "items": [
+          {
+            "i": "order-lines-dataset-kpi",
+            "x": 0,
+            "y": 0,
+            "w": 3,
+            "h": 2,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "revenue"
+                }
+              ]
+            },
+            "viz": {
+              "type": "kpi"
+            },
+            "title": "Revenue",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-kpi-2",
+            "x": 3,
+            "y": 0,
+            "w": 3,
+            "h": 2,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "order_count"
+                }
+              ]
+            },
+            "viz": {
+              "type": "kpi"
+            },
+            "title": "Orders",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-kpi-3",
+            "x": 6,
+            "y": 0,
+            "w": 3,
+            "h": 2,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "margin_rate"
+                }
+              ]
+            },
+            "viz": {
+              "type": "kpi"
+            },
+            "title": "Margin rate",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-chart",
+            "x": 0,
+            "y": 2,
+            "w": 6,
+            "h": 4,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [
+                {
+                  "field": "region"
+                }
+              ],
+              "measures": [
+                {
+                  "measure": "revenue"
+                }
+              ],
+              "orderBy": [
+                {
+                  "alias": "revenue",
+                  "direction": "desc"
+                }
+              ]
+            },
+            "viz": {
+              "type": "bar"
+            },
+            "title": "Revenue by region",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-chart-2",
+            "x": 6,
+            "y": 2,
+            "w": 6,
+            "h": 4,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [
+                {
+                  "field": "order_date",
+                  "timeGrain": "month"
+                }
+              ],
+              "measures": [
+                {
+                  "measure": "revenue"
+                }
+              ],
+              "orderBy": [
+                {
+                  "alias": "order_date_month",
+                  "direction": "asc"
+                }
+              ]
+            },
+            "viz": {
+              "type": "bar"
+            },
+            "title": "Revenue by month",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-table",
+            "x": 0,
+            "y": 6,
+            "w": 6,
+            "h": 4,
+            "sourceId": "app:semantic:commerce:74ff4456be9ecc206456",
+            "sourceRevision": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "semantic_revenue"
+                },
+                {
+                  "measure": "semantic_customer_count"
+                }
+              ]
+            },
+            "viz": {
+              "type": "table"
+            },
+            "title": "Semantic commerce totals",
+            "sourceClass": "governed_semantic",
+            "filterBindings": [
+              {
+                "filter": "customer_id",
+                "binding": "customer_id",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              },
+              {
+                "filter": "order_date",
+                "binding": "order_date",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              },
+              {
+                "filter": "order_id",
+                "binding": "order_id",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              },
+              {
+                "filter": "region",
+                "binding": "region",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              }
+            ],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          }
+        ]
+      },
+      "medium": {
+        "kind": "grid",
+        "cols": 6,
+        "rowHeight": 80,
+        "items": [
+          {
+            "i": "order-lines-dataset-kpi",
+            "x": 0,
+            "y": 0,
+            "w": 2,
+            "h": 2,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "revenue"
+                }
+              ]
+            },
+            "viz": {
+              "type": "kpi"
+            },
+            "title": "Revenue",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-kpi-2",
+            "x": 2,
+            "y": 0,
+            "w": 2,
+            "h": 2,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "order_count"
+                }
+              ]
+            },
+            "viz": {
+              "type": "kpi"
+            },
+            "title": "Orders",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-kpi-3",
+            "x": 4,
+            "y": 0,
+            "w": 2,
+            "h": 2,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "margin_rate"
+                }
+              ]
+            },
+            "viz": {
+              "type": "kpi"
+            },
+            "title": "Margin rate",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-chart",
+            "x": 0,
+            "y": 2,
+            "w": 3,
+            "h": 4,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [
+                {
+                  "field": "region"
+                }
+              ],
+              "measures": [
+                {
+                  "measure": "revenue"
+                }
+              ],
+              "orderBy": [
+                {
+                  "alias": "revenue",
+                  "direction": "desc"
+                }
+              ]
+            },
+            "viz": {
+              "type": "bar"
+            },
+            "title": "Revenue by region",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-chart-2",
+            "x": 3,
+            "y": 2,
+            "w": 3,
+            "h": 4,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [
+                {
+                  "field": "order_date",
+                  "timeGrain": "month"
+                }
+              ],
+              "measures": [
+                {
+                  "measure": "revenue"
+                }
+              ],
+              "orderBy": [
+                {
+                  "alias": "order_date_month",
+                  "direction": "asc"
+                }
+              ]
+            },
+            "viz": {
+              "type": "bar"
+            },
+            "title": "Revenue by month",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-table",
+            "x": 0,
+            "y": 6,
+            "w": 3,
+            "h": 4,
+            "sourceId": "app:semantic:commerce:74ff4456be9ecc206456",
+            "sourceRevision": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "semantic_revenue"
+                },
+                {
+                  "measure": "semantic_customer_count"
+                }
+              ]
+            },
+            "viz": {
+              "type": "table"
+            },
+            "title": "Semantic commerce totals",
+            "sourceClass": "governed_semantic",
+            "filterBindings": [
+              {
+                "filter": "customer_id",
+                "binding": "customer_id",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              },
+              {
+                "filter": "order_date",
+                "binding": "order_date",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              },
+              {
+                "filter": "order_id",
+                "binding": "order_id",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              },
+              {
+                "filter": "region",
+                "binding": "region",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              }
+            ],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          }
+        ]
+      },
+      "narrow": {
+        "kind": "grid",
+        "cols": 1,
+        "rowHeight": 80,
+        "items": [
+          {
+            "i": "order-lines-dataset-kpi",
+            "x": 0,
+            "y": 0,
+            "w": 1,
+            "h": 2,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "revenue"
+                }
+              ]
+            },
+            "viz": {
+              "type": "kpi"
+            },
+            "title": "Revenue",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-kpi-2",
+            "x": 0,
+            "y": 2,
+            "w": 1,
+            "h": 2,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "order_count"
+                }
+              ]
+            },
+            "viz": {
+              "type": "kpi"
+            },
+            "title": "Orders",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-kpi-3",
+            "x": 0,
+            "y": 4,
+            "w": 1,
+            "h": 2,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "margin_rate"
+                }
+              ]
+            },
+            "viz": {
+              "type": "kpi"
+            },
+            "title": "Margin rate",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-chart",
+            "x": 0,
+            "y": 6,
+            "w": 1,
+            "h": 4,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [
+                {
+                  "field": "region"
+                }
+              ],
+              "measures": [
+                {
+                  "measure": "revenue"
+                }
+              ],
+              "orderBy": [
+                {
+                  "alias": "revenue",
+                  "direction": "desc"
+                }
+              ]
+            },
+            "viz": {
+              "type": "bar"
+            },
+            "title": "Revenue by region",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-dataset-chart-2",
+            "x": 0,
+            "y": 10,
+            "w": 1,
+            "h": 4,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [
+                {
+                  "field": "order_date",
+                  "timeGrain": "month"
+                }
+              ],
+              "measures": [
+                {
+                  "measure": "revenue"
+                }
+              ],
+              "orderBy": [
+                {
+                  "alias": "order_date_month",
+                  "direction": "asc"
+                }
+              ]
+            },
+            "viz": {
+              "type": "bar"
+            },
+            "title": "Revenue by month",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          },
+          {
+            "i": "order-lines-table",
+            "x": 0,
+            "y": 14,
+            "w": 1,
+            "h": 4,
+            "sourceId": "app:semantic:commerce:74ff4456be9ecc206456",
+            "sourceRevision": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb",
+            "query": {
+              "dimensions": [],
+              "measures": [
+                {
+                  "measure": "semantic_revenue"
+                },
+                {
+                  "measure": "semantic_customer_count"
+                }
+              ]
+            },
+            "viz": {
+              "type": "table"
+            },
+            "title": "Semantic commerce totals",
+            "sourceClass": "governed_semantic",
+            "filterBindings": [
+              {
+                "filter": "customer_id",
+                "binding": "customer_id",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              },
+              {
+                "filter": "order_date",
+                "binding": "order_date",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              },
+              {
+                "filter": "order_id",
+                "binding": "order_id",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              },
+              {
+                "filter": "region",
+                "binding": "region",
+                "mode": "predicate",
+                "capability": "preflight_required"
+              }
+            ],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          }
+        ]
+      }
+    }
+  },
+  "datasets": [
+    {
+      "id": "dataset_d4c10df35e6ab241",
+      "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+      "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+      "snapshotId": "b1a434c8684d66af603f7cedd758b3acc6152695c365bbdff7b3a7c3f7ae08f1",
+      "contractFingerprint": "sha256:90aa55a2c2cd76a3c94384ea617ba43b4bf0fa0d8ea4a88f21d66eb154251c39"
+    },
+    {
+      "id": "dataset_8836092201aaead3",
+      "sourceId": "app:semantic:commerce:74ff4456be9ecc206456",
+      "sourceRevision": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb",
+      "snapshotId": "b1a434c8684d66af603f7cedd758b3acc6152695c365bbdff7b3a7c3f7ae08f1",
+      "contractFingerprint": "sha256:9341a36d0e9b0907acaaa6c7aaf86352b201f28946c866d8f5fcad2a540b6dcb"
+    }
+  ],
+  "filters": [
+    {
+      "id": "region",
+      "type": "multiselect",
+      "label": "Region",
+      "scope": {
+        "app": true
+      },
+      "datasetBindings": {
+        "dataset_d4c10df35e6ab241": {
+          "field": "region"
+        },
+        "dataset_8836092201aaead3": {
+          "field": "region"
+        }
+      }
+    }
+  ],
+  "interactions": {
+    "crossFilter": {
+      "enabled": true,
+      "mappings": [
+        {
+          "fromTileId": "order-lines-dataset-chart",
+          "fromField": "region",
+          "toDataset": "dataset_d4c10df35e6ab241",
+          "toField": "region"
+        },
+        {
+          "fromTileId": "order-lines-dataset-chart",
+          "fromField": "region",
+          "toDataset": "dataset_8836092201aaead3",
+          "toField": "region"
+        }
+      ]
+    },
+    "navigate": [
+      {
+        "fromTile": "order-lines-dataset-chart",
+        "toPage": "order-detail",
+        "carryFilters": [
+          "region"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,58 @@
+name: App Datasets pilot (real DuckDB)
+
+# Runs the Dataset tile product path against a real DuckDB warehouse: compose
+# field tiles, run them, filter, cross-filter, compare periods, drill, prove
+# aggregate components, cache, save as a review block, replace, convert, and
+# publish (apps/cli/src/datasets/dataset-runtime-pilot.test.ts). It also holds
+# the parity checks: tile results equal hand-written SQL, and the block and
+# semantic routes agree on shared metrics.
+#
+# The suite skips itself unless DQL_APP_DATASETS_DUCKDB_CONNECTOR_ROOT names a
+# directory that loads DuckDB, because the workspace keeps native connectors
+# optional for normal DQL users. This job supplies that directory, so here the
+# suite runs for real and a skip would be a failure of this job's purpose.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  pilot:
+    name: dataset tiles on DuckDB
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Install a disposable DuckDB connector
+        # npm reads workspace:* dependencies when run from the repo root, so
+        # install into a non-workspace prefix (same as eval-answerability).
+        run: |
+          mkdir -p "$CONNECTOR_ROOT"
+          printf '%s\n' '{"private":true}' > "$CONNECTOR_ROOT/package.json"
+          npm --prefix "$CONNECTOR_ROOT" install --no-save --no-package-lock --workspaces=false duckdb@1.1.3
+        env:
+          CONNECTOR_ROOT: ${{ runner.temp }}/app-datasets-connectors
+
+      - name: Run the pilot suite
+        working-directory: apps/cli
+        # An explicit bash shell runs with pipefail, so a failing vitest is not
+        # masked by tee.
+        shell: bash
+        run: |
+          npx vitest run src/datasets/dataset-runtime-pilot.test.ts --reporter=verbose | tee "$RUNNER_TEMP/pilot.log"
+          # A configured root must run every case; a skipped case here means the
+          # connector root was not picked up.
+          if grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/pilot.log"; then
+            echo "The pilot suite skipped cases although a DuckDB connector root was configured." >&2
+            exit 1
+          fi
+        env:
+          DQL_APP_DATASETS_DUCKDB_CONNECTOR_ROOT: ${{ runner.temp }}/app-datasets-connectors

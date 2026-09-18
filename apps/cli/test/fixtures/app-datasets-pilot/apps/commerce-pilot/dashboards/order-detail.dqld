@@ -1,0 +1,202 @@
+{
+  "version": 3,
+  "id": "order-detail",
+  "metadata": {
+    "title": "Order detail",
+    "description": "Order lines for the selected region",
+    "domain": "commerce",
+    "audience": "operators",
+    "visibility": "shared",
+    "lifecycle": "certified"
+  },
+  "datasets": [
+    {
+      "id": "dataset_d4c10df35e6ab241",
+      "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+      "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+      "snapshotId": "b1a434c8684d66af603f7cedd758b3acc6152695c365bbdff7b3a7c3f7ae08f1",
+      "contractFingerprint": "sha256:90aa55a2c2cd76a3c94384ea617ba43b4bf0fa0d8ea4a88f21d66eb154251c39"
+    }
+  ],
+  "filters": [
+    {
+      "id": "region",
+      "type": "multiselect",
+      "label": "Region",
+      "scope": {
+        "app": true
+      },
+      "datasetBindings": {
+        "dataset_d4c10df35e6ab241": {
+          "field": "region"
+        }
+      }
+    }
+  ],
+  "layout": {
+    "kind": "grid",
+    "cols": 12,
+    "rowHeight": 80,
+    "items": [
+      {
+        "i": "order-lines-dataset-table",
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 6,
+        "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+        "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+        "query": {
+          "dimensions": [],
+          "measures": [],
+          "limit": 200,
+          "detail": true,
+          "detailColumns": [
+            "order_line_id",
+            "order_id",
+            "region",
+            "order_date",
+            "net_amount"
+          ]
+        },
+        "viz": {
+          "type": "table"
+        },
+        "title": "Order lines",
+        "sourceClass": "certified_block",
+        "filterBindings": [],
+        "review": {
+          "status": "not_required",
+          "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+        },
+        "trustState": "certified",
+        "reviewStatus": "certified"
+      }
+    ],
+    "responsive": {
+      "wide": {
+        "kind": "grid",
+        "cols": 12,
+        "rowHeight": 80,
+        "items": [
+          {
+            "i": "order-lines-dataset-table",
+            "x": 0,
+            "y": 0,
+            "w": 12,
+            "h": 6,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [],
+              "limit": 200,
+              "detail": true,
+              "detailColumns": [
+                "order_line_id",
+                "order_id",
+                "region",
+                "order_date",
+                "net_amount"
+              ]
+            },
+            "viz": {
+              "type": "table"
+            },
+            "title": "Order lines",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          }
+        ]
+      },
+      "medium": {
+        "kind": "grid",
+        "cols": 6,
+        "rowHeight": 80,
+        "items": [
+          {
+            "i": "order-lines-dataset-table",
+            "x": 0,
+            "y": 0,
+            "w": 6,
+            "h": 6,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [],
+              "limit": 200,
+              "detail": true,
+              "detailColumns": [
+                "order_line_id",
+                "order_id",
+                "region",
+                "order_date",
+                "net_amount"
+              ]
+            },
+            "viz": {
+              "type": "table"
+            },
+            "title": "Order lines",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          }
+        ]
+      },
+      "narrow": {
+        "kind": "grid",
+        "cols": 1,
+        "rowHeight": 80,
+        "items": [
+          {
+            "i": "order-lines-dataset-table",
+            "x": 0,
+            "y": 0,
+            "w": 1,
+            "h": 6,
+            "sourceId": "app:block:commerce:a04df7dc095ea53854d5",
+            "sourceRevision": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609",
+            "query": {
+              "dimensions": [],
+              "measures": [],
+              "limit": 200,
+              "detail": true,
+              "detailColumns": [
+                "order_line_id",
+                "order_id",
+                "region",
+                "order_date",
+                "net_amount"
+              ]
+            },
+            "viz": {
+              "type": "table"
+            },
+            "title": "Order lines",
+            "sourceClass": "certified_block",
+            "filterBindings": [],
+            "review": {
+              "status": "not_required",
+              "sourceFingerprint": "sha256:8d04284976bfc83fb38838aa2cb988bb71430763cb05f1f4e79a4ac52b5ba609"
+            },
+            "trustState": "certified",
+            "reviewStatus": "certified"
+          }
+        ]
+      }
+    }
+  }
+}

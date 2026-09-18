@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   datasetField,
@@ -11,9 +12,13 @@ import {
   datasetHierarchyFields,
   datasetQueryRequiresAggregateComponentEvidence,
   datasetTileVisualizationCompatibility,
+  isTileTimeGrain,
   normalizeTileQuery,
+  tileQueryHash,
+  tileQueryValidationRuns,
   validateTileQuery,
 } from './tile-query.js';
+import { sha256Hex } from './sha256-sync.js';
 
 function ordersDataset(overrides: Partial<DatasetDescriptor> = {}): DatasetDescriptor {
   return {
@@ -491,5 +496,127 @@ describe('field-based tile query contract', () => {
       fromField: 'order_id',
       values: ['O-100'],
     })).toMatchObject({ status: 'blocked', code: 'HIERARCHY_LEVEL_UNSUPPORTED' });
+  });
+});
+
+describe('tile query rejections and identities', () => {
+  const codes = (result: ReturnType<typeof validateTileQuery>) => result.diagnostics.map((diagnostic) => diagnostic.code);
+
+  it('rejects an unknown measure and a measure-only field used as a grouping', () => {
+    const unknown = validateTileQuery(ordersDataset(), { dimensions: [], measures: [{ measure: 'gross_profit' }] });
+    expect(unknown.outcome).toBe('rejected');
+    expect(codes(unknown)).toContain('UNKNOWN_MEASURE');
+    expect(tileQueryValidationRuns(unknown)).toBe(false);
+
+    const roleless = ordersDataset({
+      fields: [
+        ...ordersDataset().fields,
+        // A physical column declared with a role the grouping contract does not accept.
+        { kind: 'physical', name: 'raw_payload', qualifiedId: 'commerce::block::order_lines::field::raw_payload', type: 'string', role: 'measure_input' as never, status: 'approved' },
+      ],
+    });
+    const grouped = validateTileQuery(roleless, { dimensions: [{ field: 'raw_payload' }], measures: [{ measure: 'net_amount' }] });
+    expect(codes(grouped)).toContain('INVALID_DIMENSION_ROLE');
+  });
+
+  it('routes a suggested physical field to review instead of running it', () => {
+    const suggested = ordersDataset({
+      fields: ordersDataset().fields.map((field) => (field.kind === 'physical' && field.name === 'region' ? { ...field, status: 'suggested' as const } : field)),
+    });
+    const result = validateTileQuery(suggested, { dimensions: [{ field: 'region' }], measures: [{ measure: 'net_amount' }] });
+    expect(result.outcome).toBe('needs_review');
+    expect(codes(result)).toEqual(['SUGGESTED_FIELD']);
+    expect(tileQueryValidationRuns(result)).toBe(false);
+  });
+
+  it('keeps time grains a closed vocabulary so an unknown grain cannot reach SQL or skip the grain checks', () => {
+    expect(isTileTimeGrain('month')).toBe(true);
+    expect(isTileTimeGrain('Month')).toBe(false);
+    expect(isTileTimeGrain("month'); DROP TABLE orders; --")).toBe(false);
+
+    const injected = validateTileQuery(ordersDataset(), {
+      dimensions: [{ field: 'order_date', timeGrain: "month'); DROP TABLE orders; --" }],
+      measures: [{ measure: 'net_amount' }],
+    });
+    expect(injected.outcome).toBe('rejected');
+    expect(codes(injected)).toEqual(['INVALID_TIME_GRAIN']);
+
+    // An unknown grain on the Dataset itself used to disable the
+    // finer-than-source and non-additive rollup checks by having no position.
+    const badSource = validateTileQuery(ordersDataset({ grain: { ...ordersDataset().grain, timeGrain: 'fortnight' } }), {
+      dimensions: [{ field: 'order_date', timeGrain: 'day' }],
+      measures: [{ measure: 'order_count' }],
+    });
+    expect(badSource.outcome).toBe('rejected');
+    expect(codes(badSource)).toEqual(['INVALID_TIME_GRAIN']);
+  });
+
+  it('rejects a time grain finer than the Dataset grain', () => {
+    const monthly = ordersDataset({ grain: { ...ordersDataset().grain, timeGrain: 'month' } });
+    const result = validateTileQuery(monthly, { dimensions: [{ field: 'order_date', timeGrain: 'day' }], measures: [{ measure: 'net_amount' }] });
+    expect(result.outcome).toBe('rejected');
+    expect(codes(result)).toContain('TIME_GRAIN_BELOW_SOURCE_GRAIN');
+  });
+
+  it('rejects a daily distinct count summed into months (non-additive re-aggregation)', () => {
+    const result = validateTileQuery(dailyAggregateDataset(), {
+      dimensions: [{ field: 'order_date', timeGrain: 'month' }],
+      measures: [{ measure: 'customer_count' }],
+    });
+    expect(result.outcome).toBe('rejected');
+    expect(codes(result)).toContain('NON_ADDITIVE_AGGREGATE_ROLLUP');
+  });
+
+  it('requires an aggregate Dataset to group time only through its declared time bucket', () => {
+    const aggregate = dailyAggregateDataset({
+      fields: [
+        ...dailyAggregateDataset().fields,
+        { kind: 'physical', name: 'shipped_date', qualifiedId: 'commerce::block::customer_daily::field::shipped_date', type: 'date', role: 'time', status: 'approved', time: { grains: ['day', 'month'] } },
+      ],
+    });
+    const result = validateTileQuery(aggregate, { dimensions: [{ field: 'shipped_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }] });
+    expect(result.outcome).toBe('rejected');
+    expect(codes(result)).toContain('AGGREGATE_TIME_BUCKET_REQUIRED');
+  });
+
+  it('rejects an out-of-range limit', () => {
+    for (const limit of [0, -1, 10_001, 2.5]) {
+      const result = validateTileQuery(ordersDataset(), { dimensions: [{ field: 'region' }], measures: [{ measure: 'net_amount' }], limit });
+      expect(codes(result)).toContain('INVALID_LIMIT');
+    }
+  });
+
+  it('reports a permitted rollup of an aggregate Dataset as adapted and still runs it', () => {
+    const result = validateTileQuery(dailyAggregateDataset(), {
+      dimensions: [{ field: 'order_date', timeGrain: 'month' }, { field: 'customer_day_id' }],
+      measures: [{ measure: 'revenue' }],
+    });
+    expect(result.outcome).toBe('adapted');
+    expect(result.adaptations).toEqual([
+      { kind: 'aggregate_time_rollup', message: "Rolled up from the Dataset's day grain to month." },
+    ]);
+    expect(tileQueryValidationRuns(result)).toBe(true);
+
+    // At the native grain nothing is adapted.
+    const native = validateTileQuery(dailyAggregateDataset(), {
+      dimensions: [{ field: 'order_date' }, { field: 'customer_day_id' }],
+      measures: [{ measure: 'revenue' }],
+    });
+    expect(native).toEqual({ outcome: 'covered', diagnostics: [], adaptations: [] });
+  });
+
+  it('fingerprints a tile query with sha256 that ignores key order and matches node crypto', () => {
+    const left = tileQueryHash({ dimensions: [{ field: 'region' }], measures: [{ measure: 'net_amount' }], limit: 10 });
+    const right = tileQueryHash({ limit: 10, measures: [{ measure: 'net_amount' }], dimensions: [{ field: 'region' }] });
+    expect(left).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(left).toBe(right);
+    expect(tileQueryHash({ dimensions: [{ field: 'region' }], measures: [{ measure: 'net_amount' }], limit: 11 })).not.toBe(left);
+    // Known SHA-256 vectors, including the padding boundaries and UTF-8.
+    expect(sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    expect(sha256Hex('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+    expect(sha256Hex('a'.repeat(56))).toBe('b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a');
+    for (const value of ['héllo € 😀', 'x'.repeat(64), 'x'.repeat(1000)]) {
+      expect(sha256Hex(value)).toBe(createHash('sha256').update(value).digest('hex'));
+    }
   });
 });

@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "id": "commerce-pilot",
+  "name": "Commerce pilot",
+  "description": "Governed analytical App for Commerce pilot",
+  "visibility": "shared",
+  "publicationIntent": "shared_project",
+  "ownerDomain": "commerce",
+  "usesDomains": [
+    "commerce"
+  ],
+  "requiredExports": [],
+  "domain": "commerce",
+  "audience": "stakeholders",
+  "lifecycle": "certified",
+  "owners": [
+    "analyst@example.test"
+  ],
+  "members": [
+    {
+      "userId": "analyst@example.test",
+      "displayName": "analyst@example.test",
+      "roles": [
+        "owner",
+        "analyst"
+      ]
+    }
+  ],
+  "roles": [
+    {
+      "id": "owner",
+      "displayName": "Owner"
+    },
+    {
+      "id": "analyst",
+      "displayName": "Analyst"
+    },
+    {
+      "id": "viewer",
+      "displayName": "Viewer"
+    }
+  ],
+  "policies": [
+    {
+      "id": "viewers-read",
+      "domain": "commerce",
+      "minClassification": "internal",
+      "allowedRoles": [
+        "viewer",
+        "analyst",
+        "owner"
+      ],
+      "accessLevel": "read",
+      "enabled": true
+    },
+    {
+      "id": "analyst-execute",
+      "domain": "commerce",
+      "minClassification": "internal",
+      "allowedRoles": [
+        "analyst",
+        "owner"
+      ],
+      "accessLevel": "execute",
+      "enabled": true
+    },
+    {
+      "id": "owner-admin",
+      "domain": "commerce",
+      "minClassification": "restricted",
+      "allowedRoles": [
+        "owner"
+      ],
+      "accessLevel": "admin",
+      "enabled": true
+    }
+  ],
+  "rlsBindings": [],
+  "schedules": [],
+  "homepage": {
+    "type": "dashboard",
+    "id": "overview"
+  }
+}

@@ -1,0 +1,71 @@
+import { describe, expect, it } from 'vitest';
+import type { DashboardDocument, DatasetDescriptor } from '@duckcodeailabs/dql-core';
+import { resolveDashboardDatasetFilters, resolveRelativeDateRange } from './dashboard-dataset-filters.js';
+
+const descriptor = {
+  version: 1, id: 'app:block:commerce:orders', kind: 'block', sourceRevision: 'r1', snapshotId: 's1', label: 'Orders',
+  contractRef: { kind: 'block_source', id: 'orders', fingerprint: 'c1' },
+  binding: { sourceQualifiedId: 'orders', sourceRevision: 'r1', contractFingerprint: 'c1', state: 'valid' },
+  lifecycle: 'certified', trust: 'certified', grain: { entityIds: ['order'], keyFields: ['order_id'] },
+  fields: [
+    { kind: 'physical', name: 'ordered_at', qualifiedId: 'orders.ordered_at', type: 'timestamp', role: 'time', status: 'approved', time: { grains: ['day'] } },
+    { kind: 'physical', name: 'order_date', qualifiedId: 'orders.order_date', type: 'date', role: 'time', status: 'approved', time: { grains: ['day'] } },
+    { kind: 'physical', name: 'region', qualifiedId: 'orders.region', type: 'string', role: 'dimension', status: 'approved' },
+  ],
+  operations: ['filter', 'group'], execution: { route: 'certified' },
+} as unknown as DatasetDescriptor;
+
+function dashboard(field: string, timezone?: string): DashboardDocument {
+  return {
+    version: 3, id: 'overview', title: 'Overview', metadata: {},
+    datasets: [{ id: 'orders', sourceId: 'app:block:commerce:orders', sourceRevision: 'r1', snapshotId: 's1', contractFingerprint: 'c1' }],
+    filters: [{ id: 'period', type: 'relative_date', label: 'Period', ...(timezone ? { timezone } : {}), datasetBindings: { orders: { field } } }],
+    layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [{ i: 't1', x: 0, y: 0, w: 6, h: 4, sourceId: 'app:block:commerce:orders', sourceRevision: 'r1', query: { dimensions: [], measures: [{ measure: 'orders' }] }, viz: { type: 'single_value' } }] },
+  } as unknown as DashboardDocument;
+}
+
+const resolveFor = (field: string, value: unknown, now: Date, timezone?: string) => {
+  const doc = dashboard(field, timezone);
+  return resolveDashboardDatasetFilters({ dashboard: doc, item: doc.layout.items[0]!, descriptor, values: { period: value }, now });
+};
+
+describe('relative date dashboard filters on dataset tiles', () => {
+  it('resolves presets to inclusive calendar ranges ending today', () => {
+    expect(resolveRelativeDateRange('last_7_days', '2026-03-10')).toEqual({ start: '2026-03-04', end: '2026-03-10' });
+    expect(resolveRelativeDateRange('last_1_days', '2026-03-10')).toEqual({ start: '2026-03-10', end: '2026-03-10' });
+    expect(resolveRelativeDateRange('last_90_days', '2026-03-01')).toEqual({ start: '2025-12-02', end: '2026-03-01' });
+    expect(resolveRelativeDateRange('today', '2026-03-10')).toEqual({ start: '2026-03-10', end: '2026-03-10' });
+    expect(resolveRelativeDateRange('yesterday', '2026-03-01')).toEqual({ start: '2026-02-28', end: '2026-02-28' });
+    expect(resolveRelativeDateRange('month_to_date', '2026-03-10')).toEqual({ start: '2026-03-01', end: '2026-03-10' });
+    expect(resolveRelativeDateRange('quarter_to_date', '2026-08-15')).toEqual({ start: '2026-07-01', end: '2026-08-15' });
+    expect(resolveRelativeDateRange('year_to_date', '2026-08-15')).toEqual({ start: '2026-01-01', end: '2026-08-15' });
+    for (const bad of ['last_0_days', 'last_99999_days', 'next_week', 'last_7_days; DROP']) {
+      expect(resolveRelativeDateRange(bad, '2026-03-10')).toBeUndefined();
+    }
+  });
+
+  it('bounds a date field with a start-inclusive, end-exclusive range', () => {
+    const result = resolveFor('order_date', 'last_7_days', new Date('2026-03-10T12:00:00Z'));
+    expect(result.errors).toEqual([]);
+    expect(result.filters).toEqual([
+      { field: 'order_date', op: 'gte', values: ['2026-03-04'] },
+      { field: 'order_date', op: 'lt', values: ['2026-03-11'] },
+    ]);
+  });
+
+  it('takes today from the filter timezone and keeps local midnights across a DST change', () => {
+    // 03:30 UTC on 9 March is still 8 March in New York; DST starts 8 March 2026.
+    const result = resolveFor('ordered_at', 'last_2_days', new Date('2026-03-09T03:30:00Z'), 'America/New_York');
+    expect(result.errors).toEqual([]);
+    expect(result.filters).toEqual([
+      { field: 'ordered_at', op: 'gte', values: ['2026-03-07T05:00:00.000Z'] },
+      { field: 'ordered_at', op: 'lt', values: ['2026-03-09T04:00:00.000Z'] },
+    ]);
+  });
+
+  it('requires a timezone for a timestamp field and a date-typed binding', () => {
+    expect(resolveFor('ordered_at', 'last_7_days', new Date('2026-03-10T00:00:00Z')).errors[0]?.message).toMatch(/IANA timezone/);
+    expect(resolveFor('region', 'last_7_days', new Date('2026-03-10T00:00:00Z'), 'UTC').errors[0]?.message).toMatch(/not a date or timestamp/);
+    expect(resolveFor('order_date', 'next_week', new Date('2026-03-10T00:00:00Z')).errors[0]?.code).toBe('FILTER_VALUE_INVALID');
+  });
+});

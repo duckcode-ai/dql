@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -10,6 +11,7 @@ import { DuckDBConnector, QueryExecutor, type ConnectionConfig } from '@duckcode
 import type { AgentProvider } from '@duckcodeailabs/dql-agent';
 import { LocalAppStorage, defaultLocalAppsDbPath } from '@duckcodeailabs/dql-project';
 import { startLocalServer } from '../local-runtime.js';
+import { resolveRelativeDateRange } from './dashboard-dataset-filters.js';
 
 const configuredDuckDbConnectorRoot = process.env.DQL_APP_DATASETS_DUCKDB_CONNECTOR_ROOT?.trim();
 const duckDbIt = configuredDuckDbConnectorRoot ? it : it.skip;
@@ -3324,7 +3326,372 @@ describe('Dataset App Builder real DuckDB pilot', () => {
       rmSync(projectRoot, { recursive: true, force: true });
     }
   }, 120_000);
+
+  duckDbIt('APP-074 runs at most four Dataset queries at once and executes an identical tile query once per run', async () => {
+    const pilot = await startPilotProject('dql-app-datasets-scheduler-');
+    try {
+      const { base, executor } = pilot;
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const original = executor.executeQuery.bind(executor);
+      const spy = vi.spyOn(executor, 'executeQuery').mockImplementation(async (...args: Parameters<QueryExecutor['executeQuery']>) => {
+        const isTile = typeof args[0] === 'string' && args[0].startsWith('WITH ds AS');
+        if (isTile) {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((done) => setTimeout(done, 40));
+        }
+        try {
+          return await original(...args);
+        } finally {
+          if (isTile) inFlight -= 1;
+        }
+      });
+      const { draft, page } = await composeBlockTiles(base, 'Scheduler App', [
+        ['Revenue', 'kpi', { dimensions: [], measures: [{ measure: 'revenue' }] }],
+        ['Revenue again', 'kpi', { dimensions: [], measures: [{ measure: 'revenue' }] }],
+        ['Orders', 'kpi', { dimensions: [], measures: [{ measure: 'order_count' }] }],
+        ['Customers', 'kpi', { dimensions: [], measures: [{ measure: 'customer_count' }] }],
+        ['Margin rate', 'kpi', { dimensions: [], measures: [{ measure: 'margin_rate' }] }],
+        ['Revenue by region', 'chart', { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] }],
+        ['Revenue by month', 'chart', { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }] }],
+      ]);
+      const run = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/dashboards/${encodeURIComponent(page.id)}/run`, 'POST', { fullRun: true });
+      expect(run.status, run.text).toBe(200);
+      expect(run.body.tiles.every((tile: any) => tile.status === 'ok')).toBe(true);
+      // The source-key proof probe also reads `ds`; count tile queries only.
+      const tileSql = spy.mock.calls.map(([sql]) => sql)
+        .filter((sql): sql is string => typeof sql === 'string' && sql.startsWith('WITH ds AS') && !sql.includes('__dql_grain_key'));
+      // Seven tiles, six distinct queries: the duplicate KPI shares one execution.
+      expect(tileSql).toHaveLength(6);
+      expect(new Set(tileSql).size).toBe(6);
+      expect(maxInFlight).toBeGreaterThan(1);
+      expect(maxInFlight).toBeLessThanOrEqual(4);
+      expect(findTile(run.body.tiles, 'Revenue again').result.rows).toEqual(findTile(run.body.tiles, 'Revenue').result.rows);
+      spy.mockRestore();
+    } finally {
+      await pilot.stop();
+    }
+  }, 120_000);
+
+  duckDbIt('APP-075 returns the same numbers as independent SQL, and the block and semantic routes agree on shared metrics', async () => {
+    const pilot = await startPilotProject('dql-app-datasets-parity-');
+    try {
+      const { base, executor, connection } = pilot;
+      const candidates = await createDraftAndCandidates(base, 'Parity App');
+      const blockSource = candidates.items.find((item: any) => item.kind === 'block' && item.title === 'Order lines Dataset');
+      const semanticSource = candidates.items.find((item: any) => item.kind === 'semantic' && item.capabilities?.dataset?.kind === 'semantic');
+      expect(blockSource).toBeTruthy();
+      expect(semanticSource).toBeTruthy();
+      const composed = await request(base, `/api/app-builds/${encodeURIComponent(candidates.draft.id)}/compose`, 'POST', {
+        mode: 'manual',
+        expectedRevision: candidates.draft.revision,
+        expectedProposalHash: candidates.draft.proposalHash,
+        selections: [
+          blockSelection(blockSource.sourceId, 'Block totals', 'table', { dimensions: [], measures: [{ measure: 'revenue' }, { measure: 'order_count' }, { measure: 'customer_count' }, { measure: 'margin_rate' }] }),
+          blockSelection(blockSource.sourceId, 'Block by region', 'table', { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }, { measure: 'order_count' }, { measure: 'margin_rate' }], orderBy: [{ alias: 'region', direction: 'asc' }] }),
+          blockSelection(semanticSource.sourceId, 'Semantic totals', 'table', { dimensions: [], measures: [{ measure: 'semantic_revenue' }, { measure: 'semantic_order_count' }, { measure: 'semantic_customer_count' }, { measure: 'semantic_margin_rate' }] }),
+        ],
+      });
+      expect(composed.status, composed.text).toBe(200);
+      const draft = composed.body.draft;
+      const page = draft.pages.find((candidate: any) => candidate.id === 'overview');
+      const run = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/dashboards/${encodeURIComponent(page.id)}/run`, 'POST', { fullRun: true });
+      expect(run.status, run.text).toBe(200);
+
+      // Independent SQL, written by hand against the seeded table.
+      const independent = await executor.executeQuery(`
+        SELECT SUM(net_amount) AS revenue, COUNT(DISTINCT order_id) AS order_count,
+               COUNT(DISTINCT customer_id) AS customer_count,
+               SUM(margin_amount) / NULLIF(SUM(net_amount), 0) AS margin_rate
+        FROM order_lines`, [], {}, connection);
+      const byRegion = await executor.executeQuery(`
+        SELECT region, SUM(net_amount) AS revenue, COUNT(DISTINCT order_id) AS order_count,
+               SUM(margin_amount) / NULLIF(SUM(net_amount), 0) AS margin_rate
+        FROM order_lines GROUP BY region ORDER BY region`, [], {}, connection);
+      const numeric = (value: unknown) => Number(value);
+      const expectRow = (actual: Record<string, unknown>, expected: Record<string, unknown>, keys: string[]) => {
+        for (const key of keys) expect(numeric(actual[key]), key).toBeCloseTo(numeric(expected[key]), 10);
+      };
+
+      const blockTotals = findTile(run.body.tiles, 'Block totals');
+      expect(blockTotals.status, blockTotals.error).toBe('ok');
+      expectRow(blockTotals.result.rows[0], independent.rows[0]!, ['revenue', 'order_count', 'customer_count', 'margin_rate']);
+
+      const blockByRegion = findTile(run.body.tiles, 'Block by region');
+      expect(blockByRegion.result.rows.map((row: any) => row.region)).toEqual(byRegion.rows.map((row) => row.region));
+      blockByRegion.result.rows.forEach((row: any, index: number) => expectRow(row, byRegion.rows[index]!, ['revenue', 'order_count', 'margin_rate']));
+
+      const semanticTotals = findTile(run.body.tiles, 'Semantic totals');
+      expect(semanticTotals.status, semanticTotals.error).toBe('ok');
+      const semanticRow = semanticTotals.result.rows[0];
+      expectRow(
+        { revenue: semanticRow.semantic_revenue, order_count: semanticRow.semantic_order_count, customer_count: semanticRow.semantic_customer_count, margin_rate: semanticRow.semantic_margin_rate },
+        blockTotals.result.rows[0],
+        ['revenue', 'order_count', 'customer_count', 'margin_rate'],
+      );
+      // Both receipts record the C8 outcome they executed under.
+      expect(blockTotals.dataset.validation).toEqual({ outcome: 'covered', adaptations: [] });
+      expect(semanticTotals.dataset.validation).toEqual({ outcome: 'covered', adaptations: [] });
+    } finally {
+      await pilot.stop();
+    }
+  }, 120_000);
+
+  duckDbIt('APP-071 applies a relative-date dashboard filter as the same range an analyst would write by hand', async () => {
+    const pilot = await startPilotProject('dql-app-datasets-relative-date-');
+    try {
+      const { base, executor, connection } = pilot;
+      const { draft: composedDraft, page } = await composeBlockTiles(base, 'Relative date App', [
+        ['Revenue', 'kpi', { dimensions: [], measures: [{ measure: 'revenue' }] }],
+      ]);
+      const binding = page.datasets[0];
+      const patched = await request(base, `/api/app-builds/${encodeURIComponent(composedDraft.id)}`, 'PATCH', {
+        expectedRevision: composedDraft.revision,
+        expectedProposalHash: composedDraft.proposalHash,
+        operations: [{
+          type: 'set_filter',
+          pageId: page.id,
+          filter: { id: 'period', type: 'relative_date', label: 'Period', timezone: 'UTC', datasetBindings: { [binding.id]: { field: 'order_date' } } },
+        }],
+      });
+      expect(patched.status, patched.text).toBe(200);
+      const draft = patched.body.draft;
+      // Wide enough to reach the seeded rows for years to come, and still a
+      // real bound: the expected value is computed from the same calendar day.
+      const today = new Date().toISOString().slice(0, 10);
+      const range = resolveRelativeDateRange('last_3660_days', today)!;
+      const run = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/dashboards/${encodeURIComponent(page.id)}/run`, 'POST', {
+        fullRun: true,
+        variables: { period: 'last_3660_days' },
+      });
+      expect(run.status, run.text).toBe(200);
+      const tile = findTile(run.body.tiles, 'Revenue');
+      expect(tile.status, tile.error).toBe('ok');
+      expect(tile.dataset.appliedFilters).toEqual([
+        expect.objectContaining({ field: 'order_date', op: 'gte', values: [`${range.start}T00:00:00.000Z`] }),
+        expect.objectContaining({ field: 'order_date', op: 'lt' }),
+      ]);
+      const expected = await executor.executeQuery(
+        `SELECT SUM(net_amount) AS revenue FROM order_lines WHERE order_date >= CAST('${range.start}' AS TIMESTAMP) AND order_date < CAST('${range.end}' AS TIMESTAMP) + INTERVAL 1 DAY`,
+        [], {}, connection,
+      );
+      expect(Number(tile.result.rows[0].revenue)).toBe(Number(expected.rows[0]!.revenue));
+
+      const unknownPreset = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/dashboards/${encodeURIComponent(page.id)}/run`, 'POST', {
+        fullRun: true,
+        variables: { period: 'next_fortnight' },
+      });
+      expect(findTile(unknownPreset.body.tiles, 'Revenue')).toMatchObject({ status: 'error', error: expect.stringContaining('unknown relative date') });
+    } finally {
+      await pilot.stop();
+    }
+  }, 120_000);
+
+  duckDbIt('APP-073 M4-PROM-01 saves a filtered tile as a runnable review block whose params reproduce the tile result', async () => {
+    const pilot = await startPilotProject('dql-app-datasets-promotion-params-');
+    try {
+      const { base, projectRoot } = pilot;
+      const { draft, page } = await composeBlockTiles(base, 'Promotion App', [
+        ['US revenue by month', 'table', {
+          dimensions: [{ field: 'order_date', timeGrain: 'month' }],
+          measures: [{ measure: 'revenue' }],
+          filters: [{ field: 'region', op: 'eq', values: ['US'] }],
+          orderBy: [{ alias: 'order_date_month', direction: 'asc' }],
+        }],
+      ]);
+      const run = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/dashboards/${encodeURIComponent(page.id)}/run`, 'POST', { fullRun: true });
+      expect(run.status, run.text).toBe(200);
+      const tile = findTile(run.body.tiles, 'US revenue by month');
+      expect(tile.status, tile.error).toBe('ok');
+      const saved = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/dashboards/${encodeURIComponent(page.id)}/tiles/${encodeURIComponent(tile.tileId)}/save-as-block`, 'POST', {
+        runId: run.body.runId,
+        expectedRevision: draft.revision,
+        expectedProposalHash: draft.proposalHash,
+        name: 'US revenue by month review',
+      });
+      expect(saved.status, saved.text).toBe(201);
+      const source = readFileSync(join(projectRoot, saved.body.path), 'utf-8');
+      expect(source).toContain('params {');
+      expect(source).toMatch(/: string = "US"/);
+      expect(source).not.toMatch(/(?<![A-Za-z_])\$[0-9]/);
+      expect(saved.body.replacementEligible).toBe(true);
+    } finally {
+      await pilot.stop();
+    }
+  }, 120_000);
+
+  duckDbIt('APP-076 runs the committed commerce-pilot App from a clean checkout: shared filter, cross-filter, and detail', async () => {
+    const pilot = await startPilotProject('dql-app-datasets-clean-checkout-');
+    try {
+      const { base } = pilot;
+      const runPage = (pageId: string, body: Record<string, unknown>) => request(base, `/api/apps/commerce-pilot/dashboards/${pageId}/run`, 'POST', body);
+
+      const all = await runPage('overview', { fullRun: true });
+      expect(all.status, all.text).toBe(200);
+      for (const tile of all.body.tiles) expect(tile.status, `${tile.title}: ${tile.error}`).toBe('ok');
+      expect(findTile(all.body.tiles, 'Revenue').result.rows).toEqual([{ revenue: 130 }]);
+      expect(Number(findTile(all.body.tiles, 'Semantic commerce totals').result.rows[0].semantic_revenue)).toBe(130);
+
+      // One shared filter, bound to both Datasets by field.
+      const california = await runPage('overview', { fullRun: true, variables: { region: ['CA'] } });
+      expect(california.status, california.text).toBe(200);
+      expect(findTile(california.body.tiles, 'Revenue').result.rows).toEqual([{ revenue: 60 }]);
+      expect(Number(findTile(california.body.tiles, 'Semantic commerce totals').result.rows[0].semantic_revenue)).toBe(60);
+
+      // A click on the region chart filters its mapped siblings on both Datasets.
+      const regionTile = findTile(all.body.tiles, 'Revenue by region');
+      const crossFiltered = await runPage('overview', {
+        fullRun: true,
+        crossFilters: [{ fromTileId: regionTile.tileId, fromSourceId: regionTile.dataset.sourceId, fromSourceRevision: regionTile.dataset.sourceRevision, field: 'region', values: ['US'] }],
+      });
+      expect(crossFiltered.status, crossFiltered.text).toBe(200);
+      expect(findTile(crossFiltered.body.tiles, 'Revenue').result.rows).toEqual([{ revenue: 70 }]);
+      expect(Number(findTile(crossFiltered.body.tiles, 'Semantic commerce totals').result.rows[0].semantic_revenue)).toBe(70);
+
+      // Navigation carries `region`; the detail page honours it.
+      const detail = await runPage('order-detail', { fullRun: true, variables: { region: ['CA'] } });
+      expect(detail.status, detail.text).toBe(200);
+      const lines = findTile(detail.body.tiles, 'Order lines');
+      expect(lines.status, lines.error).toBe('ok');
+      expect(lines.result.rows.map((row: any) => row.order_line_id)).toEqual(['OL-004', 'OL-006', 'OL-007']);
+      expect(new Set(lines.result.rows.map((row: any) => row.region))).toEqual(new Set(['CA']));
+    } finally {
+      await pilot.stop();
+    }
+  }, 120_000);
+
+  duckDbIt('APP-077 an App published before Datasets runs unchanged and republishes without new blockers', async () => {
+    const pilot = await startPilotProject('dql-app-datasets-legacy-republish-');
+    try {
+      const { base, projectRoot } = pilot;
+      const appDir = join(projectRoot, 'apps', 'legacy-sales');
+      mkdirSync(join(appDir, 'dashboards'), { recursive: true });
+      writeFileSync(join(appDir, 'dql.app.json'), `${JSON.stringify({
+        version: 1, id: 'legacy-sales', name: 'Legacy sales', domain: 'commerce',
+        owners: ['analyst@example.test'], members: [{ userId: 'analyst@example.test', roles: ['owner'] }],
+        roles: [{ id: 'owner' }], policies: [], homepage: { type: 'dashboard', id: 'overview' },
+      }, null, 2)}\n`);
+      const legacyPage = {
+        version: 1, id: 'overview',
+        metadata: { title: 'Overview', domain: 'commerce', lifecycle: 'certified' },
+        layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [{ i: 'order-lines', x: 0, y: 0, w: 12, h: 4, block: { blockId: 'Order lines Dataset' }, viz: { type: 'table' } }] },
+      };
+      const pagePath = join(appDir, 'dashboards', 'overview.dqld');
+      writeFileSync(pagePath, `${JSON.stringify(legacyPage, null, 2)}\n`);
+
+      // Runs as a published App with no migration and no file rewrite.
+      const published = await request(base, '/api/apps/legacy-sales/dashboards/overview/run', 'POST', { fullRun: true });
+      expect(published.status, published.text).toBe(200);
+      expect(published.body.tiles).toEqual([expect.objectContaining({ status: 'ok' })]);
+      expect(published.body.tiles[0].result.rows).toHaveLength(8);
+      expect(JSON.parse(readFileSync(pagePath, 'utf-8'))).toEqual(legacyPage);
+
+      // A version-1 tile has no recorded source revision. Opening it for edit
+      // raises exactly the refresh task it raised before Datasets existed.
+      const openedLegacy = await request(base, '/api/app-builds', 'POST', { baseAppId: 'legacy-sales', name: 'Legacy sales', authoringMode: 'manual', sourcePolicy: 'governed_only' });
+      expect(openedLegacy.status, openedLegacy.text).toBe(201);
+      expect(openedLegacy.body.draft.reviewTasks).toEqual([expect.objectContaining({ tileId: 'order-lines', message: expect.stringContaining('has no published source revision') })]);
+
+      // A Studio-published whole-block tile carries its exact source binding.
+      // Open for edit, preview, preflight, republish: no Dataset-era blocker.
+      const blockPath = 'domains/commerce/blocks/order-lines-dataset.dql';
+      const blockSource = readFileSync(join(projectRoot, blockPath), 'utf-8');
+      const sourceId = `app:block:commerce:${createHash('sha256').update(`${blockPath}\u0000Order lines Dataset`).digest('hex').slice(0, 20)}`;
+      const sourceRevision = `sha256:${createHash('sha256').update(blockSource).digest('hex')}`;
+      const studioPage = {
+        version: 2, id: 'overview',
+        metadata: { title: 'Overview', domain: 'commerce', lifecycle: 'certified' },
+        layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [{
+          i: 'order-lines', x: 0, y: 0, w: 12, h: 4, sourceId, sourceRevision,
+          block: { blockId: 'Order lines Dataset' }, viz: { type: 'table' }, title: 'Order lines',
+          sourceClass: 'certified_block', trustState: 'certified', reviewStatus: 'certified',
+          review: { status: 'not_required', sourceFingerprint: sourceRevision },
+        }] },
+      };
+      writeFileSync(pagePath, `${JSON.stringify(studioPage, null, 2)}\n`);
+      const opened = await request(base, '/api/app-builds', 'POST', { baseAppId: 'legacy-sales', name: 'Legacy sales', authoringMode: 'manual', sourcePolicy: 'governed_only' });
+      expect(opened.status, opened.text).toBe(201);
+      let draft = opened.body.draft;
+      expect(draft.reviewTasks).toEqual([]);
+      const preview = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/dashboards/overview/run`, 'POST', { fullRun: true });
+      expect(preview.status, preview.text).toBe(200);
+      expect(preview.body.tiles.every((tile: any) => tile.status === 'ok')).toBe(true);
+      const receipt = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}`, 'PATCH', {
+        expectedRevision: draft.revision,
+        expectedProposalHash: draft.proposalHash,
+        operations: [{ type: 'set_preview_receipt', receipt: { id: preview.body.runId, pageId: 'overview', revision: draft.revision, snapshotId: preview.body.snapshotId, filterFingerprint: preview.body.filterFingerprint, resultFingerprint: preview.body.resultFingerprint, createdAt: new Date().toISOString() } }],
+      });
+      expect(receipt.status, receipt.text).toBe(200);
+      draft = receipt.body.draft;
+      const preflight = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/preflight`, 'POST', { expectedRevision: draft.revision, proposalHash: draft.proposalHash });
+      expect(preflight.status, preflight.text).toBe(200);
+      draft = preflight.body.draft;
+      const republished = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/publish-to-project`, 'POST', { expectedRevision: draft.revision, proposalHash: draft.proposalHash });
+      expect(republished.status, republished.text).toBe(201);
+      const after = await request(base, '/api/apps/legacy-sales/dashboards/overview/run', 'POST', { fullRun: true });
+      expect(after.status, after.text).toBe(200);
+      expect(after.body.tiles[0].result.rows).toEqual(published.body.tiles[0].result.rows);
+    } finally {
+      await pilot.stop();
+    }
+  }, 120_000);
 });
+
+async function startPilotProject(prefix: string) {
+  const connectorRoot = requireConfiguredDuckDbConnectorRoot();
+  const projectRoot = mkdtempSync(join(tmpdir(), prefix));
+  const databasePath = join(projectRoot, 'app-datasets-pilot.duckdb');
+  const connection: ConnectionConfig = { driver: 'duckdb', filepath: databasePath, moduleSearchPaths: [connectorRoot] };
+  const executor = new QueryExecutor();
+  let server: Server | undefined;
+  cpSync(fixtureRoot, projectRoot, { recursive: true });
+  const projectConnectorRoot = join(projectRoot, '.dql', 'connectors');
+  mkdirSync(projectConnectorRoot, { recursive: true });
+  symlinkSync(join(connectorRoot, 'node_modules'), join(projectConnectorRoot, 'node_modules'), 'dir');
+  execFileSync(process.execPath, [seedWarehouse, '--seed', join(projectRoot, 'seeds', 'seed.json'), '--connector-root', connectorRoot, '--out', databasePath], { stdio: 'pipe' });
+  const port = await startLocalServer({
+    rootDir: projectRoot, projectRoot, executor, connection, preferredPort: 0,
+    captureServer: (created) => { server = created; },
+  });
+  return {
+    base: `http://127.0.0.1:${port}`,
+    executor,
+    connection,
+    projectRoot,
+    stop: async () => {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+      await executor.disconnect();
+      rmSync(projectRoot, { recursive: true, force: true });
+    },
+  };
+}
+
+async function createDraftAndCandidates(base: string, name: string) {
+  const created = await request(base, '/api/app-builds', 'POST', {
+    name, goal: 'Check governed Dataset tiles.', domain: 'commerce', authoringMode: 'manual', sourcePolicy: 'governed_only', template: 'blank',
+  });
+  expect(created.status, created.text).toBe(201);
+  const draft = created.body.draft;
+  const candidates = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/source-candidates?domain=commerce&limit=50`, 'GET');
+  expect(candidates.status, candidates.text).toBe(200);
+  return { draft, items: candidates.body.items as any[] };
+}
+
+async function composeBlockTiles(base: string, name: string, tiles: Array<[string, 'kpi' | 'chart' | 'table', Record<string, unknown>]>) {
+  const { draft, items } = await createDraftAndCandidates(base, name);
+  const source = items.find((item: any) => item.kind === 'block' && item.title === 'Order lines Dataset');
+  expect(source).toBeTruthy();
+  const composed = await request(base, `/api/app-builds/${encodeURIComponent(draft.id)}/compose`, 'POST', {
+    mode: 'manual',
+    expectedRevision: draft.revision,
+    expectedProposalHash: draft.proposalHash,
+    selections: tiles.map(([title, view, query]) => blockSelection(source.sourceId, title, view, query)),
+  });
+  expect(composed.status, composed.text).toBe(200);
+  const composedDraft = composed.body.draft;
+  return { draft: composedDraft, page: composedDraft.pages.find((candidate: any) => candidate.id === 'overview') };
+}
 
 function requireConfiguredDuckDbConnectorRoot(): string {
   if (!configuredDuckDbConnectorRoot) throw new Error('DQL_APP_DATASETS_DUCKDB_CONNECTOR_ROOT is required for this real DuckDB pilot.');
