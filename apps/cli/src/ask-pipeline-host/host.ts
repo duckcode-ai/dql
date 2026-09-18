@@ -71,7 +71,7 @@ import {
   type RuntimeSchemaTable,
 } from '@duckcodeailabs/dql-agent';
 import { buildProjectVocabulary, buildVocabularySource, embeddedManifestRelations, normalizeRelationName, type VocabularySourceInput } from './vocabulary-source.js';
-import { certifiedJoinViolations, classifySqlJoins, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, modelingRelationshipEdges, sameRelation, sharedParentShortcuts, type LedgerJoin } from './join-relationships.js';
+import { businessIdentifierLine, businessIdentifiers, certifiedJoinViolations, classifySqlJoins, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, modelingRelationshipEdges, sameRelation, sharedParentShortcuts, type LedgerJoin } from './join-relationships.js';
 
 /**
  * THE ASK PIPELINE HOST.
@@ -1962,6 +1962,8 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       const markerLines = markerTables(relations, mapEdges, sourceColumns)
         .map((item) => ({ ...item, base: relations.find((relation) => sameRelation(relation, item.base)) ?? item.base }))
         .map(markerTableLine);
+      // The number people know a table's rows by, beside its internal key.
+      const identifierLines = businessIdentifiers(relations, sourceColumns).map(businessIdentifierLine);
       // THE PROJECT'S WRITTEN RULES: the skills selected for this request whose
       // text shares the most words with the question and the chosen tables,
       // long enough to carry a definition (the reading step sees a short card).
@@ -1976,6 +1978,7 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
         ...metricLines,
         ...joinLines,
         ...markerLines,
+        ...identifierLines,
         ...skillLines,
         ...hintLines,
       ];

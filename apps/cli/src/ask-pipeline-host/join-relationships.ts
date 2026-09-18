@@ -427,3 +427,47 @@ export function markerTableLine(item: MarkerTable): string {
   const on = item.keys.map((key) => `${item.marker}.${key.from} = ${item.base}.${key.to}`).join(' AND ');
   return `- ${item.marker} holds no values of its own (only its key): a row in it marks the ${item.base} row with the same key as a ${name(item.marker).replace(/_/g, ' ')} (modeled one-to-one: ${item.relationshipName}). For "${name(item.marker).replace(/_/g, ' ')}" values, use the ${item.base} rows that have a matching ${item.marker} row (JOIN ${item.marker} ON ${on}); the values are the columns of ${item.base}.`;
 }
+
+/** A table whose rows people know by a business number, beside an internal key. */
+export interface BusinessIdentifier { relation: string; key: string; identifier: string }
+
+const nameTokens = (name: string) => name.replace(/"/g, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+
+/**
+ * BUSINESS IDENTIFIERS. Many tables carry an internal key (Policy_Identifier)
+ * and a number people use (Policy_Number, Company_Claim_Number). An answer
+ * that lists policies by the internal key alone is correct and useless to a
+ * reader; which of the two a drafted statement showed varied from run to run.
+ * Found from names alone: a key named after the table (<table>_id,
+ * <table>_identifier) and exactly one other column named after the table that
+ * ends in number, code or no. Nothing is emitted when that is ambiguous.
+ */
+export function businessIdentifiers(relations: string[], columnsOf: (relation: string) => string[]): BusinessIdentifier[] {
+  const found: BusinessIdentifier[] = [];
+  for (const relation of relations) {
+    const table = nameTokens(relation.split('.').pop()!);
+    if (table.length === 0) continue;
+    const stem = table[table.length - 1]!;
+    const columns = columnsOf(relation);
+    const key = columns.find((column) => {
+      const tokens = nameTokens(column);
+      const last = tokens[tokens.length - 1];
+      return (last === 'id' || last === 'identifier') && tokens.slice(0, -1).join('_') === table.join('_');
+    });
+    if (!key) continue;
+    const candidates = columns.filter((column) => {
+      if (column === key) return false;
+      const tokens = nameTokens(column);
+      const last = tokens[tokens.length - 1]!;
+      return ['number', 'code', 'no', 'num'].includes(last) && tokens.slice(0, -1).includes(stem) && !tokens.some((token) => ['type', 'status', 'role', 'category', 'postal', 'zip'].includes(token));
+    });
+    if (candidates.length === 1) found.push({ relation, key, identifier: candidates[0]! });
+  }
+  return found;
+}
+
+/** The line an AI drafting SQL reads for one business identifier. */
+export function businessIdentifierLine(item: BusinessIdentifier): string {
+  const name = item.relation.split('.').pop()!.replace(/"/g, '');
+  return `- ${name} rows are known to people by ${item.identifier}; ${item.key} is the internal key. When the answer lists or groups ${name} rows, show ${item.identifier} beside ${item.key}.`;
+}

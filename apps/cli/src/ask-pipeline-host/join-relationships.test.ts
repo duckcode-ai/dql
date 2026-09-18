@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { joinKeyPairs } from '@duckcodeailabs/dql-agent';
-import { certifiedJoinViolations, classifySqlJoins, joinableRelations, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, sameRelation, sharedParentShortcuts, type ModelingRelationshipEdge } from './join-relationships.js';
+import { businessIdentifierLine, businessIdentifiers, certifiedJoinViolations, classifySqlJoins, joinableRelations, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, sameRelation, sharedParentShortcuts, type ModelingRelationshipEdge } from './join-relationships.js';
 
 const certified: ModelingRelationshipEdge = {
   relationshipId: 'commerce::relationship::orders_to_customers', name: 'orders_to_customers',
@@ -178,5 +178,29 @@ describe('tables linked only by a parent they both reference', () => {
     const modeled = 'SELECT a.account_id, SUM(m.amount) FROM dev.ticket_amounts m JOIN dev.tickets t ON m.ticket_id = t.ticket_id JOIN dev.ticket_contracts tc ON tc.ticket_id = t.ticket_id JOIN dev.contracts c ON c.contract_id = tc.contract_id JOIN dev.accounts a ON c.account_id = a.account_id GROUP BY 1';
     // ticket_amounts and ticket_contracts both reference tickets, and nothing else connects them.
     expect(sharedParentShortcuts(classifySqlJoins(joinKeyPairs(modeled), edges), edges)).toEqual([]);
+  });
+});
+
+describe('business identifiers beside internal keys', () => {
+  const columns: Record<string, string[]> = {
+    'dev.policy': ['Policy_Identifier', 'Policy_Number', 'Effective_Date', 'Status_Code'],
+    'dev.claim': ['Claim_Identifier', 'Company_Claim_Number', 'Catastrophe_Identifier'],
+    'dev.orders': ['order_id', 'customer_id', 'order_total'],
+    'dev.party_role': ['Party_Role_Code', 'Party_Role_Name'],
+    'dev.ticket': ['ticket_id', 'ticket_number', 'ticket_code'],
+  };
+  const columnsOf = (relation: string) => columns[relation] ?? [];
+
+  it('names the number people use for a table with an internal key', () => {
+    const found = businessIdentifiers(['dev.policy', 'dev.claim', 'dev.orders', 'dev.party_role'], columnsOf);
+    expect(found).toEqual([
+      { relation: 'dev.policy', key: 'Policy_Identifier', identifier: 'Policy_Number' },
+      { relation: 'dev.claim', key: 'Claim_Identifier', identifier: 'Company_Claim_Number' },
+    ]);
+    expect(businessIdentifierLine(found[0]!)).toBe('- policy rows are known to people by Policy_Number; Policy_Identifier is the internal key. When the answer lists or groups policy rows, show Policy_Number beside Policy_Identifier.');
+  });
+
+  it('says nothing when two columns could be the identifier', () => {
+    expect(businessIdentifiers(['dev.ticket'], columnsOf)).toEqual([]);
   });
 });
