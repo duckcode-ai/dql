@@ -11,6 +11,7 @@ import {
   datasetPhysicalFields,
   normalizeTileQuery,
   tileQueryOutputAliases,
+  tileQueryValidationRuns,
   validateTileQuery,
 } from '@duckcodeailabs/dql-core';
 import type { AppSourceCatalogRecord } from './app-source-catalog.js';
@@ -946,7 +947,7 @@ function normalizedDatasetQuery(
   role: AppBuilderComponentRole,
 ): TileQuery | undefined {
   const supplied = normalizeTileQuery(raw);
-  if (supplied && validateTileQuery(descriptor, supplied).outcome === 'covered') return supplied;
+  if (supplied && tileQueryValidationRuns(validateTileQuery(descriptor, supplied))) return supplied;
   return deterministicDatasetQuery(descriptor, requirement, role);
 }
 
@@ -984,7 +985,7 @@ export function deterministicDatasetQuery(
     if (dimension) dimensions.push({ field: dimension.name });
   }
   const query: TileQuery = { dimensions, measures: [{ measure: matchingMeasure.name }] };
-  return validateTileQuery(descriptor, query).outcome === 'covered' ? query : undefined;
+  return tileQueryValidationRuns(validateTileQuery(descriptor, query)) ? query : undefined;
 }
 
 export function datasetPlannedQueryCoversRequirement(query: TileQuery, requirement: AppBuildRequirement, descriptor: DatasetDescriptor): boolean {

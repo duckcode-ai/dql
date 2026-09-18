@@ -15,6 +15,7 @@ import {
   datasetPhysicalField,
   tileQueryHash,
   tileQueryOutputAliases,
+  tileQueryValidationRuns,
   validateTileQuery,
   type AnalyticalQuestionFrameV2,
   type DatasetDescriptor,
@@ -91,7 +92,7 @@ export function buildDatasetComparisonPlan(input: {
     return blocked('COMPARISON_REQUIRED', 'This Dataset query has no declared period comparison.');
   }
   const validation = validateTileQuery(input.descriptor, input.query);
-  if (validation.outcome !== 'covered') {
+  if (!tileQueryValidationRuns(validation)) {
     return blocked(
       'COMPARISON_QUERY_UNSUPPORTED',
       validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ') || 'This Dataset comparison is not covered by the current source contract.',

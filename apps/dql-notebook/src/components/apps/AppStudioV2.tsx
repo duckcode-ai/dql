@@ -28,6 +28,7 @@ import type {
 import {
   datasetTileVisualizationCompatibility,
   tileQueryOutputAliases,
+  tileQueryValidationRuns,
   validateTileQuery,
   type TileFilterOperator,
   type TileQuery,
@@ -3269,7 +3270,7 @@ export function DatasetTileBuilder({
     {authoringMode === 'detail' && !detailSourceEligible ? <small className="dataset-builder-error" role="alert">Validate the complete source key before adding a detail tile. DQL will recheck it on every run.</small> : null}
     {comparisonError ? <small className="dataset-builder-error" role="alert">{comparisonError}</small> : null}
     {primaryError ? <small className="dataset-builder-error" role="alert">{primaryError}</small> : null}
-    <button type="button" className="primary dataset-add-tile" disabled={disabled || validation.outcome !== 'covered' || Boolean(comparisonError) || (authoringMode === 'metrics' && measureNames.length === 0) || (authoringMode === 'detail' && !detailSourceEligible)} onClick={() => onAdd(source, authoringMode === 'detail' ? 'table' : view, query, title)}><Play size={13} /> Add tile and run preview</button>
+    <button type="button" className="primary dataset-add-tile" disabled={disabled || !tileQueryValidationRuns(validation) || Boolean(comparisonError) || (authoringMode === 'metrics' && measureNames.length === 0) || (authoringMode === 'detail' && !detailSourceEligible)} onClick={() => onAdd(source, authoringMode === 'detail' ? 'table' : view, query, title)}><Play size={13} /> Add tile and run preview</button>
   </section>;
 }
 
@@ -3560,7 +3561,7 @@ function DatasetTileQueryInspector({
   }, [comparisonKey, descriptor.id, descriptor.sourceRevision]);
   const commit = (next: TileQuery) => {
     const validation = validateTileQuery(descriptor, next);
-    if (validation.outcome !== 'covered') {
+    if (!tileQueryValidationRuns(validation)) {
       setError(validation.diagnostics[0]?.message ?? 'The changed Dataset selection is not covered by this source contract.');
       return;
     }

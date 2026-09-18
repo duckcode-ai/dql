@@ -41,6 +41,8 @@ export function resolveDashboardDatasetFilters(input: {
   descriptor: DatasetDescriptor;
   values: Record<string, unknown>;
   crossFilters?: DashboardDatasetCrossFilterInput[];
+  /** Reference instant for relative dates; the run's own clock by default. */
+  now?: Date;
 }): DatasetTileFilterResolution {
   const filters: TileQueryFilter[] = [];
   const unbound: DatasetFilterIssue[] = [];
@@ -97,7 +99,7 @@ export function resolveDashboardDatasetFilters(input: {
       });
       continue;
     }
-    const compiled = dashboardFilterToTileFilter(filter.id, filter.type, filter.multiple === true, field, filter.timezone, value);
+    const compiled = dashboardFilterToTileFilter(filter.id, filter.type, filter.multiple === true, field, filter.timezone, value, input.now ?? new Date());
     if ('error' in compiled) {
       errors.push({ filterId: filter.id, code: 'FILTER_VALUE_INVALID', message: compiled.error });
       continue;
@@ -167,10 +169,23 @@ function dashboardFilterToTileFilter(
   field: DatasetPhysicalField,
   timezone: string | undefined,
   value: unknown,
+  now: Date,
 ): { filters: TileQueryFilter[] } | { error: string } {
-  const values = Array.isArray(value) ? value : [value];
+  let values = Array.isArray(value) ? value : [value];
   if (type === 'relative_date') {
-    return { error: `${filterId} uses relative dates, which this Dataset runtime does not support yet. Choose an explicit date range.` };
+    if (values.length !== 1 || typeof values[0] !== 'string') return { error: `${filterId} requires one relative date such as last_30_days.` };
+    if (field.type !== 'date' && field.type !== 'timestamp') {
+      return { error: `${filterId} is a relative date, but ${field.name} is not a date or timestamp field.` };
+    }
+    if (field.type === 'timestamp' && !timezone) {
+      return { error: `${filterId} requires a declared IANA timezone before it can bound timestamp values.` };
+    }
+    const range = resolveRelativeDateRange(values[0], calendarDateInTimezone(now, timezone ?? 'UTC'));
+    if (!range) return { error: `${filterId} uses an unknown relative date ${values[0]}. Use last_N_days, today, yesterday, month_to_date, quarter_to_date, or year_to_date.` };
+    // A relative date is an inclusive calendar range ending today in the
+    // filter's timezone; from here it is exactly a date range.
+    type = 'daterange';
+    values = [range.start, range.end];
   }
   if (type === 'daterange') {
     if (values.length !== 2) return { error: `${filterId} requires exactly two values for a range.` };
@@ -209,6 +224,39 @@ function dashboardFilterToTileFilter(
   }
   if (values.length !== 1) return { error: `${filterId} requires one value.` };
   return { filters: [{ field: field.name, op: 'eq', values }] };
+}
+
+/**
+ * Resolve a relative-date preset to an inclusive calendar range. `today` is
+ * the calendar date in the filter's timezone (UTC when none is declared, which
+ * only a date field allows). `last_N_days` includes today: last_7_days is
+ * today and the six days before it.
+ */
+export function resolveRelativeDateRange(preset: string, today: string): { start: string; end: string } | undefined {
+  const [year, month, day] = today.split('-').map(Number);
+  const shift = (days: number) => new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+  const lastDays = /^last_(\d{1,4})_days$/.exec(preset);
+  if (lastDays) {
+    const count = Number(lastDays[1]);
+    if (count < 1 || count > 3660) return undefined;
+    return { start: shift(-(count - 1)), end: today };
+  }
+  if (preset === 'today') return { start: today, end: today };
+  if (preset === 'yesterday') return { start: shift(-1), end: shift(-1) };
+  if (preset === 'month_to_date') return { start: `${today.slice(0, 7)}-01`, end: today };
+  if (preset === 'quarter_to_date') {
+    const quarterMonth = String(Math.floor((month - 1) / 3) * 3 + 1).padStart(2, '0');
+    return { start: `${today.slice(0, 4)}-${quarterMonth}-01`, end: today };
+  }
+  if (preset === 'year_to_date') return { start: `${today.slice(0, 4)}-01-01`, end: today };
+  return undefined;
+}
+
+function calendarDateInTimezone(instant: Date, timezone: string): string {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(instant).filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 function isCalendarDate(value: string): boolean {

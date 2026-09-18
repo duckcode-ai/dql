@@ -48,7 +48,21 @@ export interface DatasetTilePromotionInput {
   cacheDelivery?: boolean;
   /** Server-derived, never a browser assertion. */
   futureBindingsRepresentable: boolean;
+  /**
+   * The exact values bound to the executed statement's positional
+   * placeholders (`$1`, `$2`, …), server-held from the settled run. The saved
+   * block declares each as a typed `params { }` default so it runs on its own
+   * and returns the same result.
+   */
+  boundParameters: DatasetTileBoundParameter[];
   now?: () => Date;
+}
+
+export interface DatasetTileBoundParameter {
+  position: number;
+  /** Source block parameter name, or a generated dataset tile filter name. */
+  name: string;
+  value: unknown;
 }
 
 /**
@@ -84,6 +98,8 @@ export function planDatasetTilePromotion(input: DatasetTilePromotionInput): Data
   if (sql.includes('"""')) {
     return refusal('dataset_tile_sql_unavailable', 'The executed SQL cannot be represented safely in a DQL block body.');
   }
+  const parameterized = parameterizeExecutedSql(sql, input.boundParameters);
+  if (!parameterized.ok) return refusal('dataset_tile_dynamic_binding_not_representable', parameterized.message);
   const provenance: DatasetTileProvenanceV1 = {
     version: 1,
     kind: 'dataset_tile_provenance',
@@ -114,8 +130,13 @@ export function planDatasetTilePromotion(input: DatasetTilePromotionInput): Data
     '  status = "draft"',
     ...(input.description?.trim() ? [`  description = ${JSON.stringify(input.description.trim())}`] : []),
     `  dataset_tile_provenance = ${JSON.stringify(JSON.stringify(provenance))}`,
+    ...(parameterized.params.length ? [
+      '  params {',
+      ...parameterized.params.map((param) => `    ${param.name}: ${param.type} = ${param.literal}`),
+      '  }',
+    ] : []),
     '  query = """',
-    ...sql.split('\n').map((line) => `    ${line}`),
+    ...parameterized.sql.split('\n').map((line) => `    ${line}`),
     '  """',
     '}',
     '',
@@ -129,6 +150,98 @@ export function planDatasetTilePromotion(input: DatasetTilePromotionInput): Data
       ? {}
       : { replacementMessage: 'Saved as a fixed-value review draft. Replacement is unavailable because this tile has bindings or interactions that the current block contract cannot represent.' }),
   };
+}
+
+type ParameterizedSql =
+  | { ok: true; sql: string; params: Array<{ name: string; type: 'string' | 'number' | 'boolean'; literal: string }> }
+  | { ok: false; message: string };
+
+/**
+ * The executed statement binds every filter value positionally. A block binds
+ * `${name}` references the same way (the compiler lowers each to a positional
+ * parameter), so each `$N` becomes a named reference whose default is the
+ * value that produced the settled result. Placeholders inside quoted text or
+ * comments are left alone; a placeholder without a recorded value, a `?`
+ * placeholder, or a value that is not a scalar refuses the save instead of
+ * writing a block that cannot run or would run differently.
+ */
+function parameterizeExecutedSql(sql: string, bound: DatasetTileBoundParameter[]): ParameterizedSql {
+  const byPosition = new Map(bound.map((parameter) => [parameter.position, parameter]));
+  const names = new Map<number, string>();
+  const used = new Set<string>();
+  const params: Array<{ name: string; type: 'string' | 'number' | 'boolean'; literal: string }> = [];
+  let out = '';
+  let quote: "'" | '"' | '`' | undefined;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = 0; index < sql.length; index += 1) {
+    const current = sql[index]!;
+    const next = sql[index + 1];
+    if (lineComment) {
+      if (current === '\n') lineComment = false;
+      out += current;
+      continue;
+    }
+    if (blockComment) {
+      if (current === '*' && next === '/') {
+        blockComment = false;
+        out += '*/';
+        index += 1;
+        continue;
+      }
+      out += current;
+      continue;
+    }
+    if (quote) {
+      if (current === quote && sql[index - 1] !== '\\') quote = undefined;
+      out += current;
+      continue;
+    }
+    if (current === '-' && next === '-') { lineComment = true; out += '--'; index += 1; continue; }
+    if (current === '/' && next === '*') { blockComment = true; out += '/*'; index += 1; continue; }
+    if (current === "'" || current === '"' || current === '`') { quote = current; out += current; continue; }
+    if (current === '?') {
+      return { ok: false, message: 'The executed SQL uses an anonymous parameter that a saved block cannot name. The Dataset tile remains unchanged.' };
+    }
+    if (current === '$' && next !== undefined && /[0-9]/.test(next)) {
+      let end = index + 1;
+      while (end < sql.length && /[0-9]/.test(sql[end]!)) end += 1;
+      const position = Number(sql.slice(index + 1, end));
+      let name = names.get(position);
+      if (!name) {
+        const parameter = byPosition.get(position);
+        if (!parameter || !Object.prototype.hasOwnProperty.call(parameter, 'value')) {
+          return { ok: false, message: `The executed SQL has no recorded value for parameter $${position}. Run the current tile again before saving it.` };
+        }
+        const literal = paramLiteral(parameter.value);
+        if (!literal) {
+          return { ok: false, message: `Parameter $${position} holds a value a saved block cannot declare as a default. The Dataset tile remains unchanged.` };
+        }
+        const base = /^[A-Za-z][A-Za-z0-9_]*$/.test(parameter.name) && !parameter.name.startsWith('__') ? parameter.name : `tile_param_${position}`;
+        name = base;
+        for (let suffix = 2; used.has(name); suffix += 1) name = `${base}_${suffix}`;
+        used.add(name);
+        names.set(position, name);
+        params.push({ name, ...literal });
+      }
+      out += '${' + name + '}';
+      index = end - 1;
+      continue;
+    }
+    out += current;
+  }
+  return { ok: true, sql: out, params };
+}
+
+function paramLiteral(value: unknown): { type: 'string' | 'number' | 'boolean'; literal: string } | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? { type: 'number', literal: String(value) } : undefined;
+  if (typeof value === 'boolean') return { type: 'boolean', literal: String(value) };
+  if (typeof value === 'string') {
+    // The DQL lexer understands \n, \t, \\ and quote escapes only.
+    if (/[\u0000-\u0008\u000b-\u001f\u007f]/.test(value)) return undefined;
+    return { type: 'string', literal: JSON.stringify(value) };
+  }
+  return undefined;
 }
 
 function refusal(code: DatasetTilePromotionRefusalCode, message: string): DatasetTilePromotionPlan {

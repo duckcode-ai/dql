@@ -257,7 +257,11 @@ describe('field-based tile query contract', () => {
       measures: [{ measure: 'gross_margin_rate' }],
     });
 
-    expect(result).toEqual({ outcome: 'covered', diagnostics: [], adaptations: [] });
+    // Rolling a daily aggregate up to months is permitted but is an
+    // adaptation of the declared grain (C8 `adapted`), never a plain read.
+    expect(result.outcome).toBe('adapted');
+    expect(result.diagnostics).toEqual([]);
+    expect(result.adaptations.map((adaptation) => adaptation.kind)).toEqual(['aggregate_time_rollup', 'aggregate_entity_rollup']);
     expect(datasetQueryRequiresAggregateComponentEvidence(aggregate, {
       dimensions: [{ field: 'order_date', timeGrain: 'month' }],
       measures: [{ measure: 'gross_margin_rate' }],
@@ -280,8 +284,10 @@ describe('field-based tile query contract', () => {
       measures: [{ measure: 'customer_count' }],
     });
 
-    expect(revenueByMonth).toEqual({ outcome: 'covered', diagnostics: [], adaptations: [] });
-    expect(rateByMonth).toEqual({ outcome: 'covered', diagnostics: [], adaptations: [] });
+    expect(revenueByMonth.outcome).toBe('adapted');
+    expect(revenueByMonth.adaptations.map((adaptation) => adaptation.kind)).toContain('aggregate_time_rollup');
+    expect(rateByMonth.outcome).toBe('adapted');
+    expect(rateByMonth.adaptations.map((adaptation) => adaptation.kind)).toContain('aggregate_time_rollup');
     expect(distinctByMonth.diagnostics).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'NON_ADDITIVE_AGGREGATE_ROLLUP', field: 'customer_count' }),
     ]));

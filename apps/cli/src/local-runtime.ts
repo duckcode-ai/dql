@@ -148,6 +148,7 @@ import {
   tileQueryHash,
   tileQueryOutputAliases,
   normalizeTileQuery,
+  tileQueryValidationRuns,
   validateTileQuery,
   applyDatasetHierarchyDrill,
   datasetHierarchyFields,
@@ -534,9 +535,9 @@ import {
   type SemanticTileConversionPreviewRequest,
   type SemanticTileConversionPreviewResponse,
 } from './apps-api.js';
-import { compileDatasetTileQuery } from './datasets/tile-query-compiler.js';
+import { compileDatasetTileQuery, type CompiledDatasetTileQuery } from './datasets/tile-query-compiler.js';
 import { summarizeDatasetChartFacts } from './datasets/dataset-chart-fact-summary.js';
-import { planDatasetTilePromotion } from './datasets/dataset-tile-promotion.js';
+import { planDatasetTilePromotion, type DatasetTileBoundParameter } from './datasets/dataset-tile-promotion.js';
 import { proveDatasetResultEquivalence } from './datasets/result-equivalence.js';
 import { DatasetResultCache, normalizeDatasetCachedResult } from './datasets/dataset-result-cache.js';
 import { executeDatasetPeriodComparison } from './datasets/period-comparison-runtime.js';
@@ -589,6 +590,7 @@ import {
 import {
   DQLAccessDeniedError,
   activePersonaAppId,
+  activePersonaPolicyFingerprint,
   assertAppAccess,
   loadRuntimeApp,
   runtimeVariables,
@@ -4954,6 +4956,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       comparison: boolean;
       /** No browser flag can make an interactive tile replaceable. */
       futureBindingsRepresentable: boolean;
+      /** Values bound to the executed statement; never sent to the browser. */
+      boundParameters: DatasetTileBoundParameter[];
     }>;
     /**
      * Ephemeral, server-derived context for exact Dataset-chart questions.
@@ -5926,7 +5930,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           'The project changed after this preview. Run the current preview before asking App Autopilot.',
         );
       }
-      const currentPersonaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+      const currentPersonaFingerprint = activePersonaPolicyFingerprint();
       if (currentPersonaFingerprint !== held.personaPolicyFingerprint) {
         return previewValidationFailure(
           'APP_AUTOPILOT_PREVIEW_PERSONA_CHANGED',
@@ -12239,7 +12243,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (currentSnapshot.error || currentSnapshot.stale || currentSnapshot.snapshotId !== execution.snapshotFingerprint) {
       return refuse('DATASET_TILE_SAVE_SOURCE_STALE', 'The project source changed after this Dataset result ran. Refresh the source and run the current tile again.');
     }
-    const currentPersonaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+    const currentPersonaFingerprint = activePersonaPolicyFingerprint();
     if (currentPersonaFingerprint !== execution.personaPolicyFingerprint) {
       return refuse('DATASET_TILE_SAVE_POLICY_STALE', 'The active App persona changed after this Dataset result ran. Run the current tile again before saving it.');
     }
@@ -12302,6 +12306,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         resultFingerprint: execution.resultFingerprint,
         complete: execution.complete,
         futureBindingsRepresentable: execution.futureBindingsRepresentable,
+        boundParameters: execution.boundParameters,
       });
       if (!plan.ok) return refuse(plan.code, plan.message);
       const created = createBlockArtifacts(projectRoot, {
@@ -12430,7 +12435,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (snapshot.error || snapshot.stale) {
       return refuse('DATASET_TILE_REPLACE_SOURCE_STALE', 'The current project source cannot be resolved safely. Refresh the source and run the current tile again.');
     }
-    const personaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+    const personaFingerprint = activePersonaPolicyFingerprint();
     if (personaFingerprint !== execution.personaPolicyFingerprint) {
       return refuse('DATASET_TILE_REPLACE_POLICY_STALE', 'The active App persona changed after this Dataset result ran. Run the current tile again before replacing it.');
     }
@@ -12466,7 +12471,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         { driver: currentConnection.driver },
       );
       candidateSql = candidatePlan?.sql ?? '';
-      if (!candidateSql || (candidatePlan?.sqlParams.length ?? 0) > 0 || Object.keys(candidatePlan?.variables ?? {}).length > 0 || candidateSql.includes('?')) {
+      // A promoted tile's filter values are declared as `params { }` defaults.
+      // Every parameter must resolve from those defaults; anything the saved
+      // block would need from a caller at run time is not a static replacement.
+      const candidateParams = candidatePlan?.sqlParams ?? [];
+      const candidateVariables = candidatePlan?.variables ?? {};
+      if (!candidateSql || candidateSql.includes('?')
+        || candidateParams.some((parameter) => !Object.prototype.hasOwnProperty.call(candidateVariables, parameter.name))) {
         return refuse('dataset_tile_dynamic_binding_not_representable', 'The saved review draft requires runtime bindings, so DQL will not replace the static Dataset tile.');
       }
       const target = await observeWarehouseTargetIdentity(executor, currentConnection);
@@ -12504,7 +12515,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           || appBuildPreviewIntentFingerprint(latestDraft, latestPage.id) !== currentIntent) return undefined;
         const latestBlock = existsSync(blockAbsolutePath) ? readFileSync(blockAbsolutePath, 'utf-8') : '';
         if (`sha256:${createHash('sha256').update(latestBlock).digest('hex')}` !== blockSourceRevision) return undefined;
-        const latestPersona = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+        const latestPersona = activePersonaPolicyFingerprint();
         if (latestPersona !== execution.personaPolicyFingerprint) return undefined;
         return {
           datasetId: execution.sourceId,
@@ -12533,7 +12544,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           if (!scope) throw new Error('The Dataset equivalence read scope is no longer available.');
           const prepared = await prepareAnalyticalExecutionSql({ sql: execution.sql, subject: 'App Dataset tile replacement proof', executor, connection: currentConnection, projectRoot, projectConfig, enforceReadOnly: true });
           if (prepared.connection.driver !== currentConnection.driver || prepared.connection.filepath !== currentConnection.filepath || prepared.connection.schema !== currentConnection.schema) throw new Error('The Dataset statement preparation changed the connection pinned for equivalence.');
-          const result = await scope.execute(prepared.executedSql, undefined, { signal });
+          const bound = bindScopedStatement(
+            prepared.executedSql,
+            execution.boundParameters.map((parameter) => ({ name: parameter.name, position: parameter.position })),
+            Object.fromEntries(execution.boundParameters.map((parameter) => [parameter.name, parameter.value])),
+          );
+          const result = await scope.execute(bound.sql, bound.values, { signal });
           return { result, receiptId: input.runId, receiptFingerprint: execution.resultFingerprint, complete: !result.truncated && result.rowCount === result.rows.length };
         },
         executeCandidate: async ({ readScope, signal }) => {
@@ -12541,7 +12557,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           if (!scope) throw new Error('The candidate equivalence read scope is no longer available.');
           const prepared = await prepareAnalyticalExecutionSql({ sql: candidateSql, subject: 'App review-draft block replacement proof', executor, connection: currentConnection, projectRoot, projectConfig, enforceReadOnly: true });
           if (prepared.connection.driver !== currentConnection.driver || prepared.connection.filepath !== currentConnection.filepath || prepared.connection.schema !== currentConnection.schema) throw new Error('The review-draft statement preparation changed the connection pinned for equivalence.');
-          const result = await scope.execute(prepared.executedSql, undefined, { signal });
+          const bound = bindScopedStatement(prepared.executedSql, candidateParams, candidateVariables);
+          const result = await scope.execute(bound.sql, bound.values, { signal });
           return { result, receiptId: `review_block:${blockSourceRevision}`, receiptFingerprint: `sha256:${createHash('sha256').update(blockSource).digest('hex')}`, complete: !result.truncated && result.rowCount === result.rows.length };
         },
         ordering: execution.query.orderBy?.length ? 'ordered' : 'multiset',
@@ -12761,7 +12778,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         || latestDescriptor.contractRef.fingerprint !== descriptor.contractRef.fingerprint
         || !latestSource.eligibility.localPreview
         || (latestDraft.sourcePolicy === 'governed_only' && (latestSource.lifecycle !== 'certified' || latestSource.trust !== 'certified'))) return undefined;
-      const latestPersona = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+      const latestPersona = activePersonaPolicyFingerprint();
       return {
         datasetId: source.sourceId,
         sourceRevision: source.sourceRevision,
@@ -17596,7 +17613,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         throw new DashboardRunRequestError(`Dataset MCP source ${source.title} is not eligible for governed local execution.`);
       }
       const queryValidation = validateTileQuery(descriptor, query);
-      if (queryValidation.outcome !== 'covered') {
+      if (!tileQueryValidationRuns(queryValidation)) {
         throw new DashboardRunRequestError(
           `Dataset MCP query was refused: ${queryValidation.diagnostics.map((diagnostic) => diagnostic.message).join(' ') || 'the selected fields or operation are not approved.'}`,
         );
@@ -17684,6 +17701,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         source,
         descriptor,
         query,
+        validation: queryValidation,
         tileId,
       };
     };
@@ -17750,7 +17768,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           version: 1,
           source: summarizeMcpDatasetSource(resolved.source),
           query: resolved.query,
-          validation: { outcome: 'covered', diagnostics: [] },
+          validation: { outcome: resolved.validation.outcome, diagnostics: [], adaptations: resolved.validation.adaptations },
           scope: 'ephemeral_mcp_runtime',
           note: 'Preview validates the current governed Dataset contract and does not execute SQL or create an App receipt.',
         }));
@@ -17898,6 +17916,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // grounded in the query that actually produced its settled rows while
         // the persisted App document remains untouched.
         const datasetEffectiveQueries = new Map<string, TileQuery>();
+        /** Server-only: values bound to each block-route tile's executed placeholders. */
+        const datasetBoundParameters = new Map<string, DatasetTileBoundParameter[]>();
         const localApps = { current: null as LocalAppStorage | null };
         // An explicit empty scheduling bound is a deliberate no-op, never a
         // shorthand for every authored tile. That prevents a stale browser
@@ -18096,7 +18116,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // dashboard inputs. It must be available while workers compile their
         // Dataset queries; calculate it once rather than reading persona state
         // after a result has already been produced.
-        const personaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+        const personaFingerprint = activePersonaPolicyFingerprint();
         // A live cache entry retains the originating runtime receipt id for
         // provenance only. Allocate it before workers can complete so a cache
         // miss cannot reference a temporal-dead-zone response identifier.
@@ -18886,6 +18906,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 let resultFingerprint: string;
                 let executedSql: string;
                 let appliedFilters: Array<{ field: string; op: TileFilterOperator; values: unknown[]; placement: 'where' | 'having' }>;
+                /** C8 outcome the executed SQL was compiled under; recorded on the receipt. */
+                let tileValidation: CompiledDatasetTileQuery['validation'];
                 let comparisonEvidence: Record<string, unknown> | undefined;
                 /** A cache delivery is display-only and never fresh execution authority. */
                 let cacheDelivery: DatasetCacheDeliveryReceiptV1 | undefined;
@@ -18914,6 +18936,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                         sourceVariables: executionSourceVariables,
                         parameters: datasetSourceParameters,
                         aggregateComponentProof: aggregatePreparation?.componentProof,
+                        aggregateComponentBinding: { sourceId: source.sourceId, sourceRevision: currentSourceRevision, targetFingerprint: datasetTargetFingerprint },
                         driver: datasetTargetConnection.driver,
                       });
                       const periodExecutionKey = fingerprintDashboardRuntimeState({
@@ -18962,6 +18985,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   resultFingerprint = comparisonExecution.result.receipt.resultFingerprint;
                   executedSql = comparisonSql;
                   appliedFilters = comparisonExecution.periods.flatMap((period) => period.execution.value.compiled.appliedFilters);
+                  tileValidation = comparisonExecution.periods[0]?.execution.value.compiled.validation ?? { outcome: 'covered', adaptations: [] };
                   datasetResult = decorateDatasetResult({
                     columns: comparisonExecution.result.columns,
                     rows: comparisonExecution.result.rows,
@@ -18996,11 +19020,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                     filters: filterResolution.filters,
                     parameters: datasetSourceParameters,
                     aggregateComponentProof: aggregatePreparation?.componentProof,
+                    aggregateComponentBinding: { sourceId: source.sourceId, sourceRevision: currentSourceRevision, targetFingerprint: datasetTargetFingerprint },
                     driver: datasetTargetConnection.driver,
                   });
                   queryFingerprint = compiled.queryFingerprint;
                   filterFingerprint = compiled.filterFingerprint;
                   appliedFilters = compiled.appliedFilters;
+                  tileValidation = compiled.validation;
+                  const boundValues: Record<string, unknown> = { ...compiled.variables, ...invocation.values };
+                  datasetBoundParameters.set(item.i, compiled.sqlParams.map((parameter) => ({
+                    position: parameter.position,
+                    name: parameter.name,
+                    ...(Object.prototype.hasOwnProperty.call(boundValues, parameter.name) ? { value: boundValues[parameter.name] } : {}),
+                  }) as DatasetTileBoundParameter));
                   // Aggregate component proofs and period comparisons must
                   // always execute live. A cache cannot establish their
                   // scoped membership or same-read proof authority. Ordinary
@@ -19147,6 +19179,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                     sourceId: source.sourceId,
                     sourceRevision: currentSourceRevision,
                     contractFingerprint: descriptor.contractRef.fingerprint,
+                    validation: tileValidation,
                     trust: descriptor.trust,
                     lifecycle: descriptor.lifecycle,
                     binding: descriptor.binding,
@@ -19227,6 +19260,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 if (discoveryDescriptor.kind !== 'semantic') {
                   throw new Error('The selected source no longer has a semantic Dataset contract. Refresh the source before running it.');
                 }
+                // Same persona/domain gate as the block route: a semantic
+                // Dataset is not a way around App execute access.
+                assertAppAccess({
+                  app: loaded.app,
+                  domain: discoveryDescriptor.domain ?? loaded.dashboard.metadata.domain ?? loaded.app.domain,
+                  level: 'execute',
+                });
                 const requestedHierarchyDrill = datasetDrills.get(item.i);
                 let effectiveDatasetQuery = item.query;
                 if (requestedHierarchyDrill) {
@@ -19371,6 +19411,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                     sourceId: source.sourceId,
                     sourceRevision: source.sourceRevision,
                     contractFingerprint: discoveryDescriptor.contractRef.fingerprint,
+                    validation: semanticPlan.validation,
                     trust: source.trust,
                     lifecycle: source.lifecycle,
                     binding: {
@@ -20224,6 +20265,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               && result.rowCount === result.rows.length,
             comparison: Boolean(query.comparison || dataset?.comparison),
             futureBindingsRepresentable: !hasFutureBindings,
+            boundParameters: datasetBoundParameters.get(tile.tileId) ?? [],
           }];
         });
         const runEvidence = {
@@ -20334,7 +20376,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             version: 1,
             source: summarizeMcpDatasetSource(mcpRequest.source),
             query: mcpRequest.query,
-            validation: { outcome: 'covered', diagnostics: [] },
+            validation: { outcome: mcpRequest.validation.outcome, diagnostics: [], adaptations: mcpRequest.validation.adaptations },
             scope: 'ephemeral_mcp_runtime',
             partial: true,
             publicationEvidence: false,
@@ -20495,7 +20537,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 || tileQueryHash(currentTile.query) !== context.authoredQueryFingerprint) {
                 return { ok: false as const, error: 'This Dataset tile changed after the chart ran. Run the current chart again before asking about it.' };
               }
-              const currentPersonaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+              const currentPersonaFingerprint = activePersonaPolicyFingerprint();
               if (currentPersonaFingerprint !== context.personaPolicyFingerprint) {
                 return { ok: false as const, error: 'The active App persona changed after this chart ran. Run the chart again before asking about it.' };
               }
@@ -28565,6 +28607,23 @@ function renderDatasetTileDql(input: {
     ...(input.semanticRequest ? { semanticRequest: input.semanticRequest } : {}),
     ...(input.semanticTargetBinding ? { semanticTargetBinding: input.semanticTargetBinding } : {}),
   }, null, 2);
+}
+
+/**
+ * Bind a prepared `$N` statement for a DuckDB consistent read scope, which
+ * executes raw SQL: expand array values, then use DuckDB's `?` placeholders.
+ */
+function bindScopedStatement(
+  sql: string,
+  params: SQLParamSpec[],
+  variables: Record<string, unknown>,
+): { sql: string; values: unknown[] | undefined } {
+  if (params.length === 0) return { sql, values: undefined };
+  const expanded = expandArrayParameters(sql, params, variables);
+  return {
+    sql: normalizeSQLPlaceholders(expanded.sql, 'duckdb'),
+    values: buildParamValues(expanded.params, expanded.variables),
+  };
 }
 
 function errorCodeForDatasetTile(error: unknown): string {

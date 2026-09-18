@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   loadAppDocument,
   findAppDocuments,
@@ -22,6 +24,27 @@ export function runtimeVariables(base: Record<string, unknown> | undefined): Rec
 
 export function activePersonaAppId(): string | undefined {
   return defaultPersonaRegistry.active?.appId;
+}
+
+/**
+ * Identity of everything about the active persona that can change query
+ * results: the App it is scoped to, who it is, its roles, and the RLS context
+ * and attributes substituted into governed SQL. Two personas of the same App
+ * with different RLS values must never share a cached or proven result.
+ */
+export function activePersonaPolicyFingerprint(): string {
+  const persona = defaultPersonaRegistry.active;
+  const sorted = (record: Record<string, unknown> | undefined) => Object.fromEntries(
+    Object.entries(record ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  return createHash('sha256').update(JSON.stringify({
+    version: 1,
+    appId: persona?.appId ?? 'global',
+    userId: persona?.userId ?? null,
+    roles: [...(persona?.roles ?? [])].sort(),
+    rlsContext: sorted(persona?.rlsContext),
+    attributes: sorted(persona?.attributes),
+  })).digest('hex');
 }
 
 export function loadRuntimeApp(projectRoot: string, appId: string | undefined | null): AppDocument | null {

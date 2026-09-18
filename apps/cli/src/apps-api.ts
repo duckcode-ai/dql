@@ -58,6 +58,7 @@ import {
   normalizeTileQuery,
   datasetTileVisualizationCompatibility,
   tileQueryOutputAliases,
+  tileQueryValidationRuns,
   validateTileQuery,
 } from '@duckcodeailabs/dql-core';
 import {
@@ -3459,7 +3460,7 @@ function datasetDraftContractErrors(
         continue;
       }
       const validation = validateTileQuery(descriptor, tile.query);
-      if (validation.outcome !== 'covered') {
+      if (!tileQueryValidationRuns(validation)) {
         const detail = validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ');
         errors.push(`APP_BUILD_DATASET_QUERY_${validation.outcome.toUpperCase()}: ${page.id}/${tile.i} is not fully covered by the current Dataset contract. ${detail}`.trim());
       }
@@ -4096,7 +4097,7 @@ export async function proposeAppBuildDraftOperations(
     if (descriptor) {
       const normalized = normalizeTileQuery(component.query);
       const validation = normalized ? validateTileQuery(descriptor, normalized) : undefined;
-      if (!normalized || validation?.outcome !== 'covered') {
+      if (!normalized || !tileQueryValidationRuns(validation)) {
         const detail = validation?.diagnostics.map((diagnostic) => diagnostic.message).join(' ') || 'The proposed Dataset field query is malformed or not approved.';
         warnings.push(`${component.title} was not added because its Dataset query is not covered by the current source contract: ${detail}`);
         continue;
@@ -6138,7 +6139,7 @@ async function compileAppAutopilotChange(
   const currentAuthorityErrors = await datasetDraftCurrentAuthorityErrors(projectRoot, draft, 'local_preview', resolver);
   if (currentAuthorityErrors.length > 0) throw new Error(currentAuthorityErrors[0]!);
   const currentValidation = validateTileQuery(descriptor, tile.query);
-  if (currentValidation.outcome !== 'covered') {
+  if (!tileQueryValidationRuns(currentValidation)) {
     throw new Error(`APP_AUTOPILOT_DATASET_TILE_INVALID: the saved Dataset query is no longer covered. ${currentValidation.diagnostics.map((diagnostic) => diagnostic.message).join(' ')}`);
   }
   const selectedBinding = appAutopilotDatasetBinding(page, tile);
@@ -6147,7 +6148,7 @@ async function compileAppAutopilotChange(
 
   const validateQueryAndVisualization = (query: TileQuery, visualization: DashboardGridItem['viz']['type']): void => {
     const validation = validateTileQuery(descriptor, query);
-    if (validation.outcome !== 'covered') {
+    if (!tileQueryValidationRuns(validation)) {
       throw new Error(`APP_AUTOPILOT_QUERY_INVALID: ${validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ')}`);
     }
     const compatibility = datasetTileVisualizationCompatibility(query, visualization);
@@ -6753,7 +6754,7 @@ async function composeStoredAppBuildDraft(
     }
     if (dataset && defaultQuery) {
       const validation = validateTileQuery(dataset, defaultQuery);
-      if (validation.outcome !== 'covered') {
+      if (!tileQueryValidationRuns(validation)) {
         const detail = validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ') || 'The selected Dataset operations are not covered.';
         throw new Error(`APP_BUILD_DATASET_QUERY_${validation.outcome.toUpperCase()}: ${detail}`);
       }
@@ -7875,7 +7876,7 @@ export function preflightStoredAppBuildDraft(projectRoot: string, draft: AppBuil
         errors.push(`${page.id}/${tile.i} uses a ${source.lifecycle ?? 'unknown'} Dataset source and cannot be published to the Project.`);
       }
       const validation = validateTileQuery(dataset, tile.query);
-      if (validation.outcome !== 'covered') {
+      if (!tileQueryValidationRuns(validation)) {
         errors.push(`${page.id}/${tile.i} has a Dataset field selection that is not fully covered by its approved contract.`);
       }
       const visualization = datasetTileVisualizationCompatibility(tile.query, tile.viz.type);

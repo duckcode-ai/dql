@@ -24,6 +24,7 @@ import type {
   VariableDeclNode,
   WorkbookNode,
 } from '../ast/nodes.js';
+import { datasetBlockSectionLines } from '../ast/dataset-sections.js';
 import { NodeKind } from '../ast/nodes.js';
 import { parse } from '../parser/parser.js';
 
@@ -278,50 +279,10 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
     lines.push(`${indent(level + 1, state)}terms = [${node.termRefs.map(quote).join(', ')}]`);
   }
   if (node.pattern) lines.push(`${indent(level + 1, state)}pattern = ${quote(node.pattern)}`);
-  if (node.datasetGrain) {
-    lines.push(`${indent(level + 1, state)}grain = {`);
-    lines.push(`${indent(level + 2, state)}entities = [${node.datasetGrain.entities.map(quote).join(', ')}]`);
-    lines.push(`${indent(level + 2, state)}keys = [${node.datasetGrain.keys.map(quote).join(', ')}]`);
-    if (node.datasetGrain.keyEvidence) lines.push(`${indent(level + 2, state)}keyEvidence = ${quote(node.datasetGrain.keyEvidence)}`);
-    if (node.datasetGrain.description) lines.push(`${indent(level + 2, state)}description = ${quote(node.datasetGrain.description)}`);
-    if (node.datasetGrain.timeGrain) lines.push(`${indent(level + 2, state)}timeGrain = ${quote(node.datasetGrain.timeGrain)}`);
-    if (node.datasetGrain.timeBucketBy) lines.push(`${indent(level + 2, state)}timeBucketBy = ${quote(node.datasetGrain.timeBucketBy)}`);
-    if (node.datasetGrain.aggregate !== undefined) lines.push(`${indent(level + 2, state)}aggregate = ${node.datasetGrain.aggregate ? 'true' : 'false'}`);
-    lines.push(`${indent(level + 1, state)}}`);
-  } else if (node.grain) lines.push(`${indent(level + 1, state)}grain = ${quote(node.grain)}`);
-  if (node.datasetFields && node.datasetFields.length > 0) {
-    lines.push(`${indent(level + 1, state)}fields {`);
-    for (const field of [...node.datasetFields].sort((left, right) => left.name.localeCompare(right.name))) {
-      const properties = [`role = ${quote(field.role)}`];
-      if (field.type) properties.push(`type = ${quote(field.type)}`);
-      if (field.grains?.length) properties.push(`grains = [${field.grains.map(quote).join(', ')}]`);
-      if (field.primary !== undefined) properties.push(`primary = ${field.primary ? 'true' : 'false'}`);
-      if (field.hierarchy) properties.push(`hierarchy = ${quote(field.hierarchy)}`);
-      if (field.level !== undefined) properties.push(`level = ${field.level}`);
-      if (field.status) properties.push(`status = ${quote(field.status)}`);
-      lines.push(`${indent(level + 2, state)}${field.name} { ${properties.join(', ')} }`);
-    }
-    lines.push(`${indent(level + 1, state)}}`);
+  if (node.datasetGrain || node.datasetFields?.length || node.datasetMeasures?.length) {
+    lines.push(...datasetBlockSectionLines(node, (depth) => indent(level + depth, state), quote));
   }
-  if (node.datasetMeasures && node.datasetMeasures.length > 0) {
-    lines.push(`${indent(level + 1, state)}measures {`);
-    for (const measure of [...node.datasetMeasures].sort((left, right) => left.name.localeCompare(right.name))) {
-      const properties = [`agg = ${quote(measure.aggregation)}`];
-      if (measure.from) properties.push(`from = ${quote(measure.from)}`);
-      if (measure.numerator) properties.push(`numerator = ${quote(measure.numerator)}`);
-      if (measure.denominator) properties.push(`denominator = ${quote(measure.denominator)}`);
-      if (measure.expression) properties.push(`expression = ${quote(measure.expression)}`);
-      if (measure.timeBucketBy) properties.push(`timeBucketBy = ${quote(measure.timeBucketBy)}`);
-      properties.push(`additive = ${quote(measure.additive)}`);
-      if (measure.entityAdditive) properties.push(`entityAdditive = ${quote(measure.entityAdditive)}`);
-      if (measure.allowedAggs?.length) properties.push(`allowedAggs = [${measure.allowedAggs.map(quote).join(', ')}]`);
-      if (measure.format) properties.push(`format = ${quote(measure.format)}`);
-      if (measure.currency) properties.push(`currency = ${quote(measure.currency)}`);
-      if (measure.status) properties.push(`status = ${quote(measure.status)}`);
-      lines.push(`${indent(level + 2, state)}${measure.name} { ${properties.join(', ')} }`);
-    }
-    lines.push(`${indent(level + 1, state)}}`);
-  }
+  if (!node.datasetGrain && node.grain) lines.push(`${indent(level + 1, state)}grain = ${quote(node.grain)}`);
   if (node.entities && node.entities.length > 0) {
     lines.push(`${indent(level + 1, state)}entities = [${node.entities.map(quote).join(', ')}]`);
   }

@@ -11,7 +11,7 @@ import {
   type DatasetDescriptor,
   type DatasetMeasureField,
 } from './descriptor.js';
-import type { TileQuery } from '../apps/tile-query.js';
+import type { TileQuery } from '../apps/tile-query-types.js';
 
 export type DatasetAggregateComponentProofStatus =
   | 'passed'
@@ -203,8 +203,20 @@ export function datasetAggregateComponentRequirements(
 export function datasetAggregateComponentProofCovers(
   proof: DatasetAggregateComponentProofV1 | undefined,
   requirements: readonly DatasetAggregateComponentRequirement[],
+  /**
+   * The binding the caller is about to execute under. A proof covers a
+   * rollup only for the exact source revision, contract, target, and time
+   * grain it was produced for; every supplied field must match.
+   */
+  expected?: Partial<DatasetAggregateComponentBindingV1>,
 ): boolean {
   if (!proof || proof.version !== 1 || proof.status !== 'passed') return false;
+  if (expected) {
+    const binding = proof.binding as unknown as Record<string, unknown>;
+    for (const [key, value] of Object.entries(expected)) {
+      if (value !== undefined && binding[key] !== value) return false;
+    }
+  }
   const covered = new Set(proof.components
     .filter((component) => component.targetOperation === 'sum')
     .map((component) => component.alias.trim().toLowerCase()));

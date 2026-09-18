@@ -46,9 +46,11 @@ export {
   datasetHierarchyFields,
   datasetTileVisualizationCompatibility,
   datasetQueryRequiresAggregateComponentEvidence,
+  isTileTimeGrain,
   normalizeTileQuery,
   tileQueryIsTopNIntent,
   tileQueryOutputAliases,
+  tileQueryValidationRuns,
   tileQueryHash,
   tileQueryMeasure,
   validateTileQuery,
@@ -64,8 +66,10 @@ export type {
   TileQueryDimension,
   TileQueryFilter,
   TileQueryMeasure,
+  TileQueryAdaptation,
   TileQueryValidation,
   TileQueryValidationOutcome,
+  TileTimeGrain,
   DatasetHierarchyDrillResult,
 } from './tile-query.js';
 

@@ -6,80 +6,27 @@ import {
   type DatasetPhysicalField,
 } from '../datasets/descriptor.js';
 import { datasetAggregateComponentRequirements } from '../datasets/component-proof.js';
+import { sha256Hex } from './sha256-sync.js';
 
-export type TileFilterOperator = 'eq' | 'neq' | 'in' | 'not_in' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'contains';
+import type {
+  TileFilterOperator,
+  TileQueryDimension,
+  TileQueryMeasure,
+  TileQueryFilter,
+  TileQueryComparisonPeriod,
+  TileQueryComparison,
+  TileQuery,
+} from './tile-query-types.js';
 
-export interface TileQueryDimension {
-  field: string;
-  timeGrain?: string;
-  alias?: string;
-}
-
-export interface TileQueryMeasure {
-  measure: string;
-  alias?: string;
-}
-
-export interface TileQueryFilter {
-  field: string;
-  op: TileFilterOperator;
-  values?: unknown[];
-}
-
-/**
- * Explicit period comparison state for a field-based Dataset tile. This maps
- * one-for-one to the governed analytical period contract at execution time:
- * periods are start-inclusive/end-exclusive, and the comparison base is the
- * current result from which prior-period values are subtracted.
- *
- * Keep this in the TileQuery rather than deriving it from a chart title or a
- * date control. It is authored intent, participates in the query fingerprint,
- * and therefore invalidates preview/publication evidence when changed.
- */
-export interface TileQueryComparisonPeriod {
-  id: string;
-  kind: 'absolute' | 'current' | 'previous_period' | 'previous_year';
-  start?: string;
-  end?: string;
-  alignToPeriodId?: string;
-}
-
-export interface TileQueryComparison {
-  version: 1;
-  /** Exact approved physical time field; display labels are not authority. */
-  timeField: string;
-  timeRole: string;
-  calendarId: string;
-  timezone: string;
-  grain: string;
-  completenessPolicy: 'partial_current' | 'latest_complete' | 'closed_period';
-  periods: TileQueryComparisonPeriod[];
-  /** Current/base output. Deltas are calculated as base minus each comparison. */
-  basePeriodId: string;
-  comparisonPeriodIds: string[];
-  alignment: 'elapsed_period' | 'calendar_period' | 'fiscal_period';
-  outputs: Array<'value' | 'absolute_delta' | 'percent_delta'>;
-  zeroDenominatorPolicy: 'null' | 'not_applicable';
-}
-
-export interface TileQuery {
-  dimensions: TileQueryDimension[];
-  measures: TileQueryMeasure[];
-  filters?: TileQueryFilter[];
-  having?: TileQueryFilter[];
-  comparison?: TileQueryComparison;
-  orderBy?: Array<{ alias: string; direction: 'asc' | 'desc' }>;
-  limit?: number | { param: string };
-  /** Detail emits dataset-grain rows only when the contract explicitly allows it. */
-  detail?: boolean;
-  /**
-   * Approved physical columns to expose for a bounded detail tile. The
-   * source-grain key remains an execution ordering concern; it does not need
-   * to be displayed when a builder deliberately omits it.
-   */
-  detailColumns?: string[];
-  respectsGlobalFilters?: boolean;
-}
+export type {
+  TileFilterOperator,
+  TileQueryDimension,
+  TileQueryMeasure,
+  TileQueryFilter,
+  TileQueryComparisonPeriod,
+  TileQueryComparison,
+  TileQuery,
+} from './tile-query-types.js';
 
 /**
  * A Dataset query is executable independently of its presentation, but scalar
@@ -173,6 +120,7 @@ export interface TileQueryDiagnostic {
     | 'NON_ADDITIVE_AGGREGATE_ROLLUP'
     | 'NON_ADDITIVE_TIME_ROLLUP'
     | 'TIME_GRAIN_BELOW_SOURCE_GRAIN'
+    | 'INVALID_TIME_GRAIN'
     | 'INVALID_COMPARISON'
     | 'HIERARCHY_DRILL_UNSUPPORTED'
     | 'INVALID_LIMIT'
@@ -181,10 +129,29 @@ export interface TileQueryDiagnostic {
   field?: string;
 }
 
+/**
+ * A permitted adaptation of the Dataset contract (C8 `adapted`). The query is
+ * still inside the approved contract, but its result is not a straight read of
+ * the Dataset grain: it re-aggregates an already-aggregated source. The kind is
+ * recorded on receipts and disclosed next to the result.
+ */
+export interface TileQueryAdaptation {
+  kind: 'aggregate_time_rollup' | 'aggregate_entity_rollup';
+  message: string;
+}
+
 export interface TileQueryValidation {
   outcome: TileQueryValidationOutcome;
   diagnostics: TileQueryDiagnostic[];
-  adaptations: string[];
+  adaptations: TileQueryAdaptation[];
+}
+
+/**
+ * Whether a validated tile may execute without a review lane. `covered` and
+ * `adapted` both run; `needs_review` and `rejected` never do.
+ */
+export function tileQueryValidationRuns(validation: Pick<TileQueryValidation, 'outcome'> | undefined): boolean {
+  return validation?.outcome === 'covered' || validation?.outcome === 'adapted';
 }
 
 export type DatasetHierarchyDrillResult =
@@ -203,6 +170,19 @@ export type DatasetHierarchyDrillResult =
 
 const FILTER_OPERATORS = new Set<TileFilterOperator>(['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'between', 'contains']);
 const TIME_GRAINS = ['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'] as const;
+
+export type TileTimeGrain = typeof TIME_GRAINS[number];
+
+/**
+ * The closed time-grain vocabulary. A grain is rendered into dialect SQL
+ * (`DATE_TRUNC('<grain>', …)`), and the grain-order checks below compare
+ * positions in this list, so an unknown spelling must be refused — never
+ * interpolated, and never allowed to disable the finer-than-source and
+ * non-additive rollup checks by having no position.
+ */
+export function isTileTimeGrain(value: unknown): value is TileTimeGrain {
+  return typeof value === 'string' && (TIME_GRAINS as readonly string[]).includes(value);
+}
 
 /**
  * Presentation aliases name selected output columns. They are deliberately a
@@ -279,8 +259,12 @@ export function normalizeTileQuery(value: unknown): TileQuery | undefined {
  */
 export function validateTileQuery(descriptor: DatasetDescriptor, query: TileQuery): TileQueryValidation {
   const diagnostics: TileQueryDiagnostic[] = [];
-  const adaptations: string[] = [];
+  const adaptations: TileQueryAdaptation[] = [];
   const needsReview: TileQueryDiagnostic[] = [];
+  if (descriptor.grain.timeGrain !== undefined && !isTileTimeGrain(descriptor.grain.timeGrain)) {
+    diagnostics.push({ code: 'INVALID_TIME_GRAIN', message: `Dataset ${descriptor.label} declares an unknown time grain ${descriptor.grain.timeGrain}; use one of ${TIME_GRAINS.join(', ')}.` });
+    return { outcome: 'rejected', diagnostics, adaptations: [] };
+  }
   const aggregateSafety = aggregateDatasetQuerySafety(descriptor, query);
   const aggregateComponents = datasetAggregateComponentRequirements(descriptor, query);
   diagnostics.push(...aggregateSafety.diagnostics);
@@ -362,6 +346,10 @@ export function validateTileQuery(descriptor: DatasetDescriptor, query: TileQuer
     if (field.status !== 'approved') {
       needsReview.push({ code: 'SUGGESTED_FIELD', field: dimension.field, message: `${dimension.field} is a suggested field and must be reviewed before it can run.` });
     }
+    if (dimension.timeGrain && !isTileTimeGrain(dimension.timeGrain)) {
+      diagnostics.push({ code: 'INVALID_TIME_GRAIN', field: dimension.field, message: `${dimension.timeGrain} is not a time grain; use one of ${TIME_GRAINS.join(', ')}.` });
+      continue;
+    }
     if (dimension.timeGrain) {
       if (field.role !== 'time' || !field.time?.grains.includes(dimension.timeGrain)) {
         diagnostics.push({ code: 'INVALID_DIMENSION_ROLE', field: dimension.field, message: `${dimension.field} does not support the ${dimension.timeGrain} time grain.` });
@@ -438,6 +426,25 @@ export function validateTileQuery(descriptor: DatasetDescriptor, query: TileQuer
   }
   if (diagnostics.length > 0) return { outcome: 'rejected', diagnostics, adaptations: [] };
   if (needsReview.length > 0) return { outcome: 'needs_review', diagnostics: needsReview, adaptations: [] };
+  // Every rollup check above passed, so re-aggregating an aggregate Dataset is
+  // permitted — but it is an adaptation of the declared grain, not a read of
+  // it, and the result must say so.
+  if (descriptor.grain.aggregate && aggregateSafety.timeRollup) {
+    const target = query.dimensions.find((dimension) => dimension.timeGrain && descriptor.grain.timeBucketBy
+      && normalizeFieldName(dimension.field) === normalizeFieldName(descriptor.grain.timeBucketBy))?.timeGrain;
+    adaptations.push({
+      kind: 'aggregate_time_rollup',
+      message: target
+        ? `Rolled up from the Dataset's ${descriptor.grain.timeGrain} grain to ${target}.`
+        : `Rolled up across the Dataset's ${descriptor.grain.timeGrain} periods.`,
+    });
+  }
+  if (descriptor.grain.aggregate && aggregateSafety.entityRollup) {
+    adaptations.push({
+      kind: 'aggregate_entity_rollup',
+      message: `Re-aggregated above the Dataset's ${descriptor.grain.keyFields.join(', ')} grain.`,
+    });
+  }
   return { outcome: adaptations.length > 0 ? 'adapted' : 'covered', diagnostics: [], adaptations };
 }
 
@@ -704,10 +711,13 @@ export function tileQueryMeasure(descriptor: DatasetDescriptor, selection: TileQ
   return datasetMeasureField(descriptor, selection.measure);
 }
 
+/**
+ * Fixed-size identity of a canonical TileQuery. Browser and server compute it
+ * with the same synchronous hash, so a receipt's authored-query fingerprint
+ * can be compared on either side without carrying the query itself.
+ */
 export function tileQueryHash(query: TileQuery): string {
-  // The runtime supplies cryptographic fingerprints; a deterministic string is
-  // sufficient at the core boundary and makes test fixture expectations easy.
-  return JSON.stringify(canonicalize(query));
+  return `sha256:${sha256Hex(JSON.stringify(canonicalize(query)))}`;
 }
 
 function normalizeDimensions(value: unknown): TileQueryDimension[] | undefined {

@@ -3,12 +3,14 @@ import {
   datasetPhysicalField,
   datasetQueryRequiresAggregateComponentEvidence,
   tileQueryIsTopNIntent,
+  tileQueryValidationRuns,
   validateTileQuery,
   type AnalyticalQuestionFrameV2,
   type DatasetDescriptor,
   type MetricCapabilityContract,
   type TileQuery,
   type TileQueryFilter,
+  type TileQueryValidation,
 } from '@duckcodeailabs/dql-core';
 import {
   solveAnalyticalCompatibility,
@@ -39,6 +41,8 @@ export interface SemanticDatasetTilePlan {
   };
   compatibility: Extract<AnalyticalCompatibilityResult, { status: 'ready' }>;
   appliedFilters: TileQueryFilter[];
+  /** The Dataset-contract outcome this plan executed under (C8). */
+  validation: Pick<TileQueryValidation, 'outcome' | 'adaptations'>;
 }
 
 /**
@@ -58,7 +62,7 @@ export function planSemanticDatasetTileQuery(input: {
     throw new SemanticDatasetTileQueryError('SEMANTIC_DATASET_REQUIRED', 'This field tile is not backed by a semantic Dataset.');
   }
   const validation = validateTileQuery(input.descriptor, input.query);
-  if (validation.outcome !== 'covered') {
+  if (!tileQueryValidationRuns(validation)) {
     throw new SemanticDatasetTileQueryError(
       validation.outcome === 'needs_review' ? 'SEMANTIC_DATASET_QUERY_REVIEW_REQUIRED' : 'SEMANTIC_DATASET_QUERY_REJECTED',
       validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ') || 'The semantic field selection is not covered by this Dataset contract.',
@@ -225,6 +229,7 @@ export function planSemanticDatasetTileQuery(input: {
   };
   return {
     request,
+    validation: { outcome: validation.outcome, adaptations: validation.adaptations },
     governedRequest: {
       metrics: selectedMeasures.map(({ measure, capability }) => ({
         metricId: capability.metricId,

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import {
   datasetTileVisualizationCompatibility,
   tileQueryHash,
+  tileQueryValidationRuns,
   validateTileQuery,
   type DashboardGridItem,
   type DashboardSemanticQueryRef,
@@ -147,7 +148,7 @@ export function planSemanticTileConversion(input: {
     return refusal('legacy_semantic_intent_unsupported', 'A legacy semantic sort does not name one selected exact Dataset output.');
   }
   const validation = validateTileQuery(descriptor, query);
-  if (validation.outcome !== 'covered') {
+  if (!tileQueryValidationRuns(validation)) {
     return refusal('legacy_semantic_query_invalid', validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ') || 'The mapped Dataset query is not covered by the current source contract.');
   }
   const visualization = datasetTileVisualizationCompatibility(query, input.tile.viz.type);

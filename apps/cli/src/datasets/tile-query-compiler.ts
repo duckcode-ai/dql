@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   datasetAggregateComponentProofCovers,
   datasetAggregateComponentRequirements,
@@ -5,10 +7,11 @@ import {
   datasetPhysicalField,
   datasetQueryRequiresAggregateComponentEvidence,
   getDialect,
-  listDialectDrivers,
+  isTileTimeGrain,
   renderDatasetAggregateExpression,
   tileQueryIsTopNIntent,
   tileQueryHash,
+  tileQueryValidationRuns,
   validateTileQuery,
   type DatasetDescriptor,
   type DatasetAggregateComponentProofV1,
@@ -16,6 +19,7 @@ import {
   type TileFilterOperator,
   type TileQuery,
   type TileQueryFilter,
+  type TileQueryValidation,
 } from '@duckcodeailabs/dql-core';
 import type { ConnectionConfig, SQLParamSpec } from '@duckcodeailabs/dql-connectors';
 
@@ -48,6 +52,8 @@ export interface CompiledDatasetTileQuery {
   queryFingerprint: string;
   filterFingerprint: string;
   appliedFilters: Array<{ field: string; op: TileFilterOperator; values: unknown[]; placement: 'where' | 'having' }>;
+  /** The Dataset-contract outcome this SQL was compiled under (C8). */
+  validation: Pick<TileQueryValidation, 'outcome' | 'adaptations'>;
 }
 
 /**
@@ -71,6 +77,8 @@ export function compileDatasetTileQuery(input: {
    * and browser callers cannot mint it.
    */
   aggregateComponentProof?: DatasetAggregateComponentProofV1;
+  /** The run's exact binding; a proof made for any other binding does not cover. */
+  aggregateComponentBinding?: { sourceId: string; sourceRevision: string; targetFingerprint: string };
   /**
    * Set only after the server parsed the actual complete source as a known
    * aggregate query. It closes a false `grain.aggregate` declaration from
@@ -92,7 +100,7 @@ export function compileDatasetTileQuery(input: {
     having: [...(input.query.having ?? []), ...(input.having ?? [])],
   };
   const validation = validateTileQuery(input.descriptor, effectiveQuery);
-  if (validation.outcome !== 'covered') {
+  if (!tileQueryValidationRuns(validation)) {
     const messages = validation.diagnostics.map((diagnostic) => diagnostic.message).join(' ');
     throw new TileQueryCompilationError(
       validation.outcome === 'needs_review' ? 'DATASET_QUERY_REVIEW_REQUIRED' : 'DATASET_QUERY_REJECTED',
@@ -107,7 +115,11 @@ export function compileDatasetTileQuery(input: {
     || datasetQueryRequiresAggregateComponentEvidence(input.descriptor, effectiveQuery);
   if (aggregateEvidenceRequired) {
     const requirements = datasetAggregateComponentRequirements(input.descriptor, effectiveQuery);
-    if (!requirements.supported || !datasetAggregateComponentProofCovers(input.aggregateComponentProof, requirements.requirements)) {
+    if (!requirements.supported || !datasetAggregateComponentProofCovers(input.aggregateComponentProof, requirements.requirements, {
+      ...input.aggregateComponentBinding,
+      contractFingerprint: input.descriptor.contractRef.fingerprint,
+      timeGrain: input.descriptor.grain.timeGrain ?? '',
+    })) {
     throw new TileQueryCompilationError(
       'DATASET_AGGREGATE_COMPONENT_EVIDENCE_REQUIRED',
       `Aggregate Dataset ${input.descriptor.label} needs current component evidence before this rollup can run. Validate the source components against the active warehouse target.`,
@@ -187,12 +199,17 @@ export function compileDatasetTileQuery(input: {
       role: 'dimension' as const,
       ref: datasetDimensionRef(field.qualifiedId),
       type: field.type,
-    })), input.query, appliedFilters);
+    })), input.query, appliedFilters, validation);
   }
 
   const dimensions = input.query.dimensions.map((selection) => {
     const field = datasetPhysicalField(input.descriptor, selection.field);
     if (!field) throw new TileQueryCompilationError('DATASET_FIELD_DRIFT', `Dataset field ${selection.field} no longer resolves.`);
+    // Validation already refused an unknown grain; this guard keeps the grain
+    // out of rendered SQL even if a caller reaches here another way.
+    if (selection.timeGrain !== undefined && !isTileTimeGrain(selection.timeGrain)) {
+      throw new TileQueryCompilationError('DATASET_TIME_GRAIN_INVALID', `${selection.timeGrain} is not a supported time grain.`);
+    }
     const alias = safeAlias(selection.alias ?? (selection.timeGrain ? `${field.name}_${selection.timeGrain}` : field.name));
     const expression = selection.timeGrain
       ? dialect.dateTrunc(selection.timeGrain, `ds.${quote(field.name)}`)
@@ -277,7 +294,7 @@ export function compileDatasetTileQuery(input: {
       aggregation: measure.logicalMeasure.aggregation,
       ...(measure.format ? { format: measure.format } : {}),
     })),
-  ], input.query, appliedFilters);
+  ], input.query, appliedFilters, validation);
 }
 
 function compiledResult(
@@ -287,14 +304,16 @@ function compiledResult(
   columns: CompiledDatasetTileQuery['columns'],
   query: TileQuery,
   appliedFilters: CompiledDatasetTileQuery['appliedFilters'],
+  validation: TileQueryValidation,
 ): CompiledDatasetTileQuery {
   return {
+    validation: { outcome: validation.outcome, adaptations: validation.adaptations },
     sql,
     sqlParams,
     variables,
     columns,
     queryFingerprint: tileQueryHash(query),
-    filterFingerprint: JSON.stringify(appliedFilters.map((filter) => ({ ...filter, values: [...filter.values] }))),
+    filterFingerprint: `sha256:${createHash('sha256').update(JSON.stringify(appliedFilters.map((filter) => ({ ...filter, values: [...filter.values] })))).digest('hex')}`,
     appliedFilters,
   };
 }
@@ -366,9 +385,13 @@ function compileFilter(
   if (filter.op === 'between') return `${expression} BETWEEN ${bind(values[0])} AND ${bind(values[1])}`;
   if (filter.op === 'contains') {
     // Tile filters are literal user search text, never an implicit wildcard
-    // language. Use one portable escape character and bind the escaped value
-    // so quotes remain data rather than SQL syntax on every supported dialect.
-    return `${ilike(expression, addBoundValue(`%${escapeLikeLiteral(String(values[0]))}%`, filter.field))} ESCAPE '!'`;
+    // language, and the escaped value is bound so quotes remain data. BigQuery
+    // has no ESCAPE clause: its LIKE escapes with a backslash. Every other
+    // supported dialect takes an explicit escape character.
+    if (driver.trim().toLowerCase() === 'bigquery') {
+      return ilike(expression, addBoundValue(`%${escapeLikeLiteral(String(values[0]), '\\')}%`, filter.field));
+    }
+    return `${ilike(expression, addBoundValue(`%${escapeLikeLiteral(String(values[0]), '!')}%`, filter.field))} ESCAPE '!'`;
   }
   const placeholders = values.map(bind);
   return `${expression} ${filter.op === 'in' ? 'IN' : 'NOT IN'} (${placeholders.join(', ')})`;
@@ -395,8 +418,8 @@ function typedFilterParameter(
   return `CAST(${placeholder} AS TIMESTAMP)`;
 }
 
-function escapeLikeLiteral(value: string): string {
-  return value.replaceAll('!', '!!').replaceAll('%', '!%').replaceAll('_', '!_');
+function escapeLikeLiteral(value: string, escape: '!' | '\\'): string {
+  return value.replaceAll(escape, `${escape}${escape}`).replaceAll('%', `${escape}%`).replaceAll('_', `${escape}_`);
 }
 
 function resolveLimit(limit: TileQuery['limit'], parameters: Record<string, unknown> | undefined): number | undefined {
@@ -416,8 +439,18 @@ function safeAlias(value: string): string {
   return alias;
 }
 
+/**
+ * Dialects whose rendered tile SQL (DATE_TRUNC, ILIKE/LIKE escaping, typed
+ * temporal parameters, LIMIT) is pinned by golden tests in
+ * tile-query-compiler.test.ts. Others refuse with a typed error rather than
+ * run SQL nobody has checked: ClickHouse rejects `CAST(… AS TIMESTAMP)`,
+ * SQL Server and MySQL truncate dates differently, and so on. Widen this list
+ * only together with a golden for the dialect.
+ */
+export const DATASET_TILE_DIALECTS: readonly string[] = ['duckdb', 'file', 'postgresql', 'redshift', 'snowflake', 'bigquery'];
+
 function supportedTileDialect(driver: string): boolean {
-  return listDialectDrivers().includes(driver);
+  return DATASET_TILE_DIALECTS.includes(driver);
 }
 
 function stripTerminator(sql: string): string {
