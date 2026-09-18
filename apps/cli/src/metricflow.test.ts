@@ -217,6 +217,39 @@ Issue Location:
     expect(repaired?.limit).toBe(10);
   });
 
+  it('repairs a --where filter on a dimension spelled by its semantic model, from the suggestion MetricFlow wraps in Dimension()', () => {
+    // Verbatim shape of MetricFlow 0.13's filter failure: the input is named on
+    // the "Object Builder Input" line and suggestions are Dimension('…') calls.
+    const FILTER_ERROR = `ERROR: Got error(s) during query resolution.
+Error #1:
+  Message:
+    The given input does not match any of the available group-by-items for
+    SimpleMetric('total_policy_amount'). Common issues are:
+      * Incorrect names.
+    Suggestions:
+      [
+        "Dimension('policy_amount__has_premium')",
+        "Dimension('policy__status_code')",
+        "Dimension('policy__policy_number')",
+      ]
+  Query Input:
+    WhereFilter(
+      ["{{ Dimension('premium__has_premium') }} = 1"]
+    )
+    Filter Path:
+      [Resolve Query(['total_policy_amount'])]
+    Object Builder Input:
+      Dimension('premium__has_premium')`;
+    const repaired = repairMetricFlowGroupBy({
+      projectRoot: '/tmp/p',
+      metrics: ['total_policy_amount'],
+      dimensions: ['policy__policy_number'],
+      filters: [{ dimension: 'premium__has_premium', operator: 'equals', values: ['1'] }],
+    }, FILTER_ERROR);
+    expect(repaired?.filters).toEqual([{ dimension: 'policy_amount__has_premium', operator: 'equals', values: ['1'] }]);
+    expect(repaired?.dimensions).toEqual(['policy__policy_number']);
+  });
+
   it('refuses to guess when multiple suggestions tie at the same hop depth', () => {
     const ambiguous = OFFICE_ERROR.replace('effective_customer_account_name\n', 'customer_account_id\n')
       .replace('Query Input:\neffective_customer_account_name', 'Query Input:\ncustomer_account_id');

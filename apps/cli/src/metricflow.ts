@@ -544,10 +544,18 @@ export function repairMetricFlowGroupBy(
 ): MetricFlowQueryRequest | null {
   if (!/does not match any of the available group-by-items/i.test(output)) return null;
 
-  const inputs = [...output.matchAll(/Query Input:\s*\n?\s*['"]?([A-Za-z0-9_.]+)['"]?/g)]
-    .map((match) => match[1]);
+  // A group-by names its input on the "Query Input:" line; a --where filter
+  // names it as `Object Builder Input: Dimension('x__y')`, and its suggestions
+  // come wrapped the same way. Both are read, so a filter on a dimension
+  // spelled by its semantic model (premium__has_premium) is repaired to the
+  // entity spelling MetricFlow itself suggests (policy_amount__has_premium).
+  const unwrap = (item: string) => item.replace(/['"\s]/g, '').replace(/,+$/, '').replace(/^(?:Time)?Dimension\(([^,)]*)(?:,[^)]*)?\)$/, '$1');
+  const inputs = [
+    ...[...output.matchAll(/Query Input:\s*\n?\s*['"]?([A-Za-z0-9_.]+)['"]?/g)].map((match) => match[1]),
+    ...[...output.matchAll(/Object Builder Input:\s*\n?\s*(?:Time)?Dimension\(\s*['"]([A-Za-z0-9_.]+)['"]/g)].map((match) => match[1]),
+  ].filter((input): input is string => Boolean(input) && input !== 'WhereFilter');
   const suggestions = [...output.matchAll(/Suggestions:\s*\[([^\]]*)\]/g)]
-    .flatMap((match) => match[1].split(',').map((item) => item.replace(/['"\s]/g, '')).filter(Boolean));
+    .flatMap((match) => match[1].split(/,\s*(?=["'A-Za-z])/).map(unwrap).filter(Boolean));
   if (inputs.length === 0 || suggestions.length === 0) return null;
 
   const uniqueSuggestions = [...new Set(suggestions)];
