@@ -56,7 +56,7 @@ import {
   aggregatesRows,
   appliedConditions,
   joinKeyPairs,
-  unusedLeftJoins,
+  unusedJoins,
   aggregatesColumnOf,
   missingRequiredFilters,
   missingStatedValues,
@@ -2114,9 +2114,21 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
           const read = sourceColumns(relation);
           return read.length ? read : listed.length ? listed : undefined;
         };
-        for (const relation of unusedLeftJoins(sql, completeColumnsOf)) {
-          const name = relation.split('.').pop()!.replace(/"/g, '');
-          failures.push(`it LEFT JOINs ${name} but uses none of its columns, so the join restricts nothing (a LEFT JOIN keeps every row) and can only repeat rows; if ${name} marks which rows count, join it with an inner join, otherwise leave it out`);
+        // An inner join used nowhere else only restricts, which is harmless
+        // when it matches one row per row; when its key repeats, every total
+        // of the other tables is counted once per match.
+        const totals = /\b(sum|avg|count)\s*\(\s*(?!distinct\b)/i.test(sql);
+        for (const join of unusedJoins(sql, completeColumnsOf)) {
+          const name = join.relation.split('.').pop()!.replace(/"/g, '');
+          if (join.left) {
+            failures.push(`it LEFT JOINs ${name} but uses none of its columns, so the join restricts nothing (a LEFT JOIN keeps every row) and can only repeat rows; if ${name} marks which rows count, join it with an inner join, otherwise leave it out`);
+            continue;
+          }
+          if (!totals || join.keys.length === 0) continue;
+          const key = join.keys.map((column) => `"${column.replace(/"/g, '')}"`).join(', ');
+          let repeats = false;
+          try { repeats = await probeOne(`SELECT ${key} FROM ${join.relation} GROUP BY ${key} HAVING COUNT(*) > 1`); } catch { repeats = false; }
+          if (repeats) failures.push(`it joins ${name} but uses none of its columns, and ${name} has several rows per ${join.keys.join(', ')}, so every total is counted once per matching ${name} row; leave the join out, or aggregate ${name} at its own grain first if it restricts which rows count`);
         }
         state.hostJoins = ledgerJoins(joinUses);
         const certifiedUses = joinUses.filter((use) => use.relationship?.level === 'certified');

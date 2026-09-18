@@ -170,15 +170,35 @@ export function joinKeyPairs(sql: string): JoinKeyPair[] {
  * appear outside its ON clause, qualified by the table or its alias, or bare.
  */
 export function unusedLeftJoins(sql: string, columnsOf: (relation: string) => string[] | undefined): string[] {
+  return unusedJoins(sql, columnsOf).filter((join) => join.left).map((join) => join.relation);
+}
+
+export interface UnusedJoin {
+  relation: string;
+  /** The name the statement gives it: its alias, or its own name. */
+  alias: string;
+  left: boolean;
+  /** Its columns the ON clause joins on: the key whose repeats multiply rows. */
+  keys: string[];
+}
+
+/**
+ * Every joined table (LEFT or inner) used nowhere outside its own ON clause.
+ * A LEFT one restricts nothing (see unusedLeftJoins). An inner one may be a
+ * deliberate restriction ("only amounts that are loss payments"), which is
+ * harmless when it matches one row per row; when its key repeats, every total
+ * of the other tables is counted once per match, which the caller checks.
+ */
+export function unusedJoins(sql: string, columnsOf: (relation: string) => string[] | undefined): UnusedJoin[] {
   const text = sql.replace(/--[^\n]*/g, ' ');
-  const joins = [...text.matchAll(new RegExp(String.raw`\bleft\s+(?:outer\s+)?join\s+${RELATION_TOKEN}(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?\s+on\b`, 'gi'))];
-  const unused: string[] = [];
+  const joins = [...text.matchAll(new RegExp(String.raw`\b(left\s+(?:outer\s+)?|inner\s+)?join\s+${RELATION_TOKEN}(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?\s+on\b`, 'gi'))];
+  const unused: UnusedJoin[] = [];
   const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const join of joins) {
-    const relation = join[1]!;
+    const relation = join[2]!;
     const columns = columnsOf(relation);
     if (!columns?.length) continue;
-    const alias = join[2] && !NOT_ALIAS.has(join[2].toLowerCase()) ? join[2] : relation.split('.').pop()!.replace(/"/g, '');
+    const alias = join[3] && !NOT_ALIAS.has(join[3].toLowerCase()) ? join[3] : relation.split('.').pop()!.replace(/"/g, '');
     const start = join.index! + join[0].length;
     const rest = text.slice(start);
     const end = rest.search(/\b(?:left|right|inner|full|cross|join|where|group\s+by|order\s+by|limit|having|union|qualify|window)\b|\)/i);
@@ -187,7 +207,9 @@ export function unusedLeftJoins(sql: string, columnsOf: (relation: string) => st
     if (new RegExp(`(^|[^\\w$])"?${escape(alias)}"?\\.`, 'i').test(outside)) continue;
     // A bare column of this table, anywhere else, may be read from it.
     const bare = columns.some((column) => new RegExp(`(?<![\\w$."])"?${escape(column)}"?(?![\\w$])`, 'i').test(outside));
-    if (!bare) unused.push(relation);
+    if (bare) continue;
+    const keys = [...onClause.matchAll(new RegExp(`(?:^|[^\\w$])"?${escape(alias)}"?\\.("?[\\w$]+"?)`, 'gi'))].map((match) => match[1]!.replace(/"/g, ''));
+    unused.push({ relation, alias, left: Boolean(join[1] && /^left/i.test(join[1])), keys: [...new Set(keys)] });
   }
   return unused;
 }

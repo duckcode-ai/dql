@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { unusedLeftJoins } from './sql-checks.js';
+import { unusedJoins, unusedLeftJoins } from './sql-checks.js';
 
 const columns: Record<string, string[]> = {
   orders: ['order_id', 'order_number', 'customer_id'],
@@ -31,5 +31,16 @@ GROUP BY c.order_number`;
   it('counts a bare column of the joined table as a use, and never judges a table whose columns are unknown', () => {
     expect(unusedLeftJoins('SELECT o.order_id, amount FROM orders o LEFT JOIN line_items li ON li.order_id = o.order_id', columnsOf)).toEqual([]);
     expect(unusedLeftJoins('SELECT o.order_id FROM orders o LEFT JOIN audit_log a ON a.order_id = o.order_id', columnsOf)).toEqual([]);
+  });
+});
+
+describe('inner joins used nowhere else', () => {
+  it('reports an unused inner join with the key it joins on; the caller decides whether that key repeats', () => {
+    const sql = 'SELECT o.order_number, SUM(r.amount) FROM orders o JOIN line_items li ON li.order_id = o.order_id LEFT JOIN (SELECT rb.order_id, rb.amount FROM refunds_by_order rb) r ON r.order_id = o.order_id GROUP BY o.order_number';
+    const found = unusedJoins(sql, columnsOf);
+    expect(found).toEqual([{ relation: 'line_items', alias: 'li', left: false, keys: ['order_id'] }]);
+    // A join that only restricts (one refund row per line item) is reported too;
+    // its key does not repeat, so the caller keeps it.
+    expect(unusedJoins('SELECT SUM(li.amount) FROM line_items li JOIN refunds r ON r.line_item_id = li.line_item_id', columnsOf)).toEqual([{ relation: 'refunds', alias: 'r', left: false, keys: ['line_item_id'] }]);
   });
 });
