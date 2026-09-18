@@ -71,7 +71,7 @@ import {
   type RuntimeSchemaTable,
 } from '@duckcodeailabs/dql-agent';
 import { buildProjectVocabulary, buildVocabularySource, embeddedManifestRelations, normalizeRelationName, type VocabularySourceInput } from './vocabulary-source.js';
-import { businessIdentifierLine, businessIdentifiers, certifiedJoinViolations, classifySqlJoins, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, modelingRelationshipEdges, sameRelation, sharedParentShortcuts, type LedgerJoin } from './join-relationships.js';
+import { businessIdentifierLine, businessIdentifiers, modelingEntityTexts, certifiedJoinViolations, classifySqlJoins, ledgerJoins, markerTableLine, markerTables, modeledJoinPaths, modelingRelationshipEdges, sameRelation, sharedParentShortcuts, type LedgerJoin } from './join-relationships.js';
 
 /**
  * THE ASK PIPELINE HOST.
@@ -538,6 +538,8 @@ export function relationsWithColumnWords(
   emphasis: string,
   exclude: string[],
   max = 3,
+  /** What else is written about a table (its Modeling entity's context): a word found only there counts once, below any column match. */
+  tableText: (relation: string) => string | undefined = () => undefined,
 ): string[] {
   const wanted = [...relevanceWords(words, true)];
   if (wanted.length === 0) return [];
@@ -547,8 +549,12 @@ export function relationsWithColumnWords(
     .map((relation) => {
       const name = relation.binding ? physicalRelationText(relation.binding) : [relation.schema, relation.name].filter(Boolean).join('.');
       const columnWords = [...relation.columns, ...(relation.embeddedColumns ?? [])].map((column) => relevanceWords([column.name, column.description], true));
+      const described = relevanceWords([relation.description, tableText(name)], true);
       let score = 0;
-      for (const word of wanted) if (columnWords.some((set) => set.has(word))) score += emphasized.has(word) ? 3 : 1;
+      for (const word of wanted) {
+        if (columnWords.some((set) => set.has(word))) score += emphasized.has(word) ? 3 : 1;
+        else if (described.has(word)) score += emphasized.has(word) ? 1 : 0.5;
+      }
       return { name, score };
     })
     .filter((item) => item.score > 0 && !excluded.has(physicalRelationIdentity(item.name)))
@@ -2288,12 +2294,13 @@ export function createAskPipelineHost(deps: AskPipelineHostDeps): AskPipelineHos
       // decline over the project. Search every table for a column the missing
       // words name, add what is found, and draft once more.
       const words = missingFieldWords(`${first.declined} ${open}`);
+      const entityTexts = modelingEntityTexts(deps.getManifest().manifest);
       let wider: string[] = [];
       try {
         const source = view.source ?? (await baseSourceFor(connection)).source;
         // A missing FIELD is found by its column, not by a table's name.
         const fromCatalog = catalogPick(words.join(' '), relations, 3, ['dbt_column']);
-        wider = rankByReach([...fromCatalog, ...relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, [...relations, ...fromCatalog], 6)]).slice(0, 3);
+        wider = rankByReach([...fromCatalog, ...relationsWithColumnWords(source, words, `${question} ${open} ${contextText}`, [...relations, ...fromCatalog], 6, (name) => entityTexts.filter((item) => sameRelation(item.relation, name)).map((item) => item.text).join(' ') || undefined)]).slice(0, 3);
       } catch { wider = []; }
       if (wider.length > 0) {
         try {

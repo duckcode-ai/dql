@@ -323,6 +323,19 @@ describe('a column is found by the words of its name', () => {
     } as never;
     expect(relationsWithColumnWords(source, missingFieldWords('No competitor column (such as PRIMARY_COMPETITOR) is available'), 'lost to a competitor', ['sales.opportunities'])).toEqual(['crm.deal_notes', 'crm.accounts']);
   });
+
+  it('the wider look also reads what the team wrote about a table, below its columns', () => {
+    const source = {
+      relations: [
+        { schema: 'crm', name: 'deal_party_role', columns: [{ name: 'deal_ref' }, { name: 'party_ref' }, { name: 'role_code' }] },
+        { schema: 'crm', name: 'deals', columns: [{ name: 'deal_ref' }, { name: 'amount' }] },
+      ],
+    } as never;
+    const words = missingFieldWords('No listed relation provides the sales rep who closed it');
+    // Only the bridge's Modeling context says who closed the deal.
+    expect(relationsWithColumnWords(source, words, 'amounts by sales rep', ['crm.deals'])).toEqual([]);
+    expect(relationsWithColumnWords(source, words, 'amounts by sales rep', ['crm.deals'], 3, (name) => (name === 'crm.deal_party_role' ? 'Role code SR marks the sales rep who closed it' : undefined))).toEqual(['crm.deal_party_role']);
+  });
 });
 
 describe('the key a warehouse join proof tests', () => {

@@ -53,6 +53,21 @@ export function modelingRelationshipEdges(manifest: DQLManifest | undefined): Mo
   return edges;
 }
 
+/**
+ * What the team wrote about each modeled table: the entity's business name and
+ * context. "The agent who sold the policy" is often said only here, about a
+ * bridge whose columns are an id and a role code.
+ */
+export function modelingEntityTexts(manifest: DQLManifest | undefined): Array<{ relation: string; text: string }> {
+  const out: Array<{ relation: string; text: string }> = [];
+  for (const entity of Object.values(manifest?.modeling?.entities ?? {})) {
+    const relation = normalizeRelationName(manifest?.dbtProvenance?.nodes[entity.dbtUniqueId]?.relation);
+    const text = [entity.businessName, entity.businessContext].filter(Boolean).join(' ');
+    if (relation && text) out.push({ relation, text });
+  }
+  return out;
+}
+
 /** Two spellings of a relation agree on schema and table; a bare table name matches on the table alone. */
 export function sameRelation(left: string, right: string): boolean {
   const a = normalizeRelationName(left)?.toLowerCase();
