@@ -4830,4 +4830,37 @@ export const APP_STYLES = `
   color: var(--text-secondary); box-shadow: 0 16px 46px rgba(15,23,42,.24); font-size: 11.5px;
 }
 .dql-app-delete-undo button { border: 0; background: transparent; color: var(--accent); font-weight: 750; cursor: pointer; }
+
+/* Reader view: page tabs, filter chips, one ⋯ menu per tile. */
+.dql-app-page-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; }
+.dql-app-page-tabs > button { height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--dql-app-muted); font: 500 13px var(--font-ui); white-space: nowrap; cursor: pointer; }
+.dql-app-page-tabs > button:hover { background: var(--dql-app-control); color: var(--dql-app-ink); }
+.dql-app-page-tabs > button.on { background: var(--dql-app-control); color: var(--dql-app-ink); font-weight: 600; }
+.dql-app-page-tabs > .dql-app-page-add { width: 30px; padding: 0; display: grid; place-items: center; }
+.dql-app-filter-row { gap: 8px; padding: 0; border: 0; background: transparent; }
+.dql-app-filter-row .dql-app-filter-select { height: 32px; background: var(--dql-app-surface); border-color: var(--dql-app-line); }
+.dql-app-filter-row .dql-app-filter-select span { font: 500 12.5px var(--font-ui); text-transform: none; color: var(--dql-app-muted); }
+.dql-app-filter-row .dql-app-filter-select select, .dql-app-filter-row .dql-app-filter-select input { font: 600 13px var(--font-ui); max-width: 160px; }
+.dql-app-filter-reset { height: 32px; padding: 0 8px; border: 0; background: transparent; color: var(--dql-app-accent); font: 600 13px var(--font-ui); cursor: pointer; }
+.dql-tile-menu-anchor { position: absolute; top: 8px; right: 8px; z-index: 6; transition: opacity 120ms ease; }
+.dql-tile-menu-anchor:focus-within { opacity: 1 !important; }
+.dql-tile-menu-button { width: 28px; height: 28px; border: 0; border-radius: 7px; background: var(--dql-app-surface); color: var(--dql-app-muted); display: grid; place-items: center; cursor: pointer; }
+.dql-tile-menu-button:hover, .dql-tile-menu-button[aria-expanded="true"] { background: var(--dql-app-control); color: var(--dql-app-ink); }
+.dql-tile-menu { position: absolute; top: 32px; right: 0; width: 224px; padding: 6px; display: grid; border: 1px solid var(--dql-app-line-2); border-radius: 10px; background: var(--dql-app-surface); box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16); }
+.dql-tile-menu button { height: 32px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; color: var(--dql-app-ink); font: 13px var(--font-ui); text-align: left; cursor: pointer; }
+.dql-tile-menu button:hover { background: var(--dql-app-control); }
+.dql-tile-menu hr { border: 0; border-top: 1px solid var(--dql-app-line); margin: 5px 0; }
+.dql-tile-menu-label { padding: 4px 9px 2px; color: var(--dql-app-faint); font: 600 11px var(--font-ui); text-transform: uppercase; letter-spacing: .05em; }
+.dql-tile-menu button.on { color: var(--dql-app-accent); font-weight: 600; }
+.dql-app-filter-multi { position: relative; padding: 0; }
+.dql-app-filter-multi-trigger { height: 100%; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 0; background: transparent; color: var(--dql-app-ink); cursor: pointer; }
+.dql-app-filter-row .dql-app-filter-select .dql-app-filter-multi-label { font: 500 12.5px var(--font-ui); color: var(--dql-app-muted); }
+.dql-app-filter-multi-trigger b { font: 600 13px var(--font-ui); }
+.dql-app-filter-multi.is-set { border-color: color-mix(in srgb, var(--dql-app-accent) 40%, var(--dql-app-line)); background: var(--dql-app-accent-soft); }
+.dql-app-filter-multi-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; min-width: 200px; padding: 6px; display: grid; gap: 2px; border: 1px solid var(--dql-app-line-2); border-radius: 10px; background: var(--dql-app-surface); box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16); }
+.dql-app-filter-multi-menu label { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: 7px; font: 13px var(--font-ui); color: var(--dql-app-ink); cursor: pointer; }
+.dql-app-filter-multi-menu label:hover, .dql-app-filter-multi-menu label.on { background: var(--dql-app-control); }
+.dql-app-filter-multi-menu input { accent-color: var(--dql-app-accent); }
+.dql-app-filter-multi-menu button { justify-self: start; margin-top: 4px; border: 0; background: transparent; color: var(--dql-app-accent); font: 600 12.5px var(--font-ui); cursor: pointer; }
+.dql-apps-waterline .dql-kpi-value { font-family: var(--font-ui) !important; font-weight: 650 !important; letter-spacing: -.02em; color: var(--dql-app-ink) !important; }
 `;

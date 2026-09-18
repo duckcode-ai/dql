@@ -426,3 +426,16 @@ describe('Stakeholder view hides review-required pins, edit mode does not (UI-01
     expect(visible.map((item) => item.i).sort()).toEqual(['ai-pin-1', 'revenue']);
   });
 });
+
+describe('Reader tile CSV download', () => {
+  it('writes the settled columns in order and quotes commas, quotes, and line breaks', async () => {
+    const { resultToCsv } = await dashboardHelpers();
+    expect(resultToCsv({
+      columns: ['region', 'revenue', 'note'],
+      rows: [
+        { region: 'US', revenue: 70, note: 'north, east' },
+        { region: 'CA', revenue: null, note: 'said "hi"\nthen left' },
+      ],
+    })).toBe('region,revenue,note\nUS,70,"north, east"\nCA,,"said ""hi""\nthen left"');
+  });
+});

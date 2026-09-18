@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
-import { Activity, AlertTriangle, BarChart3, Bot, ChartArea, ChartColumnBig, ChartColumnIncreasing, ChartColumnStacked, ChartScatter, CheckCircle2, Donut, Filter, Gauge, GitBranch, Grid3x3, GripVertical, Hash, LineChart, Loader2, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, Workflow, Wrench, X } from 'lucide-react';
+import { Activity, AlertTriangle, BarChart3, Bot, Code2, Download, FileText, MoreHorizontal, ChartArea, ChartColumnBig, ChartColumnIncreasing, ChartColumnStacked, ChartScatter, CheckCircle2, Donut, Filter, Gauge, GitBranch, Grid3x3, GripVertical, Hash, LineChart, Loader2, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, Workflow, Wrench, X } from 'lucide-react';
 import {
   api,
   type AppBlockRecommendation,
@@ -1409,9 +1409,27 @@ function DashboardTile({
   // Editing already has one durable visualization control in the tile
   // inspector. A second row of chart icons in the tile header made the manual
   // path look like two competing editors.
-  const showVizSwitcher = Boolean(!editable && tile?.result && generatedVizOptions.length > 1);
+  // Readers switch between the allowed views from the tile's ⋯ menu.
+  const viewerVizChoices = !editable && tile?.result && generatedVizOptions.length > 1 ? generatedVizOptions : [];
   const canInspect = Boolean(tile && tile.tileType !== 'text' && (tile.artifact || tile.result || tile.citation || tile.repair));
-  const showAskHint = Boolean(canAsk && (hovered || selected));
+  // Readers reach Ask, evidence, notebook, and CSV from one ⋯ menu per tile.
+  const showAskHint = Boolean(editable && canAsk && (hovered || selected));
+  const [tileMenuOpen, setTileMenuOpen] = useState(false);
+  const askAboutTile = () => {
+    if (canAskChart && runId) {
+      onAskChart?.({ tileId: item.i, runId, question: 'What does this chart show?' });
+      return;
+    }
+    if (blockId) onFocusBlock?.(blockId);
+    if (blockId) onAskBlock?.(blockId, defaultTileCopilotQuestion(item.title ?? blockId));
+  };
+  const openEvidence = (tab: 'how' | 'dql' | 'sql') => {
+    setInspectorTab(tab);
+    setInspectorOpen(true);
+    setTileMenuOpen(false);
+  };
+  const tileResult = tile?.status === 'ok' ? tile.result : undefined;
+  const canOpenNotebook = Boolean(onOpenNotebook && tile && tile.artifact?.sourceKind !== 'dataset_query');
   const switchGeneratedViz = (chart: ChartType) => {
     if (!editable) {
       setViewerViz(chart);
@@ -1527,6 +1545,23 @@ function DashboardTile({
           <Sparkles size={11} strokeWidth={2} /> {canAskChart ? 'Ask about chart' : 'Ask AI'}
         </button>
       ) : null}
+      {!editable && (canInspect || canAsk || tileResult || viewerVizChoices.length) ? (
+        <div className="dql-tile-menu-anchor" style={{ opacity: hovered || tileMenuOpen ? 1 : 0 }} onClick={(event) => event.stopPropagation()}>
+          <button type="button" className="dql-tile-menu-button" aria-label={`Actions for ${item.title ?? 'tile'}`} aria-haspopup="menu" aria-expanded={tileMenuOpen} onClick={() => setTileMenuOpen((open) => !open)} onFocus={() => setHovered(true)}>
+            <MoreHorizontal size={15} />
+          </button>
+          {tileMenuOpen ? (
+            <div className="dql-tile-menu" role="menu" onMouseLeave={() => setTileMenuOpen(false)}>
+              {canInspect ? <button type="button" role="menuitem" onClick={() => openEvidence('how')}><ShieldCheck size={14} /> How this was computed</button> : null}
+              {canInspect && (item.query || blockId) ? <button type="button" role="menuitem" onClick={() => openEvidence('dql')}><Code2 size={14} /> View DQL</button> : null}
+              {canAsk ? <button type="button" role="menuitem" onClick={() => { setTileMenuOpen(false); askAboutTile(); }}><Sparkles size={14} /> {canAskChart ? 'Ask about this chart' : 'Ask AI about this'}</button> : null}
+              {canOpenNotebook && tile ? <button type="button" role="menuitem" onClick={() => { setTileMenuOpen(false); onOpenNotebook?.(tile); }}><FileText size={14} /> Open in notebook</button> : null}
+              {viewerVizChoices.length ? <><hr /><small className="dql-tile-menu-label">Show as</small>{viewerVizChoices.map((option) => <button key={option.value} type="button" role="menuitemradio" aria-checked={activeChart === option.value} className={activeChart === option.value ? 'on' : ''} onClick={() => { setTileMenuOpen(false); switchGeneratedViz(option.value); }}>{option.label}</button>)}</> : null}
+              {tileResult ? <><hr /><button type="button" role="menuitem" onClick={() => { setTileMenuOpen(false); downloadResultCsv(item.title ?? item.i, tileResult); }}><Download size={14} /> Download CSV</button></> : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {editable && !narrow ? (
         <div
           style={{
@@ -1632,13 +1667,6 @@ function DashboardTile({
                 {genUi?.layoutIntent ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.layoutIntent))}</span> : null}
               </div>
             </div>
-            {showVizSwitcher ? (
-              <GeneratedVizSwitcher
-                value={activeChart}
-                options={generatedVizOptions}
-                onChange={switchGeneratedViz}
-              />
-            ) : null}
           </div>
         </div>
       ) : (
@@ -1658,11 +1686,6 @@ function DashboardTile({
                 onCommit={(next) => renameTile(next)}
               />
             ) : <span>{item.title ?? blockRef}</span>}
-            {showVizSwitcher ? (
-              <span style={{ float: 'right', marginLeft: 8 }}>
-                <GeneratedVizSwitcher value={activeChart} options={generatedVizOptions} onChange={switchGeneratedViz} />
-              </span>
-            ) : null}
           </div>
           {unfilteredNotice ? (
             <div style={{ marginTop: 5 }}>
@@ -1743,20 +1766,6 @@ function DashboardTile({
         />
       </div>
       {!editable ? <TileInsightCaption item={item} tile={tile} themeMode={themeMode} /> : null}
-      {!editable && canInspect ? (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, paddingTop: 2 }}>
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              setInspectorOpen((value) => !value);
-            }}
-            style={tileEvidenceButtonStyle}
-          >
-            {inspectorOpen ? 'Hide details' : tile?.artifact?.sourceKind === 'dataset_query' ? 'View execution evidence' : 'How it works'}
-          </button>
-        </div>
-      ) : null}
       {!editable && inspectorOpen && tile ? (
         <TileEvidencePanel
           item={item}
@@ -1769,6 +1778,28 @@ function DashboardTile({
       ) : null}
     </div>
   );
+}
+
+/** Save a tile's settled rows as CSV. Values are quoted so commas and quotes survive. */
+export function resultToCsv(result: { columns: string[]; rows: Array<Record<string, unknown>> }): string {
+  const cell = (value: unknown) => {
+    if (value === null || value === undefined) return '';
+    const text = value instanceof Date ? value.toISOString() : typeof value === 'object' ? JSON.stringify(value) : String(value);
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return [result.columns.map(cell).join(','), ...result.rows.map((row) => result.columns.map((column) => cell(row[column])).join(','))].join('\n');
+}
+
+function downloadResultCsv(title: string, result: { columns: string[]; rows: Array<Record<string, unknown>> }): void {
+  const blob = new Blob([resultToCsv(result)], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${title.replace(/[^a-z0-9-_ ]+/gi, '').trim().replace(/\s+/g, '-').toLowerCase() || 'tile'}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /** Dataset questions are enabled only for a current, settled runtime result. */

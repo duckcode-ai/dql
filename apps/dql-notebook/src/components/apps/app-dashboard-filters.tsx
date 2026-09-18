@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { CalendarDays, Hash, List, ToggleLeft, Type } from 'lucide-react';
+import { CalendarDays, ChevronDown, Hash, List, ToggleLeft, Type } from 'lucide-react';
 import { api, type DashboardDocumentResponse } from '../../api/client';
 import { defaultParameterFilterValue, type DashboardFilterCandidate, type DashboardFilterCoverage } from './dashboard-filters';
 import { formatBusinessLabel } from './app-text';
@@ -279,20 +279,8 @@ function DashboardFilterInput({
   }
   if (filter.type === 'multiselect') {
     const selected = Array.isArray(value) ? value.map(String) : [];
-    const options = filter.options ?? fetchedOptions ?? [];
-    return (
-      <label className="dql-app-filter-select" title={label} aria-label={label}>
-        <span className="dql-app-filter-icon">{filterIconForDashboardFilter(filter)}</span>
-        <select
-          multiple
-          value={selected}
-          aria-label={`${label} multiple selection`}
-          onChange={(event) => onChange(Array.from(event.currentTarget.selectedOptions, (option) => option.value))}
-        >
-          {options.map((option) => <option key={String(option)} value={String(option)}>{formatBusinessLabel(String(option))}</option>)}
-        </select>
-      </label>
-    );
+    const options = (filter.options ?? fetchedOptions ?? []).map(String);
+    return <MultiSelectFilterChip label={label} icon={filterIconForDashboardFilter(filter)} options={options} selected={selected} onChange={onChange} />;
   }
   if (filter.type === 'relative_date') {
     const options = filter.options?.length ? filter.options : ['last_7_days', 'last_30_days', 'last_90_days', 'month_to_date', 'quarter_to_date', 'year_to_date'];
@@ -450,5 +438,49 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
     <button type="button" className={`dql-app-toggle ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}>
       <i /> {label}
     </button>
+  );
+}
+
+/**
+ * A multi-value filter as one chip ("Region: US") that opens a checklist.
+ * A native multi-select renders as an always-open list box in the filter row.
+ */
+function MultiSelectFilterChip({
+  label,
+  icon,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  icon: ReactNode;
+  options: string[];
+  selected: string[];
+  onChange: (value: unknown) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const summary = selected.length === 0 ? 'All' : selected.length === 1 ? formatBusinessLabel(selected[0]!) : `${selected.length} selected`;
+  const toggle = (option: string) => onChange(selected.includes(option) ? selected.filter((item) => item !== option) : [...selected, option]);
+  return (
+    <div className={`dql-app-filter-select dql-app-filter-multi ${selected.length ? 'is-set' : ''}`} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }}>
+      <button type="button" className="dql-app-filter-multi-trigger" aria-haspopup="listbox" aria-expanded={open} aria-label={`${label} multiple selection`} onClick={() => setOpen((value) => !value)}>
+        <span className="dql-app-filter-icon">{icon}</span>
+        <span className="dql-app-filter-multi-label">{label}:</span>
+        <b>{summary}</b>
+        <ChevronDown size={13} aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="dql-app-filter-multi-menu" role="listbox" aria-multiselectable="true" aria-label={label}>
+          {options.map((option) => (
+            <label key={option} className={selected.includes(option) ? 'on' : ''}>
+              <input type="checkbox" checked={selected.includes(option)} onChange={() => toggle(option)} />
+              <span>{formatBusinessLabel(option)}</span>
+            </label>
+          ))}
+          {!options.length ? <small>No values available.</small> : null}
+          {selected.length ? <button type="button" onClick={() => onChange([])}>Clear</button> : null}
+        </div>
+      ) : null}
+    </div>
   );
 }

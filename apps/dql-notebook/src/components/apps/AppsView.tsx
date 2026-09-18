@@ -1023,6 +1023,16 @@ export function AppsView(): JSX.Element {
       setAppliedAppScopedDashboardFilterValues((current) => ({ ...current, ...appDefaults }));
     }
   }, [activeDashboardFilterPageId, dashboardFilters]);
+  // Filters apply as the reader changes them. A short pause folds a burst of
+  // changes (several chips, or typing) into one page refresh.
+  const dashboardFiltersPending = useMemo(() => dashboardFilters.some((filter) => (
+    JSON.stringify(dashboardFilterValues[filter.id] ?? null) !== JSON.stringify(appliedDashboardFilterValues[filter.id] ?? null)
+  )), [appliedDashboardFilterValues, dashboardFilterValues, dashboardFilters]);
+  useEffect(() => {
+    if (!dashboardFiltersPending) return;
+    const timer = window.setTimeout(applyDashboardFilters, 450);
+    return () => window.clearTimeout(timer);
+  }, [applyDashboardFilters, dashboardFiltersPending]);
 
   const confirmDeleteApp = async () => {
     if (!deleteTarget || deletingApp) return;
@@ -2605,10 +2615,6 @@ function AppWorkspaceSurface({
             {section === 'dashboards' && dashboardDoc
               && (dashboardFilters.length > 0 || filterCandidates.length > 0 || isEditable) ? (
               <section className="dql-app-filter-row" aria-label="Dashboard filters">
-                <div className="dql-app-filter-row-copy">
-                  <b>Filters</b>
-                  <span>Set the business scope, then apply once to refresh the full story.</span>
-                </div>
                 {dashboardFilters.length > 0 ? (
                   <>
                     <DashboardFilterControls
@@ -2634,10 +2640,9 @@ function AppWorkspaceSurface({
                         })}
                       </div>
                     ) : null}
-                    <div className="dql-app-filter-row-actions">
-                      <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onResetDashboardFilters}>Reset</button>
-                      <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onApplyDashboardFilters}>Apply filters</button>
-                    </div>
+                    {dashboardFilters.some((filter) => JSON.stringify(dashboardFilterValues[filter.id] ?? null) !== JSON.stringify(defaultDashboardFilterValue(filter) ?? null)) ? (
+                      <button type="button" className="dql-app-filter-reset" onClick={onResetDashboardFilters}>Reset</button>
+                    ) : null}
                   </>
                 ) : null}
                 {/* The viewer's own control. Filtering a dashboard is a reading
@@ -2927,6 +2932,28 @@ function DashboardPagePicker({
   onAdd: () => void;
 }) {
   const activeDashboard = dashboards.find((dashboard) => dashboard.id === activeDashboardId) ?? dashboards[0];
+  if (dashboards.length <= 6) {
+    return (
+      <nav className="dql-app-page-tabs" aria-label="Dashboard page">
+        {dashboards.map((dashboard) => (
+          <button
+            key={dashboard.id}
+            type="button"
+            className={dashboard.id === activeDashboard?.id ? 'on' : ''}
+            aria-current={dashboard.id === activeDashboard?.id ? 'page' : undefined}
+            onClick={() => onOpen(dashboard.id)}
+          >
+            {dashboard.title}
+          </button>
+        ))}
+        {isBuild ? (
+          <button type="button" className="dql-app-page-add" onClick={onAdd} title="Add dashboard page" aria-label="Add dashboard page">
+            <Plus size={14} />
+          </button>
+        ) : null}
+      </nav>
+    );
+  }
   return (
     <div className="dql-app-page-picker" aria-label="Dashboard page">
       <span><LineChart size={14} /> Page</span>
