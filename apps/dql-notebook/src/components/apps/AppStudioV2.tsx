@@ -22,10 +22,13 @@ import {
 } from '../../api/client';
 import type {
   DatasetDescriptor,
+  DatasetField,
 } from '@duckcodeailabs/dql-core/datasets/descriptor';
 import {
   datasetTileVisualizationCompatibility,
   tileQueryOutputAliases,
+  tileQueryValidationRuns,
+  validateTileQuery,
   type TileQuery,
 } from '@duckcodeailabs/dql-core/apps/tile-query';
 import type { AppSummary } from '../../store/types';
@@ -35,6 +38,9 @@ import { themes } from '../../themes/notebook-theme';
 import { AiSidePanel } from '../agent/AiSidePanel';
 import { DatasetSourceAuthoringDialog, DatasetSourceRebindReviewDialog } from './builder/DatasetProposalDialog';
 import { DatasetTileBuilder } from './builder/DatasetTileBuilder';
+import { DataPanel, type DataPanelTarget } from './builder/DataPanel';
+import { DraftTileCard, DraftTileInspector, type DraftTileState } from './builder/DraftTile';
+import { EMPTY_TILE_QUERY, autoTileView, defaultTileTitle, tileVisualization, toggleFieldInQuery } from './builder/field-query';
 import { FiltersPanel, mergeStudioDateRanges, linkedComponentCount, type StudioFilterConfiguration } from './builder/GlobalFilterBar';
 import { DatasetInteractionInspector, DatasetTileQueryInspector } from './builder/InteractionLayer';
 import { humanize, messageOf } from './builder/studio-ui';
@@ -405,6 +411,12 @@ export function AppStudioV2({
   const [tileMenuId, setTileMenuId] = useState<string | null>(null);
   /** App-level settings (decision, source policy, review tasks) open in the right column. */
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** A tile being built from fields; it lives on the canvas until added or cancelled. */
+  const [draftTile, setDraftTile] = useState<DraftTileState | null>(null);
+  /** Dataset the author picked in the Data panel (a selected tile's Dataset wins). */
+  const [chosenDatasetKey, setChosenDatasetKey] = useState<string | null>(null);
+  /** The Data tab shows one Dataset's fields, or the full governed source catalog. */
+  const [dataView, setDataView] = useState<'fields' | 'sources'>('fields');
   /** One AI entry point: compose or revise the page, or change the selected tile. */
   const [aiScope, setAiScope] = useState<'page' | 'tile'>('page');
   /** The tile whose query and compiled SQL are shown inline on the canvas. */
@@ -1364,8 +1376,10 @@ export function AppStudioV2({
     sourceOverride?: AppBlockRecommendation | null,
     datasetQuery?: TileQuery,
     datasetTitle?: string,
-  ) => {
-    if (!draft || !activePage) return;
+    /** Visualization the author already saw while building the tile. */
+    datasetVisualization?: AppStudioBuildDraft['pages'][number]['layout']['items'][number]['viz']['type'],
+  ): Promise<boolean> => {
+    if (!draft || !activePage) return false;
     const source = kind === 'heading' || kind === 'text'
       ? null
       : sourceOverride === undefined ? selectedSource : sourceOverride;
@@ -1373,7 +1387,7 @@ export function AppStudioV2({
       setPanel('sources');
       setPanelOpen(true);
       setError('Choose a governed source, then use Add to page.');
-      return;
+      return false;
     }
     if (source) {
       const sourceId = source.sourceId ?? source.id;
@@ -1387,7 +1401,7 @@ export function AppStudioV2({
       setError(null);
       try {
         const previous = draft;
-        const result = await api.composeAppBuild(draft.id, {
+        let result = await api.composeAppBuild(draft.id, {
           mode: 'manual',
           expectedRevision: draft.revision,
           expectedProposalHash: draft.proposalHash,
@@ -1400,6 +1414,16 @@ export function AppStudioV2({
             ...(datasetTitle?.trim() ? { title: datasetTitle.trim() } : {}),
           }],
         });
+        const addedTileId = result.tileIds[0];
+        const addedTile = result.draft.pages.find((page) => page.id === activePage.id)?.layout.items.find((item) => item.i === addedTileId);
+        if (datasetVisualization && addedTile && addedTile.viz.type !== datasetVisualization) {
+          // Keep the chart the author built (a date reads as a line), in the
+          // same undo step as the add.
+          const patched = await api.patchAppBuild(result.draft.id, result.draft.revision, [{
+            type: 'update_tile', pageId: activePage.id, tileId: addedTile.i, patch: { viz: { ...addedTile.viz, type: datasetVisualization } },
+          }], result.draft.proposalHash);
+          result = { ...result, draft: patched.draft };
+        }
         setDraft(result.draft);
         setUndoStack((items) => [...items.slice(-29), previous]);
         setRedoStack([]);
@@ -1414,17 +1438,18 @@ export function AppStudioV2({
         setPreviewRunsByPage({});
         setFilterOptionsByPage({});
         await runPreviewForDraft(result.draft, activePage.id);
+        return true;
       } catch (cause) {
         const message = messageOf(cause);
         setSavedMessage('Compose failed');
         setSourceFeedback({ sourceId, status: 'error', view, pageTitle: activePage.metadata.title, message });
         setError(message);
+        return false;
       } finally {
         setBusy(false);
       }
-      return;
     }
-    if (kind !== 'heading' && kind !== 'text') return;
+    if (kind !== 'heading' && kind !== 'text') return false;
     const tileId = `${kind}-${Date.now().toString(36)}`;
     const width = 12;
     const height = kind === 'heading' ? 1 : 2;
@@ -1448,6 +1473,7 @@ export function AppStudioV2({
       setSelectedTileId(tileId);
       setSavedMessage(`${humanize(kind)} added`);
     }
+    return Boolean(next);
   };
 
   const arrangePage = async () => {
@@ -2282,21 +2308,104 @@ export function AppStudioV2({
   }) : '';
 
   const editing = studioView === 'edit';
-  const rightPane: 'none' | 'inspector' | 'settings' | 'ai' = proposal
+  const rightPane: 'none' | 'inspector' | 'settings' | 'ai' | 'draft' = proposal
     ? 'none'
     : copilotOpen
       ? 'ai'
       : !editing
         ? 'none'
-        : selectedTile
-          ? 'inspector'
-          : settingsOpen ? 'settings' : 'none';
+        : draftTile
+          ? 'draft'
+          : selectedTile
+            ? 'inspector'
+            : settingsOpen ? 'settings' : 'none';
+  const datasetItems = catalog.filter((item) => Boolean(item.capabilities?.dataset));
+  const datasetItemForSource = (sourceId?: string) => sourceId
+    ? datasetItems.find((item) => (item.sourceId ?? item.id) === sourceId) ?? null
+    : null;
+  const activeDatasetItem = (draftTile ? datasetItems.find((item) => item.id === draftTile.sourceKey) ?? null : null)
+    ?? datasetItemForSource(selectedDatasetTile?.sourceId)
+    ?? (chosenDatasetKey ? datasetItems.find((item) => item.id === chosenDatasetKey) ?? null : null)
+    ?? draft.sources.map((source) => datasetItemForSource(source.id)).find(Boolean)
+    ?? datasetItems[0]
+    ?? null;
+  const activeDescriptor = activeDatasetItem?.capabilities?.dataset as DatasetDescriptor | undefined;
+  const fieldsAvailable = datasetTilesEnabled && datasetItems.length > 0;
+  const tileTarget = !draftTile && selectedDatasetTile && activeDatasetItem
+    && (activeDatasetItem.sourceId ?? activeDatasetItem.id) === selectedDatasetTile.sourceId
+    ? selectedDatasetTile
+    : null;
+  const dataPanelTarget: DataPanelTarget = draftTile
+    ? { kind: 'draft', query: draftTile.query }
+    : tileTarget
+      ? { kind: 'tile', title: tileTarget.title || humanize(tileTarget.i), query: tileTarget.query! }
+      : { kind: 'none' };
+  const emptyDraft = (item: AppBlockRecommendation): DraftTileState => ({ sourceKey: item.id, query: EMPTY_TILE_QUERY, view: 'kpi', viewChosen: false, title: '' });
   const openAddTile = () => {
     setStudioView('edit');
     setSelectedTileId(null);
+    setCopilotOpen(false);
+    setSettingsOpen(false);
     setPanel('sources');
     setPanelOpen(true);
+    if (fieldsAvailable && activeDatasetItem) {
+      setDataView('fields');
+      setDraftTile((current) => current ?? emptyDraft(activeDatasetItem));
+    } else {
+      setDataView('sources');
+    }
     window.setTimeout(() => document.getElementById('studio-field-search')?.focus(), 0);
+  };
+  /** A field click builds the new tile, or edits the selected Dataset tile. */
+  const pickField = (field: DatasetField) => {
+    if (!activeDatasetItem || !activeDescriptor || !activePage) return;
+    if (tileTarget?.query) {
+      const query = toggleFieldInQuery(tileTarget.query, field);
+      if (!query.measures.length && !query.detail) {
+        setSavedMessage('A tile needs at least one measure');
+        return;
+      }
+      const validation = validateTileQuery(activeDescriptor, query);
+      if (!tileQueryValidationRuns(validation)) {
+        setError(validation.diagnostics[0]?.message ?? 'The Dataset does not cover that field combination.');
+        return;
+      }
+      const currentViz = tileTarget.viz.type;
+      // Gaining or losing the only grouping changes what the tile is (a
+      // number vs a chart), so the view follows; otherwise the author's
+      // chart type stays when it still fits.
+      const groupingChanged = (tileTarget.query.dimensions.length === 0) !== (query.dimensions.length === 0);
+      const viz = !groupingChanged && datasetTileVisualizationCompatibility(query, currentViz).compatible
+        ? currentViz
+        : tileVisualization(query, autoTileView(query));
+      // A title DQL generated from the fields follows the fields; a title the
+      // author wrote is never touched.
+      const generatedTitle = (tileTarget.title ?? '').trim().toLowerCase() === defaultTileTitle(tileTarget.query, humanize).toLowerCase();
+      void mutate([{ type: 'update_tile', pageId: activePage.id, tileId: tileTarget.i, patch: {
+        query,
+        ...(viz !== currentViz ? { viz: { ...tileTarget.viz, type: viz } } : {}),
+        ...(generatedTitle ? { title: defaultTileTitle(query, humanize) } : {}),
+      } }]);
+      return;
+    }
+    const base = draftTile && draftTile.sourceKey === activeDatasetItem.id ? draftTile : emptyDraft(activeDatasetItem);
+    const query = toggleFieldInQuery(base.query, field);
+    const keepView = base.viewChosen && datasetTileVisualizationCompatibility(query, tileVisualization(query, base.view)).compatible;
+    setDraftTile({ ...base, query, view: keepView ? base.view : autoTileView(query), viewChosen: keepView });
+    setSelectedTileId(null);
+    setCopilotOpen(false);
+    setSettingsOpen(false);
+  };
+  const chooseDataset = (item: AppBlockRecommendation) => {
+    setChosenDatasetKey(item.id);
+    setSelectedTileId(null);
+    setDraftTile((current) => current ? emptyDraft(item) : null);
+  };
+  const commitDraftTile = async () => {
+    if (!draftTile || !activeDatasetItem) return;
+    const title = draftTile.title.trim() || defaultTileTitle(draftTile.query, humanize);
+    const added = await addComponent(draftTile.view, activeDatasetItem, draftTile.query, title, tileVisualization(draftTile.query, draftTile.view));
+    if (added) setDraftTile(null);
   };
   const askAiAboutTile = (tileId: string) => {
     selectAppAutopilotTile(tileId);
@@ -2316,7 +2425,7 @@ export function AppStudioV2({
       <header className="studio-topbar">
         <div className="studio-brand"><button type="button" className="ghost-icon" onClick={onBack} aria-label="Back to Apps" title="Back to Apps"><ArrowLeft size={16} /></button><span className="mark"><LayoutDashboard size={15} /></span><div><input aria-label="App name" value={name || draft.name} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim() && name.trim() !== draft.name) void mutate([{ type: 'set_name', name: name.trim() }]); }} /><small>{savedMessage}</small></div></div>
         {proposal ? <div className="proposal-focus-title"><small>AI APP BUILD · STEP 2</small><strong>Choose proposed sources</strong></div> : <nav className="page-nav" aria-label="App pages">
-          {draft.pages.map((page) => <button key={page.id} type="button" className={activePage?.id === page.id ? 'on' : ''} aria-current={activePage?.id === page.id ? 'page' : undefined} onClick={() => { setActivePageId(page.id); setSelectedTileId(null); setTileMenuId(null); }}>{page.metadata.title}</button>)}
+          {draft.pages.map((page) => <button key={page.id} type="button" className={activePage?.id === page.id ? 'on' : ''} aria-current={activePage?.id === page.id ? 'page' : undefined} onClick={() => { setActivePageId(page.id); setSelectedTileId(null); setTileMenuId(null); setDraftTile(null); }}>{page.metadata.title}</button>)}
           {editing ? <button type="button" className="ghost-icon" onClick={() => void addPage()} aria-label="Add page" title="Add page"><Plus size={15} /></button> : null}
         </nav>}
         {proposal ? <div className="proposal-focus-status"><ShieldCheck size={14} /><span>Private draft · nothing generated yet</span></div> : <div className="studio-actions">
@@ -2353,7 +2462,8 @@ export function AppStudioV2({
         <section className={`left-content ${panelOpen ? 'open' : ''}`}>
           <button type="button" className="mobile-drawer-close" onClick={() => setPanelOpen(false)} aria-label="Close Studio drawer"><X size={16} /></button>
           {panel === 'pages' ? <PagesPanel draft={draft} activePageId={activePage?.id} onOpen={setActivePageId} onAdd={() => void addPage()} template={draft.template} onApplyTemplate={(nextTemplate) => void applyTemplate(nextTemplate)} /> : null}
-          {panel === 'sources' ? <SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} datasetTilesEnabled={datasetTilesEnabled} enablingDatasets={enablingDatasets} onEnableDatasets={() => void enableDatasetTiles()} sourceFeedback={sourceFeedback} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddDataset={(item, kind, query, title) => void addComponent(kind, item, query, title)} onAuthorDataset={openDatasetAuthoring} onRefreshDatasetBinding={(sourceId) => void refreshDatasetBinding(sourceId)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /> : null}
+          {panel === 'sources' && fieldsAvailable && dataView === 'fields' ? <DataPanel datasets={datasetItems} active={activeDatasetItem} target={dataPanelTarget} disabled={busy || previewing} onChooseDataset={chooseDataset} onPickField={pickField} onBrowseSources={() => setDataView('sources')} onAddContent={(kind) => void addComponent(kind, null)} /> : null}
+          {panel === 'sources' && (!fieldsAvailable || dataView === 'sources') ? <>{fieldsAvailable ? <button type="button" className="panel-back" onClick={() => setDataView('fields')}><ArrowLeft size={13} /> Dataset fields</button> : null}<SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} datasetTilesEnabled={datasetTilesEnabled} enablingDatasets={enablingDatasets} onEnableDatasets={() => void enableDatasetTiles()} sourceFeedback={sourceFeedback} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddDataset={(item, kind, query, title) => void addComponent(kind, item, query, title)} onAuthorDataset={openDatasetAuthoring} onRefreshDatasetBinding={(sourceId) => void refreshDatasetBinding(sourceId)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /></> : null}
           {panel === 'filters' ? <FiltersPanel draft={draft} activePageId={activePage?.id} catalog={catalog} candidates={filterCandidates} runtimeFilterFields={runtimeFilterFields} previewRunsByPage={previewRunsByPage} previewing={previewing} disabled={busy || previewing} onRunPreview={() => void runPreview()} onSave={(configuration) => void saveFilter(configuration)} onRemove={(id) => void removeFilter(id)} /> : null}
         </section>
       </aside> : null}
@@ -2389,7 +2499,7 @@ export function AppStudioV2({
               <div><h1>{activePage?.metadata.title ?? 'Overview'}</h1>{activePage?.metadata.description ? <p>{activePage.metadata.description}</p> : null}</div>
               {editing ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
             </header>
-            {editing && selectedSource && selectedSourceKind ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" disabled={busy || previewing} onClick={() => selectedSource.capabilities?.dataset ? (setPanel('sources'), setPanelOpen(true)) : void addComponent(selectedSourceKind, selectedSource)}>{selectedSource.capabilities?.dataset ? <><Settings2 size={14} /> Choose fields</> : <><Plus size={14} /> {selectedSourceAction}</>}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
+            {editing && (!fieldsAvailable || dataView === 'sources') && selectedSource && selectedSourceKind ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" disabled={busy || previewing} onClick={() => selectedSource.capabilities?.dataset ? (setPanel('sources'), setPanelOpen(true)) : void addComponent(selectedSourceKind, selectedSource)}>{selectedSource.capabilities?.dataset ? <><Settings2 size={14} /> Choose fields</> : <><Plus size={14} /> {selectedSourceAction}</>}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
             {(activePage?.filters ?? []).length ? <div className="studio-page-filterbar">{activePage!.filters!.map((filter) => <StudioFilterControl key={filter.id} filter={filter} availability={activeFilterOptions[filter.id]} value={previewVariables[filter.id] ?? filter.default} applying={previewing} onChange={(value) => applyFilterValue(filter, value)} />)}</div> : null}
             {previewCrossFilters.length ? <div className="studio-mark-filterbar" role="status" aria-label="Selected Dataset result marks"><span>Selected marks</span>{previewCrossFilters.map((filter) => <button key={`${filter.fromTileId}:${filter.field}`} type="button" onClick={() => removeDatasetCrossFilter(filter.fromTileId, filter.field)}>{humanize(filter.field)}: {filter.values.map(String).join(', ')} <X size={11} /></button>)}<button type="button" className="clear" onClick={clearDatasetCrossFilters}>Reset marks</button></div> : null}
             {previewRun?.incomplete ? <div className="studio-preview-incomplete" role="status" aria-label="Incomplete preview">
@@ -2401,8 +2511,9 @@ export function AppStudioV2({
               <span>Use “Edit with AI” on a Dataset tile. Clicking a chart keeps its own behavior and does not select the tile.</span>
             </div> : null}
             <div className="studio-page-grid">
+              {editing && draftTile && activeDescriptor ? <DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /> : null}
               {visibleItems.map((tile) => (
-                <article key={tile.i} role="group" aria-label={`App component: ${tile.title || humanize(tile.i)}`} draggable={editing} className={`studio-component-card ${editing && selectedTileId === tile.i ? 'selected' : ''} ${draggingTileId === tile.i ? 'dragging' : ''} ${tile.text ? 'text-tile' : ''}`} style={{ '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: tile.text ? undefined : breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties} onDragStart={() => { draggingTileIdRef.current = tile.i; setDraggingTileId(tile.i); }} onDragEnd={() => { draggingTileIdRef.current = null; setDraggingTileId(null); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void moveTileBefore(tile.i); }} onClick={() => { if (!editing) return; setSelectedTileId(tile.i); setSettingsOpen(false); setCopilotOpen(false); }}>
+                <article key={tile.i} role="group" aria-label={`App component: ${tile.title || humanize(tile.i)}`} draggable={editing} className={`studio-component-card ${editing && selectedTileId === tile.i ? 'selected' : ''} ${draggingTileId === tile.i ? 'dragging' : ''} ${tile.text ? 'text-tile' : ''}`} style={{ '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: tile.text ? undefined : breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties} onDragStart={() => { draggingTileIdRef.current = tile.i; setDraggingTileId(tile.i); }} onDragEnd={() => { draggingTileIdRef.current = null; setDraggingTileId(null); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void moveTileBefore(tile.i); }} onClick={() => { if (!editing) return; setSelectedTileId(tile.i); setDraftTile(null); setSettingsOpen(false); setCopilotOpen(false); }}>
                   <header>
                     {editing ? <span className="drag-handle" aria-hidden="true">⠿</span> : null}
                     <strong>{tile.title || humanize(tile.i)}</strong>
@@ -2425,12 +2536,16 @@ export function AppStudioV2({
                   {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} /></div>}
                 </article>
               ))}
-              {!visibleItems.length ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>This page is empty</strong><p>{editing ? 'Pick a governed Dataset in the Data panel, then choose the fields you want to see. You can also ask AI to draft the page.' : 'Switch to Edit to add tiles to this page.'}</p>{editing ? <div className="empty-actions"><button type="button" className="primary" onClick={openAddTile}><Plus size={14} /> Add tile</button><button type="button" onClick={() => { setAiScope('page'); setCopilotOpen(true); }}><Sparkles size={14} /> Draft with AI</button></div> : null}</div> : null}
+              {!visibleItems.length && !draftTile ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>This page is empty</strong><p>{editing ? 'Pick a governed Dataset in the Data panel, then choose the fields you want to see. You can also ask AI to draft the page.' : 'Switch to Edit to add tiles to this page.'}</p>{editing ? <div className="empty-actions"><button type="button" className="primary" onClick={openAddTile}><Plus size={14} /> Add tile</button><button type="button" onClick={() => { setAiScope('page'); setCopilotOpen(true); }}><Sparkles size={14} /> Draft with AI</button></div> : null}</div> : null}
             </div>
           </section>
         </div> : null}
       </main>
 
+      {rightPane === 'draft' && draftTile && activeDescriptor && activeDatasetItem ? <aside className="studio-right" aria-label="New tile">
+        <header><div><small>NEW TILE</small><strong>Built from {humanize(activeDatasetItem.name)}</strong></div><button type="button" className="ghost-icon" onClick={() => setDraftTile(null)} aria-label="Cancel new tile"><X size={16} /></button></header>
+        <DraftTileInspector descriptor={activeDescriptor} datasetLabel={humanize(activeDatasetItem.name)} draft={draftTile} disabled={busy} onChange={setDraftTile} onCancel={() => setDraftTile(null)} onAdd={() => void commitDraftTile()} />
+      </aside> : null}
       {rightPane === 'inspector' || rightPane === 'settings' ? <aside className={`studio-right ${selectedTile ? 'has-selection' : ''}`} aria-label={selectedTile ? 'Tile settings' : 'App settings'}>
         <header><div><small>{selectedTile ? tileKindLabel(selectedTile) : 'APP'}</small><strong>{selectedTile ? 'Tile settings' : 'App settings'}</strong></div><button type="button" className="ghost-icon" onClick={() => { setSelectedTileId(null); setSettingsOpen(false); }} aria-label={selectedTile ? 'Close tile settings' : 'Close App settings'}><X size={16} /></button></header>
         {selectedTile && activePage ? (

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Blocks, X } from 'lucide-react';
 import type { AppStudioBuildDraft } from '../../../api/client';
-import type { DatasetDescriptor, DatasetPhysicalField } from '@duckcodeailabs/dql-core/datasets/descriptor';
+import { datasetMeasureField, datasetPhysicalField, type DatasetDescriptor, type DatasetPhysicalField } from '@duckcodeailabs/dql-core/datasets/descriptor';
+import { toggleFieldInQuery } from './field-query';
 import { datasetTileVisualizationCompatibility, tileQueryOutputAliases, tileQueryValidationRuns, validateTileQuery, type TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
 import { TileQueryEditor } from '../builder/TileQueryEditor';
 import { humanize } from './studio-ui';
@@ -37,11 +38,38 @@ export function DatasetTileQueryInspector({
     }
     onChange(next);
   };
+  const [refusal, setRefusal] = useState<string | null>(null);
+  useEffect(() => setRefusal(null), [descriptor.id, JSON.stringify(query)]);
+  const remove = (name: string) => {
+    const field = datasetMeasureField(descriptor, name) ?? datasetPhysicalField(descriptor, name);
+    if (!field) return;
+    const next = toggleFieldInQuery(query, field);
+    if (!next.measures.length && !next.detail) {
+      setRefusal('A tile needs at least one measure. Add another one before removing this.');
+      return;
+    }
+    const message = commit(next);
+    if (message) setRefusal(message);
+  };
   return <section className="dataset-query-inspector">
-    <label>Dataset fields</label>
-    <p>{descriptor.label} · changes rerun this tile against the same source revision.</p>
-    <TileQueryEditor descriptor={descriptor} query={query} disabled={disabled} onChange={commit} idPrefix={`dataset-inspector-${descriptor.id}`} />
-    <button type="button" className="dataset-change-source" disabled={disabled} onClick={onOpenSources}><Blocks size={12} /> Choose another Dataset</button>
+    <div className="inspector-field"><label>Dataset</label><div className="static-field">{descriptor.label}</div></div>
+    {query.detail ? <div className="inspector-field"><label>Rows</label><p className="field-help">Row details: {query.detailColumns?.length ?? 0} columns. Change them under Filters, sort and more.</p></div> : <>
+      <div className="inspector-field"><label>Values</label><div className="pill-row">
+        {query.measures.map((measure) => <span key={measure.measure} className="field-pill measure">{humanize(measure.measure)}<button type="button" disabled={disabled} aria-label={`Remove ${humanize(measure.measure)}`} onClick={() => remove(measure.measure)}><X size={12} /></button></span>)}
+      </div></div>
+      <div className="inspector-field"><label>Group by</label><div className="pill-row">
+        {query.dimensions.map((dimension) => <span key={dimension.field} className="field-pill">{humanize(dimension.field)}{dimension.timeGrain ? ` · ${dimension.timeGrain}` : ''}<button type="button" disabled={disabled} aria-label={`Remove ${humanize(dimension.field)}`} onClick={() => remove(dimension.field)}><X size={12} /></button></span>)}
+        {!query.dimensions.length ? <small className="field-help">None — one number.</small> : null}
+      </div></div>
+      <small className="field-help">Click fields in the Data panel to add or remove them.</small>
+    </>}
+    {refusal ? <small className="dataset-builder-error" role="alert">{refusal}</small> : null}
+    <details className="draft-more">
+      <summary>Filters, sort and more</summary>
+      <p className="field-help">{descriptor.label} · changes rerun this tile against the same source revision.</p>
+      <TileQueryEditor descriptor={descriptor} query={query} disabled={disabled} onChange={commit} idPrefix={`dataset-inspector-${descriptor.id}`} />
+      <button type="button" className="dataset-change-source" disabled={disabled} onClick={onOpenSources}><Blocks size={12} /> Choose another Dataset</button>
+    </details>
   </section>;
 }
 
