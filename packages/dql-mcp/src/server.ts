@@ -19,6 +19,12 @@ import { expandContext } from './tools/expand-context.js';
 import { querySemanticModel } from './tools/query-semantic-model.js';
 import { queryViaMetadata } from './tools/query-via-metadata.js';
 import { answerQuestion, buildBlockFromPrompt } from './tools/governed.js';
+import {
+  describeDataset,
+  listDatasets,
+  previewTileQuery,
+  queryDataset,
+} from './tools/datasets.js';
 import { listProposals } from './tools/list-proposals.js';
 import {
   feedbackRecord,
@@ -111,6 +117,11 @@ const DQL_MCP_AGENTIC_INSTRUCTIONS =
   'output is grounding evidence, never join authorization.\n' +
   'Tier 3 missing context: if metadata does not identify a safe table, metric, ' +
   'dimension, or grain, refuse and ask for what is missing.\n' +
+  'App Datasets: use `list_datasets` and `describe_dataset` to discover current ' +
+  'approved Dataset capability, then `preview_tile_query` or `query_dataset` with ' +
+  'a typed TileQuery. These tools accept no SQL and execute through the same local ' +
+  'governed Dataset runtime as App Builder; their results are ephemeral and cannot ' +
+  'create App publication evidence.\n' +
   'Trust labels are one canonical vocabulary: Certified, Reviewed, ' +
   'AI-Generated, Insufficient-Context, Conflict (a base label plus an optional ' +
   'qualifier, e.g. "Certified · invariant violated"). Report the trust label ' +
@@ -257,6 +268,18 @@ function mcpToolHandlers(ctx: DQLContext): Partial<Record<DqlToolName, Pick<McpT
     },
     inspect_dql_project: {
       run: (args) => inspectDqlProject(ctx, args as Parameters<typeof inspectDqlProject>[1]),
+    },
+    list_datasets: {
+      run: (args) => listDatasets(ctx, args as Parameters<typeof listDatasets>[1]),
+    },
+    describe_dataset: {
+      run: (args) => describeDataset(ctx, args as Parameters<typeof describeDataset>[1]),
+    },
+    preview_tile_query: {
+      run: (args) => previewTileQuery(ctx, args as Parameters<typeof previewTileQuery>[1]),
+    },
+    query_dataset: {
+      run: (args) => queryDataset(ctx, args as Parameters<typeof queryDataset>[1]),
     },
     build_dql_block: {
       run: (args) => buildDqlBlock(ctx, args as Parameters<typeof buildDqlBlock>[1]),

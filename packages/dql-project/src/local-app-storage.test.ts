@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyAppBuildDraftOperations, createAppBuildDraft } from '@duckcodeailabs/dql-core';
+import { applyAppBuildDraftOperations, createAppBuildDraft, type DashboardDocument } from '@duckcodeailabs/dql-core';
 import { LocalAppStorage } from './local-app-storage.js';
 
 let dir: string;
@@ -43,6 +43,130 @@ describe('LocalAppStorage', () => {
     expect(() => store.saveAppBuildDraft(next, { expectedRevision: 1 })).toThrow(/APP_BUILD_REVISION_CONFLICT/);
   });
 
+  it('atomically records an App Autopilot Apply decision across a marker-write failure and reopen', () => {
+    const draft = createAppBuildDraft({
+      id: 'build-autopilot-atomic', appId: 'autopilot-atomic', name: 'Autopilot Atomic', authoringMode: 'manual',
+      frame: { goal: 'Exercise durable App Autopilot Apply recovery', metrics: [], dimensions: [], filters: [] },
+      now: '2026-09-11T12:00:00.000Z',
+    });
+    const operations = [{ type: 'set_name' as const, name: 'Applied once' }];
+    const next = applyAppBuildDraftOperations(draft, draft.revision, operations, '2026-09-11T12:01:00.000Z');
+    const proposal = {
+      id: 'proposal_atomic_1',
+      draftId: draft.id,
+      proposalHash: 'sha256:atomic-proposal',
+      runId: 'run_atomic_1',
+      artifactId: 'artifact_atomic_1',
+    };
+    store.saveAppBuildDraft(draft);
+    store.saveAppAutopilotChange({
+      ...proposal,
+      payload: { version: 1, id: proposal.id, operations },
+      createdAt: '2026-09-11T12:00:30.000Z',
+    });
+
+    // This trigger fails only the durable marker write, after the draft and
+    // operation statements have been attempted. The surrounding SQLite
+    // transaction must roll every earlier statement back.
+    const internal = store as unknown as { db: { exec: (sql: string) => void } };
+    internal.db.exec(`
+      CREATE TRIGGER fail_autopilot_marker
+      BEFORE UPDATE OF applied_at ON app_autopilot_changes
+      WHEN NEW.id = 'proposal_atomic_1'
+      BEGIN SELECT RAISE(ABORT, 'simulated marker failure'); END;
+    `);
+    expect(() => store.applyAppBuildDraftWithAutopilotChange(next, {
+      expectedRevision: draft.revision,
+      operations,
+      proposal,
+      appliedAt: '2026-09-11T12:01:00.000Z',
+    })).toThrow('simulated marker failure');
+
+    store.close();
+    store = new LocalAppStorage(join(dir, '.dql', 'local', 'apps.sqlite'));
+    expect(store.getAppBuildDraft(draft.id)).toMatchObject({ revision: draft.revision, name: draft.name });
+    expect(store.getAppAutopilotChange(draft.id, proposal.id)).not.toHaveProperty('appliedRevision');
+
+    const reopenedInternal = store as unknown as { db: { exec: (sql: string) => void } };
+    reopenedInternal.db.exec('DROP TRIGGER fail_autopilot_marker');
+    expect(store.applyAppBuildDraftWithAutopilotChange(next, {
+      expectedRevision: draft.revision,
+      operations,
+      proposal,
+      appliedAt: '2026-09-11T12:01:01.000Z',
+    })).toMatchObject({ draft: { revision: next.revision, name: 'Applied once' }, deduped: false });
+
+    store.close();
+    store = new LocalAppStorage(join(dir, '.dql', 'local', 'apps.sqlite'));
+    expect(store.applyAppBuildDraftWithAutopilotChange(next, {
+      expectedRevision: draft.revision,
+      operations,
+      proposal,
+      appliedAt: '2026-09-11T12:01:02.000Z',
+    })).toMatchObject({ draft: { revision: next.revision, name: 'Applied once' }, deduped: true });
+    expect(() => store.saveAppAutopilotChange({
+      ...proposal,
+      payload: { version: 1, id: proposal.id, operations: [] },
+      createdAt: '2026-09-11T12:00:30.000Z',
+    })).toThrow('APP_AUTOPILOT_CHANGE_CONFLICT');
+  });
+
+  it('round-trips exact Dataset filter component selections, including an explicit empty set', () => {
+    const page: DashboardDocument = {
+      version: 3,
+      id: 'overview',
+      metadata: { title: 'Overview' },
+      datasets: [{
+        id: 'orders-dataset',
+        sourceId: 'source:orders',
+        sourceRevision: 'source-v1',
+        snapshotId: 'snapshot-v1',
+        contractFingerprint: 'contract-v1',
+      }],
+      filters: [{
+        id: 'region',
+        type: 'multiselect',
+        scope: { app: true },
+        datasetBindings: { 'orders-dataset': { field: 'region', tileIds: [] } },
+      }],
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [
+          {
+            i: 'revenue', x: 0, y: 0, w: 6, h: 3,
+            sourceId: 'source:orders', sourceRevision: 'source-v1',
+            query: { dimensions: [], measures: [{ measure: 'revenue' }] },
+            viz: { type: 'kpi' },
+          },
+          {
+            i: 'monthly-revenue', x: 6, y: 0, w: 6, h: 3,
+            sourceId: 'source:orders', sourceRevision: 'source-v1',
+            query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }] },
+            viz: { type: 'bar' },
+          },
+        ],
+      },
+    };
+    const draft = createAppBuildDraft({
+      id: 'build-component-scope',
+      appId: 'component-scope',
+      authoringMode: 'manual',
+      frame: { goal: 'Inspect component filter scope', metrics: ['revenue'], dimensions: ['region'], filters: ['region'] },
+      sources: [{
+        id: 'source:orders', kind: 'certified_block', sourceRef: 'orders', sourceRevision: 'source-v1',
+        trustState: 'certified', reviewStatus: 'not_required',
+      }],
+      pages: [page],
+    });
+    store.saveAppBuildDraft(draft);
+    store.close();
+    store = new LocalAppStorage(join(dir, '.dql', 'local', 'apps.sqlite'));
+
+    expect(store.getAppBuildDraft(draft.id)?.pages[0]?.filters?.[0]?.datasetBindings).toEqual({
+      'orders-dataset': { field: 'region', tileIds: [] },
+    });
+  });
+
   it('stores AI pins and refresh metadata locally', () => {
     const pin = store.createAiPin({
       appId: 'executive-cockpit',
@@ -79,12 +203,32 @@ describe('LocalAppStorage', () => {
       runId: 'app_run_restart',
       draftId: 'build-revenue',
       dashboardId: 'overview',
+      intentFingerprint: 'intent-1',
       snapshotId: 'snapshot-1',
       filterFingerprint: 'filters-1',
       resultFingerprint: 'result-1',
       personaFingerprint: 'persona-1',
       successfulTileIds: ['revenue', 'orders'],
       semanticApprovalEligibleTileIds: ['revenue'],
+      datasetBindingEligibleTileIds: ['revenue'],
+      datasetBindings: [{
+        tileId: 'revenue',
+        kind: 'block',
+        sourceId: 'app:block:growth:orders',
+        sourceRevision: 'sha256:source-v1',
+        contractFingerprint: 'sha256:contract-v1',
+        targetFingerprint: 'sha256:target-v1',
+        executionTarget: { target: 'connection', connectionName: 'default' },
+        grainProof: {
+          id: 'proof.orders',
+          sourceSqlFingerprint: 'sha256:source-sql-v1',
+          parameterFingerprint: 'sha256:params-v1',
+          queryFingerprint: 'sha256:query-v1',
+          keyFingerprint: 'sha256:key-v1',
+          scopeSnapshotId: 'dataset-scope:orders-v1',
+          scopeSnapshotFingerprint: 'sha256:scope-v1',
+        },
+      }],
       createdAt: '2026-08-10T00:00:00.000Z',
     });
     store.close();
@@ -94,12 +238,32 @@ describe('LocalAppStorage', () => {
       runId: 'app_run_restart',
       draftId: 'build-revenue',
       dashboardId: 'overview',
+      intentFingerprint: 'intent-1',
       snapshotId: 'snapshot-1',
       filterFingerprint: 'filters-1',
       resultFingerprint: 'result-1',
       personaFingerprint: 'persona-1',
       successfulTileIds: ['revenue', 'orders'],
       semanticApprovalEligibleTileIds: ['revenue'],
+      datasetBindingEligibleTileIds: ['revenue'],
+      datasetBindings: [{
+        tileId: 'revenue',
+        kind: 'block',
+        sourceId: 'app:block:growth:orders',
+        sourceRevision: 'sha256:source-v1',
+        contractFingerprint: 'sha256:contract-v1',
+        targetFingerprint: 'sha256:target-v1',
+        executionTarget: { target: 'connection', connectionName: 'default' },
+        grainProof: {
+          id: 'proof.orders',
+          sourceSqlFingerprint: 'sha256:source-sql-v1',
+          parameterFingerprint: 'sha256:params-v1',
+          queryFingerprint: 'sha256:query-v1',
+          keyFingerprint: 'sha256:key-v1',
+          scopeSnapshotId: 'dataset-scope:orders-v1',
+          scopeSnapshotFingerprint: 'sha256:scope-v1',
+        },
+      }],
       createdAt: '2026-08-10T00:00:00.000Z',
     });
   });
@@ -313,9 +477,11 @@ describe('LocalAppStorage', () => {
     }));
     store.saveAppPreviewEvidence({
       runId: 'app_run_archive', draftId: 'build-executive', dashboardId: 'overview',
+      intentFingerprint: 'intent-archive',
       snapshotId: 'snapshot-1', filterFingerprint: 'filters-1', resultFingerprint: 'result-1',
       personaFingerprint: 'persona-1', successfulTileIds: ['revenue'],
-      semanticApprovalEligibleTileIds: ['revenue'], createdAt: '2026-08-08T00:00:00.000Z',
+      semanticApprovalEligibleTileIds: ['revenue'], datasetBindingEligibleTileIds: ['revenue'], createdAt: '2026-08-08T00:00:00.000Z',
+      datasetBindings: [],
     });
 
     const archive = store.archiveAndDeleteAppState(appId, '2026-08-08T00:00:00.000Z');

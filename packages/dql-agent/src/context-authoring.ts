@@ -3,6 +3,9 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import type {
   DbtSourceAuthoringInput,
+  ManifestDatasetField,
+  ManifestDatasetGrain,
+  ManifestDatasetMeasure,
   ModelingAuthoringChange,
   TermTemplateInput,
 } from '@duckcodeailabs/dql-core';
@@ -16,6 +19,44 @@ export type ContextAuthoringOrigin =
   | 'warehouse_discovery'
   | 'ai'
   | 'correction';
+
+/**
+ * A source-owned Dataset declaration patch. Target identity and source hash
+ * are execution guards, not browser hints: the runtime resolves them against
+ * the current manifest before it creates a patch. SQL, lifecycle, and other
+ * block metadata are intentionally outside this operation.
+ */
+export interface DatasetAuthoringChange {
+  targetQualifiedId: string;
+  targetPath: string;
+  expectedSourceHash: string;
+  patch: {
+    grain?: ManifestDatasetGrain;
+    fields?: ManifestDatasetField[];
+    measures?: ManifestDatasetMeasure[];
+  };
+}
+
+/**
+ * A new, review-required Dataset declaration. Unlike `dataset_change`, this
+ * operation has no existing source to patch: the runtime owns the destination
+ * path and renders the complete DQL declaration from this typed shape.  It is
+ * deliberately incapable of carrying a free-SQL body, a lifecycle upgrade,
+ * or a claimed execution proof.
+ */
+export interface DatasetDraftAuthoringChange {
+  domain: string;
+  slug: string;
+  /** A simple physical relation reference selected for review, never SQL. */
+  sourceRelation: string;
+  name: string;
+  description: string;
+  grain: ManifestDatasetGrain;
+  fields: ManifestDatasetField[];
+  measures: ManifestDatasetMeasure[];
+  /** Human-review provenance such as an App requirement id. */
+  sourceEvidence: string[];
+}
 
 export type ContextAuthoringOperation =
   | {
@@ -48,6 +89,22 @@ export type ContextAuthoringOperation =
       /** A business term written to `domains/<domain>/terms/<slug>.dql` from the shared template; the one in-product way to author a term. */
       kind: 'term_change';
       value: TermTemplateInput;
+      dependsOn?: string[];
+      evidence?: string[];
+    }
+  | {
+      id: string;
+      /** A typed Dataset source change; never inline tile SQL. */
+      kind: 'dataset_change';
+      change: DatasetAuthoringChange;
+      dependsOn?: string[];
+      evidence?: string[];
+    }
+  | {
+      id: string;
+      /** A new typed Dataset draft; commit writes only a review-required source. */
+      kind: 'dataset_draft';
+      change: DatasetDraftAuthoringChange;
       dependsOn?: string[];
       evidence?: string[];
     };
@@ -85,6 +142,7 @@ export interface ContextAuthoringProposalV1 {
     modelingChanges: number;
     skillChanges: number;
     dbtSourceChanges: number;
+    datasetChanges: number;
   };
   proposalHash: string;
   sourceRunId?: string;
@@ -120,6 +178,7 @@ export function buildContextAuthoringProposal(
       modelingChanges: input.operations.filter((operation) => operation.kind === 'modeling_change').length,
       skillChanges: input.operations.filter((operation) => operation.kind === 'skill_change').length,
       dbtSourceChanges: input.operations.filter((operation) => operation.kind === 'dbt_source_change').length,
+      datasetChanges: input.operations.filter((operation) => operation.kind === 'dataset_change' || operation.kind === 'dataset_draft').length,
     },
     sourceRunId: input.sourceRunId,
     sourceArtifactId: input.sourceArtifactId,

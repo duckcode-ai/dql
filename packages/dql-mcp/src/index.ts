@@ -27,6 +27,16 @@ export { kgSearch, kgSearchInput, feedbackRecord, feedbackRecordInput } from './
 export { inspectMetadataContext, inspectMetadataContextInput } from './tools/kg.js';
 export { queryViaMetadata, queryViaMetadataInput } from './tools/query-via-metadata.js';
 export {
+  listDatasets,
+  listDatasetsInput,
+  describeDataset,
+  describeDatasetInput,
+  previewTileQuery,
+  previewTileQueryInput,
+  queryDataset,
+  queryDatasetInput,
+} from './tools/datasets.js';
+export {
   searchMetadata,
   searchMetadataInput,
   getTableSchema,

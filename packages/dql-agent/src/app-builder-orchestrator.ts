@@ -3,6 +3,15 @@ import type {
   AppBuildFrame,
   AppBuildRequirement,
   AppBuildSourcePolicy,
+  DatasetDescriptor,
+  TileQuery,
+} from '@duckcodeailabs/dql-core';
+import {
+  datasetMeasures,
+  datasetPhysicalFields,
+  normalizeTileQuery,
+  tileQueryOutputAliases,
+  validateTileQuery,
 } from '@duckcodeailabs/dql-core';
 import type { AppSourceCatalogRecord } from './app-source-catalog.js';
 
@@ -13,18 +22,78 @@ export interface AppBuilderPlannedComponent {
   id: string;
   title: string;
   sourceId: string;
+  /**
+   * A Dataset component carries the exact approved field query that it will
+   * author. This is intent only: source revision, snapshot, trust, contracts,
+   * and SQL remain server-resolved authority at composition time.
+   */
+  query?: TileQuery;
   requirementIds: string[];
   role: AppBuilderComponentRole;
   view: AppBuilderComponentView;
   rationale: string;
 }
 
+/** A durable story page plan. Components remain identifier-bound elsewhere. */
+export interface AppBuilderPlannedPage {
+  id: string;
+  title: string;
+  componentIds: string[];
+  sections: Array<{
+    id: string;
+    title: string;
+    kind: 'exec_summary' | 'kpi_band' | 'insight' | 'appendix';
+    componentIds: string[];
+  }>;
+}
+
+/** A field-bound filter plan; source and tile bindings are compiled server-side. */
+export interface AppBuilderPlannedFilter {
+  id: string;
+  label: string;
+  field: string;
+  scope: 'page' | 'app';
+  pageId?: string;
+  componentIds: string[];
+}
+
+export interface AppBuilderPlannedNavigation {
+  fromComponentId: string;
+  toPageId: string;
+}
+
+export interface AppBuilderPlannedCrossFilter {
+  fromComponentId: string;
+  fromField: string;
+  toComponentId: string;
+  toField: string;
+}
+
+export interface AppBuilderPlannedDetailDrill {
+  pageId: string;
+  componentId: string;
+  fields: string[];
+}
+
 export interface AppBuilderBuildBrief {
   version: 1;
   planningMode: 'ai' | 'deterministic_fallback';
+  /**
+   * Bounded planner provenance for the dedicated initial App generator.
+   * It deliberately records only how the brief was produced; it contains no
+   * prompt, model output, result rows, credentials, or universal-run state.
+   */
+  plannerProvenance: AppBuilderPlannerProvenance;
   frame: AppBuildFrame;
   requirements: AppBuildRequirement[];
   components: AppBuilderPlannedComponent[];
+  /** A story-oriented page graph compiled to local App draft pages. */
+  pages: AppBuilderPlannedPage[];
+  /** Explicit Dataset field controls. No field-name fallback is permitted. */
+  filters: AppBuilderPlannedFilter[];
+  navigation: AppBuilderPlannedNavigation[];
+  crossFilters: AppBuilderPlannedCrossFilter[];
+  detailDrills: AppBuilderPlannedDetailDrill[];
   selectedSourceIds: string[];
   candidateSourceIds: string[];
   warnings: string[];
@@ -35,9 +104,30 @@ export interface AppBuilderPlannerCompletionInput {
   user: string;
 }
 
+/** Server-owned outcome carried by the local provider adapter after a real
+ * planner invocation succeeds. `providerId` is the selected local settings
+ * id, not an untrusted provider response field. */
+export interface AppBuilderPlannerCompletionResult {
+  content: string;
+  providerId?: string;
+}
+
+/**
+ * Persisted evidence for the dedicated initial generator.  A configured
+ * provider failure never turns into the deterministic mode: it rejects before
+ * a proposal is created, so `not_attempted` means no planner was available.
+ */
+export interface AppBuilderPlannerProvenance {
+  version: 1;
+  mode: 'ai' | 'deterministic';
+  providerInvocation: 'succeeded' | 'not_attempted';
+  /** Present for the real local-provider adapter after its generate call. */
+  providerId?: string;
+}
+
 export type AppBuilderPlannerCompletion = (
   input: AppBuilderPlannerCompletionInput,
-) => Promise<string | undefined>;
+) => Promise<string | AppBuilderPlannerCompletionResult | undefined>;
 
 export interface PlanAppBuildBriefInput {
   prompt: string;
@@ -78,52 +168,63 @@ export async function planAppBuildBrief(input: PlanAppBuildBriefInput): Promise<
     ...input.candidates,
   ]).slice(0, 12);
   if (!input.complete || candidates.length === 0) {
-    return ensureRequiredSources(deterministicBrief(input, candidates), candidates, requiredSourceIds);
+    return ensureAppBuildStructure(
+      ensureRequiredSources(deterministicBrief(input, candidates), candidates, requiredSourceIds),
+      candidates,
+    );
   }
 
-  let raw: string | undefined;
+  let completion: string | AppBuilderPlannerCompletionResult | undefined;
   try {
-    raw = await input.complete({
+    completion = await input.complete({
       system: appBuilderSystemPrompt(),
       user: appBuilderUserPrompt(input, candidates),
     });
-  } catch {
-    return ensureRequiredSources(
-      deterministicBrief(input, candidates, ['The configured App planning provider was unavailable; deterministic matching was used.']),
-      candidates,
-      requiredSourceIds,
-    );
+  } catch (error) {
+    throw new Error(`APP_BUILD_PLANNER_PROVIDER_FAILED: the configured App Builder provider did not return a build brief. ${error instanceof Error ? error.message : String(error)}`);
   }
+  const raw = typeof completion === 'string' ? completion : completion?.content;
+  const providerId = typeof completion === 'string'
+    ? undefined
+    : appBuilderPlannerProviderId(completion?.providerId);
   const parsed = parsePlannerJson(raw);
   if (!parsed) {
-    return ensureRequiredSources(
-      deterministicBrief(input, candidates, ['The App planning provider returned an invalid build brief; deterministic matching was used.']),
-      candidates,
-      requiredSourceIds,
-    );
+    throw new Error('APP_BUILD_PLANNER_OUTPUT_INVALID: the configured App Builder provider did not return valid JSON for the build brief.');
   }
   const allowedIds = new Set(candidates.map((candidate) => candidate.sourceId));
   const requirements = normalizeRequirements(parsed.requirements);
   const requirementIds = new Set(requirements.map((requirement) => requirement.id));
-  const components = normalizeComponents(parsed.components, allowedIds, requirementIds);
-  if (requirements.length === 0 || components.length === 0) {
-    return ensureRequiredSources(
-      deterministicBrief(input, candidates, ['The App planning provider did not return grounded requirements and components; deterministic matching was used.']),
-      candidates,
-      requiredSourceIds,
-    );
+  const components = normalizeComponents(
+    parsed.components,
+    new Map(candidates.map((candidate) => [candidate.sourceId, candidate])),
+    requirementIds,
+    new Map(requirements.map((requirement) => [requirement.id, requirement])),
+  );
+  if (requirements.length === 0) {
+    throw new Error('APP_BUILD_PLANNER_OUTPUT_INVALID: the configured App Builder provider did not return grounded requirements.');
   }
   const frame = normalizeFrame(parsed.frame, prompt, input.audience);
-  return ensureRequiredSources({
+  return ensureAppBuildStructure(ensureRequiredSources({
     version: 1,
     planningMode: 'ai',
+    plannerProvenance: {
+      version: 1,
+      mode: 'ai',
+      providerInvocation: 'succeeded',
+      ...(providerId ? { providerId } : {}),
+    },
     frame,
     requirements,
     components,
+    pages: normalizePlannedPages(parsed.pages, components),
+    filters: [],
+    navigation: [],
+    crossFilters: [],
+    detailDrills: [],
     selectedSourceIds: Array.from(new Set(components.map((component) => component.sourceId))),
     candidateSourceIds: candidates.map((candidate) => candidate.sourceId),
     warnings: [],
-  }, candidates, requiredSourceIds);
+  }, candidates, requiredSourceIds), candidates, parsed);
 }
 
 function ensureRequiredSources(
@@ -139,7 +240,7 @@ function ensureRequiredSources(
     const candidate = byId.get(component.sourceId);
     const requirementIds = component.requirementIds.filter((requirementId) => {
       const requirement = requirementsById.get(requirementId);
-      return Boolean(candidate && requirement && candidateSatisfiesStructuredRequirement(requirement, candidate));
+      return Boolean(candidate && requirement && componentSatisfiesRequirement(component, requirement, candidate));
     });
     const removed = component.requirementIds.filter((requirementId) => !requirementIds.includes(requirementId));
     if (removed.length) {
@@ -160,12 +261,21 @@ function ensureRequiredSources(
       componentId = `${componentId.replace(/-\d+$/, '')}-${suffix}`;
     }
     componentIds.add(componentId);
+    const role = match?.role ?? inferRole(candidate, components.length);
+    const query = candidate.capabilities.dataset
+      ? deterministicDatasetQuery(candidate.capabilities.dataset, match, role)
+      : undefined;
+    if (candidate.capabilities.dataset && !query) {
+      warnings.push(`${candidate.title} was explicitly selected, but no approved Dataset field query can represent it. It remains an uncovered requirement.`);
+      continue;
+    }
     components.push({
       id: componentId,
-      title: candidate.title,
+      title: datasetComponentTitle(candidate.title, candidate.capabilities.dataset, query, role),
       sourceId: candidate.sourceId,
-      requirementIds: match ? [match.id] : [],
-      role: match?.role ?? inferRole(candidate, components.length),
+      requirementIds: match && (!candidate.capabilities.dataset || datasetPlannedQueryCoversRequirement(query!, match, candidate.capabilities.dataset)) ? [match.id] : [],
+      ...(query ? { query } : {}),
+      role,
       view: inferView(candidate, components.length),
       rationale: match
         ? `Explicitly required source with a structured capability match for ${match.question}.`
@@ -181,6 +291,269 @@ function ensureRequiredSources(
     selectedSourceIds: Array.from(new Set(components.map((component) => component.sourceId))),
     warnings,
   };
+}
+
+/**
+ * Preserve the dedicated generator's narrative intent while reducing every
+ * connection to identifiers from the source-bound component set. The model may
+ * suggest a page or interaction; it cannot attach a field by display-name
+ * coincidence, introduce a source, or smuggle an executable expression here.
+ */
+function ensureAppBuildStructure(
+  brief: AppBuilderBuildBrief,
+  candidates: AppSourceCatalogRecord[],
+  raw?: Record<string, unknown>,
+): AppBuilderBuildBrief {
+  const pages = normalizePlannedPages(brief.pages, brief.components);
+  const normalized = normalizePlannedInteractions({
+    pages,
+    components: brief.components,
+    candidates: new Map(candidates.map((candidate) => [candidate.sourceId, candidate])),
+    filters: raw?.filters ?? brief.filters,
+    navigation: raw?.navigation ?? brief.navigation,
+    crossFilters: raw?.crossFilters ?? brief.crossFilters,
+    detailDrills: raw?.detailDrills ?? brief.detailDrills,
+  });
+  return {
+    ...brief,
+    pages,
+    filters: normalized.filters,
+    navigation: normalized.navigation,
+    crossFilters: normalized.crossFilters,
+    detailDrills: normalized.detailDrills,
+    warnings: [...brief.warnings, ...normalized.warnings],
+  };
+}
+
+function plannerIdentifier(value: unknown, fallback: string): string {
+  const candidate = stringValue(value)?.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  return candidate && candidate.length <= 80 ? candidate : fallback;
+}
+
+function plannerDisplayTitle(value: unknown, fallback: string): string {
+  const title = stringValue(value);
+  return title && title.length <= 160 ? title : fallback;
+}
+
+function normalizePlannedPages(value: unknown, components: AppBuilderPlannedComponent[]): AppBuilderPlannedPage[] {
+  const available = new Set(components.map((component) => component.id));
+  const assigned = new Set<string>();
+  const seenPages = new Set<string>();
+  const pages = (Array.isArray(value) ? value : []).slice(0, 8).flatMap((raw, index): AppBuilderPlannedPage[] => {
+    const record = objectValue(raw);
+    if (!record) return [];
+    const id = plannerIdentifier(record.id, `page-${index + 1}`);
+    if (seenPages.has(id)) return [];
+    seenPages.add(id);
+    const componentIds = stringArray(record.componentIds).filter((componentId) => available.has(componentId) && !assigned.has(componentId));
+    componentIds.forEach((componentId) => assigned.add(componentId));
+    return [{
+      id,
+      title: plannerDisplayTitle(record.title, humanizePlannerId(id)),
+      componentIds,
+      sections: normalizePlannedSections(record.sections, componentIds, components),
+    }];
+  });
+  if (pages.length === 0) {
+    const summary = components.filter((component) => component.role !== 'detail' && component.role !== 'evidence');
+    const detail = components.filter((component) => component.role === 'detail' || component.role === 'evidence');
+    const overview = summary.length > 0 ? summary : components;
+    const overviewIds = overview.map((component) => component.id);
+    overviewIds.forEach((componentId) => assigned.add(componentId));
+    pages.push({
+      id: 'overview',
+      title: 'Overview',
+      componentIds: overviewIds,
+      sections: defaultPlannedSections(overviewIds, components),
+    });
+    const detailIds = detail.map((component) => component.id).filter((componentId) => !overviewIds.includes(componentId));
+    if (detailIds.length > 0) {
+      detailIds.forEach((componentId) => assigned.add(componentId));
+      pages.push({ id: 'details', title: 'Details', componentIds: detailIds, sections: defaultPlannedSections(detailIds, components) });
+    }
+  }
+  const unassigned = components.map((component) => component.id).filter((componentId) => !assigned.has(componentId));
+  if (unassigned.length > 0) {
+    const first = pages[0]!;
+    first.componentIds.push(...unassigned);
+    first.sections = normalizePlannedSections(first.sections, first.componentIds, components);
+  }
+  return pages.filter((page) => page.componentIds.length > 0).map((page) => ({
+    ...page,
+    sections: page.sections.length > 0 ? page.sections : defaultPlannedSections(page.componentIds, components),
+  }));
+}
+
+function normalizePlannedSections(
+  value: unknown,
+  componentIds: string[],
+  components: AppBuilderPlannedComponent[],
+): AppBuilderPlannedPage['sections'] {
+  const allowed = new Set(componentIds);
+  const assigned = new Set<string>();
+  const seen = new Set<string>();
+  const sections = (Array.isArray(value) ? value : []).slice(0, 8).flatMap((raw, index): AppBuilderPlannedPage['sections'] => {
+    const record = objectValue(raw);
+    if (!record) return [];
+    const id = plannerIdentifier(record.id, `section-${index + 1}`);
+    const kind = record.kind;
+    if (seen.has(id) || (kind !== 'exec_summary' && kind !== 'kpi_band' && kind !== 'insight' && kind !== 'appendix')) return [];
+    seen.add(id);
+    const selected = stringArray(record.componentIds).filter((componentId) => allowed.has(componentId) && !assigned.has(componentId));
+    if (selected.length === 0) return [];
+    selected.forEach((componentId) => assigned.add(componentId));
+    return [{ id, title: plannerDisplayTitle(record.title, humanizePlannerId(id)), kind, componentIds: selected }];
+  });
+  const missing = componentIds.filter((componentId) => !assigned.has(componentId));
+  if (missing.length > 0) {
+    return [...sections, ...defaultPlannedSections(missing, components, sections.length)];
+  }
+  return sections;
+}
+
+function defaultPlannedSections(
+  componentIds: string[],
+  components: AppBuilderPlannedComponent[],
+  offset = 0,
+): AppBuilderPlannedPage['sections'] {
+  const byId = new Map(components.map((component) => [component.id, component]));
+  const groups: Array<{ kind: AppBuilderPlannedPage['sections'][number]['kind']; title: string; ids: string[] }> = [
+    { kind: 'kpi_band', title: 'Key metrics', ids: [] },
+    { kind: 'insight', title: 'Insights', ids: [] },
+    { kind: 'appendix', title: 'Details', ids: [] },
+  ];
+  for (const id of componentIds) {
+    const role = byId.get(id)?.role;
+    if (role === 'kpi') groups[0]!.ids.push(id);
+    else if (role === 'detail' || role === 'evidence') groups[2]!.ids.push(id);
+    else groups[1]!.ids.push(id);
+  }
+  return groups.flatMap((group, index) => group.ids.length > 0 ? [{
+    id: `${group.kind}-${offset + index + 1}`,
+    title: group.title,
+    kind: group.kind,
+    componentIds: group.ids,
+  }] : []);
+}
+
+function humanizePlannerId(value: string): string {
+  return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function normalizePlannedInteractions(input: {
+  pages: AppBuilderPlannedPage[];
+  components: AppBuilderPlannedComponent[];
+  candidates: Map<string, AppSourceCatalogRecord>;
+  filters: unknown;
+  navigation: unknown;
+  crossFilters: unknown;
+  detailDrills: unknown;
+}): {
+  filters: AppBuilderPlannedFilter[];
+  navigation: AppBuilderPlannedNavigation[];
+  crossFilters: AppBuilderPlannedCrossFilter[];
+  detailDrills: AppBuilderPlannedDetailDrill[];
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const componentById = new Map(input.components.map((component) => [component.id, component]));
+  const pageByComponent = new Map(input.pages.flatMap((page) => page.componentIds.map((componentId) => [componentId, page.id] as const)));
+  const pageById = new Map(input.pages.map((page) => [page.id, page]));
+  const exactField = (componentId: string, fieldName: string) => {
+    const component = componentById.get(componentId);
+    const descriptor = component ? input.candidates.get(component.sourceId)?.capabilities.dataset : undefined;
+    return descriptor ? datasetPhysicalFields(descriptor).find((field) => field.status === 'approved'
+      && sameDatasetName(fieldName, field.name, field.qualifiedId)) : undefined;
+  };
+  const filters: AppBuilderPlannedFilter[] = [];
+  const filterIds = new Set<string>();
+  for (const raw of (Array.isArray(input.filters) ? input.filters : []).slice(0, 12)) {
+    const record = objectValue(raw);
+    const field = stringValue(record?.field);
+    const scope = record?.scope;
+    if (!record || !field || (scope !== 'page' && scope !== 'app')) continue;
+    const id = plannerIdentifier(record.id, `filter-${filters.length + 1}`);
+    if (filterIds.has(id)) continue;
+    const declaredPageId = stringValue(record.pageId);
+    const requested = stringArray(record.componentIds);
+    const fallbackIds = declaredPageId && pageById.has(declaredPageId)
+      ? pageById.get(declaredPageId)!.componentIds
+      : scope === 'app' ? input.components.map((component) => component.id) : [];
+    const targets = (requested.length > 0 ? requested : fallbackIds)
+      .filter((componentId) => componentById.has(componentId) && Boolean(exactField(componentId, field)));
+    const pageId = scope === 'page'
+      ? declaredPageId && pageById.has(declaredPageId) ? declaredPageId : pageByComponent.get(targets[0] ?? '')
+      : undefined;
+    const pageTargets = scope === 'page' && pageId ? targets.filter((componentId) => pageByComponent.get(componentId) === pageId) : targets;
+    if (!pageId && scope === 'page' || pageTargets.length === 0) {
+      warnings.push(`The requested ${id} filter was omitted because no exact approved Dataset field mapping was available.`);
+      continue;
+    }
+    filterIds.add(id);
+    filters.push({
+      id,
+      label: plannerDisplayTitle(record.label, humanizePlannerId(id)),
+      field,
+      scope,
+      ...(pageId ? { pageId } : {}),
+      componentIds: Array.from(new Set(pageTargets)),
+    });
+  }
+
+  const navigation: AppBuilderPlannedNavigation[] = [];
+  const navigated = new Set<string>();
+  for (const raw of (Array.isArray(input.navigation) ? input.navigation : []).slice(0, 12)) {
+    const record = objectValue(raw);
+    const fromComponentId = stringValue(record?.fromComponentId);
+    const toPageId = stringValue(record?.toPageId);
+    if (!fromComponentId || !toPageId || !componentById.has(fromComponentId) || !pageById.has(toPageId)
+      || pageByComponent.get(fromComponentId) === toPageId || navigated.has(fromComponentId)) continue;
+    navigated.add(fromComponentId);
+    navigation.push({ fromComponentId, toPageId });
+  }
+
+  const crossFilters: AppBuilderPlannedCrossFilter[] = [];
+  const crossKeys = new Set<string>();
+  for (const raw of (Array.isArray(input.crossFilters) ? input.crossFilters : []).slice(0, 12)) {
+    const record = objectValue(raw);
+    const fromComponentId = stringValue(record?.fromComponentId);
+    const fromField = stringValue(record?.fromField);
+    const toComponentId = stringValue(record?.toComponentId);
+    const toField = stringValue(record?.toField);
+    const from = fromComponentId ? componentById.get(fromComponentId) : undefined;
+    if (!fromComponentId || !fromField || !toComponentId || !toField || !from?.query || !componentById.has(toComponentId)
+      || pageByComponent.get(fromComponentId) !== pageByComponent.get(toComponentId)) continue;
+    const output = tileQueryOutputAliases(from.query).find((candidate) => candidate.kind === 'dimension'
+      && sameDatasetName(fromField, candidate.alias, candidate.alias));
+    if (!output || !exactField(toComponentId, toField)) {
+      warnings.push('A requested cross-filter was omitted because it did not name an exact selected output and approved target field.');
+      continue;
+    }
+    const key = `${fromComponentId}:${output.alias}:${toComponentId}:${toField}`;
+    if (crossKeys.has(key)) continue;
+    crossKeys.add(key);
+    crossFilters.push({ fromComponentId, fromField: output.alias, toComponentId, toField });
+  }
+
+  const detailDrills: AppBuilderPlannedDetailDrill[] = [];
+  const drilledPages = new Set<string>();
+  for (const raw of (Array.isArray(input.detailDrills) ? input.detailDrills : []).slice(0, 8)) {
+    const record = objectValue(raw);
+    const pageId = stringValue(record?.pageId);
+    const componentId = stringValue(record?.componentId);
+    if (!pageId || !componentId || drilledPages.has(pageId) || pageByComponent.get(componentId) !== pageId) continue;
+    const fields = stringArray(record?.fields).flatMap((field) => {
+      const exact = exactField(componentId, field);
+      return exact ? [exact.name] : [];
+    });
+    if (fields.length === 0) {
+      warnings.push(`The requested detail drill for ${pageId} was omitted because it did not name approved Dataset fields.`);
+      continue;
+    }
+    drilledPages.add(pageId);
+    detailDrills.push({ pageId, componentId, fields: Array.from(new Set(fields)).slice(0, 8) });
+  }
+  return { filters, navigation, crossFilters, detailDrills, warnings };
 }
 
 function candidateSatisfiesStructuredRequirement(
@@ -213,6 +586,21 @@ function candidateSatisfiesStructuredRequirement(
   if (!capabilityValuesMatch(requirement.dimensions, candidate.capabilities.dimensions)) return false;
   if (!capabilityValuesMatch(requirement.filters, candidate.capabilities.filters)) return false;
   return true;
+}
+
+/**
+ * Coverage is about the field query a person will see, not merely every
+ * capability advertised by its source. A Dataset with revenue and margin does
+ * not make a revenue-only tile cover a margin requirement.
+ */
+function componentSatisfiesRequirement(
+  component: AppBuilderPlannedComponent,
+  requirement: AppBuildRequirement,
+  candidate: AppSourceCatalogRecord,
+): boolean {
+  if (!candidateSatisfiesStructuredRequirement(requirement, candidate)) return false;
+  const descriptor = candidate.capabilities.dataset;
+  return !descriptor || Boolean(component.query && datasetPlannedQueryCoversRequirement(component.query, requirement, descriptor));
 }
 
 function questionEvidenceMatchesCandidate(
@@ -294,22 +682,43 @@ function deterministicBrief(
       addSelection(match.candidate, requirement.id);
     }
   }
-  const components = selected.map((candidate, index): AppBuilderPlannedComponent => {
+  const deterministicWarnings = [...warnings];
+  const components = selected.flatMap((candidate, index): AppBuilderPlannedComponent[] => {
     const requirementIds = requirementIdsBySource.get(candidate.sourceId) ?? [];
     const primaryRequirement = requirements.find((requirement) => requirementIds.includes(requirement.id));
-    return {
+    const role = primaryRequirement?.role ?? inferRole(candidate, index);
+    const query = candidate.capabilities.dataset
+      ? deterministicDatasetQuery(candidate.capabilities.dataset, primaryRequirement, role)
+      : undefined;
+    if (candidate.capabilities.dataset && !query) {
+      deterministicWarnings.push(`${candidate.title} has no approved Dataset field query for this request, so it remains an uncovered source.`);
+      return [];
+    }
+    const coveredRequirementIds = candidate.capabilities.dataset && query
+      ? requirementIds.filter((requirementId) => {
+        const requirement = requirements.find((candidateRequirement) => candidateRequirement.id === requirementId);
+        return Boolean(requirement && datasetPlannedQueryCoversRequirement(query, requirement, candidate.capabilities.dataset!));
+      })
+      : requirementIds;
+    return [{
       id: `component-${index + 1}`,
-      title: candidate.title,
+      title: datasetComponentTitle(candidate.title, candidate.capabilities.dataset, query, role),
       sourceId: candidate.sourceId,
-      requirementIds,
-      role: primaryRequirement?.role ?? inferRole(candidate, index),
+      requirementIds: coveredRequirementIds,
+      ...(query ? { query } : {}),
+      role,
       view: inferView(candidate, index),
       rationale: candidate.reasons[0] ?? `Matched ${candidate.title} from the App source catalog.`,
-    };
+    }];
   });
   return {
     version: 1,
     planningMode: 'deterministic_fallback',
+    plannerProvenance: {
+      version: 1,
+      mode: 'deterministic',
+      providerInvocation: 'not_attempted',
+    },
     frame: {
       goal: input.prompt.trim(),
       decision: input.prompt.trim(),
@@ -321,9 +730,14 @@ function deterministicBrief(
     },
     requirements,
     components,
+    pages: [],
+    filters: [],
+    navigation: [],
+    crossFilters: [],
+    detailDrills: [],
     selectedSourceIds: selected.map((candidate) => candidate.sourceId),
     candidateSourceIds: candidates.map((candidate) => candidate.sourceId),
-    warnings,
+    warnings: deterministicWarnings,
   };
 }
 
@@ -384,10 +798,14 @@ function appBuilderSystemPrompt(): string {
     'You are the DQL App Builder planner. Produce one stateful analytical App build brief, not a prose answer.',
     'Use only sourceId values present in the supplied candidate cards. Never invent a source, field, capability, or trust state.',
     'Draft and review sources may be recommended, but their trust must not be upgraded.',
-    'Return JSON only with keys frame, requirements, and components.',
+    'Return JSON only with keys frame, requirements, components, pages, filters, navigation, crossFilters, and detailDrills.',
     'frame: {goal, decision?, audience?, metrics[], dimensions[], grain?, timeRange?, comparison?, filters[], desiredOutput?, clarificationQuestions?}.',
     'requirements: [{id, question, role, required, measures[], dimensions[], filters[], grain?}]. role is kpi, trend, breakdown, detail, narrative, or evidence.',
-    'components: [{id, title, sourceId, requirementIds[], role, view, rationale}]. view is kpi, line, bar, or table.',
+    'components: [{id, title, sourceId, query?, requirementIds[], role, view, rationale}]. query is a TileQuery using only the approved Dataset fields on that source card. view is kpi, line, bar, or table.',
+    'pages: [{id, title, componentIds[], sections:[{id,title,kind,componentIds[]}]}]. section kind is exec_summary, kpi_band, insight, or appendix. Every component must appear on one page.',
+    'filters: [{id,label,field,scope,pageId?,componentIds[]}]. field must be one exact approved physical Dataset field for every named component; scope is page or app.',
+    'navigation: [{fromComponentId,toPageId}]. crossFilters: [{fromComponentId,fromField,toComponentId,toField}], where fromField is an exact selected dimension output and toField is an exact approved physical target field on the same page.',
+    'detailDrills: [{pageId,componentId,fields[]}], where every field is an exact approved physical Dataset field. Never write SQL, joins, source revisions, results, or trust claims.',
     'Prefer the fewest components that cover the request. Ask a clarification only when a material choice cannot be made from supplied evidence.',
   ].join('\n');
 }
@@ -408,7 +826,7 @@ function appBuilderUserPrompt(input: PlanAppBuildBriefInput, candidates: AppSour
       lifecycle: candidate.lifecycle,
       trust: candidate.trust,
       eligibleForLocalPreview: candidate.eligibility.localPreview,
-      capabilities: candidate.capabilities,
+      capabilities: plannerCapabilities(candidate),
       evidence: candidate.reasons,
     })),
   });
@@ -427,6 +845,15 @@ function parsePlannerJson(raw: string | undefined): Record<string, unknown> | un
   } catch {
     return undefined;
   }
+}
+
+/** Provider identifiers originate in the local runtime's selected settings,
+ * but keep the persisted proposal schema bounded if another host adapter
+ * implements the planner completion contract. */
+function appBuilderPlannerProviderId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const id = value.trim();
+  return /^[a-z0-9][a-z0-9._:-]{0,79}$/i.test(id) ? id : undefined;
 }
 
 function normalizeFrame(value: unknown, prompt: string, audience?: string): AppBuildFrame {
@@ -472,8 +899,9 @@ function normalizeRequirements(value: unknown): AppBuildRequirement[] {
 
 function normalizeComponents(
   value: unknown,
-  allowedSourceIds: Set<string>,
+  candidatesById: Map<string, AppSourceCatalogRecord>,
   requirementIds: Set<string>,
+  requirementsById: Map<string, AppBuildRequirement>,
 ): AppBuilderPlannedComponent[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
@@ -484,18 +912,165 @@ function normalizeComponents(
     const role = appRole(record.role);
     const view = appView(record.view);
     const id = stringValue(record.id) ?? `component-${index + 1}`;
-    if (!sourceId || !allowedSourceIds.has(sourceId) || !role || !view || seen.has(id)) return [];
+    const candidate = sourceId ? candidatesById.get(sourceId) : undefined;
+    if (!sourceId || !candidate || !role || !view || seen.has(id)) return [];
     seen.add(id);
+    const selectedRequirementIds = stringArray(record.requirementIds).filter((requirementId) => requirementIds.has(requirementId));
+    const primaryRequirement = selectedRequirementIds
+      .map((requirementId) => requirementsById.get(requirementId))
+      .find((requirement): requirement is AppBuildRequirement => Boolean(requirement));
+    const query = candidate.capabilities.dataset
+      ? normalizedDatasetQuery(record.query, candidate.capabilities.dataset, primaryRequirement, role)
+      : undefined;
+    // A Dataset card must always carry a validated, field-level query. Do not
+    // fall back to a legacy block tile when its governed descriptor cannot
+    // express the requested component.
+    if (candidate.capabilities.dataset && !query) return [];
     return [{
       id,
-      title: stringValue(record.title) ?? id,
+      title: datasetComponentTitle(stringValue(record.title) ?? id, candidate.capabilities.dataset, query, role),
       sourceId,
-      requirementIds: stringArray(record.requirementIds).filter((requirementId) => requirementIds.has(requirementId)),
+      ...(query ? { query } : {}),
+      requirementIds: selectedRequirementIds,
       role,
       view,
       rationale: stringValue(record.rationale) ?? 'Selected from the bounded App source candidate set.',
     }];
   });
+}
+
+function normalizedDatasetQuery(
+  raw: unknown,
+  descriptor: DatasetDescriptor,
+  requirement: AppBuildRequirement | undefined,
+  role: AppBuilderComponentRole,
+): TileQuery | undefined {
+  const supplied = normalizeTileQuery(raw);
+  if (supplied && validateTileQuery(descriptor, supplied).outcome === 'covered') return supplied;
+  return deterministicDatasetQuery(descriptor, requirement, role);
+}
+
+/**
+ * A provider may choose a query only from the compact approved card. When it
+ * cannot, this deterministic fallback uses one approved measure and the
+ * narrowest role-compatible group. It never invents a field or lowers trust.
+ */
+export function deterministicDatasetQuery(
+  descriptor: DatasetDescriptor,
+  requirement: AppBuildRequirement | undefined,
+  role: AppBuilderComponentRole,
+): TileQuery | undefined {
+  const approvedMeasures = datasetMeasures(descriptor).filter((field) => field.status === 'approved');
+  const approvedFields = datasetPhysicalFields(descriptor).filter((field) => field.status === 'approved');
+  const requiredMeasures = requirement?.measures ?? [];
+  const matchingMeasure = requiredMeasures.length > 0
+    ? approvedMeasures.find((measure) => requiredMeasures.some((required) => sameDatasetName(required, measure.name, measure.qualifiedId)))
+    : approvedMeasures.find((measure) => wordsMatch(requirement?.question ?? '', `${measure.name} ${measure.qualifiedId}`))
+      ?? approvedMeasures[0];
+  if (!matchingMeasure) return undefined;
+
+  const dimensions: TileQuery['dimensions'] = [];
+  if (role === 'trend') {
+    const time = approvedFields.find((field) => field.role === 'time' && Boolean(field.time?.grains.length));
+    if (time?.time?.grains.length) {
+      const grain = time.time.grains.includes('month') ? 'month' : time.time.grains[0];
+      dimensions.push({ field: time.name, ...(grain ? { timeGrain: grain } : {}) });
+    }
+  } else if (role === 'breakdown' || role === 'detail' || role === 'evidence') {
+    const requiredDimensions = requirement?.dimensions ?? [];
+    const dimension = requiredDimensions.length > 0
+      ? approvedFields.find((field) => requiredDimensions.some((required) => sameDatasetName(required, field.name, field.qualifiedId)))
+      : approvedFields.find((field) => field.role === 'dimension' || field.role === 'key' || field.role === 'attribute');
+    if (dimension) dimensions.push({ field: dimension.name });
+  }
+  const query: TileQuery = { dimensions, measures: [{ measure: matchingMeasure.name }] };
+  return validateTileQuery(descriptor, query).outcome === 'covered' ? query : undefined;
+}
+
+export function datasetPlannedQueryCoversRequirement(query: TileQuery, requirement: AppBuildRequirement, descriptor: DatasetDescriptor): boolean {
+  const selectedMeasures = query.measures.map((selection) => selection.measure);
+  const selectedDimensions = [
+    ...query.dimensions.map((selection) => selection.field),
+    ...(query.filters ?? []).map((filter) => filter.field),
+  ];
+  if (requirement.measures.length > 0 && !requirement.measures.every((required) => selectedMeasures.some((selected) => {
+    const measure = datasetMeasures(descriptor).find((candidate) => sameDatasetName(selected, candidate.name, candidate.qualifiedId));
+    return Boolean(measure && sameDatasetName(required, measure.name, measure.qualifiedId));
+  }))) return false;
+  if (requirement.dimensions.length > 0 && !requirement.dimensions.every((required) => selectedDimensions.some((selected) => {
+    const field = datasetPhysicalFields(descriptor).find((candidate) => sameDatasetName(selected, candidate.name, candidate.qualifiedId));
+    return Boolean(field && sameDatasetName(required, field.name, field.qualifiedId));
+  }))) return false;
+  if (requirement.filters.length > 0 && !requirement.filters.every((required) => (query.filters ?? []).some((filter) => {
+    const field = datasetPhysicalFields(descriptor).find((candidate) => sameDatasetName(filter.field, candidate.name, candidate.qualifiedId));
+    return Boolean(field && sameDatasetName(required, field.name, field.qualifiedId));
+  }))) return false;
+  return true;
+}
+
+/**
+ * Provider titles are presentation-only. If a title names an approved metric
+ * that the emitted field query does not select, replace it with the exact
+ * selected output rather than leaving the App to claim coverage it cannot
+ * execute. This is deliberately narrow: ordinary descriptive titles survive.
+ */
+function datasetComponentTitle(
+  title: string,
+  descriptor: DatasetDescriptor | undefined,
+  query: TileQuery | undefined,
+  role: AppBuilderComponentRole,
+): string {
+  if (!descriptor || !query) return title;
+  const selected = datasetMeasures(descriptor).filter((measure) => (
+    query.measures.some((selection) => sameDatasetName(selection.measure, measure.name, measure.qualifiedId))
+  ));
+  if (selected.length === 0) return title;
+  const titleWords = deterministicWords(title);
+  const namesUnselected = datasetMeasures(descriptor).filter((measure) => (
+    !selected.some((selectedMeasure) => selectedMeasure.qualifiedId === measure.qualifiedId)
+    && Array.from(deterministicWords(measure.name)).some((word) => titleWords.has(word))
+  ));
+  if (namesUnselected.length === 0) return title;
+  const measureLabel = selected[0]!.name;
+  const dimension = query.dimensions[0]?.field;
+  if (role === 'trend' && dimension) return `${measureLabel} over time`;
+  if ((role === 'breakdown' || role === 'detail' || role === 'evidence') && dimension) return `${measureLabel} by ${dimension}`;
+  return measureLabel;
+}
+
+function plannerCapabilities(candidate: AppSourceCatalogRecord): Record<string, unknown> {
+  const descriptor = candidate.capabilities.dataset;
+  return {
+    measures: [...candidate.capabilities.measures],
+    dimensions: [...candidate.capabilities.dimensions],
+    filters: [...candidate.capabilities.filters],
+    outputs: [...candidate.capabilities.outputs],
+    ...(descriptor ? {
+      dataset: {
+        id: descriptor.id,
+        kind: descriptor.kind,
+        operations: [...descriptor.operations],
+        fields: datasetPhysicalFields(descriptor)
+          .filter((field) => field.status === 'approved')
+          .map((field) => ({ name: field.name, qualifiedId: field.qualifiedId, role: field.role, type: field.type, timeGrains: field.time?.grains ?? [] })),
+        measures: datasetMeasures(descriptor)
+          .filter((measure) => measure.status === 'approved')
+          .map((measure) => ({ name: measure.name, qualifiedId: measure.qualifiedId, aggregation: measure.aggregation, allowedAggs: [...measure.allowedAggs] })),
+      },
+    } : {}),
+  };
+}
+
+function sameDatasetName(value: string, name: string, qualifiedId: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === name.toLowerCase() || normalized === qualifiedId.toLowerCase();
+}
+
+function wordsMatch(question: string, candidate: string): boolean {
+  const requested = deterministicWords(question);
+  if (requested.size === 0) return false;
+  const available = deterministicWords(candidate);
+  return Array.from(requested).some((token) => available.has(token));
 }
 
 function normalizeClarifications(value: unknown): Pick<AppBuildFrame, 'clarificationQuestions'> | Record<string, never> {

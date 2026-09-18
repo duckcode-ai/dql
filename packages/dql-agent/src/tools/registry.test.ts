@@ -83,9 +83,16 @@ describe('DQL tool registry', () => {
       'resolve_analytical_path',
       'explain_relationship_proof',
       'inspect_dql_project',
+      // App Dataset execution stays declarative and routes through the same
+      // local governed runtime as App Builder. These four tools replace no
+      // existing discovery or governance path.
+      'list_datasets',
+      'describe_dataset',
+      'preview_tile_query',
+      'query_dataset',
     ]);
-    expect(mcpAgenticTools).toHaveLength(20);
-    expect(mcpAgenticTools.length).toBeLessThanOrEqual(20);
+    expect(mcpAgenticTools).toHaveLength(24);
+    expect(mcpAgenticTools.length).toBeLessThanOrEqual(24);
   });
 
   it('keeps the full MCP surface available for explicit expert sessions', () => {
@@ -117,6 +124,8 @@ describe('DQL tool registry', () => {
         'mcp__dql__inspect_metadata_context',
         'mcp__dql__query_via_metadata',
         'mcp__dql__expand_context',
+        'mcp__dql__list_datasets',
+        'mcp__dql__query_dataset',
       ]),
     );
   });

@@ -1,5 +1,11 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { DuckDBConnector, normalizeDuckDBRow, normalizeDuckDBValue, resolveDuckDBModule } from './duckdb.js';
+
+const configuredDuckDbConnectorRoot = process.env.DQL_APP_DATASETS_DUCKDB_CONNECTOR_ROOT?.trim();
+const duckDbIt = configuredDuckDbConnectorRoot ? it : it.skip;
 
 describe('resolveDuckDBModule', () => {
   it('accepts a direct Database export', () => {
@@ -80,6 +86,37 @@ describe('DuckDBConnector execution control', () => {
       expect(interrupt).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('DuckDB consistent App read scope', () => {
+  duckDbIt('copies the active schema and holds its own same-Database snapshot', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dql-duckdb-scope-'));
+    const filepath = join(directory, 'scope.duckdb');
+    const connector = new DuckDBConnector();
+    try {
+      await connector.connect({ driver: 'duckdb', filepath, moduleSearchPaths: [configuredDuckDbConnectorRoot!] });
+      await connector.execute('CREATE SCHEMA analytics');
+      await connector.execute('CREATE TABLE main.scope_values (value INTEGER)');
+      await connector.execute('INSERT INTO main.scope_values VALUES (1)');
+      await connector.execute('CREATE TABLE analytics.scope_values (value INTEGER)');
+      await connector.execute('INSERT INTO analytics.scope_values VALUES (2)');
+      await connector.execute('SET schema = analytics');
+
+      const scope = await connector.openConsistentReadScope();
+      try {
+        expect(scope.context.schema).toBe('analytics');
+        expect((await scope.execute('SELECT value FROM scope_values')).rows).toEqual([{ value: 2 }]);
+        await connector.execute('INSERT INTO analytics.scope_values VALUES (3)');
+        expect((await scope.execute('SELECT value FROM scope_values ORDER BY value')).rows).toEqual([{ value: 2 }]);
+      } finally {
+        await scope.close();
+      }
+      expect((await connector.execute('SELECT value FROM analytics.scope_values ORDER BY value')).rows).toEqual([{ value: 2 }, { value: 3 }]);
+    } finally {
+      await connector.disconnect();
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 });

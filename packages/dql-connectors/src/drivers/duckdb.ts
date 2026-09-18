@@ -1,6 +1,23 @@
+import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
 import type { QueryExecutionOptions, QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
 import { importConnectorDependency } from '../optional-dependency.js';
+
+/**
+ * A dedicated connection from the already-open DuckDB database. Dataset
+ * evidence uses this one transaction for its probe and the tile it proves, so
+ * reconnect/pool behavior cannot silently mix database snapshots.
+ */
+export interface DuckDBConsistentReadScope {
+  readonly id: string;
+  readonly context: {
+    schema?: string;
+    timeZone?: string;
+    fingerprint: string;
+  };
+  execute(sql: string, params?: unknown[], options?: QueryExecutionOptions): Promise<QueryResult>;
+  close(): Promise<void>;
+}
 
 export class DuckDBConnector implements DatabaseConnector {
   readonly driverName = 'duckdb';
@@ -29,101 +46,54 @@ export class DuckDBConnector implements DatabaseConnector {
     if (!this.connection) {
       throw new Error('DuckDB connector not connected. Call connect() first.');
     }
+    return executeDuckDBConnection(this.connection, this.db, sql, params, options);
+  }
 
-    if (options.signal?.aborted) throw duckDbCancellationError(options.signal.reason);
-    if (options.deadlineMs !== undefined && options.deadlineMs <= 0) throw duckDbDeadlineError(options.deadlineMs);
-
-    const startTime = performance.now();
-
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-      const signal = options.signal;
-      const cleanup = () => {
-        if (deadlineTimer) clearTimeout(deadlineTimer);
-        deadlineTimer = undefined;
-        signal?.removeEventListener('abort', onAbort);
-      };
-      const settle = (finish: () => void) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        finish();
-      };
-      const interrupt = () => {
-        // node-duckdb exposes interrupt on different objects depending on the
-        // version/build. Try the active connection first, then its database.
-        // Cancellation must never close a pooled connector merely to stop one
-        // query; late callbacks are ignored below.
-        const candidates = [this.connection, this.db, this.connection?.db];
-        for (const candidate of candidates) {
-          const stop = candidate?.interrupt ?? candidate?.cancel;
-          if (typeof stop !== 'function') continue;
-          try { stop.call(candidate); } catch { /* cancellation remains local */ }
-          return;
+  /**
+   * Preserve the active schema and time zone on a separate connection, then
+   * hold a transaction open across the App's related read operations. The
+   * normal connector keeps its 1.16 cancellation semantics; the scope simply
+   * invokes the same execution helper against its own connection.
+   */
+  async openConsistentReadScope(): Promise<DuckDBConsistentReadScope> {
+    if (!this.db || !this.connection) {
+      throw new Error('DuckDB connector not connected. Call connect() first.');
+    }
+    const context = await readDuckDBSessionContext(this.connection, this.db);
+    const connection = this.db.connect();
+    let closed = false;
+    let pending = Promise.resolve();
+    const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
+      const task = pending.then(work, work);
+      pending = task.then(() => undefined, () => undefined);
+      return task;
+    };
+    try {
+      if (context.schema) await executeDuckDBConnection(connection, this.db, `SET schema = ${quoteDuckDBString(context.schema)}`);
+      if (context.timeZone) await executeDuckDBConnection(connection, this.db, `SET TimeZone = ${quoteDuckDBString(context.timeZone)}`);
+      await executeDuckDBConnection(connection, this.db, 'BEGIN TRANSACTION');
+    } catch (error) {
+      await closeDuckDBConnection(connection);
+      throw error;
+    }
+    return {
+      id: `duckdb_scope_${randomUUID()}`,
+      context,
+      execute: (sql, params, options) => enqueue(async () => {
+        if (closed) throw new Error('DuckDB consistent read scope is closed.');
+        return executeDuckDBConnection(connection, this.db, sql, params, options);
+      }),
+      close: async () => {
+        if (closed) return;
+        closed = true;
+        await pending;
+        try {
+          await executeDuckDBConnection(connection, this.db, 'ROLLBACK');
+        } finally {
+          await closeDuckDBConnection(connection);
         }
-      };
-      const cancel = (error: Error) => {
-        interrupt();
-        settle(() => reject(error));
-      };
-      const onAbort = () => cancel(duckDbCancellationError(signal?.reason));
-      if (signal) signal.addEventListener('abort', onAbort, { once: true });
-      if (options.deadlineMs !== undefined && Number.isFinite(options.deadlineMs)) {
-        deadlineTimer = setTimeout(() => cancel(duckDbDeadlineError(options.deadlineMs!)), Math.max(0, options.deadlineMs));
-      }
-      const callback = (err: Error | null, result: any) => {
-        // The native binding may call back after interrupt(); never turn that
-        // late result into an answer after Ask already recorded cancellation.
-        if (settled) return;
-        if (signal?.aborted) {
-          cancel(duckDbCancellationError(signal.reason));
-          return;
-        }
-        const executionTimeMs = performance.now() - startTime;
-
-        if (err) {
-          settle(() => reject(new Error(`DuckDB query failed: ${withMissingTableHint(err.message)}`)));
-          return;
-        }
-
-        if (!result || !Array.isArray(result) || result.length === 0) {
-          settle(() => resolve({
-            columns: [],
-            rows: [],
-            rowCount: 0,
-            executionTimeMs,
-          }));
-          return;
-        }
-
-        const normalizedRows = result.map((row: Row) => normalizeDuckDBRow(row));
-
-        // Infer columns from first normalized row so JSON-facing types match runtime values.
-        const columns: ColumnMeta[] = Object.keys(normalizedRows[0]).map((name) => ({
-          name,
-          type: inferDuckDBType(normalizedRows[0][name]),
-          driverType: 'duckdb',
-        }));
-
-        settle(() => resolve({
-          columns,
-          rows: normalizedRows,
-          rowCount: normalizedRows.length,
-          executionTimeMs,
-        }));
-      };
-
-      try {
-        if (params && params.length > 0) {
-          this.connection.all(sql, ...params, callback);
-        } else {
-          this.connection.all(sql, callback);
-        }
-      } catch (error) {
-        settle(() => reject(error instanceof Error ? error : new Error(String(error))));
-      }
-    });
+      },
+    };
   }
 
   async disconnect(): Promise<void> {
@@ -197,6 +167,111 @@ function duckDbCancellationError(reason: unknown): Error {
 
 function duckDbDeadlineError(deadlineMs: number): Error {
   return new Error(`DuckDB query exceeded the ${Math.max(0, deadlineMs)}ms deadline.`);
+}
+
+function executeDuckDBConnection(
+  connection: any,
+  database: any,
+  sql: string,
+  params?: unknown[],
+  options: QueryExecutionOptions = {},
+): Promise<QueryResult> {
+  if (!connection) return Promise.reject(new Error('DuckDB connector not connected. Call connect() first.'));
+  if (options.signal?.aborted) return Promise.reject(duckDbCancellationError(options.signal.reason));
+  if (options.deadlineMs !== undefined && options.deadlineMs <= 0) return Promise.reject(duckDbDeadlineError(options.deadlineMs));
+
+  const startTime = performance.now();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const signal = options.signal;
+    const cleanup = () => {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      finish();
+    };
+    const interrupt = () => {
+      const candidates = [connection, database, connection?.db];
+      for (const candidate of candidates) {
+        const stop = candidate?.interrupt ?? candidate?.cancel;
+        if (typeof stop !== 'function') continue;
+        try { stop.call(candidate); } catch { /* local cancellation still wins */ }
+        return;
+      }
+    };
+    const cancel = (error: Error) => {
+      interrupt();
+      settle(() => reject(error));
+    };
+    const onAbort = () => cancel(duckDbCancellationError(signal?.reason));
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    if (options.deadlineMs !== undefined && Number.isFinite(options.deadlineMs)) {
+      deadlineTimer = setTimeout(() => cancel(duckDbDeadlineError(options.deadlineMs!)), Math.max(0, options.deadlineMs));
+    }
+    const callback = (err: Error | null, result: any) => {
+      if (settled) return;
+      if (signal?.aborted) {
+        cancel(duckDbCancellationError(signal.reason));
+        return;
+      }
+      const executionTimeMs = performance.now() - startTime;
+      if (err) {
+        settle(() => reject(new Error(`DuckDB query failed: ${withMissingTableHint(err.message)}`)));
+        return;
+      }
+      if (!result || !Array.isArray(result) || result.length === 0) {
+        settle(() => resolve({ columns: [], rows: [], rowCount: 0, executionTimeMs }));
+        return;
+      }
+      const normalizedRows = result.map((row: Row) => normalizeDuckDBRow(row));
+      const columns: ColumnMeta[] = Object.keys(normalizedRows[0]).map((name) => ({
+        name,
+        type: inferDuckDBType(normalizedRows[0][name]),
+        driverType: 'duckdb',
+      }));
+      settle(() => resolve({ columns, rows: normalizedRows, rowCount: normalizedRows.length, executionTimeMs }));
+    };
+    try {
+      if (params && params.length > 0) connection.all(sql, ...params, callback);
+      else connection.all(sql, callback);
+    } catch (error) {
+      settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+    }
+  });
+}
+
+async function readDuckDBSessionContext(connection: any, database: any): Promise<DuckDBConsistentReadScope['context']> {
+  const [schema, timeZone] = await Promise.all([
+    executeDuckDBConnection(connection, database, 'SELECT current_schema() AS "__dql_schema"'),
+    executeDuckDBConnection(connection, database, "SELECT current_setting('TimeZone') AS \"__dql_timezone\""),
+  ]);
+  const schemaValue = typeof schema.rows[0]?.__dql_schema === 'string' ? schema.rows[0].__dql_schema : undefined;
+  const timeZoneValue = typeof timeZone.rows[0]?.__dql_timezone === 'string' ? timeZone.rows[0].__dql_timezone : undefined;
+  return {
+    ...(schemaValue ? { schema: schemaValue } : {}),
+    ...(timeZoneValue ? { timeZone: timeZoneValue } : {}),
+    fingerprint: `sha256:${createHash('sha256').update(JSON.stringify({ schema: schemaValue ?? null, timeZone: timeZoneValue ?? null })).digest('hex')}`,
+  };
+}
+
+function quoteDuckDBString(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+async function closeDuckDBConnection(connection: any): Promise<void> {
+  await new Promise<void>((resolve) => {
+    if (!connection || typeof connection.close !== 'function') {
+      resolve();
+      return;
+    }
+    connection.close(() => resolve());
+  });
 }
 
 export function resolveDuckDBModule(module: unknown): { Database: new (path: string, callback: (err: Error | null) => void) => any } {

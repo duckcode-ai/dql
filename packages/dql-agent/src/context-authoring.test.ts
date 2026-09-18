@@ -58,6 +58,49 @@ describe('context authoring proposals', () => {
     expect(first.proposalHash).not.toBe(second.proposalHash);
   });
 
+  it('binds a typed Dataset source patch into the immutable proposal hash', () => {
+    const base = buildContextAuthoringProposal({
+      origin: 'manual',
+      baseSnapshotId: 'snapshot-1',
+      dependencyFingerprints: { 'domains/commerce/blocks/daily.dql': 'source-hash' },
+      operations: [{
+        id: 'dataset:daily:add-margin',
+        kind: 'dataset_change',
+        change: {
+          targetQualifiedId: 'commerce::block::Daily Dataset::abc123',
+          targetPath: 'domains/commerce/blocks/daily.dql',
+          expectedSourceHash: `sha256:${'a'.repeat(64)}`,
+          patch: {
+            measures: [{
+              name: 'gross_margin', aggregation: 'sum', expression: 'SUM(revenue) - SUM(cost)',
+              additive: 'additive', allowedAggs: ['sum'],
+            }],
+          },
+        },
+      }],
+      patches: [{
+        path: 'domains/commerce/blocks/daily.dql', before: 'before', after: 'after', changed: true, owner: 'dql', operationId: 'dataset:daily:add-margin',
+      }],
+      diagnostics: [],
+    });
+    const changed = buildContextAuthoringProposal({
+      ...base,
+      id: base.id,
+      createdAt: base.createdAt,
+      operations: [{
+        ...base.operations[0]!,
+        change: {
+          ...base.operations[0]!.change,
+          expectedSourceHash: `sha256:${'b'.repeat(64)}`,
+        },
+      }],
+    });
+
+    expect(base.impact).toMatchObject({ datasetChanges: 1, files: 1 });
+    expect(base.proposalHash).not.toBe(changed.proposalHash);
+    expect(base.trustState).toBe('review_required');
+  });
+
   it('persists idempotency receipts across store instances', () => {
     const root = mkdtempSync(join(tmpdir(), 'dql-context-proposal-'));
     const first = new FileContextAuthoringProposalStore(root);

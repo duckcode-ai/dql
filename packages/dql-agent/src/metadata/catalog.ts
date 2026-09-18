@@ -43,6 +43,7 @@ import {
   type DqlArtifactReference,
   type ResolvedTrustLabel,
   type AnalyticalPolicyContract,
+  type DatasetDescriptor,
   normalizeMetricCapabilityContract,
   type MetricCapabilityContract,
 } from "@duckcodeailabs/dql-core";
@@ -105,6 +106,13 @@ import {
   hasGeneratedAppSourceOrigin,
   isExplicitlyReusableAppSource,
 } from '../app-source-policy.js';
+import {
+  datasetDescriptorFromSemanticMetrics,
+  datasetDescriptorFromManifestBlock,
+  loadDatasetGrainProofs,
+  type SemanticDatasetFieldProjection,
+  type SemanticDatasetMeasureProjection,
+} from '../datasets/index.js';
 
 export { applyContextPackCompatibility, toAgentRetrievalEvidence } from './meaning-evidence.js';
 
@@ -2266,6 +2274,7 @@ export function buildMetadataSnapshot(
 
   addManifestBlockDetails(manifest, objects);
   addManifestBlockSourceObjects(projectRoot, manifest, objects);
+  addSemanticMetricDatasetSourceObjects(semanticLayer, objects);
   addManifestKnowledgeGraph(materializeIndexedKnowledgeGraph(projectRoot, manifest), objects, edges);
   addSkillObjects(skills, objects, edges);
   addDbtDagObjects(manifest, objects, edges, diagnostics);
@@ -5158,8 +5167,9 @@ function addManifestBlockSourceObjects(
   objects: Map<string, MetadataObject>,
 ): void {
   const declarations = manifest.blockDeclarations ?? Object.values(manifest.blocks ?? {});
+  const datasetProofs = loadDatasetGrainProofs(projectRoot);
   for (const block of declarations) {
-    if (!block.sql?.trim() || !block.filePath) continue;
+    if ((!block.sql?.trim() && block.blockType !== 'semantic') || !block.filePath) continue;
     // Migration rule: certified declarations remain available. Existing
     // hand-authored review/draft declarations have no generated provenance and
     // remain discoverable. Legacy Ask/research/generated drafts participate
@@ -5170,19 +5180,31 @@ function addManifestBlockSourceObjects(
     const sourceRevision = manifestBlockSourceRevision(projectRoot, block);
     const domain = block.domain?.trim() || undefined;
     const pathIdentity = sha256(`${block.filePath}\u0000${block.name}`).slice(0, 20);
-    const sourceId = `app:block:${domain ?? 'global'}:${pathIdentity}`;
-    const lifecycle = normalizeBlockSourceLifecycle(block.status);
+    // A legacy semantic block remains readable as a whole-block source. It is
+    // not a semantic-backed Dataset merely because its block type says
+    // "semantic"; those datasets are projected below from exact semantic
+    // metric capability contracts.
+    const sourceKind = 'block';
+    const sourceId = `app:${sourceKind}:${domain ?? 'global'}:${pathIdentity}`;
+    const dataset = block.blockType === 'semantic'
+      ? { proofState: 'not_a_dataset' as const }
+      : datasetDescriptorFromManifestBlock({ block, sourceId, sourceRevision, proofs: datasetProofs });
+    const lifecycle = dataset.descriptor?.lifecycle ?? normalizeBlockSourceLifecycle(block.status);
     const outputs = block.declaredOutputs
       ?? block.outputContract?.map((output) => output.name).filter(Boolean)
       ?? block.outputs?.map((output) => output.name).filter(Boolean)
       ?? [];
-    const measures = Array.from(new Set([
+    const measures = dataset.descriptor
+      ? dataset.descriptor.fields.filter((field) => field.kind === 'measure').map((field) => field.name).sort()
+      : Array.from(new Set([
       ...(block.metricRefs ?? []),
       ...(block.metricsRef ?? []),
       ...(block.metricRef ? [block.metricRef] : []),
       ...((block.outputContract ?? []).filter((output) => output.role === 'metric').map((output) => output.name)),
     ])).sort();
-    const dimensions = Array.from(new Set([
+    const dimensions = dataset.descriptor
+      ? dataset.descriptor.fields.filter((field) => field.kind === 'physical' && ['dimension', 'key', 'time', 'attribute'].includes(field.role)).map((field) => field.name).sort()
+      : Array.from(new Set([
       ...(block.dimensions ?? []),
       ...(block.dimensionRefs ?? []),
       ...(block.dimensionsRef ?? []),
@@ -5197,7 +5219,7 @@ function addManifestBlockSourceObjects(
       objectKey: sourceId,
       objectType: 'dql_block_source',
       name: block.name,
-      fullName: `${domain ?? 'global'}::block::${block.name}`,
+      fullName: `${domain ?? 'global'}::${sourceKind}::${block.name}`,
       domain,
       owner: block.owner,
       status: lifecycle,
@@ -5206,13 +5228,16 @@ function addManifestBlockSourceObjects(
       sourceSystem: 'dql',
       payload: compactObject({
         sourceId,
-        qualifiedId: `${domain ?? 'global'}::block::${block.name}::${pathIdentity}`,
-        kind: 'block',
+        qualifiedId: `${domain ?? 'global'}::${sourceKind}::${block.name}::${pathIdentity}`,
+        kind: sourceKind,
         lifecycle,
-        trust: lifecycle === 'certified' ? 'certified' : 'review_required',
+        trust: dataset.descriptor?.trust ?? (lifecycle === 'certified' ? 'certified' : 'review_required'),
         executionRef: block.filePath,
         sourceRevision,
         fingerprint: sourceRevision,
+        dataset: dataset.descriptor,
+        datasetProofState: dataset.proofState,
+        datasetProofReason: dataset.reason,
         tags: block.tags,
         blockType: block.blockType,
         chartType: block.chartType,
@@ -5234,6 +5259,348 @@ function addManifestBlockSourceObjects(
       }),
     });
   }
+}
+
+/**
+ * Semantic datasets are not DQL blocks with a different label. They are a
+ * narrow projection of the semantic layer's provider inventory and the exact,
+ * immutable metric capability object produced for each metric. If either side
+ * is ambiguous or incomplete we omit the dataset instead of guessing an
+ * adapter field, aggregation, or relationship path.
+ */
+function addSemanticMetricDatasetSourceObjects(
+  semanticLayer: SemanticLayer | undefined,
+  objects: Map<string, MetadataObject>,
+): void {
+  if (!semanticLayer) return;
+  const metricObjects = [...objects.values()].filter((object) => object.objectType === 'semantic_metric');
+  const dimensionObjects = [...objects.values()].filter((object) => object.objectType === 'semantic_dimension');
+  const modelsByName = new Map(semanticLayer.listSemanticModels().map((model) => [model.name, model]));
+  const candidates: SemanticDatasetSourceCandidate[] = [];
+  for (const metricObject of metricObjects) {
+    const capability = normalizeMetricCapabilityContract(metricObject.payload?.analyticalCapability);
+    if (!capability || !metricIdentityMatchesObject(capability.metricId, metricObject)) continue;
+    const layerMetrics = semanticLayer.listMetrics(undefined, { includeMeasures: false, includeVariants: true })
+      .filter((metric) => metadataObjectMatchesSemanticMetric(metricObject, metric));
+    if (layerMetrics.length !== 1) continue;
+    const metric = layerMetrics[0]!;
+    const model = metric.cube ? modelsByName.get(metric.cube) : undefined;
+    // A semantic metric without one exact model cannot be represented as a
+    // field dataset. It remains available to Ask through its existing path.
+    if (!model) continue;
+    const fields = semanticDatasetFieldsForCapability(capability, dimensionObjects);
+    const domain = metricObject.domain ?? metric.domain;
+    const lifecycle = semanticSourceLifecycle(metricObject);
+    const semanticRoute = capability.executionCapabilities.find((route) => route.route === 'semantic');
+    if (!semanticRoute) continue;
+    const semanticModelId = capability.semanticModelId ?? `semantic:model:${model.name}`;
+    candidates.push({
+      metricObject,
+      metric,
+      modelName: model.name,
+      semanticModelId,
+      capability,
+      fields,
+      domain,
+      lifecycle,
+      adapterId: semanticRoute.adapterId,
+    });
+  }
+
+  // A source is a semantic model projection, never one source per metric.
+  // Lifecycle, native adapter, and primary result grain form the minimum safe
+  // compatibility boundary.  A review-required metric therefore cannot ride
+  // along with a certified metric into a publishable source.
+  const groups = new Map<string, SemanticDatasetSourceCandidate[]>();
+  for (const candidate of candidates) {
+    const key = semanticDatasetGroupKey(candidate);
+    const group = groups.get(key);
+    if (group) group.push(candidate);
+    else groups.set(key, [candidate]);
+  }
+  for (const group of groups.values()) {
+    for (const compatible of splitCompatibleSemanticCandidates(group)) {
+      addSemanticDatasetSourceObject(compatible, objects);
+    }
+  }
+}
+
+interface SemanticDatasetSourceCandidate {
+  metricObject: MetadataObject;
+  metric: { name: string; label?: string; domain?: string; displayFormat?: { kind: string; currency?: string; decimals?: number } };
+  modelName: string;
+  semanticModelId: string;
+  capability: MetricCapabilityContract;
+  fields: SemanticDatasetFieldProjection[];
+  domain?: string;
+  lifecycle: DatasetDescriptor['lifecycle'];
+  adapterId?: string;
+}
+
+function semanticDatasetGroupKey(candidate: SemanticDatasetSourceCandidate): string {
+  return [
+    candidate.semanticModelId,
+    candidate.domain ?? '',
+    candidate.lifecycle,
+    candidate.adapterId ?? '',
+    candidate.capability.primaryEntityId,
+    candidate.capability.defaultResultGrainId,
+  ].join('\u0000');
+}
+
+/**
+ * An ambiguous physical name must not be resolved by discovery order. Split a
+ * model into the smallest compatible projections instead; each still uses the
+ * canonical model identity and retains all of its selected metric contracts.
+ */
+function splitCompatibleSemanticCandidates(
+  candidates: SemanticDatasetSourceCandidate[],
+): SemanticDatasetSourceCandidate[][] {
+  const sorted = [...candidates].sort((left, right) => left.capability.metricId.localeCompare(right.capability.metricId));
+  const groups: SemanticDatasetSourceCandidate[][] = [];
+  for (const candidate of sorted) {
+    const compatible = groups.find((group) => group.every((existing) => semanticFieldsCompatible(existing.fields, candidate.fields)));
+    if (compatible) compatible.push(candidate);
+    else groups.push([candidate]);
+  }
+  return groups;
+}
+
+function semanticFieldsCompatible(
+  left: SemanticDatasetFieldProjection[],
+  right: SemanticDatasetFieldProjection[],
+): boolean {
+  const byName = new Map(left.map((field) => [field.name.trim().toLowerCase(), field]));
+  return right.every((field) => {
+    const existing = byName.get(field.name.trim().toLowerCase());
+    return !existing || (existing.qualifiedId === field.qualifiedId
+      && existing.semanticReference === field.semanticReference
+      && existing.type === field.type
+      && existing.role === field.role
+      && sameSemanticDatasetTimeContract(existing.time, field.time));
+  });
+}
+
+function sameSemanticDatasetTimeContract(
+  left: SemanticDatasetFieldProjection['time'],
+  right: SemanticDatasetFieldProjection['time'],
+): boolean {
+  const leftGrains = [...(left?.grains ?? [])].sort();
+  const rightGrains = [...(right?.grains ?? [])].sort();
+  return left?.primary === right?.primary
+    && leftGrains.length === rightGrains.length
+    && leftGrains.every((grain, index) => grain === rightGrains[index]);
+}
+
+function addSemanticDatasetSourceObject(
+  candidates: SemanticDatasetSourceCandidate[],
+  objects: Map<string, MetadataObject>,
+): void {
+  const first = candidates[0];
+  if (!first) return;
+  const projectionFingerprint = sha256(stableStringify(candidates.map((candidate) => ({
+    metricId: candidate.capability.metricId,
+    metricName: candidate.metric.name,
+    displayFormat: candidate.metric.displayFormat,
+    sourceFingerprint: candidate.capability.sourceFingerprint,
+    fields: candidate.fields,
+  })).sort((left, right) => left.metricId.localeCompare(right.metricId))));
+  const sourceRevision = `sha256:${projectionFingerprint}`;
+  const sourceIdentity = [
+    first.semanticModelId,
+    first.domain ?? '',
+    first.lifecycle,
+    first.adapterId ?? '',
+    first.capability.primaryEntityId,
+    first.capability.defaultResultGrainId,
+    // A compatible field namespace is part of the persistent source identity.
+    stableStringify(candidates.flatMap((candidate) => candidate.fields).map((field) => ({
+      name: field.name,
+      qualifiedId: field.qualifiedId,
+      type: field.type,
+      role: field.role,
+    })).sort((left, right) => left.name.localeCompare(right.name))),
+  ].join('\u0000');
+  const sourceId = `app:semantic:${first.domain ?? 'global'}:${sha256(sourceIdentity).slice(0, 20)}`;
+  const measures: SemanticDatasetMeasureProjection[] = candidates.map((candidate) => ({
+    measureName: candidate.metric.name,
+    // The model name came from the same exact provider object that supplied
+    // this metric capability. It prevents a same-named metric on a different
+    // semantic model from being selected by a global bare-name lookup.
+    semanticReference: `${candidate.modelName}.${candidate.metric.name}`,
+    format: datasetFormatForSemanticMetric(candidate.metric.displayFormat),
+    capability: candidate.capability,
+    fields: candidate.fields,
+  }));
+  const dataset = datasetDescriptorFromSemanticMetrics({
+    sourceId,
+    sourceRevision,
+    semanticModelId: first.semanticModelId,
+    label: first.modelName,
+    domain: first.domain,
+    lifecycle: first.lifecycle,
+    measures,
+  });
+  if (!dataset.descriptor) return;
+  const descriptor = dataset.descriptor;
+  const dimensions = descriptor.fields
+    .filter((field) => field.kind === 'physical')
+    .map((field) => field.name)
+    .sort();
+  const measureNames = descriptor.fields
+    .filter((field) => field.kind === 'measure')
+    .map((field) => field.name)
+    .sort();
+  const metricCapabilities = Object.fromEntries(candidates.map((candidate) => [candidate.metric.name, candidate.capability]));
+  const metricCapabilitiesById = Object.fromEntries(candidates.map((candidate) => [candidate.capability.metricId, candidate.capability]));
+  const tags = Array.from(new Set(candidates.flatMap((candidate) => stringArrayFromPayload(candidate.metricObject.payload?.tags)))).sort();
+  const owner = candidates.every((candidate) => candidate.metricObject.owner === first.metricObject.owner)
+    ? first.metricObject.owner
+    : undefined;
+  objects.set(sourceId, {
+      objectKey: sourceId,
+      objectType: 'dql_block_source',
+      name: descriptor.label,
+      fullName: `${first.domain ?? 'global'}::semantic::${first.semanticModelId}`,
+      domain: first.domain,
+      owner,
+      status: first.lifecycle,
+      description: first.metricObject.description,
+      sourcePath: `semantic:${first.semanticModelId}`,
+      sourceSystem: first.metricObject.sourceSystem ?? 'semantic layer',
+      payload: compactObject({
+        sourceId,
+        qualifiedId: first.semanticModelId,
+        kind: 'semantic',
+        lifecycle: first.lifecycle,
+        trust: descriptor.trust,
+        executionRef: first.semanticModelId,
+        sourceRevision,
+        fingerprint: sourceRevision,
+        semanticModel: first.modelName,
+        semanticModelId: first.semanticModelId,
+        semanticMetricNames: measureNames,
+        metricCapabilities,
+        metricCapabilitiesById,
+        dataset: descriptor,
+        datasetProofState: dataset.proofState,
+        datasetProofReason: 'connect_source',
+        tags,
+        blockType: 'semantic',
+        measures: measureNames,
+        dimensions,
+        declaredOutputs: [...dimensions, ...measureNames],
+        allowedFilters: descriptor.operations.includes('filter') ? dimensions : [],
+        allowedVisualizations: [],
+        parameters: [],
+      }),
+  });
+}
+
+/** DQL semantic providers may declare richer display kinds; Dataset M1 carries the safely renderable subset. */
+function datasetFormatForSemanticMetric(
+  value: { kind: string; currency?: string; decimals?: number } | undefined,
+): import('@duckcodeailabs/dql-core').DatasetMeasureField['format'] | undefined {
+  if (!value || !['number', 'currency', 'percent'].includes(value.kind)) return undefined;
+  return {
+    kind: value.kind as 'number' | 'currency' | 'percent',
+    ...(typeof value.currency === 'string' && value.currency.trim() ? { currency: value.currency.trim().toUpperCase() } : {}),
+    ...(typeof value.decimals === 'number' && Number.isInteger(value.decimals) && value.decimals >= 0 && value.decimals <= 6
+      ? { decimals: value.decimals }
+      : {}),
+  };
+}
+
+function semanticDatasetFieldsForCapability(
+  capability: MetricCapabilityContract,
+  dimensionObjects: MetadataObject[],
+): SemanticDatasetFieldProjection[] {
+  const fields: SemanticDatasetFieldProjection[] = [];
+  const seenNames = new Set<string>();
+  const timeById = new Map(capability.timeDimensions.map((dimension) => [dimension.dimensionId, dimension]));
+  const dimensionsById = new Map(capability.dimensions.map((dimension) => [dimension.dimensionId, dimension]));
+  const dimensions = [
+    ...capability.dimensions.map((dimension) => ({ id: dimension.dimensionId, time: undefined })),
+    ...capability.timeDimensions.map((dimension) => ({ id: dimension.dimensionId, time: dimension })),
+  ];
+  for (const required of dimensions) {
+    const matches = dimensionObjects.filter((object) => metricIdentityMatchesObject(required.id, object));
+    if (matches.length !== 1) continue;
+    const object = matches[0]!;
+    const payload = object.payload ?? {};
+    const name = stringValue(payload.localId) ?? object.name.split('.').at(-1)?.trim();
+    if (!name || seenNames.has(name.toLowerCase())) continue;
+    const time = timeById.get(required.id);
+    const type = semanticDatasetFieldType(payload.dimensionType, Boolean(time));
+    if (!type) continue;
+    // This is the explicit bridge between the immutable catalog identity and
+    // the provider-native member syntax. Do not derive it by trimming a
+    // qualified ID: a cross-model capability can require an entity path that
+    // the final segment cannot represent.
+    const semanticReference = time
+      ? stringValue(payload.localId)
+      : dimensionsById.get(required.id)?.nativeGroupingReference ?? stringValue(payload.localId);
+    if (!semanticReference) continue;
+    seenNames.add(name.toLowerCase());
+    fields.push({
+      name,
+      qualifiedId: required.id,
+      semanticReference,
+      type,
+      role: time ? 'time' : 'dimension',
+      status: 'approved',
+      ...(time ? { time: { grains: [...time.supportedGrains] } } : {}),
+    });
+  }
+  return fields.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function metadataObjectMatchesSemanticMetric(
+  object: MetadataObject,
+  metric: { name: string; cube?: string; source?: { objectId?: string } },
+): boolean {
+  const candidates = [metric.name, metric.cube ? `${metric.cube}.${metric.name}` : undefined, metric.source?.objectId]
+    .filter((value): value is string => Boolean(value?.trim()));
+  return candidates.some((candidate) => metricIdentityMatchesObject(candidate, object));
+}
+
+function metricIdentityMatchesObject(identity: string, object: MetadataObject): boolean {
+  const target = identity.trim().toLowerCase();
+  if (!target) return false;
+  const payload = object.payload ?? {};
+  const candidates = [
+    object.objectKey,
+    object.fullName,
+    object.name,
+    stringValue(payload.qualifiedId),
+    stringValue(payload.registryQualifiedId),
+    stringValue(payload.registryReference),
+    stringValue(payload.sourceNativeId),
+    stringValue(payload.localId),
+    ...stringArrayFromPayload(payload.aliases),
+  ];
+  return candidates.some((candidate) => candidate?.trim().toLowerCase() === target);
+}
+
+function semanticDatasetFieldType(value: unknown, time: boolean): SemanticDatasetFieldProjection['type'] | undefined {
+  if (value === 'string' || value === 'number' || value === 'boolean' || value === 'date' || value === 'timestamp') return value;
+  return time ? 'timestamp' : undefined;
+}
+
+function semanticSourceLifecycle(object: MetadataObject): DatasetDescriptor['lifecycle'] {
+  const status = stringValue(object.status) ?? stringValue(object.payload?.certification);
+  if (status === 'certified') return 'certified';
+  if (status === 'review' || status === 'review_required') return 'review';
+  if (status === 'pending_recertification') return 'pending_recertification';
+  if (status === 'deprecated') return 'deprecated';
+  if (status === 'draft') return 'draft';
+  return 'unknown';
+}
+
+function stringArrayFromPayload(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry.trim())).map((entry) => entry.trim())
+    : [];
 }
 
 function normalizeBlockSourceLifecycle(status: string | undefined): string {

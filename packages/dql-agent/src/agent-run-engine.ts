@@ -210,7 +210,9 @@ export type AgentRunArtifactKind =
   | "modeling_change_proposal"
   | "skill_change_proposal"
   /** Two-phase app build: the confirmable pre-create content list. */
-  | "app_proposal";
+  | "app_proposal"
+  /** A reviewed App Studio mutation carried by the universal App Autopilot run. */
+  | "app_autopilot_change";
 
 export type AgentRunEvaluationSeverity = "info" | "warning" | "blocking";
 
