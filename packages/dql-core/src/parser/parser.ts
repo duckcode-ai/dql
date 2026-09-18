@@ -39,6 +39,10 @@ import {
   type DigestNode,
   type NarrativeNode,
 } from '../ast/nodes.js';
+import {
+  normalizeDatasetTileProvenance,
+  normalizeSemanticTileConversionProvenance,
+} from '../datasets/provenance.js';
 
 const DRAFT_STRING_METADATA_FIELDS = new Set([
   'first_asked',
@@ -60,6 +64,9 @@ const DRAFT_STRING_METADATA_FIELDS = new Set([
   'time_dimension',
   'granularity',
   'draft_path',
+  'dataset_tile_provenance',
+  'derived_from',
+  'semantic_tile_conversion_provenance',
 ]);
 
 const DRAFT_ARRAY_METADATA_FIELDS = new Set([
@@ -1243,6 +1250,9 @@ export class Parser {
     let owner: string | undefined;
     let termRefs: string[] | undefined;
     let pattern: string | undefined;
+    let datasetGrain: BlockDeclNode['datasetGrain'] | undefined;
+    let datasetFields: BlockDeclNode['datasetFields'] | undefined;
+    let datasetMeasures: BlockDeclNode['datasetMeasures'] | undefined;
     let grain: string | undefined;
     let entities: string[] | undefined;
     let outputs: string[] | undefined;
@@ -1308,6 +1318,9 @@ export class Parser {
     let sourceDqlOrderBy: string[] | undefined;
     let sourceDqlLimit: number | undefined;
     let validationWarnings: string[] | undefined;
+    let datasetTileProvenance: BlockDeclNode['datasetTileProvenance'] | undefined;
+    let derivedFrom: BlockDeclNode['derivedFrom'] | undefined;
+    let semanticTileConversionProvenance: BlockDeclNode['semanticTileConversionProvenance'] | undefined;
 
     while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
       if (this.check(TokenType.DomainKeyword)) {
@@ -1390,8 +1403,11 @@ export class Parser {
           const val = this.expect(TokenType.StringLiteral);
           pattern = val.value;
         } else if (keyToken.value === 'grain') {
-          const val = this.expect(TokenType.StringLiteral);
-          grain = val.value;
+          if (this.check(TokenType.LeftBrace)) datasetGrain = this.parseBlockDatasetGrain();
+          else {
+            const val = this.expect(TokenType.StringLiteral);
+            grain = val.value;
+          }
         } else if (keyToken.value === 'entities') {
           entities = this.parseStringArrayValues();
         } else if (keyToken.value === 'outputs') {
@@ -1415,6 +1431,18 @@ export class Parser {
         && this.current().value === 'filterBindings'
       ) {
         filterBindings = this.parseBlockFilterBindings();
+      } else if (
+        this.check(TokenType.Identifier)
+        && this.current().value === 'fields'
+        && this.tokens[this.pos + 1]?.type === TokenType.LeftBrace
+      ) {
+        datasetFields = this.parseBlockDatasetFields();
+      } else if (
+        this.check(TokenType.Identifier)
+        && this.current().value === 'measures'
+        && this.tokens[this.pos + 1]?.type === TokenType.LeftBrace
+      ) {
+        datasetMeasures = this.parseBlockDatasetMeasures();
       } else if (this.check(TokenType.QueryKeyword)) {
         this.advance();
         if (this.check(TokenType.LeftBrace)) {
@@ -1542,6 +1570,24 @@ export class Parser {
           case 'draft_path':
             draftPath = val.value;
             break;
+          case 'dataset_tile_provenance': {
+            const parsed = this.parseDatasetProvenanceMetadata(val.value);
+            if (!parsed.datasetTileProvenance) this.error('dataset_tile_provenance must contain a valid DatasetTileProvenanceV1 JSON object.');
+            else datasetTileProvenance = parsed.datasetTileProvenance;
+            break;
+          }
+          case 'derived_from': {
+            const parsed = this.parseDatasetProvenanceMetadata(val.value);
+            if (!parsed.datasetTileProvenance) this.error('derived_from must contain a valid DatasetTileProvenanceV1 JSON object.');
+            else derivedFrom = parsed.datasetTileProvenance;
+            break;
+          }
+          case 'semantic_tile_conversion_provenance': {
+            const parsed = this.parseDatasetProvenanceMetadata(val.value);
+            if (!parsed.semanticTileConversionProvenance) this.error('semantic_tile_conversion_provenance must contain a valid SemanticTileConversionProvenanceV1 JSON object.');
+            else semanticTileConversionProvenance = parsed.semanticTileConversionProvenance;
+            break;
+          }
         }
       } else if (
         this.check(TokenType.Identifier)
@@ -1673,7 +1719,7 @@ export class Parser {
           continue;
         }
         this.error(
-          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'pattern', 'grain', 'entities', 'outputs', 'allowedFilters', 'parameterPolicy', 'filterBindings', 'sourceSystems', 'replacementFor', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', Tier-2 draft metadata fields, or '}'.`,
+          `Unexpected token '${this.current().value}' inside block. Expected 'domain', 'type', 'status', 'datalex_contract', 'metric', 'metrics', 'dimensions', 'description', 'tags', 'owner', 'terms', 'pattern', 'grain', 'fields', 'measures', 'entities', 'outputs', 'allowedFilters', 'parameterPolicy', 'filterBindings', 'sourceSystems', 'replacementFor', 'params', 'query', 'visualization', 'tests', 'llmContext', 'invariants', 'examples', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', Tier-2 draft metadata fields, or '}'.`,
         );
         this.advance();
       }
@@ -1702,6 +1748,9 @@ export class Parser {
       owner,
       termRefs,
       pattern,
+      datasetGrain,
+      datasetFields,
+      datasetMeasures,
       grain,
       entities,
       outputs,
@@ -1758,8 +1807,26 @@ export class Parser {
       sourceDqlOrderBy,
       sourceDqlLimit,
       validationWarnings,
+      datasetTileProvenance,
+      derivedFrom,
+      semanticTileConversionProvenance,
       span: this.makeSpan(start, this.previousSpan()),
     };
+  }
+
+  private parseDatasetProvenanceMetadata(value: string): {
+    datasetTileProvenance?: BlockDeclNode['datasetTileProvenance'];
+    semanticTileConversionProvenance?: BlockDeclNode['semanticTileConversionProvenance'];
+  } {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return {
+        datasetTileProvenance: normalizeDatasetTileProvenance(parsed),
+        semanticTileConversionProvenance: normalizeSemanticTileConversionProvenance(parsed),
+      };
+    } catch {
+      return {};
+    }
   }
 
   private parseLegacyBlockQuerySection(): SQLQueryNode | undefined {
@@ -1910,6 +1977,209 @@ export class Parser {
     }
     this.expect(TokenType.RightBrace);
     return entries;
+  }
+
+  /**
+   * Dataset object grain is intentionally parsed separately from legacy string
+   * `grain = "customer_id"`.  Old AST/manifest consumers keep receiving the
+   * string field, while dataset-aware consumers read this richer contract.
+   */
+  private parseBlockDatasetGrain(): NonNullable<BlockDeclNode['datasetGrain']> {
+    this.expect(TokenType.LeftBrace);
+    let entities: string[] = [];
+    let keys: string[] = [];
+    let keyEvidence: string | undefined;
+    let description: string | undefined;
+    let timeGrain: string | undefined;
+    let timeBucketBy: string | undefined;
+    let aggregate: boolean | undefined;
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      if (this.check(TokenType.Comma)) { this.advance(); continue; }
+      const property = this.consumeDatasetPropertyName('grain');
+      this.expect(TokenType.Equals);
+      switch (property.value) {
+        case 'entities': entities = this.parseStringArrayValues(); break;
+        case 'keys': keys = this.parseStringArrayValues(); break;
+        case 'keyEvidence': keyEvidence = this.expectStringLike().value; break;
+        case 'description': description = this.expectStringLike().value; break;
+        case 'timeGrain': timeGrain = this.expectStringLike().value; break;
+        case 'timeBucketBy': timeBucketBy = this.expectStringLike().value; break;
+        case 'aggregate': {
+          const value = this.expect(TokenType.BooleanLiteral);
+          aggregate = value.value === 'true';
+          break;
+        }
+        default:
+          this.error(`Unknown dataset grain property '${property.value}'. Expected entities, keys, keyEvidence, description, timeGrain, timeBucketBy, or aggregate.`);
+          this.skipDatasetPropertyValue();
+      }
+      if (this.check(TokenType.Comma)) this.advance();
+    }
+    this.expect(TokenType.RightBrace);
+    if (entities.length === 0 || keys.length === 0) {
+      this.error('Dataset grain requires non-empty entities and keys arrays.');
+    }
+    return { entities, keys, keyEvidence, description, timeGrain, timeBucketBy, aggregate };
+  }
+
+  private parseBlockDatasetFields(): NonNullable<BlockDeclNode['datasetFields']> {
+    this.expect(TokenType.Identifier); // fields
+    this.expect(TokenType.LeftBrace);
+    const entries: NonNullable<BlockDeclNode['datasetFields']> = [];
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      if (this.check(TokenType.Comma)) { this.advance(); continue; }
+      const name = this.consumeDatasetPropertyName('fields');
+      this.expect(TokenType.LeftBrace);
+      let role: NonNullable<BlockDeclNode['datasetFields']>[number]['role'] | undefined;
+      let type: NonNullable<BlockDeclNode['datasetFields']>[number]['type'] | undefined;
+      let grains: string[] | undefined;
+      let primary: boolean | undefined;
+      let hierarchy: string | undefined;
+      let level: number | undefined;
+      let status: 'approved' | 'suggested' | undefined;
+      while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+        if (this.check(TokenType.Comma)) { this.advance(); continue; }
+        const property = this.consumeDatasetPropertyName(`field ${name.value}`);
+        this.expect(TokenType.Equals);
+        if (property.value === 'role') {
+          const value = this.expectStringLike().value;
+          if (value === 'dimension' || value === 'key' || value === 'time' || value === 'attribute') role = value;
+          else this.error(`Dataset field ${name.value} has unsupported role '${value}'.`);
+        } else if (property.value === 'type') {
+          const value = this.expectStringLike().value;
+          if (value === 'string' || value === 'number' || value === 'boolean' || value === 'date' || value === 'timestamp') type = value;
+          else this.error(`Dataset field ${name.value} has unsupported type '${value}'.`);
+        } else if (property.value === 'grains') {
+          grains = this.parseStringArrayValues();
+        } else if (property.value === 'primary') {
+          primary = this.expect(TokenType.BooleanLiteral).value === 'true';
+        } else if (property.value === 'hierarchy') {
+          hierarchy = this.expectStringLike().value;
+        } else if (property.value === 'level') {
+          level = Number(this.expect(TokenType.NumberLiteral).value);
+        } else if (property.value === 'status') {
+          const value = this.expectStringLike().value;
+          if (value === 'approved' || value === 'suggested') status = value;
+          else this.error(`Dataset field ${name.value} has unsupported status '${value}'.`);
+        } else {
+          this.error(`Unknown dataset field property '${property.value}' on ${name.value}.`);
+          this.skipDatasetPropertyValue();
+        }
+        if (this.check(TokenType.Comma)) this.advance();
+      }
+      this.expect(TokenType.RightBrace);
+      if (!role) this.error(`Dataset field ${name.value} requires role.`);
+      else entries.push({ name: name.value, role, type, grains, primary, hierarchy, level, status });
+      if (this.check(TokenType.Comma)) this.advance();
+    }
+    this.expect(TokenType.RightBrace);
+    return entries;
+  }
+
+  private parseBlockDatasetMeasures(): NonNullable<BlockDeclNode['datasetMeasures']> {
+    this.expect(TokenType.Identifier); // measures
+    this.expect(TokenType.LeftBrace);
+    const entries: NonNullable<BlockDeclNode['datasetMeasures']> = [];
+    while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+      if (this.check(TokenType.Comma)) { this.advance(); continue; }
+      const name = this.consumeDatasetPropertyName('measures');
+      this.expect(TokenType.LeftBrace);
+      let aggregation: NonNullable<BlockDeclNode['datasetMeasures']>[number]['aggregation'] | undefined;
+      let from: string | undefined;
+      let numerator: string | undefined;
+      let denominator: string | undefined;
+      let expression: string | undefined;
+      let timeBucketBy: string | undefined;
+      let additive: NonNullable<BlockDeclNode['datasetMeasures']>[number]['additive'] | undefined;
+      let entityAdditive: NonNullable<BlockDeclNode['datasetMeasures']>[number]['entityAdditive'] | undefined;
+      let allowedAggs: NonNullable<BlockDeclNode['datasetMeasures']>[number]['allowedAggs'] | undefined;
+      let format: NonNullable<BlockDeclNode['datasetMeasures']>[number]['format'] | undefined;
+      let currency: string | undefined;
+      let status: 'approved' | 'suggested' | undefined;
+      while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
+        if (this.check(TokenType.Comma)) { this.advance(); continue; }
+        const property = this.consumeDatasetPropertyName(`measure ${name.value}`);
+        this.expect(TokenType.Equals);
+        if (property.value === 'agg') {
+          const value = this.expectStringLike().value;
+          if (value === 'sum' || value === 'count' || value === 'count_distinct' || value === 'ratio' || value === 'avg' || value === 'min' || value === 'max') aggregation = value;
+          else this.error(`Dataset measure ${name.value} has unsupported agg '${value}'.`);
+        } else if (property.value === 'from') {
+          from = this.expectStringLike().value;
+        } else if (property.value === 'numerator') {
+          numerator = this.expectStringLike().value;
+        } else if (property.value === 'denominator') {
+          denominator = this.expectStringLike().value;
+        } else if (property.value === 'expression') {
+          expression = this.expectStringLike().value;
+        } else if (property.value === 'timeBucketBy') {
+          timeBucketBy = this.expectStringLike().value;
+        } else if (property.value === 'additive') {
+          const value = this.expectStringLike().value;
+          if (value === 'additive' || value === 'semi_additive' || value === 'non_additive') additive = value;
+          else this.error(`Dataset measure ${name.value} has unsupported additive value '${value}'.`);
+        } else if (property.value === 'entityAdditive') {
+          const value = this.expectStringLike().value;
+          if (value === 'additive' || value === 'semi_additive' || value === 'non_additive') entityAdditive = value;
+          else this.error(`Dataset measure ${name.value} has unsupported entityAdditive value '${value}'.`);
+        } else if (property.value === 'allowedAggs') {
+          const values = this.parseStringArrayValues();
+          const valid = values.filter((value): value is NonNullable<BlockDeclNode['datasetMeasures']>[number]['aggregation'] => value === 'sum' || value === 'count' || value === 'count_distinct' || value === 'ratio' || value === 'avg' || value === 'min' || value === 'max');
+          if (valid.length !== values.length) this.error(`Dataset measure ${name.value} allowedAggs contains an unsupported aggregation.`);
+          allowedAggs = valid;
+        } else if (property.value === 'format') {
+          const value = this.expectStringLike().value;
+          if (value === 'number' || value === 'currency' || value === 'percent') format = value;
+          else this.error(`Dataset measure ${name.value} has unsupported format '${value}'.`);
+        } else if (property.value === 'currency') {
+          currency = this.expectStringLike().value;
+        } else if (property.value === 'status') {
+          const value = this.expectStringLike().value;
+          if (value === 'approved' || value === 'suggested') status = value;
+          else this.error(`Dataset measure ${name.value} has unsupported status '${value}'.`);
+        } else {
+          this.error(`Unknown dataset measure property '${property.value}' on ${name.value}.`);
+          this.skipDatasetPropertyValue();
+        }
+        if (this.check(TokenType.Comma)) this.advance();
+      }
+      this.expect(TokenType.RightBrace);
+      if (!aggregation || !additive) this.error(`Dataset measure ${name.value} requires agg and additive.`);
+      else if (expression && (from || numerator || denominator)) this.error(`Calculated Dataset measure ${name.value} cannot combine expression with from, numerator, or denominator.`);
+      else if (!expression && aggregation === 'ratio' && (!numerator || !denominator)) this.error(`Dataset ratio ${name.value} requires numerator and denominator.`);
+      else if (!expression && aggregation !== 'ratio' && !from) this.error(`Dataset measure ${name.value} requires from.`);
+      else entries.push({ name: name.value, aggregation, from, numerator, denominator, expression, timeBucketBy, additive, entityAdditive, allowedAggs, format, currency, status });
+      if (this.check(TokenType.Comma)) this.advance();
+    }
+    this.expect(TokenType.RightBrace);
+    return entries;
+  }
+
+  private consumeDatasetPropertyName(context: string): Token {
+    const token = this.current();
+    if (token.type === TokenType.RightBrace || token.type === TokenType.Equals || token.type === TokenType.Comma || token.type === TokenType.EOF) {
+      this.error(`Expected a property name inside ${context}, got '${token.value}'.`);
+      return this.advance();
+    }
+    return this.advance();
+  }
+
+  private skipDatasetPropertyValue(): void {
+    if (this.check(TokenType.LeftBrace)) {
+      this.skipBalancedBlock();
+      return;
+    }
+    if (this.check(TokenType.LeftBracket)) {
+      this.advance();
+      let depth = 1;
+      while (depth > 0 && !this.isAtEnd()) {
+        if (this.check(TokenType.LeftBracket)) depth += 1;
+        if (this.check(TokenType.RightBracket)) depth -= 1;
+        this.advance();
+      }
+      return;
+    }
+    this.advance();
   }
 
   private parseBlockVisualization(): BlockVisualizationNode {

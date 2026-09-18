@@ -237,4 +237,66 @@ describe('loadSemanticLayerFromDir', () => {
     expect(layer.getMetric('')).toBeUndefined();
     expect(layer.getDimension('')).toBeUndefined();
   });
+
+  it('loads native model and entity declarations for model-scoped semantic datasets', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-semantic-native-model-'));
+    tempDirs.push(root);
+    const semanticDir = join(root, 'semantic-layer');
+    mkdirSync(join(semanticDir, 'cubes'), { recursive: true });
+    mkdirSync(join(semanticDir, 'entities'), { recursive: true });
+    mkdirSync(join(semanticDir, 'semantic_models'), { recursive: true });
+
+    writeFileSync(join(semanticDir, 'cubes', 'orders.yaml'), [
+      'name: orders',
+      'domain: commerce',
+      'table: order_lines',
+      'measures:',
+      '  - name: semantic_revenue',
+      '    sql: SUM(net_amount)',
+      '    type: sum',
+      'dimensions:',
+      '  - name: region',
+      '    sql: region',
+      '    type: string',
+      'time_dimensions:',
+      '  - name: order_date',
+      '    sql: order_date',
+      '    granularities: [day, month]',
+      '',
+    ].join('\n'));
+    writeFileSync(join(semanticDir, 'entities', 'order_line.yaml'), [
+      'name: order_line',
+      'cube: orders',
+      'table: order_lines',
+      'type: primary',
+      'expr: order_line_id',
+      '',
+    ].join('\n'));
+    writeFileSync(join(semanticDir, 'semantic_models', 'orders.yaml'), [
+      'name: orders',
+      'domain: commerce',
+      'table: order_lines',
+      'entities: [order_line]',
+      'measures: [semantic_revenue]',
+      'dimensions: [region]',
+      'time_dimensions: [order_date]',
+      '',
+    ].join('\n'));
+
+    const layer = loadSemanticLayerFromDir(semanticDir);
+
+    expect(layer.getEntity('order_line')).toMatchObject({
+      cube: 'orders',
+      type: 'primary',
+      source: { objectType: 'entity' },
+    });
+    expect(layer.getSemanticModel('orders')).toMatchObject({
+      entities: ['order_line'],
+      measures: ['semantic_revenue'],
+      dimensions: ['region'],
+      timeDimensions: ['order_date'],
+      source: { objectType: 'semantic_model' },
+    });
+    expect(layer.listMeasures().map((measure) => measure.name)).toContain('semantic_revenue');
+  });
 });

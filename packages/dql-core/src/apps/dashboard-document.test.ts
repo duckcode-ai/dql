@@ -159,6 +159,309 @@ describe('parseDashboardDocument', () => {
     expect(document?.layout.responsive?.narrow?.items[1]).toMatchObject({ x: 0, y: 1, w: 1 });
   });
 
+  it('accepts field Dataset bindings only in v3 while preserving legacy navigation', () => {
+    const fieldDatasetDocument = {
+      id: 'dataset-overview',
+      metadata: { title: 'Dataset Overview' },
+      datasets: [{
+        id: 'orders',
+        sourceId: 'source.orders',
+        sourceRevision: 'source.v1',
+        snapshotId: 'snapshot.v1',
+        contractFingerprint: 'contract.v1',
+      }],
+      filters: [{
+        id: 'region', type: 'select', datasetBindings: { orders: { field: 'region' } },
+      }],
+      interactions: {
+        crossFilter: {
+          mappings: [{ fromTileId: 'revenue-by-region', fromField: 'region', toDataset: 'orders', toField: 'region' }],
+        },
+        detail: { dataset: 'orders', columns: ['order_line_id'] },
+        navigate: [{ fromTile: 'revenue-by-region', toPage: 'detail', carryFilters: ['region'] }],
+      },
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [{
+          i: 'revenue-by-region', x: 0, y: 0, w: 6, h: 3,
+          sourceId: 'source.orders', sourceRevision: 'source.v1',
+          query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
+          viz: { type: 'bar' },
+        }],
+      },
+    };
+
+    for (const version of [1, 2] as const) {
+      const parsed = parseDashboardDocument(JSON.stringify({ ...fieldDatasetDocument, version }));
+      expect(parsed.document).toBeNull();
+      expect(parsed.errors.map((error) => error.message).join('\n')).toMatch(/require dashboard version 3/);
+    }
+
+    const v3 = parseDashboardDocument(JSON.stringify({ ...fieldDatasetDocument, version: 3 }));
+    expect(v3.errors).toEqual([]);
+    expect(v3.document?.version).toBe(3);
+
+    const legacyNavigation = parseDashboardDocument(JSON.stringify({
+      ...minimal,
+      version: 2,
+      interactions: { navigate: [{ fromTile: 'kpi', toPage: 'detail', carryFilters: [] }] },
+    }));
+    expect(legacyNavigation.errors).toEqual([]);
+    expect(legacyNavigation.document?.interactions?.navigate).toHaveLength(1);
+  });
+
+  it('round-trips explicit legacy semantic conversion provenance without making it executable authority', () => {
+    const provenance = {
+      version: 1,
+      kind: 'semantic_tile_conversion_provenance',
+      legacyIdentityFingerprint: 'sha256:legacy-identity',
+      legacyTileFingerprint: 'sha256:legacy-tile',
+      legacyPayload: {
+        semantic: {
+          id: 'legacy-revenue',
+          provider: 'native',
+          metrics: ['revenue'],
+        },
+      },
+      datasetId: 'orders',
+      sourceRevision: 'source.v1',
+      contractFingerprint: 'contract.v1',
+      queryFingerprint: 'sha256:query',
+      equivalenceProofFingerprint: 'sha256:equivalence',
+      convertedAt: '2026-09-11T00:00:00.000Z',
+    };
+    const converted = {
+      version: 3,
+      id: 'converted-overview',
+      metadata: { title: 'Converted overview' },
+      datasets: [{
+        id: 'orders',
+        sourceId: 'source.orders',
+        sourceRevision: 'source.v1',
+        snapshotId: 'snapshot.v1',
+        contractFingerprint: 'contract.v1',
+      }],
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [{
+          i: 'revenue', x: 0, y: 0, w: 4, h: 2,
+          sourceId: 'source.orders', sourceRevision: 'source.v1',
+          query: { dimensions: [], measures: [{ measure: 'revenue' }] },
+          semanticTileConversionProvenance: provenance,
+          viz: { type: 'kpi' },
+        }],
+      },
+    };
+
+    const parsed = parseDashboardDocument(JSON.stringify(converted));
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.document?.layout.items[0]?.semanticTileConversionProvenance).toEqual(provenance);
+
+    const roundTripped = parseDashboardDocument(JSON.stringify(parsed.document));
+    expect(roundTripped.errors).toEqual([]);
+    expect(roundTripped.document?.layout.items[0]?.semanticTileConversionProvenance).toEqual(provenance);
+
+    const malformed = parseDashboardDocument(JSON.stringify({
+      ...converted,
+      layout: {
+        ...converted.layout,
+        items: [{
+          ...converted.layout.items[0],
+          semanticTileConversionProvenance: { version: 1, kind: 'semantic_tile_conversion_provenance' },
+        }],
+      },
+    }));
+    expect(malformed.document).toBeNull();
+    expect(malformed.errors.map((error) => error.message).join('\n')).toContain('semanticTileConversionProvenance');
+  });
+
+  it('rejects Dataset field filter IDs that collide with dashboard parameters while retaining explicit source bindings', () => {
+    const datasetPage = {
+      version: 3,
+      id: 'dataset-parameter-boundary',
+      metadata: { title: 'Dataset parameter boundary' },
+      datasets: [{
+        id: 'orders',
+        sourceId: 'source.orders',
+        sourceRevision: 'source.v1',
+        snapshotId: 'snapshot.v1',
+        contractFingerprint: 'contract.v1',
+      }],
+      filters: [{
+        id: 'region',
+        type: 'select',
+        datasetBindings: { orders: { field: 'region' } },
+      }],
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [{
+          i: 'revenue', x: 0, y: 0, w: 6, h: 3,
+          sourceId: 'source.orders', sourceRevision: 'source.v1',
+          query: { dimensions: [], measures: [{ measure: 'revenue' }] },
+          viz: { type: 'kpi' },
+        }],
+      },
+    };
+
+    const collision = parseDashboardDocument(JSON.stringify({
+      ...datasetPage,
+      params: [{ id: 'region', type: 'string' }],
+    }));
+    expect(collision.document).toBeNull();
+    expect(collision.errors.map((error) => error.message).join('\n')).toContain('params.region conflicts with filters.region');
+
+    const explicitlyNamedSourceInput = parseDashboardDocument(JSON.stringify({
+      ...datasetPage,
+      params: [{ id: 'as_of', type: 'date' }],
+      layout: {
+        ...datasetPage.layout,
+        items: datasetPage.layout.items.map((item) => ({
+          ...item,
+          parameterBindings: [{
+            param: 'reviewed_region_parameter',
+            source: 'dashboard_filter',
+            filter: 'region',
+          }],
+        })),
+      },
+    }));
+    expect(explicitlyNamedSourceInput.errors).toEqual([]);
+    expect(explicitlyNamedSourceInput.document?.layout.items[0]?.parameterBindings).toEqual([{
+      param: 'reviewed_region_parameter', source: 'dashboard_filter', filter: 'region',
+    }]);
+
+    const legacyOverlap = parseDashboardDocument(JSON.stringify({
+      ...minimal,
+      version: 2,
+      params: [{ id: 'region', type: 'string' }],
+      filters: [{ id: 'region', type: 'select' }],
+    }));
+    expect(legacyOverlap.errors).toEqual([]);
+    expect(legacyOverlap.document?.version).toBe(2);
+  });
+
+  it('rejects a v3 Dataset scalar tile that would hide selected fields', () => {
+    const base = {
+      version: 3,
+      id: 'dataset-scalar-contract',
+      metadata: { title: 'Dataset scalar contract' },
+      datasets: [{
+        id: 'orders', sourceId: 'source.orders', sourceRevision: 'source.v1',
+        snapshotId: 'snapshot.v1', contractFingerprint: 'contract.v1',
+      }],
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [{
+          i: 'revenue-kpi', x: 0, y: 0, w: 3, h: 2,
+          sourceId: 'source.orders', sourceRevision: 'source.v1',
+          query: { dimensions: [], measures: [{ measure: 'revenue' }, { measure: 'order_count' }] },
+          viz: { type: 'single_value' },
+        }],
+      },
+    };
+
+    const multipleMeasures = parseDashboardDocument(JSON.stringify(base));
+    expect(multipleMeasures.document).toBeNull();
+    expect(multipleMeasures.errors.map((error) => error.message).join('\n')).toContain('exactly one selected measure');
+
+    const grouped = parseDashboardDocument(JSON.stringify({
+      ...base,
+      layout: {
+        ...base.layout,
+        items: [{
+          ...base.layout.items[0],
+          query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
+        }],
+      },
+    }));
+    expect(grouped.document).toBeNull();
+    expect(grouped.errors.map((error) => error.message).join('\n')).toContain('cannot group by a field');
+  });
+
+  it('preserves exact Dataset component inclusions and rejects foreign tile references', () => {
+    const document = {
+      version: 3,
+      id: 'dataset-component-scope',
+      metadata: { title: 'Dataset component scope' },
+      datasets: [
+        { id: 'orders', sourceId: 'source.orders', sourceRevision: 'source.v1', snapshotId: 'snapshot.v1', contractFingerprint: 'contract.v1' },
+        { id: 'customers', sourceId: 'source.customers', sourceRevision: 'customers.v1', snapshotId: 'snapshot.v1', contractFingerprint: 'customers.contract.v1' },
+      ],
+      filters: [{
+        id: 'region', type: 'select', scope: { app: true },
+        datasetBindings: { orders: { field: 'region', tileIds: ['revenue'] } },
+      }],
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [
+          {
+            i: 'revenue', x: 0, y: 0, w: 6, h: 3,
+            sourceId: 'source.orders', sourceRevision: 'source.v1',
+            query: { dimensions: [], measures: [{ measure: 'revenue' }] },
+            viz: { type: 'kpi' },
+          },
+          {
+            i: 'monthly-revenue', x: 6, y: 0, w: 6, h: 3,
+            sourceId: 'source.orders', sourceRevision: 'source.v1',
+            query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }] },
+            viz: { type: 'bar' },
+          },
+          {
+            i: 'customer-revenue', x: 0, y: 3, w: 6, h: 3,
+            sourceId: 'source.customers', sourceRevision: 'customers.v1',
+            query: { dimensions: [], measures: [{ measure: 'revenue' }] },
+            viz: { type: 'kpi' },
+          },
+        ],
+      },
+    };
+
+    const parsed = parseDashboardDocument(JSON.stringify(document));
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.document?.filters?.[0]?.datasetBindings).toEqual({
+      orders: { field: 'region', tileIds: ['revenue'] },
+    });
+    expect(parseDashboardDocument(JSON.stringify(parsed.document)).document?.filters?.[0]?.datasetBindings).toEqual({
+      orders: { field: 'region', tileIds: ['revenue'] },
+    });
+
+    const legacyAllTiles = parseDashboardDocument(JSON.stringify({
+      ...document,
+      filters: [{ ...document.filters[0], datasetBindings: { orders: { field: 'region' } } }],
+    }));
+    expect(legacyAllTiles.errors).toEqual([]);
+    expect(legacyAllTiles.document?.filters?.[0]?.datasetBindings).toEqual({ orders: { field: 'region' } });
+
+    const explicitNone = parseDashboardDocument(JSON.stringify({
+      ...document,
+      filters: [{ ...document.filters[0], datasetBindings: { orders: { field: 'region', tileIds: [] } } }],
+    }));
+    expect(explicitNone.errors).toEqual([]);
+    expect(explicitNone.document?.filters?.[0]?.datasetBindings).toEqual({ orders: { field: 'region', tileIds: [] } });
+
+    const explicitUnboundPage = parseDashboardDocument(JSON.stringify({
+      ...document,
+      filters: [{ ...document.filters[0], datasetBindings: {} }],
+    }));
+    expect(explicitUnboundPage.errors).toEqual([]);
+    expect(explicitUnboundPage.document?.filters?.[0]?.datasetBindings).toEqual({});
+    expect(parseDashboardDocument(JSON.stringify(explicitUnboundPage.document)).document?.filters?.[0]?.datasetBindings).toEqual({});
+
+    const unknownTile = parseDashboardDocument(JSON.stringify({
+      ...document,
+      filters: [{ ...document.filters[0], datasetBindings: { orders: { field: 'region', tileIds: ['missing'] } } }],
+    }));
+    expect(unknownTile.document).toBeNull();
+    expect(unknownTile.errors.map((error) => error.message).join('\n')).toContain('references unknown tile missing');
+
+    const foreignDatasetTile = parseDashboardDocument(JSON.stringify({
+      ...document,
+      filters: [{ ...document.filters[0], datasetBindings: { orders: { field: 'region', tileIds: ['customer-revenue'] } } }],
+    }));
+    expect(foreignDatasetTile.document).toBeNull();
+    expect(foreignDatasetTile.errors.map((error) => error.message).join('\n')).toContain('does not resolve to that exact Dataset binding');
+  });
+
   it('preserves Sankey source, target, and value bindings', () => {
     const doc = {
       ...minimal,

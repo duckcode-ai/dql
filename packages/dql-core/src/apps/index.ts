@@ -38,12 +38,43 @@ export {
   findAllDashboards,
   isBlockIdRef,
   extractDashboardBlockRefs,
+  dashboardDatasetParameterFilterErrors,
 } from './dashboard-document.js';
+
+export {
+  applyDatasetHierarchyDrill,
+  datasetHierarchyFields,
+  datasetTileVisualizationCompatibility,
+  datasetQueryRequiresAggregateComponentEvidence,
+  normalizeTileQuery,
+  tileQueryIsTopNIntent,
+  tileQueryOutputAliases,
+  tileQueryHash,
+  tileQueryMeasure,
+  validateTileQuery,
+} from './tile-query.js';
+export type {
+  DatasetTileVisualizationCompatibility,
+  DatasetTileVisualizationIssueCode,
+  TileFilterOperator,
+  TileQuery,
+  TileQueryComparison,
+  TileQueryComparisonPeriod,
+  TileQueryDiagnostic,
+  TileQueryDimension,
+  TileQueryFilter,
+  TileQueryMeasure,
+  TileQueryValidation,
+  TileQueryValidationOutcome,
+  DatasetHierarchyDrillResult,
+} from './tile-query.js';
 
 export {
   createAppBuildDraft,
   applyAppBuildDraftOperations,
   appBuildDraftHash,
+  appBuildPreviewIntentFingerprint,
+  packDashboardLayoutItems,
 } from './app-build-draft.js';
 export type {
   AppBuildDraft,
@@ -67,6 +98,7 @@ export type {
   DashboardDocument,
   DashboardParam,
   DashboardFilter,
+  DashboardDatasetFilterBinding,
   DashboardBlockRef,
   DashboardSemanticQueryRef,
   DashboardStoryEvidencePlan,
@@ -84,9 +116,16 @@ export type {
   DashboardTileParameterBinding,
   DashboardTileSourceEvidence,
   DashboardGridItem,
+  DashboardDatasetBinding,
+  DashboardInteractions,
+  DashboardCrossFilterMapping,
+  DashboardDetailInteraction,
+  DashboardNavigateInteraction,
   DashboardGridLayout,
   DashboardResponsiveLayouts,
   DashboardLoadResult,
   DashboardParseError,
   DashboardSection,
 } from './dashboard-document.js';
+
+export type { AppAnalyticalContextV1 } from './app-analytical-context.js';

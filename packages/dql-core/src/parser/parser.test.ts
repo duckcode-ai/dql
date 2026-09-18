@@ -126,6 +126,78 @@ describe('Parser', () => {
     }
   });
 
+  it('parses the v3 dataset grain and separate physical and measure namespaces', () => {
+    const ast = parse(`block "Order lines dataset" {
+      domain = "commerce"
+      type = "custom"
+      status = "certified"
+      grain = {
+        entities = ["order_line"]
+        keys = ["order_line_id"]
+        keyEvidence = "proof.order-lines"
+        timeGrain = "day"
+      }
+      fields {
+        order_line_id { role = "key", type = "string" }
+        order_date { role = "time", type = "date", grains = ["day", "month"], primary = true }
+        net_amount { role = "attribute", type = "number" }
+      }
+      measures {
+        net_amount { agg = "sum", from = "net_amount", additive = "additive", allowedAggs = ["sum"] }
+        margin_rate { agg = "ratio", numerator = "net_amount", denominator = "cost_amount", additive = "semi_additive", allowedAggs = ["ratio"] }
+      }
+      query = """SELECT order_line_id, order_date, net_amount, cost_amount FROM order_lines"""
+    }`);
+
+    const block = ast.statements[0];
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.grain).toBeUndefined();
+      expect(block.datasetGrain).toMatchObject({ entities: ['order_line'], keys: ['order_line_id'], keyEvidence: 'proof.order-lines' });
+      expect(block.datasetFields?.map((field) => field.name)).toEqual(['order_line_id', 'order_date', 'net_amount']);
+      expect(block.datasetMeasures?.map((measure) => measure.name)).toEqual(['net_amount', 'margin_rate']);
+      expect(block.datasetMeasures?.[1]).toMatchObject({ aggregation: 'ratio', numerator: 'net_amount', denominator: 'cost_amount' });
+    }
+  });
+
+  it('parses calculated Dataset measures and aggregate native time-bucket evidence without changing legacy grain', () => {
+    const ast = parse(`block "Daily order rollup" {
+      domain = "commerce"
+      type = "custom"
+      status = "review"
+      grain = {
+        entities = ["order"]
+        keys = ["order_date", "customer_id"]
+        keyEvidence = "proof.daily-orders"
+        timeGrain = "day"
+        timeBucketBy = "order_date"
+        aggregate = true
+      }
+      fields {
+        order_date { role = "time", type = "date", grains = ["day", "month", "year"] }
+        customer_id { role = "key", type = "string" }
+        net_amount { role = "attribute", type = "number" }
+        margin_amount { role = "attribute", type = "number" }
+      }
+      measures {
+        gross_margin { agg = "sum", expression = "SUM(margin_amount)", additive = "additive", allowedAggs = ["sum"] }
+        average_order_value { agg = "ratio", expression = "SUM(net_amount) / NULLIF(COUNT(order_date), 0)", additive = "non_additive", allowedAggs = ["ratio"] }
+        orders_by_day { agg = "count_distinct", from = "customer_id", timeBucketBy = "order_date", additive = "additive", allowedAggs = ["count_distinct"] }
+      }
+      query = """SELECT order_date, customer_id, net_amount, margin_amount FROM daily_orders"""
+    }`);
+
+    const block = ast.statements[0];
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.grain).toBeUndefined();
+      expect(block.datasetGrain).toMatchObject({ aggregate: true, timeGrain: 'day', timeBucketBy: 'order_date' });
+      expect(block.datasetMeasures?.[0]).toMatchObject({ aggregation: 'sum', expression: 'SUM(margin_amount)' });
+      expect(block.datasetMeasures?.[1]).toMatchObject({ aggregation: 'ratio', expression: 'SUM(net_amount) / NULLIF(COUNT(order_date), 0)' });
+      expect(block.datasetMeasures?.[2]).toMatchObject({ aggregation: 'count_distinct', timeBucketBy: 'order_date' });
+    }
+  });
+
   it('parses semantic block order and limit draft metadata', () => {
     const ast = parse(`block "Top Revenue Channels" {
       domain = "finance"

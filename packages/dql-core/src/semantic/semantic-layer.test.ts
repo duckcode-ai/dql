@@ -41,6 +41,25 @@ describe('SemanticLayer', () => {
     expect(layer.listMetrics()).toHaveLength(2);
   });
 
+  it('binds a model-qualified metric reference to its exact model when local metric names collide', () => {
+    const layer = new SemanticLayer();
+    layer.addMetric({
+      name: 'revenue', label: 'Order revenue', description: '', domain: 'commerce',
+      sql: 'order_amount', type: 'sum', table: 'orders', cube: 'orders',
+    });
+    layer.addMetric({
+      name: 'revenue', label: 'Refund revenue', description: '', domain: 'commerce',
+      sql: 'refund_amount', type: 'sum', table: 'refunds', cube: 'refunds',
+    });
+
+    expect(layer.getMetric('orders.revenue')).toMatchObject({ table: 'orders', sql: 'order_amount' });
+    expect(layer.getMetric('refunds.revenue')).toMatchObject({ table: 'refunds', sql: 'refund_amount' });
+    expect(layer.listMetrics(undefined, { includeVariants: true })).toHaveLength(2);
+    expect(layer.validateReferences(['orders.revenue', 'refunds.revenue']).unknown).toEqual([]);
+    expect(layer.composeQuery({ metrics: ['orders.revenue'], dimensions: [] })?.sql).toContain('SUM(order_amount) AS revenue');
+    expect(layer.composeQuery({ metrics: ['refunds.revenue'], dimensions: [] })?.sql).toContain('SUM(refund_amount) AS revenue');
+  });
+
   it('searches metrics and dimensions', () => {
     const layer = new SemanticLayer({
       metrics: [
@@ -977,6 +996,15 @@ describe('display-format contract', () => {
     expect(parseSemanticDisplayFormat({ format: 'count' })).toEqual({ kind: 'count' });
     expect(parseSemanticDisplayFormat({})).toBeUndefined();
     expect(parseSemanticDisplayFormat(undefined)).toBeUndefined();
+  });
+
+  it('retains an authored native YAML display format on the executable metric', () => {
+    const metric = parseMetricDefinition({
+      name: 'gross_margin_rate', label: 'Gross margin rate', description: '', domain: 'commerce',
+      sql: 'SUM(margin) / NULLIF(SUM(revenue), 0)', type: 'custom', table: 'order_lines',
+      format: { kind: 'percent', decimals: 1 },
+    });
+    expect(metric.displayFormat).toEqual({ kind: 'percent', decimals: 1 });
   });
 
   it('resolves formats metric-first, then measure, then ratio inference', () => {

@@ -17,12 +17,33 @@
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
+import {
+  datasetTileVisualizationCompatibility,
+  normalizeTileQuery,
+  tileQueryOutputAliases,
+  type TileQuery,
+} from './tile-query.js';
+import {
+  normalizeSemanticTileConversionProvenance,
+  type SemanticTileConversionProvenanceV1,
+} from '../datasets/provenance.js';
 
 export type DashboardParam = {
   id: string;
   type: 'string' | 'number' | 'boolean' | 'date' | 'daterange';
   default?: unknown;
   description?: string;
+};
+
+/**
+ * A field mapping is source-qualified by Dataset. `tileIds` is an optional
+ * explicit include list for field-query components that share that Dataset.
+ * Its absence preserves v3's original all-bound-tiles behavior; a present
+ * empty list deliberately excludes every matching component.
+ */
+export type DashboardDatasetFilterBinding = {
+  field: string;
+  tileIds?: string[];
 };
 
 export type DashboardFilter = {
@@ -53,7 +74,12 @@ export type DashboardFilter = {
   };
   required?: boolean;
   multiple?: boolean;
-  scope?: { page?: string; tileIds?: string[] };
+  /** IANA zone used when a date-only control bounds a timestamp field. */
+  timezone?: string;
+  /** `app` persists a field-bound filter through page navigation in a v3 App. */
+  scope?: { app?: boolean; page?: string; tileIds?: string[] };
+  /** Explicit dataset binding. Fields never bind across sources by name alone. */
+  datasetBindings?: Record<string, DashboardDatasetFilterBinding>;
   optionSource?: {
     mode: 'static' | 'distinct_query';
     sourceRef?: string;
@@ -260,6 +286,41 @@ export type DashboardStoryBrief = {
   generatedBy: 'deterministic' | 'ai';
 };
 
+/** Snapshot-bound source aliases used by v3 field-based tiles. */
+export type DashboardDatasetBinding = {
+  id: string;
+  sourceId: string;
+  sourceRevision: string;
+  snapshotId: string;
+  contractFingerprint: string;
+};
+
+export type DashboardCrossFilterMapping = {
+  /** A cross-filter must identify the exact Dataset tile that emitted it. */
+  fromTileId: string;
+  fromField: string;
+  toDataset: string;
+  toField: string;
+};
+
+export type DashboardDetailInteraction = {
+  dataset: string;
+  columns: string[];
+};
+
+export type DashboardNavigateInteraction = {
+  fromTile: string;
+  toPage: string;
+  carryFilters: string[];
+};
+
+/** Declarative interactions are validated once, then interpreted by the App runtime. */
+export type DashboardInteractions = {
+  crossFilter?: { enabled?: boolean; mappings: DashboardCrossFilterMapping[] };
+  detail?: DashboardDetailInteraction;
+  navigate?: DashboardNavigateInteraction[];
+};
+
 export type DashboardGridItem = {
   /** Stable layout id — used by the grid editor for positioning persistence. */
   i: string;
@@ -282,8 +343,12 @@ export type DashboardGridItem = {
   aiPin?: DashboardAiPinRef;
   /** Governed semantic query compiled against the current snapshot. */
   semantic?: DashboardSemanticQueryRef;
+  /** Durable lineage from one explicit legacy semantic-to-Dataset conversion. */
+  semanticTileConversionProvenance?: SemanticTileConversionProvenanceV1;
   /** Explicitly accepted, app-scoped exploratory DQL draft. */
   draftAnalysis?: DashboardDraftAnalysisRef;
+  /** Declarative field-based query over exactly one selected Dataset. */
+  query?: TileQuery;
   viz: DashboardVizConfig;
   /** Governed GenUI/display contract for this specific App or notebook tile. */
   display?: DashboardDisplayMetadata;
@@ -334,7 +399,7 @@ export type DashboardResponsiveLayouts = {
 };
 
 export interface DashboardDocument {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   id: string;
   metadata: {
     title: string;
@@ -355,6 +420,9 @@ export interface DashboardDocument {
   };
   params?: DashboardParam[];
   filters?: DashboardFilter[];
+  /** v3 only: source identity is fixed while field selection remains editable. */
+  datasets?: DashboardDatasetBinding[];
+  interactions?: DashboardInteractions;
   /** Story layout sections (optional). Old dashboards simply have none. */
   sections?: DashboardSection[];
   /** Runtime story evidence contract. Result-specific prose is never persisted. */
@@ -460,7 +528,7 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
   }
   const obj = raw as Record<string, unknown>;
   const version = obj.version ?? 1;
-  if (version !== 1 && version !== 2) err(`unsupported version ${String(version)} (expected 1 or 2)`);
+  if (version !== 1 && version !== 2 && version !== 3) err(`unsupported version ${String(version)} (expected 1, 2, or 3)`);
 
   if (typeof obj.id !== 'string' || obj.id.length === 0) {
     err('id must be a non-empty string');
@@ -471,9 +539,24 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
   const metadata = readMetadata(obj.metadata, err);
   const params = readParams(obj.params, err);
   const filters = readFilters(obj.filters, err);
+  const datasets = readDatasets(obj.datasets, err);
+  const interactions = readInteractions(obj.interactions, err);
   const sections = readSections(obj.sections, err);
   const story = readStoryEvidencePlan(obj.story, err);
   const layout = readLayout(obj.layout, err);
+
+  if (version === 3) {
+    validateDashboardV3References(datasets, filters, interactions, layout, err);
+    for (const message of dashboardDatasetParameterFilterErrors({
+      version: 3,
+      params,
+      filters,
+      datasets,
+      layout,
+    })) err(message);
+  } else {
+    validateDashboardLegacyCompatibility(obj, datasets, filters, interactions, layout, err);
+  }
 
   if (errors.length > 0) {
     return { document: null, errors };
@@ -481,17 +564,146 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
 
   return {
     document: {
-      version: version as 1 | 2,
+      version: version as 1 | 2 | 3,
       id,
       metadata,
       params: params.length > 0 ? params : undefined,
       filters: filters.length > 0 ? filters : undefined,
+      ...(datasets.length > 0 ? { datasets } : {}),
+      ...(interactions ? { interactions } : {}),
       sections: sections.length > 0 ? sections : undefined,
       ...(story ? { story } : {}),
       layout,
     },
     errors: [],
   };
+}
+
+/**
+ * Field-based Datasets were introduced with the v3 document contract.  Keep
+ * older dashboards readable, including their page navigation, but reject a
+ * v3 Dataset declaration grafted onto a v1/v2 document before it reaches a
+ * compiler or execution surface that cannot bind its governance contract.
+ */
+function validateDashboardLegacyCompatibility(
+  raw: Record<string, unknown>,
+  datasets: DashboardDatasetBinding[],
+  filters: DashboardFilter[],
+  interactions: DashboardInteractions | undefined,
+  layout: DashboardDocument['layout'],
+  err: (m: string) => void,
+): void {
+  if (raw.datasets !== undefined || datasets.length > 0) {
+    err('datasets require dashboard version 3');
+  }
+  for (const filter of filters) {
+    if (filter.datasetBindings && Object.keys(filter.datasetBindings).length > 0) {
+      err(`filters.${filter.id}.datasetBindings require dashboard version 3`);
+    }
+  }
+  for (const item of layout.items) {
+    if (item.query) err(`layout.items.${item.i}.query requires dashboard version 3`);
+  }
+  if (interactions?.crossFilter) err('interactions.crossFilter requires dashboard version 3');
+  if (interactions?.detail) err('interactions.detail requires dashboard version 3');
+}
+
+function validateDashboardV3References(
+  datasets: DashboardDatasetBinding[],
+  filters: DashboardFilter[],
+  interactions: DashboardInteractions | undefined,
+  layout: DashboardDocument['layout'],
+  err: (m: string) => void,
+): void {
+  const bySourceId = new Map(datasets.map((dataset) => [dataset.sourceId, dataset]));
+  const byDatasetId = new Map(datasets.map((dataset) => [dataset.id, dataset]));
+  const byTileId = new Map(layout.items.map((item) => [item.i, item]));
+  for (const item of layout.items) {
+    if (!item.query) continue;
+    const visualization = datasetTileVisualizationCompatibility(item.query, item.viz.type);
+    if (!visualization.compatible) {
+      err(`layout.items.${item.i}.viz ${visualization.message}`);
+    }
+    const dataset = item.sourceId ? bySourceId.get(item.sourceId) : undefined;
+    if (!dataset) {
+      err(`layout.items.${item.i}.query sourceId does not match a declared dataset`);
+      continue;
+    }
+    if (item.sourceRevision !== dataset.sourceRevision) {
+      err(`layout.items.${item.i}.query sourceRevision does not match its declared dataset`);
+    }
+  }
+  for (const filter of filters) {
+    for (const [datasetId, binding] of Object.entries(filter.datasetBindings ?? {})) {
+      const dataset = byDatasetId.get(datasetId);
+      if (!dataset) {
+        err(`filters.${filter.id}.datasetBindings references unknown dataset ${datasetId}`);
+        continue;
+      }
+      if (binding.tileIds === undefined) continue;
+      const seenTileIds = new Set<string>();
+      for (const tileId of binding.tileIds) {
+        if (!tileId.trim() || seenTileIds.has(tileId)) {
+          err(`filters.${filter.id}.datasetBindings.${datasetId}.tileIds must contain unique non-empty tile ids`);
+          continue;
+        }
+        seenTileIds.add(tileId);
+        const tile = byTileId.get(tileId);
+        if (!tile) {
+          err(`filters.${filter.id}.datasetBindings.${datasetId}.tileIds references unknown tile ${tileId}`);
+          continue;
+        }
+        if (!tile.query || tile.sourceId !== dataset.sourceId || tile.sourceRevision !== dataset.sourceRevision) {
+          err(`filters.${filter.id}.datasetBindings.${datasetId}.tileIds tile ${tileId} does not resolve to that exact Dataset binding`);
+        }
+      }
+    }
+  }
+  for (const mapping of interactions?.crossFilter?.mappings ?? []) {
+    if (!byDatasetId.has(mapping.toDataset)) err(`interactions.crossFilter references unknown target dataset ${mapping.toDataset}`);
+    const sourceItem = layout.items.find((item) => item.i === mapping.fromTileId);
+    if (!sourceItem) {
+      err(`interactions.crossFilter references unknown source tile ${mapping.fromTileId}`);
+      continue;
+    }
+    if (!sourceItem.query || !sourceItem.sourceId || !sourceItem.sourceRevision) {
+      err(`interactions.crossFilter source tile ${mapping.fromTileId} must be a field-based Dataset tile with an exact source binding`);
+      continue;
+    }
+    const sourceDataset = bySourceId.get(sourceItem.sourceId);
+    if (!sourceDataset || sourceDataset.sourceRevision !== sourceItem.sourceRevision) {
+      err(`interactions.crossFilter source tile ${mapping.fromTileId} does not resolve to its declared Dataset source`);
+      continue;
+    }
+    if (!tileQueryOutputAliases(sourceItem.query).some((output) => output.alias === mapping.fromField)) {
+      err(`interactions.crossFilter source field ${mapping.fromField} is not a selected output of tile ${mapping.fromTileId}`);
+    }
+  }
+  if (interactions?.detail && !byDatasetId.has(interactions.detail.dataset)) {
+    err(`interactions.detail references unknown dataset ${interactions.detail.dataset}`);
+  }
+}
+
+/**
+ * Dataset field filters own their filter IDs at runtime. Reusing one as a
+ * dashboard parameter would make the same request value both a governed
+ * predicate and a source parameter. Require authors to use an explicitly
+ * named tile parameter binding instead, so the source invocation remains
+ * distinguishable from the field-filter contract.
+ *
+ * This is deliberately v3-only: older dashboards retain their historic
+ * parameter/filter behavior because they have no Dataset field-query path.
+ */
+export function dashboardDatasetParameterFilterErrors(
+  dashboard: Pick<DashboardDocument, 'version' | 'params' | 'filters' | 'datasets' | 'layout'>,
+): string[] {
+  if (dashboard.version !== 3) return [];
+  const parameterIds = new Set((dashboard.params ?? []).map((parameter) => parameter.id));
+  return (dashboard.filters ?? []).flatMap((filter) => {
+    const hasDatasetFieldBinding = Boolean(filter.datasetBindings && Object.keys(filter.datasetBindings).length > 0);
+    if (!hasDatasetFieldBinding || !parameterIds.has(filter.id)) return [];
+    return [`params.${filter.id} conflicts with filters.${filter.id}: Dataset field filters require a distinct dashboard parameter id; bind source input through an explicit, separately named tile parameter.`];
+  });
 }
 
 function readStoryEvidencePlan(raw: unknown, err: (m: string) => void): DashboardStoryEvidencePlan | undefined {
@@ -648,12 +860,29 @@ function readFilters(raw: unknown, err: (m: string) => void): DashboardFilter[] 
       field: readDashboardFilterField(f.field, i, err),
       required: typeof f.required === 'boolean' ? f.required : undefined,
       multiple: typeof f.multiple === 'boolean' ? f.multiple : undefined,
+      timezone: readDashboardFilterTimezone(f.timezone, i, err),
       scope: readDashboardFilterScope(f.scope, i, err),
+      datasetBindings: readDashboardDatasetFilterBindings(f.datasetBindings, i, err),
       optionSource: readDashboardFilterOptionSource(f.optionSource, i, err),
       dependsOn: stringArrayOrUndefined(f.dependsOn, `filters[${i}].dependsOn`, err),
     });
   }
   return out;
+}
+
+function readDashboardFilterTimezone(raw: unknown, index: number, err: (m: string) => void): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !raw.trim()) {
+    err(`filters[${index}].timezone must be a non-empty IANA time zone string`);
+    return undefined;
+  }
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: raw.trim() });
+    return raw.trim();
+  } catch {
+    err(`filters[${index}].timezone is not a valid IANA time zone`);
+    return undefined;
+  }
 }
 
 function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['layout'] {
@@ -696,6 +925,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const aiPinRaw = it.aiPin as Record<string, unknown> | undefined;
     const semantic = readSemanticQueryRef(it.semantic, i, err);
     const draftAnalysis = readDraftAnalysisRef(it.draftAnalysis, i, err);
+    const query = it.query === undefined ? undefined : normalizeTileQuery(it.query);
+    if (it.query !== undefined && !query) err(`layout.items[${i}].query must be a valid TileQuery object`);
     let block: DashboardBlockRef | null = null;
     if (blockRaw && typeof blockRaw.blockId === 'string') {
       block = { blockId: blockRaw.blockId, version: typeof blockRaw.version === 'string' ? blockRaw.version : undefined };
@@ -708,9 +939,12 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const aiPin = aiPinRaw && typeof aiPinRaw.id === 'string'
       ? { id: aiPinRaw.id }
       : null;
-    if (!block && !text && !aiPin && !semantic && !draftAnalysis) {
-      err(`layout.items[${i}] must have a block, semantic, draftAnalysis, text, or aiPin source`);
+    if (!block && !text && !aiPin && !semantic && !draftAnalysis && !query) {
+      err(`layout.items[${i}] must have a block, semantic, draftAnalysis, text, or aiPin source (or a field-based query)`);
       continue;
+    }
+    if (query && (typeof it.sourceId !== 'string' || !it.sourceId.trim() || typeof it.sourceRevision !== 'string' || !it.sourceRevision.trim())) {
+      err(`layout.items[${i}].query requires snapshot-bound sourceId and sourceRevision`);
     }
 
     const vizRaw = it.viz as Record<string, unknown> | undefined;
@@ -729,6 +963,11 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     }
 
     const display = readDisplayMetadata(it.display, i, allowedViz, err);
+    const semanticTileConversionProvenance = readSemanticTileConversionProvenance(
+      it.semanticTileConversionProvenance,
+      i,
+      err,
+    );
     const filterBindings = readTileFilterBindings(it.filterBindings, i, err);
     const parameterBindings = readTileParameterBindings(it.parameterBindings, i, err);
     const sourceEvidence = readTileSourceEvidence(it.sourceEvidence, i, err);
@@ -746,7 +985,9 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       ...(text ? { text } : {}),
       ...(aiPin ? { aiPin } : {}),
       ...(semantic ? { semantic } : {}),
+      ...(semanticTileConversionProvenance ? { semanticTileConversionProvenance } : {}),
       ...(draftAnalysis ? { draftAnalysis } : {}),
+      ...(query ? { query } : {}),
       viz: { type: vizRaw.type as DashboardVizConfig['type'], options: opts },
       ...(display ? { display } : {}),
       ...(filterBindings.length > 0 ? { filterBindings } : {}),
@@ -763,6 +1004,20 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
 
   const responsive = readResponsiveLayouts(o.responsive, err);
   return { kind: 'grid', cols, rowHeight, items, ...(responsive ? { responsive } : {}) };
+}
+
+function readSemanticTileConversionProvenance(
+  raw: unknown,
+  index: number,
+  err: (m: string) => void,
+): SemanticTileConversionProvenanceV1 | undefined {
+  if (raw === undefined) return undefined;
+  const provenance = normalizeSemanticTileConversionProvenance(raw);
+  if (!provenance) {
+    err(`layout.items[${index}].semanticTileConversionProvenance must be a valid SemanticTileConversionProvenanceV1 object`);
+    return undefined;
+  }
+  return provenance;
 }
 
 function readDashboardFilterField(raw: unknown, index: number, err: (m: string) => void): DashboardFilter['field'] {
@@ -792,9 +1047,148 @@ function readDashboardFilterScope(raw: unknown, index: number, err: (m: string) 
   }
   const scope = raw as Record<string, unknown>;
   return {
+    app: scope.app === true || undefined,
     page: typeof scope.page === 'string' ? scope.page : undefined,
     tileIds: stringArrayOrUndefined(scope.tileIds, `filters[${index}].scope.tileIds`, err),
   };
+}
+
+function readDashboardDatasetFilterBindings(
+  raw: unknown,
+  index: number,
+  err: (m: string) => void,
+): DashboardFilter['datasetBindings'] {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err(`filters[${index}].datasetBindings must be an object`);
+    return undefined;
+  }
+  const bindings: Record<string, DashboardDatasetFilterBinding> = {};
+  for (const [datasetId, candidate] of Object.entries(raw as Record<string, unknown>)) {
+    if (!datasetId.trim() || typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+      err(`filters[${index}].datasetBindings entries must have dataset ids and field objects`);
+      continue;
+    }
+    const field = (candidate as Record<string, unknown>).field;
+    if (typeof field !== 'string' || !field.trim()) {
+      err(`filters[${index}].datasetBindings.${datasetId}.field must be a non-empty string`);
+      continue;
+    }
+    const tileIds = stringArrayOrUndefined(
+      (candidate as Record<string, unknown>).tileIds,
+      `filters[${index}].datasetBindings.${datasetId}.tileIds`,
+      err,
+    );
+    bindings[datasetId] = { field: field.trim(), ...(tileIds === undefined ? {} : { tileIds }) };
+  }
+  // An explicit empty object is meaningful for an App-scoped Dataset filter:
+  // the page owns the control but deliberately has no source/tile inclusion
+  // until an author makes one. Preserve it across reload rather than turning
+  // it into an absent binding that a later page mutation could misread.
+  return bindings;
+}
+
+function readDatasets(raw: unknown, err: (m: string) => void): DashboardDatasetBinding[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    err('datasets must be an array when present');
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: DashboardDatasetBinding[] = [];
+  raw.forEach((candidate, index) => {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+      err(`datasets[${index}] must be an object`);
+      return;
+    }
+    const value = candidate as Record<string, unknown>;
+    const id = typeof value.id === 'string' ? value.id.trim() : '';
+    const sourceId = typeof value.sourceId === 'string' ? value.sourceId.trim() : '';
+    const sourceRevision = typeof value.sourceRevision === 'string' ? value.sourceRevision.trim() : '';
+    const snapshotId = typeof value.snapshotId === 'string' ? value.snapshotId.trim() : '';
+    const contractFingerprint = typeof value.contractFingerprint === 'string' ? value.contractFingerprint.trim() : '';
+    if (!id || !sourceId || !sourceRevision || !snapshotId || !contractFingerprint) {
+      err(`datasets[${index}] requires id, sourceId, sourceRevision, snapshotId, and contractFingerprint`);
+      return;
+    }
+    if (seen.has(id)) {
+      err(`datasets[${index}].id ${id} is duplicated`);
+      return;
+    }
+    seen.add(id);
+    out.push({ id, sourceId, sourceRevision, snapshotId, contractFingerprint });
+  });
+  return out;
+}
+
+function readInteractions(raw: unknown, err: (m: string) => void): DashboardInteractions | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err('interactions must be an object when present');
+    return undefined;
+  }
+  const value = raw as Record<string, unknown>;
+  let crossFilter: DashboardInteractions['crossFilter'];
+  const rawCrossFilter = value.crossFilter;
+  if (rawCrossFilter !== undefined) {
+    if (typeof rawCrossFilter !== 'object' || rawCrossFilter === null || Array.isArray(rawCrossFilter)) {
+      err('interactions.crossFilter must be an object');
+    } else {
+      const record = rawCrossFilter as Record<string, unknown>;
+      const mappings: DashboardCrossFilterMapping[] = [];
+      if (!Array.isArray(record.mappings)) err('interactions.crossFilter.mappings must be an array');
+      else record.mappings.forEach((candidate, index) => {
+        if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+          err(`interactions.crossFilter.mappings[${index}] must be an object`);
+          return;
+        }
+        const mapping = candidate as Record<string, unknown>;
+        const fromTileId = typeof mapping.fromTileId === 'string' ? mapping.fromTileId.trim() : '';
+        const fromField = typeof mapping.fromField === 'string' ? mapping.fromField.trim() : '';
+        const toDataset = typeof mapping.toDataset === 'string' ? mapping.toDataset.trim() : '';
+        const toField = typeof mapping.toField === 'string' ? mapping.toField.trim() : '';
+        if (!fromTileId || !fromField || !toDataset || !toField) {
+          err(`interactions.crossFilter.mappings[${index}] requires fromTileId, fromField, toDataset, and toField`);
+          return;
+        }
+        mappings.push({ fromTileId, fromField, toDataset, toField });
+      });
+      crossFilter = { enabled: record.enabled === false ? false : undefined, mappings };
+    }
+  }
+  let detail: DashboardDetailInteraction | undefined;
+  if (value.detail !== undefined) {
+    if (typeof value.detail !== 'object' || value.detail === null || Array.isArray(value.detail)) err('interactions.detail must be an object');
+    else {
+      const record = value.detail as Record<string, unknown>;
+      const dataset = typeof record.dataset === 'string' ? record.dataset.trim() : '';
+      const columns = stringArrayOrUndefined(record.columns, 'interactions.detail.columns', err) ?? [];
+      if (!dataset || columns.length === 0) err('interactions.detail requires dataset and at least one column');
+      else detail = { dataset, columns };
+    }
+  }
+  let navigate: DashboardNavigateInteraction[] | undefined;
+  if (value.navigate !== undefined) {
+    if (!Array.isArray(value.navigate)) err('interactions.navigate must be an array');
+    else {
+      navigate = value.navigate.flatMap((candidate, index) => {
+        if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+          err(`interactions.navigate[${index}] must be an object`);
+          return [];
+        }
+        const record = candidate as Record<string, unknown>;
+        const fromTile = typeof record.fromTile === 'string' ? record.fromTile.trim() : '';
+        const toPage = typeof record.toPage === 'string' ? record.toPage.trim() : '';
+        const carryFilters = stringArrayOrUndefined(record.carryFilters, `interactions.navigate[${index}].carryFilters`, err) ?? [];
+        if (!fromTile || !toPage) {
+          err(`interactions.navigate[${index}] requires fromTile and toPage`);
+          return [];
+        }
+        return [{ fromTile, toPage, carryFilters }];
+      });
+    }
+  }
+  return crossFilter || detail || navigate ? { ...(crossFilter ? { crossFilter } : {}), ...(detail ? { detail } : {}), ...(navigate ? { navigate } : {}) } : undefined;
 }
 
 function readDashboardFilterOptionSource(raw: unknown, index: number, err: (m: string) => void): DashboardFilter['optionSource'] {

@@ -417,6 +417,16 @@ export interface ManifestBlock {
   pattern?: string;
   /** Enterprise reusable-widget grain, for example customer_id or month. */
   grain?: string;
+  /**
+   * v3 field-based App Builder dataset grain. `grain` above remains the legacy
+   * string metadata for older consumers. Virtual measures never appear in the
+   * physical output contract below.
+   */
+  datasetGrain?: ManifestDatasetGrain;
+  /** Reviewed physical columns that can be selected, grouped, or filtered. */
+  datasetFields?: ManifestDatasetField[];
+  /** Governed measures built from the declared physical columns. */
+  datasetMeasures?: ManifestDatasetMeasure[];
   /** Business entities represented by the row grain or output. */
   entities?: string[];
   /** Declared output field names reviewers should expect. */
@@ -541,6 +551,45 @@ export interface ManifestBlockDisplayHints {
   allowedVisualizations?: string[];
   fieldHints?: Record<string, string>;
   source: 'block_visualization' | 'derived' | 'ai_import';
+}
+
+export interface ManifestDatasetGrain {
+  entities: string[];
+  keys: string[];
+  /** Id of a typed, source-controlled grain proof. A string alone is not proof. */
+  keyEvidence?: string;
+  description?: string;
+  timeGrain?: string;
+  /** Exact physical bucket field declared by an aggregate Dataset source. */
+  timeBucketBy?: string;
+  aggregate?: boolean;
+}
+
+export interface ManifestDatasetField {
+  name: string;
+  role: 'dimension' | 'key' | 'time' | 'attribute';
+  type?: 'string' | 'number' | 'boolean' | 'date' | 'timestamp';
+  grains?: string[];
+  primary?: boolean;
+  hierarchy?: string;
+  level?: number;
+  status?: 'approved' | 'suggested';
+}
+
+export interface ManifestDatasetMeasure {
+  name: string;
+  aggregation: 'sum' | 'count' | 'count_distinct' | 'ratio' | 'avg' | 'min' | 'max';
+  from?: string;
+  numerator?: string;
+  denominator?: string;
+  expression?: string;
+  timeBucketBy?: string;
+  additive: 'additive' | 'semi_additive' | 'non_additive';
+  entityAdditive?: 'additive' | 'semi_additive' | 'non_additive';
+  allowedAggs?: Array<'sum' | 'count' | 'count_distinct' | 'ratio' | 'avg' | 'min' | 'max'>;
+  format?: 'number' | 'currency' | 'percent';
+  currency?: string;
+  status?: 'approved' | 'suggested';
 }
 
 export interface ManifestBlockParameterPolicy {
@@ -891,8 +940,37 @@ export interface ManifestDashboard {
   params: string[];
   /** Filter ids declared on the dashboard. */
   filters: string[];
+  /**
+   * v3 field-based tiles are virtual consumption artifacts.  They retain the
+   * authored Dataset binding and deterministic intent fingerprints, but never
+   * pretend an offline manifest compiler has target-specific physical SQL.
+   */
+  datasetTiles?: ManifestDatasetTile[];
   /** Layout summary; full grid lives on disk. */
   layout: { kind: 'grid'; cols: number; rowHeight: number; itemCount: number };
+}
+
+/**
+ * Offline lineage record for one v3 App Dataset tile.  The IDs identify the
+ * saved App/page/tile; fingerprints identify the exact authored dependency
+ * boundary that runtime evidence must later revalidate against a target.
+ */
+export interface ManifestDatasetTile {
+  id: string;
+  sourceId: string;
+  sourceRevision: string;
+  snapshotId: string;
+  contractFingerprint: string;
+  sourceFingerprint: string;
+  queryFingerprint: string;
+  dependencyFingerprint: string;
+  sourceKind: 'block_dataset' | 'semantic_dataset' | 'other_dataset';
+  selectedOutputs: {
+    dimensions: string[];
+    measures: string[];
+    filters: string[];
+    having: string[];
+  };
 }
 
 // ---- dbt Import ----

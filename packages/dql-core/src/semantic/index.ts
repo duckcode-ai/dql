@@ -3,6 +3,8 @@ export {
   SemanticLayer,
   parseMetricDefinition,
   parseDimensionDefinition,
+  parseEntityDefinition,
+  parseSemanticModelDefinition,
   parseHierarchyDefinition,
   parseSegmentDefinition,
   parsePreAggregationDefinition,
