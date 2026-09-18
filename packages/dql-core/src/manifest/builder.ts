@@ -59,7 +59,8 @@ import {
 } from '../apps/index.js';
 import { loadDbtRunState, applyBlockDataState, type DbtRunStateIndex } from './dbt-freshness.js';
 import { blockParameterDefinitions } from '../blocks/parameters.js';
-import { loadDbtFirstModeling, siblingDbtArtifact } from './dbt-first-modeling.js';
+import { loadDbtFirstModeling, loadWarehouseModeling, siblingDbtArtifact } from './dbt-first-modeling.js';
+import { WAREHOUSE_CATALOG_PATH, readWarehouseCatalog } from './warehouse-catalog.js';
 import { domainFolderSlug } from './domain-writer.js';
 import { loadDomainPackageRegistry } from './domain-package-registry.js';
 import type { DomainPackageRegistryResult } from './domain-package-registry.js';
@@ -178,8 +179,10 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
     if (semanticManifestPath) files.add(semanticManifestPath);
   }
 
-  if (config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first') {
+  if (modelingModeOf(config)) {
     for (const f of scanFilesRecursive(join(projectRoot, 'domains'), ['.yaml', '.yml'], scanCache)) files.add(f);
+    // Warehouse-first and hybrid entities bind to the warehouse catalog snapshot (RFC 0007).
+    if (modelingModeOf(config) !== 'dbt-first' && existsSync(join(projectRoot, WAREHOUSE_CATALOG_PATH))) files.add(join(projectRoot, WAREHOUSE_CATALOG_PATH));
     const registry = loadDomainPackageRegistry(projectRoot);
     for (const f of manifestKnowledgeSkillInputFiles(projectRoot, registry)) files.add(f);
   }
@@ -210,11 +213,20 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   const config = loadProjectConfig(projectRoot);
   const projectName = config.project ?? 'dql-project';
   const dbtFirstV3 = config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first';
-  if ((config.manifestVersion === 3 || config.modeling?.mode === 'dbt-first') && !dbtFirstV3) {
+  // Warehouse-first and hybrid modeling (RFC 0007): entities bind to warehouse relations.
+  const warehouseV3 = config.manifestVersion === 3 && (config.modeling?.mode === 'warehouse-first' || config.modeling?.mode === 'hybrid');
+  const modelingV3 = dbtFirstV3 || warehouseV3;
+  if ((config.manifestVersion === 3 || config.modeling?.mode === 'dbt-first') && !modelingV3) {
     diagnostics.push({
       kind: 'config',
       severity: 'error',
       message: 'manifest v3 requires both `manifestVersion: 3` and `modeling.mode: "dbt-first"`; compiling with manifest v2 compatibility defaults',
+    });
+  } else if ((config.modeling?.mode === 'warehouse-first' || config.modeling?.mode === 'hybrid') && !warehouseV3) {
+    diagnostics.push({
+      kind: 'config',
+      severity: 'error',
+      message: `\`modeling.mode: "${config.modeling.mode}"\` requires \`manifestVersion: 3\`; compiling with manifest v2 compatibility defaults`,
     });
   }
   const datalexManifestPath = resolveDataLexManifestPath(projectRoot, options.datalexManifestPath, config);
@@ -232,7 +244,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
 
   // Scan first-class business domains
   const domainDirs = ['domains', 'blocks', 'terms', 'business-views', ...(options.extraBlockDirs ?? [])];
-  const packageRegistry = dbtFirstV3 ? loadDomainPackageRegistry(projectRoot) : undefined;
+  const packageRegistry = modelingV3 ? loadDomainPackageRegistry(projectRoot) : undefined;
   const domains = packageRegistry
     ? Object.fromEntries(packageRegistry.values().map((pkg) => [pkg.id, pkg.domain]))
     : scanDomains(projectRoot, domainDirs, diagnostics, scanCache);
@@ -339,6 +351,15 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
       dbtFirstModeling = loadDbtFirstModeling(projectRoot, options.dbtManifestPath);
       diagnostics.push(...dbtFirstModeling.diagnostics);
     }
+  } else if (warehouseV3) {
+    const catalog = readWarehouseCatalog(projectRoot);
+    if (catalog.error) diagnostics.push({ kind: 'config', severity: 'error', message: `warehouse catalog snapshot ${WAREHOUSE_CATALOG_PATH} could not be read: ${catalog.error}` });
+    dbtFirstModeling = loadWarehouseModeling(projectRoot, {
+      mode: config.modeling!.mode as 'warehouse-first' | 'hybrid',
+      ...(catalog.snapshot ? { catalog: catalog.snapshot, catalogPath: WAREHOUSE_CATALOG_PATH } : {}),
+      ...(options.dbtManifestPath ? { dbtManifestPath: options.dbtManifestPath } : {}),
+    });
+    diagnostics.push(...dbtFirstModeling.diagnostics);
   }
 
   // Apps & dashboards (consumption layer). Scanned after blocks/notebooks
@@ -352,7 +373,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     metrics,
     dimensions,
     notebooks,
-    dbtFirstV3 ? stripDbtImportDetails(dbtImport) : dbtImport,
+    modelingV3 ? stripDbtImportDetails(dbtImport) : dbtImport,
     apps,
     dashboards,
     businessViews,
@@ -361,11 +382,11 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   if (dbtFirstModeling) appendDbtFirstModelingLineage(lineage, dbtFirstModeling.modeling);
 
   const baseManifest: Omit<DQLManifest, 'knowledgeGraph'> = {
-    manifestVersion: dbtFirstV3 ? 3 : 2,
+    manifestVersion: modelingV3 ? 3 : 2,
     dqlVersion,
     // v3 is a reproducible policy artifact. Runtime build time lives in the
     // local cache, not in the canonical manifest content.
-    generatedAt: dbtFirstV3 ? new Date(0).toISOString() : new Date().toISOString(),
+    generatedAt: modelingV3 ? new Date(0).toISOString() : new Date().toISOString(),
     project: projectName,
     projectRoot,
     domains,
@@ -376,16 +397,16 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     notebooks,
     metrics,
     dimensions,
-    sources: dbtFirstV3 ? stripDbtOwnedSourceDetails(sources) : sources,
+    sources: modelingV3 ? stripDbtOwnedSourceDetails(sources) : sources,
     apps: Object.keys(apps).length > 0 ? apps : undefined,
     dashboards: Object.keys(dashboards).length > 0 ? dashboards : undefined,
     lineage,
-    dbtImport: dbtFirstV3 ? undefined : dbtImport,
+    dbtImport: modelingV3 ? undefined : dbtImport,
     dbtProvenance: dbtFirstModeling?.provenance,
     modeling: dbtFirstModeling?.modeling,
     diagnostics,
   };
-  if (!dbtFirstV3) return baseManifest;
+  if (!modelingV3) return baseManifest;
 
   const skillCatalog = loadManifestKnowledgeSkills(projectRoot, packageRegistry);
   diagnostics.push(...skillCatalog.diagnostics);
@@ -462,7 +483,8 @@ interface ProjectConfig {
   /** Manifest v3 is opt-in and only active with `modeling.mode: "dbt-first"`. */
   manifestVersion?: 1 | 2 | 3;
   modeling?: {
-    mode?: 'dbt-first';
+    /** `warehouse-first` and `hybrid` bind entities to warehouse relations (RFC 0007). */
+    mode?: 'dbt-first' | 'warehouse-first' | 'hybrid';
   };
   semanticLayer?: { provider?: string; path?: string; projectPath?: string };
   dataDir?: string;
@@ -2959,4 +2981,15 @@ function normalizeTableName(name: string): string {
     return filename.replace(/\.(csv|parquet|json)$/i, '');
   }
   return name;
+}
+
+/**
+ * The project's modeling mode when manifest v3 modeling is active, else
+ * undefined. `dbt-first` binds entities to dbt models; `warehouse-first` and
+ * `hybrid` bind them to warehouse relations (RFC 0007).
+ */
+export function modelingModeOf(config: { manifestVersion?: number; modeling?: { mode?: string } }): 'dbt-first' | 'warehouse-first' | 'hybrid' | undefined {
+  if (config.manifestVersion !== 3) return undefined;
+  const mode = config.modeling?.mode;
+  return mode === 'dbt-first' || mode === 'warehouse-first' || mode === 'hybrid' ? mode : undefined;
 }

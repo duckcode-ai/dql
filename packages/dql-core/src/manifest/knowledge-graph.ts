@@ -184,9 +184,12 @@ export function buildManifestKnowledgeGraph(input: BuildManifestKnowledgeGraphIn
     }));
   }
   for (const node of Object.values(manifest.dbtProvenance?.nodes ?? {})) {
-    const id = `dbt::${node.uniqueId}`;
-    addObject(object(node.resourceType === 'source' ? 'dbt_source' : 'dbt_model', id, node.name, node.sourcePath, {
-      sourceSystem: 'dbt',
+    const id = provenanceObjectId(node);
+    // A warehouse relation (RFC 0007) is a source table the project read from
+    // the warehouse catalog, not a dbt object.
+    const kind: ManifestKnowledgeObjectKind = node.resourceType === 'warehouse' ? 'source_table' : node.resourceType === 'source' ? 'dbt_source' : 'dbt_model';
+    addObject(object(kind, id, node.name, node.sourcePath, {
+      sourceSystem: node.resourceType === 'warehouse' ? 'dql' : 'dbt',
       nativeId: node.uniqueId,
       sourceFingerprint: node.identityFingerprint,
       aliases: unique([node.name, node.relation ?? '', node.uniqueId]),
@@ -220,7 +223,8 @@ export function buildManifestKnowledgeGraph(input: BuildManifestKnowledgeGraphIn
     }));
     addEdge('contains', `domain::${entity.domain}`, id);
     if (entity.areaId) addEdge('contains', entity.areaId, id);
-    addEdge('binds_to', id, `dbt::${entity.dbtUniqueId}`);
+    const bound = manifest.dbtProvenance?.nodes[entity.dbtUniqueId];
+    addEdge('binds_to', id, bound ? provenanceObjectId(bound) : `dbt::${entity.dbtUniqueId}`);
   }
 
   const relationshipIds = new Map<string, string[]>();
@@ -626,6 +630,11 @@ function resolveModelEntity(manifest: Omit<DQLManifest, 'knowledgeGraph'>, ref: 
   return modelEntity(manifest, ref)?.qualifiedId ?? ref;
 }
 
+/** The graph id of a provenance node: `dbt::<id>`, or `warehouse::<id>` for a warehouse relation. */
+function provenanceObjectId(node: { uniqueId: string; resourceType: string }): string {
+  return node.resourceType === 'warehouse' ? `warehouse::${node.uniqueId}` : `dbt::${node.uniqueId}`;
+}
+
 function modelEntity(manifest: Omit<DQLManifest, 'knowledgeGraph'>, ref: string) {
   return manifest.modeling?.entities[ref] ?? Object.values(manifest.modeling?.entities ?? {}).find((entity) => entity.id === ref || entity.localId === ref || entity.qualifiedId === ref);
 }
@@ -633,7 +642,7 @@ function modelEntity(manifest: Omit<DQLManifest, 'knowledgeGraph'>, ref: string)
 function sourceObjectId(manifest: Omit<DQLManifest, 'knowledgeGraph'>, table: string): string | undefined {
   const normalized = table.toLowerCase();
   const dbt = Object.values(manifest.dbtProvenance?.nodes ?? {}).find((node) => unique([node.name, node.relation ?? '', node.uniqueId]).some((value) => value.toLowerCase() === normalized));
-  if (dbt) return `dbt::${dbt.uniqueId}`;
+  if (dbt) return provenanceObjectId(dbt);
   return Object.values(manifest.sources ?? {}).some((source) => source.name.toLowerCase() === normalized) ? `source::${normalized}` : undefined;
 }
 

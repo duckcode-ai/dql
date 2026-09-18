@@ -6,13 +6,27 @@ export {
   loadProjectConfig,
   resolveDataLexManifestPath,
   resolveDbtManifestPath,
+  modelingModeOf,
   type ManifestBuildOptions,
   type DbtImportFilters,
 } from './builder.js';
 
 export { detectOutputDrift } from './output-drift.js';
 export {
+  WAREHOUSE_CATALOG_PATH,
+  normalizeWarehouseCatalog,
+  readWarehouseCatalog,
+  resolveWarehouseRelation,
+  warehouseRelationId,
+  writeWarehouseCatalog,
+  type WarehouseCatalogColumnV1,
+  type WarehouseCatalogForeignKeyV1,
+  type WarehouseCatalogRelationV1,
+  type WarehouseCatalogSnapshotV1,
+} from './warehouse-catalog.js';
+export {
   loadDbtFirstModeling,
+  loadWarehouseModeling,
   siblingDbtArtifact,
   relationshipKeyTypes,
   relationshipValidationProofFingerprint,
@@ -135,6 +149,7 @@ export type {
   ManifestDbtNodeProvenance,
   ManifestMetricFlowProvenance,
   ManifestDbtFirstModeling,
+  ManifestModelingMode,
   ManifestDomainPackage,
   ManifestModelArea,
   ManifestModelEntity,

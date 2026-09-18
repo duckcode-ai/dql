@@ -34,12 +34,14 @@ import type {
   ManifestRelationshipValidationEvidence,
 } from './types.js';
 import { loadDomainPackageRegistry } from './domain-package-registry.js';
+import { resolveWarehouseRelation, type WarehouseCatalogRelationV1, type WarehouseCatalogSnapshotV1 } from './warehouse-catalog.js';
+import type { ManifestModelingMode } from './types.js';
 
 type UnknownRecord = Record<string, unknown>;
 
 interface DbtNodeFacts {
   uniqueId: string;
-  resourceType: 'model' | 'source';
+  resourceType: 'model' | 'source' | 'warehouse';
   name: string;
   packageName?: string;
   relation?: string;
@@ -69,6 +71,8 @@ interface RawEntity {
   id?: unknown;
   dbt_model?: unknown;
   dbtModel?: unknown;
+  /** Warehouse-first and hybrid modes only (RFC 0007). */
+  relation?: unknown;
   domain?: unknown;
   grain?: unknown;
   keys?: unknown;
@@ -146,6 +150,92 @@ export function loadDbtFirstModeling(
   manifestPath: string,
 ): DbtFirstModelingLoadResult {
   const diagnostics: ManifestDiagnostic[] = [];
+  const { nodeFacts, provenance } = readDbtNodeFacts(manifestPath, diagnostics);
+  return compileModeling(projectRoot, nodeFacts, provenance, diagnostics, { mode: 'dbt-first' });
+}
+
+/**
+ * Warehouse-first and hybrid modeling (RFC 0007). Entities bind to relations
+ * of the warehouse catalog snapshot (`relation:`); in hybrid mode they may also
+ * bind to dbt models (`dbt_model:`), and a relation dbt already models binds to
+ * the dbt model. The snapshot's relations become `warehouse` nodes in the same
+ * provenance record, so every reader that resolves an entity's relation through
+ * `nodes[entity.dbtUniqueId].relation` works unchanged.
+ */
+export function loadWarehouseModeling(
+  projectRoot: string,
+  options: {
+    mode: Exclude<ManifestModelingMode, 'dbt-first'>;
+    catalog?: WarehouseCatalogSnapshotV1;
+    catalogPath?: string;
+    /** Hybrid only: the dbt manifest.json, when the project has one. */
+    dbtManifestPath?: string;
+  },
+): DbtFirstModelingLoadResult {
+  const diagnostics: ManifestDiagnostic[] = [];
+  const dbt = options.mode === 'hybrid' && options.dbtManifestPath && existsSync(options.dbtManifestPath)
+    ? readDbtNodeFacts(options.dbtManifestPath, diagnostics)
+    : undefined;
+  if (options.mode === 'hybrid' && !dbt) {
+    diagnostics.push({ kind: 'config', severity: 'warning', message: 'hybrid modeling found no readable dbt manifest.json; only warehouse relations are available to entities' });
+  }
+  const nodeFacts = dbt?.nodeFacts ?? new Map<string, DbtNodeFacts>();
+  const nodes: Record<string, ManifestDbtNodeProvenance> = { ...(dbt?.provenance.nodes ?? {}) };
+  if (!options.catalog) {
+    diagnostics.push({ kind: 'config', severity: 'warning', message: 'no warehouse catalog snapshot yet: run `dql catalog sync` (or Sync schema in Settings) so entities can bind to warehouse relations' });
+  }
+  for (const relation of options.catalog?.relations ?? []) {
+    const facts = warehouseNodeFacts(relation);
+    nodeFacts.set(facts.uniqueId, facts);
+    nodes[facts.uniqueId] = {
+      uniqueId: facts.uniqueId,
+      resourceType: 'warehouse',
+      name: relation.name,
+      relation: relation.relation,
+      identityFingerprint: facts.identityFingerprint,
+      available: {
+        description: Boolean(relation.comment) || relation.columns.some((column) => Boolean(column.comment)),
+        columns: relation.columns.length > 0,
+        tests: false,
+        catalogTypes: relation.columns.some((column) => Boolean(column.type)),
+        dqlMeta: false,
+      },
+    };
+  }
+  const provenance: ManifestDbtProvenance = {
+    ...(dbt?.provenance ?? { manifestPath: '', manifestFingerprint: '', metricFlow: {} }),
+    nodes: sortRecord(nodes),
+    ...(options.catalog ? { warehouseCatalogPath: options.catalogPath, warehouseCatalogFingerprint: options.catalog.fingerprint } : {}),
+  };
+  return compileModeling(projectRoot, nodeFacts, provenance, diagnostics, { mode: options.mode, catalog: options.catalog });
+}
+
+/** A warehouse relation's facts in the shape entity binding and relationship checks read. */
+function warehouseNodeFacts(relation: WarehouseCatalogRelationV1): DbtNodeFacts {
+  const columns = new Set(relation.columns.map((column) => column.name.toLowerCase()));
+  const columnTypes = new Map<string, string>();
+  for (const column of relation.columns) if (column.type) columnTypes.set(column.name.toLowerCase(), column.type.toLowerCase());
+  const keys = relation.primaryKey ?? [];
+  return {
+    uniqueId: relation.id,
+    resourceType: 'warehouse',
+    name: relation.name,
+    relation: relation.relation,
+    ...(keys.length ? { grain: keys.join(', ') } : {}),
+    keys,
+    columns,
+    columnTypes,
+    knownColumns: columns,
+    // The catalog lists every column of the relation, so an absent one is really absent.
+    columnsComplete: relation.columns.length > 0,
+    identityFingerprint: fingerprint({ uniqueId: relation.id, relation: relation.relation, keys: [...keys].sort(), columns: [...columns].sort() }),
+  };
+}
+
+function readDbtNodeFacts(
+  manifestPath: string,
+  diagnostics: ManifestDiagnostic[],
+): { nodeFacts: Map<string, DbtNodeFacts>; provenance: ManifestDbtProvenance } {
   const rawManifest = readJson(manifestPath, 'dbt manifest', diagnostics);
   const catalogPath = siblingDbtArtifact(manifestPath, 'catalog.json');
   const semanticManifestPath = siblingDbtArtifact(manifestPath, 'semantic_manifest.json');
@@ -234,7 +324,16 @@ export function loadDbtFirstModeling(
     nodes: sortRecord(nodeProvenance),
     metricFlow: sortRecord(metricFlow),
   };
+  return { nodeFacts, provenance };
+}
 
+function compileModeling(
+  projectRoot: string,
+  nodeFacts: Map<string, DbtNodeFacts>,
+  provenance: ManifestDbtProvenance,
+  diagnostics: ManifestDiagnostic[],
+  options: { mode: ManifestModelingMode; catalog?: WarehouseCatalogSnapshotV1 },
+): DbtFirstModelingLoadResult {
   const domainSources = loadDomainSources(projectRoot, diagnostics);
   const modelFiles = collectModelingFiles(domainSources);
   const areas: Record<string, ManifestModelArea> = {};
@@ -286,13 +385,39 @@ export function loadDbtFirstModeling(
 
     for (const rawEntity of arrayOfRecords(source.entities) as RawEntity[]) {
       const id = stringValue(rawEntity.id);
-      const dbtUniqueId = stringValue(rawEntity.dbt_model) ?? stringValue(rawEntity.dbtModel);
-      if (!id || !dbtUniqueId) {
-        diagnostics.push(modelingError(relPath, 'each entity requires `id` and `dbt_model`'));
-        continue;
+      const authoredRelation = stringValue(rawEntity.relation);
+      let dbtUniqueId = stringValue(rawEntity.dbt_model) ?? stringValue(rawEntity.dbtModel);
+      if (options.mode === 'dbt-first') {
+        if (!id || !dbtUniqueId) {
+          diagnostics.push(modelingError(relPath, !dbtUniqueId && authoredRelation
+            ? `entity "${id ?? '?'}" uses \`relation:\`, which needs \`modeling.mode\` "warehouse-first" or "hybrid"; a dbt-first entity names its \`dbt_model\``
+            : 'each entity requires `id` and `dbt_model`'));
+          continue;
+        }
+      } else {
+        if (!id || Boolean(dbtUniqueId) === Boolean(authoredRelation)) {
+          diagnostics.push(modelingError(relPath, 'each entity requires `id` and exactly one of `dbt_model` or `relation`'));
+          continue;
+        }
+        if (authoredRelation) {
+          const found = options.catalog ? resolveWarehouseRelation(options.catalog, authoredRelation) : {};
+          if (!found.relation) {
+            diagnostics.push(modelingError(relPath, found.ambiguous
+              ? `entity "${id}" relation "${authoredRelation}" matches ${found.ambiguous.length} warehouse relations (${found.ambiguous.slice(0, 3).map((item) => item.relation).join(', ')}); qualify it with its schema or database`
+              : `entity "${id}" references unknown warehouse relation "${authoredRelation}"${options.catalog ? '' : ' (no warehouse catalog snapshot yet: run `dql catalog sync`)'}`));
+            continue;
+          }
+          // ONE BINDING PER RELATION: in hybrid mode a relation dbt already
+          // models binds to the dbt model, so its dbt facts stay authoritative.
+          const dbtOwner = options.mode === 'hybrid'
+            ? [...nodeFacts.values()].find((node) => node.resourceType === 'model' && node.relation && node.relation.toLowerCase() === found.relation!.relation.toLowerCase())
+            : undefined;
+          dbtUniqueId = dbtOwner?.uniqueId ?? found.relation.id;
+        }
       }
+      if (!dbtUniqueId) continue;
       const dbt = nodeFacts.get(dbtUniqueId);
-      if (!dbt || dbt.resourceType !== 'model') {
+      if (!dbt || (dbt.resourceType !== 'model' && dbt.resourceType !== 'warehouse')) {
         diagnostics.push(modelingError(relPath, `entity "${id}" references unknown dbt model "${dbtUniqueId}"`));
         continue;
       }
@@ -313,6 +438,7 @@ export function loadDbtFirstModeling(
         domain: entityDomain,
         areaId: area?.qualifiedId,
         dbtUniqueId,
+        ...(authoredRelation && options.mode !== 'dbt-first' ? { relation: authoredRelation } : {}),
         businessName: stringValue(rawEntity.business_name ?? rawEntity.businessName),
         businessContext: stringValue(rawEntity.business_context ?? rawEntity.businessContext),
         grain,
@@ -522,7 +648,7 @@ export function loadDbtFirstModeling(
   return {
     provenance,
     modeling: {
-      mode: 'dbt-first',
+      mode: options.mode,
       packages,
       areas: sortRecord(areas),
       entities: sortRecord(entities),

@@ -946,6 +946,7 @@ export interface ManifestDbtImport {
 
 /** A deterministic reference to dbt artifacts without copying their contents. */
 export interface ManifestDbtProvenance {
+  /** The dbt manifest.json; empty for a warehouse-first project, which has no dbt project. */
   manifestPath: string;
   catalogPath?: string;
   semanticManifestPath?: string;
@@ -955,11 +956,24 @@ export interface ManifestDbtProvenance {
   projectName?: string;
   nodes: Record<string, ManifestDbtNodeProvenance>;
   metricFlow: Record<string, ManifestMetricFlowProvenance>;
+  /**
+   * Warehouse-first and hybrid modeling (RFC 0007): the warehouse catalog
+   * snapshot the `warehouse.` nodes were read from. Absent on dbt-first
+   * projects, whose manifest is unchanged.
+   */
+  warehouseCatalogPath?: string;
+  warehouseCatalogFingerprint?: string;
 }
 
 export interface ManifestDbtNodeProvenance {
+  /** dbt unique id, or `warehouse.<database>.<schema>.<name>` for a warehouse relation (RFC 0007). */
   uniqueId: string;
-  resourceType: 'model' | 'source';
+  /**
+   * `warehouse` marks a relation read from the warehouse catalog, not from
+   * dbt: the table a warehouse-first entity binds to. Every reader that
+   * resolves `nodes[entity.dbtUniqueId].relation` works for it unchanged.
+   */
+  resourceType: 'model' | 'source' | 'warehouse';
   name: string;
   packageName?: string;
   relation?: string;
@@ -984,8 +998,11 @@ export interface ManifestMetricFlowProvenance {
   fingerprint: string;
 }
 
+/** Where modeling entities bind (RFC 0007). */
+export type ManifestModelingMode = 'dbt-first' | 'warehouse-first' | 'hybrid';
+
 export interface ManifestDbtFirstModeling {
-  mode: 'dbt-first';
+  mode: ManifestModelingMode;
   packages: Record<string, ManifestDomainPackage>;
   /**
    * Focused, Git-backed modeling sections. Areas are source ownership and
@@ -1046,7 +1063,13 @@ export interface ManifestModelEntity {
   domain: string;
   /** The focused source area that owns this entity, when authored as an area. */
   areaId?: string;
+  /**
+   * The node the entity binds to: a dbt unique id, or a `warehouse.` id for an
+   * entity authored with `relation:` (RFC 0007).
+   */
   dbtUniqueId: string;
+  /** The relation as authored (`relation:`), for a warehouse-bound entity. Absent for dbt entities. */
+  relation?: string;
   /** DQL-owned business identity; dbt descriptions remain read-only provenance. */
   businessName?: string;
   businessContext?: string;
