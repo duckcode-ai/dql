@@ -364,7 +364,6 @@ export function DashboardRenderer({
       setBusinessStory(result?.partial || result?.incomplete ? null : result?.story ?? null);
       latestRunIdRef.current = result?.runId ?? null;
       onRunChange?.(accepted);
-      if (!result) setError('Dashboard run failed.');
       if (result?.runId && !result.partial && !result.incomplete) {
         void api.getDashboardStory(appId, dashboard.id, result.runId).then((storyResult) => {
           if (!isCurrent() || !storyResult || latestRunIdRef.current !== storyResult.runId) return;

@@ -283,3 +283,54 @@ function datasetPhysicalFieldForReference(
   return descriptor.fields.find((field): field is DatasetPhysicalField => field.kind === 'physical'
     && (field.name === reference || field.qualifiedId === reference));
 }
+
+export interface DatasetCrossFilterLinkProposal {
+  fromField: string;
+  fieldLabel: string;
+  mappings: Array<{ fromTileId: string; fromField: string; toDataset: string; toField: string }>;
+  targetLabels: string[];
+}
+
+/**
+ * Suggest cross-filter links for a grouped tile that has none yet. A target is
+ * proposed only where a page Dataset has an approved physical field with the
+ * same name and type as the tile's grouping field. This is a proposal for the
+ * author to confirm with one click; the runtime still filters only through the
+ * saved mappings and never matches names on its own.
+ */
+export function proposeDatasetCrossFilterLinks(input: {
+  page: DashboardPage;
+  tile: DashboardTile;
+  descriptorFor: (binding: NonNullable<DashboardPage['datasets']>[number]) => DatasetDescriptor | undefined;
+}): DatasetCrossFilterLinkProposal | undefined {
+  const { page, tile } = input;
+  if (!tile.query || tile.query.detail || !tile.sourceId) return undefined;
+  const ownBinding = (page.datasets ?? []).find((binding) => binding.sourceId === tile.sourceId && binding.sourceRevision === tile.sourceRevision);
+  const ownDescriptor = ownBinding ? input.descriptorFor(ownBinding) : undefined;
+  if (!ownDescriptor) return undefined;
+  const mapped = new Set((page.interactions?.crossFilter?.mappings ?? []).filter((mapping) => mapping.fromTileId === tile.i).map((mapping) => mapping.fromField));
+  const outputs = tileQueryOutputAliases(tile.query).filter((output) => output.kind === 'dimension');
+  for (const [index, dimension] of tile.query.dimensions.entries()) {
+    if (dimension.timeGrain) continue;
+    const alias = outputs[index]?.alias;
+    if (!alias || mapped.has(alias)) continue;
+    const field = datasetPhysicalFieldForReference(ownDescriptor, dimension.field);
+    if (!field) continue;
+    const mappings: DatasetCrossFilterLinkProposal['mappings'] = [];
+    const targetLabels: string[] = [];
+    for (const binding of page.datasets ?? []) {
+      const descriptor = input.descriptorFor(binding);
+      const target = descriptor?.fields.find((candidate): candidate is DatasetPhysicalField => (
+        candidate.kind === 'physical'
+        && candidate.status === 'approved'
+        && candidate.name.toLowerCase() === field.name.toLowerCase()
+        && candidate.type === field.type
+      ));
+      if (!descriptor || !target) continue;
+      mappings.push({ fromTileId: tile.i, fromField: alias, toDataset: binding.id, toField: target.name });
+      targetLabels.push(descriptor.label);
+    }
+    if (mappings.length) return { fromField: alias, fieldLabel: field.name, mappings, targetLabels };
+  }
+  return undefined;
+}

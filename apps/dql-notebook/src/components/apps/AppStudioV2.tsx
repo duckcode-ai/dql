@@ -38,6 +38,8 @@ import type { CellChartConfig } from '../../store/types';
 import type { ThemeMode } from '../../themes/notebook-theme';
 import { themes } from '../../themes/notebook-theme';
 import { AiSidePanel } from '../agent/AiSidePanel';
+import { TileQueryEditor } from './builder/TileQueryEditor';
+import { TileLivePreview } from './builder/TileLivePreview';
 import { usePersistedAgentThreadId } from '../agent/usePersistedAgentThreadId';
 import { ContextProposalReviewDrawer } from '../modeling/ContextProposalReviewDrawer';
 import { ChartOutput } from '../output/ChartOutput';
@@ -83,16 +85,10 @@ import {
   datasetMarkActions,
   datasetMarkSelectionForRow,
   popDatasetHierarchyDrill,
+  proposeDatasetCrossFilterLinks,
+  type DatasetCrossFilterLinkProposal,
   type RuntimeDatasetHierarchyDrillCandidate,
 } from './app-dataset-interactions';
-import {
-  buildDatasetComparison,
-  datasetComparisonDraftFromQuery,
-  datasetComparisonSummary,
-  datasetComparisonTimeFields,
-  defaultDatasetComparisonDraft,
-  type DatasetComparisonDraft,
-} from './app-dataset-comparison';
 import {
   isCurrentDatasetTileEvidence,
   presentDatasetTileEvidence,
@@ -387,6 +383,7 @@ export function AppStudioV2({
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [catalogRefreshNonce, setCatalogRefreshNonce] = useState(0);
   const [datasetTilesEnabled, setDatasetTilesEnabled] = useState(false);
+  const [enablingDatasets, setEnablingDatasets] = useState(false);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [proposal, setProposal] = useState<AppStudioAiProposal | null>(null);
@@ -1283,6 +1280,41 @@ export function AppStudioV2({
     } finally {
       setBusy(false);
     }
+  };
+
+  const datasetLinkProposal = (page: AppStudioBuildDraft['pages'][number], tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]) => (
+    busy || previewing ? undefined : proposeDatasetCrossFilterLinks({
+      page,
+      tile,
+      descriptorFor: (binding) => draft?.sources.find((source) => source.id === binding.sourceId && source.sourceRevision === binding.sourceRevision)?.capabilities?.dataset,
+    })
+  );
+  // One click saves the proposed mappings as ordinary page interactions; the
+  // author can inspect or remove each one in the tile's Interactions panel.
+  const linkDatasetTileField = (tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]) => {
+    if (!activePage) return;
+    const proposal = datasetLinkProposal(activePage, tile);
+    if (!proposal) return;
+    const existing = activePage.interactions?.crossFilter?.mappings ?? [];
+    void mutate([{
+      type: 'set_interactions',
+      pageId: activePage.id,
+      interactions: {
+        ...(activePage.interactions ?? {}),
+        crossFilter: { ...(activePage.interactions?.crossFilter ?? {}), mappings: [...existing, ...proposal.mappings] },
+      },
+    }]);
+  };
+
+  const enableDatasetTiles = async () => {
+    setEnablingDatasets(true);
+    const result = await api.enableDatasetTiles();
+    setEnablingDatasets(false);
+    if (!result.ok) {
+      setCatalogError(result.error || 'DQL could not turn on field-based tiles for this project.');
+      return;
+    }
+    setCatalogRefreshNonce((current) => current + 1);
   };
 
   const loadMoreSources = async () => {
@@ -2260,7 +2292,7 @@ export function AppStudioV2({
         <section className={`left-content ${panelOpen ? 'open' : ''}`}>
           <button type="button" className="mobile-drawer-close" onClick={() => setPanelOpen(false)} aria-label="Close Studio drawer"><X size={16} /></button>
           {panel === 'pages' ? <PagesPanel draft={draft} activePageId={activePage?.id} onOpen={setActivePageId} onAdd={() => void addPage()} /> : null}
-          {panel === 'sources' ? <SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} datasetTilesEnabled={datasetTilesEnabled} sourceFeedback={sourceFeedback} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddDataset={(item, kind, query, title) => void addComponent(kind, item, query, title)} onAuthorDataset={openDatasetAuthoring} onRefreshDatasetBinding={(sourceId) => void refreshDatasetBinding(sourceId)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /> : null}
+          {panel === 'sources' ? <SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} datasetTilesEnabled={datasetTilesEnabled} enablingDatasets={enablingDatasets} onEnableDatasets={() => void enableDatasetTiles()} sourceFeedback={sourceFeedback} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddDataset={(item, kind, query, title) => void addComponent(kind, item, query, title)} onAuthorDataset={openDatasetAuthoring} onRefreshDatasetBinding={(sourceId) => void refreshDatasetBinding(sourceId)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /> : null}
           {panel === 'filters' ? <FiltersPanel draft={draft} activePageId={activePage?.id} catalog={catalog} candidates={filterCandidates} runtimeFilterFields={runtimeFilterFields} previewRunsByPage={previewRunsByPage} previewing={previewing} disabled={busy || previewing} onRunPreview={() => void runPreview()} onSave={(configuration) => void saveFilter(configuration)} onRemove={(id) => void removeFilter(id)} /> : null}
           {panel === 'templates' ? <TemplatesPanel current={draft.template} onApply={(nextTemplate) => void applyTemplate(nextTemplate)} /> : null}
         </section>
@@ -2312,7 +2344,7 @@ export function AppStudioV2({
                   <header><span className="drag-handle" aria-hidden="true">⠿</span><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /> <strong>{tile.title || humanize(tile.i)}</strong>{tile.sourceId && tile.query ? <button type="button" className={`studio-autopilot-target ${selectedDatasetTile?.i === tile.i ? 'on' : ''}`} aria-pressed={selectedDatasetTile?.i === tile.i} onClick={(event) => { event.stopPropagation(); selectAppAutopilotTile(tile.i); }}>{selectedDatasetTile?.i === tile.i ? 'App Autopilot target' : 'Select for App Autopilot'}</button> : null}<small>{tile.viz.type.replace(/_/g, ' ')}</small></header>
                   {unsupportedTileFilters(tile).map((binding) => <div key={binding.filter} className="tile-filter-notice"><Filter size={11} /><span>{binding.unsupportedReason ?? `${humanize(binding.filter)} does not affect this component.`}</span></div>)}
                   {previewRun?.tiles.find((item) => item.tileId === tile.i)?.dataset?.unboundFilters?.map((issue) => <div key={`${issue.filterId}:${issue.code}`} className="tile-filter-notice"><Filter size={11} /><span>{issue.message}</span></div>)}
-                  {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} /></div>}
+                  {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} /></div>}
                 </article>
               ))}
               {!visibleItems.length ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>Build this page</strong><p>Open Sources on the left, choose governed data, and add its recommended view. You can also add text or a heading.</p><button type="button" onClick={() => { setPanel('sources'); setPanelOpen(true); }}>Open Sources</button></div> : null}
@@ -2933,6 +2965,8 @@ function SourcesPanel({
   error,
   disabled,
   datasetTilesEnabled,
+  enablingDatasets = false,
+  onEnableDatasets,
   sourceFeedback,
   onQuery,
   onSelect,
@@ -2955,6 +2989,8 @@ function SourcesPanel({
   error: string | null;
   disabled: boolean;
   datasetTilesEnabled: boolean;
+  enablingDatasets?: boolean;
+  onEnableDatasets?: () => void;
   sourceFeedback: AppStudioSourceFeedback | null;
   onQuery: (value: string) => void;
   onSelect: (item: AppBlockRecommendation) => void;
@@ -2975,7 +3011,7 @@ function SourcesPanel({
   const visibleItems = items.filter((item) => viewFilter === 'all' || recommendedComponentKind(item) === viewFilter);
   return <>
     <PanelTitle title="Sources" detail="Choose a Dataset, then build a governed field tile" />
-    {!datasetTilesEnabled ? <div className="source-catalog-empty" role="status"><strong>Field-based Dataset tiles are disabled for this local project.</strong><small>Add <code>{'"apps": { "datasets": true }'}</code> to <code>dql.config.json</code>, then refresh this source list.</small></div> : null}
+    {!datasetTilesEnabled ? <div className="source-catalog-empty" role="status"><strong>Build tiles from Dataset fields</strong><small>Pick measures and groupings from a governed Dataset instead of pinning a finished block. This writes <code>{'"apps": { "datasets": true }'}</code> to <code>dql.config.json</code>.</small>{onEnableDatasets ? <button type="button" className="primary" disabled={disabled || enablingDatasets} onClick={onEnableDatasets}>{enablingDatasets ? 'Turning on…' : 'Turn on field-based tiles'}</button> : null}</div> : null}
     <label className="source-search-primary">
       <Search size={15} />
       <input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search blocks, metrics, or domains" aria-label="Search governed sources" />
@@ -3022,7 +3058,7 @@ function SourcesPanel({
           <span className={item.status === 'certified' ? 'certified' : 'review'}>{item.status === 'certified' ? <ShieldCheck size={14} /> : <FileText size={14} />}</span>
           <div><strong title={item.name}>{humanize(item.name)}</strong><small>{humanize(item.domain)} · {sourceCatalogKindLabel(item)} · {item.status === 'certified' ? 'Certified' : 'Review required'}{isUsed ? ' · In App' : ''}</small></div>
         </button>
-        <button type="button" className="source-add-view" disabled={disabled || datasetDisabled} title={datasetDisabled ? 'Enable apps.datasets in dql.config.json to build field-based Dataset tiles.' : blockedByPolicy ? 'Enable the review lane and add this draft block in one saved change.' : undefined} onClick={() => item.capabilities?.dataset ? onSelect(item) : onAdd(item, kind)} aria-label={item.capabilities?.dataset ? `Configure fields for ${item.name}` : `${actionLabel}: ${item.name}`}>{item.capabilities?.dataset ? <><Settings2 size={13} /> Configure fields</> : <><Plus size={13} /> {actionLabel}</>}</button>
+        <button type="button" className="source-add-view" disabled={disabled || datasetDisabled} title={datasetDisabled ? 'Turn on field-based tiles at the top of this list to build from Dataset fields.' : blockedByPolicy ? 'Enable the review lane and add this draft block in one saved change.' : undefined} onClick={() => item.capabilities?.dataset ? onSelect(item) : onAdd(item, kind)} aria-label={item.capabilities?.dataset ? `Configure fields for ${item.name}` : `${actionLabel}: ${item.name}`}>{item.capabilities?.dataset ? <><Settings2 size={13} /> Configure fields</> : <><Plus size={13} /> {actionLabel}</>}</button>
         {rowFeedback ? <small className={`source-action-feedback ${rowFeedback.status}`} role={rowFeedback.status === 'error' ? 'alert' : 'status'}>{rowFeedback.status === 'error' ? rowFeedback.message : actionLabel}</small> : null}
         {isSelected ? <div className="source-catalog-detail">
           <p>{item.description || `${humanize(item.name)} from the ${humanize(item.domain)} domain.`}</p>
@@ -3034,7 +3070,7 @@ function SourcesPanel({
               {isUsed ? <button type="button" className="dataset-author-source" disabled={disabled || !item.sourceId} onClick={() => item.sourceId && onRefreshDatasetBinding(item.sourceId)}><ShieldCheck size={12} /> Refresh this App binding</button> : null}
             </>
             : item.capabilities?.dataset
-              ? <div className="source-view-options"><small>Enable <code>apps.datasets</code> in <code>dql.config.json</code> to build field-based tiles from this governed Dataset.</small></div>
+              ? <div className="source-view-options"><small>Turn on field-based tiles at the top of this list to build from this Dataset's fields.</small></div>
             : <div className="source-view-options" aria-label={`Add ${item.name} with another view`}>
               <button type="button" disabled={disabled} aria-label={blockedByPolicy ? `Enable review lane and add ${item.name} as KPI` : undefined} onClick={() => onAdd(item, 'kpi')}><Gauge size={13} /> KPI</button>
               <button type="button" disabled={disabled} aria-label={blockedByPolicy ? `Enable review lane and add ${item.name} as Chart` : undefined} onClick={() => onAdd(item, 'chart')}><BarChart3 size={13} /> Chart</button>
@@ -3064,133 +3100,32 @@ export function DatasetTileBuilder({
   onAdd: (source: AppBlockRecommendation, view: 'kpi' | 'chart' | 'table', query: TileQuery, title?: string) => void;
 }): JSX.Element {
   const descriptor = source.capabilities?.dataset as DatasetDescriptor;
-  const approvedMeasures = descriptor.fields.filter((field): field is DatasetMeasureField => field.kind === 'measure' && field.status === 'approved');
-  const groupFields = descriptor.fields.filter((field): field is DatasetPhysicalField => (
-    field.kind === 'physical'
-    && field.status === 'approved'
-    && ['dimension', 'key', 'time', 'attribute'].includes(field.role)
-  ));
-  const filterFields = descriptor.fields.filter((field): field is DatasetPhysicalField => field.kind === 'physical' && field.status === 'approved');
+  const firstMeasure = descriptor.fields.find((field): field is DatasetMeasureField => field.kind === 'measure' && field.status === 'approved');
+  const [query, setQuery] = useState<TileQuery>(() => ({
+    dimensions: [],
+    measures: firstMeasure ? [{ measure: firstMeasure.name }] : [],
+    respectsGlobalFilters: true,
+  }));
   const [view, setView] = useState<'kpi' | 'chart' | 'table'>('chart');
-  const [authoringMode, setAuthoringMode] = useState<'metrics' | 'detail'>('metrics');
-  const [measureNames, setMeasureNames] = useState<string[]>(() => approvedMeasures[0] ? [approvedMeasures[0].name] : []);
-  const [detailColumns, setDetailColumns] = useState<string[]>(() => filterFields.slice(0, Math.min(filterFields.length, 6)).map((field) => field.name));
-  const [detailLimit, setDetailLimit] = useState(100);
-  const [groupField, setGroupField] = useState('');
-  const [timeGrain, setTimeGrain] = useState('');
-  const [filters, setFilters] = useState<TileQuery['filters']>([]);
-  const [filterField, setFilterField] = useState(filterFields[0]?.name ?? '');
-  const [filterOp, setFilterOp] = useState<TileFilterOperator>('eq');
-  const [filterValue, setFilterValue] = useState('');
-  const [having, setHaving] = useState<TileQuery['having']>([]);
-  const [havingMeasure, setHavingMeasure] = useState(() => approvedMeasures[0]?.name ?? '');
-  const [havingOp, setHavingOp] = useState<TileFilterOperator>('gt');
-  const [havingValue, setHavingValue] = useState('');
   const [title, setTitle] = useState('');
-  const [filterError, setFilterError] = useState<string | null>(null);
-  const [havingError, setHavingError] = useState<string | null>(null);
   const [sourceValidation, setSourceValidation] = useState<{ state: 'idle' | 'running' | 'passed' | 'failed'; message?: string }>({ state: 'idle' });
-  const [comparisonEnabled, setComparisonEnabled] = useState(false);
-  const [comparisonDraft, setComparisonDraft] = useState<DatasetComparisonDraft>(() => defaultDatasetComparisonDraft(descriptor));
-  const grouped = groupFields.find((field) => field.name === groupField);
-  const comparisonTimeFields = useMemo(() => datasetComparisonTimeFields(descriptor), [descriptor]);
-  const comparisonResult = useMemo(() => comparisonEnabled
-    ? buildDatasetComparison(descriptor, comparisonDraft)
-    : undefined, [comparisonDraft, comparisonEnabled, descriptor]);
-  const comparison = comparisonResult?.status === 'ready' ? comparisonResult.comparison : undefined;
-  const comparisonError = comparisonEnabled
-    ? measureNames.length !== 1
-      ? 'Choose exactly one approved measure before comparing periods.'
-      : comparisonResult?.status === 'blocked'
-        ? comparisonResult.message
-        : undefined
-    : undefined;
-  const detailSupported = descriptor.operations.includes('detail');
-  const detailSourceEligible = descriptor.kind !== 'block'
-    ? false
-    : descriptor.binding.state === 'valid' || sourceValidation.state === 'passed';
-  const query = useMemo<TileQuery>(() => {
-    if (authoringMode === 'detail') {
-      return {
-        dimensions: [],
-        measures: [],
-        detail: true,
-        detailColumns,
-        limit: detailLimit,
-        ...(filters?.length ? { filters } : {}),
-        respectsGlobalFilters: true,
-      };
-    }
-    const dimensions = groupField
-      ? [{
-        field: groupField,
-        ...(grouped?.role === 'time' && timeGrain ? { timeGrain } : {}),
-      }]
-      : [];
-    const measures = measureNames.map((measure) => ({ measure }));
-    const primaryAlias = measures[0]?.measure;
-    return {
-      dimensions,
-      measures,
-      ...(filters?.length ? { filters } : {}),
-      ...(having?.length ? { having } : {}),
-      ...(comparison ? { comparison } : {}),
-      ...(view === 'chart' && dimensions.length && primaryAlias && !comparisonEnabled ? { orderBy: [{ alias: primaryAlias, direction: 'desc' as const }] } : {}),
-      ...(view === 'table' && !comparisonEnabled ? { limit: 100 } : {}),
-      respectsGlobalFilters: true,
-    };
-  }, [authoringMode, comparison, comparisonEnabled, detailColumns, detailLimit, filters, groupField, grouped?.role, having, measureNames, timeGrain, view]);
+  const detail = query.detail === true;
+  const detailSourceEligible = descriptor.kind === 'block'
+    && (descriptor.binding.state === 'valid' || sourceValidation.state === 'passed');
+  const effectiveView = detail ? 'table' : view;
   const validation = validateTileQuery(descriptor, query);
-  const primaryError = validation.diagnostics[0]?.message;
-  const toggleMeasure = (measure: string) => {
-    setMeasureNames((current) => {
-      const next = current.includes(measure)
-      ? current.filter((candidate) => candidate !== measure)
-      : [...current, measure];
-      setHaving((currentHaving) => currentHaving?.filter((filter) => next.includes(filter.field)) ?? []);
-      if (!next.includes(havingMeasure)) setHavingMeasure(next[0] ?? '');
-      return next;
-    });
-  };
-  const addFilter = () => {
-    const field = filterFields.find((candidate) => candidate.name === filterField);
-    if (!field) return;
-    const values = datasetBuilderFilterValues(field, filterOp, filterValue);
-    if (!values) {
-      setFilterError(filterOp === 'between'
-        ? 'Enter exactly two values, separated by a comma.'
-        : `Enter a valid ${field.type} value.`);
-      return;
-    }
-    setFilters((current) => [...(current ?? []), { field: field.name, op: filterOp, values }]);
-    setFilterValue('');
-    setFilterError(null);
-  };
-  const addHaving = () => {
-    if (!measureNames.includes(havingMeasure)) {
-      setHavingError('Choose a selected approved measure before filtering totals.');
-      return;
-    }
-    const values = datasetBuilderHavingValues(havingOp, havingValue);
-    if (!values) {
-      setHavingError(havingOp === 'between'
-        ? 'Enter exactly two numeric totals, separated by a comma.'
-        : 'Enter a valid numeric total.');
-      return;
-    }
-    setHaving((current) => [...(current ?? []), { field: havingMeasure, op: havingOp, values }]);
-    setHavingValue('');
-    setHavingError(null);
-  };
-  const changeGroup = (next: string) => {
-    if (comparisonEnabled && next && next === comparisonDraft.timeField) {
-      setGroupField('');
-      setTimeGrain('');
-      return;
-    }
-    const field = groupFields.find((candidate) => candidate.name === next);
-    setGroupField(next);
-    setTimeGrain(field?.role === 'time' ? field.time?.grains[0] ?? '' : '');
+  const visualization = datasetTileVisualizationCompatibility(query, effectiveView === 'kpi' ? 'kpi' : effectiveView === 'table' ? 'table' : 'bar');
+  const blockingMessage = !tileQueryValidationRuns(validation)
+    ? validation.diagnostics[0]?.message ?? 'Choose at least one measure, or switch to row details.'
+    : detail && !detailSourceEligible
+      ? 'Validate the complete source key before adding a detail tile. DQL will recheck it on every run.'
+      : !visualization.compatible ? visualization.message : undefined;
+  const changeQuery = (next: TileQuery) => {
+    setQuery(next);
+    // A comparison or grouped selection cannot show as a single KPI value.
+    // Move to the lossless view instead of silently dropping outputs.
+    const compatibility = datasetTileVisualizationCompatibility(next, view === 'kpi' ? 'kpi' : view === 'table' ? 'table' : 'bar');
+    if (!compatibility.compatible && compatibility.recoveryVisualization) setView(compatibility.recoveryVisualization);
   };
   const validateSourceGrain = async () => {
     const sourceId = source.sourceId?.trim();
@@ -3212,114 +3147,32 @@ export function DatasetTileBuilder({
     }
     setSourceValidation({ state: 'failed', message: result.error || 'The declared Dataset keys were not unique on the active target. Fix the source or contract, then validate again.' });
   };
-  const bindingNote = authoringMode === 'detail' && !detailSourceEligible
-    ? 'Detail rows need a validated source-grain key on the active target. Your selected columns stay in this draft while validation runs.'
-    : sourceValidation.state === 'passed'
-    ? sourceValidation.message
-    : descriptor.binding.state === 'valid'
-      ? 'Target binding is current for this Dataset.'
-      : 'Validate declared source keys for the active target, then add a tile. The draft keeps your field choices.';
+  const needsKeyValidation = descriptor.kind === 'block' && (descriptor.binding.state !== 'valid' || detail);
+  const defaultTitle = detail
+    ? `${descriptor.label} rows`
+    : `${humanize(query.measures[0]?.measure ?? 'Measure')}${query.dimensions[0] ? ` by ${humanize(query.dimensions[0].field)}` : ''}`;
   return <section className="dataset-tile-builder" aria-label={`Build a tile from ${descriptor.label}`}>
-    <header><span><Blocks size={13} /></span><div><small>FIELD-BASED DATASET</small><strong>1. Choose dataset · 2. Choose measures, grouping, or rows · 3. Add and run preview</strong></div></header>
-    <p className="dataset-builder-description">{descriptor.label} · {descriptor.trust === 'certified' ? 'Certified source' : 'Review-required source'}. Fields compile to governed DQL at run time.</p>
-    <fieldset className="dataset-builder-mode"><legend>Build mode</legend><label><input type="radio" name={`dataset-mode-${source.sourceId}`} checked={authoringMode === 'metrics'} disabled={disabled} onChange={() => setAuthoringMode('metrics')} /><span><strong>Measures and grouping</strong><small>Aggregate live rows into a KPI, chart, or table.</small></span></label><label title={detailSupported ? undefined : 'This source does not expose a validated grain-key detail operation.'}><input type="radio" name={`dataset-mode-${source.sourceId}`} checked={authoringMode === 'detail'} disabled={disabled || !detailSupported} onChange={() => { setAuthoringMode('detail'); setComparisonEnabled(false); setView('table'); }} /><span><strong>Bounded row details</strong><small>{detailSupported ? 'Choose approved physical fields and a row limit.' : 'This source has no supported grain-key detail operation.'}</small></span></label></fieldset>
-    {authoringMode === 'metrics' ? <>
-      <label><span>Tile type</span><select value={view} disabled={disabled} onChange={(event) => { const next = event.target.value as typeof view; setView(next); if (next === 'kpi') { setGroupField(''); setTimeGrain(''); } }}><option value="chart">Chart</option><option value="table">Table</option><option value="kpi">KPI</option></select></label>
-      <fieldset><legend>Approved measures</legend><div className="dataset-measure-list">{approvedMeasures.map((measure) => <label key={measure.qualifiedId}><input type="checkbox" checked={measureNames.includes(measure.name)} disabled={disabled} onChange={() => toggleMeasure(measure.name)} /><span><strong>{humanize(measure.name)}</strong><small>{measure.aggregation.replace(/_/g, ' ')}{measure.format?.kind ? ` · ${measure.format.kind}` : ''}</small></span></label>)}</div>{!approvedMeasures.length ? <small className="dataset-builder-error">This Dataset has no approved measure and cannot create a field tile.</small> : null}</fieldset>
-      <label><span>Group by</span><select value={groupField} disabled={disabled || view === 'kpi'} onChange={(event) => changeGroup(event.target.value)}><option value="">No grouping</option>{groupFields.map((field) => <option key={field.qualifiedId} value={field.name} disabled={comparisonEnabled && field.name === comparisonDraft.timeField}>{humanize(field.name)} · {field.role}</option>)}</select></label>
-      {grouped?.role === 'time' ? <label><span>Time grain</span><select value={timeGrain} disabled={disabled} onChange={(event) => setTimeGrain(event.target.value)}>{(grouped.time?.grains ?? []).map((grain) => <option key={grain} value={grain}>{humanize(grain)}</option>)}</select></label> : null}
-      <fieldset className="dataset-comparison-builder" aria-label="Compare periods"><legend>Compare periods</legend>
-        <label className="dataset-comparison-toggle"><input type="checkbox" checked={comparisonEnabled} disabled={disabled || comparisonTimeFields.length === 0} onChange={(event) => {
-          const enabled = event.target.checked;
-          setComparisonEnabled(enabled);
-          if (enabled && view === 'kpi') setView('table');
-          if (enabled && groupField === comparisonDraft.timeField) {
-            setGroupField('');
-            setTimeGrain('');
-          }
-        }} /><span><strong>Compare two calendar periods</strong><small>{comparisonTimeFields.length ? 'Shows current, prior, difference, and change together. It uses a Table or chart.' : 'This Dataset does not declare a supported comparison time field.'}</small></span></label>
-        {comparisonEnabled ? <div className="dataset-comparison-fields">
-          <label><span>Time field</span><select value={comparisonDraft.timeField} disabled={disabled} onChange={(event) => {
-            const timeField = event.target.value;
-            const next = comparisonTimeFields.find((field) => field.name === timeField);
-            setComparisonDraft((current) => ({
-              ...current,
-              timeField,
-              grain: next?.time?.grains.find((grain) => grain.toLowerCase() === current.grain.toLowerCase())
-                ?? next?.time?.grains.find((grain) => ['day', 'week', 'month', 'quarter', 'year'].includes(grain.toLowerCase()))
-                ?? current.grain,
-            }));
-            if (groupField === timeField) {
-              setGroupField('');
-              setTimeGrain('');
-            }
-          }}>{comparisonTimeFields.map((field) => <option key={field.qualifiedId} value={field.name}>{humanize(field.name)}</option>)}</select></label>
-          <label><span>Calendar grain</span><select value={comparisonDraft.grain} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, grain: event.target.value }))}>{(comparisonTimeFields.find((field) => field.name === comparisonDraft.timeField)?.time?.grains ?? []).filter((grain) => ['day', 'week', 'month', 'quarter', 'year'].includes(grain.toLowerCase())).map((grain) => <option key={grain} value={grain}>{humanize(grain)}</option>)}</select></label>
-          <div className="dataset-comparison-periods"><label><span>Current period starts</span><input type="date" value={comparisonDraft.baseStart} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, baseStart: event.target.value }))} /></label><label><span>Current period ends before</span><input type="date" value={comparisonDraft.baseEnd} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, baseEnd: event.target.value }))} /></label><label><span>Comparison period starts</span><input type="date" value={comparisonDraft.comparisonStart} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, comparisonStart: event.target.value }))} /></label><label><span>Comparison period ends before</span><input type="date" value={comparisonDraft.comparisonEnd} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, comparisonEnd: event.target.value }))} /></label></div>
-          <details className="dataset-comparison-advanced"><summary>Period settings</summary><label><span>Time role</span><select value={comparisonDraft.timeRole} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, timeRole: event.target.value }))}><option value="event_time">Event time</option><option value="reporting_time">Reporting time</option></select></label><label><span>Time zone</span><input value={comparisonDraft.timezone} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, timezone: event.target.value }))} aria-label="Comparison time zone" /></label><label><span>Calendar</span><select value={comparisonDraft.calendarId} disabled><option value="calendar:gregorian">Gregorian calendar</option></select></label><label><span>Completeness</span><select value={comparisonDraft.completenessPolicy} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, completenessPolicy: event.target.value as DatasetComparisonDraft['completenessPolicy'] }))}><option value="closed_period">Closed period</option><option value="latest_complete">Latest complete</option><option value="partial_current">Partial current</option></select></label></details>
-          {comparisonResult?.status === 'ready' ? <small className="dataset-comparison-summary">{comparisonResult.summary}</small> : null}
-        </div> : null}
-      </fieldset>
-    </> : <fieldset className="dataset-detail-columns"><legend>Approved detail columns</legend><small>Only physical source columns are available. The declared grain key orders rows deterministically without exposing it unless you select it.</small><div>{filterFields.map((field) => <label key={field.qualifiedId}><input type="checkbox" checked={detailColumns.includes(field.name)} disabled={disabled} onChange={() => setDetailColumns((current) => current.includes(field.name) ? current.filter((column) => column !== field.name) : [...current, field.name])} /><span>{humanize(field.name)}</span><em>{field.role}</em></label>)}</div><label className="dataset-detail-limit"><span>Maximum rows</span><input type="number" min={1} max={10000} value={detailLimit} disabled={disabled} onChange={(event) => setDetailLimit(Number(event.target.value))} /></label></fieldset>}
-    <fieldset className="dataset-filter-builder"><legend>Approved filter</legend><div><select value={filterField} disabled={disabled || !filterFields.length} onChange={(event) => { const next = event.target.value; setFilterField(next); setFilterOp(datasetBuilderFilterOperators(filterFields.find((field) => field.name === next))[0] ?? 'eq'); }}>{filterFields.map((field) => <option key={field.qualifiedId} value={field.name}>{humanize(field.name)}</option>)}</select><select value={filterOp} disabled={disabled} onChange={(event) => setFilterOp(event.target.value as TileFilterOperator)}>{datasetBuilderFilterOperators(filterFields.find((field) => field.name === filterField)).map((operator) => <option key={operator} value={operator}>{humanize(operator)}</option>)}</select></div><div><input value={filterValue} disabled={disabled} onChange={(event) => setFilterValue(event.target.value)} placeholder={filterOp === 'between' ? 'Start, end' : filterOp === 'in' || filterOp === 'not_in' ? 'One or more values, comma separated' : 'Value'} /><button type="button" disabled={disabled || !filterField || !filterValue.trim()} onClick={addFilter}><Plus size={12} /> Add filter</button></div>{filterError ? <small className="dataset-builder-error">{filterError}</small> : null}{filters?.length ? <div className="dataset-filter-chips">{filters.map((filter, index) => <button key={`${filter.field}-${filter.op}-${index}`} type="button" onClick={() => setFilters((current) => current?.filter((_, candidate) => candidate !== index))} title="Remove filter">{humanize(filter.field)} {filter.op.replace('_', ' ')} {filter.values?.map(String).join(', ')} <X size={11} /></button>)}</div> : null}</fieldset>
-    {authoringMode === 'metrics' && descriptor.operations.includes('having') ? <fieldset className="dataset-filter-builder" aria-label="Filter totals"><legend>Filter totals</legend><small>Applies after the selected measures are aggregated. It never changes the source-row filter.</small><div><select value={havingMeasure} disabled={disabled || !measureNames.length} onChange={(event) => setHavingMeasure(event.target.value)}>{measureNames.map((measure) => <option key={measure} value={measure}>{humanize(measure)}</option>)}</select><select value={havingOp} disabled={disabled} onChange={(event) => setHavingOp(event.target.value as TileFilterOperator)}>{datasetBuilderHavingOperators.map((operator) => <option key={operator} value={operator}>{humanize(operator)}</option>)}</select></div><div><input value={havingValue} disabled={disabled} onChange={(event) => setHavingValue(event.target.value)} placeholder={havingOp === 'between' ? 'Lower total, upper total' : havingOp === 'in' || havingOp === 'not_in' ? 'One or more totals, comma separated' : 'Total'} /><button type="button" disabled={disabled || !havingMeasure || !havingValue.trim()} onClick={addHaving}><Plus size={12} /> Add total filter</button></div>{havingError ? <small className="dataset-builder-error">{havingError}</small> : null}{having?.length ? <div className="dataset-filter-chips">{having.map((filter, index) => <button key={`${filter.field}-${filter.op}-${index}`} type="button" onClick={() => setHaving((current) => current?.filter((_, candidate) => candidate !== index))} title="Remove total filter">{humanize(filter.field)} {filter.op.replace('_', ' ')} {filter.values?.map(String).join(', ')} <X size={11} /></button>)}</div> : null}</fieldset> : null}
-    <label><span>Tile title <small>Optional</small></span><input value={title} disabled={disabled} onChange={(event) => setTitle(event.target.value)} placeholder={authoringMode === 'detail' ? 'Order line details' : `${humanize(measureNames[0] ?? 'Measure')} ${groupField ? `by ${humanize(groupField)}` : ''}`.trim()} /></label>
-    <small className="dataset-binding-note">{bindingNote}</small>
-    {descriptor.kind === 'block' && (descriptor.binding.state !== 'valid' || authoringMode === 'detail') ? <button type="button" className="dataset-validate-source" disabled={disabled || sourceValidation.state === 'running'} onClick={() => void validateSourceGrain()}><ShieldCheck size={12} /> {sourceValidation.state === 'running' ? 'Validating full source…' : sourceValidation.state === 'passed' ? 'Validate source keys again' : 'Validate source keys'}</button> : null}
+    <header><span><Blocks size={13} /></span><div><small>{descriptor.label.toUpperCase()}</small><strong>Pick measures and a grouping. The preview updates as you go.</strong></div></header>
+    <p className="dataset-builder-description">{descriptor.trust === 'certified' ? 'Certified Dataset' : 'Review-required Dataset'} · fields compile to governed SQL on every run.</p>
+    {!detail ? <label><span>Show as</span><select value={view} disabled={disabled} onChange={(event) => {
+      const next = event.target.value as typeof view;
+      setView(next);
+      if (next === 'kpi' && query.dimensions.length) {
+        const { orderBy: _orderBy, limit: _limit, ...rest } = query;
+        setQuery({ ...rest, dimensions: [] });
+      }
+    }}><option value="chart">Chart</option><option value="table">Table</option><option value="kpi">KPI</option></select></label> : null}
+    <TileQueryEditor descriptor={descriptor} query={query} disabled={disabled} onChange={changeQuery} idPrefix={`dataset-builder-${source.sourceId ?? source.id}`} />
+    <TileLivePreview sourceId={source.sourceId} query={query} runnable={tileQueryValidationRuns(validation)} reason={validation.diagnostics[0]?.message} />
+    <label><span>Tile title <small>Optional</small></span><input value={title} disabled={disabled} onChange={(event) => setTitle(event.target.value)} placeholder={defaultTitle} /></label>
+    {needsKeyValidation ? <>
+      <small className="dataset-binding-note">{sourceValidation.state === 'passed' ? sourceValidation.message : detail ? 'Row details need the Dataset key validated on the active warehouse.' : 'DQL checks the Dataset key on the active warehouse when the tile runs. You can validate it now.'}</small>
+      <button type="button" className="dataset-validate-source" disabled={disabled || sourceValidation.state === 'running'} onClick={() => void validateSourceGrain()}><ShieldCheck size={12} /> {sourceValidation.state === 'running' ? 'Validating full source…' : sourceValidation.state === 'passed' ? 'Validate source keys again' : 'Validate source keys'}</button>
+    </> : null}
     {sourceValidation.state === 'failed' && sourceValidation.message ? <small className="dataset-builder-error" role="alert">{sourceValidation.message}</small> : null}
-    {authoringMode === 'detail' && !detailSourceEligible ? <small className="dataset-builder-error" role="alert">Validate the complete source key before adding a detail tile. DQL will recheck it on every run.</small> : null}
-    {comparisonError ? <small className="dataset-builder-error" role="alert">{comparisonError}</small> : null}
-    {primaryError ? <small className="dataset-builder-error" role="alert">{primaryError}</small> : null}
-    <button type="button" className="primary dataset-add-tile" disabled={disabled || !tileQueryValidationRuns(validation) || Boolean(comparisonError) || (authoringMode === 'metrics' && measureNames.length === 0) || (authoringMode === 'detail' && !detailSourceEligible)} onClick={() => onAdd(source, authoringMode === 'detail' ? 'table' : view, query, title)}><Play size={13} /> Add tile and run preview</button>
+    {blockingMessage ? <small className="dataset-builder-error" role="alert">{blockingMessage}</small> : null}
+    <button type="button" className="primary dataset-add-tile" disabled={disabled || Boolean(blockingMessage)} onClick={() => onAdd(source, effectiveView, query, title)}><Play size={13} /> Add tile</button>
   </section>;
-}
-
-function datasetBuilderFilterOperators(field?: DatasetPhysicalField): TileFilterOperator[] {
-  if (!field) return ['eq'];
-  if (field.type === 'string') return ['eq', 'neq', 'contains', 'in', 'not_in'];
-  if (field.type === 'boolean') return ['eq', 'neq'];
-  return ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'in', 'not_in'];
-}
-
-const datasetBuilderHavingOperators: TileFilterOperator[] = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'in', 'not_in'];
-
-function datasetBuilderHavingValues(
-  operator: TileFilterOperator,
-  raw: string,
-): number[] | null {
-  if (!datasetBuilderHavingOperators.includes(operator)) return null;
-  const fragments = (operator === 'in' || operator === 'not_in' || operator === 'between')
-    ? raw.split(',').map((value) => value.trim()).filter(Boolean)
-    : [raw.trim()];
-  if (!fragments.length || (operator === 'between' && fragments.length !== 2)) return null;
-  if (operator !== 'in' && operator !== 'not_in' && operator !== 'between' && fragments.length !== 1) return null;
-  const values = fragments.map((value) => Number(value));
-  return values.every((value) => Number.isFinite(value)) ? values : null;
-}
-
-function datasetBuilderFilterValues(
-  field: DatasetPhysicalField,
-  operator: TileFilterOperator,
-  raw: string,
-): unknown[] | null {
-  const fragments = (operator === 'in' || operator === 'not_in' || operator === 'between')
-    ? raw.split(',').map((value) => value.trim()).filter(Boolean)
-    : [raw.trim()];
-  if (!fragments.length || (operator === 'between' && fragments.length !== 2)) return null;
-  if (operator !== 'in' && operator !== 'not_in' && operator !== 'between' && fragments.length !== 1) return null;
-  const values = fragments.map((value): unknown | undefined => {
-    if (field.type === 'number') {
-      const number = Number(value);
-      return Number.isFinite(number) ? number : undefined;
-    }
-    if (field.type === 'boolean') {
-      if (value.toLowerCase() === 'true') return true;
-      if (value.toLowerCase() === 'false') return false;
-      return undefined;
-    }
-    return value;
-  });
-  return values.some((value) => value === undefined) ? null : values;
 }
 
 function FiltersPanel({
@@ -3518,214 +3371,26 @@ function DatasetTileQueryInspector({
   onChange: (next: TileQuery, recovery?: { visualization: 'table'; message: string }) => void;
   onOpenSources: () => void;
 }): JSX.Element {
-  const measures = descriptor.fields.filter((field): field is DatasetMeasureField => field.kind === 'measure' && field.status === 'approved');
-  const dimensions = descriptor.fields.filter((field): field is DatasetPhysicalField => field.kind === 'physical' && field.status === 'approved' && ['dimension', 'key', 'time', 'attribute'].includes(field.role));
-  const filterFields = descriptor.fields.filter((field): field is DatasetPhysicalField => field.kind === 'physical' && field.status === 'approved');
-  const selectedMeasures = new Set(query.measures.map((selection) => selection.measure));
-  const selectedDimension = query.dimensions[0];
-  const grouped = dimensions.find((field) => field.name === selectedDimension?.field || field.qualifiedId === selectedDimension?.field);
-  const detailSupported = descriptor.operations.includes('detail');
-  const detail = query.detail === true;
-  const selectedDetailColumns = new Set(query.detailColumns ?? filterFields.map((field) => field.name));
-  const [filterField, setFilterField] = useState(filterFields[0]?.name ?? '');
-  const [filterOp, setFilterOp] = useState<TileFilterOperator>('eq');
-  const [filterValue, setFilterValue] = useState('');
-  const [havingMeasure, setHavingMeasure] = useState(() => query.measures[0]?.measure ?? '');
-  const [havingOp, setHavingOp] = useState<TileFilterOperator>('gt');
-  const [havingValue, setHavingValue] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const comparisonTimeFields = useMemo(() => datasetComparisonTimeFields(descriptor), [descriptor]);
-  const comparisonKey = query.comparison ? JSON.stringify(query.comparison) : '';
-  const [comparisonEnabled, setComparisonEnabled] = useState(Boolean(query.comparison));
-  const [comparisonDraft, setComparisonDraft] = useState<DatasetComparisonDraft>(() => datasetComparisonDraftFromQuery(descriptor, query.comparison));
-  const comparisonResult = useMemo(() => comparisonEnabled
-    ? buildDatasetComparison(descriptor, comparisonDraft)
-    : undefined, [comparisonDraft, comparisonEnabled, descriptor]);
-  const comparisonSummary = datasetComparisonSummary(query.comparison);
-  useEffect(() => {
-    setFilterField(filterFields[0]?.name ?? '');
-    setFilterOp('eq');
-    setFilterValue('');
-    setHavingMeasure(query.measures[0]?.measure ?? '');
-    setHavingOp('gt');
-    setHavingValue('');
-    setError(null);
-  }, [descriptor.id, descriptor.sourceRevision]);
-  useEffect(() => {
-    const selected = query.measures.map((selection) => selection.measure);
-    if (!selected.includes(havingMeasure)) setHavingMeasure(selected[0] ?? '');
-  }, [havingMeasure, query.measures.map((selection) => selection.measure).join('|')]);
-  useEffect(() => {
-    setComparisonEnabled(Boolean(query.comparison));
-    setComparisonDraft(datasetComparisonDraftFromQuery(descriptor, query.comparison));
-  }, [comparisonKey, descriptor.id, descriptor.sourceRevision]);
-  const commit = (next: TileQuery) => {
+  // Saved tiles change only through a query the contract runs. A refused
+  // edit leaves the tile as it was and says why.
+  const commit = (next: TileQuery): string | void => {
     const validation = validateTileQuery(descriptor, next);
     if (!tileQueryValidationRuns(validation)) {
-      setError(validation.diagnostics[0]?.message ?? 'The changed Dataset selection is not covered by this source contract.');
-      return;
+      return validation.diagnostics[0]?.message ?? 'That change is not covered by this Dataset.';
     }
     const visualizationContract = datasetTileVisualizationCompatibility(next, visualization);
     if (!visualizationContract.compatible) {
-      const message = visualizationContract.message ?? 'This Dataset field selection requires a Table visualization.';
-      if (visualizationContract.recoveryVisualization) {
-        setError(message);
-        onChange(next, { visualization: visualizationContract.recoveryVisualization, message });
-        return;
-      }
-      setError(message);
-      return;
+      const message = visualizationContract.message ?? 'This field selection needs a Table.';
+      if (!visualizationContract.recoveryVisualization) return message;
+      onChange(next, { visualization: visualizationContract.recoveryVisualization, message });
+      return message;
     }
-    setError(null);
     onChange(next);
-  };
-  const toggleMeasure = (measure: DatasetMeasureField) => {
-    const nextMeasures = query.measures.some((selection) => selection.measure === measure.name || selection.measure === measure.qualifiedId)
-      ? query.measures.filter((selection) => selection.measure !== measure.name && selection.measure !== measure.qualifiedId)
-      : [...query.measures, { measure: measure.name }];
-    if (nextMeasures.length === 0) {
-      setError('A Dataset tile needs at least one approved measure.');
-      return;
-    }
-    const selected = new Set(nextMeasures.map((selection) => selection.measure));
-    const nextHaving = (query.having ?? []).filter((filter) => selected.has(filter.field));
-    const { having: _having, ...withoutHaving } = query;
-    commit(nextHaving.length ? { ...withoutHaving, measures: nextMeasures, having: nextHaving } : { ...withoutHaving, measures: nextMeasures });
-  };
-  const changeGroup = (fieldName: string) => {
-    const field = dimensions.find((candidate) => candidate.name === fieldName);
-    const dimensionsNext = field ? [{ field: field.name, ...(field.role === 'time' && field.time?.grains[0] ? { timeGrain: field.time.grains[0] } : {}) }] : [];
-    commit({ ...query, dimensions: dimensionsNext });
-  };
-  const changeMode = (next: 'metrics' | 'detail') => {
-    if (next === 'detail') {
-      const columns = query.detailColumns?.length ? query.detailColumns : filterFields.slice(0, Math.min(filterFields.length, 6)).map((field) => field.name);
-      commit({
-        dimensions: [],
-        measures: [],
-        detail: true,
-        detailColumns: columns,
-        limit: typeof query.limit === 'number' ? query.limit : 100,
-        ...(query.filters?.length ? { filters: query.filters } : {}),
-        ...(query.respectsGlobalFilters === false ? { respectsGlobalFilters: false } : {}),
-      });
-      return;
-    }
-    const firstMeasure = measures[0];
-    if (!firstMeasure) {
-      setError('This Dataset has no approved measure for a grouped tile.');
-      return;
-    }
-    commit({
-      dimensions: [],
-      measures: [{ measure: firstMeasure.name }],
-      ...(query.filters?.length ? { filters: query.filters } : {}),
-      ...(query.respectsGlobalFilters === false ? { respectsGlobalFilters: false } : {}),
-    });
-  };
-  const toggleDetailColumn = (field: DatasetPhysicalField) => {
-    const columns = selectedDetailColumns.has(field.name)
-      ? [...selectedDetailColumns].filter((column) => column !== field.name)
-      : [...selectedDetailColumns, field.name];
-    commit({ ...query, detailColumns: columns });
-  };
-  const addFilter = () => {
-    const field = filterFields.find((candidate) => candidate.name === filterField);
-    if (!field) return;
-    const values = datasetBuilderFilterValues(field, filterOp, filterValue);
-    if (!values) {
-      setError(filterOp === 'between' ? 'Enter exactly two values, separated by a comma.' : `Enter a valid ${field.type} filter value.`);
-      return;
-    }
-    commit({ ...query, filters: [...(query.filters ?? []), { field: field.name, op: filterOp, values }] });
-    setFilterValue('');
-  };
-  const addHaving = () => {
-    const selected = query.measures.some((measure) => measure.measure === havingMeasure);
-    if (!selected) {
-      setError('Choose a selected approved measure before filtering totals.');
-      return;
-    }
-    const values = datasetBuilderHavingValues(havingOp, havingValue);
-    if (!values) {
-      setError(havingOp === 'between' ? 'Enter exactly two numeric totals, separated by a comma.' : 'Enter a valid numeric total.');
-      return;
-    }
-    commit({ ...query, having: [...(query.having ?? []), { field: havingMeasure, op: havingOp, values }] });
-    setHavingValue('');
-  };
-  const applyComparison = () => {
-    if (detail) {
-      setError('A period comparison cannot be combined with bounded row details. Switch back to measures and grouping first.');
-      return;
-    }
-    if (query.measures.length !== 1) {
-      setError('Choose exactly one approved measure before applying a period comparison.');
-      return;
-    }
-    if (query.dimensions.some((dimension) => dimension.field === comparisonDraft.timeField)) {
-      setError('Remove the comparison time field from Group by before applying periods. The selected periods already define that time scope.');
-      return;
-    }
-    if (comparisonResult?.status !== 'ready') {
-      setError(comparisonResult?.status === 'blocked'
-        ? comparisonResult.message
-        : 'Complete the comparison periods before applying them.');
-      return;
-    }
-    const { comparison: _comparison, orderBy: _orderBy, limit: _limit, ...withoutPresentationLimits } = query;
-    // A comparison aligns complete period results before it calculates deltas.
-    // The explicit Apply action removes only incompatible presentation caps;
-    // it retains every selected field and filter.
-    commit({ ...withoutPresentationLimits, comparison: comparisonResult.comparison });
-  };
-  const removeComparison = () => {
-    const { comparison: _comparison, ...withoutComparison } = query;
-    setComparisonEnabled(false);
-    commit(withoutComparison);
   };
   return <section className="dataset-query-inspector">
     <label>Dataset fields</label>
-    <p>{descriptor.label} · fixed source revision · field changes invalidate the settled preview.</p>
-    <fieldset className="dataset-builder-mode"><legend>Build mode</legend><label><input type="radio" name={`dataset-inspector-mode-${descriptor.id}`} checked={!detail} disabled={disabled} onChange={() => changeMode('metrics')} /><span><strong>Measures and grouping</strong><small>Aggregate rows using approved measures.</small></span></label><label title={detailSupported ? undefined : 'This source does not expose a validated grain-key detail operation.'}><input type="radio" name={`dataset-inspector-mode-${descriptor.id}`} checked={detail} disabled={disabled || !detailSupported} onChange={() => changeMode('detail')} /><span><strong>Bounded row details</strong><small>{detailSupported ? 'Selected source fields, with a fixed maximum row count.' : 'Not available for this Dataset source.'}</small></span></label></fieldset>
-    {!detail ? <>
-      <div className="dataset-inspector-measures">{measures.map((measure) => <label key={measure.qualifiedId}><input type="checkbox" checked={selectedMeasures.has(measure.name) || selectedMeasures.has(measure.qualifiedId)} disabled={disabled} onChange={() => toggleMeasure(measure)} /><span>{humanize(measure.name)}</span><small>{measure.aggregation.replace(/_/g, ' ')}</small></label>)}</div>
-      <div className="dataset-inspector-row"><span>Group by</span><select value={grouped?.name ?? ''} disabled={disabled} onChange={(event) => changeGroup(event.target.value)}><option value="">No grouping</option>{dimensions.map((field) => <option key={field.qualifiedId} value={field.name}>{humanize(field.name)} · {field.role}</option>)}</select></div>
-      {grouped?.role === 'time' ? <div className="dataset-inspector-row"><span>Time grain</span><select value={selectedDimension?.timeGrain ?? grouped.time?.grains[0] ?? ''} disabled={disabled} onChange={(event) => commit({ ...query, dimensions: [{ field: grouped.name, timeGrain: event.target.value }] })}>{(grouped.time?.grains ?? []).map((grain) => <option key={grain} value={grain}>{humanize(grain)}</option>)}</select></div> : null}
-      <fieldset className="dataset-comparison-builder dataset-inspector-comparison" aria-label="Compare periods">
-        <legend>Compare periods</legend>
-        <label className="dataset-comparison-toggle"><input type="checkbox" checked={comparisonEnabled} disabled={disabled || (!comparisonTimeFields.length && !comparisonEnabled)} onChange={(event) => {
-          if (!event.target.checked) {
-            removeComparison();
-            return;
-          }
-          setComparisonEnabled(true);
-          setComparisonDraft(datasetComparisonDraftFromQuery(descriptor, query.comparison));
-        }} /><span><strong>Compare two calendar periods</strong><small>{comparisonTimeFields.length ? 'Run current, prior, difference, and change from the saved Dataset query.' : query.comparison ? 'This saved comparison needs a supported time field before it can run again.' : 'This Dataset does not declare a supported comparison time field.'}</small></span></label>
-        {comparisonEnabled ? <div className="dataset-comparison-fields">
-          <label><span>Time field</span><select value={comparisonDraft.timeField} disabled={disabled || !comparisonTimeFields.length} onChange={(event) => {
-            const timeField = event.target.value;
-            const next = comparisonTimeFields.find((field) => field.name === timeField);
-            setComparisonDraft((current) => ({
-              ...current,
-              timeField,
-              grain: next?.time?.grains.find((grain) => grain.toLowerCase() === current.grain.toLowerCase())
-                ?? next?.time?.grains.find((grain) => ['day', 'week', 'month', 'quarter', 'year'].includes(grain.toLowerCase()))
-                ?? current.grain,
-            }));
-          }}>{comparisonTimeFields.map((field) => <option key={field.qualifiedId} value={field.name}>{humanize(field.name)}</option>)}</select></label>
-          <label><span>Calendar grain</span><select value={comparisonDraft.grain} disabled={disabled || !comparisonTimeFields.length} onChange={(event) => setComparisonDraft((current) => ({ ...current, grain: event.target.value }))}>{(comparisonTimeFields.find((field) => field.name === comparisonDraft.timeField)?.time?.grains ?? []).filter((grain) => ['day', 'week', 'month', 'quarter', 'year'].includes(grain.toLowerCase())).map((grain) => <option key={grain} value={grain}>{humanize(grain)}</option>)}</select></label>
-          <div className="dataset-comparison-periods"><label><span>Current period starts</span><input type="date" value={comparisonDraft.baseStart} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, baseStart: event.target.value }))} /></label><label><span>Current period ends before</span><input type="date" value={comparisonDraft.baseEnd} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, baseEnd: event.target.value }))} /></label><label><span>Comparison period starts</span><input type="date" value={comparisonDraft.comparisonStart} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, comparisonStart: event.target.value }))} /></label><label><span>Comparison period ends before</span><input type="date" value={comparisonDraft.comparisonEnd} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, comparisonEnd: event.target.value }))} /></label></div>
-          <details className="dataset-comparison-advanced"><summary>Period settings</summary><label><span>Time role</span><select value={comparisonDraft.timeRole} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, timeRole: event.target.value }))}><option value="event_time">Event time</option><option value="reporting_time">Reporting time</option></select></label><label><span>Time zone</span><input value={comparisonDraft.timezone} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, timezone: event.target.value }))} aria-label="Comparison time zone" /></label><label><span>Calendar</span><select value={comparisonDraft.calendarId} disabled><option value="calendar:gregorian">Gregorian calendar</option></select></label><label><span>Completeness</span><select value={comparisonDraft.completenessPolicy} disabled={disabled} onChange={(event) => setComparisonDraft((current) => ({ ...current, completenessPolicy: event.target.value as DatasetComparisonDraft['completenessPolicy'] }))}><option value="closed_period">Closed period</option><option value="latest_complete">Latest complete</option><option value="partial_current">Partial current</option></select></label></details>
-          {comparisonResult?.status === 'ready' ? <small className="dataset-comparison-summary">{comparisonResult.summary}</small> : null}
-          <button type="button" disabled={disabled || comparisonResult?.status !== 'ready'} onClick={applyComparison}>Apply comparison</button>
-        </div> : null}
-        {comparisonSummary ? <small className="dataset-comparison-summary">Saved: {comparisonSummary}</small> : null}
-      </fieldset>
-    </> : <fieldset className="dataset-detail-columns"><legend>Detail columns</legend><small>These are live source rows. DQL orders by the declared source key and rechecks key eligibility before execution.</small><div>{filterFields.map((field) => <label key={field.qualifiedId}><input type="checkbox" checked={selectedDetailColumns.has(field.name)} disabled={disabled} onChange={() => toggleDetailColumn(field)} /><span>{humanize(field.name)}</span><em>{field.role}</em></label>)}</div><label className="dataset-detail-limit"><span>Maximum rows</span><input type="number" min={1} max={10000} value={typeof query.limit === 'number' ? query.limit : 100} disabled={disabled} onChange={(event) => commit({ ...query, limit: Number(event.target.value) })} /></label></fieldset>}
-    <fieldset className="dataset-inspector-filters"><legend>Tile filters</legend><div><select value={filterField} disabled={disabled || !filterFields.length} onChange={(event) => { const next = event.target.value; setFilterField(next); setFilterOp(datasetBuilderFilterOperators(filterFields.find((field) => field.name === next))[0] ?? 'eq'); }}>{filterFields.map((field) => <option key={field.qualifiedId} value={field.name}>{humanize(field.name)}</option>)}</select><select value={filterOp} disabled={disabled} onChange={(event) => setFilterOp(event.target.value as TileFilterOperator)}>{datasetBuilderFilterOperators(filterFields.find((field) => field.name === filterField)).map((operator) => <option key={operator} value={operator}>{humanize(operator)}</option>)}</select></div><div><input value={filterValue} disabled={disabled} onChange={(event) => setFilterValue(event.target.value)} placeholder={filterOp === 'between' ? 'Start, end' : 'Value'} /><button type="button" disabled={disabled || !filterField || !filterValue.trim()} onClick={addFilter}><Plus size={11} /> Add</button></div>{query.filters?.length ? <div className="dataset-filter-chips">{query.filters.map((filter, index) => <button key={`${filter.field}-${filter.op}-${index}`} type="button" disabled={disabled} onClick={() => commit({ ...query, filters: query.filters?.filter((_, candidate) => candidate !== index) })}>{humanize(filter.field)} {filter.op.replace('_', ' ')} {filter.values?.map(String).join(', ')} <X size={11} /></button>)}</div> : null}</fieldset>
-    {!detail && descriptor.operations.includes('having') ? <fieldset className="dataset-inspector-filters" aria-label="Filter totals"><legend>Filter totals</legend><small>Filters aggregated measures after calculation; source-row filters remain separate.</small><div><select value={havingMeasure} disabled={disabled || !query.measures.length} onChange={(event) => setHavingMeasure(event.target.value)}>{query.measures.map((measure) => <option key={measure.measure} value={measure.measure}>{humanize(measure.measure)}</option>)}</select><select value={havingOp} disabled={disabled} onChange={(event) => setHavingOp(event.target.value as TileFilterOperator)}>{datasetBuilderHavingOperators.map((operator) => <option key={operator} value={operator}>{humanize(operator)}</option>)}</select></div><div><input value={havingValue} disabled={disabled} onChange={(event) => setHavingValue(event.target.value)} placeholder={havingOp === 'between' ? 'Lower total, upper total' : 'Total'} /><button type="button" disabled={disabled || !havingMeasure || !havingValue.trim()} onClick={addHaving}><Plus size={11} /> Add total filter</button></div>{query.having?.length ? <div className="dataset-filter-chips">{query.having.map((filter, index) => <button key={`${filter.field}-${filter.op}-${index}`} type="button" disabled={disabled} onClick={() => { const next = query.having?.filter((_, candidate) => candidate !== index) ?? []; const { having: _having, ...withoutHaving } = query; commit(next.length ? { ...withoutHaving, having: next } : withoutHaving); }}>{humanize(filter.field)} {filter.op.replace('_', ' ')} {filter.values?.map(String).join(', ')} <X size={11} /></button>)}</div> : null}</fieldset> : null}
-    {error ? <small className="dataset-builder-error" role="alert">{error}</small> : null}
+    <p>{descriptor.label} · changes rerun this tile against the same source revision.</p>
+    <TileQueryEditor descriptor={descriptor} query={query} disabled={disabled} onChange={commit} idPrefix={`dataset-inspector-${descriptor.id}`} />
     <button type="button" className="dataset-change-source" disabled={disabled} onClick={onOpenSources}><Blocks size={12} /> Choose another Dataset</button>
   </section>;
 }
@@ -4047,6 +3712,8 @@ export function StudioTilePreview({
   onDrillBack,
   onNavigate,
   hasNavigation = false,
+  linkProposal,
+  onLinkField,
 }: {
   tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number];
   run?: DashboardRunResponse['tiles'][number];
@@ -4059,6 +3726,9 @@ export function StudioTilePreview({
   onDrillBack?: () => void;
   onNavigate?: () => void;
   hasNavigation?: boolean;
+  /** Same-name, same-type fields on page Datasets this tile could filter. */
+  linkProposal?: DatasetCrossFilterLinkProposal;
+  onLinkField?: () => void;
 }): JSX.Element {
   const frameRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(560);
@@ -4122,6 +3792,10 @@ export function StudioTilePreview({
         </select></label> : null}
         {selectedMarkAction?.kind === 'drill' ? <small>{markActions.length > 1 ? 'Choose the drill action, then ' : ''}Click a {humanize(selectedMarkAction.candidate.fromField)} mark to drill to {humanize(selectedMarkAction.candidate.toField)}.</small> : null}
         {hierarchy.activeSteps.length > 0 && onDrillBack ? <button type="button" onClick={onDrillBack}>Back</button> : null}
+      </div> : null}
+      {!selectableFields.length && linkProposal && onLinkField ? <div className="dataset-link-hint" role="note">
+        <span>Clicking this {chart === 'table' ? 'table' : 'chart'} filters nothing yet.</span>
+        <button type="button" onClick={onLinkField} title={`Map ${humanize(linkProposal.fieldLabel)} to: ${linkProposal.targetLabels.join(', ')}`}>Link {humanize(linkProposal.fieldLabel)} to {linkProposal.mappings.length === 1 ? linkProposal.targetLabels[0] : `${linkProposal.mappings.length} Datasets`}</button>
       </div> : null}
       {hasNavigation ? <button type="button" className="dataset-detail-navigation" onClick={onNavigate}>Open configured details</button> : null}
     </div>

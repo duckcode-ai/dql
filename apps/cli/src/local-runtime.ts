@@ -17759,6 +17759,32 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // One explicit author action turns field-based Dataset tiles on for this
+    // project, instead of asking them to hand-edit dql.config.json. It only
+    // sets `apps.datasets`; every other key is preserved.
+    if (req.method === 'POST' && path === '/api/app-datasets/enable') {
+      try {
+        const configPath = join(projectRoot, 'dql.config.json');
+        const raw = existsSync(configPath)
+          ? JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+          : {};
+        const apps = raw.apps && typeof raw.apps === 'object' && !Array.isArray(raw.apps)
+          ? raw.apps as Record<string, unknown>
+          : {};
+        if (apps.datasets !== true) {
+          raw.apps = { ...apps, datasets: true };
+          writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf-8');
+          projectConfig = loadProjectConfig(projectRoot);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, datasets: datasetsAppFeatureEnabled(projectConfig) }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'POST' && path === '/api/app-datasets/preview') {
       try {
         const resolved = await resolveMcpDatasetRuntimeRequest(await readJSON(req));

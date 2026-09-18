@@ -11,6 +11,7 @@ import {
   buildDatasetHierarchyDrill,
   appendDatasetHierarchyDrill,
   popDatasetHierarchyDrill,
+  proposeDatasetCrossFilterLinks,
   replaceDatasetCrossFilter,
 } from './app-dataset-interactions';
 
@@ -200,3 +201,44 @@ function hierarchyDescriptor(): DatasetDescriptor {
     execution: { route: 'governed_sql' },
   };
 }
+
+describe('cross-filter link proposals', () => {
+  const physical = (name: string, type: string, status = 'approved') => ({ kind: 'physical', name, qualifiedId: `f.${name}`, type, role: 'dimension', status });
+  const descriptor = (label: string, fields: unknown[]) => ({ label, fields }) as never;
+  const orders = descriptor('Orders', [physical('region', 'string'), physical('order_date', 'date')]);
+  const revenue = descriptor('Revenue model', [physical('region', 'string')]);
+  const targets = descriptor('Targets', [physical('region', 'number')]);
+  const page = {
+    id: 'overview',
+    datasets: [
+      { id: 'orders', sourceId: 's.orders', sourceRevision: 'r1' },
+      { id: 'revenue', sourceId: 's.revenue', sourceRevision: 'r1' },
+      { id: 'targets', sourceId: 's.targets', sourceRevision: 'r1' },
+    ],
+    layout: { items: [] },
+  } as never;
+  const byId: Record<string, unknown> = { orders, revenue, targets };
+  const tile = { i: 'by-region', sourceId: 's.orders', sourceRevision: 'r1', query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] } } as never;
+
+  it('proposes only same-name, same-type approved fields and leaves the choice to the author', () => {
+    const proposal = proposeDatasetCrossFilterLinks({ page, tile, descriptorFor: (binding) => byId[binding.id] as never });
+    expect(proposal).toEqual({
+      fromField: 'region',
+      fieldLabel: 'region',
+      mappings: [
+        { fromTileId: 'by-region', fromField: 'region', toDataset: 'orders', toField: 'region' },
+        { fromTileId: 'by-region', fromField: 'region', toDataset: 'revenue', toField: 'region' },
+      ],
+      targetLabels: ['Orders', 'Revenue model'],
+    });
+  });
+
+  it('proposes nothing once the field is mapped, or for time and detail tiles', () => {
+    const mapped = { ...(page as object), interactions: { crossFilter: { mappings: [{ fromTileId: 'by-region', fromField: 'region', toDataset: 'orders', toField: 'region' }] } } } as never;
+    expect(proposeDatasetCrossFilterLinks({ page: mapped, tile, descriptorFor: (binding) => byId[binding.id] as never })).toBeUndefined();
+    const monthly = { ...(tile as object), query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'revenue' }] } } as never;
+    expect(proposeDatasetCrossFilterLinks({ page, tile: monthly, descriptorFor: (binding) => byId[binding.id] as never })).toBeUndefined();
+    const detail = { ...(tile as object), query: { dimensions: [], measures: [], detail: true, detailColumns: ['region'], limit: 10 } } as never;
+    expect(proposeDatasetCrossFilterLinks({ page, tile: detail, descriptorFor: (binding) => byId[binding.id] as never })).toBeUndefined();
+  });
+});

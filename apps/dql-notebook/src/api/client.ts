@@ -2686,6 +2686,16 @@ export interface DashboardRunResponse {
   }>;
 }
 
+/** Live, evidence-free preview of one Dataset field query (App Studio builder). */
+export type DatasetTileQueryPreview =
+  | {
+    ok: true;
+    result?: { columns?: unknown[]; rows?: Array<Record<string, unknown>>; rowCount?: number; truncated?: boolean };
+    validation?: { outcome: string; adaptations?: Array<{ kind: string; message: string }> };
+    trustState?: string;
+  }
+  | { ok: false; error?: string; validation?: { outcome: string } };
+
 /** Response from the server-owned review-draft save path. SQL and rows never
  * cross this App Studio boundary. */
 export type DatasetTileSaveAsBlockResponse =
@@ -8228,15 +8238,13 @@ export const api = {
     variables?: Record<string, unknown>,
     crossFilters?: DashboardDatasetCrossFilter[],
     options?: DashboardRunOptions,
-  ): Promise<DashboardRunResponse | null> {
-    try {
-      return await request<DashboardRunResponse>(
-        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
-        { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}) }) },
-      );
-    } catch {
-      return null;
-    }
+  ): Promise<DashboardRunResponse> {
+    // Throw the server's typed refusal (access, source drift, feature off)
+    // so the viewer shows why a page did not run, not a generic failure.
+    return request<DashboardRunResponse>(
+      `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
+      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}) }) },
+    );
   },
 
   async runAppBuildPreview(
@@ -8272,23 +8280,37 @@ export const api = {
     }
   },
 
-  async retryDashboardTile(
-    appId: string,
-    dashboardId: string,
-    tileId: string,
-    variables?: Record<string, unknown>,
-    crossFilters?: DashboardDatasetCrossFilter[],
-    options?: Omit<DashboardRunOptions, 'tileId'>,
-  ): Promise<DashboardRunResponse | null> {
+  /** Turn on field-based Dataset tiles for this project (writes `apps.datasets: true`). */
+  async enableDatasetTiles(): Promise<{ ok: boolean; datasets?: boolean; error?: string }> {
     try {
-      return await request<DashboardRunResponse>(
-        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
-        { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, tileId, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}) }) },
-      );
-    } catch {
-      return null;
+      return await request('/api/app-datasets/enable', { method: 'POST', body: '{}' });
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
+
+  /**
+   * Live preview of one field query while it is being built. The server runs
+   * it through the ordinary governed Dataset runtime in an ephemeral one-tile
+   * page: same validation, proofs, and execution, but no App receipt, story,
+   * or publication evidence. Pass a signal so a newer edit cancels this one.
+   */
+  async previewDatasetTileQuery(
+    input: { sourceId: string; query: TileQuery },
+    signal?: AbortSignal,
+  ): Promise<DatasetTileQueryPreview> {
+    try {
+      return await request<DatasetTileQueryPreview>('/api/app-datasets/run', {
+        method: 'POST',
+        body: JSON.stringify({ sourceId: input.sourceId, query: input.query }),
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+
 
   async getDashboardStory(appId: string, dashboardId: string, runId: string): Promise<Pick<DashboardRunResponse, 'runId' | 'snapshotId' | 'filterFingerprint' | 'resultFingerprint' | 'personaFingerprint' | 'facts' | 'story'> | null> {
     try {
