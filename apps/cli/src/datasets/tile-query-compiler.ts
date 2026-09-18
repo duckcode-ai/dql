@@ -142,10 +142,11 @@ export function compileDatasetTileQuery(input: {
     return `$${nextPosition}`;
   };
   const quote = (identifier: string) => dialect.quoteIdentifier(identifier);
+  const column = (name: string) => `ds.${sourceColumnReference(name, input.driver, quote)}`;
   const physicalExpression = (name: string): string => {
     const field = datasetPhysicalField(input.descriptor, name);
     if (!field) throw new TileQueryCompilationError('DATASET_FIELD_DRIFT', `Dataset field ${name} no longer resolves.`);
-    return `ds.${quote(field.name)}`;
+    return column(field.name);
   };
 
   const whereFilters = effectiveQuery.filters ?? [];
@@ -188,10 +189,10 @@ export function compileDatasetTileQuery(input: {
     const selectPrefix = !dialect.limitAtEnd && limit ? `TOP ${limit} ` : '';
     const sql = [
       `WITH ds AS (${sourceSql})`,
-      `SELECT ${selectPrefix}${fields.map((field) => `ds.${quote(field.name)} AS ${quote(field.name)}`).join(', ')}`,
+      `SELECT ${selectPrefix}${fields.map((field) => `${column(field.name)} AS ${quote(field.name)}`).join(', ')}`,
       'FROM ds',
       ...(whereClauses.length ? [`WHERE ${whereClauses.join(' AND ')}`] : []),
-      `ORDER BY ${keyFields.map((field) => `ds.${quote(field.name)} ASC`).join(', ')}`,
+      `ORDER BY ${keyFields.map((field) => `${column(field.name)} ASC`).join(', ')}`,
       ...(dialect.limitAtEnd && limit ? [dialect.limitClause(limit)] : []),
     ].join('\n');
     return compiledResult(sql, sqlParams, variables, fields.map((field) => ({
@@ -212,8 +213,8 @@ export function compileDatasetTileQuery(input: {
     }
     const alias = safeAlias(selection.alias ?? (selection.timeGrain ? `${field.name}_${selection.timeGrain}` : field.name));
     const expression = selection.timeGrain
-      ? dialect.dateTrunc(selection.timeGrain, `ds.${quote(field.name)}`)
-      : `ds.${quote(field.name)}`;
+      ? truncateToGrain(selection.timeGrain, column(field.name), field.type, input.driver, dialect)
+      : column(field.name);
     return { alias, expression, field, timeGrain: selection.timeGrain };
   });
   const measures = input.query.measures.map((selection) => {
@@ -295,6 +296,38 @@ export function compileDatasetTileQuery(input: {
       ...(measure.format ? { format: measure.format } : {}),
     })),
   ], input.query, appliedFilters, validation);
+}
+
+/**
+ * A reference to a column of the source block's result. Snowflake folds an
+ * unquoted identifier to upper case, so a block that selects `region` exposes
+ * `REGION`; quoting the authored lower-case name would miss it. A plain
+ * identifier is therefore left unquoted there (and resolves the same way the
+ * block's own SQL did). Output aliases stay quoted so result columns keep the
+ * authored spelling.
+ */
+function sourceColumnReference(name: string, driver: string, quote: (identifier: string) => string): string {
+  return driver === 'snowflake' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : quote(name);
+}
+
+/**
+ * Dialect time truncation for a validated grain. BigQuery needs
+ * TIMESTAMP_TRUNC for timestamps (DATE_TRUNC is the DATE form), and its WEEK
+ * starts on Sunday unless told otherwise; the other supported dialects start
+ * weeks on Monday, so BigQuery is pinned to WEEK(MONDAY) to agree with them.
+ */
+function truncateToGrain(
+  grain: string,
+  columnSql: string,
+  fieldType: string,
+  driver: string,
+  dialect: ReturnType<typeof getDialect>,
+): string {
+  if (driver === 'bigquery') {
+    const part = grain === 'week' ? 'WEEK(MONDAY)' : grain.toUpperCase();
+    return fieldType === 'date' ? `DATE_TRUNC(${columnSql}, ${part})` : `TIMESTAMP_TRUNC(${columnSql}, ${part})`;
+  }
+  return dialect.dateTrunc(grain, columnSql);
 }
 
 function compiledResult(
