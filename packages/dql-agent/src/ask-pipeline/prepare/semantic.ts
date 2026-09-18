@@ -24,8 +24,27 @@ function semanticName(entry: VocabularyEntry): string {
   return entry.sourceId ?? (entry.model ? `${entry.model}.${entry.name}` : entry.name);
 }
 
+/**
+ * A yes/no flag as the literal its column accepts. Flags are stored as
+ * booleans, as 0/1 integers, or (in a semantic model) as a constant `1` joined
+ * in: '1'/'0' compares correctly with a boolean and with an integer on every
+ * supported warehouse, where 'true' fails on an integer ("could not convert
+ * string 'true' to INT32"). Only a column known to hold text keeps the words.
+ */
+function flagLiteral(entry: VocabularyEntry, value: boolean): string {
+  const type = (entry.dataType ?? '').toLowerCase();
+  if (/char|text|string/.test(type) || /bool/.test(type)) return value ? 'true' : 'false';
+  return value ? '1' : '0';
+}
+
 function predicateToFilter(predicate: IntentPredicate, entry: VocabularyEntry): SemanticCompileRequest['filters'] extends Array<infer T> | undefined ? T : never {
-  const values = predicate.op === 'is_true' ? ['true'] : predicate.op === 'is_false' ? ['false'] : predicate.values.map(String);
+  const asFlag = (value: unknown): string => {
+    if (!entry.roles.includes('boolean')) return String(value);
+    if (value === true || /^true$/i.test(String(value))) return flagLiteral(entry, true);
+    if (value === false || /^false$/i.test(String(value))) return flagLiteral(entry, false);
+    return String(value);
+  };
+  const values = predicate.op === 'is_true' ? [flagLiteral(entry, true)] : predicate.op === 'is_false' ? [flagLiteral(entry, false)] : predicate.values.map(asFlag);
   return { dimension: semanticName(entry), operator: OPERATORS[predicate.op], values };
 }
 

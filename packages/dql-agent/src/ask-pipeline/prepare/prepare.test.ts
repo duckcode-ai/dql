@@ -116,6 +116,22 @@ describe('semantic binding', () => {
     const bound = bindSemanticRequest(intent({ measures: [{ ref: 'metric:order_item.revenue', scope: [{ ref: 'dimension:order_item.is_drink_item', op: 'is_true', values: [], source: 'question' }] }] }), vocabulary);
     expect(bound.refusal?.code).toBe('measure_scope_not_expressible');
   });
+  it('a yes/no flag is filtered with the literal its column accepts', () => {
+    const flags = buildVocabularyIndex({ ...source, dimensions: [
+      ...source.dimensions!,
+      { name: 'has_refund', model: 'orders' },
+      { name: 'is_gift', model: 'orders', dataType: 'integer' },
+      { name: 'is_rush', model: 'orders', dataType: 'varchar' },
+    ] });
+    const filterFor = (ref: string, op: 'is_true' | 'is_false' | 'eq', values: Array<string | boolean> = []) => bindSemanticRequest(intent({ measures: [{ ref: 'metric:orders.order_total' }], filters: [{ ref, op, values, source: 'question' }] }), flags).request?.filters?.[0]?.values;
+    // A flag of unknown type (a semantic-model constant 1) and an integer flag: '1'/'0', never 'true'.
+    expect(filterFor('dimension:orders.has_refund', 'is_true')).toEqual(['1']);
+    expect(filterFor('dimension:orders.is_gift', 'is_false')).toEqual(['0']);
+    expect(filterFor('dimension:orders.is_gift', 'eq', [true])).toEqual(['1']);
+    // A boolean column and a text column keep the words.
+    expect(filterFor('dimension:order_item.is_drink_item', 'is_true')).toEqual(['true']);
+    expect(filterFor('dimension:orders.is_rush', 'eq', ['true'])).toEqual(['true']);
+  });
   it('a second date breakdown is grouped too, never dropped; one at another grain refuses the tier', () => {
     const byDay = bindSemanticRequest(intent({
       measures: [{ ref: 'metric:order_item.revenue' }], expectedShape: 'table',
