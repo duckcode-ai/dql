@@ -1,0 +1,52 @@
+// dql-format: 1
+
+block "Order lines Dataset" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  owner = "commerce@example.test"
+  description = "Certified order-line Dataset for live field-based App tiles."
+  tags = ["orders", "revenue", "app-datasets"]
+
+  grain = {
+    entities = ["order_line"]
+    keys = ["order_line_id"]
+    keyEvidence = "proof.order-lines"
+    timeGrain = "day"
+  }
+
+  fields {
+    order_line_id { role = "key", type = "string" }
+    order_id { role = "dimension", type = "string", hierarchy = "commerce_customer_orders", level = 1 }
+    customer_id { role = "dimension", type = "string", hierarchy = "commerce_customer_orders", level = 0 }
+    region { role = "dimension", type = "string" }
+    order_date { role = "time", type = "timestamp", grains = ["day", "month"], primary = true }
+    net_amount { role = "attribute", type = "number" }
+    cost_amount { role = "attribute", type = "number" }
+    margin_amount { role = "attribute", type = "number" }
+  }
+
+  measures {
+    revenue { agg = "sum", from = "net_amount", additive = "additive", allowedAggs = ["sum"], format = "currency", currency = "USD" }
+    order_count { agg = "count_distinct", from = "order_id", additive = "non_additive", allowedAggs = ["count_distinct"], format = "number" }
+    customer_count { agg = "count_distinct", from = "customer_id", additive = "non_additive", allowedAggs = ["count_distinct"], format = "number" }
+    margin_rate { agg = "ratio", numerator = "margin_amount", denominator = "net_amount", additive = "non_additive", allowedAggs = ["ratio"], format = "percent" }
+  }
+
+  query = """
+SELECT
+  order_line_id,
+  order_id,
+  customer_id,
+  region,
+  order_date,
+  net_amount,
+  cost_amount,
+  margin_amount
+FROM order_lines
+"""
+
+  visualization {
+    chart = "bar"
+  }
+}

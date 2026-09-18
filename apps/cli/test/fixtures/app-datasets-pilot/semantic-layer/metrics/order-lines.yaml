@@ -1,0 +1,82 @@
+metrics:
+  - name: semantic_revenue
+    label: Revenue
+    description: Native semantic revenue over complete order-line rows.
+    domain: commerce
+    status: certified
+    cube: order_lines
+    table: order_lines
+    sql: SUM(net_amount)
+    type: sum
+    aggregation: sum
+    metric_type: simple
+    type_params:
+      measure: semantic_revenue
+    agg_time_dimension: order_date
+    format:
+      kind: currency
+      currency: USD
+      decimals: 2
+  - name: semantic_margin_amount
+    label: Margin amount
+    description: Native semantic margin over complete order-line rows.
+    domain: commerce
+    status: certified
+    cube: order_lines
+    table: order_lines
+    sql: SUM(margin_amount)
+    type: sum
+    aggregation: sum
+    metric_type: simple
+    type_params:
+      measure: semantic_margin_amount
+    agg_time_dimension: order_date
+    format:
+      kind: currency
+      currency: USD
+      decimals: 2
+  - name: semantic_order_count
+    label: Distinct orders
+    description: Native semantic distinct-order count recomputed from rows.
+    domain: commerce
+    status: certified
+    cube: order_lines
+    table: order_lines
+    sql: COUNT(DISTINCT order_id)
+    type: count_distinct
+    aggregation: count_distinct
+    metric_type: simple
+    type_params:
+      measure: semantic_order_count
+    agg_time_dimension: order_date
+  - name: semantic_customer_count
+    label: Distinct customers
+    description: Native semantic distinct-customer count recomputed from rows.
+    domain: commerce
+    status: certified
+    cube: order_lines
+    table: order_lines
+    sql: COUNT(DISTINCT customer_id)
+    type: count_distinct
+    aggregation: count_distinct
+    metric_type: simple
+    type_params:
+      measure: semantic_customer_count
+    agg_time_dimension: order_date
+  - name: semantic_margin_rate
+    label: Margin rate
+    description: Ratio of sums over complete order-line rows, represented as 0 through 1.
+    domain: commerce
+    status: certified
+    cube: order_lines
+    table: order_lines
+    sql: (1.0 * SUM(margin_amount)) / NULLIF(SUM(net_amount), 0)
+    type: custom
+    aggregation: ratio
+    metric_type: ratio
+    type_params:
+      input_measures: [semantic_margin_amount, semantic_revenue]
+    agg_time_dimension: order_date
+    format:
+      kind: percent
+      decimals: 1

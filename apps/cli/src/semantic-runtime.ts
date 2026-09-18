@@ -1,5 +1,6 @@
 import {
   compareWarehouseTargets,
+  getDialect,
   semanticDimensionReference,
   type ComposeQueryResult,
   type MetricDefinition,
@@ -26,6 +27,7 @@ import {
 
 export type SemanticRuntimeAdapterId = 'native' | 'metricflow-cli' | 'dbt-cloud';
 export type SemanticMetricExecutionStatus = 'ready' | 'requires_setup' | 'unsupported';
+export type SemanticRuntimeHavingOperator = 'eq' | 'neq' | 'in' | 'not_in' | 'gt' | 'gte' | 'lt' | 'lte' | 'between';
 
 export interface SemanticRuntimeProjectConfig {
   semanticLayer?: { provider?: string; projectPath?: string };
@@ -41,6 +43,8 @@ export interface SemanticRuntimeAdapterStatus {
   ready: boolean;
   source: 'bundled' | 'local' | 'env' | 'none';
   detail: string;
+  /** Positive runtime capability; declarations alone cannot grant it. */
+  capabilities?: { having: boolean };
 }
 
 export interface SemanticRuntimeStatus {
@@ -62,6 +66,8 @@ export interface SemanticRuntimeQueryRequest {
   metrics: string[];
   dimensions: string[];
   filters?: Array<{ dimension?: string; operator?: string; values?: string[]; expression?: string }>;
+  /** A governed post-aggregate metric predicate. */
+  having?: Array<{ metric: string; operator: SemanticRuntimeHavingOperator; values: string[] }>;
   timeDimension?: { name: string; granularity: string };
   orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
   limit?: number;
@@ -265,6 +271,19 @@ export class MetricFlowAskTargetMismatchError extends SemanticRuntimeRequiredErr
       snapshotId: input.target.snapshotId,
       safeActions: ['select_matching_connection', 'configure_dbt_profile_target', 'refresh_snapshot'],
     };
+  }
+}
+
+/**
+ * A semantic Dataset metric filter is post-aggregate. A raw WHERE fallback
+ * would alter the metric, so adapters must advertise this exact operation.
+ */
+export class SemanticRuntimeHavingUnsupportedError extends Error {
+  readonly code = 'SEMANTIC_HAVING_UNSUPPORTED';
+
+  constructor(readonly adapter: SemanticRuntimeAdapterId) {
+    super(`${adapter} does not advertise support for governed post-aggregate metric filters. Remove the total filter or select a Dataset source whose current semantic adapter supports it.`);
+    this.name = 'SemanticRuntimeHavingUnsupportedError';
   }
 }
 
@@ -477,6 +496,7 @@ export function normalizeSemanticRuntimeQueryRequest(
       ...filter,
       ...(filter.values ? { values: [...filter.values] } : {}),
     })),
+    having: request.having?.map((filter) => ({ ...filter, values: [...filter.values] })),
     orderBy: request.orderBy?.map((order) => ({ ...order })),
     ...(request.timeDimension ? { timeDimension: { ...request.timeDimension } } : {}),
   };
@@ -486,12 +506,12 @@ export function normalizeSemanticRuntimeQueryRequest(
     return normalized;
   }
 
-  const metrics = semanticLayer.listMetrics();
+  const metrics = semanticLayer.listMetrics(undefined, { includeVariants: true });
   const metricByName = new Map(metrics.map((metric) => [metric.name.toLowerCase(), metric]));
   const grains = new Set<string>();
   const visited = new Set<string>();
   for (const metricName of normalized.metrics) {
-    const metric = resolveMetricDefinition(metricName, metrics, metricByName);
+    const metric = semanticLayer.getMetric(metricName) ?? resolveMetricDefinition(metricName, metrics, metricByName);
     if (metric) collectMetricOffsetGrains(metric, metrics, metricByName, visited, grains);
   }
   const offsetGrain = finestTimeGrain(grains);
@@ -687,6 +707,7 @@ export async function getSemanticRuntimeStatus(
       ready: true,
       source: 'bundled',
       detail: 'Bundled with DQL. Executes safe simple/additive metrics without an external runtime.',
+      capabilities: { having: true },
     },
     {
       id: 'metricflow-cli',
@@ -696,6 +717,7 @@ export async function getSemanticRuntimeStatus(
       tested: cliReady,
       ready: cliReady,
       source: cliReady ? 'local' : 'none',
+      capabilities: { having: false },
       detail: cliReady
         ? `Detected ${metricFlowCli?.source === 'managed' ? 'the project-local managed runtime' : 'a compatible `mf` executable'}${metricFlowCli?.version ? ` · ${metricFlowCli.version}` : ''}.`
         : 'The DQL adapter is bundled; install a project-local MetricFlow Python runtime or use an existing `mf` executable.',
@@ -708,6 +730,7 @@ export async function getSemanticRuntimeStatus(
       tested: cloudReady || cloud.testState === 'failed',
       ready: cloudReady,
       source: cloud.source,
+      capabilities: { having: false },
       detail: !cloud.configured
         ? 'Adapter is bundled; configure Host, Environment ID, and a Semantic Layer service token.'
         : cloudTest?.ok && !cloud.executionTargetFingerprint
@@ -725,6 +748,13 @@ export async function getSemanticRuntimeStatus(
         : 'Test the configured dbt Cloud Semantic Layer connection, or install a compatible local MetricFlow runtime.'
       : 'Configure dbt Cloud Semantic Layer, or install a compatible local MetricFlow runtime for derived, ratio, cumulative, and conversion metrics.';
   return { preference, active, adapters, setup };
+}
+
+export function semanticRuntimeAdapterSupportsHaving(
+  status: SemanticRuntimeStatus,
+  adapter: SemanticRuntimeAdapterId,
+): boolean {
+  return status.adapters.find((candidate) => candidate.id === adapter)?.capabilities?.having === true;
 }
 
 export async function testSemanticRuntimeDraft(
@@ -1251,6 +1281,9 @@ export async function compileSemanticRuntimeQuery(
 
   let lastRuntimeError: Error | undefined;
   for (const adapter of candidates) {
+    if (effectiveRequest.having?.length && !semanticRuntimeAdapterSupportsHaving(status, adapter)) {
+      throw new SemanticRuntimeHavingUnsupportedError(adapter);
+    }
     if (adapter === 'dbt-cloud') {
       const adapterStatus = status.adapters.find((item) => item.id === adapter);
       if (!adapterStatus?.ready) continue;
@@ -1346,19 +1379,30 @@ export async function compileSemanticRuntimeQuery(
       }
     }
     const nativeRequest = semanticRequestWithoutPathSelectors(effectiveRequest);
+    const postAggregateHaving = nativeRequest.having ?? [];
     const composed = context.semanticLayer.composeQuery({
       metrics: nativeRequest.metrics,
       dimensions: nativeRequest.dimensions,
       filters: nativeRequest.filters as Array<{ dimension: string; operator: string; values: string[] }> | undefined,
-      limit: nativeRequest.limit,
+      // A total predicate is applied before presentation ordering and limits.
+      limit: postAggregateHaving.length > 0 ? undefined : nativeRequest.limit,
       timeDimension: nativeRequest.timeDimension,
-      orderBy: nativeRequest.orderBy,
+      orderBy: postAggregateHaving.length > 0 ? undefined : nativeRequest.orderBy,
       driver: context.driver,
       tableMapping: context.tableMapping,
     });
     if (composed) {
+      const sql = postAggregateHaving.length > 0
+        ? composeNativePostAggregateHaving({
+            sql: composed.sql,
+            request: nativeRequest,
+            semanticLayer: context.semanticLayer,
+            driver: context.driver,
+          })
+        : composed.sql;
       return {
         ...composed,
+        sql,
         engine: 'native',
         effectiveRequest,
         semanticTrace: semanticTraceForSuccess({
@@ -1369,7 +1413,9 @@ export async function compileSemanticRuntimeQuery(
             runtimeReference: parseSemanticDimensionSelection(binding.authoringReference).reference,
             entityPath: [],
           })),
-          warnings: [],
+          warnings: postAggregateHaving.length > 0
+            ? ['Applied the approved metric filter after semantic aggregation.']
+            : [],
         }),
       };
     }
@@ -1382,6 +1428,91 @@ export async function compileSemanticRuntimeQuery(
     throw new SemanticRuntimeRequiredError(lastRuntimeError.message);
   }
   return null;
+}
+
+/**
+ * Wrap compiler-owned aggregate output and predicate only output aliases.
+ * This is the post-aggregation meaning of a Dataset HAVING filter and never
+ * injects user text into provider SQL.
+ */
+function composeNativePostAggregateHaving(input: {
+  sql: string;
+  request: SemanticRuntimeQueryRequest;
+  semanticLayer: SemanticLayer;
+  driver?: string;
+}): string {
+  const having = input.request.having ?? [];
+  if (having.length === 0) return input.sql;
+  const dialect = getDialect(input.driver);
+  const relation = dialect.quoteIdentifier('dql_semantic_aggregate');
+  const metricAlias = (reference: string): string => {
+    const metric = input.semanticLayer.getMetric(reference);
+    if (!metric) throw new SemanticRuntimeHavingUnsupportedError('native');
+    return metric.name;
+  };
+  const column = (alias: string): string => `${relation}.${dialect.quoteIdentifier(alias)}`;
+  const numericLiteral = (value: unknown): string => {
+    // Tile query values originate in a JSON App draft.  The typed planner
+    // normalizes them to strings, but do not let a numeric JSON scalar turn a
+    // governed post-aggregate predicate into a generic capability failure on
+    // the way to the compiler.  We still accept only finite decimal literals;
+    // this is a representation normalization, never SQL interpolation.
+    const literal = typeof value === 'number' && Number.isFinite(value)
+      ? String(value)
+      : typeof value === 'string'
+        ? value.trim()
+        : '';
+    if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(literal)) {
+      throw new SemanticRuntimeHavingUnsupportedError('native');
+    }
+    return literal;
+  };
+  const predicate = (filter: NonNullable<SemanticRuntimeQueryRequest['having']>[number]): string => {
+    const expression = column(metricAlias(filter.metric));
+    const values = filter.values.map(numericLiteral);
+    if (values.length === 0) throw new SemanticRuntimeHavingUnsupportedError('native');
+    switch (filter.operator) {
+      case 'eq': return `${expression} = ${values[0]}`;
+      case 'neq': return `${expression} <> ${values[0]}`;
+      case 'gt': return `${expression} > ${values[0]}`;
+      case 'gte': return `${expression} >= ${values[0]}`;
+      case 'lt': return `${expression} < ${values[0]}`;
+      case 'lte': return `${expression} <= ${values[0]}`;
+      case 'between':
+        if (values.length !== 2) throw new SemanticRuntimeHavingUnsupportedError('native');
+        return `${expression} BETWEEN ${values[0]} AND ${values[1]}`;
+      case 'in': return `${expression} IN (${values.join(', ')})`;
+      case 'not_in': return `${expression} NOT IN (${values.join(', ')})`;
+    }
+  };
+  const outputAlias = (reference: string): string => {
+    const metric = input.semanticLayer.getMetric(reference);
+    if (metric) return metric.name;
+    const parsed = parseSemanticDimensionSelection(reference).reference;
+    if (input.request.timeDimension && parsed === parseSemanticDimensionSelection(input.request.timeDimension.name).reference) {
+      const time = input.semanticLayer.resolveDimension(parsed, input.request.metrics);
+      if (time) return `${time.name}_${input.request.timeDimension.granularity}`;
+    }
+    const dimension = input.semanticLayer.resolveDimension(parsed, input.request.metrics);
+    if (dimension) return dimension.name;
+    throw new SemanticRuntimeHavingUnsupportedError('native');
+  };
+  const orderBy = (input.request.orderBy ?? []).map((order) => {
+    if (order.direction !== 'asc' && order.direction !== 'desc') throw new SemanticRuntimeHavingUnsupportedError('native');
+    return `${column(outputAlias(order.name))} ${order.direction.toUpperCase()}`;
+  });
+  const limit = input.request.limit;
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000)) {
+    throw new SemanticRuntimeHavingUnsupportedError('native');
+  }
+  const select = !dialect.limitAtEnd && limit ? `SELECT TOP ${limit} *` : 'SELECT *';
+  return [
+    select,
+    `FROM (${input.sql}) AS ${relation}`,
+    `WHERE ${having.map(predicate).join(' AND ')}`,
+    ...(orderBy.length > 0 ? [`ORDER BY ${orderBy.join(', ')}`] : []),
+    ...(dialect.limitAtEnd && limit ? [dialect.limitClause(limit)] : []),
+  ].join('\n');
 }
 
 /**
@@ -1638,6 +1769,7 @@ function selectActiveAdapter(
 export function isSemanticRuntimeError(error: unknown): boolean {
   return error instanceof SemanticSourceDriftError
     || error instanceof SemanticRuntimeRequiredError
+    || error instanceof SemanticRuntimeHavingUnsupportedError
     || error instanceof SemanticRuntimeCompilationError
     || error instanceof SemanticRuntimePathAmbiguityError
     || error instanceof MetricFlowUnavailableError;
@@ -1645,10 +1777,11 @@ export function isSemanticRuntimeError(error: unknown): boolean {
 
 export function semanticRuntimeErrorCode(
   error: unknown,
-): 'SEMANTIC_RUNTIME_REQUIRED' | 'SEMANTIC_COMPILATION_FAILED' | 'SEMANTIC_PATH_AMBIGUOUS' | 'SEMANTIC_SOURCE_DRIFT' | undefined {
+): 'SEMANTIC_RUNTIME_REQUIRED' | 'SEMANTIC_HAVING_UNSUPPORTED' | 'SEMANTIC_COMPILATION_FAILED' | 'SEMANTIC_PATH_AMBIGUOUS' | 'SEMANTIC_SOURCE_DRIFT' | undefined {
   if (error instanceof SemanticSourceDriftError) return error.code;
   if (error instanceof SemanticRuntimePathAmbiguityError) return error.code;
   if (error instanceof SemanticRuntimeCompilationError) return error.code;
+  if (error instanceof SemanticRuntimeHavingUnsupportedError) return error.code;
   if (error instanceof SemanticRuntimeRequiredError || error instanceof MetricFlowUnavailableError) {
     return 'SEMANTIC_RUNTIME_REQUIRED';
   }

@@ -164,6 +164,10 @@ function renderPromoted(
   // Flip status.
   out = out.replace(/status\s*=\s*"draft"/, 'status = "certified"');
 
+  // M4 Dataset tile lineage is durable source provenance. Certification moves
+  // the review draft but must not erase where the governed block came from.
+  out = out.replace(/^(\s*)dataset_tile_provenance\s*=/m, '$1derived_from =');
+
   // Set domain (overwrite the existing one).
   out = out.replace(/(domain\s*=\s*)"[^"]*"/, `$1"${fields.domain}"`);
 

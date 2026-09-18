@@ -106,12 +106,24 @@ export function connectionReference(connection: ConnectionConfig): string {
 }
 
 function configuredWarehouseContext(connection: ConnectionConfig): WarehouseTargetContextV1 {
+  // DuckDB/file/sqlite targets have no server-side CURRENT_* identity. Bind a
+  // redacted stable marker for the configured local database so target A and
+  // target B cannot collapse into one empty-context fingerprint. The marker
+  // is a one-way digest, never a filesystem path exposed to a receipt/UI.
+  const localDatabase = (connection.driver === 'duckdb' || connection.driver === 'file')
+    ? connection.filepath
+    : connection.driver === 'sqlite'
+      ? connection.database
+      : undefined;
+  const localCatalog = localDatabase && localDatabase !== ':memory:'
+    ? `LOCAL_${semanticExecutionFingerprint({ driver: connection.driver, localDatabase }).slice(0, 24)}`
+    : undefined;
   return {
     account: connection.driver === 'snowflake'
       ? normalizeConfiguredSnowflakeAccount(connection.account ?? connection.host)
       : connection.account ?? connection.host,
     database: connection.database,
-    catalog: connection.catalog,
+    catalog: connection.catalog ?? localCatalog,
     schema: connection.schema,
     role: connection.role,
     warehouse: connection.warehouse,

@@ -1,0 +1,8 @@
+name: order_line
+label: Order line
+description: The row-grain entity for the native semantic model.
+domain: commerce
+cube: order_lines
+table: order_lines
+type: primary
+expr: order_line_id

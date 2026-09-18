@@ -10,6 +10,7 @@ import {
 import {
   ConnectorQueryError,
   type ConnectionConfig,
+  type QueryExecutionOptions,
   type QueryExecutor,
   type QueryResult,
 } from '@duckcodeailabs/dql-connectors';
@@ -119,9 +120,24 @@ export async function executeTargetBoundSemanticQuery(input: {
   compile: () => Promise<SemanticRuntimeCompileResult | null>;
   prepareSql?: (sql: string) => { sql: string; connection?: ConnectionConfig };
   rowBound?: number;
+  /** Cancels this run only; callers must never interrupt a shared connector. */
+  signal?: AbortSignal;
+  /**
+   * M4 conversion/equivalence callers may run final compiled SQL through one
+   * already-open private read scope.  Identity observation and semantic target
+   * binding remain owned by this gateway; the callback is intentionally only
+   * a final-statement transport and is never exposed to browser input.
+   */
+  executePrepared?: (input: {
+    sql: string;
+    connection: ConnectionConfig;
+    options: QueryExecutionOptions;
+  }) => Promise<QueryResult>;
 }): Promise<SemanticExecutionGatewayResult | null> {
+  throwIfAborted(input.signal);
   const startedAt = Date.now();
   const executionTarget = await observeWarehouseTargetIdentity(input.executor, input.connection);
+  throwIfAborted(input.signal);
   // Target validation intentionally happens before a remote compiler is called.
   buildSemanticTargetBinding({
     projectRoot: input.projectRoot,
@@ -131,6 +147,7 @@ export async function executeTargetBoundSemanticQuery(input: {
   });
   const compileStartedAt = Date.now();
   const compiled = await input.compile();
+  throwIfAborted(input.signal);
   if (!compiled) return null;
   if (compiled.engine !== input.plannedAdapter) {
     throw new SemanticAdapterDriftError(input.plannedAdapter, compiled.engine);
@@ -150,20 +167,22 @@ export async function executeTargetBoundSemanticQuery(input: {
     prepared.sql,
     compiled.engine,
     targetBinding,
+    input.signal,
   );
+  throwIfAborted(input.signal);
   const executionStartedAt = Date.now();
   const rowBound = Math.max(1, Math.min(input.rowBound ?? 10_000, 100_000));
-  const result = await positionalExecutor(input.executor)(
-    prepared.sql,
-    [],
-    preparedConnection,
-    {
-      maxRows: rowBound,
-      maxBytes: 16 * 1024 * 1024,
-      batchSize: 500,
-      deadlineMs: 120_000,
-    },
-  );
+  const options: QueryExecutionOptions = {
+    maxRows: rowBound,
+    maxBytes: 16 * 1024 * 1024,
+    batchSize: 500,
+    deadlineMs: 120_000,
+    signal: input.signal,
+  };
+  const result = input.executePrepared
+    ? await input.executePrepared({ sql: prepared.sql, connection: preparedConnection, options })
+    : await positionalExecutor(input.executor)(prepared.sql, [], preparedConnection, options);
+  throwIfAborted(input.signal);
   const runtimeBindings = runtimeBindingsFromTrace(compiled.semanticTrace);
   const compiledSqlFingerprint = semanticExecutionFingerprint(compiled.sql);
   const executedSqlFingerprint = semanticExecutionFingerprint(prepared.sql);
@@ -234,6 +253,7 @@ async function preflightCompiledSql(
   sql: string,
   adapterId: SemanticAdapterIdV1,
   targetBinding: SemanticTargetBindingV1,
+  signal?: AbortSignal,
 ): Promise<void> {
   // Snowflake EXPLAIN resolves relations, columns, aliases and permissions
   // without accepting the result as an analytical execution.
@@ -243,11 +263,16 @@ async function preflightCompiledSql(
       `EXPLAIN USING TEXT ${sql}`,
       [],
       connection,
-      { maxRows: 500, maxBytes: 1024 * 1024, batchSize: 100, deadlineMs: 60_000 },
+      { maxRows: 500, maxBytes: 1024 * 1024, batchSize: 100, deadlineMs: 60_000, signal },
     );
   } catch (error) {
     throw new SemanticPhysicalPreflightError(adapterId, error, sql, targetBinding);
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new Error('Semantic App run was cancelled.');
 }
 
 function extractInvalidIdentifier(message: string): string | undefined {

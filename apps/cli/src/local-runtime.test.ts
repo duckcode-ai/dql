@@ -137,6 +137,7 @@ import {
   planAgentRunNarration,
   serializeJSON,
   staticResponseCacheControl,
+  appAutopilotPreviewRequirementFor,
   startLocalServer,
   validateBlockStudioSource,
   validateConnectionForTest,
@@ -641,6 +642,32 @@ function traceRecorder(): {
   } as unknown as AskTraceObserverV1;
   return { observer, spans };
 }
+
+describe('App Autopilot preview requirement classification', () => {
+  it('distinguishes presentation commands, analytical repairs, and result-explanation clauses', () => {
+    const cases: Array<{ question: string; expected: 'none' | 'result' | 'failed_tile' }> = [
+      { question: 'Fix title to Revenue by Region.', expected: 'none' },
+      { question: 'Show this as a bar chart.', expected: 'none' },
+      { question: 'Change the title to Monthly Revenue by Month and show this as a bar chart.', expected: 'none' },
+      { question: 'Fix the title and chart layout.', expected: 'none' },
+      { question: 'Show revenue.', expected: 'result' },
+      { question: 'What revenue does this filtered chart show, and how is it distributed across months?', expected: 'result' },
+      { question: 'How is the filtered revenue distributed across months?', expected: 'result' },
+      { question: 'How do I change this revenue chart title?', expected: 'none' },
+      { question: 'Why are these values different?', expected: 'result' },
+      { question: 'Show this chart and explain the total.', expected: 'result' },
+      { question: 'Fix title and explain the current result.', expected: 'result' },
+      { question: 'Fix a query.', expected: 'failed_tile' },
+      { question: 'Repair this metric.', expected: 'failed_tile' },
+      { question: 'Repair the failed query.', expected: 'failed_tile' },
+      { question: 'What is the smallest governed repair needed before this selected tile can answer its intended question?', expected: 'failed_tile' },
+    ];
+
+    for (const { question, expected } of cases) {
+      expect(appAutopilotPreviewRequirementFor(question), question).toBe(expected);
+    }
+  });
+});
 
 describe('App Copilot uniform orchestration (AGT-007, AGT-022)', () => {
   it('adapts App research evidence into a deep stakeholder AgentRun', () => {

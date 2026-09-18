@@ -1,4 +1,4 @@
-import type { ProviderDispatchPhaseV1, ProviderEgressPurpose, SemanticAggregationCompilerReceiptV1, SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
+import type { DatasetCacheDeliveryReceiptV1, DatasetTileProvenanceV1, ProviderDispatchPhaseV1, ProviderEgressPurpose, SemanticAggregationCompilerReceiptV1, SemanticDisplayFormat, SemanticTileConversionProvenanceV1 } from '@duckcodeailabs/dql-core';
 import {
   terminalTitle,
   parsePhysicalIdentifier,
@@ -68,6 +68,11 @@ import {
   type DatabaseConnector,
   type QueryResult,
   type SQLParamSpec,
+  DuckDBConnector,
+  type DuckDBConsistentReadScope,
+  buildParamValues,
+  expandArrayParameters,
+  normalizeSQLPlaceholders,
 } from "@duckcodeailabs/dql-connectors";
 import {
   buildExecutionPlan,
@@ -86,11 +91,14 @@ import {
   buildTermTemplate,
   loadSemanticLayerFromDir,
   normalizeDqlArtifactReference,
+  applyAppBuildDraftOperations,
+  appBuildPreviewIntentFingerprint,
   serializeMetricDefinitionToYaml,
   resolveSemanticLayerAsync,
   resolveRepoSource,
   getDialect,
   Parser,
+  analyze,
   NodeKind,
   blockParameterDefinitions,
   buildLineageGraph,
@@ -125,14 +133,35 @@ import {
   type LineageDimensionInput,
   type Business360ResultV2,
   type AppDocument,
+  type AppBuildDraft,
+  type AppBuildRequirement,
+  type AppBuildDraftOperation,
+  type AppBuildDraftSource,
+  type AppBuildSourcePolicy,
+  type AppAnalyticalContextV1,
   type DashboardDocument,
   type DashboardDisplayTrustState,
   type DashboardGridItem,
+  type DatasetDescriptor,
+  type TileQuery,
+  type TileFilterOperator,
+  tileQueryHash,
+  tileQueryOutputAliases,
+  normalizeTileQuery,
+  validateTileQuery,
+  applyDatasetHierarchyDrill,
+  datasetHierarchyFields,
+  datasetQueryRequiresAggregateComponentEvidence,
+  datasetTileVisualizationCompatibility,
+  dashboardDatasetParameterFilterErrors,
   type DQLManifest,
   type DqlArtifactReference,
   type DqlArtifactExecutionReceipt,
   type DqlExecutableArtifactV1,
   type ManifestBlock,
+  type ManifestDatasetField,
+  type ManifestDatasetGrain,
+  type ManifestDatasetMeasure,
   canonicalize,
   canonicalizeNotebook,
   diffDQL,
@@ -177,7 +206,12 @@ import {
   semanticExecutionFingerprint,
   modelAreaLocalId,
   DEFAULT_MODEL_AREA_ID,
+  validateDatasetGrainProof,
 } from '@duckcodeailabs/dql-core';
+import {
+  prepareDatasetDeclarationPatch,
+  type DatasetDeclarationPatch,
+} from '@duckcodeailabs/dql-core/datasets/source-authoring.node';
 import { dump as dumpYaml, load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
@@ -253,6 +287,12 @@ import {
   isAgentProjectIndexReady,
   currentMetadataFingerprint,
   ensureMetadataCatalogFresh,
+  queryAppSourceCatalog,
+  resolveAppSourceCatalogRecords,
+  datasetBindingAuthorityForManifestBlock,
+  datasetBlockProofMaterial,
+  datasetDescriptorFromManifestBlock,
+  loadDatasetGrainProofs,
   readIndexedDomainKnowledge,
   readIndexedKnowledge360,
   compactSemanticRuntimeFailure,
@@ -329,6 +369,7 @@ import {
   type Skill,
   type WriteSkillInput,
   type ContextAuthoringDiagnosticV1,
+  type DatasetDraftAuthoringChange,
   type ContextAuthoringOperation,
   type ContextAuthoringOrigin,
   type ContextAuthoringPatchV1,
@@ -474,13 +515,52 @@ import {
 import { addSqlResultFilter, dashboardFilterableResultColumns, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import {
+  applyAppAutopilotChange,
   handleAppsApi,
+  loadStoredAppBuildDraft,
+  prepareAppAutopilotChange,
   proposeAppAiBuild,
   recommendVisualization,
   type AppBuildGeneratedAnswer,
+  type AppAutopilotIntent,
   type AppContextEnvelopeV1,
   type AppExecutionRepairTrace,
+  type DatasetTileSaveAsBlockRequest,
+  type DatasetTileSaveAsBlockResponse,
+  type DatasetTileReplaceWithBlockRequest,
+  type DatasetTileReplaceWithBlockResponse,
+  type SemanticTileConversionAcceptRequest,
+  type SemanticTileConversionAcceptResponse,
+  type SemanticTileConversionPreviewRequest,
+  type SemanticTileConversionPreviewResponse,
 } from './apps-api.js';
+import { compileDatasetTileQuery } from './datasets/tile-query-compiler.js';
+import { summarizeDatasetChartFacts } from './datasets/dataset-chart-fact-summary.js';
+import { planDatasetTilePromotion } from './datasets/dataset-tile-promotion.js';
+import { proveDatasetResultEquivalence } from './datasets/result-equivalence.js';
+import { DatasetResultCache, normalizeDatasetCachedResult } from './datasets/dataset-result-cache.js';
+import { executeDatasetPeriodComparison } from './datasets/period-comparison-runtime.js';
+import {
+  DatasetAggregateComponentProofError,
+  inspectDatasetAggregateComponentProof,
+  prepareDatasetAggregateComponentProof,
+} from './datasets/component-proof-execution.js';
+import { classifyDatasetAggregateSource } from '@duckcodeailabs/dql-core/datasets/component-proof.node';
+import {
+  resolveDashboardDatasetFilters,
+  type DashboardDatasetCrossFilterInput,
+} from './datasets/dashboard-dataset-filters.js';
+import {
+  assessDatasetGrainProbe,
+  compileDatasetGrainProbe,
+  datasetGrainProbeFailureMessage,
+} from './datasets/grain-proof-execution.js';
+import {
+  datasetGrainProofFromRuntime,
+  persistLocalDatasetGrainProof,
+} from './datasets/grain-proof-registry.js';
+import { planSemanticDatasetTileQuery } from './datasets/semantic-tile-query.js';
+import { planSemanticTileConversion } from './datasets/semantic-tile-conversion.js';
 import {
   getActiveProvider,
   getEffectiveProviderConfig,
@@ -514,7 +594,7 @@ import {
   runtimeVariables,
 } from './governance-runtime.js';
 import { LocalAppStorage, LocalNotebookResearchStorage, defaultLocalAppsDbPath, defaultNotebookResearchDbPath } from '@duckcodeailabs/dql-project';
-import type { BlockRecord, NotebookResearchDiagnostics, NotebookResearchDqlArtifact, NotebookResearchDqlPromotion, NotebookResearchDqlPromotionAction, NotebookResearchIntent, NotebookResearchNextActionFilter, NotebookResearchPlan, NotebookResearchReadinessFilter, NotebookResearchRun, NotebookResearchRunListResult, NotebookResearchSort, NotebookResearchSourceCellInput, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
+import type { BlockRecord, LocalAppPreviewDatasetBindingEvidence, NotebookResearchDiagnostics, NotebookResearchDqlArtifact, NotebookResearchDqlPromotion, NotebookResearchDqlPromotionAction, NotebookResearchIntent, NotebookResearchNextActionFilter, NotebookResearchPlan, NotebookResearchReadinessFilter, NotebookResearchRun, NotebookResearchRunListResult, NotebookResearchSort, NotebookResearchSourceCellInput, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
 import {
   Certifier,
   ENTERPRISE_RULES,
@@ -575,6 +655,7 @@ import {
   describeRuntimeCompatibility,
   explainMissingSemanticRuntime,
   getSemanticRuntimeStatus,
+  semanticRuntimeAdapterSupportsHaving,
   semanticRuntimeErrorDetails,
   semanticRuntimeErrorCode,
   semanticMetricExecutionCapability as runtimeMetricExecutionCapability,
@@ -636,10 +717,97 @@ export const APP_SOURCE_REUSABLE_TAG = 'app-source';
 const NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT = 500;
 const NOTEBOOK_FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#6d5dfc"/><path d="M9 9h14v14H9z" fill="none" stroke="#fff" stroke-width="2"/><path d="M13 13h6M13 17h6M13 21h4" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>';
 
+/** The exact server-held preview evidence an App Autopilot request needs. */
+export type AppAutopilotPreviewRequirement = 'none' | 'result' | 'failed_tile';
+
+const APP_AUTOPILOT_RESULT_EXPLANATION = /\b(?:explain|why|what\s+happened|insight|summari[sz]e|summary|result|value|values|story|narrative)\b/i;
+const APP_AUTOPILOT_SHOW_ANALYTICAL_VALUE = /\b(?:show|display)\s+(?:(?:the|this|that|current|selected)\s+)*(?:revenue|sales|total|count|metric|measure|orders|customers|values?|results?)\b/i;
+// Keep this deliberately narrower than a catch-all "what" or "how" match.
+// These are value questions, not presentation requests such as "how do I
+// change this chart title?" A supplied server-held preview still handles
+// indirect wording that does not fit either pattern below.
+const APP_AUTOPILOT_WHAT_ANALYTICAL_VALUE = /\bwhat\s+(?:(?:[a-z0-9_]+\s+){0,5})?(?:revenue|sales|total|count|metric|measure|orders|customers|values?|results?)\s+(?:does|do|did|is|are|was|were)\b/i;
+const APP_AUTOPILOT_HOW_ANALYTICAL_VALUE = /\bhow\s+(?:much|many|is|are|was|were)\b[\s\S]{0,120}\b(?:revenue|sales|total|count|metric|measure|orders|customers|values?|results?)\b/i;
+const APP_AUTOPILOT_ANALYTICAL_REPAIR = /\b(?:repair|fix)\b(?:\s+(?:a|an|the|this|that|these|those|my|our|selected|current|failed|broken|invalid))*\s+(?:query|result|calculation|metric|measure|total|revenue|sales|values?|data)\b/i;
+// This is the App Studio repair shortcut, not a general question classifier.
+// It must enter the failed-tile lane before a provider is dispatched so a
+// healthy selected tile cannot spend a provider call discovering there is
+// nothing to repair.
+const APP_AUTOPILOT_SELECTED_TILE_REPAIR_SHORTCUT = /^\s*what\s+is\s+the\s+smallest\s+governed\s+repair\s+needed\s+before\s+(?:this\s+)?selected\s+tile\s+can\s+answer\s+(?:its\s+)?intended\s+question[?.!]*\s*$/i;
+const APP_AUTOPILOT_FAILURE_CUE = /\b(?:broken|failed|failure|error|diagnostic|invalid|not\s+working)\b/i;
+const APP_AUTOPILOT_FAILURE_TARGET = /\b(?:query|result|calculation|metric|measure|total|revenue|sales|values?|data|tile|chart)\b/i;
+const APP_AUTOPILOT_PRESENTATION_VERB = /\b(?:show|display|make|turn|change|switch|set|fix|rename|arrange|move|resize|group|update)\b/i;
+const APP_AUTOPILOT_PRESENTATION_OBJECT = /\b(?:title|label|layout|chart|visuali[sz]ation|viz|bar|line|area|pie|table|kpi|position|size|width|height)\b/i;
+const APP_AUTOPILOT_TITLE_EDIT_REQUEST = /\b(?:rename|change|set|update|fix)\b[\s\S]{0,80}\b(?:tile\s+)?(?:title|label)\b\s*(?:to|as)\b/i;
+const APP_AUTOPILOT_VISUALIZATION_EDIT_REQUEST = /\b(?:show|display|change|make|turn|switch|set)\b[\s\S]{0,80}\b(?:as|to)\s+(?:an?\s+)?(?:single[ _-]?value|grouped[ _-]?bar|stacked[ _-]?bar|line|bar|area|pie|donut|scatter|heatmap|histogram|waterfall|gauge|table|pivot|map|funnel|sankey|kpi)\b/i;
+
+/**
+ * Keep presentation commands separate from analytical-result questions. The
+ * model still interprets the resulting typed edit, but only explanation and
+ * actual analytical-repair lanes receive result or failed-tile evidence.
+ */
+export function appAutopilotPreviewRequirementFor(question: string): AppAutopilotPreviewRequirement {
+  const text = question.trim();
+  // A result/explanation clause is authoritative in a mixed request: a user
+  // cannot avoid fresh-result validation by adding a visual edit to it.
+  if (APP_AUTOPILOT_RESULT_EXPLANATION.test(text)
+    || APP_AUTOPILOT_SHOW_ANALYTICAL_VALUE.test(text)
+    || APP_AUTOPILOT_WHAT_ANALYTICAL_VALUE.test(text)
+    || APP_AUTOPILOT_HOW_ANALYTICAL_VALUE.test(text)) return 'result';
+
+  const requestsAnalyticalRepair = APP_AUTOPILOT_SELECTED_TILE_REPAIR_SHORTCUT.test(text)
+    || APP_AUTOPILOT_ANALYTICAL_REPAIR.test(text);
+  const identifiesFailedAnalyticalTarget = APP_AUTOPILOT_FAILURE_CUE.test(text)
+    && APP_AUTOPILOT_FAILURE_TARGET.test(text);
+  if (requestsAnalyticalRepair || identifiesFailedAnalyticalTarget) return 'failed_tile';
+
+  // A bare visual command, including "show this as a bar chart", does not
+  // claim a result or a failure and is compiled through the bounded typed
+  // App-change path without preview evidence.
+  if (APP_AUTOPILOT_PRESENTATION_VERB.test(text) && APP_AUTOPILOT_PRESENTATION_OBJECT.test(text)) return 'none';
+  return 'none';
+}
+
+/**
+ * A single bounded `update_tile` can atomically carry a title and a
+ * visualization. Require each explicit presentation clause before creating a
+ * review artifact so a model completion cannot silently discard one half of a
+ * compound request.
+ */
+function appAutopilotAssertRequestedPresentationParts(
+  request: string,
+  intent: Pick<AppAutopilotIntent, 'title' | 'visualization'>,
+): void {
+  const missing: string[] = [];
+  if (APP_AUTOPILOT_TITLE_EDIT_REQUEST.test(request) && !intent.title) missing.push('tile title');
+  if (APP_AUTOPILOT_VISUALIZATION_EDIT_REQUEST.test(request) && !intent.visualization) missing.push('visualization');
+  if (missing.length > 0) {
+    throw new Error(`APP_AUTOPILOT_REQUEST_PARTIAL: App Autopilot did not return the requested ${missing.join(' and ')} change. No review proposal was created; retry the request or split the changes.`);
+  }
+}
+
 export interface ProjectConfig {
   project?: string;
   manifestVersion?: 1 | 2 | 3;
   modeling?: { mode?: ManifestModelingMode };
+  /**
+   * Explicit opt-ins for locally evolving App authoring surfaces. Dataset
+   * field queries remain off until the project owner enables them, so an
+   * existing App keeps its legacy block semantics after an upgrade.
+   */
+  apps?: {
+    datasets?: boolean;
+    /**
+     * Default-off local delivery cache for complete Dataset results. It is
+     * deliberately separate from semantic preparation and App persistence.
+     */
+    datasetResultCache?: {
+      enabled?: boolean;
+      ttlSeconds?: number;
+      maxEntries?: number;
+      maxBytes?: number;
+    };
+  };
   layout?: { version?: number; mode?: string; skillsPath?: string };
   defaultConnection?: ConnectionConfig;
   defaultConnectionName?: string;
@@ -840,6 +1008,27 @@ export interface LocalServerOptions {
   askAnalyticalPlannerProviderFactory?: (input: {
     projectRoot: string;
     request: AgentRunRequest;
+  }) => AgentProvider | null | Promise<AgentProvider | null>;
+  /**
+   * Host-only seam for exact Dataset-chart answers. The runtime still validates
+   * the current server-issued chart context before it asks this provider; a
+   * browser or MCP caller cannot supply a provider, rows, or source authority.
+   */
+  datasetChartAnswerProviderFactory?: (input: {
+    projectRoot: string;
+    question: string;
+    context: AppAnalyticalContextV1;
+  }) => AgentProvider | null | Promise<AgentProvider | null>;
+  /**
+   * Host-only seam for App Autopilot integration tests. Production still
+   * resolves the same configured provider adapter used by the universal
+   * AgentRun runtime. The browser cannot select a provider or provide context.
+   */
+  appAutopilotProviderFactory?: (input: {
+    projectRoot: string;
+    request: AgentRunRequest;
+    /** Server-built, bounded prompt context; never browser result authority. */
+    promptContext: string;
   }) => AgentProvider | null | Promise<AgentProvider | null>;
   /**
    * Host-only watcher seam for local-runtime tests and embeddings. Production
@@ -4699,6 +4888,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     projectRoot,
     projectConfig: () => projectConfig,
   });
+  const datasetResultCache = openDatasetResultCache(projectRoot, projectConfig);
   recordAgentRuntimeVersion(projectRoot, runtimeVersion);
   // A clone carries governed Hint Graph files in Git, never the rebuildable
   // `.dql/cache` database. Materialize that projection as soon as the Notebook
@@ -4731,8 +4921,126 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     successfulTileIds: string[];
     /** Semantic tiles that executed from compiler-owned SQL without AI repair. */
     semanticApprovalEligibleTileIds: string[];
+    /** Field tiles with a positive source/target binding for this exact run. */
+    datasetBindingEligibleTileIds: string[];
+    /** Restart-safe source, proof, and observed-target evidence for field tiles. */
+    datasetBindings: LocalAppPreviewDatasetBindingEvidence[];
+    /** Exact executable local-draft content for App Builder preview receipt replay. */
+    intentFingerprint: string;
+    /**
+     * Server-only, short-lived material for an explicit save-as-review-draft
+     * action. This never enters LocalAppStorage: the durable preview receipt
+     * retains IDs and fingerprints only, so a restart requires a new run.
+     */
+    datasetTilePromotionEvidence: Array<{
+      tileId: string;
+      title: string;
+      sourceId: string;
+      sourceRevision: string;
+      contractFingerprint: string;
+      query: TileQuery;
+      queryFingerprint: string;
+      filterFingerprint: string;
+      parameterFingerprint: string;
+      interactionFingerprint: string;
+      snapshotFingerprint: string;
+      targetFingerprint: string;
+      personaPolicyFingerprint: string;
+      sql: string;
+      schemaFingerprint: string;
+      resultFingerprint: string;
+      /** Complete current output is required before durable save or proof. */
+      complete: boolean;
+      comparison: boolean;
+      /** No browser flag can make an interactive tile replaceable. */
+      futureBindingsRepresentable: boolean;
+    }>;
+    /**
+     * Ephemeral, server-derived context for exact Dataset-chart questions.
+     * Result rows never enter durable App preview receipts; a restart therefore
+     * requires a fresh chart run before this answer lane can speak for it.
+     */
+    chartContexts: AppAnalyticalContextV1[];
     facts: ReturnType<typeof buildDeterministicDashboardStory>['facts'];
     story: ReturnType<typeof buildDeterministicDashboardStory>['story'];
+    expiresAt: number;
+  }>();
+  /**
+   * A failed Dataset tile can be described to App Autopilot only from this
+   * server-held run record. The browser names a tile/run pair; it never sends
+   * a failure string, source state, rows, or a repair operation.
+   */
+  type DatasetChartFailedTileEvidence = {
+    tileId: string;
+    title: string;
+    error: string;
+    diagnosticCodes: string[];
+    source: AppAnalyticalContextV1['source'];
+    authoredQueryFingerprint: string;
+    filterFingerprint: string;
+    interactionFingerprint: string;
+    personaPolicyFingerprint: string;
+  };
+
+  type DatasetChartRunEvidence = {
+    appId: string;
+    dashboardId: string;
+    snapshotId: string;
+    dashboardFingerprint: string;
+    /** Present only for a local App Builder draft. */
+    draftRevision?: number;
+    /** Captures draft page/filter/interaction authoring state at preview time. */
+    draftIntentFingerprint?: string;
+    /** The server-derived effective viewer/filter/interaction request state. */
+    previewInputFingerprint: string;
+    /** The validated mounted-view scope that owns this ephemeral context. */
+    runScopeKey?: string;
+    /** Monotonic within one mounted-view scope, never browser supplied. */
+    runScopeGeneration?: number;
+    chartContexts: AppAnalyticalContextV1[];
+    failedTileContexts: DatasetChartFailedTileEvidence[];
+    expiresAt: number;
+  };
+  /**
+   * Dataset chart questions and App Autopilot use current, run-local evidence
+   * without making rows a reusable whole-dashboard receipt. Keeping this
+   * registry separate from dashboardRunEvidence preserves the publication gate
+   * and means a process restart always requires a fresh preview.
+   */
+  const datasetChartRunEvidence = new Map<string, DatasetChartRunEvidence>();
+  /**
+   * A settled run no longer occupies `activeDashboardRuns`, but its chart
+   * context must still become stale when this same mounted viewer starts a
+   * newer run. Keep that generation separately from in-flight cancellation.
+   */
+  const datasetChartScopeGenerations = new Map<string, number>();
+  /**
+   * A dashboard interaction supersedes an earlier interaction only within the
+   * same mounted viewer scope. A second browser tab has its own scope and
+   * must never cancel the first tab's warehouse request.
+   */
+  const activeDashboardRuns = new Map<string, {
+    generation: number;
+    controller: AbortController;
+  }>();
+  /**
+   * M4-CONV-01 keeps a semantic-to-Dataset preview entirely server-local.
+   * The browser receives the reviewed candidate, but never owns the source
+   * capability, compiled SQL, rows, or equivalence authority. Acceptance
+   * deliberately recomputes the proof rather than trusting this short-lived
+   * record after a source, target, or draft change.
+   */
+  const semanticTileConversionPreviews = new Map<string, {
+    draftId: string;
+    dashboardId: string;
+    tileId: string;
+    revision: number;
+    proposalHash: string;
+    legacyTileFingerprint: string;
+    sourceId: string;
+    sourceRevision: string;
+    contractFingerprint: string;
+    queryFingerprint: string;
     expiresAt: number;
   }>();
   const loadAppBuildPreviewEvidence = (runId: string) => {
@@ -4746,12 +5054,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return {
         appId: persisted.draftId,
         dashboardId: persisted.dashboardId,
+        intentFingerprint: persisted.intentFingerprint,
         snapshotId: persisted.snapshotId,
         filterFingerprint: persisted.filterFingerprint,
         resultFingerprint: persisted.resultFingerprint,
         personaFingerprint: persisted.personaFingerprint,
         successfulTileIds: persisted.successfulTileIds,
         semanticApprovalEligibleTileIds: persisted.semanticApprovalEligibleTileIds,
+        datasetBindingEligibleTileIds: persisted.datasetBindingEligibleTileIds,
+        datasetBindings: persisted.datasetBindings,
+        datasetTilePromotionEvidence: [],
+        chartContexts: [],
         // Persisted receipts are bound again by draft revision, source
         // fingerprints, filters and snapshot during preflight. They therefore
         // survive a process restart without making result rows durable.
@@ -5276,6 +5589,652 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return values.length > 0 ? [...new Set(values)] : undefined;
   };
 
+  type AppAutopilotScope = {
+    draftId: string;
+    pageId: string;
+    tileId: string;
+    previewRunId?: string;
+  };
+
+  type AppAutopilotPreviewContext =
+    | { kind: 'result'; run: DatasetChartRunEvidence; context: AppAnalyticalContextV1 }
+    | { kind: 'failed_tile'; run: DatasetChartRunEvidence; failure: DatasetChartFailedTileEvidence };
+  type AppAutopilotPreviewKind = Exclude<AppAutopilotPreviewRequirement, 'none'>;
+  type AppAutopilotPreviewFailureCode =
+    | 'APP_AUTOPILOT_PREVIEW_RESULT_REQUIRED'
+    | 'APP_AUTOPILOT_PREVIEW_FAILED_TILE_REQUIRED'
+    | 'APP_AUTOPILOT_PREVIEW_EXPIRED'
+    | 'APP_AUTOPILOT_PREVIEW_SUPERSEDED'
+    | 'APP_AUTOPILOT_PREVIEW_SCOPE_MISMATCH'
+    | 'APP_AUTOPILOT_PREVIEW_DRAFT_STATE_MISSING'
+    | 'APP_AUTOPILOT_PREVIEW_DRAFT_CHANGED'
+    | 'APP_AUTOPILOT_PREVIEW_EVIDENCE_UNAVAILABLE'
+    | 'APP_AUTOPILOT_PREVIEW_RESULT_UNAVAILABLE'
+    | 'APP_AUTOPILOT_PREVIEW_FAILED_TILE_UNAVAILABLE'
+    | 'APP_AUTOPILOT_PREVIEW_FAILED_TILE_HEALTHY'
+    | 'APP_AUTOPILOT_PREVIEW_TILE_CHANGED'
+    | 'APP_AUTOPILOT_PREVIEW_PROJECT_CHANGED'
+    | 'APP_AUTOPILOT_PREVIEW_PERSONA_CHANGED'
+    | 'APP_AUTOPILOT_PREVIEW_SOURCE_CHANGED'
+    | 'APP_AUTOPILOT_PREVIEW_TARGET_CHANGED'
+    | 'APP_AUTOPILOT_PREVIEW_VALIDATION_FAILED';
+  type AppAutopilotPreviewFailure = {
+    ok: false;
+    reasonCode: AppAutopilotPreviewFailureCode;
+    error: string;
+  };
+  type AppAutopilotPreviewValidation =
+    | { ok: true; preview: AppAutopilotPreviewContext }
+    | AppAutopilotPreviewFailure;
+
+  type AppAutopilotServerContext = {
+    scope: AppAutopilotScope;
+    draft: AppBuildDraft;
+    page: DashboardDocument;
+    tile: DashboardGridItem;
+    source: ReturnType<typeof resolveAppSourceCatalogRecords>['items'][number];
+    approvedPhysicalFields: string[];
+    approvedMeasures: string[];
+    previewRequirement: AppAutopilotPreviewRequirement;
+    preview?: AppAutopilotPreviewContext;
+    /** An optional stale preview never blocks a metadata-only edit, but it
+     * gives an explanation or repair response precise recovery guidance. */
+    previewFailure?: AppAutopilotPreviewFailure;
+    validatePreview?: (kind: AppAutopilotPreviewKind | 'available') => Promise<AppAutopilotPreviewValidation>;
+    promptContext: string;
+  };
+
+  type AppAutopilotInterpretation =
+    | { kind: 'change'; intent: AppAutopilotIntent; summary: string }
+    | { kind: 'explain'; answer: string }
+    | { kind: 'repair'; answer: string }
+    | { kind: 'repair_not_needed'; answer: string; reasonCode: 'APP_AUTOPILOT_PREVIEW_FAILED_TILE_HEALTHY' }
+    | { kind: 'preview_required'; answer: string; reasonCode: AppAutopilotPreviewFailureCode };
+
+  /**
+   * A compact App artifact projection of the shared provider classifier.  The
+   * provider's raw error is never retained here: the durable run receives only
+   * an allowlisted transport kind, classifier values, and a one-way fingerprint.
+   */
+  type AppAutopilotProviderFailureV1 = {
+    version: 1;
+    transportKind: ProviderName;
+    normalizedCode: `provider_${ProviderFailureDiagnosticV1['cause']}`;
+    messageFingerprint: string;
+    phase: ProviderFailureDiagnosticV1['phase'];
+    cause: ProviderFailureDiagnosticV1['cause'];
+    retryable: boolean;
+    safeAction: ProviderFailureDiagnosticV1['safeAction'];
+    statusClass?: NonNullable<ProviderFailureDiagnosticV1['httpStatusClass']>;
+    providerFingerprint?: string;
+  };
+  type AppAutopilotProviderFailureError = Error & {
+    appAutopilotProviderFailure?: AppAutopilotProviderFailureV1;
+  };
+
+  const isAppAutopilotSurfaceRequest = (request: AgentRunRequest): boolean => (
+    agentRunWorkspaceValue(request, 'surface') === 'app_autopilot'
+  );
+
+  const isAppAutopilotScopeValue = (value: string | undefined): value is string => (
+    Boolean(value && /^[a-z0-9_:-]+$/i.test(value))
+  );
+
+  const appAutopilotScopeFor = (request: AgentRunRequest): AppAutopilotScope | undefined => {
+    if (!isAppAutopilotSurfaceRequest(request)) return undefined;
+    const draftId = agentRunWorkspaceValue(request, 'appBuildId');
+    const pageId = agentRunWorkspaceValue(request, 'pageId');
+    const tileId = agentRunWorkspaceValue(request, 'tileId');
+    const previewRunId = agentRunWorkspaceValue(request, 'previewRunId');
+    if (!draftId || !pageId || !tileId
+      || !isAppAutopilotScopeValue(draftId)
+      || !isAppAutopilotScopeValue(pageId)
+      || !isAppAutopilotScopeValue(tileId)
+      || (previewRunId !== undefined && !isAppAutopilotScopeValue(previewRunId))) {
+      return undefined;
+    }
+    return { draftId, pageId, tileId, ...(previewRunId ? { previewRunId } : {}) };
+  };
+
+  /** Presentation-only key written into the immutable response artifact. */
+  const appAutopilotPresentationScope = (scope: AppAutopilotScope): string => (
+    `${scope.draftId}:${scope.pageId}:${scope.tileId}:${scope.previewRunId ?? 'no-preview'}`
+  );
+
+  /**
+   * The App panel owns the presentation key, but the server produces it from
+   * opaque identifiers only. Missing or malformed selectors deliberately use
+   * the same sentinel values as App Studio so a blocked response stays visible
+   * instead of falling into the initial App-builder route.
+   */
+  const appAutopilotPresentationScopeForRequest = (request: AgentRunRequest): string => {
+    const part = (key: string, fallback: string) => {
+      const value = agentRunWorkspaceValue(request, key);
+      return isAppAutopilotScopeValue(value) ? value : fallback;
+    };
+    return `${part('appBuildId', 'new')}:${part('pageId', 'no-page')}:${part('tileId', 'no-tile')}:${part('previewRunId', 'no-preview')}`;
+  };
+
+  // A right-side App Autopilot request must never be reinterpreted as a new
+  // App generation request merely because the user has not selected a tile.
+  const isAppAutopilotRequest = (request: AgentRunRequest): boolean => isAppAutopilotSurfaceRequest(request);
+
+  /**
+   * Structural App edits remain useful before a preview exists. Requests that
+   * claim to explain a result or repair a failed tile instead need one exact,
+   * current server-held preview record. Browser wording never carries rows or
+   * diagnostics; it only selects which evidence lane the server must prove.
+   */
+  const resolveAppAutopilotServerContext = async (
+    request: AgentRunRequest,
+  ): Promise<AppAutopilotServerContext> => {
+    const scope = appAutopilotScopeFor(request);
+    if (!scope) {
+      throw new Error('APP_AUTOPILOT_CONTEXT_INVALID: App Autopilot needs one saved App draft, page, and Dataset tile.');
+    }
+    const draft = loadStoredAppBuildDraft(projectRoot, scope.draftId);
+    if (!draft) {
+      throw new Error('APP_AUTOPILOT_DRAFT_NOT_FOUND: the saved App draft is no longer available. Reopen App Studio and try again.');
+    }
+    const page = draft.pages.find((candidate) => candidate.id === scope.pageId);
+    const tile = page?.layout.items.find((candidate) => candidate.i === scope.tileId);
+    if (!page || !tile || !tile.sourceId || !tile.query) {
+      throw new Error('APP_AUTOPILOT_DATASET_TILE_REQUIRED: select one saved Dataset tile before asking App Autopilot to make a change.');
+    }
+    const resolved = resolveAppSourceCatalogRecords(projectRoot, [tile.sourceId], draft.sourcePolicy);
+    const source = resolved.items.find((candidate) => candidate.sourceId === tile.sourceId);
+    const dataset = source?.capabilities.dataset;
+    if (!source || !dataset || resolved.missingSourceIds.length > 0) {
+      throw new Error('APP_AUTOPILOT_SOURCE_UNAVAILABLE: the selected tile no longer resolves to a current governed Dataset source.');
+    }
+    const approvedPhysicalFields = dataset.fields
+      .filter((field) => field.kind === 'physical'
+        && field.status === 'approved')
+      .map((field) => field.name)
+      .filter((field, index, fields) => fields.indexOf(field) === index)
+      .slice(0, 40);
+    const approvedMeasures = dataset.fields
+      .filter((field) => field.kind === 'measure' && field.status === 'approved')
+      .map((field) => field.name)
+      .filter((field, index, fields) => fields.indexOf(field) === index)
+      .slice(0, 40);
+    const previewRequirement = appAutopilotPreviewRequirementFor(request.question);
+    const promptContext = JSON.stringify({
+      draft: {
+        id: draft.id,
+        revision: draft.revision,
+        title: draft.name,
+        goal: draft.frame.goal,
+        sourcePolicy: draft.sourcePolicy,
+        openReviewTasks: draft.reviewTasks.filter((task) => task.status === 'open').map((task) => task.message).slice(0, 8),
+      },
+      page: {
+        id: page.id,
+        title: page.metadata.title,
+        filters: (page.filters ?? []).map((filter) => ({
+          id: filter.id,
+          label: filter.label,
+          type: filter.type,
+          scope: filter.scope,
+        })).slice(0, 20),
+        datasetTiles: page.layout.items.filter((candidate) => Boolean(candidate.query && candidate.sourceId)).map((candidate) => ({
+          id: candidate.i,
+          title: candidate.title,
+          sourceId: candidate.sourceId,
+          visualization: candidate.viz.type,
+          outputs: candidate.query ? tileQueryOutputAliases(candidate.query) : [],
+        })).slice(0, 40),
+      },
+      pages: draft.pages.map((candidate) => ({
+        id: candidate.id,
+        title: candidate.metadata.title,
+        filters: (candidate.filters ?? []).map((filter) => ({ id: filter.id, label: filter.label, appScoped: filter.scope?.app === true })).slice(0, 20),
+        datasetTiles: candidate.layout.items.filter((item) => Boolean(item.query && item.sourceId)).map((item) => ({
+          id: item.i,
+          title: item.title,
+          sourceId: item.sourceId,
+          outputs: item.query ? tileQueryOutputAliases(item.query) : [],
+        })).slice(0, 40),
+      })).slice(0, 20),
+      tile: {
+        id: tile.i,
+        title: tile.title,
+        visualization: tile.viz.type,
+        sourceId: tile.sourceId,
+        sourceRevision: tile.sourceRevision,
+        query: tile.query,
+      },
+      source: {
+        id: source.sourceId,
+        title: source.title,
+        qualifiedIdentity: source.qualifiedIdentity,
+        lifecycle: source.lifecycle,
+        trust: source.trust,
+        revision: source.sourceRevision,
+        approvedPhysicalFields: dataset.fields.filter((field): field is DatasetDescriptor['fields'][number] & { kind: 'physical' } => field.kind === 'physical' && field.status === 'approved')
+          .map((field) => ({ name: field.name, role: field.role, type: field.type })).slice(0, 40),
+        approvedMeasures: dataset.fields.filter((field): field is DatasetDescriptor['fields'][number] & { kind: 'measure' } => field.kind === 'measure' && field.status === 'approved')
+          .map((field) => ({ name: field.name, aggregation: field.aggregation })).slice(0, 40),
+      },
+      approvedPhysicalFields,
+      approvedMeasures,
+      ...(scope.previewRunId ? { previewRunId: scope.previewRunId } : {}),
+    });
+    const previewRequiredMessage = 'Run preview before asking App Autopilot to explain a result or repair a failed tile.';
+    const previewValidationFailure = (
+      reasonCode: AppAutopilotPreviewFailureCode,
+      error: string,
+    ): AppAutopilotPreviewFailure => ({ ok: false, reasonCode, error });
+    /**
+     * Preview requirement describes what the request claims to need. A supplied
+     * run ID is separate evidence: hydrate it when it remains current even for
+     * indirect wording, but never make stale optional evidence block a typed
+     * presentation edit that does not need result or failure facts.
+     */
+    const validatePreview = async (
+      kind: AppAutopilotPreviewKind | 'available',
+    ): Promise<AppAutopilotPreviewValidation> => {
+      if (!scope.previewRunId) {
+        return previewValidationFailure(
+          kind === 'failed_tile'
+            ? 'APP_AUTOPILOT_PREVIEW_FAILED_TILE_REQUIRED'
+            : 'APP_AUTOPILOT_PREVIEW_RESULT_REQUIRED',
+          previewRequiredMessage,
+        );
+      }
+      const run = datasetChartRunEvidence.get(scope.previewRunId);
+      if (!run || run.expiresAt < Date.now()) {
+        datasetChartRunEvidence.delete(scope.previewRunId);
+        return previewValidationFailure('APP_AUTOPILOT_PREVIEW_EXPIRED', previewRequiredMessage);
+      }
+      if (run.runScopeKey && datasetChartScopeGenerations.get(run.runScopeKey) !== run.runScopeGeneration) {
+        datasetChartRunEvidence.delete(scope.previewRunId);
+        return previewValidationFailure(
+          'APP_AUTOPILOT_PREVIEW_SUPERSEDED',
+          'A newer preview replaced this App viewer state. Run the current preview before asking App Autopilot.',
+        );
+      }
+      if (run.appId !== scope.draftId || run.dashboardId !== scope.pageId) {
+        return previewValidationFailure(
+          'APP_AUTOPILOT_PREVIEW_SCOPE_MISMATCH',
+          'This preview does not belong to the selected App draft page. Run the current preview before asking App Autopilot.',
+        );
+      }
+      if (run.draftRevision === undefined || !run.draftIntentFingerprint) {
+        return previewValidationFailure('APP_AUTOPILOT_PREVIEW_DRAFT_STATE_MISSING', previewRequiredMessage);
+      }
+      const currentDraft = loadStoredAppBuildDraft(projectRoot, scope.draftId);
+      const currentPage = currentDraft?.pages.find((candidate) => candidate.id === scope.pageId);
+      const currentTile = currentPage?.layout.items.find((candidate) => candidate.i === scope.tileId);
+      if (!currentDraft || !currentPage || !currentTile?.query || !currentTile.sourceId) {
+        return previewValidationFailure(
+          'APP_AUTOPILOT_PREVIEW_DRAFT_CHANGED',
+          'The selected App draft, page, or Dataset tile changed after this preview. Run the current preview before asking App Autopilot.',
+        );
+      }
+      const currentDashboardFingerprint = `sha256:${createHash('sha256').update(JSON.stringify(currentPage)).digest('hex')}`;
+      if (currentDraft.revision !== run.draftRevision
+        || appBuildPreviewIntentFingerprint(currentDraft, currentPage.id) !== run.draftIntentFingerprint
+        || currentDashboardFingerprint !== run.dashboardFingerprint) {
+        return previewValidationFailure(
+          'APP_AUTOPILOT_PREVIEW_DRAFT_CHANGED',
+          'The App draft or its filters, navigation, or tile layout changed after this preview. Run the current preview before asking App Autopilot.',
+        );
+      }
+      const heldResult = run.chartContexts.find((candidate) => candidate.tileId === scope.tileId);
+      const heldFailure = run.failedTileContexts.find((candidate) => candidate.tileId === scope.tileId);
+      // A failed-tile request must validate a successful selected-tile result
+      // through the same source/filter/target checks before telling the user
+      // that repair is unnecessary. That makes a current healthy preview
+      // distinct from an absent or stale preview without weakening freshness.
+      const healthySelectedTile = kind === 'failed_tile' && !heldFailure && Boolean(heldResult);
+      const held = kind === 'result'
+        ? heldResult
+        : kind === 'failed_tile'
+          ? heldFailure ?? heldResult
+          : heldResult ?? heldFailure;
+      if (!held) {
+        if (kind === 'failed_tile') {
+          return previewValidationFailure(
+            'APP_AUTOPILOT_PREVIEW_FAILED_TILE_UNAVAILABLE',
+            'The selected tile has no server-held failed Dataset diagnostic in this preview. Run preview before asking App Autopilot to repair it.',
+          );
+        }
+        return previewValidationFailure(
+          kind === 'result'
+            ? 'APP_AUTOPILOT_PREVIEW_RESULT_UNAVAILABLE'
+            : 'APP_AUTOPILOT_PREVIEW_EVIDENCE_UNAVAILABLE',
+          'The selected tile has no settled Dataset result in this preview. Run preview before asking App Autopilot to explain it.',
+        );
+      }
+      const heldSource = held.source;
+      if (currentTile.sourceId !== heldSource.sourceId
+        || currentTile.sourceRevision !== heldSource.sourceRevision
+        || tileQueryHash(currentTile.query) !== held.authoredQueryFingerprint
+        || !held.filterFingerprint
+        || !held.interactionFingerprint
+        || !run.previewInputFingerprint) {
+        return previewValidationFailure(
+          'APP_AUTOPILOT_PREVIEW_TILE_CHANGED',
+          'The selected Dataset tile or its preview filter and interaction state changed after this preview. Run the current preview before asking App Autopilot.',
+        );
+      }
+      const currentSnapshot = projectSnapshot();
+      if (currentSnapshot.error || currentSnapshot.stale || currentSnapshot.snapshotId !== run.snapshotId) {
+        return previewValidationFailure(
+          'APP_AUTOPILOT_PREVIEW_PROJECT_CHANGED',
+          'The project changed after this preview. Run the current preview before asking App Autopilot.',
+        );
+      }
+      const currentPersonaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+      if (currentPersonaFingerprint !== held.personaPolicyFingerprint) {
+        return previewValidationFailure(
+          'APP_AUTOPILOT_PREVIEW_PERSONA_CHANGED',
+          'The active App persona changed after this preview. Run the current preview before asking App Autopilot.',
+        );
+      }
+      try {
+        await ensureMetadataCatalogFresh(projectRoot, { manifest: currentSnapshot.manifest, semanticLayer });
+        const currentSources = resolveAppSourceCatalogRecords(projectRoot, [heldSource.sourceId], currentDraft.sourcePolicy);
+        const currentSource = currentSources.items[0];
+        const descriptor = currentSource?.capabilities.dataset;
+        if (!currentSource || !descriptor || currentSources.missingSourceIds.length > 0
+          || currentSource.sourceRevision !== heldSource.sourceRevision
+          || descriptor.contractRef.fingerprint !== heldSource.contractFingerprint
+          || currentSource.lifecycle !== heldSource.lifecycle
+          || currentSource.trust !== heldSource.trust
+          || !currentSource.eligibility.localPreview) {
+          return previewValidationFailure(
+            'APP_AUTOPILOT_PREVIEW_SOURCE_CHANGED',
+            'The governed Dataset source changed after this preview. Refresh the source and run the current preview before asking App Autopilot.',
+          );
+        }
+        if (heldSource.targetFingerprint) {
+          const currentConnection = await resolveExecutionConnection({});
+          const currentTargetFingerprint = (await observeWarehouseTargetIdentity(executor, currentConnection)).identityFingerprint;
+          if (currentTargetFingerprint !== heldSource.targetFingerprint) {
+            return previewValidationFailure(
+              'APP_AUTOPILOT_PREVIEW_TARGET_CHANGED',
+              'The active warehouse target changed after this preview. Run the current preview before asking App Autopilot.',
+            );
+          }
+        }
+        if (healthySelectedTile) {
+          return previewValidationFailure(
+            'APP_AUTOPILOT_PREVIEW_FAILED_TILE_HEALTHY',
+            'The selected tile has a current successful governed preview and no failed Dataset diagnostic to repair. You can change its title, layout, grouping, or visualization directly.',
+          );
+        }
+        return heldResult && held === heldResult
+          ? { ok: true, preview: { kind: 'result', run, context: heldResult } }
+          : { ok: true, preview: { kind: 'failed_tile', run, failure: held as DatasetChartFailedTileEvidence } };
+      } catch {
+        return previewValidationFailure(
+          'APP_AUTOPILOT_PREVIEW_VALIDATION_FAILED',
+          'DQL could not confirm this App preview against the current governed source. Run the current preview before asking App Autopilot.',
+        );
+      }
+    };
+    const previewValidationKind: AppAutopilotPreviewKind | 'available' = previewRequirement === 'none'
+      ? 'available'
+      : previewRequirement;
+    const previewValidation = scope.previewRunId || previewRequirement !== 'none'
+      ? await validatePreview(previewValidationKind)
+      : undefined;
+    const preview = previewValidation?.ok ? previewValidation.preview : undefined;
+    const previewFailure = previewValidation && !previewValidation.ok ? previewValidation : undefined;
+    const serverPromptContext = JSON.stringify({
+      ...(JSON.parse(promptContext) as Record<string, unknown>),
+      ...(preview?.kind === 'result' ? {
+        currentPreview: {
+          kind: 'fresh_server_held_result',
+          runId: preview.context.runId,
+          source: preview.context.source,
+          rowCount: preview.context.result.rowCount,
+          columns: preview.context.result.columns.slice(0, 20),
+          effectiveFilters: preview.context.effectiveFilters,
+          summary: answerFromDatasetChartContext(preview.context, dataset),
+          filterFingerprint: preview.context.filterFingerprint,
+          interactionFingerprint: preview.context.interactionFingerprint,
+        },
+      } : preview?.kind === 'failed_tile' ? {
+        currentPreview: {
+          kind: 'fresh_server_held_failed_tile',
+          runId: preview.run.appId === scope.draftId ? scope.previewRunId : undefined,
+          title: preview.failure.title,
+          error: preview.failure.error,
+          diagnosticCodes: preview.failure.diagnosticCodes,
+          source: preview.failure.source,
+          filterFingerprint: preview.failure.filterFingerprint,
+          interactionFingerprint: preview.failure.interactionFingerprint,
+        },
+      } : {}),
+    });
+    return {
+      scope,
+      draft,
+      page,
+      tile,
+      source,
+      approvedPhysicalFields,
+      approvedMeasures,
+      previewRequirement,
+      ...(preview ? { preview } : {}),
+      ...(previewFailure ? { previewFailure } : {}),
+      validatePreview,
+      promptContext: serverPromptContext,
+    };
+  };
+
+  const extractAppAutopilotJson = (raw: string): Record<string, unknown> | undefined => {
+    const trimmed = raw.trim().replace(/^\`\`\`(?:json)?/i, '').replace(/\`\`\`$/i, '').trim();
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start < 0 || end < start) return undefined;
+    try {
+      const parsed = JSON.parse(trimmed.slice(start, end + 1));
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const interpretAppAutopilotRequest = async (
+    request: AgentRunRequest,
+    context: AppAutopilotServerContext,
+  ): Promise<AppAutopilotInterpretation> => {
+    if (context.previewRequirement !== 'none' && !context.preview) {
+      if (context.previewRequirement === 'failed_tile'
+        && context.previewFailure?.reasonCode === 'APP_AUTOPILOT_PREVIEW_FAILED_TILE_HEALTHY') {
+        return {
+          kind: 'repair_not_needed',
+          answer: context.previewFailure.error,
+          reasonCode: context.previewFailure.reasonCode,
+        };
+      }
+      return {
+        kind: 'preview_required',
+        answer: context.previewFailure?.error ?? 'Run preview before asking App Autopilot to explain a result or repair a failed tile.',
+        reasonCode: context.previewFailure?.reasonCode ?? (context.previewRequirement === 'failed_tile'
+          ? 'APP_AUTOPILOT_PREVIEW_FAILED_TILE_REQUIRED'
+          : 'APP_AUTOPILOT_PREVIEW_RESULT_REQUIRED'),
+      };
+    }
+    const provider = opts.appAutopilotProviderFactory
+      ? await opts.appAutopilotProviderFactory({ projectRoot, request, promptContext: context.promptContext })
+      : await createBlockStudioAssistProvider(projectRoot);
+    if (!provider) {
+      throw new Error('APP_AUTOPILOT_PROVIDER_UNAVAILABLE: configure a supported AI provider before using App Autopilot.');
+    }
+    const dispatchTrace = createProviderDispatchTrace({
+      observer: askTraceObserverForV1(request),
+      phase: 'generation',
+      purpose: 'answer_generation',
+      admit: (event) => {
+        const ledger = agentRunProviderEvidenceContext.getStore();
+        if (ledger) {
+          return ledger.observe(event, {
+            purpose: 'answer_generation',
+            dispatchPhase: 'generation',
+            optIn: false,
+          });
+        }
+        const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
+        assertProviderPayloadAllowed(envelope, {
+          allowResultRows: false,
+          maxResultRows: 0,
+          purpose: 'answer_generation',
+        });
+        return envelope;
+      },
+    });
+    // A provider adapter can retain a typed HTTP/process completion while its
+    // public `generate()` rejection is a generic wrapper. Preserve the same
+    // safe classification the shared trace saw, rather than reclassifying the
+    // wrapper as `unknown` in the App artifact.
+    let dispatchedProviderFailure: AppAutopilotProviderFailureV1 | undefined;
+    const appAutopilotDispatchOptions = {
+      ...dispatchTrace.options,
+      onProviderDispatchComplete: (event: ProviderDispatchCompletionEvent) => {
+        dispatchTrace.options.onProviderDispatchComplete(event);
+        if (event.outcome === 'ok') return;
+        const completionError = event.error ?? (typeof event.httpStatus === 'number'
+          ? Object.assign(new Error(`HTTP ${event.httpStatus}`), { code: `HTTP_${event.httpStatus}` })
+          : new Error('provider completion failed'));
+        dispatchedProviderFailure = appAutopilotProviderFailureProjection(
+          { name: event.provider },
+          completionError,
+        );
+      },
+      onProviderDispatchRejected: (event: ProviderDispatchRejectionEvent) => {
+        dispatchTrace.options.onProviderDispatchRejected(event);
+        // The shared trace ignores a duplicate rejection after an admitted
+        // completion for this physical send. Keep its earlier, more precise
+        // completion classification in the App artifact as well.
+        if (!dispatchedProviderFailure) {
+          dispatchedProviderFailure = appAutopilotProviderFailureProjection(
+            { name: event.provider },
+            event.error,
+          );
+        }
+      },
+    };
+    let raw: string;
+    try {
+      raw = await provider.generate([
+        {
+          role: 'system',
+          content: [
+            'You are App Autopilot inside DQL. Interpret one request against the server-owned App context.',
+            'You never write SQL, add a source, change source trust, infer a field, or apply an App change.',
+            'A currentPreview, when present, is server-held, bounded evidence. Use only its stated facts; never ask for, infer, or reconstruct result rows, SQL, source authority, filters, or diagnostics.',
+            'For a safe change, return exactly one JSON object with action in: group_tile, change_visualization, rename_tile, add_tile, remove_tile, add_page, remove_page, add_filter, remove_filter, map_filter, add_cross_filter, add_navigation, add_detail_drill, arrange_layout.',
+            'Use only exact ids and field/measure names exposed in appContext. Include only the keys needed by the action: field, measure, visualization, title, targetField, targetPageId, targetTileId, filterId, scope (page or app), summary.',
+            'group_tile needs field. change_visualization needs visualization. rename_tile and add_page need title. add_tile needs measure and optionally field/visualization/title. add_filter needs field and optionally filterId/scope. map_filter needs filterId and field.',
+            'For one selected-tile request that changes both title and visualization, return action change_visualization with both title and visualization. DQL compiles those two presentation fields into one atomic typed update. If any requested structural clause cannot be represented, return action repair with a specific reason; never omit it.',
+            'add_cross_filter needs field as a selected output on the selected tile, targetTileId, and targetField. add_navigation needs targetPageId. add_detail_drill needs field. remove_filter needs filterId. remove_page may use targetPageId; otherwise it removes the selected page.',
+            'For a factual explanation, return exactly JSON: {"action":"explain","answer":"..."}. Use only the context and state uncertainty plainly.',
+            'For a failed-tile repair that one allowed typed App action can resolve, return that change action. For a repair that needs source or contract work, return exactly JSON: {"action":"repair","answer":"..."}. Explain the blocker and the smallest reviewer action.',
+            'If a requested id, field, measure, or mapping is absent, use action repair; never invent one.',
+            'No markdown or prose outside the JSON object.',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            request: request.question,
+            appContext: JSON.parse(context.promptContext),
+          }),
+        },
+      ], {
+        maxTokens: 500,
+        temperature: 0,
+        signal: request.signal,
+        maxProviderDispatches: 1,
+        ...appAutopilotDispatchOptions,
+      });
+      dispatchTrace.settle('ok');
+    } catch (error) {
+      dispatchTrace.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
+      const providerFailure = dispatchedProviderFailure ?? appAutopilotProviderFailureProjection(provider, error);
+      throw Object.assign(
+        new Error('APP_AUTOPILOT_PROVIDER_FAILED: App Autopilot could not interpret this request through the configured provider.'),
+        {
+          code: 'APP_AUTOPILOT_PROVIDER_FAILED',
+          appAutopilotProviderFailure: providerFailure,
+        },
+      ) as AppAutopilotProviderFailureError;
+    }
+    // A provider completion can arrive after an interaction, source, target,
+    // persona, or draft revision changes. Re-run the same server-owned proof
+    // before treating a completion as an App explanation or review artifact.
+    if (context.preview && context.validatePreview) {
+      const afterProvider = await context.validatePreview(context.preview.kind);
+      if (!afterProvider.ok) {
+        return {
+          kind: 'preview_required',
+          answer: afterProvider.error,
+          reasonCode: afterProvider.reasonCode,
+        };
+      }
+    }
+    const parsed = extractAppAutopilotJson(raw);
+    const action = typeof parsed?.action === 'string' ? parsed.action : '';
+    const changeActions = new Set<AppAutopilotIntent['action']>([
+      'group_tile', 'change_visualization', 'rename_tile', 'add_tile', 'remove_tile',
+      'add_page', 'remove_page', 'add_filter', 'remove_filter', 'map_filter',
+      'add_cross_filter', 'add_navigation', 'add_detail_drill', 'arrange_layout',
+    ]);
+    if (changeActions.has(action as AppAutopilotIntent['action'])) {
+      const text = (key: string, maximum = 600): string | undefined => {
+        const value = parsed?.[key];
+        return typeof value === 'string' && value.trim() && value.trim().length <= maximum ? value.trim() : undefined;
+      };
+      const visualization = text('visualization', 40);
+      const intent: AppAutopilotIntent = {
+        action: action as AppAutopilotIntent['action'],
+        request: request.question,
+        ...(text('field', 160) ? { field: text('field', 160) } : {}),
+        ...(text('measure', 160) ? { measure: text('measure', 160) } : {}),
+        ...(visualization ? { visualization: visualization as AppAutopilotIntent['visualization'] } : {}),
+        ...(text('title', 120) ? { title: text('title', 120) } : {}),
+        ...(text('targetField', 160) ? { targetField: text('targetField', 160) } : {}),
+        ...(text('targetPageId', 160) ? { targetPageId: text('targetPageId', 160) } : {}),
+        ...(text('targetTileId', 160) ? { targetTileId: text('targetTileId', 160) } : {}),
+        ...(text('filterId', 160) ? { filterId: text('filterId', 160) } : {}),
+        ...(parsed?.scope === 'page' || parsed?.scope === 'app' ? { scope: parsed.scope } : {}),
+        ...(text('summary', 600) ? { summary: text('summary', 600) } : {}),
+      };
+      appAutopilotAssertRequestedPresentationParts(request.question, intent);
+      const summary = intent.summary ?? `Review the proposed ${intent.action.replace(/_/g, ' ')} App change.`;
+      return { kind: 'change', intent, summary };
+    }
+    if (action === 'explain' || action === 'repair') {
+      const answer = typeof parsed?.answer === 'string' ? parsed.answer.trim().slice(0, 2_000) : '';
+      if (!answer) {
+        throw new Error('APP_AUTOPILOT_INTERPRETATION_INVALID: the provider did not return a usable App explanation.');
+      }
+      if (action === 'explain' && context.preview?.kind !== 'result') {
+        return {
+          kind: 'preview_required',
+          answer: context.previewFailure?.error ?? 'Run preview before asking App Autopilot to explain a result.',
+          reasonCode: context.previewFailure?.reasonCode ?? 'APP_AUTOPILOT_PREVIEW_RESULT_REQUIRED',
+        };
+      }
+      if (action === 'repair' && context.preview?.kind !== 'failed_tile') {
+        return {
+          kind: 'preview_required',
+          answer: context.previewFailure?.error ?? 'Run preview before asking App Autopilot to repair a failed tile.',
+          reasonCode: context.previewFailure?.reasonCode ?? 'APP_AUTOPILOT_PREVIEW_FAILED_TILE_REQUIRED',
+        };
+      }
+      return action === 'explain' ? { kind: 'explain', answer } : { kind: 'repair', answer };
+    }
+    throw new Error('APP_AUTOPILOT_INTERPRETATION_INVALID: the provider returned an unsupported App Autopilot action.');
+  };
+
   const agentRunTitle = (question: string, fallback: string): string => {
     const cleaned = question.replace(/\s+/g, ' ').trim();
     if (!cleaned) return fallback;
@@ -5370,6 +6329,116 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     ref,
     payload,
   });
+
+  const appAutopilotProviderFailureProjection = (
+    provider: Pick<AgentProvider, 'name'>,
+    error: unknown,
+  ): AppAutopilotProviderFailureV1 => {
+    const message = error instanceof Error
+      ? error.message
+      : typeof error === 'string' && error.trim()
+        ? error
+        : 'provider completion failed';
+    const rawCode = error && typeof error === 'object'
+      ? String((error as { code?: unknown }).code ?? '')
+      : '';
+    // Reuse the shared classifier used by the dispatch trace.  Do not retain
+    // either the raw code or provider message in the App artifact.
+    const diagnostic = classifyProviderFailure({
+      message,
+      ...(rawCode ? { code: rawCode } : {}),
+      phase: 'generation',
+      providerFingerprint: runtimeTraceFingerprint(provider.name),
+    });
+    return {
+      version: 1,
+      transportKind: provider.name,
+      normalizedCode: `provider_${diagnostic.cause}` as `provider_${ProviderFailureDiagnosticV1['cause']}`,
+      messageFingerprint: runtimeTraceFingerprint(`${rawCode}\u0000${message}`),
+      phase: diagnostic.phase,
+      cause: diagnostic.cause,
+      retryable: diagnostic.retryable,
+      safeAction: diagnostic.safeAction,
+      ...(diagnostic.httpStatusClass ? { statusClass: diagnostic.httpStatusClass } : {}),
+      ...(diagnostic.providerFingerprint ? { providerFingerprint: diagnostic.providerFingerprint } : {}),
+    };
+  };
+
+  const appAutopilotProviderFailureFromError = (error: unknown): AppAutopilotProviderFailureV1 | undefined => {
+    if (!error || typeof error !== 'object') return undefined;
+    const candidate = (error as AppAutopilotProviderFailureError).appAutopilotProviderFailure;
+    return candidate?.version === 1 ? candidate : undefined;
+  };
+
+  const appAutopilotProviderFailureGuidance = (failure: AppAutopilotProviderFailureV1): string => {
+    switch (failure.safeAction) {
+      case 'wait_and_retry':
+        return 'APP_AUTOPILOT_PROVIDER_FAILED: The configured provider asked DQL to wait before retrying this App request.';
+      case 'retry_same_provider':
+        return 'APP_AUTOPILOT_PROVIDER_FAILED: The configured provider did not complete this App request; retry the same request.';
+      case 'fix_provider_configuration':
+        return 'APP_AUTOPILOT_PROVIDER_FAILED: The configured provider needs local configuration attention before this App request can continue.';
+      case 'none':
+        return 'APP_AUTOPILOT_PROVIDER_FAILED: The configured provider request was cancelled before DQL could validate an App response.';
+      default:
+        return 'APP_AUTOPILOT_PROVIDER_FAILED: The configured provider failed before DQL could validate an App response; inspect this local run for its safe diagnostic.';
+    }
+  };
+
+  const appAutopilotBlockedResult = (
+    request: AgentRunRequest,
+    message: string,
+    options: { providerFailure?: AppAutopilotProviderFailureV1 } = {},
+  ) => {
+    const code = message.match(/^([A-Z0-9_]+):/)?.[1] ?? 'APP_AUTOPILOT_BLOCKED';
+    const tileRequired = code === 'APP_AUTOPILOT_DATASET_TILE_REQUIRED';
+    const providerFailure = code === 'APP_AUTOPILOT_PROVIDER_FAILED'
+      ? options.providerFailure
+      : undefined;
+    const scope = appAutopilotScopeFor(request);
+    return {
+      summary: message,
+      answer: message,
+      status: 'blocked' as const,
+      trustState: 'blocked' as const,
+      stopReason: 'blocked' as const,
+      artifacts: [agentRunArtifact(
+        'answer',
+        tileRequired ? 'Select a Dataset tile' : providerFailure ? 'App Autopilot provider failure' : 'App Autopilot blocked',
+        {
+          version: 1,
+          kind: tileRequired ? 'app_autopilot_tile_required' : 'app_autopilot_blocked',
+          code,
+          ...(providerFailure ? {
+            providerFailure,
+            refusalDetails: { message: appAutopilotProviderFailureGuidance(providerFailure) },
+          } : {}),
+          ...(scope ? {
+            draftId: scope.draftId,
+            pageId: scope.pageId,
+            tileId: scope.tileId,
+            ...(scope.previewRunId ? { previewRunId: scope.previewRunId } : {}),
+          } : {}),
+          contextScope: appAutopilotPresentationScopeForRequest(request),
+        },
+        undefined,
+        'blocked',
+      )],
+      evaluations: [
+        agentRunEvaluation(
+          'app-autopilot-context-or-provider',
+          providerFailure ? 'Configured App provider' : 'App Autopilot',
+          false,
+          'blocking',
+          providerFailure ? appAutopilotProviderFailureGuidance(providerFailure) : message,
+          providerFailure,
+        ),
+      ],
+      ...(tileRequired ? {
+        nextActions: [{ id: 'select-app-dataset-tile', label: 'Select a Dataset tile' }],
+      } : {}),
+    };
+  };
 
   // Provider-backed narration for an explicitly consented Research result.
   // Ordinary Ask never enters this helper; deterministic narration remains the
@@ -6281,6 +7350,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     if (input.operations.length === 0) throw Object.assign(new Error('At least one authoring operation is required.'), { code: 'INVALID_REQUEST' });
     const diagnostics: ContextAuthoringDiagnosticV1[] = [...(input.diagnostics ?? [])];
+    const preparedDatasetChanges = new Map<string, PreparedDatasetAuthoringChange>();
+    const preparedDatasetDrafts = new Map<string, PreparedDatasetDraftAuthoringChange>();
     // A follow-up turn changes part of a draft and leaves the rest standing.
     // Operation ids are deterministic (entity:<domain>:<id>), so the new turn
     // overwrites the operation it revises instead of proposing a second one.
@@ -6288,6 +7359,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       ? mergeAuthoringOperations(input.baseOperations, input.operations)
       : input.operations;
     const operations = requested.map((operation): ContextAuthoringOperation => {
+      if (operation.kind === 'dataset_change') {
+        const prepared = prepareDatasetAuthoringChangeForProposal(projectRoot, snapshot.manifest, operation.change);
+        preparedDatasetChanges.set(operation.id, prepared);
+        diagnostics.push({
+          code: 'DATASET_CHANGE_REVIEW_REQUIRED',
+          severity: 'info',
+          operationId: operation.id,
+          message: `The Dataset declaration for ${prepared.block.name} will be saved as review-required. It does not certify the source or rebind any App.`,
+        });
+        return operation;
+      }
+      if (operation.kind === 'dataset_draft') {
+        const prepared = prepareDatasetDraftAuthoringChangeForProposal(projectRoot, snapshot.manifest, operation.change);
+        preparedDatasetDrafts.set(operation.id, prepared);
+        diagnostics.push({
+          code: 'DATASET_DRAFT_REVIEW_REQUIRED',
+          severity: 'info',
+          operationId: operation.id,
+          message: `The new Dataset draft ${prepared.blockName} will be saved for review. It has no certification, proof, or App binding.`,
+        });
+        return operation;
+      }
       if (operation.kind === 'skill_change') {
         const value = { ...operation.value };
         value.status = 'draft';
@@ -6394,6 +7487,32 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           owner: 'dbt',
           operationId: operation.id,
         });
+      } else if (operation.kind === 'dataset_change') {
+        const prepared = preparedDatasetChanges.get(operation.id);
+        if (!prepared) {
+          throw Object.assign(new Error(`Dataset operation ${operation.id} was not prepared against the current project snapshot.`), { code: 'DATASET_CHANGE_PREVIEW_MISSING' });
+        }
+        patches.push({
+          path: prepared.relativePath,
+          before: prepared.source,
+          after: prepared.patch.after,
+          changed: prepared.source !== prepared.patch.after,
+          owner: 'dql',
+          operationId: operation.id,
+        });
+      } else if (operation.kind === 'dataset_draft') {
+        const prepared = preparedDatasetDrafts.get(operation.id);
+        if (!prepared) {
+          throw Object.assign(new Error(`Dataset draft operation ${operation.id} was not prepared against the current project snapshot.`), { code: 'DATASET_DRAFT_PREVIEW_MISSING' });
+        }
+        patches.push({
+          path: prepared.relativePath,
+          before: prepared.before,
+          after: prepared.source,
+          changed: prepared.before !== prepared.source,
+          owner: 'dql',
+          operationId: operation.id,
+        });
       }
     }
     const duplicatePaths = patches.map((patch) => patch.path).filter((path, index, values) => values.indexOf(path) !== index);
@@ -6415,6 +7534,44 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     });
     contextProposalStore.save(proposal);
     return proposal;
+  };
+
+  /**
+   * M3 App gaps never create app-local SQL. This composes the smallest typed
+   * Dataset review draft from the uncovered requirement, then passes it
+   * through the same parse/semantic/immutable Context Proposal path used by
+   * source authoring. A provider may help an author later, but no provider SQL
+   * or claimed source authority crosses this boundary.
+   */
+  const createAppDatasetGapProposal = async (input: {
+    appBuildId: string;
+    requirement: AppBuildRequirement;
+    domain?: string;
+    sourceRelation?: string;
+  }): Promise<ContextAuthoringProposalV1> => {
+    const snapshot = projectSnapshot();
+    const change = appDatasetGapDraftChange({
+      appBuildId: input.appBuildId,
+      requirement: input.requirement,
+      domain: input.domain ?? Object.keys(snapshot.manifest.domains ?? {})[0] ?? '',
+      sourceRelation: input.sourceRelation,
+    });
+    return previewContextAuthoring({
+      origin: 'ai',
+      operations: [{
+        id: `dataset-draft:app-gap:${change.slug}`,
+        kind: 'dataset_draft',
+        change,
+        evidence: [...change.sourceEvidence],
+      }],
+      expectedSnapshotId: snapshot.snapshotId,
+      sourceArtifactId: `app-build:${input.appBuildId}:requirement:${input.requirement.id}`,
+      diagnostics: [{
+        code: 'APP_DATASET_GAP_REVIEW_REQUIRED',
+        severity: 'info',
+        message: 'This is a typed Dataset review draft. It is not an App tile, certification, source proof, or executable publication artifact.',
+      }],
+    });
   };
 
   const modelingAuthoringRunExecutor: AgentRouteExecutor = async ({ runId, request }) => {
@@ -6779,7 +7936,214 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ],
       };
     },
-    app_build: async ({ request, routeDecision, emit }) => {
+    app_build: async ({ runId, request, routeDecision, emit }) => {
+      if (isAppAutopilotRequest(request)) {
+        const requestedScope = appAutopilotScopeFor(request);
+        if (!requestedScope) {
+          const hasSavedDraftAndPage = isAppAutopilotScopeValue(agentRunWorkspaceValue(request, 'appBuildId'))
+            && isAppAutopilotScopeValue(agentRunWorkspaceValue(request, 'pageId'));
+          const message = hasSavedDraftAndPage
+            ? 'APP_AUTOPILOT_DATASET_TILE_REQUIRED: select one saved Dataset tile before asking App Autopilot to make a change.'
+            : 'APP_AUTOPILOT_CONTEXT_INVALID: App Autopilot needs one saved App draft and page before it can select a Dataset tile.';
+          emit({
+            type: 'executor.started',
+            message: hasSavedDraftAndPage
+              ? 'Waiting for a saved Dataset tile selection before App Autopilot can continue.'
+              : 'Waiting for a saved App draft and page before App Autopilot can continue.',
+            route: 'app_build',
+          });
+          return appAutopilotBlockedResult(request, message);
+        }
+        emit({
+          type: 'executor.started',
+          message: 'Reconstructing the saved App context and asking App Autopilot to interpret the requested change.',
+          route: 'app_build',
+        });
+        try {
+          const context = await resolveAppAutopilotServerContext(request);
+          const interpretation = await interpretAppAutopilotRequest(request, context);
+          if (interpretation.kind === 'repair_not_needed') {
+            return {
+              summary: 'App Autopilot found no failed Dataset tile to repair.',
+              answer: interpretation.answer,
+              status: 'blocked',
+              trustState: 'blocked',
+              stopReason: 'blocked',
+              artifacts: [agentRunArtifact('answer', 'No failed Dataset tile to repair', {
+                version: 1,
+                kind: 'app_autopilot_repair_not_needed',
+                draftId: context.draft.id,
+                pageId: context.page.id,
+                tileId: context.tile.i,
+                reasonCode: interpretation.reasonCode,
+                // The shared AgentRun panel surfaces this typed refusal ahead
+                // of its generic blocked-run headline after a reload.
+                refusalDetails: { message: interpretation.answer },
+                contextScope: appAutopilotPresentationScope(context.scope),
+              }, undefined, 'blocked')],
+              evaluations: [
+                agentRunEvaluation(
+                  'app-autopilot-repair',
+                  'Fresh failed-tile diagnostic',
+                  false,
+                  'info',
+                  interpretation.answer,
+                ),
+              ],
+            };
+          }
+          if (interpretation.kind === 'preview_required') {
+            return {
+              summary: 'App Autopilot needs a fresh preview before it can use result or failed-tile evidence.',
+              answer: interpretation.answer,
+              status: 'blocked',
+              trustState: 'blocked',
+              stopReason: 'blocked',
+              artifacts: [agentRunArtifact('answer', 'App Autopilot preview required', {
+                version: 1,
+                kind: 'app_autopilot_preview_required',
+                draftId: context.draft.id,
+                pageId: context.page.id,
+                tileId: context.tile.i,
+                reasonCode: interpretation.reasonCode,
+                contextScope: appAutopilotPresentationScope(context.scope),
+              }, undefined, 'blocked')],
+              evaluations: [
+                agentRunEvaluation(
+                  'app-autopilot-preview',
+                  'Fresh server-held App preview',
+                  false,
+                  'blocking',
+                  interpretation.answer,
+                ),
+              ],
+              nextActions: [{ id: 'run-app-preview', label: 'Run preview' }],
+            };
+          }
+          const baseEvaluations = [
+            agentRunEvaluation(
+              'app-autopilot-context',
+              'Server-owned App context',
+              true,
+              'info',
+              `Loaded draft ${context.draft.id} revision ${context.draft.revision}, page ${context.page.id}, and tile ${context.tile.i} from local persistence.`,
+            ),
+            agentRunEvaluation(
+              'app-autopilot-provider',
+              'Configured provider interpretation',
+              true,
+              'info',
+              'The configured universal AgentRun provider interpreted the request against the current App and approved Dataset fields.',
+            ),
+          ];
+          if (interpretation.kind === 'explain') {
+            return {
+              summary: 'App Autopilot explained the current saved App context.',
+              answer: interpretation.answer,
+              status: 'needs_review',
+              trustState: 'review_required',
+              stopReason: 'human_review_required',
+              artifacts: [agentRunArtifact('answer', 'App Autopilot explanation', {
+                version: 1,
+                kind: 'app_autopilot_explanation',
+                draftId: context.draft.id,
+                pageId: context.page.id,
+                tileId: context.tile.i,
+                contextScope: appAutopilotPresentationScope(context.scope),
+                ...(context.preview?.kind === 'result' ? { previewRunId: context.preview.context.runId } : {}),
+              }, undefined, 'review_required')],
+              evaluations: [
+                ...baseEvaluations,
+                agentRunEvaluation(
+                  'app-autopilot-explanation',
+                  'Context-limited explanation',
+                  true,
+                  'warning',
+                  'The explanation is limited to the fresh server-held Dataset result, current saved App draft, and current governed Dataset contract. It does not change the draft.',
+                ),
+              ],
+            };
+          }
+          if (interpretation.kind === 'repair') {
+            return {
+              summary: 'App Autopilot identified a review or repair action without changing the draft.',
+              answer: interpretation.answer,
+              status: 'needs_review',
+              trustState: 'review_required',
+              stopReason: 'human_review_required',
+              artifacts: [agentRunArtifact('answer', 'App Autopilot repair guidance', {
+                version: 1,
+                kind: 'app_autopilot_repair_guidance',
+                draftId: context.draft.id,
+                pageId: context.page.id,
+                tileId: context.tile.i,
+                contextScope: appAutopilotPresentationScope(context.scope),
+                ...(context.preview?.kind === 'failed_tile' ? { previewRunId: context.scope.previewRunId } : {}),
+              }, undefined, 'review_required')],
+              evaluations: [
+                ...baseEvaluations,
+                agentRunEvaluation(
+                  'app-autopilot-repair',
+                  'Review-required repair guidance',
+                  true,
+                  'warning',
+                  'No App mutation was prepared. This guidance is grounded in the fresh server-held failed-tile diagnostic; review it and refresh or repair the source through its governed workflow.',
+                ),
+              ],
+            };
+          }
+          const artifactId = `app_autopilot:${runId}`;
+          const proposal = await prepareAppAutopilotChange(projectRoot, {
+            draftId: context.scope.draftId,
+            pageId: context.scope.pageId,
+            tileId: context.scope.tileId,
+            // The provider selects a narrow action intent. The compiler
+            // receives no operation, SQL, source claim, or browser payload.
+            intent: interpretation.intent,
+            runId,
+            artifactId,
+          });
+          return {
+            summary: interpretation.summary,
+            answer: 'Review the typed App change below. Applying it updates only the current local draft and requires a fresh preview before publication.',
+            status: 'needs_review',
+            trustState: 'review_required',
+            stopReason: 'human_review_required',
+            artifacts: [{
+              id: artifactId,
+              kind: 'app_autopilot_change',
+              title: `Review change: ${context.tile.title || context.tile.i}`,
+              trustState: 'review_required',
+              ref: proposal.id,
+              payload: { ...proposal, contextScope: appAutopilotPresentationScope(context.scope) },
+            }],
+            evaluations: [
+              ...baseEvaluations,
+              agentRunEvaluation(
+                'app-autopilot-dataset-contract',
+                'Current Dataset contract',
+                true,
+                'info',
+                `The proposed ${interpretation.intent.action.replace(/_/g, ' ')} change is constrained to current governed App and Dataset contracts on ${context.source.title}.`,
+              ),
+              agentRunEvaluation(
+                'app-autopilot-review',
+                'Explicit App review',
+                true,
+                'warning',
+                'The App draft is unchanged until the author reviews and applies this typed change.',
+              ),
+            ],
+            nextActions: [{ id: 'review-app-autopilot-change', label: 'Review App change', artifactKind: 'app_autopilot_change' }],
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const providerFailure = appAutopilotProviderFailureFromError(error);
+          return appAutopilotBlockedResult(request, message, {
+            ...(providerFailure ? { providerFailure } : {}),
+          });
+        }
+      }
       emit({
         type: 'executor.started',
         message: 'Planning the app: matching certified blocks and finding coverage gaps.',
@@ -10549,6 +11913,175 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
 
+  /**
+   * Execute one already-resolved complete-source grain probe and retain only
+   * its target-bound local evidence. Both the explicit source-validation API
+   * and a field-tile run use this exact producer: a missing local file is not
+   * authority, but a successful full-source probe can bootstrap that local
+   * evidence without changing lifecycle, trust, or certification.
+   */
+  const prepareDatasetBlockGrainEvidence = async (input: {
+    probe: ReturnType<typeof compileDatasetGrainProbe>;
+    proofId: string;
+    material: NonNullable<ReturnType<typeof datasetBlockProofMaterial>>;
+    sourceId: string;
+    sourceRevision: string;
+    connection: ConnectionConfig;
+    targetFingerprint: string;
+    snapshotId: string;
+    subject: string;
+    signal?: AbortSignal;
+    /**
+     * Aggregate Dataset checks run through one dedicated same-target read
+     * scope. Other callers retain the regular execution service path.
+     */
+    executePrepared?: NonNullable<ExecutionServiceInput['executePrepared']>;
+  }) => {
+    const proofId = input.proofId.trim();
+    if (!proofId) {
+      throw new Error('DATASET_GRAIN_DECLARATION_REQUIRED: add a stable keyEvidence reference before validating this Dataset source.');
+    }
+    const execution = await analyticalExecutionService.execute({
+      sql: input.probe.sql,
+      subject: input.subject,
+      connection: input.connection,
+      sqlParams: input.probe.sqlParams,
+      variables: input.probe.variables,
+      signal: input.signal,
+      executePrepared: input.executePrepared,
+    });
+    const evidence = assessDatasetGrainProbe({
+      probe: input.probe,
+      result: execution.result,
+      sourceId: input.sourceId,
+      sourceRevision: input.sourceRevision,
+      declaredProofId: proofId,
+      targetFingerprint: input.targetFingerprint,
+      snapshotId: input.snapshotId,
+    });
+    const proof = datasetGrainProofFromRuntime({ proofId, material: input.material, evidence });
+    const persisted = persistLocalDatasetGrainProof(projectRoot, proof);
+    return { probe: input.probe, evidence, proof, persisted };
+  };
+
+  /**
+   * Source validation for field-based Datasets. This writes only local,
+   * target-bound key evidence; it never changes a block's lifecycle or marks
+   * a generated artifact certified. App Studio can call it before a first tile
+   * runs, and the App runtime still rechecks the complete source on every run.
+   */
+  const validateDatasetSourceGrain = async (body: Record<string, unknown>) => {
+    const sourceId = typeof body.sourceId === 'string' ? body.sourceId.trim() : '';
+    if (!sourceId) throw new Error('DATASET_SOURCE_ID_REQUIRED: choose the exact Dataset source before validating its declared grain.');
+    const requestedRevision = typeof body.sourceRevision === 'string' ? body.sourceRevision.trim() : undefined;
+    const suppliedParameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
+      ? body.parameters as Record<string, unknown>
+      : {};
+    const runSnapshot = projectSnapshot();
+    await ensureMetadataCatalogFresh(projectRoot, { manifest: runSnapshot.manifest, semanticLayer });
+    const resolved = resolveAppSourceCatalogRecords(projectRoot, [sourceId], 'include_review_required');
+    const source = resolved.items[0];
+    if (!source || resolved.missingSourceIds.length > 0) {
+      throw new Error(`DATASET_SOURCE_NOT_FOUND: ${sourceId} no longer resolves in the active project catalog.`);
+    }
+    if (source.kind !== 'block') {
+      throw new Error('DATASET_GRAIN_SEMANTIC_UNSUPPORTED: semantic Dataset identity is governed by its adapter target binding rather than a physical row-key probe.');
+    }
+    const block = resolveDatasetSourceManifestBlock(runSnapshot.manifest, source.executionRef);
+    if (!block) throw new Error(`DATASET_SOURCE_DRIFT: ${source.qualifiedIdentity} no longer resolves to its saved block path.`);
+    const blockPath = join(projectRoot, block.filePath);
+    const blockSource = readFileSync(blockPath, 'utf8');
+    const sourceRevision = `sha256:${createHash('sha256').update(blockSource).digest('hex')}`;
+    if (requestedRevision && requestedRevision !== sourceRevision) {
+      throw new Error('DATASET_SOURCE_DRIFT: this Dataset changed after it was selected. Refresh the source before validating its grain.');
+    }
+    if (source.sourceRevision !== sourceRevision) {
+      throw new Error('DATASET_SOURCE_CATALOG_STALE: refresh the local source catalog before validating this Dataset.');
+    }
+    const descriptorResult = datasetDescriptorFromManifestBlock({
+      block,
+      sourceId: source.sourceId,
+      sourceRevision,
+      proofs: new Map(),
+    });
+    const descriptor = descriptorResult.descriptor;
+    const proofId = descriptor?.grain.keyEvidence?.trim();
+    if (!descriptor || !proofId) {
+      throw new Error('DATASET_GRAIN_DECLARATION_REQUIRED: add a physical Dataset grain, key, fields, measures, and keyEvidence before validating this source.');
+    }
+    const invocation = prepareBlockInvocation({
+      block: block.name,
+      source: blockSource,
+      parameters: suppliedParameters,
+      parameterSources: Object.fromEntries(Object.keys(suppliedParameters).map((name) => [name, 'surface' as const])),
+      surface: 'block_studio',
+    });
+    if (invocation.errors.length || invocation.unresolvedParameters.length) {
+      throw new Error(invocation.errors[0] ?? `DATASET_GRAIN_PARAMETERS_REQUIRED: provide values for ${invocation.unresolvedParameters.join(', ')}.`);
+    }
+    const datasetConnection = await resolveExecutionConnection(body);
+    const targetFingerprint = (await observeWarehouseTargetIdentity(executor, datasetConnection)).identityFingerprint;
+    const tableMapping = await resolveSemanticTableMapping(executor, datasetConnection, semanticLayer, projectRoot);
+    const semanticCompose = semanticLayer
+      ? await composeSemanticBlockSqlForRuntime(blockSource, semanticLayer, {
+          driver: datasetConnection.driver,
+          tableMapping,
+          projectRoot,
+          projectConfig,
+          detectedProvider: semanticDetectedProvider,
+          parameters: invocation.values,
+        })
+      : null;
+    const blockPlan = buildExecutionPlan(
+      { id: `dataset-grain-${source.sourceId}`, type: 'dql', source: blockSource, title: block.name },
+      {
+        semanticLayer,
+        driver: datasetConnection.driver,
+        tableMapping,
+        parameters: invocation.values,
+        semanticSql: semanticCompose?.sql ?? undefined,
+      },
+    );
+    const sourceSql = semanticCompose?.sql ?? blockPlan?.sql;
+    if (!sourceSql) {
+      throw new Error(semanticCompose?.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message ?? 'DATASET_GRAIN_SOURCE_EMPTY: the Dataset block produced no executable source query.');
+    }
+    const material = datasetBlockProofMaterial({
+      block,
+      sourceId: source.sourceId,
+      sourceRevision,
+      parameterValues: invocation.values,
+    });
+    if (!material) throw new Error('DATASET_GRAIN_DECLARATION_REQUIRED: this block no longer exposes a complete Dataset contract.');
+    const probe = compileDatasetGrainProbe({
+      descriptor,
+      sourceSql,
+      sourceSqlParams: blockPlan?.sqlParams,
+      sourceVariables: blockPlan?.variables,
+      parameterValues: invocation.values,
+      driver: datasetConnection.driver,
+    });
+    const prepared = await prepareDatasetBlockGrainEvidence({
+      probe,
+      proofId,
+      material,
+      sourceId: source.sourceId,
+      sourceRevision,
+      connection: datasetConnection,
+      targetFingerprint,
+      snapshotId: runSnapshot.snapshotId,
+      subject: 'Dataset declared grain validation',
+    });
+    return {
+      source: { sourceId: source.sourceId, sourceRevision, lifecycle: source.lifecycle, trust: source.trust },
+      targetFingerprint,
+      evidence: prepared.evidence,
+      proof: prepared.proof,
+      localPath: relative(projectRoot, prepared.persisted.path),
+      eligible: prepared.evidence.status === 'passed',
+    };
+  };
+
   const writeAgentRunSse = (
     response: ServerResponse,
     event: string,
@@ -10653,6 +12186,839 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return response;
     }) as typeof response.end;
     return rawResponse;
+  };
+
+  /**
+   * Save one already-settled Dataset tile as a Domain review draft. The
+   * browser names the App/page/tile and supplies optimistic guards only; this
+   * closure reloads all source, draft, target, policy, and run authority from
+   * the local runtime before it writes a block.
+   */
+  const saveDatasetTileAsBlock = async (
+    input: DatasetTileSaveAsBlockRequest,
+  ): Promise<DatasetTileSaveAsBlockResponse> => {
+    const refuse = (code: string, error: string, status = 409): DatasetTileSaveAsBlockResponse => ({ ok: false, code, error, status });
+    if (!datasetsAppFeatureEnabled(projectConfig)) {
+      return refuse('DATASET_TILE_SAVE_DISABLED', 'Dataset tile authoring is disabled for this project. Enable apps.datasets before saving a reusable block.');
+    }
+    const run = dashboardRunEvidence.get(input.runId);
+    if (!run || run.expiresAt < Date.now()) {
+      dashboardRunEvidence.delete(input.runId);
+      return refuse('DATASET_TILE_SAVE_RUN_EXPIRED', 'This Dataset result is no longer current. Run the current App page again before saving it.');
+    }
+    if (run.appId !== input.draftId || run.dashboardId !== input.dashboardId) {
+      return refuse('DATASET_TILE_SAVE_RUN_MISMATCH', 'The selected Dataset result does not belong to this local App page. Run the current page again.');
+    }
+    const execution = run.datasetTilePromotionEvidence.find((candidate) => candidate.tileId === input.tileId);
+    if (!execution) {
+      return refuse('DATASET_TILE_SAVE_NOT_SETTLED', 'This tile has no complete current Dataset execution evidence. Run the current tile again before saving it.');
+    }
+
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    let draft: AppBuildDraft | null;
+    try {
+      draft = storage.getAppBuildDraft(input.draftId);
+    } finally {
+      storage.close();
+    }
+    if (!draft) return refuse('DATASET_TILE_SAVE_DRAFT_MISSING', 'The local App draft is no longer available. Reopen it and run the tile again.');
+    if (draft.revision !== input.expectedRevision || draft.proposalHash !== input.expectedProposalHash) {
+      return refuse('APP_BUILD_REVISION_CONFLICT', 'The App changed before this tile was saved. Refresh the draft and run the current tile again.');
+    }
+    const dashboard = draft.pages.find((page) => page.id === input.dashboardId);
+    const tile = dashboard?.layout.items.find((item) => item.i === input.tileId);
+    if (!dashboard || !tile?.query || tile.sourceId !== execution.sourceId || tile.sourceRevision !== execution.sourceRevision
+      || tileQueryHash(tile.query) !== tileQueryHash(execution.query)) {
+      return refuse('DATASET_TILE_SAVE_INTENT_STALE', 'The selected Dataset tile changed after this result ran. Run the current tile again before saving it.');
+    }
+    const currentIntent = appBuildPreviewIntentFingerprint(draft, dashboard.id);
+    if (!run.intentFingerprint || run.intentFingerprint !== currentIntent) {
+      return refuse('DATASET_TILE_SAVE_INTENT_STALE', 'The App page content changed after this result ran. Run the current tile again before saving it.');
+    }
+    const currentSnapshot = projectSnapshot();
+    if (currentSnapshot.error || currentSnapshot.stale || currentSnapshot.snapshotId !== execution.snapshotFingerprint) {
+      return refuse('DATASET_TILE_SAVE_SOURCE_STALE', 'The project source changed after this Dataset result ran. Refresh the source and run the current tile again.');
+    }
+    const currentPersonaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+    if (currentPersonaFingerprint !== execution.personaPolicyFingerprint) {
+      return refuse('DATASET_TILE_SAVE_POLICY_STALE', 'The active App persona changed after this Dataset result ran. Run the current tile again before saving it.');
+    }
+    const storedAuthorityErrors = datasetDraftStoredAuthorityErrors(dashboard, draft.sources, draft.sourcePolicy);
+    if (storedAuthorityErrors.has(execution.sourceId)) {
+      return refuse('DATASET_TILE_SAVE_SOURCE_REPAIR_REQUIRED', storedAuthorityErrors.get(execution.sourceId)!);
+    }
+    const binding = dashboard.datasets?.find((candidate) => (
+      candidate.sourceId === execution.sourceId
+      && candidate.sourceRevision === execution.sourceRevision
+    ));
+    if (!binding || binding.contractFingerprint !== execution.contractFingerprint) {
+      return refuse('DATASET_TILE_SAVE_SOURCE_STALE', 'The saved Dataset source revision or field contract no longer matches the settled result. Refresh the source and run the tile again.');
+    }
+    const runBinding = run.datasetBindings.find((candidate) => candidate.tileId === input.tileId);
+    if (!runBinding
+      || runBinding.sourceId !== execution.sourceId
+      || runBinding.sourceRevision !== execution.sourceRevision
+      || runBinding.contractFingerprint !== execution.contractFingerprint
+      || runBinding.targetFingerprint !== execution.targetFingerprint) {
+      return refuse('DATASET_TILE_SAVE_BINDING_UNVERIFIED', 'This Dataset result has no current source and target binding evidence. Run the current tile again after validating the source.');
+    }
+    try {
+      await ensureMetadataCatalogFresh(projectRoot, { manifest: currentSnapshot.manifest, semanticLayer });
+      const resolved = resolveAppSourceCatalogRecords(projectRoot, [execution.sourceId], draft.sourcePolicy);
+      const source = resolved.items[0];
+      const descriptor = source?.capabilities.dataset;
+      if (!source || !descriptor || resolved.missingSourceIds.length > 0
+        || source.sourceRevision !== execution.sourceRevision
+        || descriptor.contractRef.fingerprint !== execution.contractFingerprint
+        || !source.eligibility.localPreview) {
+        return refuse('DATASET_TILE_SAVE_SOURCE_STALE', 'The governed Dataset source changed or is no longer eligible for this local review. Refresh the source and run the current tile again.');
+      }
+      const currentConnection = await resolveExecutionConnection({});
+      const target = await observeWarehouseTargetIdentity(executor, currentConnection);
+      if (target.identityFingerprint !== execution.targetFingerprint) {
+        return refuse('DATASET_TILE_SAVE_TARGET_STALE', 'The active warehouse target changed after this Dataset result ran. Run the current tile again before saving it.');
+      }
+      const plan = planDatasetTilePromotion({
+        appId: draft.appId,
+        pageId: dashboard.id,
+        tileId: tile.i,
+        name: input.name?.trim() || execution.title,
+        domain: input.domain?.trim() || descriptor.domain || dashboard.metadata.domain || 'general',
+        ...(input.description?.trim() ? { description: input.description.trim() } : {}),
+        datasetId: execution.sourceId,
+        sourceRevision: execution.sourceRevision,
+        contractFingerprint: execution.contractFingerprint,
+        query: execution.query,
+        queryFingerprint: execution.queryFingerprint,
+        filterFingerprint: execution.filterFingerprint,
+        parameterFingerprint: execution.parameterFingerprint,
+        interactionFingerprint: execution.interactionFingerprint,
+        snapshotFingerprint: execution.snapshotFingerprint,
+        targetFingerprint: execution.targetFingerprint,
+        personaPolicyFingerprint: execution.personaPolicyFingerprint,
+        receiptId: input.runId,
+        sql: execution.comparison ? '' : execution.sql,
+        schemaFingerprint: execution.schemaFingerprint,
+        resultFingerprint: execution.resultFingerprint,
+        complete: execution.complete,
+        futureBindingsRepresentable: execution.futureBindingsRepresentable,
+      });
+      if (!plan.ok) return refuse(plan.code, plan.message);
+      const created = createBlockArtifacts(projectRoot, {
+        name: input.name?.trim() || execution.title,
+        domain: input.domain?.trim() || descriptor.domain || dashboard.metadata.domain || 'general',
+        ...(input.description?.trim() ? { description: input.description.trim() } : {}),
+        content: plan.source,
+        folderPath: '_drafts',
+      });
+      // Saving is always a review draft. It intentionally bypasses
+      // promoteFromDraft, which certifies and removes a draft.
+      setBlockStudioStatus(projectRoot, created.path, 'draft');
+      scheduleProjectRefresh('Saved a Dataset tile as a reusable review draft.');
+      return {
+        ok: true,
+        path: created.path,
+        status: 'draft',
+        provenanceFingerprint: `sha256:${createHash('sha256').update(JSON.stringify(plan.provenance)).digest('hex')}`,
+        replacementEligible: plan.replacementEligible,
+        ...(plan.replacementMessage ? { replacementMessage: plan.replacementMessage } : {}),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return refuse(message === 'BLOCK_EXISTS' ? 'DATASET_TILE_SAVE_PATH_EXISTS' : 'DATASET_TILE_SAVE_FAILED',
+        message === 'BLOCK_EXISTS'
+          ? 'A review draft already uses that block path. Choose a different name.'
+          : `DQL could not save this Dataset tile as a review draft: ${message}`,
+        message === 'BLOCK_EXISTS' ? 409 : 400);
+    }
+  };
+
+  /**
+   * M4-REPL-01. Saving a review draft never changes its source tile. This
+   * explicit second action reloads current authority and reruns the current
+   * Dataset statement and saved block in one DuckDB read transaction.
+   */
+  const replaceDatasetTileWithReviewBlock = async (
+    input: DatasetTileReplaceWithBlockRequest,
+  ): Promise<DatasetTileReplaceWithBlockResponse> => {
+    const refuse = (code: string, error: string, status = 409): DatasetTileReplaceWithBlockResponse => ({ ok: false, code, error, status });
+    if (!datasetsAppFeatureEnabled(projectConfig)) {
+      return refuse('DATASET_TILE_REPLACE_DISABLED', 'Dataset tile authoring is disabled for this project. Enable apps.datasets before replacing a tile.');
+    }
+    const run = dashboardRunEvidence.get(input.runId);
+    if (!run || run.expiresAt < Date.now()) {
+      dashboardRunEvidence.delete(input.runId);
+      return refuse('DATASET_TILE_REPLACE_RUN_EXPIRED', 'This Dataset result is no longer current. Run the current App page again before replacing the tile.');
+    }
+    if (run.appId !== input.draftId || run.dashboardId !== input.dashboardId) {
+      return refuse('DATASET_TILE_REPLACE_RUN_MISMATCH', 'The selected Dataset result does not belong to this local App page. Run the current page again.');
+    }
+    const execution = run.datasetTilePromotionEvidence.find((candidate) => candidate.tileId === input.tileId);
+    if (!execution || !execution.complete) {
+      return refuse('DATASET_TILE_REPLACE_NOT_SETTLED', 'This tile has no complete current Dataset execution evidence. Run the current tile again before replacing it.');
+    }
+    if (execution.comparison) {
+      return refuse('comparison_not_representable_as_single_block', 'This comparison uses multiple executions and result graph arithmetic, so it cannot replace the tile with one reusable SQL block. The Dataset tile remains runnable.');
+    }
+    if (!execution.futureBindingsRepresentable || !execution.sql.trim() || execution.sql.includes('?')) {
+      return refuse('dataset_tile_dynamic_binding_not_representable', 'This tile has filters, parameters, or interactions that the saved fixed-value review block cannot represent. The Dataset tile remains unchanged.');
+    }
+
+    const normalizedBlockPath = normalize(input.blockPath).replaceAll('\\', '/').replace(/^\/+/, '');
+    if (!isDraftBlockPath(normalizedBlockPath) || normalizedBlockPath.includes('..') || normalizedBlockPath !== input.blockPath.replaceAll('\\', '/').replace(/^\/+/, '')) {
+      return refuse('DATASET_TILE_REPLACE_BLOCK_INVALID', 'Replacement requires the exact path of a server-created review draft under blocks/_drafts.');
+    }
+    const blockAbsolutePath = resolve(projectRoot, normalizedBlockPath);
+    if (!blockAbsolutePath.startsWith(`${resolve(projectRoot)}${sep}`) || !existsSync(blockAbsolutePath)) {
+      return refuse('DATASET_TILE_REPLACE_BLOCK_MISSING', 'The saved review draft is no longer available at its governed project path. Save a new current review draft before replacing the tile.');
+    }
+
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    let draft: AppBuildDraft | null;
+    try {
+      draft = storage.getAppBuildDraft(input.draftId);
+    } finally {
+      storage.close();
+    }
+    if (!draft) return refuse('DATASET_TILE_REPLACE_DRAFT_MISSING', 'The local App draft is no longer available. Reopen it and run the tile again.');
+    if (draft.revision !== input.expectedRevision || draft.proposalHash !== input.expectedProposalHash) {
+      return refuse('APP_BUILD_REVISION_CONFLICT', 'The App changed before this tile was replaced. Refresh the draft and run the current tile again.');
+    }
+    const dashboard = draft.pages.find((page) => page.id === input.dashboardId);
+    const tile = dashboard?.layout.items.find((item) => item.i === input.tileId);
+    if (!dashboard || !tile?.query || tile.sourceId !== execution.sourceId || tile.sourceRevision !== execution.sourceRevision
+      || tileQueryHash(tile.query) !== tileQueryHash(execution.query)) {
+      return refuse('DATASET_TILE_REPLACE_INTENT_STALE', 'The selected Dataset tile changed after this result ran. Run the current tile again before replacing it.');
+    }
+    const originalTileQuery = tile.query;
+    const currentIntent = appBuildPreviewIntentFingerprint(draft, dashboard.id);
+    if (!run.intentFingerprint || run.intentFingerprint !== currentIntent) {
+      return refuse('DATASET_TILE_REPLACE_INTENT_STALE', 'The App page content changed after this result ran. Run the current tile again before replacing it.');
+    }
+    if (draft.sourcePolicy !== 'include_review_required' && input.enableReviewRequired !== true) {
+      return refuse('DATASET_TILE_REPLACE_REVIEW_POLICY_REQUIRED', 'Replacing this tile uses a review-required block. Choose the explicit review-required replacement action to keep that source policy visible.');
+    }
+
+    let blockSource: string;
+    let blockSourceRevision: string;
+    let candidateSql = '';
+    try {
+      blockSource = readFileSync(blockAbsolutePath, 'utf-8');
+      blockSourceRevision = `sha256:${createHash('sha256').update(blockSource).digest('hex')}`;
+      const statement = new Parser(blockSource, normalizedBlockPath).parse().statements
+        .find((candidate) => candidate.kind === NodeKind.BlockDecl);
+      if (!statement || statement.kind !== NodeKind.BlockDecl || statement.status !== 'draft' || !statement.datasetTileProvenance) {
+        return refuse('DATASET_TILE_REPLACE_BLOCK_INVALID', 'The selected file is not a current Dataset review draft with durable provenance.');
+      }
+      const provenance: DatasetTileProvenanceV1 = statement.datasetTileProvenance;
+      if (provenance.appId !== draft.appId
+        || provenance.pageId !== dashboard.id
+        || provenance.tileId !== tile.i
+        || provenance.datasetId !== execution.sourceId
+        || provenance.sourceRevision !== execution.sourceRevision
+        || provenance.contractFingerprint !== execution.contractFingerprint
+        || provenance.queryFingerprint !== execution.queryFingerprint
+        || provenance.snapshotFingerprint !== execution.snapshotFingerprint
+        || provenance.sqlFingerprint !== `sha256:${createHash('sha256').update(execution.sql).digest('hex')}`) {
+        return refuse('DATASET_TILE_REPLACE_BLOCK_STALE', 'The selected review draft does not match this current Dataset tile and execution. Save a new review draft before replacing it.');
+      }
+    } catch (error) {
+      return refuse('DATASET_TILE_REPLACE_BLOCK_INVALID', `DQL could not read this review draft as one executable block: ${error instanceof Error ? error.message : String(error)}`, 400);
+    }
+
+    const snapshot = projectSnapshot();
+    if (snapshot.error || snapshot.stale) {
+      return refuse('DATASET_TILE_REPLACE_SOURCE_STALE', 'The current project source cannot be resolved safely. Refresh the source and run the current tile again.');
+    }
+    const personaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+    if (personaFingerprint !== execution.personaPolicyFingerprint) {
+      return refuse('DATASET_TILE_REPLACE_POLICY_STALE', 'The active App persona changed after this Dataset result ran. Run the current tile again before replacing it.');
+    }
+    if (datasetDraftStoredAuthorityErrors(dashboard, draft.sources, draft.sourcePolicy).has(execution.sourceId)) {
+      return refuse('DATASET_TILE_REPLACE_SOURCE_REPAIR_REQUIRED', 'The selected Dataset source needs repair before this tile can be replaced.');
+    }
+    const binding = dashboard.datasets?.find((candidate) => candidate.sourceId === execution.sourceId && candidate.sourceRevision === execution.sourceRevision);
+    const runBinding = run.datasetBindings.find((candidate) => candidate.tileId === input.tileId);
+    if (!binding || binding.contractFingerprint !== execution.contractFingerprint || !runBinding
+      || runBinding.sourceId !== execution.sourceId || runBinding.sourceRevision !== execution.sourceRevision
+      || runBinding.contractFingerprint !== execution.contractFingerprint || runBinding.targetFingerprint !== execution.targetFingerprint) {
+      return refuse('DATASET_TILE_REPLACE_BINDING_UNVERIFIED', 'This Dataset result has no current source and target binding evidence. Run the current tile again after validating the source.');
+    }
+
+    try {
+      await ensureMetadataCatalogFresh(projectRoot, { manifest: snapshot.manifest, semanticLayer });
+      const resolved = resolveAppSourceCatalogRecords(projectRoot, [execution.sourceId], draft.sourcePolicy);
+      const source = resolved.items[0];
+      const descriptor = source?.capabilities.dataset;
+      if (!source || !descriptor || resolved.missingSourceIds.length > 0 || source.sourceRevision !== execution.sourceRevision
+        || descriptor.contractRef.fingerprint !== execution.contractFingerprint || !source.eligibility.localPreview) {
+        return refuse('DATASET_TILE_REPLACE_SOURCE_STALE', 'The governed Dataset source changed or is no longer eligible for this local review. Refresh the source and run the current tile again.');
+      }
+      const currentConnection = await resolveExecutionConnection({});
+      if (currentConnection.driver !== 'duckdb') {
+        return refuse('equivalence_read_scope_unavailable', `Replacing a Dataset tile currently requires a DuckDB same-connection read scope; ${currentConnection.driver} cannot supply that proof.`);
+      }
+      // Compile the review draft only after resolving the current target.  A
+      // saved block must not inherit a stale process-global connection driver
+      // while the proof itself pins both statements to this target.
+      const candidatePlan = buildExecutionPlan(
+        { id: `dataset-replacement:${tile.i}`, type: 'dql', source: blockSource, title: tile.title ?? 'Review draft' },
+        { driver: currentConnection.driver },
+      );
+      candidateSql = candidatePlan?.sql ?? '';
+      if (!candidateSql || (candidatePlan?.sqlParams.length ?? 0) > 0 || Object.keys(candidatePlan?.variables ?? {}).length > 0 || candidateSql.includes('?')) {
+        return refuse('dataset_tile_dynamic_binding_not_representable', 'The saved review draft requires runtime bindings, so DQL will not replace the static Dataset tile.');
+      }
+      const target = await observeWarehouseTargetIdentity(executor, currentConnection);
+      if (target.identityFingerprint !== execution.targetFingerprint) {
+        return refuse('DATASET_TILE_REPLACE_TARGET_STALE', 'The active warehouse target changed after this Dataset result ran. Run the current tile again before replacing it.');
+      }
+      const connectionFingerprint = fingerprintDashboardRuntimeState({
+        driver: currentConnection.driver,
+        filepath: currentConnection.filepath ?? null,
+        schema: currentConnection.schema ?? null,
+      });
+      const scopes = new Map<string, DuckDBConsistentReadScope>();
+      const resolveProofIdentity = async () => {
+        const latestSnapshot = projectSnapshot();
+        // Creating the review draft itself is a legitimate project mutation.
+        // Its provenance still binds to the original settled tile snapshot,
+        // while the equivalence transaction pins this fresh post-save catalog
+        // snapshot before and after both candidate executions.
+        if (latestSnapshot.error || latestSnapshot.stale || latestSnapshot.snapshotId !== snapshot.snapshotId) return undefined;
+        const latestConnection = await resolveExecutionConnection({});
+        if (fingerprintDashboardRuntimeState({ driver: latestConnection.driver, filepath: latestConnection.filepath ?? null, schema: latestConnection.schema ?? null }) !== connectionFingerprint) return undefined;
+        const latestTarget = await observeWarehouseTargetIdentity(executor, latestConnection);
+        if (latestTarget.identityFingerprint !== execution.targetFingerprint) return undefined;
+        const latestStorage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+        let latestDraft: AppBuildDraft | null;
+        try {
+          latestDraft = latestStorage.getAppBuildDraft(input.draftId);
+        } finally {
+          latestStorage.close();
+        }
+        const latestPage = latestDraft?.pages.find((page) => page.id === dashboard.id);
+        const latestTile = latestPage?.layout.items.find((item) => item.i === tile.i);
+        if (!latestDraft || latestDraft.revision !== draft.revision || latestDraft.proposalHash !== draft.proposalHash
+          || !latestPage || !latestTile?.query || tileQueryHash(latestTile.query) !== tileQueryHash(originalTileQuery)
+          || appBuildPreviewIntentFingerprint(latestDraft, latestPage.id) !== currentIntent) return undefined;
+        const latestBlock = existsSync(blockAbsolutePath) ? readFileSync(blockAbsolutePath, 'utf-8') : '';
+        if (`sha256:${createHash('sha256').update(latestBlock).digest('hex')}` !== blockSourceRevision) return undefined;
+        const latestPersona = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+        if (latestPersona !== execution.personaPolicyFingerprint) return undefined;
+        return {
+          datasetId: execution.sourceId,
+          sourceRevision: execution.sourceRevision,
+          contractFingerprint: execution.contractFingerprint,
+          snapshotFingerprint: latestSnapshot.snapshotId,
+          targetFingerprint: latestTarget.identityFingerprint,
+          personaPolicyFingerprint: latestPersona,
+          dialect: latestConnection.driver,
+          adapterFingerprint: `dataset_tile_to_review_block:${blockSourceRevision}`,
+          compilerFingerprint: fingerprintDashboardRuntimeState({ datasetSql: execution.sql, candidateSql }),
+          rowBoundFingerprint: 'unbounded_complete_result_v1',
+        };
+      };
+      const proof = await proveDatasetResultEquivalence({
+        resolveIdentity: resolveProofIdentity,
+        openReadScope: async () => {
+          const connector = await executor.getConnector(currentConnection);
+          if (!(connector instanceof DuckDBConnector)) throw new Error('The active Dataset target did not expose DuckDB scoped-read support.');
+          const scope = await connector.openConsistentReadScope();
+          scopes.set(scope.id, scope);
+          return { id: scope.id, close: async () => { scopes.delete(scope.id); await scope.close(); } };
+        },
+        executeDataset: async ({ readScope, signal }) => {
+          const scope = scopes.get(readScope.id);
+          if (!scope) throw new Error('The Dataset equivalence read scope is no longer available.');
+          const prepared = await prepareAnalyticalExecutionSql({ sql: execution.sql, subject: 'App Dataset tile replacement proof', executor, connection: currentConnection, projectRoot, projectConfig, enforceReadOnly: true });
+          if (prepared.connection.driver !== currentConnection.driver || prepared.connection.filepath !== currentConnection.filepath || prepared.connection.schema !== currentConnection.schema) throw new Error('The Dataset statement preparation changed the connection pinned for equivalence.');
+          const result = await scope.execute(prepared.executedSql, undefined, { signal });
+          return { result, receiptId: input.runId, receiptFingerprint: execution.resultFingerprint, complete: !result.truncated && result.rowCount === result.rows.length };
+        },
+        executeCandidate: async ({ readScope, signal }) => {
+          const scope = scopes.get(readScope.id);
+          if (!scope) throw new Error('The candidate equivalence read scope is no longer available.');
+          const prepared = await prepareAnalyticalExecutionSql({ sql: candidateSql, subject: 'App review-draft block replacement proof', executor, connection: currentConnection, projectRoot, projectConfig, enforceReadOnly: true });
+          if (prepared.connection.driver !== currentConnection.driver || prepared.connection.filepath !== currentConnection.filepath || prepared.connection.schema !== currentConnection.schema) throw new Error('The review-draft statement preparation changed the connection pinned for equivalence.');
+          const result = await scope.execute(prepared.executedSql, undefined, { signal });
+          return { result, receiptId: `review_block:${blockSourceRevision}`, receiptFingerprint: `sha256:${createHash('sha256').update(blockSource).digest('hex')}`, complete: !result.truncated && result.rowCount === result.rows.length };
+        },
+        ordering: execution.query.orderBy?.length ? 'ordered' : 'multiset',
+      });
+      if (!proof.ok) return refuse(proof.code, proof.message);
+
+      const proofFingerprint = `sha256:${createHash('sha256').update(JSON.stringify(proof.proof)).digest('hex')}`;
+      const reviewSourceId = `app:review_block:${createHash('sha256').update(normalizedBlockPath).digest('hex').slice(0, 24)}`;
+      const reviewSource: AppBuildDraftSource = {
+        id: reviewSourceId, kind: 'review_block', sourceRef: normalizedBlockPath, sourcePath: normalizedBlockPath,
+        executionRef: normalizedBlockPath, sourceRevision: blockSourceRevision, sourceFingerprint: blockSourceRevision,
+        lifecycle: 'review', capabilities: { measures: [], dimensions: [], outputs: [], filters: [], parameters: [] },
+        trustState: 'review_required', reviewStatus: 'required',
+      };
+      const { query: _query, ...tileWithoutDatasetQuery } = tile;
+      const replacementTile: DashboardGridItem = {
+        ...tileWithoutDatasetQuery, sourceId: reviewSourceId, sourceRevision: blockSourceRevision, block: { ref: normalizedBlockPath },
+        sourceClass: 'exploratory_analysis', trustState: 'review_required', reviewStatus: 'review_required',
+        review: { status: 'required', sourceFingerprint: blockSourceRevision },
+        sourceEvidence: [...(tile.sourceEvidence ?? []), {
+          source: normalizedBlockPath, path: normalizedBlockPath, kind: 'review_block', trustState: 'review_required',
+          reason: `Explicit replacement after fresh same-read-scope equivalence proof ${proofFingerprint}; ${proof.proof.rowCount} result row(s) matched.`,
+        }],
+      };
+      const replacementPage: DashboardDocument = {
+        ...dashboard,
+        layout: { ...dashboard.layout, items: dashboard.layout.items.map((item) => item.i === tile.i ? replacementTile : item) },
+      };
+      const operations: AppBuildDraftOperation[] = [];
+      if (draft.sourcePolicy !== 'include_review_required') {
+        operations.push({ type: 'set_source_policy', sourcePolicy: 'include_review_required' });
+      }
+      operations.push({ type: 'upsert_source', source: reviewSource });
+      operations.push({ type: 'upsert_page', page: replacementPage });
+      operations.push({
+        type: 'set_review_task',
+        task: {
+          id: `review:dataset-replacement:${dashboard.id}:${tile.i}`, sourceId: reviewSourceId, pageId: dashboard.id, tileId: tile.i, status: 'open',
+          message: `Review required: ${tile.title ?? tile.i} was explicitly replaced with ${normalizedBlockPath} after fresh equivalence proof ${proofFingerprint}.`,
+        },
+      });
+      const next = applyAppBuildDraftOperations(draft, draft.revision, operations);
+      const mutationStorage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+      try {
+        mutationStorage.saveAppBuildDraft(next, { expectedRevision: draft.revision, operations });
+      } finally {
+        mutationStorage.close();
+      }
+      projectSnapshots.invalidate();
+      scheduleProjectRefresh('Replaced a Dataset tile with an equivalence-proved review draft.');
+      return { ok: true, draft: next, blockPath: normalizedBlockPath, equivalenceProofFingerprint: proofFingerprint };
+    } catch (error) {
+      return refuse('DATASET_TILE_REPLACE_FAILED', `DQL could not prove this replacement safely: ${error instanceof Error ? error.message : String(error)}`, 400);
+    }
+  };
+
+  type SemanticConversionPrepared = {
+    draft: AppBuildDraft;
+    dashboard: DashboardDocument;
+    tile: DashboardGridItem;
+    source: ReturnType<typeof resolveAppSourceCatalogRecords>['items'][number];
+    descriptor: DatasetDescriptor;
+    query: TileQuery;
+    provenance: Omit<SemanticTileConversionProvenanceV1, 'equivalenceProofFingerprint' | 'convertedAt'>;
+    proofFingerprint: string;
+  };
+
+  /**
+   * M4-CONV-01 executes both the persisted legacy semantic intent and its
+   * exact Dataset projection through the same private DuckDB read scope.  This
+   * helper is intentionally used for both preview and acceptance: accepting a
+   * browser-visible proposal never reuses its earlier result or proof.
+   */
+  const prepareSemanticTileConversion = async (input: {
+    draftId: string;
+    dashboardId: string;
+    tileId: string;
+    expectedRevision: number;
+    expectedProposalHash: string;
+  }): Promise<SemanticConversionPrepared | Extract<SemanticTileConversionPreviewResponse, { ok: false }>> => {
+    const refuse = (code: string, error: string, status = 409): Extract<SemanticTileConversionPreviewResponse, { ok: false }> => ({ ok: false, code, error, status });
+    if (!datasetsAppFeatureEnabled(projectConfig)) {
+      return refuse('SEMANTIC_TILE_CONVERSION_DISABLED', 'Dataset tile authoring is disabled for this project. Enable apps.datasets before converting this semantic tile.');
+    }
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    let draft: AppBuildDraft | null;
+    try {
+      draft = storage.getAppBuildDraft(input.draftId);
+    } finally {
+      storage.close();
+    }
+    if (!draft) return refuse('SEMANTIC_TILE_CONVERSION_DRAFT_MISSING', 'The local App draft is no longer available. Reopen it before converting this tile.');
+    if (draft.revision !== input.expectedRevision || draft.proposalHash !== input.expectedProposalHash) {
+      return refuse('APP_BUILD_REVISION_CONFLICT', 'The App changed before this conversion could run. Refresh the draft and preview the current legacy tile again.');
+    }
+    const dashboard = draft.pages.find((page) => page.id === input.dashboardId);
+    const tile = dashboard?.layout.items.find((item) => item.i === input.tileId);
+    if (!dashboard || !tile?.semantic) {
+      return refuse('SEMANTIC_TILE_CONVERSION_LEGACY_TILE_REQUIRED', 'Select a current legacy semantic tile before previewing a Dataset conversion.');
+    }
+    const legacySemantic = tile.semantic;
+    const sourceId = tile.sourceId?.trim();
+    if (!sourceId) {
+      return refuse('legacy_semantic_identity_incomplete', 'This legacy semantic tile has no persisted governed source identity, so DQL cannot convert it safely.');
+    }
+    const snapshot = projectSnapshot();
+    if (snapshot.error || snapshot.stale) {
+      return refuse('SEMANTIC_TILE_CONVERSION_SOURCE_STALE', 'The current project source cannot be resolved safely. Refresh the source and run the legacy tile again.');
+    }
+    if (!semanticLayer) {
+      return refuse('SEMANTIC_TILE_CONVERSION_SEMANTIC_UNAVAILABLE', 'The native semantic layer is unavailable, so DQL cannot prove this conversion.');
+    }
+    try {
+      await ensureMetadataCatalogFresh(projectRoot, { manifest: snapshot.manifest, semanticLayer });
+    } catch (error) {
+      return refuse('SEMANTIC_TILE_CONVERSION_SOURCE_STALE', `DQL could not refresh the governed source catalog: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const resolved = resolveAppSourceCatalogRecords(projectRoot, [sourceId], draft.sourcePolicy);
+    const source = resolved.items[0];
+    const descriptor = source?.capabilities.dataset;
+    if (!source || !descriptor || resolved.missingSourceIds.length > 0 || source.kind !== 'semantic') {
+      return refuse('SEMANTIC_TILE_CONVERSION_SOURCE_STALE', 'The legacy semantic tile no longer resolves to one current governed semantic Dataset source. Refresh or keep the original tile.');
+    }
+    if (!source.eligibility.localPreview) {
+      return refuse('APP_BUILD_REVIEW_POLICY_REQUIRED', 'The current governed semantic source is not eligible for this local preview under the App source policy.');
+    }
+    if (draft.sourcePolicy === 'governed_only' && (source.lifecycle !== 'certified' || source.trust !== 'certified')) {
+      return refuse('APP_BUILD_REVIEW_POLICY_REQUIRED', 'This conversion keeps the source review-required. Enable review-required sources explicitly or select a certified source.');
+    }
+    const semanticModelName = tile.semantic.semanticModelRefs.length === 1
+      ? tile.semantic.semanticModelRefs[0]!.trim()
+      : '';
+    if (!semanticModelName) {
+      return refuse('legacy_semantic_identity_incomplete', 'The legacy semantic tile does not name exactly one provider model for this conversion.');
+    }
+    const plan = planSemanticTileConversion({
+      tile,
+      source: {
+        sourceId: source.sourceId,
+        sourceRevision: source.sourceRevision,
+        snapshotId: source.snapshotId,
+        descriptor,
+        metricCapabilities: source.capabilities.metricCapabilities ?? {},
+        semanticModelName,
+      },
+    });
+    if (!plan.ok) return refuse(plan.code, plan.message);
+    const currentConnection = await resolveExecutionConnection({});
+    if (currentConnection.driver !== 'duckdb') {
+      return refuse('equivalence_read_scope_unavailable', `Converting this semantic tile currently requires a DuckDB same-connection read scope; ${currentConnection.driver} cannot supply that proof.`);
+    }
+    const plannedAdapter = await resolvePlannedSemanticAdapter(projectRoot, 'native');
+    if (plannedAdapter !== 'native') {
+      return refuse('legacy_semantic_intent_unsupported', `The current semantic runtime resolves ${plannedAdapter}; this exact conversion supports only the native adapter.`);
+    }
+    const tableMapping = await resolveSemanticTableMapping(executor, currentConnection, semanticLayer, projectRoot);
+    const staticLegacyFilters = (tile.semantic.filters ?? []).map((filter) => ({
+      dimension: filter.field,
+      operator: filter.operator,
+      values: Array.isArray(filter.value) ? filter.value.map(String) : [String(filter.value)],
+    }));
+    const legacyRequest = {
+      metrics: tile.semantic.metrics,
+      dimensions: tile.semantic.dimensions ?? [],
+      filters: staticLegacyFilters,
+      ...(tile.semantic.timeDimension ? { timeDimension: { name: tile.semantic.timeDimension, granularity: 'month' } } : {}),
+      ...(tile.semantic.orderBy?.length ? { orderBy: tile.semantic.orderBy.map((order) => ({ name: order.field, direction: order.direction })) } : {}),
+      ...(tile.semantic.limit !== undefined ? { limit: tile.semantic.limit } : {}),
+      engine: 'native' as const,
+    };
+    let candidatePlan: ReturnType<typeof planSemanticDatasetTileQuery>;
+    try {
+      candidatePlan = planSemanticDatasetTileQuery({
+        descriptor,
+        query: plan.query,
+        metricCapabilities: source.capabilities.metricCapabilities ?? {},
+        title: tile.title,
+      });
+    } catch (error) {
+      return refuse('legacy_semantic_query_invalid', `The mapped Dataset query is no longer covered by the current governed source: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const target = await observeWarehouseTargetIdentity(executor, currentConnection);
+    const scopeById = new Map<string, DuckDBConsistentReadScope>();
+    const sourceFingerprint = fingerprintDashboardRuntimeState({
+      sourceId: source.sourceId,
+      sourceRevision: source.sourceRevision,
+      contractFingerprint: descriptor.contractRef.fingerprint,
+      sourceSnapshotId: source.snapshotId,
+      legacy: legacySemantic,
+      query: plan.query,
+      adapter: 'native',
+    });
+    const resolveProofIdentity = async () => {
+      const latestSnapshot = projectSnapshot();
+      if (latestSnapshot.error || latestSnapshot.stale || latestSnapshot.snapshotId !== snapshot.snapshotId) return undefined;
+      const latestConnection = await resolveExecutionConnection({});
+      if (latestConnection.driver !== currentConnection.driver || latestConnection.filepath !== currentConnection.filepath || latestConnection.schema !== currentConnection.schema) return undefined;
+      const latestTarget = await observeWarehouseTargetIdentity(executor, latestConnection);
+      if (latestTarget.identityFingerprint !== target.identityFingerprint) return undefined;
+      const latestStorage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+      let latestDraft: AppBuildDraft | null;
+      try {
+        latestDraft = latestStorage.getAppBuildDraft(input.draftId);
+      } finally {
+        latestStorage.close();
+      }
+      const latestDashboard = latestDraft?.pages.find((page) => page.id === input.dashboardId);
+      const latestTile = latestDashboard?.layout.items.find((item) => item.i === input.tileId);
+      if (!latestDraft || latestDraft.revision !== draft.revision || latestDraft.proposalHash !== draft.proposalHash
+        || !latestTile?.semantic || fingerprintDashboardRuntimeState(latestTile.semantic) !== fingerprintDashboardRuntimeState(legacySemantic)) return undefined;
+      const latestResolved = resolveAppSourceCatalogRecords(projectRoot, [sourceId], latestDraft.sourcePolicy);
+      const latestSource = latestResolved.items[0];
+      const latestDescriptor = latestSource?.capabilities.dataset;
+      if (!latestSource || !latestDescriptor || latestResolved.missingSourceIds.length > 0
+        || latestSource.kind !== 'semantic' || latestSource.sourceRevision !== source.sourceRevision
+        || latestSource.snapshotId !== source.snapshotId
+        || latestDescriptor.contractRef.fingerprint !== descriptor.contractRef.fingerprint
+        || !latestSource.eligibility.localPreview
+        || (latestDraft.sourcePolicy === 'governed_only' && (latestSource.lifecycle !== 'certified' || latestSource.trust !== 'certified'))) return undefined;
+      const latestPersona = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+      return {
+        datasetId: source.sourceId,
+        sourceRevision: source.sourceRevision,
+        contractFingerprint: descriptor.contractRef.fingerprint,
+        snapshotFingerprint: latestSnapshot.snapshotId,
+        targetFingerprint: latestTarget.identityFingerprint,
+        personaPolicyFingerprint: latestPersona,
+        dialect: latestConnection.driver,
+        adapterFingerprint: 'legacy_semantic_to_dataset_native_v1',
+        compilerFingerprint: sourceFingerprint,
+        rowBoundFingerprint: String(legacySemantic.limit ?? 'scalar_complete'),
+      };
+    };
+    const scopedExecutor = (readScopeId: string) => async ({ sql, connection: preparedConnection, options }: { sql: string; connection: ConnectionConfig; options: Parameters<DuckDBConsistentReadScope['execute']>[2] }) => {
+      if (preparedConnection.driver !== currentConnection.driver || preparedConnection.filepath !== currentConnection.filepath || preparedConnection.schema !== currentConnection.schema) {
+        throw new Error('Semantic statement preparation changed the connection pinned for conversion equivalence.');
+      }
+      const scope = scopeById.get(readScopeId);
+      if (!scope) throw new Error('The semantic conversion read scope is no longer available.');
+      return scope.execute(sql, undefined, options);
+    };
+    const proof = await proveDatasetResultEquivalence({
+      resolveIdentity: resolveProofIdentity,
+      openReadScope: async () => {
+        const connector = await executor.getConnector(currentConnection);
+        if (!(connector instanceof DuckDBConnector)) throw new Error('The active semantic Dataset target did not expose DuckDB scoped-read support.');
+        const scope = await connector.openConsistentReadScope();
+        scopeById.set(scope.id, scope);
+        return { id: scope.id, close: async () => { scopeById.delete(scope.id); await scope.close(); } };
+      },
+      executeDataset: async ({ readScope, signal }) => {
+        const execution = await executeTargetBoundSemanticQuery({
+          executor,
+          connection: currentConnection,
+          projectRoot,
+          plannedAdapter: 'native',
+          compile: async () => composeRuntimeSemanticQuery(legacyRequest, semanticLayer!, {
+            projectRoot,
+            projectConfig,
+            detectedProvider: semanticDetectedProvider,
+            driver: currentConnection.driver,
+            tableMapping,
+            signal,
+          }),
+          rowBound: legacySemantic.limit ?? 10_000,
+          signal,
+          executePrepared: scopedExecutor(readScope.id),
+        });
+        if (!execution) throw new Error('The legacy semantic tile did not compile for the current native adapter.');
+        return {
+          result: execution.result,
+          receiptId: execution.executionReceipt.receiptId,
+          receiptFingerprint: execution.executionReceipt.resultFingerprint ?? '',
+          complete: !execution.result.truncated && execution.result.rowCount === execution.result.rows.length,
+        };
+      },
+      executeCandidate: async ({ readScope, signal }) => {
+        const execution = await executeTargetBoundSemanticQuery({
+          executor,
+          connection: currentConnection,
+          projectRoot,
+          plannedAdapter: 'native',
+          compile: async () => composeRuntimeSemanticQuery({ ...candidatePlan.request, engine: 'native' }, semanticLayer!, {
+            projectRoot,
+            projectConfig,
+            detectedProvider: semanticDetectedProvider,
+            driver: currentConnection.driver,
+            tableMapping,
+            signal,
+          }),
+          rowBound: candidatePlan.request.limit ?? 10_000,
+          signal,
+          executePrepared: scopedExecutor(readScope.id),
+        });
+        if (!execution) throw new Error('The mapped Dataset tile did not compile for the current native adapter.');
+        return {
+          result: execution.result,
+          receiptId: execution.executionReceipt.receiptId,
+          receiptFingerprint: execution.executionReceipt.resultFingerprint ?? '',
+          complete: !execution.result.truncated && execution.result.rowCount === execution.result.rows.length,
+        };
+      },
+      ordering: plan.query.orderBy?.length ? 'ordered' : 'multiset',
+    });
+    if (!proof.ok) return refuse(proof.code, proof.message);
+    return {
+      draft,
+      dashboard,
+      tile,
+      source,
+      descriptor,
+      query: plan.query,
+      provenance: plan.provenance,
+      proofFingerprint: `sha256:${createHash('sha256').update(JSON.stringify(proof.proof)).digest('hex')}`,
+    };
+  };
+
+  const previewSemanticTileConversion = async (
+    input: SemanticTileConversionPreviewRequest,
+  ): Promise<SemanticTileConversionPreviewResponse> => {
+    const prepared = await prepareSemanticTileConversion(input);
+    if (!('draft' in prepared)) return prepared;
+    const proposalId = `semantic-conversion:${randomUUID()}`;
+    semanticTileConversionPreviews.set(proposalId, {
+      draftId: input.draftId,
+      dashboardId: input.dashboardId,
+      tileId: input.tileId,
+      revision: prepared.draft.revision,
+      proposalHash: prepared.draft.proposalHash,
+      legacyTileFingerprint: prepared.provenance.legacyTileFingerprint,
+      sourceId: prepared.source.sourceId,
+      sourceRevision: prepared.source.sourceRevision,
+      contractFingerprint: prepared.descriptor.contractRef.fingerprint,
+      queryFingerprint: tileQueryHash(prepared.query),
+      expiresAt: Date.now() + 5 * 60_000,
+    });
+    const provenance: SemanticTileConversionProvenanceV1 = {
+      ...prepared.provenance,
+      equivalenceProofFingerprint: prepared.proofFingerprint,
+      convertedAt: new Date().toISOString(),
+    };
+    return {
+      ok: true,
+      proposalId,
+      candidate: {
+        sourceId: prepared.source.sourceId,
+        sourceRevision: prepared.source.sourceRevision,
+        contractFingerprint: prepared.descriptor.contractRef.fingerprint,
+        query: prepared.query,
+        queryFingerprint: tileQueryHash(prepared.query),
+        provenance,
+      },
+      equivalenceProofFingerprint: prepared.proofFingerprint,
+    };
+  };
+
+  const acceptSemanticTileConversion = async (
+    input: SemanticTileConversionAcceptRequest,
+  ): Promise<SemanticTileConversionAcceptResponse> => {
+    const refuse = (code: string, error: string, status = 409): SemanticTileConversionAcceptResponse => ({ ok: false, code, error, status });
+    const preview = semanticTileConversionPreviews.get(input.proposalId);
+    if (!preview || preview.expiresAt < Date.now()) {
+      semanticTileConversionPreviews.delete(input.proposalId);
+      return refuse('SEMANTIC_TILE_CONVERSION_PREVIEW_EXPIRED', 'This conversion preview is no longer current. Preview the legacy semantic tile again before accepting it.');
+    }
+    if (preview.draftId !== input.draftId || preview.dashboardId !== input.dashboardId || preview.tileId !== input.tileId
+      || preview.revision !== input.expectedRevision || preview.proposalHash !== input.expectedProposalHash) {
+      return refuse('SEMANTIC_TILE_CONVERSION_PREVIEW_STALE', 'This conversion preview does not match the current App page. Preview the current legacy tile again.');
+    }
+    // The proof is rerun under current authority rather than adopted from the
+    // preview record. That makes changed source/target/persona/draft state a
+    // refusal even if the browser still holds an old proposal id.
+    const prepared = await prepareSemanticTileConversion(input);
+    if (!('draft' in prepared)) return refuse(prepared.code, prepared.error, prepared.status);
+    if (prepared.provenance.legacyTileFingerprint !== preview.legacyTileFingerprint
+      || prepared.source.sourceId !== preview.sourceId
+      || prepared.source.sourceRevision !== preview.sourceRevision
+      || prepared.descriptor.contractRef.fingerprint !== preview.contractFingerprint
+      || tileQueryHash(prepared.query) !== preview.queryFingerprint) {
+      return refuse('SEMANTIC_TILE_CONVERSION_PREVIEW_STALE', 'The source or mapped Dataset query changed after this preview. Preview the current legacy tile again.');
+    }
+    const certified = prepared.source.lifecycle === 'certified' && prepared.source.trust === 'certified';
+    const source: AppBuildDraftSource = {
+      id: prepared.source.sourceId,
+      kind: 'governed_semantic',
+      sourceRef: prepared.source.executionRef,
+      qualifiedIdentity: prepared.source.qualifiedIdentity,
+      sourcePath: prepared.source.sourcePath,
+      executionRef: prepared.source.executionRef,
+      snapshotId: prepared.source.snapshotId,
+      sourceRevision: prepared.source.sourceRevision,
+      sourceFingerprint: prepared.source.sourceRevision,
+      lifecycle: prepared.source.lifecycle,
+      capabilities: prepared.source.capabilities,
+      trustState: certified ? 'certified' : 'review_required',
+      reviewStatus: certified ? 'not_required' : 'required',
+    };
+    const provenance: SemanticTileConversionProvenanceV1 = {
+      ...prepared.provenance,
+      equivalenceProofFingerprint: prepared.proofFingerprint,
+      convertedAt: new Date().toISOString(),
+    };
+    const { semantic: _legacySemantic, ...tileWithoutLegacySemantic } = prepared.tile;
+    const convertedTile: DashboardGridItem = {
+      ...tileWithoutLegacySemantic,
+      sourceId: prepared.source.sourceId,
+      sourceRevision: prepared.source.sourceRevision,
+      query: prepared.query,
+      semanticTileConversionProvenance: provenance,
+      sourceClass: 'governed_semantic',
+      review: certified
+        ? { status: 'not_required', sourceFingerprint: prepared.source.sourceRevision }
+        : { status: 'required', sourceFingerprint: prepared.source.sourceRevision },
+      trustState: certified ? 'certified' : 'review_required',
+      reviewStatus: certified ? 'certified' : 'review_required',
+      sourceEvidence: [
+        ...(prepared.tile.sourceEvidence ?? []),
+        {
+          source: prepared.source.executionRef,
+          path: prepared.source.sourcePath,
+          kind: 'semantic_dataset_conversion',
+          trustState: certified ? 'certified' : 'review_required',
+          reason: `Explicit legacy semantic-to-Dataset conversion after fresh same-read-scope equivalence proof ${prepared.proofFingerprint}.`,
+        },
+      ],
+    };
+    const existingBinding = prepared.dashboard.datasets?.find((binding) => binding.sourceId === prepared.source.sourceId);
+    if (existingBinding && (existingBinding.sourceRevision !== prepared.source.sourceRevision
+      || existingBinding.contractFingerprint !== prepared.descriptor.contractRef.fingerprint)) {
+      return refuse('SEMANTIC_TILE_CONVERSION_SOURCE_STALE', 'This page already pins a different revision of the governed Dataset. Refresh the page source before converting the legacy tile.');
+    }
+    const binding = existingBinding ?? {
+      id: `dataset_${createHash('sha256').update(prepared.source.sourceId).digest('hex').slice(0, 16)}`,
+      sourceId: prepared.source.sourceId,
+      sourceRevision: prepared.source.sourceRevision,
+      snapshotId: prepared.source.snapshotId,
+      contractFingerprint: prepared.descriptor.contractRef.fingerprint,
+    };
+    const page: DashboardDocument = {
+      ...prepared.dashboard,
+      version: 3,
+      datasets: existingBinding
+        ? prepared.dashboard.datasets
+        : [...(prepared.dashboard.datasets ?? []), binding],
+      layout: {
+        ...prepared.dashboard.layout,
+        items: prepared.dashboard.layout.items.map((item) => item.i === prepared.tile.i ? convertedTile : item),
+      },
+    };
+    const operations: AppBuildDraftOperation[] = [
+      { type: 'upsert_source', source },
+      { type: 'upsert_page', page },
+      ...(!certified ? [{
+        type: 'set_review_task' as const,
+        task: {
+          id: `review:semantic-conversion:${page.id}:${convertedTile.i}`,
+          sourceId: source.id,
+          pageId: page.id,
+          tileId: convertedTile.i,
+          status: 'open' as const,
+          message: `Review required: ${convertedTile.title ?? convertedTile.i} was explicitly converted from a legacy semantic tile after fresh equivalence proof ${prepared.proofFingerprint}.`,
+        },
+      }] : []),
+    ];
+    try {
+      const next = applyAppBuildDraftOperations(prepared.draft, prepared.draft.revision, operations);
+      const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+      try {
+        storage.saveAppBuildDraft(next, { expectedRevision: prepared.draft.revision, operations });
+      } finally {
+        storage.close();
+      }
+      semanticTileConversionPreviews.delete(input.proposalId);
+      return { ok: true, draft: next, equivalenceProofFingerprint: prepared.proofFingerprint };
+    } catch (error) {
+      return refuse('SEMANTIC_TILE_CONVERSION_ACCEPT_FAILED', `DQL could not save this reviewed conversion: ${error instanceof Error ? error.message : String(error)}`, 400);
+    }
   };
 
   const server = createServer((req, res) => {
@@ -11618,7 +13984,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({ requestId, proposal }));
       } catch (error) {
         const code = apiErrorCode(error, 'PROPOSAL_INVALID');
-        res.writeHead(code === 'PROPOSAL_STALE' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.writeHead(['PROPOSAL_STALE', 'SOURCE_CHANGED', 'DATASET_SOURCE_TARGET_NOT_FOUND', 'DATASET_SOURCE_TARGET_AMBIGUOUS'].includes(code) ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Refresh Modeling and preview the proposal again.'] })));
       }
       return;
@@ -11648,11 +14014,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const selected = Array.isArray(body.selectedOperationIds)
           ? body.selectedOperationIds.filter((value): value is string => typeof value === 'string')
           : current.operations.map((operation) => operation.id);
-        const operations = contextAuthoringDependencyClosure(current.operations, selected);
+        const selectedOperations = contextAuthoringDependencyClosure(current.operations, selected);
+        // Rebase is an explicit user action. Dataset operations carry a
+        // source-byte hash, so replaying their historic request would only
+        // rediscover SOURCE_CHANGED forever. Rebind that one hash from the
+        // current resolved block while preserving the old immutable proposal
+        // and its requested declaration patch for a fresh before/after review.
+        const rebasedSnapshot = body.rebase === true ? projectSnapshot() : undefined;
+        const operations = rebasedSnapshot
+          ? rebaseDatasetAuthoringOperations(projectRoot, rebasedSnapshot.manifest, selectedOperations)
+          : selectedOperations;
         const proposal = previewContextAuthoring({
           origin: current.origin,
           operations,
-          expectedSnapshotId: body.rebase === true ? projectSnapshot().snapshotId : current.baseSnapshotId,
+          expectedSnapshotId: rebasedSnapshot?.snapshotId ?? current.baseSnapshotId,
           sourceRunId: current.sourceRunId,
           sourceArtifactId: current.sourceArtifactId,
           revision: (current.revision ?? 1) + 1,
@@ -11661,7 +14036,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({ requestId, proposal }));
       } catch (error) {
         const code = apiErrorCode(error, 'PROPOSAL_INVALID');
-        res.writeHead(code === 'PROPOSAL_STALE' ? 409 : code === 'PROPOSAL_NOT_FOUND' ? 404 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.writeHead(['PROPOSAL_STALE', 'SOURCE_CHANGED', 'DATASET_SOURCE_TARGET_NOT_FOUND', 'DATASET_SOURCE_TARGET_AMBIGUOUS'].includes(code) ? 409 : code === 'PROPOSAL_NOT_FOUND' ? 404 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Refresh the proposal against the latest project snapshot.'] })));
       }
       return;
@@ -12931,6 +15306,73 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
       res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON(result));
+      return;
+    }
+
+    /**
+     * The only App Autopilot write lane. The browser addresses an immutable
+     * AgentRun and proposal id, while the server derives the draft, artifact,
+     * source pins, and typed operation from durable local state. This keeps an
+     * old browser tab from replaying a free-form App mutation or applying an
+     * artifact from another run.
+     */
+    if (req.method === 'POST' && /^\/api\/agent-runs\/[^/]+\/app-autopilot-changes\/[^/]+\/apply$/.test(path)) {
+      const match = path.match(/^\/api\/agent-runs\/([^/]+)\/app-autopilot-changes\/([^/]+)\/apply$/);
+      const runId = decodeURIComponent(match?.[1] ?? '');
+      const proposalId = decodeURIComponent(match?.[2] ?? '');
+      const run = await agentRunStore.get(runId);
+      if (!run) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'APP_AUTOPILOT_RUN_NOT_FOUND', error: 'The App Autopilot run is no longer available. Ask App Autopilot to prepare a new change.' }));
+        return;
+      }
+      if (run.status !== 'needs_review' || run.trustState !== 'review_required') {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'APP_AUTOPILOT_REVIEW_REQUIRED', error: 'Only a review-required App Autopilot run may apply a typed App change.' }));
+        return;
+      }
+      const artifact = run.artifacts.find((candidate) => candidate.kind === 'app_autopilot_change' && candidate.ref === proposalId);
+      const payload = artifact ? agentRunRecord(artifact.payload) : undefined;
+      const draftId = agentRunString(payload?.draftId);
+      if (!artifact || !payload
+        || agentRunString(payload.id) !== proposalId
+        || agentRunString(payload.runId) !== run.id
+        || agentRunString(payload.artifactId) !== artifact.id
+        || !draftId) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'APP_AUTOPILOT_ARTIFACT_MISMATCH', error: 'This run does not carry the selected immutable App Autopilot change.' }));
+        return;
+      }
+      const body = agentRunRecord(await readJSON(req).catch(() => null));
+      const expectedRevision = typeof body?.expectedRevision === 'number' && Number.isInteger(body.expectedRevision)
+        ? body.expectedRevision
+        : undefined;
+      const expectedProposalHash = agentRunString(body?.expectedProposalHash);
+      const proposalHash = agentRunString(body?.proposalHash);
+      if (expectedRevision === undefined || !expectedProposalHash || !proposalHash) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'APP_AUTOPILOT_APPLY_INVALID', error: 'The expected App draft revision and immutable proposal hash are required.' }));
+        return;
+      }
+      try {
+        const result = await applyAppAutopilotChange(projectRoot, {
+          draftId,
+          proposalId,
+          runId: run.id,
+          artifactId: artifact.id,
+          expectedRevision,
+          expectedProposalHash,
+          proposalHash,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, ...result }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const code = /^([A-Z0-9_]+):/.exec(message)?.[1] ?? 'APP_AUTOPILOT_APPLY_FAILED';
+        const status = code.endsWith('_NOT_FOUND') ? 404 : 409;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code, error: message }));
+      }
       return;
     }
 
@@ -15112,21 +17554,280 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
-    const appDashRun = path.match(/^\/api\/(apps|app-builds)\/([^/]+)\/dashboards\/([^/]+)\/run$/);
-    if (req.method === 'POST' && appDashRun) {
+    /**
+     * The MCP Dataset surface deliberately has no saved or hidden App.  It
+     * resolves a current governed source into this in-memory one-tile page,
+     * then enters the ordinary Dataset dashboard runner below.  Keeping the
+     * page interaction-scoped means it cannot create App story, preview, or
+     * publication evidence, while source validation, target observation,
+     * grain/component proofs, cancellation, and execution remain identical.
+     */
+    const resolveMcpDatasetRuntimeRequest = async (raw: unknown) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new DashboardRunRequestError('Dataset MCP input must be an object with sourceId, query, and optional parameters.');
+      }
+      const body = raw as Record<string, unknown>;
+      const allowed = new Set(['sourceId', 'query', 'parameters']);
+      if (Object.keys(body).some((key) => !allowed.has(key))) {
+        throw new DashboardRunRequestError('Dataset MCP accepts only sourceId, query, and optional parameters. SQL and client source authority are not accepted.');
+      }
+      const sourceId = typeof body.sourceId === 'string' ? body.sourceId.trim() : '';
+      const query = normalizeTileQuery(body.query);
+      if (!sourceId || !query) {
+        throw new DashboardRunRequestError('Dataset MCP requires an exact sourceId and a valid typed TileQuery.');
+      }
+      const parameters = body.parameters === undefined
+        ? {}
+        : body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
+          ? body.parameters as Record<string, unknown>
+          : undefined;
+      if (!parameters || Object.keys(parameters).length > 50) {
+        throw new DashboardRunRequestError('Dataset MCP parameters must be an object with at most 50 declared parameter values.');
+      }
+      const snapshot = projectSnapshot();
+      await ensureMetadataCatalogFresh(projectRoot, { manifest: snapshot.manifest, semanticLayer });
+      const resolved = resolveAppSourceCatalogRecords(projectRoot, [sourceId], 'governed_only');
+      const source = resolved.items[0];
+      const descriptor = source?.capabilities.dataset;
+      if (!source || !descriptor || resolved.missingSourceIds.length > 0) {
+        throw new DashboardRunRequestError(`Dataset MCP source ${sourceId} is not a current approved governed Dataset.`);
+      }
+      if (!source.eligibility.localPreview) {
+        throw new DashboardRunRequestError(`Dataset MCP source ${source.title} is not eligible for governed local execution.`);
+      }
+      const queryValidation = validateTileQuery(descriptor, query);
+      if (queryValidation.outcome !== 'covered') {
+        throw new DashboardRunRequestError(
+          `Dataset MCP query was refused: ${queryValidation.diagnostics.map((diagnostic) => diagnostic.message).join(' ') || 'the selected fields or operation are not approved.'}`,
+        );
+      }
+      const declaredParameters = new Set(source.capabilities.parameters.map((parameter) => parameter.name));
+      const unknownParameters = Object.keys(parameters).filter((name) => !declaredParameters.has(name));
+      if (unknownParameters.length > 0) {
+        throw new DashboardRunRequestError(`Dataset MCP parameter(s) are not declared by ${source.title}: ${unknownParameters.join(', ')}.`);
+      }
+      const parameterBindings = Object.keys(parameters).map((param) => ({
+        param,
+        source: 'variable' as const,
+        field: param,
+      }));
+      const dashboardId = 'mcp-dataset-query';
+      const tileId = 'mcp-dataset-tile';
+      const dashboard: DashboardDocument = {
+        version: 3,
+        id: dashboardId,
+        metadata: {
+          title: `Dataset MCP: ${source.title}`,
+          ...(source.domain ? { domain: source.domain } : {}),
+        },
+        datasets: [{
+          id: 'mcp-dataset-source',
+          sourceId: source.sourceId,
+          sourceRevision: source.sourceRevision,
+          snapshotId: source.snapshotId,
+          contractFingerprint: descriptor.contractRef.fingerprint,
+        }],
+        layout: {
+          kind: 'grid',
+          cols: 12,
+          rowHeight: 32,
+          items: [{
+            i: tileId,
+            x: 0,
+            y: 0,
+            w: 12,
+            h: 8,
+            sourceId: source.sourceId,
+            sourceRevision: source.sourceRevision,
+            query,
+            viz: { type: 'table' },
+            ...(parameterBindings.length > 0 ? { parameterBindings } : {}),
+            title: source.title,
+            sourceClass: source.kind === 'semantic' ? 'governed_semantic' : 'certified_block',
+            trustState: source.trust === 'certified' ? 'certified' : 'review_required',
+            reviewStatus: source.trust === 'certified' ? 'certified' : 'review_required',
+          }],
+        },
+      };
+      const app: AppDocument = {
+        version: 1,
+        id: 'mcp-dataset-runtime',
+        name: 'MCP Dataset runtime',
+        description: 'Ephemeral governed Dataset execution context for MCP.',
+        visibility: 'private',
+        publicationIntent: 'personal',
+        domain: source.domain ?? 'general',
+        usesDomains: source.domain ? [source.domain] : [],
+        requiredExports: [],
+        audience: 'analysts',
+        lifecycle: 'draft',
+        owners: ['local-mcp'],
+        tags: ['mcp', 'dataset-runtime'],
+        members: [],
+        roles: [],
+        policies: [],
+        homepage: { type: 'dashboard', id: dashboardId },
+      };
+      return {
+        app,
+        dashboard,
+        appDir: join(projectRoot, '.dql', 'local', 'mcp-dataset-runtime'),
+        // Keep the loaded-dashboard shape compatible with the ordinary runner.
+        // This ephemeral context deliberately has no App-scoped draft files.
+        draftArtifactsDir: undefined,
+        body: {
+          variables: parameters,
+          // Explicitly keep the in-memory run interaction-scoped. It cannot
+          // become an App receipt even though it shares all query guards.
+          tileId,
+        },
+        source,
+        descriptor,
+        query,
+        tileId,
+      };
+    };
+
+    const summarizeMcpDatasetSource = (source: ReturnType<typeof resolveAppSourceCatalogRecords>['items'][number]) => {
+      const descriptor = source.capabilities.dataset;
+      return {
+        sourceId: source.sourceId,
+        title: source.title,
+        ...(source.description ? { description: source.description } : {}),
+        ...(source.domain ? { domain: source.domain } : {}),
+        sourceRevision: source.sourceRevision,
+        snapshotId: source.snapshotId,
+        kind: source.kind,
+        lifecycle: source.lifecycle,
+        trust: source.trust,
+        ...(descriptor ? {
+          contractFingerprint: descriptor.contractRef.fingerprint,
+          descriptor,
+          parameters: source.capabilities.parameters,
+        } : {}),
+      };
+    };
+
+    if (req.method === 'GET' && path === '/api/app-datasets') {
       try {
-        const runSurface = appDashRun[1] as 'apps' | 'app-builds';
-        const appId = decodeURIComponent(appDashRun[2]);
-        const dashboardId = decodeURIComponent(appDashRun[3]);
-        const body = await readJSON(req).catch(() => ({}));
-        const loaded = runSurface === 'app-builds'
-          ? loadAppBuildDraftDashboard(projectRoot, appId, dashboardId)
-          : loadAppDashboard(projectRoot, appId, dashboardId);
+        const snapshot = projectSnapshot();
+        await ensureMetadataCatalogFresh(projectRoot, { manifest: snapshot.manifest, semanticLayer });
+        const requestedSourceId = url.searchParams.get('sourceId')?.trim();
+        const query = url.searchParams.get('query')?.trim();
+        const page = queryAppSourceCatalog(projectRoot, {
+          sourcePolicy: 'governed_only',
+          ...(query ? { query } : {}),
+          limit: 50,
+        });
+        const datasets = page.items
+          .filter((source) => Boolean(source.capabilities.dataset) && source.eligibility.localPreview)
+          .filter((source) => !requestedSourceId || source.sourceId === requestedSourceId)
+          .map(summarizeMcpDatasetSource);
+        if (requestedSourceId && datasets.length === 0) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Dataset MCP source ${requestedSourceId} is not a current approved governed Dataset.` }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          version: 1,
+          snapshotId: page.snapshotId,
+          ...(requestedSourceId ? { dataset: datasets[0] } : { datasets, total: datasets.length }),
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/app-datasets/preview') {
+      try {
+        const resolved = await resolveMcpDatasetRuntimeRequest(await readJSON(req));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          version: 1,
+          source: summarizeMcpDatasetSource(resolved.source),
+          query: resolved.query,
+          validation: { outcome: 'covered', diagnostics: [] },
+          scope: 'ephemeral_mcp_runtime',
+          note: 'Preview validates the current governed Dataset contract and does not execute SQL or create an App receipt.',
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    const appDashRun = path.match(/^\/api\/(apps|app-builds)\/([^/]+)\/dashboards\/([^/]+)\/run$/);
+    const mcpDatasetRun = req.method === 'POST' && path === '/api/app-datasets/run';
+    if (req.method === 'POST' && (appDashRun || mcpDatasetRun)) {
+      let activeDashboardRunKey: string | undefined;
+      let activeDashboardRun: { generation: number; controller: AbortController } | undefined;
+      let chartRunScopeKey: string | undefined;
+      let chartRunScopeGeneration: number | undefined;
+      let dashboardRequestAbortHandler: (() => void) | undefined;
+      try {
+        const mcpRequest = mcpDatasetRun ? await resolveMcpDatasetRuntimeRequest(await readJSON(req)) : undefined;
+        const runSurface = mcpRequest ? 'dataset-mcp' as const : appDashRun![1] as 'apps' | 'app-builds';
+        const appId = mcpRequest ? mcpRequest.app.id : decodeURIComponent(appDashRun![2]);
+        const dashboardId = mcpRequest ? mcpRequest.dashboard.id : decodeURIComponent(appDashRun![3]);
+        const body = mcpRequest ? mcpRequest.body : await readJSON(req).catch(() => ({}));
+        const loaded = mcpRequest
+          ? mcpRequest
+          : runSurface === 'app-builds'
+            ? loadAppBuildDraftDashboard(projectRoot, appId, dashboardId)
+            : loadAppDashboard(projectRoot, appId, dashboardId);
         if (!loaded) {
           res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: `Dashboard "${dashboardId}" not found in ${runSurface === 'app-builds' ? 'local App draft' : 'App'} "${appId}"` }));
           return;
         }
+        // Local drafts can outlive parser upgrades or be restored from an
+        // earlier SQLite state. Do not let a v3 field Dataset query bypass the
+        // document parser simply because it came from local draft storage.
+        if (loaded.dashboard.version < 3 && dashboardUsesDatasetV3Features(loaded.dashboard)) {
+          throw new DashboardRunRequestError('Dataset bindings, field queries, and Dataset interactions require dashboard version 3. Upgrade this dashboard before running it.');
+        }
+        const datasetVisualizationErrors = dashboardDatasetTileVisualizationErrors(loaded.dashboard);
+        if (datasetVisualizationErrors.length > 0) {
+          throw new DashboardRunRequestError(datasetVisualizationErrors[0]!);
+        }
+        const datasetParameterErrors = dashboardDatasetParameterFilterErrors(loaded.dashboard);
+        if (datasetParameterErrors.length > 0) {
+          throw new DashboardRunRequestError(datasetParameterErrors[0]!);
+        }
+        const draftIntentFingerprint: string | undefined = runSurface === 'app-builds'
+          && 'previewIntentFingerprint' in loaded
+          && typeof loaded.previewIntentFingerprint === 'string'
+          ? loaded.previewIntentFingerprint
+          : undefined;
+        // A local App draft is the authoring authority for what may be run.
+        // A restored placeholder intentionally has no Dataset capability; a
+        // later catalog refresh must not silently turn that repair state into
+        // executable source authority. Published Apps do not carry a mutable
+        // draft registry and are validated directly against current source
+        // bindings below.
+        const loadedDraftDashboard = runSurface === 'app-builds'
+          && isLoadedAppBuildDraftDashboard(loaded);
+        const storedDraftDatasetSourceErrors = loadedDraftDashboard
+          ? datasetDraftStoredAuthorityErrors(
+            loaded.dashboard,
+            loaded.draftSources,
+            loaded.draftSourcePolicy,
+          )
+          : new Map<string, string>();
+        const storedDraftSourcesById = loadedDraftDashboard
+          ? new Map(loaded.draftSources.map((source) => [source.id, source]))
+          : undefined;
+        // This exact receipt ID is part of the run's local state boundary.
+        // A later incomplete response may invalidate it, but must never clear
+        // a receipt attached by a newer run for the same page.
+        const previewReceiptIdAtRunStart = loadedDraftDashboard
+          ? loaded.previewReceiptId
+          : undefined;
         const activeApp = activePersonaAppId();
         if (runSurface === 'apps' && activeApp && activeApp !== appId) {
           res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -15134,7 +17835,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
 
-        const manifest = buildManifest({ projectRoot });
+        // One run is bound to the project state visible when it began. A later
+        // snapshot change invalidates the result/story receipt rather than
+        // letting an obsolete field query become publish evidence.
+        const runSnapshot = projectSnapshot();
+        const manifest = runSnapshot.manifest;
         const variables = body.variables && typeof body.variables === 'object'
           ? body.variables as Record<string, unknown>
           : {};
@@ -15142,16 +17847,311 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const requestedTileId = typeof body.tileId === 'string' && body.tileId.trim()
           ? body.tileId.trim()
           : undefined;
+        const authoredTileIds = new Set(loaded.dashboard.layout.items.map((item) => item.i));
+        if (requestedTileId && !authoredTileIds.has(requestedTileId)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Tile ${requestedTileId} is not authored on this dashboard.` }));
+          return;
+        }
+        const requestedVisibleTileIds = parseDashboardRunTileIds(body.visibleTileIds, authoredTileIds, 'visibleTileIds');
+        const requestedAffectedTileIds = parseDashboardRunTileIds(body.affectedTileIds, authoredTileIds, 'affectedTileIds');
+        const datasetDrills = parseDashboardDatasetHierarchyDrills(body.datasetDrills, authoredTileIds);
+        const fullDashboardRun = body.fullRun === true;
+        if (fullDashboardRun && (requestedTileId || requestedVisibleTileIds || requestedAffectedTileIds || datasetDrills.size > 0)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'A full dashboard run cannot include tile, visible, affected, or hierarchy-interaction scheduling bounds.' }));
+          return;
+        }
+        activeDashboardRunKey = dashboardRunSupersessionKey(runSurface, appId, dashboardId, body.runScope);
+        const priorDashboardRun = activeDashboardRunKey ? activeDashboardRuns.get(activeDashboardRunKey) : undefined;
+        // The newest interaction owns this mounted viewer scope. A caller
+        // that does not provide a scope retains legacy independent-request
+        // behavior rather than accidentally cancelling another viewer.
+        priorDashboardRun?.controller.abort(new Error('Superseded by a newer dashboard interaction in this viewer.'));
+        activeDashboardRun = {
+          generation: (priorDashboardRun?.generation ?? 0) + 1,
+          controller: new AbortController(),
+        };
+        if (activeDashboardRunKey) activeDashboardRuns.set(activeDashboardRunKey, activeDashboardRun);
+        // A chart answer is tied to a settled server result, but the result is
+        // only current for the mounted viewer that produced it. Advance that
+        // viewer's generation as soon as a valid newer request begins, even if
+        // the request later fails or is superseded itself. Older short-lived
+        // evidence stays long enough to return an explicit supersession refusal
+        // instead of becoming indistinguishable from an expired run. Other tabs
+        // have a different key and retain their own answerable context.
+        if (!mcpRequest && activeDashboardRunKey) {
+          chartRunScopeKey = activeDashboardRunKey;
+          chartRunScopeGeneration = (datasetChartScopeGenerations.get(chartRunScopeKey) ?? 0) + 1;
+          datasetChartScopeGenerations.set(chartRunScopeKey, chartRunScopeGeneration);
+        }
+        dashboardRequestAbortHandler = () => activeDashboardRun?.controller.abort(new Error('Dashboard request was disconnected.'));
+        req.once('aborted', dashboardRequestAbortHandler);
+        const dashboardRunIsCurrent = () => Boolean(
+          activeDashboardRun
+          && (!activeDashboardRunKey || activeDashboardRuns.get(activeDashboardRunKey) === activeDashboardRun)
+          && !activeDashboardRun.controller.signal.aborted,
+        );
         const tiles: Array<{ tileId: string; status: string; [key: string]: any }> = [];
+        // The saved TileQuery and a hierarchy-interaction query have distinct
+        // authority. Keep the latter in run-local memory so a chart answer is
+        // grounded in the query that actually produced its settled rows while
+        // the persisted App document remains untouched.
+        const datasetEffectiveQueries = new Map<string, TileQuery>();
         const localApps = { current: null as LocalAppStorage | null };
-        const itemsToRun = loaded.dashboard.layout.items.filter((item) => !requestedTileId || item.i === requestedTileId);
+        // An explicit empty scheduling bound is a deliberate no-op, never a
+        // shorthand for every authored tile. That prevents a stale browser
+        // viewport or a malformed caller from accidentally producing a full
+        // story/receipt run. Omitted bounds retain legacy full-run behavior.
+        const scheduledTileIds = fullDashboardRun
+          ? authoredTileIds
+          : requestedTileId
+          ? new Set([requestedTileId])
+          : requestedAffectedTileIds !== undefined
+            ? new Set(requestedAffectedTileIds)
+            : requestedVisibleTileIds !== undefined
+              ? new Set(requestedVisibleTileIds)
+              : authoredTileIds;
+        const itemsToRun = loaded.dashboard.layout.items.filter((item) => scheduledTileIds.has(item.i));
+        if (Array.from(datasetDrills.keys()).some((tileId) => !scheduledTileIds.has(tileId))) {
+          throw new DashboardRunRequestError('Each Dataset hierarchy interaction must run its selected authored tile.');
+        }
+        // A hierarchy transition changes the effective query while leaving the
+        // saved App query immutable. It is exploration evidence only and can
+        // never be attached as a whole-page preview/publication receipt.
+        // An explicit scheduler or interaction request remains bounded even on
+        // a one-tile page. Its result must never gain whole-page story or
+        // publication authority merely because the selected set happens to
+        // contain every current layout item.
+        const partialRun = itemsToRun.length !== loaded.dashboard.layout.items.length
+          || Boolean(requestedTileId || requestedVisibleTileIds || requestedAffectedTileIds)
+          || datasetDrills.size > 0;
         const tileOrder = new Map(itemsToRun.map((item, index) => [item.i, index]));
+        const datasetSourceById = new Map<string, ReturnType<typeof resolveAppSourceCatalogRecords>['items'][number]>();
+        const datasetSourceErrors = new Map<string, string>();
+        let datasetTargetConnection: ConnectionConfig | undefined;
+        let datasetTargetFingerprint: string | undefined;
+        let datasetSetupError: string | undefined;
+        // A source can feed several tiles in one App run. Share the one live
+        // full-source grain check when its SQL/parameter/target binding is
+        // identical; distinct parameters deliberately receive distinct checks.
+        const datasetGrainChecks = new Map<string, ReturnType<typeof prepareDatasetBlockGrainEvidence>>();
+        type DatasetAggregateScopeState = {
+          scope: DuckDBConsistentReadScope;
+          preparedSourceSql: string;
+          sourceSqlParams: SQLParamSpec[];
+          sourceVariables: Record<string, unknown>;
+          grainPreparation: Awaited<ReturnType<typeof prepareDatasetBlockGrainEvidence>>;
+          executePrepared: NonNullable<ExecutionServiceInput['executePrepared']>;
+          /** One membership query per exact raw COUNT(DISTINCT) component/binding/run. */
+          componentChecks: Map<string, Promise<{ overlapDetected: boolean }>>;
+        };
+        // Aggregate Dataset proof, grain check, and dependent field query use
+        // one transaction on a second connection from the same DuckDB
+        // Database. This map is run-owned: it is never local proof storage and
+        // it is closed after the four-worker dashboard run settles.
+        const datasetAggregateScopes = new Map<string, Promise<DatasetAggregateScopeState>>();
+        const datasetAggregateComponentProofs = new Map<
+          string,
+          Promise<Awaited<ReturnType<typeof prepareDatasetAggregateComponentProof>>>
+        >();
+        const openDatasetAggregateScope = async (input: {
+          key: string;
+          descriptor: DatasetDescriptor;
+          sourceSql: string;
+          sourceSqlParams: SQLParamSpec[];
+          sourceVariables: Record<string, unknown>;
+          parameterValues: Record<string, unknown>;
+          proofId: string;
+          proofMaterial: NonNullable<ReturnType<typeof datasetBlockProofMaterial>>;
+          sourceId: string;
+          sourceRevision: string;
+          connection: ConnectionConfig;
+          targetFingerprint: string;
+        }): Promise<DatasetAggregateScopeState> => {
+          const existing = datasetAggregateScopes.get(input.key);
+          if (existing) return existing;
+          const opening = (async (): Promise<DatasetAggregateScopeState> => {
+            if (input.connection.driver !== 'duckdb') {
+              throw new DatasetAggregateComponentProofError(
+                'DATASET_AGGREGATE_COMPONENT_SNAPSHOT_UNSUPPORTED',
+                `Aggregate Dataset rollups currently require a DuckDB consistent read scope; ${input.connection.driver} cannot prove COUNT(DISTINCT) component membership on one pinned read.`,
+              );
+            }
+            const preparedSource = await prepareAnalyticalExecutionSql({
+              sql: input.sourceSql,
+              subject: 'App Dataset aggregate source preparation',
+              executor,
+              connection: input.connection,
+              projectRoot,
+              projectConfig,
+              enforceReadOnly: true,
+            });
+            if (preparedSource.connection.driver !== input.connection.driver
+              || preparedSource.connection.filepath !== input.connection.filepath
+              || preparedSource.connection.schema !== input.connection.schema) {
+              throw new DatasetAggregateComponentProofError(
+                'DATASET_AGGREGATE_COMPONENT_SNAPSHOT_UNSUPPORTED',
+                'The prepared aggregate Dataset source changed its connection binding, so DQL cannot prove components and tile rows on one current read scope.',
+              );
+            }
+            const connector = await executor.getConnector(input.connection);
+            if (!(connector instanceof DuckDBConnector)) {
+              throw new DatasetAggregateComponentProofError(
+                'DATASET_AGGREGATE_COMPONENT_SNAPSHOT_UNSUPPORTED',
+                'The active Dataset target did not expose the DuckDB scoped-read capability required for this aggregate rollup.',
+              );
+            }
+            const scope = await connector.openConsistentReadScope();
+            const executePrepared: NonNullable<ExecutionServiceInput['executePrepared']> = async (preparation, options) => {
+              if (preparation.connection.driver !== input.connection.driver
+                || preparation.connection.filepath !== input.connection.filepath
+                || preparation.connection.schema !== input.connection.schema) {
+                throw new DatasetAggregateComponentProofError(
+                  'DATASET_AGGREGATE_COMPONENT_SCOPE_DRIFT',
+                  'The prepared Dataset statement no longer matches the connection pinned for its aggregate component proof.',
+                );
+              }
+              const expanded = expandArrayParameters(
+                preparation.executedSql,
+                options.sqlParams,
+                runtimeVariables(options.variables),
+              );
+              const values = buildParamValues(expanded.params, expanded.variables);
+              return scope.execute(
+                normalizeSQLPlaceholders(expanded.sql, preparation.connection.driver),
+                values.length > 0 ? values : undefined,
+                { signal: options.signal },
+              );
+            };
+            try {
+              const probe = compileDatasetGrainProbe({
+                descriptor: input.descriptor,
+                sourceSql: preparedSource.preparedSql,
+                sourceSqlParams: input.sourceSqlParams,
+                sourceVariables: input.sourceVariables,
+                parameterValues: input.parameterValues,
+                driver: preparedSource.connection.driver,
+              });
+              const grainPreparation = await prepareDatasetBlockGrainEvidence({
+                probe,
+                proofId: input.proofId,
+                material: input.proofMaterial,
+                sourceId: input.sourceId,
+                sourceRevision: input.sourceRevision,
+                connection: preparedSource.connection,
+                targetFingerprint: input.targetFingerprint,
+                snapshotId: runSnapshot.snapshotId,
+                subject: 'App Dataset declared grain check in aggregate read scope',
+                signal: activeDashboardRun!.controller.signal,
+                executePrepared,
+              });
+              return {
+                scope,
+                preparedSourceSql: preparedSource.preparedSql,
+                sourceSqlParams: [...probe.sqlParams],
+                sourceVariables: { ...probe.variables },
+                grainPreparation,
+                executePrepared,
+                componentChecks: new Map(),
+              };
+            } catch (error) {
+              await scope.close();
+              throw error;
+            }
+          })();
+          datasetAggregateScopes.set(input.key, opening);
+          return opening;
+        };
+        // Exact duplicate Dataset requests occur when several tiles render the
+        // same query or a tile is present in a responsive layout.  Share the
+        // live result within this run only; no result is persisted or reused
+        // after an interaction, source revision, target, or filter change.
+        const datasetQueryExecutions = new Map<string, Promise<ExecutionServiceResult>>();
+        const semanticDatasetExecutions = new Map<string, Promise<Awaited<ReturnType<typeof executeTargetBoundSemanticQuery>>>>();
+        const datasetCrossFilters = parseDashboardDatasetCrossFilters(body.crossFilters);
+        // The receipt fingerprint covers the declarative query state and the
+        // exact request inputs, including cross-filter provenance. A browser
+        // cannot reuse a response from a different control state as a settled
+        // preview just because the top-level dashboard filter values match.
+        const datasetRunInputFingerprint = fingerprintDashboardRuntimeState({
+          dashboardValues: dashboardVariables,
+          requestValues: variables,
+          crossFilters: datasetCrossFilters,
+          datasetDrills: Array.from(datasetDrills.values()),
+          requestedTileId: requestedTileId ?? null,
+          fullDashboardRun,
+          visibleTileIds: requestedVisibleTileIds ?? null,
+          affectedTileIds: requestedAffectedTileIds ?? null,
+          tiles: itemsToRun.map((item) => ({
+            id: item.i,
+            sourceId: item.sourceId ?? null,
+            sourceRevision: item.sourceRevision ?? null,
+            query: item.query ?? null,
+            filterBindings: item.filterBindings ?? [],
+            parameterBindings: item.parameterBindings ?? [],
+          })),
+        });
+        // Cache identity is fixed at request start, alongside the declarative
+        // dashboard inputs. It must be available while workers compile their
+        // Dataset queries; calculate it once rather than reading persona state
+        // after a result has already been produced.
+        const personaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+        // A live cache entry retains the originating runtime receipt id for
+        // provenance only. Allocate it before workers can complete so a cache
+        // miss cannot reference a temporal-dead-zone response identifier.
+        const runId = `app_run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const datasetSourceIds = Array.from(new Set(itemsToRun
+          .filter((item) => Boolean(item.query && item.sourceId))
+          .map((item) => item.sourceId!)));
+        if (datasetSourceIds.length > 0) {
+          try {
+            // The App catalog is rebuilt against this run's project manifest,
+            // then exact source ids are resolved once for all four workers.
+            // A catalog discovery state is never treated as target authority.
+            await ensureMetadataCatalogFresh(projectRoot, { manifest, semanticLayer });
+            const sourcePolicy: AppBuildSourcePolicy = loadedDraftDashboard
+              ? loaded.draftSourcePolicy
+              : 'governed_only';
+            const resolvedSources = resolveAppSourceCatalogRecords(
+              projectRoot,
+              datasetSourceIds,
+              sourcePolicy,
+            );
+            for (const source of resolvedSources.items) datasetSourceById.set(source.sourceId, source);
+            for (const sourceId of resolvedSources.missingSourceIds) {
+              datasetSourceErrors.set(
+                sourceId,
+                `Dataset source ${sourceId} no longer resolves in the active project catalog. Refresh or reselect the Dataset before running it.`,
+              );
+            }
+            for (const source of resolvedSources.items) {
+              if (!source.capabilities.dataset) {
+                datasetSourceErrors.set(
+                  source.sourceId,
+                  `Dataset source ${source.title} no longer exposes an approved field contract. Refresh or reselect the Dataset before running it.`,
+                );
+              } else if (!source.eligibility.localPreview) {
+                datasetSourceErrors.set(
+                  source.sourceId,
+                  `Dataset source ${source.title} is ${source.lifecycle} and is not eligible for this local preview policy. Enable review-required sources or select a certified Dataset.`,
+                );
+              }
+            }
+            if (resolvedSources.items.some((source) => !datasetSourceErrors.has(source.sourceId))) {
+              datasetTargetConnection = await resolveExecutionConnection(body as Record<string, unknown>);
+              datasetTargetFingerprint = (await observeWarehouseTargetIdentity(executor, datasetTargetConnection)).identityFingerprint;
+            }
+          } catch (error) {
+            datasetSetupError = error instanceof Error ? error.message : String(error);
+          }
+        }
         let nextTileIndex = 0;
         // App preview is a multi-source execution, so isolate each tile's
         // failure and run a small fixed pool. Four avoids serial 4k-catalog
         // behavior without flooding the configured warehouse.
         const runTileWorker = async () => {
-          while (nextTileIndex < itemsToRun.length) {
+          while (dashboardRunIsCurrent() && nextTileIndex < itemsToRun.length) {
             const item = itemsToRun[nextTileIndex++];
             if (!item) continue;
           if (item.text) {
@@ -15444,6 +18444,1023 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }
             continue;
           }
+          if (item.query) {
+            if (!datasetsAppFeatureEnabled(projectConfig)) {
+              tiles.push({
+                tileId: item.i,
+                status: 'error',
+                tileType: 'dataset',
+                title: item.title,
+                trustState: 'review_required',
+                error: 'APP_DATASETS_FEATURE_DISABLED: enable apps.datasets in dql.config.json before running field-based Dataset tiles.',
+              });
+              continue;
+            }
+            const source = item.sourceId ? datasetSourceById.get(item.sourceId) : undefined;
+            const discoveryDescriptor = source?.capabilities.dataset;
+            try {
+              if (!item.sourceId || !item.sourceRevision) {
+                throw new Error('This field tile has no exact Dataset source binding. Choose a Dataset again before running it.');
+              }
+              const storedAuthorityError = storedDraftDatasetSourceErrors.get(item.sourceId);
+              if (storedAuthorityError) throw new Error(storedAuthorityError);
+              if (datasetSetupError) throw new Error(datasetSetupError);
+              const currentAuthorityError = datasetSourceErrors.get(item.sourceId);
+              if (currentAuthorityError) throw new Error(currentAuthorityError);
+              if (!source || !discoveryDescriptor) {
+                throw new Error(`Dataset source ${item.sourceId} no longer exposes an approved field contract.`);
+              }
+              if (source.sourceRevision !== item.sourceRevision) {
+                throw new Error('This Dataset changed after the tile was authored. Choose the current Dataset and reselect its fields.');
+              }
+              // The persisted draft card and page binding establish authoring
+              // provenance; the catalog establishes current capability. Both
+              // must agree before scheduling a query. This closes the gap
+              // where a placeholder or forged stored source could share an id
+              // and revision with a later catalog entry but carry a different
+              // field contract or lifecycle claim.
+              const storedDraftSource = storedDraftSourcesById?.get(item.sourceId);
+              if (storedDraftSource) {
+                const storedDescriptor = storedDraftSource.capabilities?.dataset;
+                const expectedKind = source.kind === 'semantic' ? 'governed_semantic' : 'block';
+                const storedKindMatches = storedDraftSource.kind === expectedKind
+                  || (expectedKind === 'block' && storedDraftSource.kind === 'certified_block');
+                const expectedTrustState = source.trust === 'certified' ? 'certified' : 'review_required';
+                const expectedReviewStatus = source.trust === 'certified' ? 'not_required' : 'required';
+                if (!storedDescriptor
+                  || !storedKindMatches
+                  || storedDraftSource.sourceRevision !== source.sourceRevision
+                  || (storedDraftSource.sourceFingerprint !== undefined && storedDraftSource.sourceFingerprint !== source.sourceRevision)
+                  || storedDescriptor.contractRef.fingerprint !== discoveryDescriptor.contractRef.fingerprint
+                  || storedDescriptor.binding.contractFingerprint !== discoveryDescriptor.binding.contractFingerprint
+                  || storedDescriptor.binding.sourceRevision !== discoveryDescriptor.binding.sourceRevision
+                  || storedDraftSource.lifecycle !== source.lifecycle
+                  || storedDraftSource.trustState !== expectedTrustState
+                  || storedDraftSource.reviewStatus !== expectedReviewStatus) {
+                  throw new Error('APP_BUILD_DATASET_SOURCE_REPAIR_REQUIRED: the stored Dataset authority no longer matches the current governed source. Refresh or reselect this Dataset before running it.');
+                }
+              }
+              if (!datasetTargetConnection || !datasetTargetFingerprint) {
+                throw new Error('Connect the selected source before running this Dataset tile.');
+              }
+              const filterResolution = resolveDashboardDatasetFilters({
+                dashboard: loaded.dashboard,
+                item,
+                descriptor: discoveryDescriptor,
+                values: dashboardVariables,
+                crossFilters: datasetCrossFilters,
+              });
+              if (filterResolution.errors.length > 0) {
+                throw new Error(filterResolution.errors.map((issue) => issue.message).join(' '));
+              }
+              const boundParameters = dashboardTileParameterValues({
+                item,
+                dashboardValues: dashboardVariables,
+                requestValues: variables,
+              });
+              // Field-bound Dataset filters compile separately through the
+              // approved physical-field contract below. Do not also pass an
+              // unbound filter value into the source just because its filter
+              // id happens to collide with a block parameter name. Declared
+              // dashboard parameters and explicit tile parameter bindings
+              // remain valid source inputs.
+              const datasetSourceParameters = dashboardDatasetSourceParameterValues({
+                dashboard: loaded.dashboard,
+                dashboardValues: dashboardVariables,
+                boundParameters,
+              });
+              if (source.kind === 'block') {
+                const block = resolveDatasetSourceManifestBlock(manifest, source.executionRef);
+                if (!block) {
+                  throw new Error(`Dataset source ${source.qualifiedIdentity} no longer resolves to its authored block path.`);
+                }
+                assertAppAccess({
+                  app: loaded.app,
+                  domain: block.domain ?? loaded.dashboard.metadata.domain ?? loaded.app.domain,
+                  level: 'execute',
+                });
+                const blockPath = join(projectRoot, block.filePath);
+                const blockSource = readFileSync(blockPath, 'utf-8');
+                const currentSourceRevision = `sha256:${createHash('sha256').update(blockSource).digest('hex')}`;
+                if (currentSourceRevision !== source.sourceRevision || currentSourceRevision !== item.sourceRevision) {
+                  throw new Error('This Dataset block changed after it was selected. Refresh the Dataset binding before running it.');
+                }
+                const invocation = prepareBlockInvocation({
+                  block: block.name,
+                  source: blockSource,
+                  parameters: datasetSourceParameters,
+                  parameterSources: Object.fromEntries(
+                    Object.keys(boundParameters).map((name) => [name, 'surface' as const]),
+                  ),
+                  surface: 'app',
+                });
+                if (invocation.errors.length || invocation.unresolvedParameters.length) {
+                  throw new Error(invocation.errors[0] ?? `Needs values for: ${invocation.unresolvedParameters.join(', ')}`);
+                }
+                // A Dataset proof covers the fully-resolved source, including
+                // source parameters. Do this before granting execution
+                // eligibility so a proof for one tenant/as-of value cannot be
+                // reused for another value with the same DQL text.
+                const proofMaterial = datasetBlockProofMaterial({
+                  block,
+                  sourceId: source.sourceId,
+                  sourceRevision: currentSourceRevision,
+                  parameterValues: invocation.values,
+                });
+                if (!proofMaterial) {
+                  throw new Error('This Dataset no longer has a complete declaration-derived grain proof scope. Refresh and revalidate the source.');
+                }
+                const authority = datasetBindingAuthorityForManifestBlock({
+                  block,
+                  sourceId: source.sourceId,
+                  sourceRevision: currentSourceRevision,
+                  runtimeSnapshotId: runSnapshot.snapshotId,
+                  activeTargetFingerprint: datasetTargetFingerprint,
+                  parameterValues: invocation.values,
+                });
+                // A persisted local proof is deliberately not a prerequisite
+                // for preparing the complete-source probe. Fresh project
+                // reconstruction starts with no `.dql/local` state, so use a
+                // declaration-derived descriptor only to compile that probe;
+                // execution remains blocked until its observed proof is
+                // reconstructed below.
+                const provisionalDataset = datasetDescriptorFromManifestBlock({
+                  block,
+                  sourceId: source.sourceId,
+                  sourceRevision: currentSourceRevision,
+                  proofs: loadDatasetGrainProofs(projectRoot),
+                  authority,
+                  parameterValues: invocation.values,
+                });
+                const grainDescriptor = provisionalDataset.descriptor;
+                const declaredProofId = grainDescriptor?.grain.keyEvidence?.trim();
+                if (!grainDescriptor || !declaredProofId) {
+                  throw new Error('This Dataset no longer has a complete declaration-derived grain proof scope. Refresh and revalidate the source.');
+                }
+                if (grainDescriptor.contractRef.fingerprint !== discoveryDescriptor.contractRef.fingerprint) {
+                  throw new Error('The Dataset field contract changed after source discovery. Refresh the Dataset and reselect its fields.');
+                }
+                const requestedHierarchyDrill = datasetDrills.get(item.i);
+                let effectiveDatasetQuery = item.query;
+                if (requestedHierarchyDrill) {
+                  for (const step of requestedHierarchyDrill.steps) {
+                    const transition = applyDatasetHierarchyDrill({
+                      descriptor: grainDescriptor,
+                      query: effectiveDatasetQuery,
+                      hierarchyId: step.hierarchyId,
+                      fromField: step.fromField,
+                      values: step.values,
+                    });
+                    if (transition.status !== 'ready') {
+                      throw new DashboardRunRequestError(`Dataset hierarchy drill is unavailable: ${transition.message}`);
+                    }
+                    effectiveDatasetQuery = transition.query;
+                  }
+                }
+                const tableMapping = await resolveSemanticTableMapping(
+                  executor,
+                  datasetTargetConnection,
+                  semanticLayer,
+                  projectRoot,
+                );
+                const semanticCompose = semanticLayer
+                  ? await composeSemanticBlockSqlForRuntime(blockSource, semanticLayer, {
+                      driver: datasetTargetConnection.driver,
+                      tableMapping,
+                      projectRoot,
+                      projectConfig,
+                      detectedProvider: semanticDetectedProvider,
+                      parameters: invocation.values,
+                    })
+                  : null;
+                const blockPlan = buildExecutionPlan(
+                  { id: item.i, type: 'dql', source: blockSource, title: item.title ?? block.name },
+                  {
+                    semanticLayer,
+                    driver: datasetTargetConnection.driver,
+                    tableMapping,
+                    parameters: invocation.values,
+                    semanticSql: semanticCompose?.sql ?? undefined,
+                  },
+                );
+                const sourceSql = semanticCompose?.sql ?? blockPlan?.sql;
+                if (!sourceSql) {
+                  throw new Error(semanticCompose?.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message ?? 'The Dataset block produced no executable source query.');
+                }
+                // Never let a source declaration clear `aggregate` to turn a
+                // known GROUP BY/aggregate source into a row Dataset. The
+                // classifier is AST-based; it does not infer business grain
+                // for arbitrary physical tables.
+                const sourceAggregation = classifyDatasetAggregateSource({
+                  sourceSql,
+                  driver: datasetTargetConnection.driver,
+                });
+                if (sourceAggregation === 'aggregate' && !grainDescriptor.grain.aggregate) {
+                  throw new DatasetAggregateComponentProofError(
+                    'DATASET_AGGREGATE_DECLARATION_MISMATCH',
+                    'The current Dataset SQL is a grouped aggregate source, but its declared grain.aggregate is false. Review the Dataset grain before running field tiles.',
+                  );
+                }
+                if (sourceAggregation === 'row' && grainDescriptor.grain.aggregate) {
+                  throw new DatasetAggregateComponentProofError(
+                    'DATASET_AGGREGATE_DECLARATION_MISMATCH',
+                    'The current Dataset SQL no longer exposes a grouped aggregate source that matches its declared aggregate grain. Refresh and review the Dataset contract.',
+                  );
+                }
+                const aggregateProofRequired = grainDescriptor.grain.aggregate
+                  && datasetQueryRequiresAggregateComponentEvidence(grainDescriptor, effectiveDatasetQuery);
+                const aggregateInspection = aggregateProofRequired
+                  ? inspectDatasetAggregateComponentProof({
+                      descriptor: grainDescriptor,
+                      query: effectiveDatasetQuery,
+                      sourceSql,
+                      driver: datasetTargetConnection.driver,
+                    })
+                  : undefined;
+                const grainProbe = compileDatasetGrainProbe({
+                  descriptor: grainDescriptor,
+                  sourceSql,
+                  sourceSqlParams: blockPlan?.sqlParams,
+                  sourceVariables: blockPlan?.variables,
+                  parameterValues: invocation.values,
+                  driver: datasetTargetConnection.driver,
+                });
+                const grainCheckKey = fingerprintDashboardRuntimeState({
+                  sourceId: source.sourceId,
+                  sourceRevision: currentSourceRevision,
+                  target: datasetTargetFingerprint,
+                  runtimeSnapshotId: runSnapshot.snapshotId,
+                  proofMaterial: {
+                    queryFingerprint: proofMaterial.queryFingerprint,
+                    keyFingerprint: proofMaterial.keyFingerprint,
+                    parameterFingerprint: proofMaterial.parameterFingerprint,
+                    contractFingerprint: proofMaterial.contractFingerprint,
+                    snapshotId: proofMaterial.scope.snapshotId,
+                    snapshotFingerprint: proofMaterial.scope.snapshotFingerprint,
+                  },
+                  probe: {
+                    sourceSqlFingerprint: grainProbe.sourceSqlFingerprint,
+                    parameterFingerprint: grainProbe.parameterFingerprint,
+                  },
+                });
+                let aggregateScope: DatasetAggregateScopeState | undefined;
+                let grainPreparation: Awaited<ReturnType<typeof prepareDatasetBlockGrainEvidence>>;
+                if (aggregateInspection?.requiresDistinctScope) {
+                  const aggregateScopeKey = fingerprintDashboardRuntimeState({
+                    grainCheckKey,
+                    sourceSql,
+                    sourceSqlParams: blockPlan?.sqlParams ?? [],
+                    sourceVariables: blockPlan?.variables ?? {},
+                    parameters: invocation.values,
+                    driver: datasetTargetConnection.driver,
+                  });
+                  aggregateScope = await openDatasetAggregateScope({
+                    key: aggregateScopeKey,
+                    descriptor: grainDescriptor,
+                    sourceSql,
+                    sourceSqlParams: [...(blockPlan?.sqlParams ?? [])],
+                    sourceVariables: { ...(blockPlan?.variables ?? {}) },
+                    parameterValues: invocation.values,
+                    proofId: declaredProofId,
+                    proofMaterial,
+                    sourceId: source.sourceId,
+                    sourceRevision: currentSourceRevision,
+                    connection: datasetTargetConnection,
+                    targetFingerprint: datasetTargetFingerprint,
+                  });
+                  grainPreparation = aggregateScope.grainPreparation;
+                } else {
+                  let grainCheck = datasetGrainChecks.get(grainCheckKey);
+                  if (!grainCheck) {
+                    grainCheck = prepareDatasetBlockGrainEvidence({
+                      probe: grainProbe,
+                      proofId: declaredProofId,
+                      material: proofMaterial,
+                      sourceId: source.sourceId,
+                      sourceRevision: currentSourceRevision,
+                      connection: datasetTargetConnection!,
+                      targetFingerprint: datasetTargetFingerprint!,
+                      snapshotId: runSnapshot.snapshotId,
+                      subject: 'App Dataset declared grain check',
+                      signal: activeDashboardRun!.controller.signal,
+                    });
+                    datasetGrainChecks.set(grainCheckKey, grainCheck);
+                  }
+                  grainPreparation = await grainCheck;
+                }
+                const grainEvidence = grainPreparation.evidence;
+                const grainFailure = datasetGrainProbeFailureMessage(grainEvidence);
+                if (grainFailure) throw new Error(grainFailure);
+                // The full-source evidence is now current for this binding.
+                // Rebuild against the actual proof rather than accepting the
+                // provisional descriptor used solely to prepare the probe.
+                const runtimeDataset = datasetDescriptorFromManifestBlock({
+                  block,
+                  sourceId: source.sourceId,
+                  sourceRevision: currentSourceRevision,
+                  proofs: new Map([[grainPreparation.proof.id, grainPreparation.proof]]),
+                  authority,
+                  parameterValues: invocation.values,
+                });
+                const descriptor = runtimeDataset.descriptor;
+                if (!descriptor || runtimeDataset.proofState !== 'valid' || descriptor.binding.state !== 'valid') {
+                  throw new Error(datasetProofFailureMessage(runtimeDataset.proofState));
+                }
+                // Revalidate the exact interaction against the proof-bound
+                // descriptor. The provisional descriptor above only exists to
+                // prepare a fresh full-source grain check.
+                if (requestedHierarchyDrill) {
+                  let verifiedHierarchyQuery = item.query;
+                  for (const step of requestedHierarchyDrill.steps) {
+                    const transition = applyDatasetHierarchyDrill({
+                      descriptor,
+                      query: verifiedHierarchyQuery,
+                      hierarchyId: step.hierarchyId,
+                      fromField: step.fromField,
+                      values: step.values,
+                    });
+                    if (transition.status !== 'ready') {
+                      throw new DashboardRunRequestError(`Dataset hierarchy drill is unavailable: ${transition.message}`);
+                    }
+                    verifiedHierarchyQuery = transition.query;
+                  }
+                  if (tileQueryHash(verifiedHierarchyQuery) !== tileQueryHash(effectiveDatasetQuery)) {
+                    throw new DashboardRunRequestError('Dataset hierarchy drill no longer matches the proof-bound source contract. Refresh the result before drilling.');
+                  }
+                }
+                let aggregatePreparation: Awaited<ReturnType<typeof prepareDatasetAggregateComponentProof>> | undefined;
+                if (aggregateProofRequired && aggregateInspection) {
+                  const aggregateSourceSql = aggregateScope?.preparedSourceSql ?? sourceSql;
+                  const aggregateSourceSqlParams = aggregateScope?.sourceSqlParams ?? grainProbe.sqlParams;
+                  const aggregateSourceVariables = aggregateScope?.sourceVariables ?? grainProbe.variables;
+                  // Preparation may normalize the source statement. Reparse
+                  // that exact SQL before binding a proof or compiling a tile;
+                  // the earlier parse is only safe for deciding whether a
+                  // scoped COUNT(DISTINCT) read is needed.
+                  const preparedAggregateInspection = aggregateScope
+                    ? inspectDatasetAggregateComponentProof({
+                        descriptor,
+                        query: effectiveDatasetQuery,
+                        sourceSql: aggregateSourceSql,
+                        driver: datasetTargetConnection.driver,
+                      })
+                    : aggregateInspection;
+                  const componentProofKey = fingerprintDashboardRuntimeState({
+                    sourceId: source.sourceId,
+                    sourceRevision: currentSourceRevision,
+                    target: datasetTargetFingerprint,
+                    proofScope: proofMaterial.scope,
+                    sourceSql: aggregateSourceSql,
+                    sourceSqlParams: aggregateSourceSqlParams.map((parameter) => ({ name: parameter.name, position: parameter.position })),
+                    parameters: aggregateSourceVariables,
+                    query: effectiveDatasetQuery,
+                    requiredComponents: preparedAggregateInspection.components.map((component) => ({
+                      alias: component.alias,
+                      aggregate: component.sourceAggregate,
+                      fingerprint: component.sourceExpressionFingerprint,
+                    })),
+                    readScope: aggregateScope?.scope.id ?? null,
+                  });
+                  let componentProof = datasetAggregateComponentProofs.get(componentProofKey);
+                  if (!componentProof) {
+                    componentProof = prepareDatasetAggregateComponentProof({
+                      descriptor,
+                      query: effectiveDatasetQuery,
+                      sourceSql: aggregateSourceSql,
+                      sourceSqlParams: aggregateSourceSqlParams,
+                      sourceVariables: aggregateSourceVariables,
+                      sourceId: source.sourceId,
+                      sourceRevision: currentSourceRevision,
+                      contractFingerprint: descriptor.contractRef.fingerprint,
+                      targetFingerprint: datasetTargetFingerprint,
+                      proofMaterial,
+                      grainEvidence,
+                      ...(aggregateScope ? {
+                        scope: aggregateScope.scope,
+                        checkDistinctComponent: async ({ probe, signal }) => {
+                          const scopeState = aggregateScope!;
+                          const componentCheckKey = fingerprintDashboardRuntimeState({
+                            sourceId: source.sourceId,
+                            sourceRevision: currentSourceRevision,
+                            target: datasetTargetFingerprint,
+                            proofScope: proofMaterial.scope,
+                            readScope: scopeState.scope.id,
+                            probe: probe.fingerprint,
+                            component: {
+                              alias: probe.component.alias,
+                              sourceExpressionFingerprint: probe.component.sourceExpressionFingerprint,
+                              countedKeyFingerprint: probe.component.countedKeyFingerprint ?? null,
+                            },
+                          });
+                          let componentCheck = scopeState.componentChecks.get(componentCheckKey);
+                          if (!componentCheck) {
+                            componentCheck = analyticalExecutionService.execute({
+                              sql: probe.sql,
+                              subject: `App Dataset distinct-component check for ${probe.component.alias}`,
+                              connection: datasetTargetConnection,
+                              sqlParams: aggregateSourceSqlParams,
+                              variables: aggregateSourceVariables,
+                              signal,
+                              executePrepared: scopeState.executePrepared,
+                            }).then((execution) => ({ overlapDetected: execution.result.rows.length > 0 }));
+                            scopeState.componentChecks.set(componentCheckKey, componentCheck);
+                          }
+                          return componentCheck;
+                        },
+                      } : {}),
+                      inspection: preparedAggregateInspection,
+                      driver: datasetTargetConnection.driver,
+                      signal: activeDashboardRun!.controller.signal,
+                    });
+                    datasetAggregateComponentProofs.set(componentProofKey, componentProof);
+                  }
+                  aggregatePreparation = await componentProof;
+                }
+                const executionSourceSql = aggregateScope?.preparedSourceSql ?? sourceSql;
+                const executionSourceSqlParams = aggregateScope?.sourceSqlParams ?? blockPlan?.sqlParams;
+                const executionSourceVariables = aggregateScope?.sourceVariables ?? blockPlan?.variables;
+                let datasetResult: Record<string, unknown>;
+                let queryFingerprint: string;
+                let filterFingerprint: string;
+                let compiledSqlFingerprint: string;
+                let resultFingerprint: string;
+                let executedSql: string;
+                let appliedFilters: Array<{ field: string; op: TileFilterOperator; values: unknown[]; placement: 'where' | 'having' }>;
+                let comparisonEvidence: Record<string, unknown> | undefined;
+                /** A cache delivery is display-only and never fresh execution authority. */
+                let cacheDelivery: DatasetCacheDeliveryReceiptV1 | undefined;
+                if (effectiveDatasetQuery.comparison) {
+                  // The analytical graph owns period alignment and arithmetic;
+                  // each callback still compiles one approved, bounded field
+                  // query through the ordinary Dataset compiler and active
+                  // connection. Cross/dashboard filters are part of the
+                  // effective period query, never browser-side arithmetic.
+                  const comparisonQuery: TileQuery = {
+                    ...effectiveDatasetQuery,
+                    filters: [...(effectiveDatasetQuery.filters ?? []), ...filterResolution.filters],
+                  };
+                  const comparisonExecution = await executeDatasetPeriodComparison({
+                    descriptor,
+                    query: comparisonQuery,
+                    snapshotId: runSnapshot.snapshotId,
+                    referenceInstant: new Date().toISOString(),
+                    signal: activeDashboardRun!.controller.signal,
+                    executePeriod: async (period) => {
+                      const periodCompiled = compileDatasetTileQuery({
+                        descriptor,
+                        query: period.query,
+                        sourceSql: executionSourceSql,
+                        sourceSqlParams: executionSourceSqlParams,
+                        sourceVariables: executionSourceVariables,
+                        parameters: datasetSourceParameters,
+                        aggregateComponentProof: aggregatePreparation?.componentProof,
+                        driver: datasetTargetConnection.driver,
+                      });
+                      const periodExecutionKey = fingerprintDashboardRuntimeState({
+                        sourceId: source.sourceId,
+                        sourceRevision: currentSourceRevision,
+                        target: datasetTargetFingerprint,
+                        periodId: period.periodId,
+                        query: periodCompiled.queryFingerprint,
+                        filters: periodCompiled.filterFingerprint,
+                        parameters: { ...periodCompiled.variables, ...invocation.values },
+                      });
+                      let periodExecution = datasetQueryExecutions.get(periodExecutionKey);
+                      if (!periodExecution) {
+                        periodExecution = analyticalExecutionService.execute({
+                          sql: periodCompiled.sql,
+                          subject: `App Dataset comparison period ${period.periodId}`,
+                          connection: datasetTargetConnection,
+                          sqlParams: periodCompiled.sqlParams,
+                          variables: { ...periodCompiled.variables, ...invocation.values },
+                          signal: activeDashboardRun!.controller.signal,
+                          executePrepared: aggregateScope?.executePrepared,
+                        });
+                        datasetQueryExecutions.set(periodExecutionKey, periodExecution);
+                      }
+                      const execution = await periodExecution;
+                      return {
+                        columns: execution.result.columns,
+                        rows: execution.result.rows,
+                        receiptFingerprint: execution.resultFingerprint,
+                        value: { compiled: periodCompiled, execution },
+                      };
+                    },
+                  });
+                  const periodExecutions = comparisonExecution.periods.map((period) => period.execution.value);
+                  const comparisonSql = comparisonExecution.periods
+                    .map((period) => `-- Period ${period.periodId}\n${period.execution.value.execution.preparation.executedSql}`)
+                    .join('\n\n');
+                  queryFingerprint = comparisonExecution.plan.graph.fingerprint;
+                  filterFingerprint = fingerprintDashboardRuntimeState(
+                    comparisonExecution.periods.map((period) => ({
+                      periodId: period.periodId,
+                      filterFingerprint: period.execution.value.compiled.filterFingerprint,
+                    })),
+                  );
+                  compiledSqlFingerprint = executionFingerprint(comparisonSql);
+                  resultFingerprint = comparisonExecution.result.receipt.resultFingerprint;
+                  executedSql = comparisonSql;
+                  appliedFilters = comparisonExecution.periods.flatMap((period) => period.execution.value.compiled.appliedFilters);
+                  datasetResult = decorateDatasetResult({
+                    columns: comparisonExecution.result.columns,
+                    rows: comparisonExecution.result.rows,
+                    rowCount: comparisonExecution.result.rows.length,
+                    executionTime: periodExecutions.reduce((total, period) => total + period.execution.result.executionTime, 0),
+                  }, descriptor, effectiveDatasetQuery, {
+                    comparison: comparisonExecution.plan.outputAliases,
+                  });
+                  comparisonEvidence = {
+                    version: 1,
+                    frame: comparisonExecution.plan.frame,
+                    graph: {
+                      id: comparisonExecution.plan.graph.graphId,
+                      fingerprint: comparisonExecution.plan.graph.fingerprint,
+                    },
+                    receipt: comparisonExecution.result.receipt,
+                    periods: comparisonExecution.periods.map((period) => ({
+                      id: period.periodId,
+                      queryFingerprint: period.execution.value.compiled.queryFingerprint,
+                      filterFingerprint: period.execution.value.compiled.filterFingerprint,
+                      compiledSqlFingerprint: period.execution.value.execution.compiledSqlFingerprint,
+                      resultFingerprint: period.execution.value.execution.resultFingerprint,
+                    })),
+                  };
+                } else {
+                  const compiled = compileDatasetTileQuery({
+                    descriptor,
+                    query: effectiveDatasetQuery,
+                    sourceSql: executionSourceSql,
+                    sourceSqlParams: executionSourceSqlParams,
+                    sourceVariables: executionSourceVariables,
+                    filters: filterResolution.filters,
+                    parameters: datasetSourceParameters,
+                    aggregateComponentProof: aggregatePreparation?.componentProof,
+                    driver: datasetTargetConnection.driver,
+                  });
+                  queryFingerprint = compiled.queryFingerprint;
+                  filterFingerprint = compiled.filterFingerprint;
+                  appliedFilters = compiled.appliedFilters;
+                  // Aggregate component proofs and period comparisons must
+                  // always execute live. A cache cannot establish their
+                  // scoped membership or same-read proof authority. Ordinary
+                  // physical Dataset queries may use a complete local cache
+                  // identity after all current source/target/grain checks
+                  // above have already passed.
+                  const canUseDatasetCache = Boolean(
+                    datasetResultCache
+                    && !partialRun
+                    && !aggregatePreparation
+                    && !aggregateScope,
+                  );
+                  // Refresh skips only the read. It retains the exact identity
+                  // so the fresh complete result atomically replaces the
+                  // previous delivery for the next ordinary run.
+                  const cacheIdentity = canUseDatasetCache
+                    ? {
+                        datasetId: source.sourceId,
+                        sourceRevision: currentSourceRevision,
+                        contractFingerprint: descriptor.contractRef.fingerprint,
+                        snapshotFingerprint: runSnapshot.snapshotId,
+                        targetFingerprint: datasetTargetFingerprint,
+                        normalizedQuery: {
+                          query: effectiveDatasetQuery,
+                          compiledQueryFingerprint: compiled.queryFingerprint,
+                          compiledFilterFingerprint: compiled.filterFingerprint,
+                        },
+                        filterFingerprint: compiled.filterFingerprint,
+                        parameterFingerprint: `sha256:${fingerprintDashboardRuntimeState({
+                          source: datasetSourceParameters,
+                          invocation: invocation.values,
+                          compiled: compiled.variables,
+                        })}`,
+                        interactionFingerprint: `sha256:${fingerprintDashboardRuntimeState({
+                          crossFilters: datasetCrossFilters,
+                          hierarchy: requestedHierarchyDrill?.steps ?? [],
+                        })}`,
+                        dialect: datasetTargetConnection.driver,
+                        adapterFingerprint: 'dataset_block_runtime_v1',
+                        compilerFingerprint: 'dataset_tile_compiler_v1',
+                        rowBoundFingerprint: `normalized_result_rows:${NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT}`,
+                        personaPolicyFingerprint: personaFingerprint,
+                      }
+                    : undefined;
+                  const cacheKey = DatasetResultCache.keyFor(cacheIdentity);
+                  const cached = body.refresh === true || !cacheKey
+                    ? undefined
+                    : datasetResultCache?.get(cacheKey);
+                  if (cached && cacheKey) {
+                    // The cached result has already been normalized and
+                    // decorated under the identical key. Do not project an
+                    // executed SQL string or a fresh execution provenance.
+                    datasetResult = {
+                      ...cached.result,
+                      columns: [...cached.result.columns],
+                      rows: cached.result.rows.map((row) => ({ ...row })),
+                    };
+                    compiledSqlFingerprint = executionFingerprint(compiled.sql);
+                    resultFingerprint = cached.result.resultFingerprint
+                      ?? executionFingerprint(stableExecutionValue({
+                        columns: cached.result.columns,
+                        rows: cached.result.rows,
+                        rowCount: cached.result.rowCount,
+                      }));
+                    executedSql = '';
+                    cacheDelivery = datasetResultCache!.deliveryReceipt(cacheKey, cached);
+                  } else {
+                    const queryExecutionKey = fingerprintDashboardRuntimeState({
+                      sourceId: source.sourceId,
+                      sourceRevision: currentSourceRevision,
+                      target: datasetTargetFingerprint,
+                      query: compiled.queryFingerprint,
+                      filters: compiled.filterFingerprint,
+                      parameters: { ...compiled.variables, ...invocation.values },
+                    });
+                    let queryExecution = datasetQueryExecutions.get(queryExecutionKey);
+                    if (!queryExecution) {
+                      queryExecution = analyticalExecutionService.execute({
+                        sql: compiled.sql,
+                        subject: 'App Dataset field query',
+                        connection: datasetTargetConnection,
+                        sqlParams: compiled.sqlParams,
+                        variables: { ...compiled.variables, ...invocation.values },
+                        signal: activeDashboardRun!.controller.signal,
+                        executePrepared: aggregateScope?.executePrepared,
+                      });
+                      datasetQueryExecutions.set(queryExecutionKey, queryExecution);
+                    }
+                    const execution = await queryExecution;
+                    datasetResult = decorateDatasetResult(execution.result, descriptor, effectiveDatasetQuery);
+                    compiledSqlFingerprint = execution.compiledSqlFingerprint;
+                    resultFingerprint = execution.resultFingerprint;
+                    executedSql = execution.preparation.executedSql;
+                    const cacheResult = normalizeDatasetCachedResult(datasetResult);
+                    if (cacheKey && cacheResult && dashboardRunIsCurrent()) {
+                      datasetResultCache?.put(cacheKey, {
+                        result: cacheResult,
+                        originalReceiptId: runId,
+                        sourceRevision: currentSourceRevision,
+                        contractFingerprint: descriptor.contractRef.fingerprint,
+                        targetFingerprint: datasetTargetFingerprint,
+                      });
+                    }
+                  }
+                }
+                const tileExecutionFingerprint = fingerprintDashboardRuntimeState({
+                  runInput: datasetRunInputFingerprint,
+                  snapshotId: runSnapshot.snapshotId,
+                  tileId: item.i,
+                  sourceId: source.sourceId,
+                  sourceRevision: currentSourceRevision,
+                  query: queryFingerprint,
+                  filters: filterFingerprint,
+                  unboundFilters: filterResolution.unbound,
+                  parameters: datasetSourceParameters,
+                });
+                const executedParameterEvidence = datasetBoundParameterEvidence(invocation.values);
+                const executedParameterFingerprint = `sha256:${fingerprintDashboardRuntimeState(invocation.values)}`;
+                const authoredQuerySpec = renderDatasetTileAuthoredQuerySpec({
+                  descriptor,
+                  query: item.query,
+                  filters: appliedFilters,
+                  parameterEvidence: executedParameterEvidence,
+                });
+                datasetEffectiveQueries.set(item.i, structuredClone(effectiveDatasetQuery));
+                tiles.push({
+                  tileId: item.i,
+                  status: 'ok',
+                  tileType: 'dataset',
+                  title: item.title ?? descriptor.label,
+                  viz: item.viz,
+                  chartConfig: datasetChartConfig(blockPlan?.chartConfig, item, descriptor, effectiveDatasetQuery),
+                  result: datasetResult,
+                  compiledSqlFingerprint,
+                  resultFingerprint,
+                  executionFingerprint: tileExecutionFingerprint,
+                  trustState: descriptor.trust,
+                  citation: { kind: 'dataset_query', name: descriptor.label, path: block.filePath },
+                  filters: {
+                    applied: appliedFilters,
+                    unbound: filterResolution.unbound,
+                  },
+                  dataset: {
+                    sourceId: source.sourceId,
+                    sourceRevision: currentSourceRevision,
+                    contractFingerprint: descriptor.contractRef.fingerprint,
+                    trust: descriptor.trust,
+                    lifecycle: descriptor.lifecycle,
+                    binding: descriptor.binding,
+                    proofState: runtimeDataset.proofState,
+                    proofMaterial: {
+                      queryFingerprint: proofMaterial.queryFingerprint,
+                      keyFingerprint: proofMaterial.keyFingerprint,
+                      parameterFingerprint: proofMaterial.parameterFingerprint,
+                      scopeSnapshotId: proofMaterial.scope.snapshotId,
+                      scopeSnapshotFingerprint: proofMaterial.scope.snapshotFingerprint,
+                    },
+                    grainRuntimeEvidence: grainEvidence,
+                    ...(aggregatePreparation ? {
+                      aggregateComponentProof: aggregatePreparation.componentProof,
+                      aggregationSafety: aggregatePreparation.aggregationSafety,
+                    } : {}),
+                    authoredQueryFingerprint: tileQueryHash(item.query),
+                    ...(requestedHierarchyDrill ? {
+                      interactionQueryFingerprint: tileQueryHash(effectiveDatasetQuery),
+                    } : {}),
+                    hierarchy: {
+                      activeSteps: requestedHierarchyDrill?.steps ?? [],
+                      candidates: datasetHierarchyDrillCandidates(descriptor, effectiveDatasetQuery),
+                      ...(requestedHierarchyDrill ? {
+                        interactionQueryFingerprint: tileQueryHash(effectiveDatasetQuery),
+                      } : {}),
+                    },
+                    queryFingerprint,
+                    filterFingerprint,
+                    executionFingerprint: tileExecutionFingerprint,
+                    parameterEvidence: executedParameterEvidence,
+                    ...(cacheDelivery ? { cacheDelivery } : {}),
+                    ...(comparisonEvidence ? { comparison: comparisonEvidence } : {}),
+                    ...(cacheDelivery ? {} : { executionProvenance: {
+                      version: 1,
+                      kind: 'block_runtime',
+                      sourceId: source.sourceId,
+                      sourceRevision: currentSourceRevision,
+                      contractFingerprint: descriptor.contractRef.fingerprint,
+                      queryFingerprint,
+                      filterFingerprint,
+                      executionFingerprint: tileExecutionFingerprint,
+                      parameterFingerprint: executedParameterFingerprint,
+                      compiledSqlFingerprint,
+                      executedSqlFingerprint: executionFingerprint(executedSql),
+                      resultFingerprint,
+                      targetFingerprint: datasetTargetFingerprint,
+                    } }),
+                    appliedFilters,
+                    unboundFilters: filterResolution.unbound,
+                  },
+                  artifact: {
+                    version: 1,
+                    sourceKind: 'dataset_query',
+                    name: item.title ?? descriptor.label,
+                    sourcePath: block.filePath,
+                    authoredQuerySpec,
+                    dql: renderDatasetTileDql({
+                      descriptor,
+                      query: effectiveDatasetQuery,
+                      filters: appliedFilters,
+                      parameters: datasetSourceParameters,
+                    }),
+                    ...(cacheDelivery ? {} : { sql: executedSql.slice(0, 40_000) }),
+                    trustState: descriptor.trust,
+                    explanation: [
+                      ...(cacheDelivery
+                        ? ['Cached local Dataset delivery. It did not dispatch fresh SQL and cannot save, replace, prove equivalence, or publish this App page.', `Cached at ${String(cacheDelivery.cachedAt ?? 'an unknown time')}; use Refresh for a live execution.`]
+                        : ['This field tile compiled over the complete governed Dataset source at run time.', `Source proof ${descriptor.binding.proofId ?? 'is'} valid for the active target and source revision.`]),
+                      filterResolution.unbound.length > 0 ? `${filterResolution.unbound.length} explicitly unmapped dashboard filter(s) did not apply.` : 'All mapped dashboard filters were bound through approved physical fields.',
+                    ],
+                    executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                  },
+                });
+              } else {
+                const activeSemanticLayer = semanticLayer;
+                if (!activeSemanticLayer) throw new Error('Semantic layer is not available for this Dataset source.');
+                if (discoveryDescriptor.kind !== 'semantic') {
+                  throw new Error('The selected source no longer has a semantic Dataset contract. Refresh the source before running it.');
+                }
+                const requestedHierarchyDrill = datasetDrills.get(item.i);
+                let effectiveDatasetQuery = item.query;
+                if (requestedHierarchyDrill) {
+                  for (const step of requestedHierarchyDrill.steps) {
+                    const transition = applyDatasetHierarchyDrill({
+                      descriptor: discoveryDescriptor,
+                      query: effectiveDatasetQuery,
+                      hierarchyId: step.hierarchyId,
+                      fromField: step.fromField,
+                      values: step.values,
+                    });
+                    if (transition.status !== 'ready') {
+                      throw new DashboardRunRequestError(`Dataset hierarchy drill is unavailable: ${transition.message}`);
+                    }
+                    effectiveDatasetQuery = transition.query;
+                  }
+                }
+                const effectiveQuery = {
+                  ...effectiveDatasetQuery,
+                  filters: [...(effectiveDatasetQuery.filters ?? []), ...filterResolution.filters],
+                };
+                const semanticPlan = planSemanticDatasetTileQuery({
+                  descriptor: discoveryDescriptor,
+                  query: effectiveQuery,
+                  metricCapabilities: source.capabilities.metricCapabilities ?? {},
+                  parameters: datasetSourceParameters,
+                  title: item.title,
+                });
+                // The model-scoped Dataset already selected its one governed
+                // semantic route through the exact per-measure compatibility
+                // contracts. Do not let an unrelated installed MetricFlow CLI
+                // replace a native DQL Dataset simply because global runtime
+                // preference is `auto`.
+                const requiredAdapter = semanticPlan.compatibility.adapterId;
+                if (!requiredAdapter) {
+                  throw new Error('The selected Dataset has no approved semantic adapter binding. Refresh the source before running it.');
+                }
+                const requestedAdapter = semanticDatasetRuntimeAdapter(requiredAdapter);
+                const plannedAdapter = await resolvePlannedSemanticAdapter(projectRoot, requestedAdapter);
+                if (requestedAdapter !== plannedAdapter) {
+                  throw new Error(`The selected Dataset contract requires ${requestedAdapter}, but the active project resolves ${plannedAdapter}.`);
+                }
+                if (semanticPlan.request.having?.length) {
+                  const runtimeStatus = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
+                  if (!semanticRuntimeAdapterSupportsHaving(runtimeStatus, plannedAdapter)) {
+                    throw new DashboardRunRequestError(
+                      `Semantic adapter ${plannedAdapter} does not currently advertise governed post-aggregate total filtering. Remove the total filter or use a supported semantic source.`,
+                    );
+                  }
+                }
+                const semanticExecutionKey = fingerprintDashboardRuntimeState({
+                  sourceId: source.sourceId,
+                  sourceRevision: source.sourceRevision,
+                  target: datasetTargetFingerprint,
+                  adapter: plannedAdapter,
+                  request: semanticPlan.request,
+                  filters: semanticPlan.appliedFilters,
+                  parameters: datasetSourceParameters,
+                });
+                let semanticExecution = semanticDatasetExecutions.get(semanticExecutionKey);
+                if (!semanticExecution) {
+                  semanticExecution = executeTargetBoundSemanticQuery({
+                    executor,
+                    connection: datasetTargetConnection,
+                    projectRoot,
+                    plannedAdapter,
+                    metricFlow: plannedAdapter === 'metricflow-cli'
+                      ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+                      : undefined,
+                    compile: async () => composeRuntimeSemanticQuery(
+                      { ...semanticPlan.request, engine: plannedAdapter },
+                      activeSemanticLayer,
+                      {
+                        projectRoot,
+                        projectConfig,
+                        detectedProvider: semanticDetectedProvider,
+                        driver: datasetTargetConnection.driver,
+                        signal: activeDashboardRun!.controller.signal,
+                        ...(plannedAdapter === 'native' ? {
+                          tableMapping: await resolveSemanticTableMapping(executor, datasetTargetConnection, activeSemanticLayer, projectRoot),
+                        } : {}),
+                      },
+                    ),
+                    rowBound: semanticPlan.request.limit ?? 10_000,
+                    signal: activeDashboardRun!.controller.signal,
+                  });
+                  semanticDatasetExecutions.set(semanticExecutionKey, semanticExecution);
+                }
+                const resolvedSemanticExecution = await semanticExecution;
+                if (!resolvedSemanticExecution) throw new Error('The semantic Dataset query could not be compiled for the active source.');
+                const result = decorateDatasetResult(normalizeQueryResult(resolvedSemanticExecution.result, {
+                  metrics: semanticPlan.request.metrics,
+                  dimensions: semanticPlan.request.dimensions,
+                }), discoveryDescriptor, effectiveDatasetQuery);
+                const tileExecutionFingerprint = fingerprintDashboardRuntimeState({
+                  runInput: datasetRunInputFingerprint,
+                  snapshotId: runSnapshot.snapshotId,
+                  tileId: item.i,
+                  sourceId: source.sourceId,
+                  sourceRevision: source.sourceRevision,
+                  request: semanticPlan.request,
+                  filters: semanticPlan.appliedFilters,
+                  unboundFilters: filterResolution.unbound,
+                  parameters: datasetSourceParameters,
+                });
+                const executedParameterEvidence = datasetBoundParameterEvidence(datasetSourceParameters);
+                const executedParameterFingerprint = `sha256:${fingerprintDashboardRuntimeState(datasetSourceParameters)}`;
+                const semanticQueryFingerprint = fingerprintDashboardRuntimeState(semanticPlan.request);
+                const semanticFilterFingerprint = fingerprintDashboardRuntimeState({
+                  applied: semanticPlan.appliedFilters,
+                  having: effectiveQuery.having ?? [],
+                  unbound: filterResolution.unbound,
+                });
+                const semanticBoundFilterEvidence = [
+                  ...semanticPlan.appliedFilters.map((filter) => ({ ...filter, placement: 'where' as const })),
+                  ...(effectiveQuery.having ?? []).map((filter) => ({ ...filter, placement: 'having' as const })),
+                ];
+                const authoredQuerySpec = renderDatasetTileAuthoredQuerySpec({
+                  descriptor: discoveryDescriptor,
+                  query: effectiveQuery,
+                  filters: semanticBoundFilterEvidence,
+                  parameterEvidence: executedParameterEvidence,
+                  semanticRequest: semanticPlan.governedRequest,
+                  semanticTargetBinding: resolvedSemanticExecution.targetBinding,
+                });
+                datasetEffectiveQueries.set(item.i, structuredClone(effectiveDatasetQuery));
+                tiles.push({
+                  tileId: item.i,
+                  status: 'ok',
+                  tileType: 'dataset',
+                  title: item.title ?? discoveryDescriptor.label,
+                  viz: item.viz,
+                  chartConfig: datasetChartConfig(undefined, item, discoveryDescriptor, effectiveDatasetQuery, true),
+                  result,
+                  compiledSqlFingerprint: resolvedSemanticExecution.executionReceipt.compiledSqlFingerprint,
+                  resultFingerprint: resolvedSemanticExecution.executionReceipt.resultFingerprint,
+                  executionFingerprint: tileExecutionFingerprint,
+                  trustState: source.trust,
+                  citation: { kind: 'dataset_query', name: discoveryDescriptor.label, path: source.executionRef },
+                  filters: { applied: semanticPlan.appliedFilters, unbound: filterResolution.unbound },
+                  dataset: {
+                    sourceId: source.sourceId,
+                    sourceRevision: source.sourceRevision,
+                    contractFingerprint: discoveryDescriptor.contractRef.fingerprint,
+                    trust: source.trust,
+                    lifecycle: source.lifecycle,
+                    binding: {
+                      ...discoveryDescriptor.binding,
+                      state: 'valid',
+                      activeSnapshotId: runSnapshot.snapshotId,
+                      activeTargetFingerprint: resolvedSemanticExecution.executionTarget.identityFingerprint,
+                    },
+                    semanticTargetBinding: resolvedSemanticExecution.targetBinding,
+                    semanticReceipt: resolvedSemanticExecution.executionReceipt,
+                    semanticRequest: semanticPlan.governedRequest,
+                    authoredQueryFingerprint: tileQueryHash(item.query),
+                    ...(requestedHierarchyDrill ? {
+                      interactionQueryFingerprint: tileQueryHash(effectiveDatasetQuery),
+                    } : {}),
+                    hierarchy: {
+                      activeSteps: requestedHierarchyDrill?.steps ?? [],
+                      candidates: datasetHierarchyDrillCandidates(discoveryDescriptor, effectiveDatasetQuery),
+                      ...(requestedHierarchyDrill ? {
+                        interactionQueryFingerprint: tileQueryHash(effectiveDatasetQuery),
+                      } : {}),
+                    },
+                    queryFingerprint: semanticQueryFingerprint,
+                    filterFingerprint: semanticFilterFingerprint,
+                    executionFingerprint: tileExecutionFingerprint,
+                    parameterEvidence: executedParameterEvidence,
+                    executionProvenance: {
+                      version: 1,
+                      kind: 'semantic_runtime',
+                      sourceId: source.sourceId,
+                      sourceRevision: source.sourceRevision,
+                      contractFingerprint: discoveryDescriptor.contractRef.fingerprint,
+                      queryFingerprint: semanticQueryFingerprint,
+                      filterFingerprint: semanticFilterFingerprint,
+                      executionFingerprint: tileExecutionFingerprint,
+                      parameterFingerprint: executedParameterFingerprint,
+                      compiledSqlFingerprint: resolvedSemanticExecution.executionReceipt.compiledSqlFingerprint,
+                      executedSqlFingerprint: resolvedSemanticExecution.executionReceipt.executedSqlFingerprint,
+                      resultFingerprint: resolvedSemanticExecution.executionReceipt.resultFingerprint,
+                      targetFingerprint: resolvedSemanticExecution.executionTarget.identityFingerprint,
+                    },
+                    appliedFilters: semanticPlan.appliedFilters,
+                    unboundFilters: filterResolution.unbound,
+                  },
+                  artifact: {
+                    version: 1,
+                    sourceKind: 'dataset_query',
+                    name: item.title ?? discoveryDescriptor.label,
+                    sourcePath: source.executionRef,
+                    authoredQuerySpec,
+                    dql: renderDatasetTileDql({
+                      descriptor: discoveryDescriptor,
+                      query: effectiveQuery,
+                      filters: semanticBoundFilterEvidence,
+                      parameters: datasetSourceParameters,
+                      semanticRequest: semanticPlan.governedRequest,
+                      semanticTargetBinding: resolvedSemanticExecution.targetBinding,
+                    }),
+                    sql: resolvedSemanticExecution.preparedSql.slice(0, 40_000),
+                    trustState: source.trust,
+                    explanation: [
+                      'This Dataset tile used the selected semantic adapter with a target-bound semantic execution receipt.',
+                      'Runtime success records this run binding; it does not elevate the source trust or lifecycle.',
+                      filterResolution.unbound.length > 0 ? `${filterResolution.unbound.length} explicitly unmapped dashboard filter(s) did not apply.` : 'All mapped dashboard filters were bound through approved semantic fields.',
+                    ],
+                    executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                  },
+                });
+              }
+            } catch (err) {
+              tiles.push({
+                tileId: item.i,
+                status: 'error',
+                tileType: 'dataset',
+                title: item.title ?? discoveryDescriptor?.label ?? 'Dataset tile',
+                error: err instanceof Error ? err.message : String(err),
+                trustState: discoveryDescriptor?.trust ?? 'review_required',
+                dataset: {
+                  sourceId: item.sourceId,
+                  sourceRevision: item.sourceRevision,
+                  ...(discoveryDescriptor ? {
+                    contractFingerprint: discoveryDescriptor.contractRef.fingerprint,
+                    binding: discoveryDescriptor.binding,
+                  } : {}),
+                  errors: [errorCodeForDatasetTile(err)],
+                },
+              });
+            }
+            continue;
+          }
           if (item.semantic) {
             try {
               if (!semanticLayer) throw new Error('Semantic layer is not available for this governed query.');
@@ -15486,6 +19503,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   sql: composed.sql,
                   subject: 'App tile semantic query',
                   connection: targetConnection,
+                  signal: activeDashboardRun!.controller.signal,
                 });
                 normalizedResult = execution.result;
                 executedSql = execution.preparation.executedSql;
@@ -15677,6 +19695,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               connection: blockTargetConnection,
               sqlParams: blockFilterApplication.sqlParams,
               variables: { ...blockFilterApplication.variables, ...blockInvocation.values },
+              signal: activeDashboardRun!.controller.signal,
             });
             tiles.push({
               tileId: item.i,
@@ -15815,12 +19834,74 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           }
         };
-        await Promise.all(Array.from(
-          { length: Math.min(4, itemsToRun.length) },
-          () => runTileWorker(),
-        ));
+        try {
+          await Promise.all(Array.from(
+            { length: Math.min(4, itemsToRun.length) },
+            () => runTileWorker(),
+          ));
+        } finally {
+          // DuckDB cannot interrupt an active native query in the installed
+          // driver. Closing waits for that scoped queue to settle, then rolls
+          // back and releases only its dedicated connection. The shared pool
+          // and normal App connector remain untouched.
+          await Promise.allSettled(Array.from(datasetAggregateScopes.values()).map(async (scopeState) => {
+            const state = await scopeState;
+            await state.scope.close();
+          }));
+        }
         tiles.sort((left, right) => (tileOrder.get(left.tileId) ?? 0) - (tileOrder.get(right.tileId) ?? 0));
         localApps.current?.close();
+        const completionSnapshot = projectSnapshot();
+        const completionDraftIntentFingerprint = runSurface === 'app-builds'
+          ? currentAppBuildPreviewIntentFingerprint(projectRoot, appId, dashboardId)
+          : undefined;
+        // Project snapshots do not include private SQLite App drafts. A draft
+        // edit while a preview is in flight therefore needs its own stale gate
+        // before rows/story can become reusable publication evidence.
+        const supersededRun = !dashboardRunIsCurrent();
+        const staleRun = supersededRun
+          || completionSnapshot.snapshotId !== runSnapshot.snapshotId
+          || (runSurface === 'app-builds' && (!draftIntentFingerprint || completionDraftIntentFingerprint !== draftIntentFingerprint));
+        // A source or dashboard edit during execution makes every calculated
+        // result and derived story obsolete. Keep the error on the response,
+        // but never persist or narrate those rows as settled evidence.
+        const settledTiles = staleRun
+          ? tiles.map((tile) => tile.tileType !== 'text'
+            ? {
+                ...tile,
+                status: 'stale',
+                error: !supersededRun
+                  ? 'The project changed while this tile was running. Run the current dashboard again before using its result.'
+                  : 'A newer dashboard interaction superseded this run. Run the current dashboard again before using its result.',
+                result: undefined,
+              }
+            : tile)
+          : tiles;
+        // A complete page run may still have a mixture of safe current rows
+        // and governed failures. Keep those safe rows available to the App,
+        // but do not derive a page story or leave an earlier all-success
+        // receipt eligible for publication. Text and AI pins are not part of
+        // the executable receipt contract.
+        const incompleteTileIds = !staleRun && !partialRun
+          ? settledTiles
+            .filter((tile) => tile.tileType !== 'text' && tile.tileType !== 'aiPin' && tile.status !== 'ok')
+            .map((tile) => tile.tileId)
+          : [];
+        const incompleteRun = incompleteTileIds.length > 0;
+        const priorPreviewReceiptInvalidated = loadedDraftDashboard
+          && incompleteRun
+          && Boolean(draftIntentFingerprint)
+          ? invalidateIncompleteAppBuildPreviewReceipt({
+            projectRoot,
+            draftId: appId,
+            dashboardId,
+            intentFingerprint: draftIntentFingerprint!,
+            expectedReceiptId: previewReceiptIdAtRunStart,
+          })
+          : false;
+        if (priorPreviewReceiptInvalidated && previewReceiptIdAtRunStart) {
+          dashboardRunEvidence.delete(previewReceiptIdAtRunStart);
+        }
         // Which of each tile's result columns a viewer may safely filter on.
         // Decided here, from a real dialect parse of the SQL that actually ran,
         // for the same reason Ask does it server-side: an aggregate output needs
@@ -15829,7 +19910,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const runDialect = (() => {
           try { return requireActiveConnection().driver || 'duckdb'; } catch { return 'duckdb'; }
         })();
-        const tilesWithFilters = tiles.map((tile) => {
+        const tilesWithFilters = settledTiles.map((tile) => {
           const executedSql = (tile as { artifact?: { sql?: unknown } }).artifact?.sql;
           const columns = (tile as { result?: { columns?: string[] } }).result?.columns ?? [];
           if (typeof executedSql !== 'string' || columns.length === 0) return tile;
@@ -15844,59 +19925,366 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         });
         const filterOptions = collectDashboardFilterOptions(loaded.dashboard, tilesWithFilters);
-        const snapshot = projectSnapshot();
-        const filterFingerprint = createHash('sha256').update(JSON.stringify(dashboardVariables)).digest('hex');
-        const resultFingerprint = createHash('sha256').update(JSON.stringify(tiles.map((tile) => ({ tileId: tile.tileId, status: tile.status, result: tile.result })))).digest('hex');
-        const personaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
-        const runId = `app_run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const storyResult = buildDeterministicDashboardStory({
+        const filterFingerprint = fingerprintDashboardRuntimeState({
+          runInput: datasetRunInputFingerprint,
+          effectiveDatasetTiles: tilesWithFilters
+            .filter((tile) => tile.tileType === 'dataset')
+            .map((tile) => ({
+              tileId: tile.tileId,
+              executionFingerprint: tile.executionFingerprint ?? null,
+              queryFingerprint: tile.dataset?.queryFingerprint ?? null,
+              filterFingerprint: tile.dataset?.filterFingerprint ?? null,
+              appliedFilters: tile.dataset?.appliedFilters ?? [],
+              unboundFilters: tile.dataset?.unboundFilters ?? [],
+            })),
+        });
+        const resultFingerprint = createHash('sha256').update(JSON.stringify(settledTiles.map((tile) => ({ tileId: tile.tileId, status: tile.status, result: tile.result })))).digest('hex');
+        const dashboardFingerprint = `sha256:${createHash('sha256').update(JSON.stringify(loaded.dashboard)).digest('hex')}`;
+        const chartContexts: AppAnalyticalContextV1[] = tilesWithFilters.flatMap((tile) => {
+          if (tile.status !== 'ok' || tile.tileType !== 'dataset') return [];
+          const item = loaded.dashboard.layout.items.find((candidate) => candidate.i === tile.tileId);
+          const dataset = tile.dataset as Record<string, unknown> | undefined;
+          const provenance = dataset?.executionProvenance as Record<string, unknown> | undefined;
+          const result = tile.result as Record<string, unknown> | undefined;
+          const authoredQuery = item?.query;
+          const effectiveQuery = item && datasetEffectiveQueries.get(item.i);
+          const sourceId = typeof dataset?.sourceId === 'string' ? dataset.sourceId : '';
+          const sourceRevision = typeof dataset?.sourceRevision === 'string' ? dataset.sourceRevision : '';
+          const contractFingerprint = typeof dataset?.contractFingerprint === 'string' ? dataset.contractFingerprint : '';
+          const queryFingerprint = typeof dataset?.queryFingerprint === 'string' ? dataset.queryFingerprint : '';
+          const execution = typeof dataset?.executionFingerprint === 'string' ? dataset.executionFingerprint : '';
+          const resultEvidence = typeof provenance?.resultFingerprint === 'string'
+            ? provenance.resultFingerprint
+            : typeof tile.resultFingerprint === 'string' ? tile.resultFingerprint : '';
+          const columns = Array.isArray(result?.columns)
+            ? result.columns.filter((column): column is string => typeof column === 'string')
+            : [];
+          const rows = Array.isArray(result?.rows)
+            ? result.rows.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
+            : [];
+          if (!item || !authoredQuery || !effectiveQuery || !sourceId || !sourceRevision || !contractFingerprint
+            || !queryFingerprint || !execution || !resultEvidence || columns.length === 0) return [];
+          const appliedFilters = Array.isArray(dataset?.appliedFilters)
+            ? dataset.appliedFilters.flatMap((value) => {
+                if (!value || typeof value !== 'object') return [];
+                const filter = value as Record<string, unknown>;
+                const field = typeof filter.field === 'string' ? filter.field : '';
+                const op = typeof filter.op === 'string' ? filter.op as TileFilterOperator : undefined;
+                const values = Array.isArray(filter.values) ? [...filter.values] : [];
+                const placement = filter.placement === 'having' ? 'having' as const : filter.placement === 'where' ? 'where' as const : undefined;
+                return field && op && placement ? [{ field, op, values, placement }] : [];
+              })
+            : [];
+          const unboundFilters = Array.isArray(dataset?.unboundFilters)
+            ? dataset.unboundFilters.flatMap((value) => {
+                if (!value || typeof value !== 'object') return [];
+                const issue = value as Record<string, unknown>;
+                return [{
+                  ...(typeof issue.filterId === 'string' ? { filterId: issue.filterId } : {}),
+                  ...(typeof issue.code === 'string' ? { code: issue.code } : {}),
+                  ...(typeof issue.message === 'string' ? { message: issue.message } : {}),
+                }];
+              })
+            : [];
+          const citation = tile.citation as { name?: unknown; path?: unknown } | undefined;
+          const context: AppAnalyticalContextV1 = {
+            version: 1,
+            appId,
+            dashboardId,
+            tileId: item.i,
+            runId,
+            evidenceScope: partialRun ? 'interaction' : incompleteRun ? 'incomplete' : 'full_dashboard',
+            snapshotId: runSnapshot.snapshotId,
+            dashboardFingerprint,
+            source: {
+              sourceId,
+              sourceRevision,
+              contractFingerprint,
+              lifecycle: typeof dataset?.lifecycle === 'string' ? dataset.lifecycle : 'unknown',
+              trust: dataset?.trust === 'certified' ? 'certified' : 'review_required',
+              ...(typeof provenance?.targetFingerprint === 'string' ? { targetFingerprint: provenance.targetFingerprint } : {}),
+              ...(typeof citation?.name === 'string' ? { label: citation.name } : {}),
+              ...(typeof citation?.path === 'string' ? { path: citation.path } : {}),
+            },
+            authoredQuery: structuredClone(authoredQuery),
+            authoredQueryFingerprint: typeof dataset?.authoredQueryFingerprint === 'string'
+              ? dataset.authoredQueryFingerprint
+              : tileQueryHash(authoredQuery),
+            ...(typeof dataset?.interactionQueryFingerprint === 'string'
+              ? { interactionQueryFingerprint: dataset.interactionQueryFingerprint }
+              : {}),
+            executionQueryFingerprint: queryFingerprint,
+            filterFingerprint: typeof dataset?.filterFingerprint === 'string' ? dataset.filterFingerprint : '',
+            parameterFingerprint: typeof provenance?.parameterFingerprint === 'string' ? provenance.parameterFingerprint : '',
+            interactionFingerprint: fingerprintDashboardRuntimeState({
+              query: tileQueryHash(effectiveQuery),
+              hierarchy: (dataset?.hierarchy as { activeSteps?: unknown } | undefined)?.activeSteps ?? [],
+            }),
+            executionFingerprint: execution,
+            resultFingerprint: resultEvidence,
+            schemaFingerprint: executionFingerprint(JSON.stringify({ columns, columnsMeta: result?.columnsMeta ?? [] })),
+            personaPolicyFingerprint: personaFingerprint,
+            effectiveFilters: structuredClone(dashboardStoryFiltersForTile(loaded.dashboard, dashboardVariables, dataset as never)),
+            appliedFilters,
+            unboundFilters,
+            result: {
+              columns,
+              rows: structuredClone(rows),
+              rowCount: typeof result?.rowCount === 'number' ? result.rowCount : rows.length,
+              ...(Array.isArray(result?.columnsMeta)
+                ? { columnsMeta: result.columnsMeta.filter((column): column is Record<string, unknown> => Boolean(column) && typeof column === 'object' && !Array.isArray(column)) }
+                : {}),
+            },
+          };
+          return [context];
+        });
+        // A failed Dataset tile can be repaired only from diagnostic evidence
+        // captured by this runtime. The browser names the run and tile but
+        // never supplies an error, source, query, or target claim.
+        const failedTileContexts: DatasetChartFailedTileEvidence[] = settledTiles.flatMap((tile) => {
+          if (tile.status !== 'error' || tile.tileType !== 'dataset') return [];
+          const item = loaded.dashboard.layout.items.find((candidate) => candidate.i === tile.tileId);
+          if (!item?.query || !item.sourceId || !item.sourceRevision) return [];
+          const source = datasetSourceById.get(item.sourceId);
+          const descriptor = source?.capabilities.dataset;
+          if (!source || !descriptor || source.sourceRevision !== item.sourceRevision) return [];
+          const dataset = agentRunRecord(tile.dataset);
+          const binding = agentRunRecord(dataset?.binding);
+          const diagnosticCodes = Array.isArray(dataset?.errors)
+            ? dataset.errors.filter((code): code is string => typeof code === 'string' && code.length > 0).slice(0, 8)
+            : [];
+          const error = typeof tile.error === 'string' && tile.error.trim()
+            ? tile.error.trim().slice(0, 2_000)
+            : 'The Dataset tile did not complete with the current governed source state.';
+          return [{
+            tileId: item.i,
+            title: typeof tile.title === 'string' && tile.title.trim() ? tile.title.trim().slice(0, 240) : item.i,
+            error,
+            diagnosticCodes,
+            source: {
+              sourceId: source.sourceId,
+              sourceRevision: source.sourceRevision,
+              contractFingerprint: descriptor.contractRef.fingerprint,
+              lifecycle: source.lifecycle,
+              trust: source.trust,
+              ...(typeof binding?.activeTargetFingerprint === 'string'
+                ? { targetFingerprint: binding.activeTargetFingerprint }
+                : datasetTargetFingerprint ? { targetFingerprint: datasetTargetFingerprint } : {}),
+              label: source.title,
+              path: source.executionRef,
+            },
+            authoredQueryFingerprint: tileQueryHash(item.query),
+            filterFingerprint: typeof dataset?.filterFingerprint === 'string'
+              ? dataset.filterFingerprint
+              : fingerprintDashboardRuntimeState({ runInput: datasetRunInputFingerprint, tileId: item.i, filters: dashboardVariables }),
+            interactionFingerprint: fingerprintDashboardRuntimeState({
+              query: tileQueryHash(item.query),
+              crossFilters: body.crossFilters ?? [],
+              hierarchy: Array.from(datasetDrills.get(item.i)?.steps ?? []),
+            }),
+            personaPolicyFingerprint: personaFingerprint,
+          }];
+        });
+        // A visible/affected subset is useful for responsive interaction, but
+        // cannot truthfully claim a whole-dashboard story or become a preview
+        // receipt. Grouped/limited Dataset facts are already scope-aware; a
+        // subset adds another scope boundary, so keep it explicit.
+        const storyResult = partialRun
+          ? {
+              facts: [],
+              story: {
+                headline: 'Partial dashboard refresh',
+                paragraphs: [`Refreshed ${itemsToRun.length} of ${loaded.dashboard.layout.items.length} authored components.`],
+                caveat: 'Run the full dashboard before using a combined story or publication evidence.',
+                claims: [],
+                evidenceRefs: [],
+                trustState: 'draft_ready' as const,
+                generatedBy: 'deterministic' as const,
+              },
+            }
+          : incompleteRun
+            ? {
+                facts: [],
+                story: {
+                  headline: 'Dashboard preview incomplete',
+                  paragraphs: [`${incompleteTileIds.length} component${incompleteTileIds.length === 1 ? '' : 's'} could not complete with the current governed source state.`],
+                  caveat: 'Safe component results are current, but run the failed components successfully before using a page story or Project publication evidence.',
+                  claims: [],
+                  evidenceRefs: [],
+                  trustState: 'draft_ready' as const,
+                  generatedBy: 'deterministic' as const,
+                },
+              }
+          : buildDeterministicDashboardStory({
           goal: loaded.dashboard.story?.goal ?? loaded.dashboard.metadata.businessOutcome ?? loaded.dashboard.metadata.title,
           audience: loaded.dashboard.story?.audience ?? loaded.dashboard.metadata.audience,
           filters: dashboardVariables,
-          tiles: tiles.map((tile) => ({
-            tileId: tile.tileId,
-            title: typeof tile.title === 'string' ? tile.title : tile.tileId,
-            status: tile.status,
-            trustState: (tile.trustState === 'certified' || tile.trustState === 'review_required' || tile.trustState === 'draft_ready'
-              ? tile.trustState
-              : tile.certificationStatus === 'certified' ? 'certified' : 'review_required') as DashboardDisplayTrustState,
-            result: tile.result as { columns?: unknown[]; rows?: unknown[]; rowCount?: number } | undefined,
-            citation: tile.citation,
-          })),
+          tiles: settledTiles.map((tile) => {
+            const dashboardItem = loaded.dashboard.layout.items.find((item) => item.i === tile.tileId);
+            const effectiveStoryFilters = dashboardStoryFiltersForTile(loaded.dashboard, dashboardVariables, tile.dataset);
+            const datasetScope = dashboardItem?.query
+              ? {
+                  // A Dataset tile is a whole-scope value only when its query
+                  // returns a scalar. Any declared dimension is an observation
+                  // at that grain; its distinct counts, ratios and Top-N rows
+                  // must never be summed by the story layer.
+                  kind: dashboardItem.query.dimensions.length > 0 ? 'grouped_observations' as const : 'whole_scope' as const,
+                  dimensions: dashboardItem.query.dimensions.map((dimension) => dimension.alias ?? dimension.field),
+                  outputDimensionAliases: tileQueryOutputAliases(dashboardItem.query)
+                    .filter((output) => output.kind === 'dimension')
+                    .map((output) => output.alias),
+                  limited: dashboardItem.query.limit !== undefined,
+                }
+              : undefined;
+            return {
+              tileId: tile.tileId,
+              title: typeof tile.title === 'string' ? tile.title : tile.tileId,
+              status: tile.status,
+              trustState: (tile.trustState === 'certified' || tile.trustState === 'review_required' || tile.trustState === 'draft_ready'
+                ? tile.trustState
+                : tile.certificationStatus === 'certified' ? 'certified' : 'review_required') as DashboardDisplayTrustState,
+              result: tile.result as { columns?: unknown[]; rows?: unknown[]; rowCount?: number; columnsMeta?: Array<{ name?: unknown; kind?: unknown; unit?: unknown; decimals?: unknown }> } | undefined,
+              datasetScope,
+              filters: effectiveStoryFilters,
+              citation: tile.citation,
+            };
+          }),
           eligibleTileIds: loaded.dashboard.story?.eligibleTileIds,
           driverTileIds: loaded.dashboard.story?.driverTileIds,
+          });
+        const datasetBindings = settledTiles
+          .filter((tile) => tile.status === 'ok' && tile.tileType === 'dataset')
+          .flatMap((tile) => {
+            const binding = previewDatasetBindingEvidenceFromTile(tile as Record<string, unknown>);
+            return binding ? [binding] : [];
+          });
+        const datasetTilePromotionEvidence = tilesWithFilters.flatMap((tile) => {
+          if (tile.status !== 'ok' || tile.tileType !== 'dataset') return [];
+          const item = loaded.dashboard.layout.items.find((candidate) => candidate.i === tile.tileId);
+          const dataset = agentRunRecord(tile.dataset);
+          if (agentRunRecord(dataset?.cacheDelivery)) return [];
+          const provenance = agentRunRecord(dataset?.executionProvenance);
+          const artifact = agentRunRecord(tile.artifact);
+          const result = agentRunRecord(tile.result);
+          const query = item?.query;
+          const sourceId = typeof dataset?.sourceId === 'string' ? dataset.sourceId.trim() : '';
+          const sourceRevision = typeof dataset?.sourceRevision === 'string' ? dataset.sourceRevision.trim() : '';
+          const contractFingerprint = typeof dataset?.contractFingerprint === 'string' ? dataset.contractFingerprint.trim() : '';
+          const queryFingerprint = typeof dataset?.queryFingerprint === 'string' ? dataset.queryFingerprint.trim() : '';
+          const filter = typeof dataset?.filterFingerprint === 'string' ? dataset.filterFingerprint.trim() : '';
+          const parameterFingerprint = typeof provenance?.parameterFingerprint === 'string'
+            ? provenance.parameterFingerprint.trim()
+            : '';
+          const targetFingerprint = typeof provenance?.targetFingerprint === 'string'
+            ? provenance.targetFingerprint.trim()
+            : '';
+          const resultEvidence = typeof provenance?.resultFingerprint === 'string'
+            ? provenance.resultFingerprint.trim()
+            : typeof tile.resultFingerprint === 'string' ? tile.resultFingerprint.trim() : '';
+          const executedSql = typeof artifact?.sql === 'string' && artifact.sql.length < 40_000
+            ? artifact.sql
+            : '';
+          const columns = Array.isArray(result?.columns)
+            ? result.columns.filter((column): column is string => typeof column === 'string')
+            : [];
+          if (!item || !query || !sourceId || !sourceRevision || !contractFingerprint || !queryFingerprint
+            || !filter || !parameterFingerprint || !targetFingerprint || !resultEvidence || !executedSql || columns.length === 0) return [];
+          const activeSteps = agentRunRecord(dataset?.hierarchy)?.activeSteps ?? [];
+          const hasFutureBindings = (item.filterBindings?.length ?? 0) > 0
+            || (item.parameterBindings?.length ?? 0) > 0
+            || (loaded.dashboard.filters?.length ?? 0) > 0
+            || Boolean(loaded.dashboard.interactions?.crossFilter?.mappings.length)
+            || Boolean(loaded.dashboard.interactions?.navigate?.length)
+            || Boolean(loaded.dashboard.interactions?.detail)
+            || Array.isArray(activeSteps) && activeSteps.length > 0;
+          return [{
+            tileId: tile.tileId,
+            title: typeof tile.title === 'string' && tile.title.trim() ? tile.title.trim() : item.i,
+            sourceId,
+            sourceRevision,
+            contractFingerprint,
+            query: structuredClone(query),
+            queryFingerprint,
+            filterFingerprint: filter,
+            parameterFingerprint,
+            interactionFingerprint: fingerprintDashboardRuntimeState({
+              effectiveQuery: datasetEffectiveQueries.get(tile.tileId) ?? query,
+              crossFilters: body.crossFilters ?? [],
+              hierarchy: activeSteps,
+            }),
+            snapshotFingerprint: runSnapshot.snapshotId,
+            targetFingerprint,
+            personaPolicyFingerprint: personaFingerprint,
+            sql: executedSql,
+            schemaFingerprint: executionFingerprint(JSON.stringify({ columns, columnsMeta: result?.columnsMeta ?? [] })),
+            resultFingerprint: resultEvidence,
+            complete: result?.truncated !== true
+              && typeof result?.rowCount === 'number'
+              && Array.isArray(result?.rows)
+              && result.rowCount === result.rows.length,
+            comparison: Boolean(query.comparison || dataset?.comparison),
+            futureBindingsRepresentable: !hasFutureBindings,
+          }];
         });
         const runEvidence = {
           appId,
           dashboardId,
-          snapshotId: snapshot.snapshotId,
+          snapshotId: runSnapshot.snapshotId,
           filterFingerprint,
           resultFingerprint,
           personaFingerprint,
-          successfulTileIds: tiles.filter((tile) => tile.status === 'ok').map((tile) => tile.tileId),
-          semanticApprovalEligibleTileIds: tiles.filter((tile) => (
+          successfulTileIds: settledTiles.filter((tile) => tile.status === 'ok').map((tile) => tile.tileId),
+          semanticApprovalEligibleTileIds: settledTiles.filter((tile) => (
             tile.status === 'ok'
             && tile.tileType === 'semantic'
             && (!('repair' in tile) || tile.repair?.approvalEligible !== false)
           )).map((tile) => tile.tileId),
+          datasetBindingEligibleTileIds: datasetBindings.map((binding) => binding.tileId),
+          datasetBindings,
+          intentFingerprint: draftIntentFingerprint ?? '',
+          datasetTilePromotionEvidence,
+          chartContexts,
           facts: storyResult.facts,
           story: storyResult.story,
           expiresAt: Date.now() + 15 * 60_000,
         };
-        dashboardRunEvidence.set(runId, runEvidence);
-        if (runSurface === 'app-builds') {
+        if (!staleRun && !partialRun) dashboardRunEvidence.set(runId, runEvidence);
+        // MCP runs intentionally have no App/chart-answer lifecycle. They use
+        // the same execution guards, but their ephemeral result must not enter
+        // an App-scoped evidence registry under the synthetic runtime id.
+        if (!mcpRequest && !staleRun && (chartContexts.length > 0 || failedTileContexts.length > 0)) {
+          datasetChartRunEvidence.set(runId, {
+            appId,
+            dashboardId,
+            snapshotId: runSnapshot.snapshotId,
+            dashboardFingerprint,
+            ...(runSurface === 'app-builds' ? {
+              draftRevision: loadStoredAppBuildDraft(projectRoot, appId)?.revision,
+              draftIntentFingerprint,
+            } : {}),
+            previewInputFingerprint: datasetRunInputFingerprint,
+            ...(chartRunScopeKey ? { runScopeKey: chartRunScopeKey, runScopeGeneration: chartRunScopeGeneration } : {}),
+            chartContexts,
+            failedTileContexts,
+            expiresAt: Date.now() + 15 * 60_000,
+          });
+        }
+        if (runSurface === 'app-builds' && !staleRun && !partialRun) {
           const receiptStorage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
           try {
             receiptStorage.saveAppPreviewEvidence({
               runId,
               draftId: appId,
               dashboardId,
-              snapshotId: snapshot.snapshotId,
+              intentFingerprint: draftIntentFingerprint ?? '',
+              snapshotId: runSnapshot.snapshotId,
               filterFingerprint,
               resultFingerprint,
               personaFingerprint,
               successfulTileIds: runEvidence.successfulTileIds,
               semanticApprovalEligibleTileIds: runEvidence.semanticApprovalEligibleTileIds,
+              datasetBindingEligibleTileIds: runEvidence.datasetBindingEligibleTileIds,
+              datasetBindings: runEvidence.datasetBindings,
               createdAt: new Date().toISOString(),
             });
           } finally {
@@ -15904,13 +20292,76 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         }
         for (const [id, evidence] of dashboardRunEvidence) if (evidence.expiresAt < Date.now()) dashboardRunEvidence.delete(id);
+        for (const [id, evidence] of datasetChartRunEvidence) if (evidence.expiresAt < Date.now()) datasetChartRunEvidence.delete(id);
+        const liveChartScopeKeys = new Set(Array.from(datasetChartRunEvidence.values())
+          .map((evidence) => evidence.runScopeKey)
+          .filter((scopeKey): scopeKey is string => Boolean(scopeKey)));
+        for (const scopeKey of datasetChartScopeGenerations.keys()) {
+          if (!liveChartScopeKeys.has(scopeKey) && !activeDashboardRuns.has(scopeKey)) {
+            datasetChartScopeGenerations.delete(scopeKey);
+          }
+        }
+        if (dashboardRequestAbortHandler) req.off('aborted', dashboardRequestAbortHandler);
+        if (activeDashboardRunKey && activeDashboardRun && activeDashboardRuns.get(activeDashboardRunKey) === activeDashboardRun) {
+          activeDashboardRuns.delete(activeDashboardRunKey);
+        }
+        if (mcpRequest) {
+          const tile = tilesWithFilters.find((candidate) => candidate.tileId === mcpRequest.tileId);
+          const dataset = tile?.dataset && typeof tile.dataset === 'object'
+            ? tile.dataset as Record<string, unknown>
+            : undefined;
+          const provenance = dataset?.executionProvenance && typeof dataset.executionProvenance === 'object'
+            ? dataset.executionProvenance as Record<string, unknown>
+            : undefined;
+          const binding = dataset?.binding && typeof dataset.binding === 'object'
+            ? dataset.binding as Record<string, unknown>
+            : undefined;
+          const receipt = {
+            snapshotId: runSnapshot.snapshotId,
+            ...(typeof dataset?.queryFingerprint === 'string' ? { queryFingerprint: dataset.queryFingerprint } : {}),
+            ...(typeof dataset?.filterFingerprint === 'string' ? { filterFingerprint: dataset.filterFingerprint } : {}),
+            ...(typeof dataset?.executionFingerprint === 'string' ? { executionFingerprint: dataset.executionFingerprint } : {}),
+            ...(typeof provenance?.resultFingerprint === 'string'
+              ? { resultFingerprint: provenance.resultFingerprint }
+              : typeof tile?.resultFingerprint === 'string' ? { resultFingerprint: tile.resultFingerprint } : {}),
+            ...(typeof provenance?.targetFingerprint === 'string'
+              ? { targetFingerprint: provenance.targetFingerprint }
+              : typeof binding?.activeTargetFingerprint === 'string' ? { targetFingerprint: binding.activeTargetFingerprint } : {}),
+          };
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            ok: tile?.status === 'ok' && !staleRun,
+            version: 1,
+            source: summarizeMcpDatasetSource(mcpRequest.source),
+            query: mcpRequest.query,
+            validation: { outcome: 'covered', diagnostics: [] },
+            scope: 'ephemeral_mcp_runtime',
+            partial: true,
+            publicationEvidence: false,
+            ...(tile?.status === 'ok' && !staleRun
+              ? {
+                  result: tile.result,
+                  trustState: tile.trustState,
+                  filters: tile.filters,
+                  receipt,
+                }
+              : {
+                  error: tile?.error ?? (staleRun
+                    ? 'The Dataset MCP run became stale before it completed. Retry the current query.'
+                    : 'The Dataset MCP query did not produce a settled result.'),
+                  diagnostics: dataset?.errors ?? [],
+                  receipt,
+                }),
+          }));
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           appId,
           dashboardId,
           persona: activePersonaAppId() ? { appId: activePersonaAppId() } : null,
           runId,
-          snapshotId: snapshot.snapshotId,
+          snapshotId: runSnapshot.snapshotId,
           filterFingerprint,
           resultFingerprint,
           personaFingerprint,
@@ -15918,9 +20369,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tiles: tilesWithFilters,
           facts: storyResult.facts,
           story: storyResult.story,
+          ...(partialRun ? { partial: true, executedTileIds: itemsToRun.map((item) => item.i) } : {}),
+          ...(incompleteRun ? {
+            incomplete: {
+              failedTileIds: incompleteTileIds,
+              message: `Preview is incomplete: ${incompleteTileIds.length} component${incompleteTileIds.length === 1 ? '' : 's'} failed. Safe component results are current, but this page has no current story or Project publication evidence until every component succeeds.`,
+              ...(loadedDraftDashboard ? { priorPreviewReceiptInvalidated } : {}),
+            },
+          } : {}),
+          ...(staleRun ? {
+            stale: true,
+            staleReason: !supersededRun
+              ? 'The project changed while this dashboard was running. Results and story were invalidated; run the current dashboard again.'
+              : 'A newer dashboard interaction superseded this run. Results and story were invalidated; run the current dashboard again.',
+          } : {}),
         }));
       } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        if (dashboardRequestAbortHandler) req.off('aborted', dashboardRequestAbortHandler);
+        if (activeDashboardRunKey && activeDashboardRun && activeDashboardRuns.get(activeDashboardRunKey) === activeDashboardRun) {
+          activeDashboardRuns.delete(activeDashboardRunKey);
+        }
+        res.writeHead(err instanceof DashboardRunRequestError ? 400 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: err instanceof Error ? err.message : String(err) }));
       }
       return;
@@ -15939,6 +20408,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           url,
           path,
           projectRoot,
+          datasetsEnabled: datasetsAppFeatureEnabled(projectConfig),
           executeSql: executeLocalSqlForStoredResult,
           generateInvestigationSql: generateInvestigationSqlForApp,
           runNotebook: (appId, notebookPath) => runNotebookForApp(appId, notebookPath),
@@ -15953,15 +20423,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           // questions. Throws when no provider is configured — propose degrades
           // gracefully by listing the gap instead.
           generateGovernedAnswer: (question, appContext) => generateAppBuildAnswerWithRepair(question, appContext),
+          // M3 source gaps are immutable Context Authoring proposals. They
+          // never write app-local SQL or let a provider choose a source path.
+          createDatasetGapProposal: createAppDatasetGapProposal,
           // App Builder owns its orchestration and structured state. It shares
           // only the configured provider adapter with Ask/Notebook.
           planAppBuild: async ({ system, user }) => {
-            const provider = await createBlockStudioAssistProvider(projectRoot);
-            if (!provider) return undefined;
-            return provider.generate([
+            const selected = await selectAssistProvider(projectRoot);
+            if (!selected) return undefined;
+            const content = await selected.provider.generate([
               { role: 'system', content: system },
               { role: 'user', content: user },
             ], { maxTokens: 2_400, temperature: 0.1 });
+            // This is a direct App Builder planner receipt, not a universal
+            // AgentRun ledger entry. It is only returned after generate()
+            // resolves, and never includes prompt text, rows, or credentials.
+            return { content, providerId: selected.id };
           },
           queueOperation: <TResult>(
             input: { type: string; scope: string; resourceRevision?: string; message?: string; cancellable?: boolean },
@@ -15972,6 +20449,115 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             return operation;
           },
           scheduleProjectRefresh: (reason) => { scheduleProjectRefresh(reason); },
+          saveDatasetTileAsBlock,
+          replaceDatasetTileWithReviewBlock,
+          previewSemanticTileConversion,
+          acceptSemanticTileConversion,
+          answerDatasetChart: async ({ appId, dashboardId, tileId, runId, question }) => {
+            const run = datasetChartRunEvidence.get(runId);
+            if (!run || run.expiresAt < Date.now()) {
+              datasetChartRunEvidence.delete(runId);
+              return { ok: false as const, error: 'This chart result is no longer current. Run the chart again before asking about it.' };
+            }
+            const chartRunScopeIsCurrent = () => !run.runScopeKey
+              || (datasetChartScopeGenerations.get(run.runScopeKey) === run.runScopeGeneration);
+            const context = run.chartContexts.find((candidate) => candidate.tileId === tileId);
+            if (!context) {
+              return { ok: false as const, error: 'This tile has no settled governed Dataset result in the selected run. Run the tile again before asking about it.' };
+            }
+            // A provider request can outlive a page, source, persona, or target
+            // mutation. Check the full server-owned context both before and
+            // after it, instead of treating a run-scope generation as the only
+            // freshness authority.
+            const validateCurrentChartContext = async () => {
+              if (!chartRunScopeIsCurrent()) {
+                datasetChartRunEvidence.delete(runId);
+                return { ok: false as const, error: 'A newer chart run replaced this viewer scope. Run the current chart again before asking about it.' };
+              }
+              if (run.appId !== appId || run.dashboardId !== dashboardId) {
+                return { ok: false as const, error: 'This chart run does not belong to the requested App page. Run the current chart again.' };
+              }
+              const currentSnapshot = projectSnapshot();
+              if (currentSnapshot.error || currentSnapshot.stale || currentSnapshot.snapshotId !== context.snapshotId) {
+                return { ok: false as const, error: 'The project changed after this chart ran. Run the current chart again before asking about it.' };
+              }
+              const currentDashboard = loadAppDashboard(projectRoot, appId, dashboardId)?.dashboard;
+              const currentDashboardFingerprint = currentDashboard
+                ? `sha256:${createHash('sha256').update(JSON.stringify(currentDashboard)).digest('hex')}`
+                : undefined;
+              if (!currentDashboard || currentDashboardFingerprint !== context.dashboardFingerprint) {
+                return { ok: false as const, error: 'This App page or its filter/query definition changed after the chart ran. Run the current chart again before asking about it.' };
+              }
+              const currentTile = currentDashboard.layout.items.find((item) => item.i === tileId);
+              if (!currentTile?.query
+                || currentTile.sourceId !== context.source.sourceId
+                || currentTile.sourceRevision !== context.source.sourceRevision
+                || tileQueryHash(currentTile.query) !== context.authoredQueryFingerprint) {
+                return { ok: false as const, error: 'This Dataset tile changed after the chart ran. Run the current chart again before asking about it.' };
+              }
+              const currentPersonaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+              if (currentPersonaFingerprint !== context.personaPolicyFingerprint) {
+                return { ok: false as const, error: 'The active App persona changed after this chart ran. Run the chart again before asking about it.' };
+              }
+              try {
+                await ensureMetadataCatalogFresh(projectRoot, { manifest: currentSnapshot.manifest, semanticLayer });
+                const resolved = resolveAppSourceCatalogRecords(projectRoot, [context.source.sourceId], 'include_review_required');
+                const source = resolved.items[0];
+                const descriptor = source?.capabilities.dataset;
+                if (!source || !descriptor || resolved.missingSourceIds.length > 0
+                  || source.sourceRevision !== context.source.sourceRevision
+                  || descriptor.contractRef.fingerprint !== context.source.contractFingerprint
+                  || source.lifecycle !== context.source.lifecycle
+                  || source.trust !== context.source.trust
+                  || !source.eligibility.localPreview) {
+                  return { ok: false as const, error: 'The governed Dataset source changed after this chart ran. Refresh the source and run the chart again.' };
+                }
+                if (context.source.targetFingerprint) {
+                  const currentConnection = await resolveExecutionConnection({});
+                  const currentTargetFingerprint = (await observeWarehouseTargetIdentity(executor, currentConnection)).identityFingerprint;
+                  if (currentTargetFingerprint !== context.source.targetFingerprint) {
+                    return { ok: false as const, error: 'The active warehouse target changed after this chart ran. Run the current chart again before asking about it.' };
+                  }
+                }
+                return { ok: true as const, source };
+              } catch (error) {
+                return {
+                  ok: false as const,
+                  error: `DQL could not confirm this chart against the current governed source: ${error instanceof Error ? error.message : String(error)}. Run the chart again before asking about it.`,
+                };
+              }
+            };
+
+            const beforeProvider = await validateCurrentChartContext();
+            if (!beforeProvider.ok) return beforeProvider;
+            const answered = await answerDatasetChartQuestion({
+              context,
+              descriptor: beforeProvider.source.capabilities.dataset,
+              question,
+              resolveProvider: async () => {
+                if (opts.datasetChartAnswerProviderFactory) {
+                  return opts.datasetChartAnswerProviderFactory({ projectRoot, question, context });
+                }
+                return createBlockStudioAssistProvider(projectRoot);
+              },
+            });
+            const afterProvider = await validateCurrentChartContext();
+            if (!afterProvider.ok) return afterProvider;
+            return {
+              ok: true as const,
+              answer: answered.answer,
+              answerMode: answered.mode,
+              trustState: context.source.trust === 'certified' ? 'certified' as const : 'review_required' as const,
+              reviewStatus: context.source.trust === 'certified' ? 'certified' as const : 'review_required' as const,
+              citations: [{
+                kind: 'dataset_query',
+                name: context.source.label ?? afterProvider.source.title,
+                ...(context.source.path ? { path: context.source.path } : {}),
+              }],
+              followUps: ['Run the chart again after changing source, query, filters, or persona', 'Review this tile’s execution evidence'],
+              context,
+            };
+          },
           verifyDashboardRun: ({ runId, appId, dashboardId, tileIds }) => {
             const evidence = dashboardRunEvidence.get(runId);
             if (!evidence || evidence.expiresAt < Date.now()) return { ok: false, error: 'The dashboard run receipt expired. Run the dashboard again.' };
@@ -15986,14 +20572,159 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }
             return { ok: true, snapshotId: evidence.snapshotId, resultFingerprint: evidence.resultFingerprint };
           },
-          verifyAppBuildPreview: ({ runId, draftId, dashboardId, tileIds }) => {
+          verifyAppBuildPreview: async ({ runId, draftId, dashboardId, tileIds, datasetTileIds = [], intentFingerprint, purpose }) => {
             const evidence = loadAppBuildPreviewEvidence(runId);
             if (!evidence) return { ok: false, error: 'The App preview receipt is unavailable. Run the local draft again.' };
             if (evidence.appId !== draftId || evidence.dashboardId !== dashboardId) return { ok: false, error: 'The App preview receipt does not match this local draft page.' };
+            if (!intentFingerprint || evidence.intentFingerprint !== intentFingerprint) {
+              return { ok: false, error: 'The App preview receipt was produced by different draft content. Run the current local draft again.' };
+            }
+            // Receipt attachment must derive review-preview policy from the
+            // current persisted draft, not from a browser value or from a
+            // successful SQL result. Publication follows the stricter branch
+            // below and never treats this local policy as a trust upgrade.
+            let currentDraftSourcePolicy: AppBuildSourcePolicy | undefined;
+            if (purpose === 'local_preview') {
+              const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+              try {
+                const currentDraft = storage.getAppBuildDraft(draftId);
+                if (!currentDraft || !currentDraft.pages.some((page) => page.id === dashboardId)) {
+                  return { ok: false, error: 'The current local App draft is unavailable. Reopen the draft and run its preview again.' };
+                }
+                if (appBuildPreviewIntentFingerprint(currentDraft, dashboardId) !== intentFingerprint) {
+                  return { ok: false, error: 'The App preview receipt was produced by different draft content. Run the current draft again.' };
+                }
+                currentDraftSourcePolicy = currentDraft.sourcePolicy;
+              } finally {
+                storage.close();
+              }
+            }
             const successful = new Set(evidence.successfulTileIds);
             const failed = tileIds.filter((tileId) => !successful.has(tileId));
             if (failed.length > 0) return { ok: false, error: `These App components did not complete successfully: ${failed.join(', ')}` };
-            return { ok: true, snapshotId: evidence.snapshotId, resultFingerprint: evidence.resultFingerprint };
+            const verifiedDatasetBindings = new Set(evidence.datasetBindingEligibleTileIds);
+            const unverifiedDatasetTiles = datasetTileIds.filter((tileId) => !verifiedDatasetBindings.has(tileId));
+            if (unverifiedDatasetTiles.length > 0) {
+              return { ok: false, error: `These Dataset tiles do not have a current source/target binding receipt: ${unverifiedDatasetTiles.join(', ')}. Run the current draft again after validating the source.` };
+            }
+            if (datasetTileIds.length > 0) {
+              const recordsByTileId = new Map(evidence.datasetBindings.map((record) => [record.tileId, record]));
+              const missingRecords = datasetTileIds.filter((tileId) => !recordsByTileId.has(tileId));
+              if (missingRecords.length > 0) {
+                return { ok: false, error: `These Dataset tiles use legacy or incomplete binding evidence: ${missingRecords.join(', ')}. Run the current draft again before publication.` };
+              }
+              const currentSnapshot = projectSnapshot();
+              if (currentSnapshot.error || currentSnapshot.stale) {
+                return { ok: false, error: 'The current project snapshot could not be refreshed for this Dataset receipt. Run the current draft again.' };
+              }
+              const projectSnapshotChanged = currentSnapshot.snapshotId !== evidence.snapshotId;
+              try {
+                await ensureMetadataCatalogFresh(projectRoot, { manifest: currentSnapshot.manifest, semanticLayer });
+                const records = datasetTileIds.map((tileId) => recordsByTileId.get(tileId)!);
+                const currentSources = resolveAppSourceCatalogRecords(
+                  projectRoot,
+                  records.map((record) => record.sourceId),
+                  'include_review_required',
+                );
+                if (currentSources.missingSourceIds.length > 0) {
+                  return { ok: false, error: `The current catalog no longer resolves Dataset source(s): ${currentSources.missingSourceIds.join(', ')}. Refresh the Dataset and run the draft again.` };
+                }
+                const sourceById = new Map(currentSources.items.map((source) => [source.sourceId, source]));
+                const proofs = loadDatasetGrainProofs(projectRoot);
+                const configuredTarget = executionTargetDescriptor({});
+                for (const record of records) {
+                  const source = sourceById.get(record.sourceId);
+                  const descriptor = source?.capabilities.dataset;
+                  if (!source || !descriptor
+                    || source.kind !== record.kind
+                    || source.sourceRevision !== record.sourceRevision
+                    || descriptor.contractRef.fingerprint !== record.contractFingerprint) {
+                    return { ok: false, error: `Dataset tile ${record.tileId} changed source, revision, or field contract after its preview. Refresh the Dataset and run the draft again.` };
+                  }
+                  if (purpose === 'project_publish') {
+                    // A settled result is never a trust upgrade. Publishing
+                    // must re-check current catalog lifecycle and explicit
+                    // project-publish eligibility even when id, revision, and
+                    // contract happen to remain unchanged after a review-state
+                    // downgrade.
+                    if (source.lifecycle !== 'certified'
+                      || source.trust !== 'certified'
+                      || !source.eligibility.projectPublish) {
+                      return {
+                        ok: false,
+                        error: `Dataset tile ${record.tileId} is currently ${source.lifecycle} and is not eligible for Project publication. Refresh the governed source and run the draft again after certification.`,
+                      };
+                    }
+                  } else {
+                    // Local review preview is allowed only when the *current
+                    // persisted* draft explicitly opted into review-required
+                    // sources and the canonical catalog says that exact
+                    // source remains locally executable. It never changes
+                    // the receipt's truthful review lifecycle or grants
+                    // publication eligibility.
+                    if (!source.eligibility.localPreview) {
+                      return {
+                        ok: false,
+                        error: `Dataset tile ${record.tileId} is currently ${source.lifecycle} and is not eligible for this local preview policy. Enable review-required sources or select a certified Dataset.`,
+                      };
+                    }
+                    if ((source.lifecycle !== 'certified' || source.trust !== 'certified')
+                      && currentDraftSourcePolicy !== 'include_review_required') {
+                      return {
+                        ok: false,
+                        error: `Dataset tile ${record.tileId} is currently ${source.lifecycle}. Enable review-required sources explicitly before saving its local preview evidence.`,
+                      };
+                    }
+                  }
+                  // Connection targets are always re-derived from the current
+                  // server configuration. Do not reconnect to the historical
+                  // target named by a receipt after the active project has
+                  // moved to another warehouse.
+                  const currentTarget = record.executionTarget.target === 'local'
+                    ? { target: 'local' as const }
+                    : configuredTarget;
+                  if (!sameDatasetExecutionTarget(record.executionTarget, currentTarget)) {
+                    return { ok: false, error: `Dataset tile ${record.tileId} no longer uses the current configured execution target. Run the draft again.` };
+                  }
+                  const currentConnection = await resolveExecutionConnection({ executionTarget: currentTarget });
+                  const currentTargetFingerprint = (await observeWarehouseTargetIdentity(executor, currentConnection)).identityFingerprint;
+                  if (currentTargetFingerprint !== record.targetFingerprint) {
+                    return { ok: false, error: `Dataset tile ${record.tileId} was previewed against a different warehouse target. Run the draft again after validating the current source.` };
+                  }
+                  if (record.kind === 'block') {
+                    const grainProof = record.grainProof;
+                    if (!grainProof) {
+                      return { ok: false, error: `Dataset tile ${record.tileId} has no persisted declared grain proof scope. Run the current draft again after validating the source.` };
+                    }
+                    const validation = validateDatasetGrainProof({
+                      proof: proofs.get(grainProof.id),
+                      sourceFingerprint: source.sourceRevision,
+                      queryFingerprint: grainProof.queryFingerprint,
+                      keyFingerprint: grainProof.keyFingerprint,
+                      parameterFingerprint: grainProof.parameterFingerprint,
+                      targetFingerprint: currentTargetFingerprint,
+                      snapshotId: grainProof.scopeSnapshotId,
+                      snapshotFingerprint: grainProof.scopeSnapshotFingerprint,
+                    });
+                    if (!validation.valid) {
+                      return { ok: false, error: `Dataset tile ${record.tileId} no longer has a current declared grain proof (${validation.reason ?? 'invalid'}). Revalidate the source and run the draft again.` };
+                    }
+                  }
+                }
+                if (projectSnapshotChanged) {
+                  return { ok: false, error: 'The Dataset receipt no longer matches the current project snapshot. Run the current draft again.' };
+                }
+              } catch (error) {
+                return { ok: false, error: `The current Dataset source/target binding could not be verified: ${error instanceof Error ? error.message : String(error)}` };
+              }
+            }
+            return {
+              ok: true,
+              snapshotId: evidence.snapshotId,
+              filterFingerprint: evidence.filterFingerprint,
+              resultFingerprint: evidence.resultFingerprint,
+              intentFingerprint: evidence.intentFingerprint,
+            };
           },
           // Story narration for commit — LLM-backed with deterministic fallback.
           narrate: narrateForAgentRun,
@@ -17966,6 +22697,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const status = code === 'SOURCE_CHANGED' || apiErrorMessage(error) === 'BLOCK_EXISTS' ? 409 : 500;
         res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: apiErrorMessage(error), code }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/datasets/validate-grain') {
+      try {
+        const body = await readJSON(req).catch(() => ({})) as Record<string, unknown>;
+        const validation = await validateDatasetSourceGrain(body);
+        res.writeHead(validation.eligible ? 200 : 422, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: validation.eligible, ...validation }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const conflict = message.startsWith('DATASET_SOURCE_DRIFT') || message.startsWith('DATASET_SOURCE_CATALOG_STALE');
+        res.writeHead(conflict ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: message }));
       }
       return;
     }
@@ -22390,6 +27136,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   server.once('close', () => {
     runtimeClosing = true;
+    datasetResultCache?.close();
     for (const watcher of [...projectWatchers]) closeProjectWatcher(watcher);
     projectWatchers.length = 0;
     unsubscribeOperationEvents();
@@ -23055,7 +27802,17 @@ function loadAppBuildDraftDashboard(
   projectRoot: string,
   draftId: string,
   dashboardId: string,
-): { app: AppDocument; dashboard: DashboardDocument; appDir: string; draftArtifactsDir?: string } | null {
+): {
+  app: AppDocument;
+  dashboard: DashboardDocument;
+  appDir: string;
+  draftArtifactsDir?: string;
+  previewIntentFingerprint: string;
+  /** Receipt visible when this run began; a late incomplete run may clear only this ID. */
+  previewReceiptId?: string;
+  draftSources: AppBuildDraftSource[];
+  draftSourcePolicy: AppBuildSourcePolicy;
+} | null {
   const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
   try {
     const draft = storage.getAppBuildDraft(draftId);
@@ -23087,7 +27844,143 @@ function loadAppBuildDraftDashboard(
       dashboard,
       appDir: base?.appDir ?? join(projectRoot, '.dql', 'local', 'app-builds', draft.id),
       draftArtifactsDir: join(projectRoot, '.dql', 'local', 'app-builds', draft.id),
+      previewIntentFingerprint: appBuildPreviewIntentFingerprint(draft, dashboard.id),
+      previewReceiptId: (draft.previewReceipts ?? (draft.previewReceipt ? [draft.previewReceipt] : []))
+        .find((receipt) => receipt.pageId === dashboard.id)?.id,
+      // Keep the persisted local registry alongside the page.  This is not a
+      // catalog substitute: it only establishes whether this draft has an
+      // explicit, previously approved capability that the later live-catalog
+      // resolution may validate. A restore placeholder remains repair-only.
+      draftSources: draft.sources,
+      draftSourcePolicy: draft.sourcePolicy,
     };
+  } finally {
+    storage.close();
+  }
+}
+
+/**
+ * Verify the local-draft half of Dataset authority before any catalog or
+ * warehouse work is scheduled. Catalog records establish current execution
+ * capability; the persisted source registry establishes that the author chose
+ * and approved this exact source/revision/contract for this editable draft.
+ *
+ * This deliberately permits a real review-required source when the local
+ * draft opted into `include_review_required`. Publication is stricter and is
+ * separately verified against current catalog lifecycle and eligibility.
+ */
+function datasetDraftStoredAuthorityErrors(
+  dashboard: DashboardDocument,
+  sources: AppBuildDraftSource[],
+  sourcePolicy: AppBuildSourcePolicy,
+): Map<string, string> {
+  const errors = new Map<string, string>();
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  for (const item of dashboard.layout.items) {
+    if (!item.query || !item.sourceId) continue;
+    const source = sourceById.get(item.sourceId);
+    const pageBinding = item.sourceRevision
+      ? dashboard.datasets?.find((binding) => binding.sourceId === item.sourceId && binding.sourceRevision === item.sourceRevision)
+      : undefined;
+    const descriptor = source?.capabilities?.dataset;
+    if (!source || !descriptor) {
+      errors.set(
+        item.sourceId,
+        `APP_BUILD_DATASET_SOURCE_REPAIR_REQUIRED: ${item.title || item.i} has no stored approved Dataset capability. Refresh or reselect this Dataset before running it.`,
+      );
+      continue;
+    }
+    if (!item.sourceRevision || !pageBinding
+      || source.sourceRevision !== item.sourceRevision
+      || source.sourceFingerprint !== undefined && source.sourceFingerprint !== item.sourceRevision
+      || descriptor.sourceRevision !== item.sourceRevision
+      || descriptor.binding.sourceRevision !== item.sourceRevision
+      || descriptor.contractRef.fingerprint !== pageBinding.contractFingerprint
+      || descriptor.binding.contractFingerprint !== pageBinding.contractFingerprint) {
+      errors.set(
+        item.sourceId,
+        `APP_BUILD_DATASET_SOURCE_REPAIR_REQUIRED: ${item.title || item.i} does not have a matching stored Dataset revision and field contract. Refresh or reselect this Dataset before running it.`,
+      );
+      continue;
+    }
+    if (sourcePolicy === 'governed_only'
+      && (source.lifecycle !== 'certified' || source.trustState !== 'certified')) {
+      errors.set(
+        item.sourceId,
+        `APP_BUILD_REVIEW_POLICY_REQUIRED: ${item.title || item.i} uses a ${source.lifecycle ?? 'unknown'} Dataset source. Enable review-required sources or select a certified Dataset before running it.`,
+      );
+    }
+  }
+  return errors;
+}
+
+function isLoadedAppBuildDraftDashboard(value: unknown): value is {
+  draftSources: AppBuildDraftSource[];
+  draftSourcePolicy: AppBuildSourcePolicy;
+  previewReceiptId?: string;
+} {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return Array.isArray(candidate.draftSources)
+    && (candidate.draftSourcePolicy === 'governed_only' || candidate.draftSourcePolicy === 'include_review_required')
+    && (candidate.previewReceiptId === undefined || typeof candidate.previewReceiptId === 'string');
+}
+
+/** Re-read the private draft at preview completion; filesystem snapshots do not observe SQLite edits. */
+function currentAppBuildPreviewIntentFingerprint(
+  projectRoot: string,
+  draftId: string,
+  dashboardId: string,
+): string | undefined {
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    const draft = storage.getAppBuildDraft(draftId);
+    if (!draft || !draft.pages.some((page) => page.id === dashboardId)) return undefined;
+    return appBuildPreviewIntentFingerprint(draft, dashboardId);
+  } finally {
+    storage.close();
+  }
+}
+
+/**
+ * A full local-draft run with one or more failed components cannot leave an
+ * older successful page receipt eligible for publication. The run captures the
+ * receipt ID at dispatch, then this function clears only that exact ID after
+ * confirming the editable draft still has the same page intent. A newer run
+ * can therefore attach a fresh receipt without being erased by a late older
+ * response.
+ */
+function invalidateIncompleteAppBuildPreviewReceipt(input: {
+  projectRoot: string;
+  draftId: string;
+  dashboardId: string;
+  intentFingerprint: string;
+  expectedReceiptId?: string;
+}): boolean {
+  if (!input.expectedReceiptId) return false;
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(input.projectRoot));
+  try {
+    const current = storage.getAppBuildDraft(input.draftId);
+    if (!current || !current.pages.some((page) => page.id === input.dashboardId)) return false;
+    if (appBuildPreviewIntentFingerprint(current, input.dashboardId) !== input.intentFingerprint) return false;
+    const receipt = (current.previewReceipts ?? (current.previewReceipt ? [current.previewReceipt] : []))
+      .find((candidate) => candidate.pageId === input.dashboardId);
+    if (!receipt || receipt.id !== input.expectedReceiptId) return false;
+    const operations: AppBuildDraftOperation[] = [{
+      type: 'clear_preview_receipt',
+      pageId: input.dashboardId,
+      expectedReceiptId: input.expectedReceiptId,
+    }];
+    const next: AppBuildDraft = applyAppBuildDraftOperations(current, current.revision, operations);
+    // Receipt state and the old run's restart-safe evidence change in the
+    // same local transaction. Otherwise a caller could re-submit the old
+    // successful run after this incomplete scope cleared its receipt.
+    storage.saveAppBuildDraft(next, {
+      expectedRevision: current.revision,
+      operations,
+      deletePreviewEvidenceRunId: input.expectedReceiptId,
+    });
+    return true;
   } finally {
     storage.close();
   }
@@ -23115,6 +28008,572 @@ function resolveDashboardItemBlock(
     .find((b) => normalize(b.filePath).replaceAll('\\', '/') === normalizedRef) ?? null;
 }
 
+/** Resolve the catalog-pinned source path, never a display name or tile hint. */
+function resolveDatasetSourceManifestBlock(
+  manifest: DQLManifest,
+  executionRef: string,
+): ManifestBlock | null {
+  const normalizedRef = normalize(executionRef).replaceAll('\\', '/');
+  return (manifest.blockDeclarations ?? Object.values(manifest.blocks))
+    .find((block) => normalize(block.filePath).replaceAll('\\', '/') === normalizedRef) ?? null;
+}
+
+/**
+ * Only a browser-created mounted-view token participates in supersession.
+ * Keeping an absent/invalid token out of the key preserves compatibility for
+ * scripts and old clients: their requests are independent rather than sharing
+ * a process-global page cancellation slot.
+ */
+export function dashboardRunSupersessionKey(
+  surface: 'apps' | 'app-builds' | 'dataset-mcp',
+  appId: string,
+  dashboardId: string,
+  value: unknown,
+): string | undefined {
+  const scope = typeof value === 'string' ? value.trim() : '';
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(scope)) return undefined;
+  return `${surface}:${appId}:${dashboardId}:${scope}`;
+}
+
+/**
+ * Validate advisory client scheduling bounds against the authored page before
+ * any warehouse work starts. They cannot introduce a tile or alter its query;
+ * they only reduce a run to already-authored visible or affected components.
+ */
+class DashboardRunRequestError extends Error {
+  readonly name = 'DashboardRunRequestError';
+}
+
+/** Mirrors the v3 parser boundary for drafts loaded directly from local state. */
+function dashboardUsesDatasetV3Features(dashboard: DashboardDocument): boolean {
+  return Boolean(
+    dashboard.datasets?.length
+    || dashboard.layout.items.some((item) => Boolean(item.query))
+    || dashboard.filters?.some((filter) => Boolean(filter.datasetBindings && Object.keys(filter.datasetBindings).length))
+    || dashboard.interactions?.crossFilter
+    || dashboard.interactions?.detail,
+  );
+}
+
+/**
+ * A restored local draft can bypass parser validation. Recheck the same pure
+ * v3 Dataset visualization contract before it schedules a source query, so a
+ * scalar widget cannot return a successful result while concealing fields.
+ */
+export function dashboardDatasetTileVisualizationErrors(dashboard: DashboardDocument): string[] {
+  if (dashboard.version !== 3) return [];
+  return dashboard.layout.items.flatMap((item) => {
+    if (!item.query) return [];
+    const visualization = datasetTileVisualizationCompatibility(item.query, item.viz.type);
+    return visualization.compatible
+      ? []
+      : [`Dataset tile ${item.i} has an incompatible ${item.viz.type} visualization: ${visualization.message}`];
+  });
+}
+
+/**
+ * Facts must retain the controls that actually reached their tile. A Dataset
+ * filter can deliberately exclude one component while remaining page-scoped
+ * so the runtime can show that exclusion. Do not narrate that component as if
+ * it carried the page's selected values.
+ */
+export function dashboardStoryFiltersForTile(
+  dashboard: Pick<DashboardDocument, 'filters'>,
+  dashboardFilters: Record<string, unknown>,
+  dataset: { unboundFilters?: Array<{ filterId?: unknown; code?: unknown }> } | undefined,
+): Record<string, unknown> {
+  const declaredFilterIds = new Set((dashboard.filters ?? []).map((filter) => filter.id));
+  const excluded = new Set((dataset?.unboundFilters ?? [])
+    .filter((issue) => issue.code === 'DATASET_TILE_EXCLUDED' || issue.code === 'FILTER_MAPPING_MISSING')
+    .map((issue) => typeof issue.filterId === 'string' && declaredFilterIds.has(issue.filterId) ? issue.filterId : '')
+    .filter(Boolean));
+  if (excluded.size === 0) return dashboardFilters;
+  return Object.fromEntries(Object.entries(dashboardFilters)
+    .filter(([filterId]) => !excluded.has(filterId)));
+}
+
+/**
+ * A small deterministic narrator for an already-authoritative chart result.
+ * It intentionally does not compile, retrieve, coerce nulls to zero, or
+ * inspect client-supplied rows. The caller has already matched its source,
+ * query, filters, target, snapshot, and persona to current server state.
+ */
+function answerFromDatasetChartContext(
+  context: AppAnalyticalContextV1,
+  descriptor?: DatasetDescriptor,
+): string {
+  const value = (entry: unknown): string => {
+    if (entry === null || entry === undefined) return 'unavailable';
+    if (typeof entry === 'string') return entry;
+    if (typeof entry === 'number' || typeof entry === 'boolean') return String(entry);
+    return JSON.stringify(entry);
+  };
+  const resultSummary = summarizeDatasetChartFacts(context, descriptor).text;
+  const filters = Object.entries(context.effectiveFilters)
+    .filter(([, entry]) => entry !== undefined && entry !== null && entry !== '')
+    .map(([name, entry]) => `${name} = ${value(entry)}`);
+  const exclusions = context.unboundFilters
+    .filter((issue) => issue.code === 'DATASET_TILE_EXCLUDED' || issue.code === 'FILTER_MAPPING_MISSING')
+    .map((issue) => issue.filterId)
+    .filter((filterId): filterId is string => Boolean(filterId));
+  const scope = filters.length > 0
+    ? `Its effective scope is ${filters.join(', ')}.`
+    : 'Its effective scope is the full Dataset result.';
+  const exclusion = exclusions.length > 0
+    ? ` ${exclusions.join(', ')} ${exclusions.length === 1 ? 'is' : 'are'} explicitly excluded from this tile, so ${exclusions.length === 1 ? 'that filter does' : 'those filters do'} not narrow these rows.`
+    : '';
+  const interaction = context.evidenceScope === 'interaction'
+    ? ' This is a scoped interaction result and cannot be used as App publication evidence.'
+    : context.evidenceScope === 'incomplete'
+      ? ' Other page components did not complete, so this result is current for this chart but the page has no combined story or publication evidence.'
+      : '';
+  const lifecycle = context.source.trust === 'certified' ? 'certified' : 'review-required';
+  return `${context.source.label ?? context.tileId} is a ${lifecycle} Dataset chart. ${resultSummary} ${scope}${exclusion}${interaction}`;
+}
+
+export type DatasetChartAnswerMode = 'provider' | 'deterministic_context_summary' | 'out_of_context';
+
+export interface DatasetChartAnswerResult {
+  answer: string;
+  mode: DatasetChartAnswerMode;
+}
+
+/**
+ * Answer one question about an already-validated Dataset chart result. This is
+ * deliberately not an Ask route: it cannot retrieve, compile, or execute a
+ * new query. The provider receives only the exact server-owned context that
+ * the caller has already revalidated against the current App/page/source.
+ */
+export async function answerDatasetChartQuestion(input: {
+  context: AppAnalyticalContextV1;
+  /** Current governed Dataset contract revalidated by the caller. */
+  descriptor?: DatasetDescriptor;
+  question: string;
+  resolveProvider: () => AgentProvider | null | Promise<AgentProvider | null>;
+}): Promise<DatasetChartAnswerResult> {
+  const question = input.question.trim();
+  const unavailable = () => ({
+    mode: 'deterministic_context_summary' as const,
+    answer: `Deterministic context summary (no configured AI provider is available): ${answerFromDatasetChartContext(input.context, input.descriptor)}`,
+  });
+  if (questionRequiresEvidenceOutsideDatasetChart(question)) {
+    return {
+      mode: 'out_of_context',
+      answer: 'This chart\'s current governed result cannot establish that answer. It can answer only from the displayed values, filters, and result columns; run or build another governed chart for the needed evidence.',
+    };
+  }
+  let provider: AgentProvider | null;
+  try {
+    provider = await input.resolveProvider();
+  } catch {
+    return unavailable();
+  }
+  if (!provider) return unavailable();
+  const messages: Parameters<AgentProvider['generate']>[0] = [
+    {
+      role: 'system',
+      content: [
+        'Answer one question using only the supplied GOVERNED_CHART_CONTEXT.',
+        'Do not retrieve data, write or suggest SQL, change the App, infer causal drivers, forecast, recommend an action, or use knowledge outside this context.',
+        'Preserve null or unavailable values as unavailable; do not turn them into zero.',
+        'If the current chart context cannot establish the answer, respond exactly: "This chart\'s current governed result cannot establish that answer."',
+        'Give a concise stakeholder-facing answer and keep its filter and interaction scope truthful.',
+      ].join(' '),
+    },
+    {
+      role: 'user',
+      content: JSON.stringify({
+        question,
+        governedChartContext: input.context,
+      }, (_key, value) => typeof value === 'bigint' ? value.toString() : value),
+    },
+  ];
+  try {
+    const answer = (await provider.generate(messages, { maxTokens: 700, temperature: 0.1 })).trim();
+    return answer
+      ? { mode: 'provider', answer }
+      : unavailable();
+  } catch {
+    return unavailable();
+  }
+}
+
+/**
+ * A chart result has no causal, predictive, or prescriptive evidence. Refuse
+ * those requests before a provider can phrase an unsupported answer. Other
+ * questions still carry an explicit provider instruction to refuse whenever
+ * their answer is not established by the exact result context.
+ */
+function questionRequiresEvidenceOutsideDatasetChart(question: string): boolean {
+  return /\b(?:why|cause|causes|caused|driver|drivers|root\s+cause|forecast|predict|prediction|recommend|recommendation|should|what\s+if)\b/i.test(question);
+}
+
+/**
+ * Persist only server-derived binding material. Returning undefined is
+ * deliberate: a Dataset tile without a complete record may display its live
+ * result, but it cannot become a restart-safe publication receipt.
+ */
+function previewDatasetBindingEvidenceFromTile(tile: Record<string, unknown>): LocalAppPreviewDatasetBindingEvidence | undefined {
+  const dataset = agentRunRecord(tile.dataset);
+  // A cache-delivery receipt is intentionally display-only. It never has the
+  // fresh source/target/grain authority required to attach a restart-safe App
+  // preview receipt or publish the page.
+  if (agentRunRecord(dataset?.cacheDelivery)) return undefined;
+  const binding = agentRunRecord(dataset?.binding);
+  const artifact = agentRunRecord(tile.artifact);
+  const executionTarget = agentRunRecord(artifact?.executionTarget);
+  const tileId = typeof tile.tileId === 'string' ? tile.tileId.trim() : '';
+  const sourceId = typeof dataset?.sourceId === 'string' ? dataset.sourceId.trim() : '';
+  const sourceRevision = typeof dataset?.sourceRevision === 'string' ? dataset.sourceRevision.trim() : '';
+  const contractFingerprint = typeof dataset?.contractFingerprint === 'string' ? dataset.contractFingerprint.trim() : '';
+  const targetFingerprint = typeof binding?.activeTargetFingerprint === 'string' ? binding.activeTargetFingerprint.trim() : '';
+  if (!tileId || !sourceId || !sourceRevision || !contractFingerprint || !targetFingerprint) return undefined;
+  let target: LocalAppPreviewDatasetBindingEvidence['executionTarget'] | undefined;
+  if (executionTarget?.target === 'local') target = { target: 'local' };
+  else if (executionTarget?.target === 'connection'
+    && (executionTarget.connectionName === undefined || typeof executionTarget.connectionName === 'string')) {
+    target = { target: 'connection', ...(typeof executionTarget.connectionName === 'string' ? { connectionName: executionTarget.connectionName } : {}) };
+  }
+  if (!target) return undefined;
+  if (dataset?.semanticTargetBinding) {
+    return {
+      tileId,
+      kind: 'semantic',
+      sourceId,
+      sourceRevision,
+      contractFingerprint,
+      targetFingerprint,
+      executionTarget: target,
+    };
+  }
+  const runtimeEvidence = agentRunRecord(dataset?.grainRuntimeEvidence);
+  const material = agentRunRecord(dataset?.proofMaterial);
+  const proofId = typeof binding?.proofId === 'string' ? binding.proofId.trim() : '';
+  const declaredProofId = typeof runtimeEvidence?.declaredProofId === 'string' ? runtimeEvidence.declaredProofId.trim() : '';
+  const required = {
+    sourceSqlFingerprint: typeof runtimeEvidence?.sourceSqlFingerprint === 'string' ? runtimeEvidence.sourceSqlFingerprint.trim() : '',
+    parameterFingerprint: typeof runtimeEvidence?.parameterFingerprint === 'string' ? runtimeEvidence.parameterFingerprint.trim() : '',
+    queryFingerprint: typeof material?.queryFingerprint === 'string' ? material.queryFingerprint.trim() : '',
+    keyFingerprint: typeof material?.keyFingerprint === 'string' ? material.keyFingerprint.trim() : '',
+    scopeSnapshotId: typeof material?.scopeSnapshotId === 'string' ? material.scopeSnapshotId.trim() : '',
+    scopeSnapshotFingerprint: typeof material?.scopeSnapshotFingerprint === 'string' ? material.scopeSnapshotFingerprint.trim() : '',
+  };
+  if (!proofId || proofId !== declaredProofId || Object.values(required).some((value) => !value)
+    || runtimeEvidence?.status !== 'passed' || runtimeEvidence?.targetFingerprint !== targetFingerprint
+    || runtimeEvidence?.sourceId !== sourceId || runtimeEvidence?.sourceRevision !== sourceRevision) return undefined;
+  return {
+    tileId,
+    kind: 'block',
+    sourceId,
+    sourceRevision,
+    contractFingerprint,
+    targetFingerprint,
+    executionTarget: target,
+    grainProof: { id: proofId, ...required },
+  };
+}
+
+function sameDatasetExecutionTarget(
+  left: LocalAppPreviewDatasetBindingEvidence['executionTarget'],
+  right: LocalAppPreviewDatasetBindingEvidence['executionTarget'],
+): boolean {
+  if (left.target !== right.target) return false;
+  if (left.target === 'local' || right.target === 'local') return true;
+  return left.connectionName === right.connectionName;
+}
+
+function parseDashboardRunTileIds(value: unknown, available: ReadonlySet<string>, label: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 200) {
+    throw new DashboardRunRequestError(`${label} must be an array of at most 200 authored tile ids.`);
+  }
+  const ids = Array.from(new Set(value.map((candidate) => typeof candidate === 'string' ? candidate.trim() : '')));
+  if (ids.some((id) => !id || !available.has(id))) {
+    throw new DashboardRunRequestError(`${label} contains a tile that is not authored on this dashboard.`);
+  }
+  return ids;
+}
+
+function parseDashboardDatasetCrossFilters(value: unknown): DashboardDatasetCrossFilterInput[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new DashboardRunRequestError('crossFilters must be an array of exact Dataset field selections when supplied.');
+  }
+  if (value.length > 200) {
+    throw new DashboardRunRequestError('crossFilters must contain at most 200 exact Dataset field selections.');
+  }
+  return value.map((candidate, index) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new DashboardRunRequestError(`crossFilters[${index}] must be an object with field, values, fromTileId, fromSourceId, and fromSourceRevision.`);
+    }
+    const record = candidate as Record<string, unknown>;
+    const field = typeof record.field === 'string' ? record.field.trim() : '';
+    const fromTileId = typeof record.fromTileId === 'string' ? record.fromTileId.trim() : '';
+    const fromSourceId = typeof record.fromSourceId === 'string' ? record.fromSourceId.trim() : '';
+    const fromSourceRevision = typeof record.fromSourceRevision === 'string' ? record.fromSourceRevision.trim() : '';
+    if (!field || !fromTileId || !fromSourceId || !fromSourceRevision) {
+      throw new DashboardRunRequestError(`crossFilters[${index}] requires field, fromTileId, fromSourceId, and fromSourceRevision.`);
+    }
+    if (!Array.isArray(record.values) || record.values.length === 0 || record.values.length > 200) {
+      throw new DashboardRunRequestError(`crossFilters[${index}].values must be a non-empty array of at most 200 scalar selections.`);
+    }
+    if (record.values.some((candidateValue) => candidateValue !== null && !['string', 'number', 'boolean'].includes(typeof candidateValue))) {
+      throw new DashboardRunRequestError(`crossFilters[${index}].values must contain only scalar Dataset values.`);
+    }
+    return { field, values: [...record.values], fromTileId, fromSourceId, fromSourceRevision };
+  });
+}
+
+type DashboardDatasetHierarchyDrillInput = {
+  tileId: string;
+  steps: Array<{
+    hierarchyId: string;
+    fromField: string;
+    values: unknown[];
+  }>;
+};
+
+/**
+ * A hierarchy interaction can only name an authored tile and carry concrete
+ * scalar member values from a settled mark. The server still reloads the
+ * current source descriptor and applies each step through the core transition;
+ * this parser never accepts a browser-supplied TileQuery.
+ */
+function parseDashboardDatasetHierarchyDrills(
+  value: unknown,
+  available: ReadonlySet<string>,
+): Map<string, DashboardDatasetHierarchyDrillInput> {
+  if (value === undefined) return new Map();
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) {
+    throw new DashboardRunRequestError('datasetDrills must be an array of one to 50 authored Dataset tile interactions when supplied.');
+  }
+  const parsed = new Map<string, DashboardDatasetHierarchyDrillInput>();
+  for (let index = 0; index < value.length; index += 1) {
+    const candidate = value[index];
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new DashboardRunRequestError(`datasetDrills[${index}] must name an authored tile and declared hierarchy steps.`);
+    }
+    const record = candidate as Record<string, unknown>;
+    const tileId = typeof record.tileId === 'string' ? record.tileId.trim() : '';
+    if (!tileId || !available.has(tileId) || parsed.has(tileId)) {
+      throw new DashboardRunRequestError(`datasetDrills[${index}].tileId must name one unique authored dashboard tile.`);
+    }
+    if (!Array.isArray(record.steps) || record.steps.length === 0 || record.steps.length > 8) {
+      throw new DashboardRunRequestError(`datasetDrills[${index}].steps must contain one to eight declared hierarchy transitions.`);
+    }
+    const steps = record.steps.map((rawStep, stepIndex) => {
+      if (!rawStep || typeof rawStep !== 'object' || Array.isArray(rawStep)) {
+        throw new DashboardRunRequestError(`datasetDrills[${index}].steps[${stepIndex}] must be an object.`);
+      }
+      const step = rawStep as Record<string, unknown>;
+      const hierarchyId = typeof step.hierarchyId === 'string' ? step.hierarchyId.trim() : '';
+      const fromField = typeof step.fromField === 'string' ? step.fromField.trim() : '';
+      if (!hierarchyId || !fromField) {
+        throw new DashboardRunRequestError(`datasetDrills[${index}].steps[${stepIndex}] requires a hierarchyId and fromField.`);
+      }
+      if (!Array.isArray(step.values) || step.values.length === 0 || step.values.length > 200
+        || step.values.some((member) => member !== null && !['string', 'number', 'boolean'].includes(typeof member))) {
+        throw new DashboardRunRequestError(`datasetDrills[${index}].steps[${stepIndex}].values must contain one to 200 scalar selected values.`);
+      }
+      return { hierarchyId, fromField, values: [...step.values] };
+    });
+    parsed.set(tileId, { tileId, steps });
+  }
+  return parsed;
+}
+
+/** Deterministic run-state digest for stale-response and preview-receipt gates. */
+function fingerprintDashboardRuntimeState(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(canonicalDashboardRuntimeState(value))).digest('hex');
+}
+
+function canonicalDashboardRuntimeState(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalDashboardRuntimeState);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalDashboardRuntimeState(entry)]));
+  }
+  return value;
+}
+
+function datasetProofFailureMessage(proofState: string): string {
+  switch (proofState) {
+    case 'missing':
+      return 'This Dataset needs its declared grain/key evidence before it can run against the active source.';
+    case 'stale':
+      return 'This Dataset proof no longer matches the active source, dependency contract, or warehouse target. Revalidate it before running.';
+    case 'invalid':
+      return 'This Dataset grain/key evidence is invalid for the active source. Review the Dataset contract before running.';
+    case 'target_required':
+      return 'Connect the selected source so DQL can validate its Dataset evidence against the active warehouse target.';
+    default:
+      return 'This Dataset source does not have a valid target-bound grain/key proof.';
+  }
+}
+
+type DatasetBoundParameterEvidence = {
+  name: string;
+  kind: 'null' | 'string' | 'number' | 'boolean' | 'array' | 'object';
+  valueCount?: number;
+  valueFingerprint: string;
+};
+
+/**
+ * Expose binding presence without serializing values into an App result. The
+ * value remains with the server/connector; the fingerprint lets a viewer tell
+ * whether an execution was bound differently without learning the value.
+ */
+function datasetBoundParameterEvidence(parameters: Record<string, unknown>): DatasetBoundParameterEvidence[] {
+  return Object.entries(parameters)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => {
+      const kind = value === null
+        ? 'null'
+        : Array.isArray(value)
+          ? 'array'
+          : typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+            ? typeof value
+            : 'object';
+      return {
+        name,
+        kind,
+        ...(Array.isArray(value) ? { valueCount: value.length } : {}),
+        valueFingerprint: `sha256:${fingerprintDashboardRuntimeState(value)}`,
+      } as DatasetBoundParameterEvidence;
+    });
+}
+
+/**
+ * Filter values follow the same presentation rule as source parameters. The
+ * authored query specification records approved fields/operators and an opaque
+ * binding fingerprint, never the selected member values.
+ */
+function datasetBoundFilterEvidence(filters: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(filters)) return [];
+  return filters.map((filter, index) => {
+    const record = filter && typeof filter === 'object' && !Array.isArray(filter)
+      ? filter as Record<string, unknown>
+      : {};
+    const values = Array.isArray(record.values) ? record.values : record.value === undefined ? [] : [record.value];
+    const field = typeof record.field === 'string'
+      ? record.field
+      : typeof record.fieldId === 'string'
+        ? record.fieldId
+        : undefined;
+    return {
+      index,
+      ...(field ? { field } : {}),
+      ...(typeof record.semanticReference === 'string' ? { semanticReference: record.semanticReference } : {}),
+      ...(typeof record.op === 'string' ? { operator: record.op } : {}),
+      ...(typeof record.placement === 'string' ? { placement: record.placement } : {}),
+      valueCount: values.length,
+      valueFingerprint: `sha256:${fingerprintDashboardRuntimeState(values)}`,
+    };
+  });
+}
+
+function redactDatasetTileQueryForPresentation(query: unknown): Record<string, unknown> {
+  const record = query && typeof query === 'object' && !Array.isArray(query)
+    ? query as Record<string, unknown>
+    : {};
+  return {
+    ...(Array.isArray(record.dimensions) ? { dimensions: record.dimensions } : {}),
+    ...(Array.isArray(record.measures) ? { measures: record.measures } : {}),
+    ...(Array.isArray(record.filters) ? { filters: datasetBoundFilterEvidence(record.filters) } : {}),
+    ...(Array.isArray(record.having) ? { having: datasetBoundFilterEvidence(record.having) } : {}),
+    ...(Array.isArray(record.orderBy) ? { orderBy: record.orderBy } : {}),
+    ...(record.limit !== undefined ? { limit: record.limit } : {}),
+    ...(record.detail === true ? { detail: true } : {}),
+    ...(Array.isArray(record.detailColumns) ? { detailColumns: record.detailColumns } : {}),
+    ...(record.respectsGlobalFilters === true ? { respectsGlobalFilters: true } : {}),
+  };
+}
+
+function redactDatasetSemanticRequestForPresentation(request: unknown): Record<string, unknown> {
+  const record = request && typeof request === 'object' && !Array.isArray(request)
+    ? request as Record<string, unknown>
+    : {};
+  return {
+    ...(Array.isArray(record.metrics) ? { metrics: record.metrics } : {}),
+    ...(Array.isArray(record.dimensions) ? { dimensions: record.dimensions } : {}),
+    ...(Array.isArray(record.filters) ? { filters: datasetBoundFilterEvidence(record.filters) } : {}),
+    ...(record.timeDimension && typeof record.timeDimension === 'object' ? { timeDimension: record.timeDimension } : {}),
+    ...(Array.isArray(record.orderBy) ? { orderBy: record.orderBy } : {}),
+    ...(record.limit !== undefined ? { limit: record.limit } : {}),
+  };
+}
+
+/**
+ * A redacted declarative Dataset TileQuery specification. It intentionally is
+ * not labeled DQL or SQL: SQL is emitted separately only after the server has
+ * compiled and executed this exact query.
+ */
+function renderDatasetTileAuthoredQuerySpec(input: {
+  descriptor: { id: string; sourceRevision: string; contractRef: { id: string; fingerprint: string }; trust: string; lifecycle: string; binding: unknown };
+  query: unknown;
+  filters: unknown;
+  parameterEvidence: DatasetBoundParameterEvidence[];
+  semanticTargetBinding?: unknown;
+  /** Canonical capabilities plus their exact adapter references, never a guessed member name. */
+  semanticRequest?: unknown;
+}): string {
+  return JSON.stringify({
+    version: 3,
+    kind: 'dataset_tile_query',
+    dataset: {
+      id: input.descriptor.id,
+      sourceRevision: input.descriptor.sourceRevision,
+      contract: input.descriptor.contractRef,
+      trust: input.descriptor.trust,
+      lifecycle: input.descriptor.lifecycle,
+      binding: input.descriptor.binding,
+    },
+    query: redactDatasetTileQueryForPresentation(input.query),
+    boundFilterEvidence: datasetBoundFilterEvidence(input.filters),
+    boundParameterEvidence: input.parameterEvidence,
+    ...(input.semanticRequest ? { semanticRequest: redactDatasetSemanticRequestForPresentation(input.semanticRequest) } : {}),
+    ...(input.semanticTargetBinding ? { semanticTargetBinding: input.semanticTargetBinding } : {}),
+  }, null, 2);
+}
+
+/** The full artifact representation remains available only to Notebook handoff. */
+function renderDatasetTileDql(input: {
+  descriptor: { id: string; sourceRevision: string; contractRef: { id: string; fingerprint: string }; trust: string; lifecycle: string; binding: unknown };
+  query: unknown;
+  filters: unknown;
+  parameters: Record<string, unknown>;
+  semanticTargetBinding?: unknown;
+  /** Canonical capabilities plus their exact adapter references, never a guessed member name. */
+  semanticRequest?: unknown;
+}): string {
+  return JSON.stringify({
+    version: 3,
+    kind: 'dataset_tile_query',
+    dataset: {
+      id: input.descriptor.id,
+      sourceRevision: input.descriptor.sourceRevision,
+      contract: input.descriptor.contractRef,
+      trust: input.descriptor.trust,
+      lifecycle: input.descriptor.lifecycle,
+      binding: input.descriptor.binding,
+    },
+    query: input.query,
+    boundFilters: input.filters,
+    boundParameters: input.parameters,
+    ...(input.semanticRequest ? { semanticRequest: input.semanticRequest } : {}),
+    ...(input.semanticTargetBinding ? { semanticTargetBinding: input.semanticTargetBinding } : {}),
+  }, null, 2);
+}
+
+function errorCodeForDatasetTile(error: unknown): string {
+  if (error && typeof error === 'object' && 'code' in error && typeof (error as { code?: unknown }).code === 'string') {
+    return (error as { code: string }).code;
+  }
+  return 'DATASET_TILE_EXECUTION_FAILED';
+}
+
 function mergeDashboardChartConfig(
   base: object | null | undefined,
   item: DashboardGridItem,
@@ -23126,6 +28585,186 @@ function mergeDashboardChartConfig(
     ...options,
     chart: dashboardVizToChart(String(options.chart ?? baseChart ?? item.viz.type)),
   };
+}
+
+/**
+ * Field tiles carry the presentation contract selected from the Dataset, not
+ * a name-based guess made by a chart. This keeps ratios as stored fractions
+ * (for example .25) while displaying them as 25%, and preserves a declared
+ * measure currency after the SQL result crosses the App boundary.
+ */
+function decorateDatasetResult(
+  result: unknown,
+  descriptor: DatasetDescriptor,
+  query: TileQuery,
+  presentation?: {
+    comparison?: {
+      values: Array<{ periodId: string; alias: string }>;
+      deltas: Array<{ periodId: string; alias: string }>;
+      percentDeltas: Array<{ periodId: string; alias: string }>;
+    };
+  },
+): Record<string, unknown> {
+  const raw = result && typeof result === 'object' ? result as Record<string, unknown> : {};
+  const columns = Array.isArray(raw.columns)
+    ? raw.columns.map((column) => typeof column === 'string'
+      ? column
+      : column && typeof column === 'object' && typeof (column as { name?: unknown }).name === 'string'
+        ? (column as { name: string }).name
+        : String(column))
+    : [];
+  const existing = new Map((Array.isArray(raw.columnsMeta) ? raw.columnsMeta : [])
+    .filter((meta): meta is Record<string, unknown> => Boolean(meta && typeof meta === 'object' && typeof (meta as { name?: unknown }).name === 'string'))
+    .map((meta) => [normalizeDatasetPresentationColumn(String(meta.name)), meta]));
+  const expected = new Map<string, Record<string, unknown>>();
+  for (const dimension of query.dimensions) {
+    const field = descriptor.fields.find((candidate) => candidate.kind === 'physical'
+      && (candidate.name === dimension.field || candidate.qualifiedId === dimension.field));
+    if (!field || field.kind !== 'physical') continue;
+    const alias = dimension.alias ?? (dimension.timeGrain ? `${field.name}_${dimension.timeGrain}` : field.name);
+    const meta = {
+      name: alias,
+      kind: field.type === 'boolean' ? 'boolean' : field.type === 'date' || field.type === 'timestamp' ? 'date' : field.type === 'number' ? 'number' : 'text',
+      ref: datasetPresentationDimensionRef(field.qualifiedId),
+      ...(dimension.timeGrain ? { grain: dimension.timeGrain } : {}),
+    };
+    for (const name of [alias, field.name, field.qualifiedId]) expected.set(normalizeDatasetPresentationColumn(name), meta);
+  }
+  for (const selection of query.measures) {
+    const measure = descriptor.fields.find((candidate) => candidate.kind === 'measure'
+      && (candidate.name === selection.measure || candidate.qualifiedId === selection.measure));
+    if (!measure || measure.kind !== 'measure') continue;
+    const alias = selection.alias ?? measure.name;
+    const kind = measure.format?.kind
+      ?? (measure.aggregation === 'count' || measure.aggregation === 'count_distinct' ? 'count' : 'number');
+    const meta = {
+      name: alias,
+      kind,
+      ref: datasetPresentationMeasureRef(measure.qualifiedId, measure.metricId),
+      ...(kind === 'percent' ? { unit: 'fraction' } : measure.format?.currency ? { unit: measure.format.currency } : {}),
+      ...(measure.format?.decimals !== undefined ? { decimals: measure.format.decimals } : {}),
+    };
+    for (const name of [alias, measure.name, measure.qualifiedId, ...(measure.metricId ? [measure.metricId] : [])]) {
+      expected.set(normalizeDatasetPresentationColumn(name), meta);
+    }
+  }
+  // Comparison values are still the selected governed measure. The analytical
+  // graph gives each resolved period a stable output alias, so carry the
+  // source-owned display contract across that alias rather than asking a
+  // renderer to infer a currency or ratio from its generated name.
+  if (presentation?.comparison && query.measures.length === 1) {
+    const selection = query.measures[0]!;
+    const measure = descriptor.fields.find((candidate) => candidate.kind === 'measure'
+      && (candidate.name === selection.measure || candidate.qualifiedId === selection.measure));
+    if (measure?.kind === 'measure') {
+      const kind = measure.format?.kind
+        ?? (measure.aggregation === 'count' || measure.aggregation === 'count_distinct' ? 'count' : 'number');
+      const measureMeta = {
+        kind,
+        ref: datasetPresentationMeasureRef(measure.qualifiedId, measure.metricId),
+        ...(kind === 'percent' ? { unit: 'fraction' } : measure.format?.currency ? { unit: measure.format.currency } : {}),
+        ...(measure.format?.decimals !== undefined ? { decimals: measure.format.decimals } : {}),
+      };
+      for (const value of presentation.comparison.values) {
+        expected.set(normalizeDatasetPresentationColumn(value.alias), { name: value.alias, ...measureMeta });
+      }
+      for (const delta of presentation.comparison.deltas) {
+        // Ratio values remain stored as fractions. A rate delta therefore
+        // displays with the same governed fraction format; it is not mutated
+        // into an untraceable client-side numeric value.
+        expected.set(normalizeDatasetPresentationColumn(delta.alias), { name: delta.alias, ...measureMeta });
+      }
+      for (const delta of presentation.comparison.percentDeltas) {
+        // The graph returns percent changes on a 100-based scale. Leave the
+        // number untouched and give the formatter an explicit percent contract.
+        expected.set(normalizeDatasetPresentationColumn(delta.alias), {
+          name: delta.alias,
+          kind: 'percent',
+          ref: datasetPresentationMeasureRef(measure.qualifiedId, measure.metricId),
+          ...(measure.format?.decimals !== undefined ? { decimals: measure.format.decimals } : {}),
+        });
+      }
+    }
+  }
+  const columnsMeta = columns.flatMap((column) => {
+    const expectedMeta = expected.get(normalizeDatasetPresentationColumn(column));
+    const existingMeta = existing.get(normalizeDatasetPresentationColumn(column));
+    return expectedMeta || existingMeta ? [{ ...(existingMeta ?? {}), ...(expectedMeta ?? {}), name: column }] : [];
+  });
+  return {
+    ...raw,
+    columns,
+    ...(columnsMeta.length ? { columnsMeta } : {}),
+  };
+}
+
+/**
+ * The browser receives only server-derived drill choices for the current
+ * effective query. A matching label or a guessed next column never exposes a
+ * relationship: both hierarchy identity and adjacent declared level are
+ * required again when the interaction request is replayed.
+ */
+function datasetHierarchyDrillCandidates(
+  descriptor: DatasetDescriptor,
+  query: TileQuery,
+): Array<{ hierarchyId: string; fromField: string; fromAlias: string; toField: string }> {
+  return query.dimensions.flatMap((dimension) => {
+    const field = descriptor.fields.find((candidate) => candidate.kind === 'physical'
+      && (candidate.name === dimension.field || candidate.qualifiedId === dimension.field));
+    if (!field || field.kind !== 'physical' || !field.hierarchy?.id) return [];
+    const levels = datasetHierarchyFields(descriptor, field.hierarchy.id);
+    const next = levels.find((candidate) => candidate.hierarchy?.level === field.hierarchy!.level + 1);
+    if (!next) return [];
+    return [{
+      hierarchyId: field.hierarchy.id,
+      fromField: field.name,
+      fromAlias: dimension.alias ?? (dimension.timeGrain ? `${field.name}_${dimension.timeGrain}` : field.name),
+      toField: next.name,
+    }];
+  });
+}
+
+function datasetChartConfig(
+  base: object | null | undefined,
+  item: DashboardGridItem,
+  descriptor: DatasetDescriptor,
+  query: TileQuery,
+  semantic = false,
+): Record<string, unknown> {
+  const dimension = query.dimensions[0];
+  const measure = query.measures[0];
+  const resolvedMeasure = measure && descriptor.fields.find((field) => field.kind === 'measure'
+    && (field.name === measure.measure || field.qualifiedId === measure.measure));
+  const suggested = {
+    ...(dimension ? {
+      x: semantic
+        ? descriptor.fields.find((field) => field.kind === 'physical' && (field.name === dimension.field || field.qualifiedId === dimension.field))?.name
+        : dimension.alias ?? (dimension.timeGrain ? `${dimension.field}_${dimension.timeGrain}` : dimension.field),
+    } : {}),
+    ...(measure ? {
+      y: semantic ? measure.measure : measure.alias ?? measure.measure,
+      metrics: query.measures.map((selection) => semantic ? selection.measure : selection.alias ?? selection.measure),
+    } : {}),
+    ...(resolvedMeasure?.kind === 'measure' && resolvedMeasure.format ? { format: resolvedMeasure.format.kind } : {}),
+  };
+  return mergeDashboardChartConfig({ ...(base ?? {}), ...suggested }, item);
+}
+
+function normalizeDatasetPresentationColumn(value: string): string {
+  return value.trim().toLowerCase().replace(/["`\[\]]/g, '').split('.').at(-1)?.replace(/[^a-z0-9]/g, '') ?? '';
+}
+
+function datasetPresentationDimensionRef(qualifiedId: string): string {
+  return qualifiedId.startsWith('dimension:') || qualifiedId.startsWith('entity:')
+    ? qualifiedId
+    : `dimension:${qualifiedId}`;
+}
+
+function datasetPresentationMeasureRef(qualifiedId: string, metricId?: string): string {
+  if (metricId) return metricId.startsWith('metric:') ? metricId : `metric:${metricId}`;
+  return qualifiedId.startsWith('measure:') || qualifiedId.startsWith('metric:')
+    ? qualifiedId
+    : `measure:${qualifiedId}`;
 }
 
 function dashboardVizToChart(value: string): string {
@@ -24005,6 +29644,562 @@ function parseContextAuthoringOrigin(value: unknown): ContextAuthoringOrigin {
   throw Object.assign(new Error('A valid context proposal origin is required.'), { code: 'INVALID_REQUEST' });
 }
 
+type DatasetAuthoringOperation = Extract<ContextAuthoringOperation, { kind: 'dataset_change' }>;
+type DatasetDraftAuthoringOperation = Extract<ContextAuthoringOperation, { kind: 'dataset_draft' }>;
+
+interface PreparedDatasetAuthoringChange {
+  block: ManifestBlock;
+  relativePath: string;
+  source: string;
+  patch: ReturnType<typeof prepareDatasetDeclarationPatch>;
+}
+
+interface PreparedDatasetDraftAuthoringChange {
+  blockName: string;
+  relativePath: string;
+  before: string;
+  source: string;
+}
+
+/**
+ * A review draft is intentionally a tiny, typed source declaration.  The
+ * browser and a provider can suggest business names and a relation, but they
+ * cannot smuggle a SQL body, source path, lifecycle, or validation proof into
+ * the proposal.  The generated declaration is parsed and semantically checked
+ * before it becomes an immutable Context Authoring proposal.
+ */
+function prepareDatasetDraftAuthoringChangeForProposal(
+  projectRoot: string,
+  manifest: DQLManifest,
+  change: DatasetDraftAuthoringOperation['change'],
+): PreparedDatasetDraftAuthoringChange {
+  const domain = change.domain.trim();
+  const knownDomain = Object.values(manifest.domains ?? {}).find((candidate) => candidate.id === domain);
+  if (!knownDomain) {
+    throw Object.assign(new Error(`Dataset draft domain ${domain} is not present in the current project snapshot.`), { code: 'DATASET_DRAFT_DOMAIN_NOT_FOUND' });
+  }
+  const relativePath = `domains/${domainFolderSlug(domain)}/blocks/_drafts/${change.slug}.dql`;
+  const absolute = resolveContextPatchPath(projectRoot, null, relativePath);
+  const before = existsSync(absolute) ? readFileSync(absolute, 'utf8') : '';
+  if (before) {
+    throw Object.assign(new Error(`Dataset draft target ${relativePath} already exists. Refresh the source gap instead of overwriting an existing review draft.`), { code: 'DATASET_DRAFT_TARGET_EXISTS' });
+  }
+  const source = renderDatasetDraftSource(change);
+  try {
+    const program = new Parser(source, relativePath).parse();
+    const diagnostics = analyze(program);
+    const errors = diagnostics.filter((diagnostic) => diagnostic.severity === 'error');
+    if (errors.length > 0) {
+      throw new Error(errors.map((diagnostic) => diagnostic.message).join(' '));
+    }
+  } catch (cause) {
+    throw Object.assign(
+      new Error(`The typed Dataset draft could not compile before review: ${cause instanceof Error ? cause.message : 'unknown DQL error'}`),
+      { code: 'DATASET_DRAFT_COMPILE_FAILED' },
+    );
+  }
+  return { blockName: change.name, relativePath, before, source };
+}
+
+function renderDatasetDraftSource(change: DatasetDraftAuthoringChange): string {
+  const selectFields = change.fields.map((field) => field.name).join(', ');
+  const quote = (value: string) => `"${escapeDqlString(value)}"`;
+  const fieldLines = change.fields.map((field) => {
+    const properties = [
+      `role = ${quote(field.role)}`,
+      `type = ${quote(field.type ?? 'string')}`,
+      ...(field.grains?.length ? [`grains = [${field.grains.map(quote).join(', ')}]`] : []),
+      ...(field.primary === true ? ['primary = true'] : []),
+      ...(field.hierarchy ? [`hierarchy = ${quote(field.hierarchy)}`] : []),
+      ...(field.level === undefined ? [] : [`level = ${field.level}`]),
+      'status = "suggested"',
+    ];
+    return `    ${field.name} { ${properties.join(', ')} }`;
+  });
+  const measureLines = change.measures.map((measure) => {
+    const properties = [
+      `agg = ${quote(measure.aggregation)}`,
+      ...(measure.from ? [`from = ${quote(measure.from)}`] : []),
+      ...(measure.numerator ? [`numerator = ${quote(measure.numerator)}`] : []),
+      ...(measure.denominator ? [`denominator = ${quote(measure.denominator)}`] : []),
+      ...(measure.expression ? [`expression = ${quote(measure.expression)}`] : []),
+      ...(measure.timeBucketBy ? [`timeBucketBy = ${quote(measure.timeBucketBy)}`] : []),
+      `additive = ${quote(measure.additive)}`,
+      ...(measure.entityAdditive ? [`entityAdditive = ${quote(measure.entityAdditive)}`] : []),
+      ...(measure.allowedAggs?.length ? [`allowedAggs = [${measure.allowedAggs.map(quote).join(', ')}]`] : []),
+      ...(measure.format ? [`format = ${quote(measure.format)}`] : []),
+      ...(measure.currency ? [`currency = ${quote(measure.currency)}`] : []),
+      'status = "suggested"',
+    ];
+    return `    ${measure.name} { ${properties.join(', ')} }`;
+  });
+  return [
+    `block ${quote(change.name)} {`,
+    `  domain = ${quote(change.domain)}`,
+    '  type = "custom"',
+    '  status = "draft"',
+    `  description = ${quote(change.description)}`,
+    '  tags = ["app-gap", "review-required", "dataset-draft"]',
+    `  llmContext = ${quote(`Review draft from ${change.sourceEvidence.join(', ')}. Verify the source relation, grain, fields, measures, and interpretation before certifying.`)}`,
+    '  grain = {',
+    `    entities = [${change.grain.entities.map(quote).join(', ')}]`,
+    `    keys = [${change.grain.keys.map(quote).join(', ')}]`,
+    ...(change.grain.description ? [`    description = ${quote(change.grain.description)}`] : []),
+    ...(change.grain.timeGrain ? [`    timeGrain = ${quote(change.grain.timeGrain)}`] : []),
+    ...(change.grain.timeBucketBy ? [`    timeBucketBy = ${quote(change.grain.timeBucketBy)}`] : []),
+    ...(change.grain.aggregate === undefined ? [] : [`    aggregate = ${change.grain.aggregate ? 'true' : 'false'}`]),
+    '  }',
+    '  fields {',
+    ...fieldLines,
+    '  }',
+    '  measures {',
+    ...measureLines,
+    '  }',
+    '  query = """',
+    `SELECT ${selectFields}`,
+    `FROM ${change.sourceRelation}`,
+    '  """',
+    '}',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Dataset source changes cross the HTTP boundary as data, so normalize every
+ * nested member before the server resolves it. The browser may suggest a
+ * declaration, but cannot select a file, lifecycle, SQL fragment, or proof
+ * authority outside this narrow shape.
+ */
+function parseDatasetAuthoringChange(value: unknown, operationId: string): DatasetAuthoringOperation['change'] {
+  const change = contextProposalObject(value, `Dataset operation ${operationId}`);
+  assertContextProposalKeys(change, ['targetQualifiedId', 'targetPath', 'expectedSourceHash', 'patch'], `Dataset operation ${operationId}`);
+  const targetQualifiedId = contextProposalString(change.targetQualifiedId, `Dataset operation ${operationId} targetQualifiedId`);
+  const targetPath = contextProposalRelativePath(change.targetPath, `Dataset operation ${operationId} targetPath`);
+  const expectedSourceHash = contextProposalString(change.expectedSourceHash, `Dataset operation ${operationId} expectedSourceHash`);
+  if (!/^sha256:[a-f0-9]{64}$/i.test(expectedSourceHash)) {
+    throw Object.assign(new Error(`Dataset operation ${operationId} expectedSourceHash must be an exact sha256 source revision.`), { code: 'INVALID_REQUEST' });
+  }
+  const rawPatch = contextProposalObject(change.patch, `Dataset operation ${operationId} patch`);
+  assertContextProposalKeys(rawPatch, ['grain', 'fields', 'measures'], `Dataset operation ${operationId} patch`);
+  if (!Object.prototype.hasOwnProperty.call(rawPatch, 'grain')
+    && !Object.prototype.hasOwnProperty.call(rawPatch, 'fields')
+    && !Object.prototype.hasOwnProperty.call(rawPatch, 'measures')) {
+    throw Object.assign(new Error(`Dataset operation ${operationId} needs a grain, field, or measure patch.`), { code: 'INVALID_REQUEST' });
+  }
+  const patch: DatasetDeclarationPatch = {
+    ...(Object.prototype.hasOwnProperty.call(rawPatch, 'grain') ? { grain: parseDatasetProposalGrain(rawPatch.grain, operationId) } : {}),
+    ...(Object.prototype.hasOwnProperty.call(rawPatch, 'fields') ? { fields: parseDatasetProposalFields(rawPatch.fields, operationId) } : {}),
+    ...(Object.prototype.hasOwnProperty.call(rawPatch, 'measures') ? { measures: parseDatasetProposalMeasures(rawPatch.measures, operationId) } : {}),
+  };
+  return { targetQualifiedId, targetPath, expectedSourceHash, patch };
+}
+
+function parseDatasetDraftAuthoringChange(value: unknown, operationId: string): DatasetDraftAuthoringChange {
+  const change = contextProposalObject(value, `Dataset draft operation ${operationId}`);
+  assertContextProposalKeys(
+    change,
+    ['domain', 'slug', 'sourceRelation', 'name', 'description', 'grain', 'fields', 'measures', 'sourceEvidence'],
+    `Dataset draft operation ${operationId}`,
+  );
+  const domain = contextProposalString(change.domain, `Dataset draft operation ${operationId} domain`);
+  const slug = contextProposalString(change.slug, `Dataset draft operation ${operationId} slug`).toLowerCase();
+  const sourceRelation = contextProposalString(change.sourceRelation, `Dataset draft operation ${operationId} sourceRelation`);
+  const name = contextProposalString(change.name, `Dataset draft operation ${operationId} name`);
+  const description = contextProposalString(change.description, `Dataset draft operation ${operationId} description`);
+  if (!/^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(domain)) {
+    throw Object.assign(new Error(`Dataset draft operation ${operationId} domain must be a simple current Domain id.`), { code: 'INVALID_REQUEST' });
+  }
+  if (!/^[a-z][a-z0-9-]{0,79}$/.test(slug)) {
+    throw Object.assign(new Error(`Dataset draft operation ${operationId} slug must use lower-case letters, digits, and hyphens.`), { code: 'INVALID_REQUEST' });
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){0,2}$/.test(sourceRelation)) {
+    throw Object.assign(new Error(`Dataset draft operation ${operationId} sourceRelation must be a simple table or schema.table reference, not SQL.`), { code: 'INVALID_REQUEST' });
+  }
+  const rawGrain = contextProposalObject(change.grain, `Dataset draft operation ${operationId} grain`);
+  if (Object.prototype.hasOwnProperty.call(rawGrain, 'keyEvidence')) {
+    throw Object.assign(new Error(`Dataset draft operation ${operationId} cannot claim key evidence. Validate keys against a real target after review.`), { code: 'INVALID_REQUEST' });
+  }
+  const grain = parseDatasetProposalGrain(rawGrain, operationId);
+  const fields = parseDatasetDraftFields(change.fields, operationId);
+  const measures = parseDatasetDraftMeasures(change.measures, operationId);
+  const sourceEvidence = contextProposalStringArray(change.sourceEvidence, `Dataset draft operation ${operationId} sourceEvidence`, { min: 1, max: 16 });
+  const physicalNames = new Set(fields.map((field) => field.name.toLowerCase()));
+  if (grain.keys.some((key) => !physicalNames.has(key.toLowerCase()))) {
+    throw Object.assign(new Error(`Dataset draft operation ${operationId} grain keys must be declared physical fields.`), { code: 'INVALID_REQUEST' });
+  }
+  if (fields.some((field) => field.role === 'key' && !grain.keys.some((key) => key.toLowerCase() === field.name.toLowerCase()))) {
+    throw Object.assign(new Error(`Dataset draft operation ${operationId} key fields must appear in the declared grain.`), { code: 'INVALID_REQUEST' });
+  }
+  for (const measure of measures) {
+    const dependencies = measure.expression
+      ? []
+      : measure.aggregation === 'ratio'
+        ? [measure.numerator, measure.denominator]
+        : [measure.from];
+    if (dependencies.some((dependency) => dependency && !physicalNames.has(dependency.toLowerCase()))) {
+      throw Object.assign(new Error(`Dataset draft operation ${operationId} measure ${measure.name} depends on an undeclared physical field.`), { code: 'INVALID_REQUEST' });
+    }
+  }
+  return { domain, slug, sourceRelation, name, description, grain, fields, measures, sourceEvidence };
+}
+
+/**
+ * Deterministic, typed fallback for one explicit App source gap. It does not
+ * infer a physical schema from a name: every generated field and measure is
+ * visibly `suggested`, every aggregation is non-additive, and the review draft
+ * uses an explicit relation placeholder unless an author names one. The
+ * proposal is useful to review without being executable authority.
+ */
+function appDatasetGapDraftChange(input: {
+  appBuildId: string;
+  requirement: AppBuildRequirement;
+  domain: string;
+  sourceRelation?: string;
+}): DatasetDraftAuthoringChange {
+  const domain = input.domain.trim();
+  if (!domain) {
+    throw Object.assign(new Error('APP_BUILD_DATASET_GAP_DOMAIN_REQUIRED: choose an existing Domain before preparing this Dataset review draft.'), { code: 'DATASET_DRAFT_DOMAIN_NOT_FOUND' });
+  }
+  const rawSlug = `${input.requirement.id || input.requirement.question}`.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 52) || 'dataset-gap';
+  const slug = rawSlug[0] && /[a-z]/.test(rawSlug[0]) ? rawSlug : `gap-${rawSlug}`;
+  const fieldName = (value: string, fallback: string): string => {
+    const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+    const candidate = normalized && /^[a-z_]/.test(normalized) ? normalized : fallback;
+    return candidate.slice(0, 64);
+  };
+  const uniqueNames = (values: string[], fallbackPrefix: string): string[] => {
+    const seen = new Set<string>();
+    return values.map((value, index) => fieldName(value, `${fallbackPrefix}_${index + 1}`)).filter((value) => {
+      if (seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+  };
+  const dimensions = uniqueNames(input.requirement.dimensions ?? [], 'dimension');
+  const measures = uniqueNames(input.requirement.measures ?? [], 'measure');
+  const key = 'record_id';
+  const usedPhysicalNames = new Set([key, ...dimensions]);
+  const measurePhysical = new Map<string, string>();
+  for (const measure of measures) {
+    let physical = measure;
+    if (usedPhysicalNames.has(physical)) physical = `${measure}_value`.slice(0, 64);
+    let suffix = 2;
+    while (usedPhysicalNames.has(physical)) physical = `${measure}_value_${suffix++}`.slice(0, 64);
+    usedPhysicalNames.add(physical);
+    measurePhysical.set(measure, physical);
+  }
+  const physicalFields: ManifestDatasetField[] = [
+    { name: key, role: 'key', type: 'string', primary: true, status: 'suggested' },
+    ...dimensions.filter((name) => name !== key).map((name) => ({ name, role: 'dimension' as const, type: 'string' as const, status: 'suggested' as const })),
+    ...measures.map((name) => ({ name: measurePhysical.get(name)!, role: 'attribute' as const, type: 'number' as const, status: 'suggested' as const })),
+  ];
+  // A gap with no named measure is still a valid typed review artifact. The
+  // count is deliberately non-additive until a reviewer declares its meaning.
+  if (measures.length === 0) physicalFields.push({ name: 'value', role: 'attribute', type: 'number', status: 'suggested' });
+  const sourceMeasures: ManifestDatasetMeasure[] = (measures.length > 0 ? measures : ['value']).map((name) => ({
+    name,
+    aggregation: 'sum',
+    from: measurePhysical.get(name) ?? name,
+    additive: 'non_additive',
+    allowedAggs: ['sum'],
+    status: 'suggested',
+  }));
+  const title = input.requirement.question.trim().replace(/\s+/g, ' ').slice(0, 180) || 'App Dataset gap';
+  return {
+    domain,
+    slug,
+    sourceRelation: input.sourceRelation?.trim() || `review_${slug.replace(/-/g, '_')}_source`,
+    name: `App gap ${title}`,
+    description: `Review-required Dataset draft for the uncovered App requirement: ${title}`,
+    grain: { entities: [`${slug}_record`], keys: [key], description: 'Suggested record grain. Validate the key and source relation against the warehouse before certification.' },
+    fields: physicalFields,
+    measures: sourceMeasures,
+    sourceEvidence: [`app-build:${input.appBuildId}`, `requirement:${input.requirement.id}`],
+  };
+}
+
+function parseDatasetDraftFields(value: unknown, operationId: string): ManifestDatasetField[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 200) {
+    throw Object.assign(new Error(`Dataset draft operation ${operationId} fields must contain 1-200 physical fields.`), { code: 'INVALID_REQUEST' });
+  }
+  const types = new Set<NonNullable<ManifestDatasetField['type']>>(['string', 'number', 'boolean', 'date', 'timestamp']);
+  const names = new Set<string>();
+  return value.map((raw, index): ManifestDatasetField => {
+    const field = contextProposalObject(raw, `Dataset draft operation ${operationId} field ${index + 1}`);
+    assertContextProposalKeys(field, ['name', 'role', 'type', 'grains', 'primary', 'hierarchy', 'level'], `Dataset draft operation ${operationId} field ${index + 1}`);
+    const name = contextProposalString(field.name, `Dataset draft operation ${operationId} field ${index + 1} name`);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || names.has(name.toLowerCase())) {
+      throw Object.assign(new Error(`Dataset draft operation ${operationId} field ${index + 1} needs a unique simple physical name.`), { code: 'INVALID_REQUEST' });
+    }
+    names.add(name.toLowerCase());
+    const role = field.role;
+    if (role !== 'dimension' && role !== 'key' && role !== 'time' && role !== 'attribute') {
+      throw Object.assign(new Error(`Dataset draft operation ${operationId} field ${index + 1} needs a supported physical role.`), { code: 'INVALID_REQUEST' });
+    }
+    const type = field.type;
+    if (!types.has(type as NonNullable<ManifestDatasetField['type']>)) {
+      throw Object.assign(new Error(`Dataset draft operation ${operationId} field ${index + 1} needs a supported physical type.`), { code: 'INVALID_REQUEST' });
+    }
+    const level = field.level;
+    if (level !== undefined && (!Number.isInteger(level) || Number(level) < 0 || Number(level) > 1000)) {
+      throw Object.assign(new Error(`Dataset draft operation ${operationId} field ${index + 1} level must be a non-negative integer.`), { code: 'INVALID_REQUEST' });
+    }
+    return {
+      name,
+      role,
+      type: type as NonNullable<ManifestDatasetField['type']>,
+      ...(field.grains === undefined ? {} : { grains: contextProposalStringArray(field.grains, `Dataset draft operation ${operationId} field ${index + 1} grains`, { min: 1, max: 16 }) }),
+      ...(field.primary === undefined ? {} : { primary: contextProposalBoolean(field.primary, `Dataset draft operation ${operationId} field ${index + 1} primary`) }),
+      ...(field.hierarchy === undefined ? {} : { hierarchy: contextProposalString(field.hierarchy, `Dataset draft operation ${operationId} field ${index + 1} hierarchy`) }),
+      ...(level === undefined ? {} : { level: Number(level) }),
+      status: 'suggested',
+    };
+  });
+}
+
+function parseDatasetDraftMeasures(value: unknown, operationId: string): ManifestDatasetMeasure[] {
+  if (!Array.isArray(value)) {
+    throw Object.assign(new Error(`Dataset draft operation ${operationId} measures must be an array.`), { code: 'INVALID_REQUEST' });
+  }
+  for (const [index, raw] of value.entries()) {
+    const measure = contextProposalObject(raw, `Dataset draft operation ${operationId} measure ${index + 1}`);
+    if (Object.prototype.hasOwnProperty.call(measure, 'status')) {
+      throw Object.assign(new Error(`Dataset draft operation ${operationId} cannot set measure approval status. New measures remain suggested until reviewed.`), { code: 'INVALID_REQUEST' });
+    }
+  }
+  const measures = parseDatasetProposalMeasures(value, operationId);
+  const names = new Set<string>();
+  return measures.map((measure) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(measure.name) || names.has(measure.name.toLowerCase())) {
+      throw Object.assign(new Error(`Dataset draft operation ${operationId} measures need unique simple names.`), { code: 'INVALID_REQUEST' });
+    }
+    names.add(measure.name.toLowerCase());
+    return { ...measure, status: 'suggested' };
+  });
+}
+
+/** Resolve an App Dataset authoring target against the current Git snapshot. */
+function prepareDatasetAuthoringChangeForProposal(
+  projectRoot: string,
+  manifest: DQLManifest,
+  change: DatasetAuthoringOperation['change'],
+): PreparedDatasetAuthoringChange {
+  const resolved = resolveDatasetAuthoringSource(projectRoot, manifest, change);
+  if (change.expectedSourceHash !== resolved.sourceRevision) {
+    throw Object.assign(new Error(`Dataset source ${resolved.block.name} changed after the proposal was prepared. Repreview against the current revision.`), { code: 'SOURCE_CHANGED' });
+  }
+  const patch = prepareDatasetDeclarationPatch({
+    source: resolved.source,
+    filePath: change.targetPath,
+    blockName: resolved.block.name,
+    patch: change.patch,
+  });
+  return { block: resolved.block, relativePath: change.targetPath, source: resolved.source, patch };
+}
+
+/**
+ * Explicitly rebase Dataset operations onto current source bytes. This only
+ * refreshes the server-computed expected hash after resolving the exact same
+ * target identity; it never carries forward a previous file body, lifecycle,
+ * or catalog capability as authority.
+ */
+function rebaseDatasetAuthoringOperations(
+  projectRoot: string,
+  manifest: DQLManifest,
+  operations: ContextAuthoringOperation[],
+): ContextAuthoringOperation[] {
+  return operations.map((operation) => {
+    if (operation.kind !== 'dataset_change') return operation;
+    const resolved = resolveDatasetAuthoringSource(projectRoot, manifest, operation.change);
+    return {
+      ...operation,
+      change: {
+        ...operation.change,
+        expectedSourceHash: resolved.sourceRevision,
+      },
+    };
+  });
+}
+
+function resolveDatasetAuthoringSource(
+  projectRoot: string,
+  manifest: DQLManifest,
+  change: DatasetAuthoringOperation['change'],
+): { block: ManifestBlock; source: string; sourceRevision: string } {
+  const declarations = manifest.blockDeclarations ?? Object.values(manifest.blocks ?? {});
+  const candidates = declarations.filter((block) => block.filePath === change.targetPath && block.blockType !== 'semantic');
+  if (candidates.length !== 1) {
+    throw Object.assign(
+      new Error(`Dataset source ${change.targetPath} no longer resolves to exactly one current DQL block.`),
+      { code: candidates.length === 0 ? 'DATASET_SOURCE_TARGET_NOT_FOUND' : 'DATASET_SOURCE_TARGET_AMBIGUOUS' },
+    );
+  }
+  const block = candidates[0]!;
+  if (!block.datasetGrain || !block.datasetFields?.length || !block.datasetMeasures?.length) {
+    throw Object.assign(new Error(`Block ${block.name} is not a field-based Dataset source.`), { code: 'DATASET_SOURCE_NOT_DATASET' });
+  }
+  const qualifiedId = datasetAuthoringQualifiedId(block);
+  if (change.targetQualifiedId !== qualifiedId) {
+    throw Object.assign(new Error(`Dataset source identity changed for ${block.name}. Refresh the source before proposing a change.`), { code: 'SOURCE_CHANGED' });
+  }
+  const absolute = resolveContextPatchPath(projectRoot, null, change.targetPath);
+  const source = readFileSync(absolute, 'utf8');
+  const sourceRevision = `sha256:${createHash('sha256').update(source).digest('hex')}`;
+  return { block, source, sourceRevision };
+}
+
+function datasetAuthoringQualifiedId(block: ManifestBlock): string {
+  const domain = block.domain?.trim() || 'global';
+  const pathIdentity = createHash('sha256').update(`${block.filePath}\u0000${block.name}`).digest('hex').slice(0, 20);
+  return `${domain}::block::${block.name}::${pathIdentity}`;
+}
+
+function parseDatasetProposalGrain(value: unknown, operationId: string): ManifestDatasetGrain {
+  const grain = contextProposalObject(value, `Dataset operation ${operationId} grain`);
+  assertContextProposalKeys(grain, ['entities', 'keys', 'keyEvidence', 'description', 'timeGrain', 'timeBucketBy', 'aggregate'], `Dataset operation ${operationId} grain`);
+  return {
+    entities: contextProposalStringArray(grain.entities, `Dataset operation ${operationId} grain entities`, { min: 1, max: 32 }),
+    keys: contextProposalStringArray(grain.keys, `Dataset operation ${operationId} grain keys`, { min: 1, max: 32 }),
+    ...(grain.keyEvidence === undefined ? {} : { keyEvidence: contextProposalString(grain.keyEvidence, `Dataset operation ${operationId} grain keyEvidence`) }),
+    ...(grain.description === undefined ? {} : { description: contextProposalString(grain.description, `Dataset operation ${operationId} grain description`) }),
+    ...(grain.timeGrain === undefined ? {} : { timeGrain: contextProposalString(grain.timeGrain, `Dataset operation ${operationId} grain timeGrain`) }),
+    ...(grain.timeBucketBy === undefined ? {} : { timeBucketBy: contextProposalString(grain.timeBucketBy, `Dataset operation ${operationId} grain timeBucketBy`) }),
+    ...(grain.aggregate === undefined ? {} : { aggregate: contextProposalBoolean(grain.aggregate, `Dataset operation ${operationId} grain aggregate`) }),
+  };
+}
+
+function parseDatasetProposalFields(value: unknown, operationId: string): ManifestDatasetField[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 200) {
+    throw Object.assign(new Error(`Dataset operation ${operationId} fields must contain 1-200 physical fields.`), { code: 'INVALID_REQUEST' });
+  }
+  return value.map((raw, index): ManifestDatasetField => {
+    const field = contextProposalObject(raw, `Dataset operation ${operationId} field ${index + 1}`);
+    // Types and approval status belong to the source-resolved physical
+    // inventory. Field proposals may overlay only role/time/hierarchy
+    // metadata, so a browser cannot imply a schema or lifecycle change.
+    assertContextProposalKeys(field, ['name', 'role', 'grains', 'primary', 'hierarchy', 'level'], `Dataset operation ${operationId} field ${index + 1}`);
+    const role = field.role;
+    if (role !== 'dimension' && role !== 'key' && role !== 'time' && role !== 'attribute') {
+      throw Object.assign(new Error(`Dataset operation ${operationId} field ${index + 1} needs a supported physical role.`), { code: 'INVALID_REQUEST' });
+    }
+    const level = field.level;
+    if (level !== undefined && (!Number.isInteger(level) || Number(level) < 0 || Number(level) > 1000)) {
+      throw Object.assign(new Error(`Dataset operation ${operationId} field ${index + 1} level must be a non-negative integer.`), { code: 'INVALID_REQUEST' });
+    }
+    return {
+      name: contextProposalString(field.name, `Dataset operation ${operationId} field ${index + 1} name`),
+      role,
+      ...(field.grains === undefined ? {} : { grains: contextProposalStringArray(field.grains, `Dataset operation ${operationId} field ${index + 1} grains`, { min: 1, max: 16 }) }),
+      ...(field.primary === undefined ? {} : { primary: contextProposalBoolean(field.primary, `Dataset operation ${operationId} field ${index + 1} primary`) }),
+      ...(field.hierarchy === undefined ? {} : { hierarchy: contextProposalString(field.hierarchy, `Dataset operation ${operationId} field ${index + 1} hierarchy`) }),
+      ...(level === undefined ? {} : { level: Number(level) }),
+    };
+  });
+}
+
+function parseDatasetProposalMeasures(value: unknown, operationId: string): ManifestDatasetMeasure[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 200) {
+    throw Object.assign(new Error(`Dataset operation ${operationId} measures must contain 1-200 governed measures.`), { code: 'INVALID_REQUEST' });
+  }
+  const aggregations = new Set<ManifestDatasetMeasure['aggregation']>(['sum', 'count', 'count_distinct', 'ratio', 'avg', 'min', 'max']);
+  return value.map((raw, index): ManifestDatasetMeasure => {
+    const measure = contextProposalObject(raw, `Dataset operation ${operationId} measure ${index + 1}`);
+    assertContextProposalKeys(measure, ['name', 'aggregation', 'from', 'numerator', 'denominator', 'expression', 'timeBucketBy', 'additive', 'entityAdditive', 'allowedAggs', 'format', 'currency', 'status'], `Dataset operation ${operationId} measure ${index + 1}`);
+    const aggregation = measure.aggregation;
+    if (!aggregations.has(aggregation as ManifestDatasetMeasure['aggregation'])) {
+      throw Object.assign(new Error(`Dataset operation ${operationId} measure ${index + 1} needs a supported aggregation.`), { code: 'INVALID_REQUEST' });
+    }
+    const additive = measure.additive;
+    if (additive !== 'additive' && additive !== 'semi_additive' && additive !== 'non_additive') {
+      throw Object.assign(new Error(`Dataset operation ${operationId} measure ${index + 1} needs an explicit additivity state.`), { code: 'INVALID_REQUEST' });
+    }
+    const entityAdditive = measure.entityAdditive;
+    if (entityAdditive !== undefined && entityAdditive !== 'additive' && entityAdditive !== 'semi_additive' && entityAdditive !== 'non_additive') {
+      throw Object.assign(new Error(`Dataset operation ${operationId} measure ${index + 1} has an unsupported entity additivity state.`), { code: 'INVALID_REQUEST' });
+    }
+    const format = measure.format;
+    if (format !== undefined && format !== 'number' && format !== 'currency' && format !== 'percent') {
+      throw Object.assign(new Error(`Dataset operation ${operationId} measure ${index + 1} has an unsupported display format.`), { code: 'INVALID_REQUEST' });
+    }
+    const status = measure.status;
+    if (status !== undefined && status !== 'approved' && status !== 'suggested') {
+      throw Object.assign(new Error(`Dataset operation ${operationId} measure ${index + 1} has an unsupported measure status.`), { code: 'INVALID_REQUEST' });
+    }
+    const allowedAggs = measure.allowedAggs === undefined
+      ? undefined
+      : contextProposalStringArray(measure.allowedAggs, `Dataset operation ${operationId} measure ${index + 1} allowedAggs`, { min: 1, max: 7 })
+        .map((candidate) => {
+          if (!aggregations.has(candidate as ManifestDatasetMeasure['aggregation'])) {
+            throw Object.assign(new Error(`Dataset operation ${operationId} measure ${index + 1} has an unsupported allowed aggregation.`), { code: 'INVALID_REQUEST' });
+          }
+          return candidate as ManifestDatasetMeasure['aggregation'];
+        });
+    return {
+      name: contextProposalString(measure.name, `Dataset operation ${operationId} measure ${index + 1} name`),
+      aggregation: aggregation as ManifestDatasetMeasure['aggregation'],
+      additive,
+      ...(measure.from === undefined ? {} : { from: contextProposalString(measure.from, `Dataset operation ${operationId} measure ${index + 1} from`) }),
+      ...(measure.numerator === undefined ? {} : { numerator: contextProposalString(measure.numerator, `Dataset operation ${operationId} measure ${index + 1} numerator`) }),
+      ...(measure.denominator === undefined ? {} : { denominator: contextProposalString(measure.denominator, `Dataset operation ${operationId} measure ${index + 1} denominator`) }),
+      ...(measure.expression === undefined ? {} : { expression: contextProposalString(measure.expression, `Dataset operation ${operationId} measure ${index + 1} expression`) }),
+      ...(measure.timeBucketBy === undefined ? {} : { timeBucketBy: contextProposalString(measure.timeBucketBy, `Dataset operation ${operationId} measure ${index + 1} timeBucketBy`) }),
+      ...(entityAdditive === undefined ? {} : { entityAdditive }),
+      ...(allowedAggs === undefined ? {} : { allowedAggs }),
+      ...(format === undefined ? {} : { format }),
+      ...(measure.currency === undefined ? {} : { currency: contextProposalString(measure.currency, `Dataset operation ${operationId} measure ${index + 1} currency`) }),
+      ...(status === undefined ? {} : { status }),
+    };
+  });
+}
+
+function contextProposalObject(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw Object.assign(new Error(`${label} must be an object.`), { code: 'INVALID_REQUEST' });
+  }
+  return value as Record<string, unknown>;
+}
+
+function assertContextProposalKeys(value: Record<string, unknown>, allowed: string[], label: string): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw Object.assign(new Error(`${label} contains unsupported field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}.`), { code: 'INVALID_REQUEST' });
+  }
+}
+
+function contextProposalString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 1000) {
+    throw Object.assign(new Error(`${label} must be a non-empty string.`), { code: 'INVALID_REQUEST' });
+  }
+  return value.trim();
+}
+
+function contextProposalStringArray(value: unknown, label: string, limits: { min: number; max: number }): string[] {
+  if (!Array.isArray(value) || value.length < limits.min || value.length > limits.max) {
+    throw Object.assign(new Error(`${label} must contain ${limits.min}-${limits.max} strings.`), { code: 'INVALID_REQUEST' });
+  }
+  const values = value.map((item, index) => contextProposalString(item, `${label} ${index + 1}`));
+  if (new Set(values.map((item) => item.toLowerCase())).size !== values.length) {
+    throw Object.assign(new Error(`${label} cannot contain duplicate identifiers.`), { code: 'INVALID_REQUEST' });
+  }
+  return values;
+}
+
+function contextProposalBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') throw Object.assign(new Error(`${label} must be true or false.`), { code: 'INVALID_REQUEST' });
+  return value;
+}
+
+function contextProposalRelativePath(value: unknown, label: string): string {
+  const path = contextProposalString(value, label).replace(/\\/g, '/');
+  if (path.startsWith('/') || path.split('/').some((segment) => segment === '..' || !segment)) {
+    throw Object.assign(new Error(`${label} must remain inside the current project.`), { code: 'INVALID_REQUEST' });
+  }
+  return path;
+}
+
 function parseContextAuthoringOperations(value: unknown): ContextAuthoringOperation[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 100) throw Object.assign(new Error('Provide 1-100 authoring operations.'), { code: 'INVALID_REQUEST' });
   const ids = new Set<string>();
@@ -24046,6 +30241,12 @@ function parseContextAuthoringOperations(value: unknown): ContextAuthoringOperat
       const value = operation.value as TermTemplateInput | undefined;
       if (!value || typeof value.title !== 'string' || !value.title.trim() || typeof value.domain !== 'string' || !value.domain.trim()) throw Object.assign(new Error(`Term operation ${id} needs a title and a domain.`), { code: 'INVALID_REQUEST' });
       return { id, kind: 'term_change', value: { ...value, title: value.title.trim(), domain: value.domain.trim(), owner: typeof value.owner === 'string' && value.owner.trim() ? value.owner.trim() : 'unassigned', status: 'draft' }, dependsOn, evidence };
+    }
+    if (operation.kind === 'dataset_change') {
+      return { id, kind: 'dataset_change', change: parseDatasetAuthoringChange(operation.change, id), dependsOn, evidence };
+    }
+    if (operation.kind === 'dataset_draft') {
+      return { id, kind: 'dataset_draft', change: parseDatasetDraftAuthoringChange(operation.change, id), dependsOn, evidence };
     }
     throw Object.assign(new Error(`Unsupported context operation kind for ${id}.`), { code: 'INVALID_REQUEST' });
   });
@@ -25040,6 +31241,30 @@ export function loadProjectConfig(projectRoot: string): ProjectConfig {
   }
 
   return config;
+}
+
+/** Dataset-backed field tiles are intentionally an explicit local project opt-in. */
+export function datasetsAppFeatureEnabled(config: Pick<ProjectConfig, 'apps'>): boolean {
+  return config.apps?.datasets === true;
+}
+
+/**
+ * The Dataset result cache is an explicit local opt-in. Invalid optional
+ * limits fall back to the cache's bounded defaults instead of making an
+ * identity-less or unbounded cache available.
+ */
+function openDatasetResultCache(projectRoot: string, config: Pick<ProjectConfig, 'apps'>): DatasetResultCache | undefined {
+  const settings = config.apps?.datasetResultCache;
+  if (!settings || settings.enabled !== true) return undefined;
+  const positive = (value: unknown): number | undefined => (
+    typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+  );
+  return new DatasetResultCache({
+    path: join(projectRoot, '.dql', 'local', 'dataset-results.sqlite'),
+    ...(positive(settings.ttlSeconds) ? { ttlMs: positive(settings.ttlSeconds)! * 1_000 } : {}),
+    ...(positive(settings.maxEntries) ? { maxEntries: positive(settings.maxEntries) } : {}),
+    ...(positive(settings.maxBytes) ? { maxBytes: positive(settings.maxBytes) } : {}),
+  });
 }
 
 export interface SkillPathSettings {
@@ -26878,7 +33103,16 @@ export interface ExecutionServiceInput {
   sqlParams?: SQLParamSpec[];
   variables?: Record<string, unknown>;
   semanticRefs?: { metrics: string[]; dimensions: string[] };
-  executePrepared?: (preparation: AnalyticalExecutionPreparation) => Promise<QueryResult>;
+  /** Bound to the caller's interaction lifetime; never interrupts shared state. */
+  signal?: AbortSignal;
+  executePrepared?: (
+    preparation: AnalyticalExecutionPreparation,
+    options: {
+      signal?: AbortSignal;
+      sqlParams: SQLParamSpec[];
+      variables: Record<string, unknown>;
+    },
+  ) => Promise<QueryResult>;
 }
 
 export interface ExecutionServiceResult {
@@ -26901,6 +33135,7 @@ export class ExecutionService {
   }) {}
 
   async execute(input: ExecutionServiceInput): Promise<ExecutionServiceResult> {
+    throwIfExecutionSignalAborted(input.signal);
     const preparation = await prepareAnalyticalExecutionSql({
       sql: input.sql,
       subject: input.subject,
@@ -26911,14 +33146,21 @@ export class ExecutionService {
       enforceReadOnly: input.enforceReadOnly,
       rowLimit: input.rowLimit,
     });
+    throwIfExecutionSignalAborted(input.signal);
     const raw = input.executePrepared
-      ? await input.executePrepared(preparation)
+      ? await input.executePrepared(preparation, {
+          signal: input.signal,
+          sqlParams: input.sqlParams ?? [],
+          variables: input.variables ?? {},
+        })
       : await this.host.executor.executeQuery(
           preparation.executedSql,
           input.sqlParams ?? [],
           runtimeVariables(input.variables ?? {}),
           preparation.connection,
+          input.signal ? { signal: input.signal } : undefined,
         );
+    throwIfExecutionSignalAborted(input.signal);
     const result = normalizeQueryResult(raw, input.semanticRefs);
     return {
       preparation,
@@ -26931,6 +33173,11 @@ export class ExecutionService {
       })),
     };
   }
+}
+
+function throwIfExecutionSignalAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new Error('App dashboard execution was cancelled.');
 }
 
 /**
@@ -27242,6 +33489,27 @@ export function dashboardTileParameterValues(input: {
     if (value !== undefined) values[binding.param] = value;
   }
   return values;
+}
+
+/**
+ * Dataset field filters have an explicit compiler path and must not become
+ * source parameters through a coincidental name match. Limit the source
+ * invocation to declared dashboard parameters plus explicit tile bindings.
+ * The latter intentionally retains a reviewed `dashboard_filter` parameter
+ * binding when an author has declared one.
+ */
+export function dashboardDatasetSourceParameterValues(input: {
+  dashboard: Pick<DashboardDocument, 'params'>;
+  dashboardValues: Record<string, unknown>;
+  boundParameters: Record<string, unknown>;
+}): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+  for (const parameter of input.dashboard.params ?? []) {
+    if (Object.prototype.hasOwnProperty.call(input.dashboardValues, parameter.id)) {
+      values[parameter.id] = input.dashboardValues[parameter.id];
+    }
+  }
+  return { ...values, ...input.boundParameters };
 }
 
 export function applyDashboardFiltersToBlockExecution(input: {
@@ -29835,6 +36103,17 @@ function isDbtSemanticRuntime(
   return Boolean(semanticLayer?.listMetrics().some((metric) => metric.source?.provider === 'dbt'));
 }
 
+/**
+ * Metric capability contracts carry an adapter identifier as data. The App
+ * runtime only accepts adapters it can bind and execute; an unknown value is
+ * a source-contract drift, never a cue to fall back to a default compiler.
+ */
+function semanticDatasetRuntimeAdapter(adapterId: string): SemanticRuntimeAdapterId {
+  if (adapterId === 'native' || adapterId === 'metricflow-cli' || adapterId === 'dbt-cloud') return adapterId;
+  if (adapterId === 'metricflow') return 'metricflow-cli';
+  throw new Error(`The selected Dataset requires unsupported semantic adapter ${adapterId}. Refresh the source or choose a Dataset with an approved runtime.`);
+}
+
 async function resolvePlannedSemanticAdapter(
   projectRoot: string,
   requested: SemanticRuntimeQueryRequest['engine'],
@@ -29925,6 +36204,7 @@ async function composeRuntimeSemanticQuery(
     detectedProvider: string | null | undefined;
     driver?: ConnectionConfig['driver'];
     tableMapping?: Record<string, string>;
+    signal?: AbortSignal;
   },
 ): Promise<{
   sql: string;
@@ -29943,6 +36223,7 @@ async function composeRuntimeSemanticQuery(
     semanticLayer,
     driver: context.driver,
     tableMapping: context.tableMapping,
+    signal: context.signal,
   });
 }
 

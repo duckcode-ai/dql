@@ -109,6 +109,73 @@ describe('target-bound semantic execution gateway', () => {
     expect(execution?.semanticTrace.steps.map((step) => step.id)).toContain('preflight_physical_sql');
   });
 
+  it('forwards the page-run abort signal through semantic preflight and execution', async () => {
+    const controller = new AbortController();
+    const optionSignals: Array<AbortSignal | undefined> = [];
+    const executor = {
+      executePositional: vi.fn(async (sql: string, _params: unknown[], _connection: unknown, options?: { signal?: AbortSignal }) => {
+        optionSignals.push(options?.signal);
+        if (sql.includes('CURRENT_ACCOUNT()')) return result([observedSnowflakeTarget('PROD')]);
+        if (sql.startsWith('EXPLAIN USING TEXT')) return result([{ plan: 'ok' }]);
+        return result([{ REVENUE: 42 }]);
+      }),
+    } as unknown as QueryExecutor;
+
+    await executeTargetBoundSemanticQuery({
+      executor,
+      connection,
+      projectRoot: root,
+      plannedAdapter: 'native',
+      compile: async () => compiled(),
+      signal: controller.signal,
+    });
+
+    expect(optionSignals).toContain(controller.signal);
+    controller.abort(new Error('new filter selection'));
+    await expect(executeTargetBoundSemanticQuery({
+      executor,
+      connection,
+      projectRoot: root,
+      plannedAdapter: 'native',
+      compile: async () => compiled(),
+      signal: controller.signal,
+    })).rejects.toThrow('new filter selection');
+  });
+
+  it('uses an injected private final-statement executor without bypassing target binding', async () => {
+    const sqlCalls: string[] = [];
+    const scopedCalls: string[] = [];
+    const executor = {
+      executePositional: vi.fn(async (sql: string) => {
+        sqlCalls.push(sql);
+        if (sql.includes('CURRENT_ACCOUNT()')) return result([observedSnowflakeTarget('PROD')]);
+        if (sql.startsWith('EXPLAIN USING TEXT')) return result([{ plan: 'ok' }]);
+        throw new Error('the shared executor must not run the final semantic statement');
+      }),
+    } as unknown as QueryExecutor;
+
+    const execution = await executeTargetBoundSemanticQuery({
+      executor,
+      connection,
+      projectRoot: root,
+      plannedAdapter: 'native',
+      compile: async () => compiled(),
+      executePrepared: async ({ sql, connection: preparedConnection, options }) => {
+        scopedCalls.push(sql);
+        expect(preparedConnection).toEqual(connection);
+        expect(options.maxRows).toBe(10_000);
+        return result([{ REVENUE: 42 }]);
+      },
+    });
+
+    expect(sqlCalls).toEqual([
+      expect.stringContaining('CURRENT_ACCOUNT()'),
+      'EXPLAIN USING TEXT SELECT 42 AS REVENUE',
+    ]);
+    expect(scopedCalls).toEqual(['SELECT 42 AS REVENUE']);
+    expect(execution?.result.rows).toEqual([{ REVENUE: 42 }]);
+  });
+
   it('rejects target drift before calling the selected dbt Cloud compiler', async () => {
     saveTestedSemanticRuntimeSettings(root, {
       preference: 'dbt-cloud',

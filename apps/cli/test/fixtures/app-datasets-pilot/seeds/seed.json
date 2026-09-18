@@ -1,0 +1,27 @@
+{
+  "_comment": "Deterministic DuckDB seed for App Builder Dataset tiles. Repeated order IDs, repeated customers across periods, NULL measures, and a zero denominator make incorrect cached-preview or row-grain assumptions visible.",
+  "tables": {
+    "order_lines": {
+      "columns": [
+        { "name": "order_line_id", "type": "text" },
+        { "name": "order_id", "type": "text" },
+        { "name": "customer_id", "type": "text" },
+        { "name": "region", "type": "text" },
+        { "name": "order_date", "type": "timestamp" },
+        { "name": "net_amount", "type": "decimal" },
+        { "name": "cost_amount", "type": "decimal" },
+        { "name": "margin_amount", "type": "decimal" }
+      ],
+      "rows": [
+        { "order_line_id": "OL-001", "order_id": "O-100", "customer_id": "C-001", "region": "US", "order_date": "2026-01-05", "net_amount": 40, "cost_amount": 25, "margin_amount": 15 },
+        { "order_line_id": "OL-002", "order_id": "O-100", "customer_id": "C-001", "region": "US", "order_date": "2026-01-05", "net_amount": 20, "cost_amount": 10, "margin_amount": 10 },
+        { "order_line_id": "OL-003", "order_id": "O-101", "customer_id": "C-001", "region": "US", "order_date": "2026-02-10", "net_amount": null, "cost_amount": 0, "margin_amount": null },
+        { "order_line_id": "OL-004", "order_id": "O-102", "customer_id": "C-002", "region": "CA", "order_date": "2026-02-12", "net_amount": 30, "cost_amount": 12, "margin_amount": 18 },
+        { "order_line_id": "OL-005", "order_id": "O-103", "customer_id": "C-002", "region": "US", "order_date": "2026-02-13", "net_amount": 0, "cost_amount": 0, "margin_amount": 0 },
+        { "order_line_id": "OL-006", "order_id": "O-104", "customer_id": "C-003", "region": "CA", "order_date": "2026-03-01", "net_amount": 25, "cost_amount": 10, "margin_amount": 15 },
+        { "order_line_id": "OL-007", "order_id": "O-104", "customer_id": "C-003", "region": "CA", "order_date": "2026-03-01", "net_amount": 5, "cost_amount": 2, "margin_amount": 3 },
+        { "order_line_id": "OL-008", "order_id": "O-105", "customer_id": "C-001", "region": "US", "order_date": "2026-03-02", "net_amount": 10, "cost_amount": 4, "margin_amount": 6 }
+      ]
+    }
+  }
+}

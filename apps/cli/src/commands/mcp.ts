@@ -95,7 +95,7 @@ async function runMcpTest(targetPath: string | null, flags: CLIFlags): Promise<v
   checks.push({
     name: 'MCP tool surface',
     ok: true,
-    detail: 'ask_dql, answer_question, query_via_metadata, build_block_from_prompt, build_dql_app, inspect_dql_project, certify, lineage, and metadata tools are available',
+    detail: 'ask_dql, answer_question, typed App Dataset tools, query_via_metadata, build_block_from_prompt, build_dql_app, inspect_dql_project, certify, lineage, and metadata tools are available',
   });
 
   // Advisory: is the DQL runtime up? Governed answer/build + bounded execution
@@ -115,6 +115,26 @@ async function runMcpTest(targetPath: string | null, flags: CLIFlags): Promise<v
     name: 'DQL runtime (governed generation + execution)',
     ok: runtimeOk,
     detail: runtimeDetail,
+    optional: true,
+  });
+
+  // Dataset MCP calls must reach the dedicated typed Dataset endpoint, not
+  // merely any process speaking HTTP on the configured runtime port. The
+  // endpoint itself owns current catalog, source, proof and target validation.
+  let datasetRuntimeOk = false;
+  let datasetRuntimeDetail = `not reachable at ${runtimeBase}/api/app-datasets — start \`dql serve\` for typed Dataset MCP execution`;
+  try {
+    const response = await fetch(`${runtimeBase}/api/app-datasets`, { signal: AbortSignal.timeout(1500) });
+    datasetRuntimeOk = response.status >= 200 && response.status < 300;
+    if (datasetRuntimeOk) datasetRuntimeDetail = `typed Dataset runtime available at ${runtimeBase}/api/app-datasets`;
+    else datasetRuntimeDetail = `typed Dataset runtime returned ${response.status} at ${runtimeBase}/api/app-datasets`;
+  } catch {
+    // Retain the actionable unavailable detail above.
+  }
+  checks.push({
+    name: 'Dataset MCP runtime capability',
+    ok: datasetRuntimeOk,
+    detail: datasetRuntimeDetail,
     optional: true,
   });
 
