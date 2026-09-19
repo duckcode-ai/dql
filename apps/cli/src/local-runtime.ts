@@ -14285,6 +14285,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           (sql) => executor.executeQuery(sql, [], {}, activeConnection),
           (identifier) => getDialect(activeConnection.driver).quoteIdentifier(identifier),
           projectRoot,
+          activeConnection.driver,
         );
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, evidence }));
@@ -14315,6 +14316,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           { ...spec, keyTypes: catalogKeyTypes(snapshot.manifest, spec, undefined, projectRoot) },
           (sql) => executor.executeQuery(sql, [], {}, activeConnection),
           (identifier) => getDialect(activeConnection.driver).quoteIdentifier(identifier),
+          new Date(),
+          activeConnection.driver,
         );
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, ...profile }));
@@ -27832,13 +27835,14 @@ async function validateModelingRelationship(
   execute: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }>,
   quoteIdentifier: (identifier: string) => string = quoteSqlIdentifier,
   projectRoot?: string,
+  dialect?: string,
 ): Promise<ManifestRelationshipValidationEvidence> {
   const { fromRelation, toRelation } = relationshipRelations(manifest, relationship.from, relationship.to);
   if (!relationship.keys.length) throw new Error('At least one join key pair is required.');
   // ONE PROOF (REL-005): the builder's profile and this validation run the same
   // statement and write the same evidence.
   const spec = { fromRelation, toRelation, keys: relationship.keys, cardinality: relationship.cardinality, fanout: relationship.fanout };
-  return validateRelationshipOnWarehouse({ ...spec, keyTypes: catalogKeyTypes(manifest, spec, undefined, projectRoot) }, execute, quoteIdentifier);
+  return validateRelationshipOnWarehouse({ ...spec, keyTypes: catalogKeyTypes(manifest, spec, undefined, projectRoot) }, execute, quoteIdentifier, new Date(), dialect);
 }
 
 function relatedProductsForDomain(
@@ -33335,6 +33339,7 @@ export async function discoverProjectWarehouseModel(projectRoot: string, options
     snapshot,
     (sql) => executor.executeQuery(sql, [], {}, connection),
     (identifier) => getDialect(connection.driver).quoteIdentifier(identifier),
+    { dialect: connection.driver },
   );
 }
 
