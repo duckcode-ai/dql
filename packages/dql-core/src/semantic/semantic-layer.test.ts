@@ -1050,6 +1050,43 @@ describe('explainCompatibleDimensions memoization', () => {
   });
 });
 
+describe('joins that follow a dbt entity are walked many-to-one only', () => {
+  const cube = (name: string, joins: Array<{ right: string; key: string; entity?: string }>) => ({
+    name, label: name, description: '', sql: name, table: name, domain: 'claims', measures: [], dimensions: [], timeDimensions: [], segments: [], preAggregations: [],
+    joins: joins.map((join) => ({ name: join.right, left: name, right: join.right, type: 'left' as const, sql: `\${left}.${join.key} = \${right}.${join.key}`, ...(join.entity ? { entity: join.entity } : {}) })),
+  });
+  const layer = (entityJoins: boolean) => {
+    const e = (entity: string) => (entityJoins ? entity : undefined);
+    const built = new SemanticLayer({
+      metrics: [
+        { name: 'claims', label: 'Claims', description: '', domain: 'claims', sql: 'claim_id', type: 'count', table: 'claim', cube: 'claim' },
+        { name: 'coverage_rows', label: 'Coverage rows', description: '', domain: 'claims', sql: '*', type: 'count', table: 'claim_coverage', cube: 'claim_coverage' },
+      ],
+      dimensions: [
+        { name: 'policy_number', label: 'Policy', description: '', sql: 'policy_number', type: 'string', table: 'policy', cube: 'policy' },
+        { name: 'claim_status', label: 'Status', description: '', sql: 'status', type: 'string', table: 'claim', cube: 'claim' },
+      ],
+    });
+    // claim_coverage holds claim and policy as foreign entities.
+    built.addCube(cube('claim_coverage', [{ right: 'claim', key: 'claim_id', entity: e('claim') }, { right: 'policy', key: 'policy_id', entity: e('policy') }]));
+    built.addCube(cube('claim', []));
+    built.addCube(cube('policy', []));
+    return built;
+  };
+
+  it('composes along the entity (many-to-one), and refuses a path that walks one backwards', () => {
+    const governed = layer(true);
+    expect(governed.composeQuery({ metrics: ['coverage_rows'], dimensions: ['claim_status'], driver: 'duckdb' })?.sql).toMatch(/JOIN\s+claim/i);
+    // claim → claim_coverage runs one-to-many: counting claims per policy that
+    // way multiplies them; MetricFlow refuses it, and so does DQL.
+    expect(governed.composeQuery({ metrics: ['claims'], dimensions: ['policy_number'], driver: 'duckdb' })).toBeNull();
+  });
+
+  it('leaves hand-written joins, which declare no entity, as they were', () => {
+    expect(layer(false).composeQuery({ metrics: ['claims'], dimensions: ['policy_number'], driver: 'duckdb' })).not.toBeNull();
+  });
+});
+
 describe('a semantic filter is bound or the composition refuses', () => {
   const layer = new SemanticLayer();
   layer.addMetric({

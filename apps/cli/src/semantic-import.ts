@@ -1114,6 +1114,8 @@ function serializeSemanticObject(
         lines.push(`    right: ${yamlScalar(joinDef.right)}`);
         lines.push(`    type: ${yamlScalar(joinDef.type)}`);
         lines.push(`    sql: ${yamlBlockScalar(joinDef.sql, 4)}`);
+        // The dbt entity a join follows fixes its direction (many-to-one).
+        if (joinDef.entity) lines.push(`    entity: ${yamlScalar(joinDef.entity)}`);
       }
     }
     if (object.segments.length > 0) {

@@ -236,6 +236,8 @@ export interface JoinDefinition {
    * path to build MetricFlow multi-hop group-by names (`bcm_hdr__customer_name`).
    */
   entity?: string;
+  /** Set on the graph's reverse copy of a join (right to left). */
+  reversed?: boolean;
 }
 
 export interface TimeDimensionDefinition extends DimensionDefinition {
@@ -593,7 +595,7 @@ export class SemanticLayer {
       this.joinGraph.set(join.left, existing);
       // Also add reverse direction
       const rev = this.joinGraph.get(join.right) ?? [];
-      rev.push({ ...join, left: join.right, right: join.left });
+      rev.push({ ...join, left: join.right, right: join.left, reversed: true });
       this.joinGraph.set(join.right, rev);
     }
   }
@@ -680,6 +682,12 @@ export class SemanticLayer {
       const neighbors = this.joinGraph.get(cube) ?? [];
       for (const join of neighbors) {
         if (visited.has(join.right)) continue;
+        // A join that follows a dbt entity runs many-to-one, from the model
+        // that holds the entity as foreign to the one where it is primary.
+        // Walking it backwards reaches every row that shares the key, which
+        // multiplies the aggregate (or, as with claims reached through policy
+        // amounts, groups every row under NULL). MetricFlow never does this.
+        if (join.reversed && join.entity) continue;
         const newPath = [...path, join];
         if (join.right === toCube) return newPath;
         visited.add(join.right);
@@ -2184,6 +2192,7 @@ export function parseCubeDefinition(raw: Record<string, unknown>): CubeDefinitio
       right: String(j.right ?? j.name ?? ''),
       type: (['inner', 'left', 'right', 'full'].includes(String(j.type ?? 'left')) ? String(j.type ?? 'left') : 'left') as JoinDefinition['type'],
       sql: String(j.sql ?? ''),
+      ...(typeof j.entity === 'string' && j.entity ? { entity: j.entity } : {}),
     }));
 
   const segments = segmentsRaw
