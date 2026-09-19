@@ -274,12 +274,12 @@ export function discoverWarehouseModel(input: {
   // Naming: `customer_id` on orders points at customers.
   const byBaseName = new Map<string, WarehouseCatalogRelationV1[]>();
   for (const relation of snapshot.relations) {
-    if (relation.kind !== 'table') continue;
+    // Views count as much as tables: dbt builds models as views by default.
     const name = baseName(relation);
     byBaseName.set(name, [...(byBaseName.get(name) ?? []), relation]);
   }
   for (const relation of snapshot.relations) {
-    if (relation.kind !== 'table') continue;
+    // Views count as much as tables: dbt builds models as views by default.
     for (const column of relation.columns) {
       const match = /^(.+?)_(id|key|code|number|no)$/i.exec(column.name);
       if (!match) continue;
@@ -366,7 +366,9 @@ export async function inferSharedKeyJoins(
   options: { maxChecks?: number } = {},
 ): Promise<WarehouseDiscoveryReport> {
   const quoteRelation = (relation: string) => relation.split('.').map(quote).join('.');
-  const tables = snapshot.relations.filter((relation) => relation.kind === 'table' && relation.columns.length > 0);
+  // Tables and views alike: dbt builds models as views by default, and the
+  // data checks below read a view exactly as they read a table.
+  const tables = snapshot.relations.filter((relation) => relation.columns.length > 0);
   const holders = new Map<string, Array<{ relation: WarehouseCatalogRelationV1; column: string }>>();
   for (const relation of tables) {
     for (const column of relation.columns) {
