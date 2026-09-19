@@ -821,15 +821,27 @@ export class SemanticLayer {
     // silently returns a WRONG number at the highest-trust tier, so we either
     // apply it or refuse to compose (null) — the caller then falls through to
     // generated SQL rather than surfacing a governed-but-wrong answer.
+    // A filter dimension on another table only means something in that
+    // table's rows: `has_loss_payment = 1` is true exactly for the claim
+    // amounts loss_payment holds. The query does not join that table for a
+    // metric's own filter, so the predicate would read a column that is not
+    // there, or (a constant such as `1`) be true for every row and silently
+    // widen the metric to all rows. Either way the composition refuses.
+    let filterOutsideQuery = false;
     const resolveFilterColumn = (ref: string): string => {
       const dim = this.resolveDimensionForMetrics(ref, resolvedMetrics);
-      if (dim?.sql) return qualifyForTable(dim.sql, dim.table);
+      if (dim?.sql) {
+        const onPrimary = dim.table === primaryTable;
+        if (!onPrimary && (!joinedTables.has(dim.table) || !/[A-Za-z_]/.test(dim.sql.replace(/'[^']*'/g, '')))) filterOutsideQuery = true;
+        return qualifyForTable(dim.sql, dim.table);
+      }
       const column = ref.includes('__') ? ref.split('__').pop() ?? ref : ref;
       return qualifyForTable(column, primaryTable);
     };
     const metricFilters = resolvedMetrics.map((m) => computeMetricFilterPredicate(m, resolveFilterColumn));
     // A metric that declares a filter we cannot render fails the whole compose.
     if (metricFilters.some((r) => r.kind === 'fail')) return null;
+    if (filterOutsideQuery) return null;
     const okFilters = metricFilters.filter((r): r is { kind: 'ok'; sql: string } => r.kind === 'ok');
     // When EVERY metric carries the SAME filter, hoist it to a single WHERE
     // predicate (cleaner and equivalent); otherwise apply per-metric via CASE WHEN.

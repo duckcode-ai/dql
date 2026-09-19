@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
+import { dump as dumpYaml } from 'js-yaml';
 import {
   CubejsProvider,
   DbtProvider,
@@ -145,11 +146,20 @@ export async function performSemanticImport(opts: {
     }
   }
 
+  // dbt declares an entity in every semantic model that uses it (primary in
+  // one, foreign in the others). A name declared more than once is written per
+  // model; a name declared once keeps its plain file, as before.
+  const entityNameCounts = new Map<string, number>();
+  for (const object of objects) {
+    if (object.kind === 'entity') entityNameCounts.set(object.name, (entityNameCounts.get(object.name) ?? 0) + 1);
+  }
   for (const object of objects) {
     const normalizedDomain = normalizeDomain(object.domain);
     const registryReference = object.kind === 'dimension' || object.kind === 'time_dimension'
       ? semanticDimensionReference(object)
-      : object.name;
+      : object.kind === 'entity' && (entityNameCounts.get(object.name) ?? 0) > 1 && object.cube
+        ? `${object.cube}.${object.name}`
+        : object.name;
     const filePath = buildSemanticFilePath(object.kind, normalizedDomain, registryReference);
     const absPath = join(targetProjectRoot, filePath);
     if (existsSync(absPath) && !previousManaged.has(filePath)) {
@@ -989,6 +999,11 @@ function buildSemanticFilePath(
   return join('semantic-layer', folder, slugifyPathSegment(domain), `${slugifyPathSegment(name)}.yaml`);
 }
 
+/** A top-level `key: value` for a nested value, serialized rather than stringified. */
+function yamlField(key: string, value: unknown): string {
+  return dumpYaml({ [key]: value }, { lineWidth: -1 }).trimEnd();
+}
+
 function serializeSemanticObject(
   object:
     | (CubeDefinition & { kind: 'cube' })
@@ -1019,6 +1034,15 @@ function serializeSemanticObject(
   if ('expr' in object && object.expr) lines.push(`expr: ${yamlScalar(object.expr)}`);
   if ('metricType' in object && object.metricType) lines.push(`metricType: ${yamlScalar(object.metricType)}`);
   if ('aggTimeDimension' in object && object.aggTimeDimension) lines.push(`aggTimeDimension: ${yamlScalar(object.aggTimeDimension)}`);
+  // What scopes a metric, and what a derived metric is built from. Leaving
+  // these out made a filtered metric (loss payments only) sum every row, and
+  // left a derived metric with nothing to compose; the native engine applies a
+  // filter it can render and refuses a metric whose filter it cannot.
+  if (object.kind === 'metric') {
+    if (object.filter !== undefined && object.filter !== null && object.filter !== '') lines.push(yamlField('filter', object.filter));
+    if (object.filters && Object.keys(object.filters).length > 0) lines.push(yamlField('filters', object.filters));
+    if (object.typeParams && Object.keys(object.typeParams).length > 0) lines.push(yamlField('typeParams', object.typeParams));
+  }
   if ('owner' in object && object.owner) lines.push(`owner: ${yamlScalar(object.owner)}`);
   if ('tags' in object && object.tags && object.tags.length > 0) {
     lines.push('tags:');
@@ -1034,7 +1058,8 @@ function serializeSemanticObject(
     if (object.source.extra && Object.keys(object.source.extra).length > 0) {
       lines.push('  extra:');
       for (const [key, value] of Object.entries(object.source.extra)) {
-        lines.push(`    ${key}: ${yamlScalar(String(value))}`);
+        if (value === undefined) continue;
+        lines.push(`    ${key}: ${yamlScalar(typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value))}`);
       }
     }
   }

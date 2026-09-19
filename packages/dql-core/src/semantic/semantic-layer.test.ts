@@ -270,6 +270,27 @@ describe('SemanticLayer', () => {
   });
 
   describe('governed metric-scoped filters (G1)', () => {
+    // dbt Labs' insurance semantic layer: loss payments are the claim amounts
+    // the loss_payment table holds, marked by a constant `has_loss_payment`.
+    const markerLayer = () => new SemanticLayer({
+      metrics: [
+        { name: 'loss_payment_amount', label: 'Loss payments', description: '', domain: 'claims', sql: 'claim_amount', type: 'sum', table: 'claim_amount', cube: 'claim_amount', filter: "{{ Dimension('claim_amount__has_loss_payment') }} = 1" },
+        { name: 'total_claim_amount', label: 'All claim amounts', description: '', domain: 'claims', sql: 'claim_amount', type: 'sum', table: 'claim_amount', cube: 'claim_amount' },
+      ],
+      dimensions: [
+        { name: 'has_loss_payment', label: 'Has loss payment', description: '', sql: '1', type: 'number', table: 'loss_payment', cube: 'loss_payment' },
+        { name: 'amount_type_code', label: 'Amount type', description: '', sql: 'amount_type_code', type: 'string', table: 'claim_amount', cube: 'claim_amount' },
+      ],
+    });
+
+    it('refuses a metric whose filter lives on a table the query does not join, instead of summing every row', () => {
+      const layer = markerLayer();
+      expect(layer.composeQuery({ metrics: ['loss_payment_amount'], dimensions: [], driver: 'duckdb' })).toBeNull();
+      expect(layer.composeQuery({ metrics: ['loss_payment_amount', 'total_claim_amount'], dimensions: ['amount_type_code'], driver: 'duckdb' })).toBeNull();
+      // The unfiltered metric still composes.
+      expect(layer.composeQuery({ metrics: ['total_claim_amount'], dimensions: [], driver: 'duckdb' })?.sql).toContain('SUM(claim_amount) AS total_claim_amount');
+    });
+
     it('hoists a single metric filter to WHERE', () => {
       const layer = new SemanticLayer({
         metrics: [{ name: 'completed_revenue', label: 'Completed Revenue', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders', filter: "status = 'completed'" }],

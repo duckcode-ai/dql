@@ -46,7 +46,8 @@ export async function runSemantic(
     case 'validate':
       return semanticValidate(semanticConfig, projectRoot, flags);
     case 'query':
-      return semanticQuery(semanticConfig, projectRoot, rest.slice(1), flags);
+      // `dql semantic query <metrics> [dims]`: the metrics are the first argument.
+      return semanticQuery(semanticConfig, projectRoot, rest, flags);
     case 'pull':
       return semanticPull(semanticConfig, flags);
     case 'import':
@@ -292,7 +293,7 @@ function semanticQuery(
     console.log(JSON.stringify({ sql: composed, metrics: metricNames, dimensions: dimNames }, null, 2));
   } else {
     console.log(`\n  Composed SQL:\n`);
-    console.log(`  ${composed}`);
+    console.log(`  ${composed.sql}`);
     console.log('');
   }
 }
