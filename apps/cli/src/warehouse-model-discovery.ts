@@ -24,7 +24,7 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { profileRelationshipOnWarehouse, suggestRelationshipKeys } from '@duckcodeailabs/dql-agent';
 
-export type RelationshipEvidenceSource = 'declared_foreign_key' | 'view_join' | 'query_history' | 'named_for_table' | 'same_name';
+export type RelationshipEvidenceSource = 'declared_foreign_key' | 'view_join' | 'query_history' | 'shared_key' | 'named_for_table' | 'same_name';
 
 /** A join seen in the warehouse's recent query history, and how often. */
 export interface ObservedJoin {
@@ -86,12 +86,20 @@ export interface WarehouseDiscoveryReport {
   relationships: DiscoveredRelationship[];
   /** Relationships already modeled, left alone. */
   existingRelationships: number;
+  /** The modeled joins as `<relation id>|<relation id>|<from>=<to>` (lower case), so later checks leave them alone too. */
+  modeledJoins?: string[];
   validated: boolean;
   /** Opt-in query-history evidence: how much was read, or why it could not be. */
   queryHistory?: { statements: number; joins: number } | { error: string };
 }
 
-const EVIDENCE_ORDER: RelationshipEvidenceSource[] = ['declared_foreign_key', 'view_join', 'query_history', 'named_for_table', 'same_name'];
+const EVIDENCE_ORDER: RelationshipEvidenceSource[] = ['declared_foreign_key', 'view_join', 'query_history', 'shared_key', 'named_for_table', 'same_name'];
+/** Column types that are never join keys: measures, flags and timestamps. */
+const NON_KEY_TYPE = /^(double|float|real|decimal|numeric|money|bool|boolean|date|time|timestamp|datetime|interval|json|jsonb|blob|bytea|array|struct|map)/i;
+/** A name shared by this many tables or more is an audit or housekeeping column, not a key. */
+const MAX_TABLES_SHARING_A_KEY = 12;
+/** Share of the referencing side's values that may be missing on the unique side. */
+const MAX_UNMATCHED_SHARE = 0.05;
 /** A join seen fewer times than this in query history is noise, not evidence. */
 const MIN_OBSERVED_JOINS = 2;
 const GENERIC_SCHEMAS = new Set(['main', 'public', 'dbo', 'default']);
@@ -332,6 +340,7 @@ export function discoverWarehouseModel(input: {
     entities,
     relationships,
     existingRelationships,
+    modeledJoins: [...modeled].map((signature) => signature.toLowerCase()).sort(),
     validated: false,
   };
 }
@@ -342,6 +351,131 @@ export function discoverWarehouseModel(input: {
  * Validate statement) and one per grain candidate; metadata-free aggregates
  * only, never row values.
  */
+/**
+ * Joins the data proves, for a warehouse that declares no keys. A column name
+ * shared by several tables is a key where it is unique and never null in one
+ * of them, and a join where the other tables' values are found there (at most
+ * 5% missing). Names are only where to look: whether a column is a key is
+ * decided by the data, never by how it is spelled. Aggregates only.
+ */
+export async function inferSharedKeyJoins(
+  report: WarehouseDiscoveryReport,
+  snapshot: WarehouseCatalogSnapshotV1,
+  execute: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }>,
+  quote: (identifier: string) => string,
+  options: { maxChecks?: number } = {},
+): Promise<WarehouseDiscoveryReport> {
+  const quoteRelation = (relation: string) => relation.split('.').map(quote).join('.');
+  const tables = snapshot.relations.filter((relation) => relation.kind === 'table' && relation.columns.length > 0);
+  const holders = new Map<string, Array<{ relation: WarehouseCatalogRelationV1; column: string }>>();
+  for (const relation of tables) {
+    for (const column of relation.columns) {
+      if (column.type && NON_KEY_TYPE.test(column.type)) continue;
+      const key = column.name.toLowerCase();
+      holders.set(key, [...(holders.get(key) ?? []), { relation, column: column.name }]);
+    }
+  }
+  const shared = [...holders.entries()].filter(([, list]) => list.length >= 2 && list.length <= MAX_TABLES_SHARING_A_KEY);
+  if (shared.length === 0) return report;
+  let checks = 0;
+  const budget = options.maxChecks ?? 400;
+  const num = (row: Record<string, unknown>, name: string) => Number(row[name] ?? row[name.toUpperCase()]);
+
+  // 1. Which shared columns are unique and never null in which tables: one statement per table.
+  const unique = new Set<string>();
+  const byTable = new Map<string, Array<{ relation: WarehouseCatalogRelationV1; column: string }>>();
+  for (const [, list] of shared) for (const item of list) byTable.set(item.relation.id, [...(byTable.get(item.relation.id) ?? []), item]);
+  for (const items of byTable.values()) {
+    if (checks++ >= budget) break;
+    const relation = items[0]!.relation;
+    const parts = items.map((item, index) => `COUNT(${quote(item.column)}) AS nn_${index}, COUNT(DISTINCT ${quote(item.column)}) AS nd_${index}`);
+    try {
+      const row = (await execute(`SELECT COUNT(*) AS row_count, ${parts.join(', ')} FROM ${quoteRelation(relation.relation)}`)).rows[0] ?? {};
+      const rows = num(row, 'row_count');
+      items.forEach((item, index) => {
+        if (rows > 0 && num(row, `nn_${index}`) === rows && num(row, `nd_${index}`) === rows) unique.add(`${relation.id}|${item.column.toLowerCase()}`);
+      });
+    } catch { /* a table that cannot be read proposes nothing */ }
+  }
+
+  // 2. Containment: the other tables' values are found in the unique side.
+  const entityOf = new Map(report.entities.map((entity) => [entity.relationId, entity]));
+  // Joins already drafted in this report, or already modeled, are left alone
+  // (either direction), identified by table id.
+  const relationIdOf = new Map(report.entities.map((entity) => [`${entity.domain}::${entity.id}`, entity.relationId]));
+  const known = new Set<string>(report.modeledJoins ?? []);
+  for (const item of report.relationships) {
+    const fromId = relationIdOf.get(`${item.fromDomain}::${item.from}`);
+    const toId = relationIdOf.get(`${item.toDomain}::${item.to}`);
+    if (fromId && toId) known.add(`${fromId}|${toId}|${item.keys.map((pair) => `${pair.from}=${pair.to}`).join('&')}`.toLowerCase());
+  }
+  const added: DiscoveredRelationship[] = [];
+  const referencedBy = new Map<string, number>();
+  for (const [, list] of shared) {
+    const targets = list.filter((item) => unique.has(`${item.relation.id}|${item.column.toLowerCase()}`));
+    for (const target of targets) {
+      for (const source of list) {
+        if (source.relation.id === target.relation.id) continue;
+        // Two tables unique on the same column (a subtype and its parent): the
+        // smaller one points at the larger, checked the same way.
+        const sourceUnique = unique.has(`${source.relation.id}|${source.column.toLowerCase()}`);
+        if (sourceUnique && targets.length > 1 && (source.relation.rowCountEstimate ?? 0) > (target.relation.rowCountEstimate ?? 0)) continue;
+        if (checks++ >= budget) break;
+        try {
+          const row = (await execute(`SELECT COUNT(${quote(source.column)}) AS referencing, COUNT(CASE WHEN ${quote(source.column)} IS NOT NULL AND ${quote(source.column)} NOT IN (SELECT ${quote(target.column)} FROM ${quoteRelation(target.relation.relation)} WHERE ${quote(target.column)} IS NOT NULL) THEN 1 END) AS unmatched FROM ${quoteRelation(source.relation.relation)}`)).rows[0] ?? {};
+          const referencing = num(row, 'referencing');
+          const unmatched = num(row, 'unmatched');
+          if (!(referencing > 0) || unmatched > referencing * MAX_UNMATCHED_SHARE) continue;
+          const from = entityOf.get(source.relation.id);
+          const to = entityOf.get(target.relation.id);
+          if (!from || !to) continue;
+          const signature = `${source.relation.id}|${target.relation.id}|${source.column}=${target.column}`.toLowerCase();
+          const reverse = `${target.relation.id}|${source.relation.id}|${target.column}=${source.column}`.toLowerCase();
+          if (known.has(signature) || known.has(reverse)) continue;
+          known.add(signature);
+          referencedBy.set(`${target.relation.id}|${target.column.toLowerCase()}`, (referencedBy.get(`${target.relation.id}|${target.column.toLowerCase()}`) ?? 0) + 1);
+          added.push({
+            id: '',
+            domain: from.domain,
+            from: from.id,
+            to: to.id,
+            fromDomain: from.domain,
+            toDomain: to.domain,
+            fromRelation: source.relation.relation,
+            toRelation: target.relation.relation,
+            keys: [{ from: source.column, to: target.column }],
+            evidence: [{ source: 'shared_key', reason: `${target.column} is unique in ${target.relation.name}, and ${referencing - unmatched} of ${referencing} ${source.relation.name} values are found there` }],
+            cardinality: sourceUnique ? 'one_to_one' : 'many_to_one',
+            fanout: 'safe',
+          });
+        } catch { /* an unreadable pair proposes nothing */ }
+      }
+    }
+  }
+
+  // 3. A table's grain is the unique column other tables point at (the most-referenced one).
+  const entities = report.entities.map((entity) => {
+    if (entity.grain) return entity;
+    const referenced = [...referencedBy.entries()].filter(([key]) => key.startsWith(`${entity.relationId}|`)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    if (referenced.length === 0) return entity;
+    const column = tables.find((relation) => relation.id === entity.relationId)?.columns.find((item) => `${entity.relationId}|${item.name.toLowerCase()}` === referenced[0]![0])?.name;
+    return column ? { ...entity, grain: column, keys: [column], grainSource: 'unique_column' as const } : entity;
+  });
+
+  // Ids as discovery names them: `<from>_to_<to>`, with the key when a pair has several.
+  const taken = new Map<string, Set<string>>();
+  for (const item of report.relationships) taken.set(item.domain, new Set([...(taken.get(item.domain) ?? []), item.id]));
+  for (const item of added) {
+    const ids = taken.get(item.domain) ?? new Set<string>();
+    taken.set(item.domain, ids);
+    let id = slug(`${item.from}_to_${item.to}`);
+    if (ids.has(id)) id = slug(`${item.from}_to_${item.to}_by_${item.keys[0]!.from}`);
+    ids.add(id);
+    item.id = id;
+  }
+  return { ...report, entities, relationships: [...report.relationships, ...added] };
+}
+
 export async function validateWarehouseDiscovery(
   report: WarehouseDiscoveryReport,
   snapshot: WarehouseCatalogSnapshotV1,
@@ -349,6 +483,8 @@ export async function validateWarehouseDiscovery(
   quote: (identifier: string) => string,
   options: { maxRelationships?: number } = {},
 ): Promise<WarehouseDiscoveryReport> {
+  // Joins the data proves come first, then every draft is checked the same way.
+  report = await inferSharedKeyJoins(report, snapshot, execute, quote);
   const typesOf = new Map(snapshot.relations.map((relation) => [relation.relation, new Map(relation.columns.map((column) => [column.name.toLowerCase(), column.type?.toLowerCase()]))]));
   const quoteRelation = (relation: string) => relation.split('.').map(quote).join('.');
   const entities: DiscoveredEntity[] = [];

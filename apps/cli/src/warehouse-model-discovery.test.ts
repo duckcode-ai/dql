@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { normalizeWarehouseCatalog, warehouseRelationId, type DQLManifest, type WarehouseCatalogRelationV1 } from '@duckcodeailabs/dql-core';
-import { discoverWarehouseModel, observedJoinsFromQueries, queryHistorySql, validateWarehouseDiscovery, viewJoins, warehouseDiscoveryChanges } from './warehouse-model-discovery.js';
+import { discoverWarehouseModel, inferSharedKeyJoins, observedJoinsFromQueries, queryHistorySql, validateWarehouseDiscovery, viewJoins, warehouseDiscoveryChanges } from './warehouse-model-discovery.js';
 
 const table = (schema: string, name: string, columns: string[], extra: Partial<WarehouseCatalogRelationV1> = {}): WarehouseCatalogRelationV1 => ({
   id: warehouseRelationId({ schema, name }),
@@ -113,6 +113,49 @@ describe('drafting a model from the warehouse catalog', () => {
     expect(joins.order_to_customer!.validation).toMatchObject({ status: 'passed', unmatchedFrom: 0 });
     // Aggregates only: no statement reads a row's values.
     expect(sql.every((statement) => /COUNT\(/i.test(statement))).toBe(true);
+    db.close();
+  });
+});
+
+describe('joins the data proves, on a warehouse that declares no keys', () => {
+  it('proposes a join where a shared column is unique on one side and contained on the other, and nothing else', async () => {
+    const t = (name: string, columns: Array<[string, string]>, rows: number) => ({
+      id: warehouseRelationId({ schema: 'app', name }), schema: 'app', name, relation: `app.${name}`, kind: 'table' as const,
+      columns: columns.map(([column, type]) => ({ name: column, type })), rowCountEstimate: rows,
+    });
+    const bare = normalizeWarehouseCatalog({
+      version: 1, driver: 'sqlite', connectionId: 'default', scopes: [{ catalogOrDatabase: 'app', schemas: ['app'] }], capturedAt: '2026-09-19T00:00:00.000Z',
+      relations: [
+        t('shops', [['Cust_Code', 'TEXT'], ['name', 'TEXT'], ['status', 'TEXT']], 3),
+        t('sales', [['Order_Ref', 'INTEGER'], ['Cust_Code', 'TEXT'], ['status', 'TEXT'], ['name', 'TEXT'], ['total', 'DOUBLE']], 5),
+        t('refunds', [['Order_Ref', 'INTEGER'], ['total', 'DOUBLE']], 2),
+      ],
+    });
+    const db = new Database(':memory:');
+    db.exec(`
+      ATTACH ':memory:' AS app;
+      CREATE TABLE app.shops (Cust_Code TEXT, name TEXT, status TEXT);
+      CREATE TABLE app.sales (Order_Ref INTEGER, Cust_Code TEXT, status TEXT, name TEXT, total DOUBLE);
+      CREATE TABLE app.refunds (Order_Ref INTEGER, total DOUBLE);
+      INSERT INTO app.shops VALUES ('C1', 'North', 'open'), ('C2', 'South', 'open'), ('C3', 'East', 'closed');
+      INSERT INTO app.sales VALUES (1, 'C1', 'open', 'x', 10), (2, 'C1', 'open', 'y', 20), (3, 'C2', 'closed', 'z', 30), (4, 'C3', 'open', 'w', 40), (5, 'C2', 'open', 'v', 50);
+      INSERT INTO app.refunds VALUES (2, 20), (5, 50);
+    `);
+    const execute = async (sql: string) => ({ rows: db.prepare(sql).all() as Array<Record<string, unknown>> });
+    const drafted = discoverWarehouseModel({ snapshot: bare, projectName: 'app' });
+    // Names alone say nothing here: no declared keys, no `_id` columns.
+    expect(drafted.relationships).toEqual([]);
+    const inferred = await inferSharedKeyJoins(drafted, bare, execute, (identifier) => `"${identifier}"`);
+    const joins = inferred.relationships.map((item) => `${item.from}.${item.keys[0]!.from} -> ${item.to}.${item.keys[0]!.to} (${item.cardinality})`).sort();
+    expect(joins).toEqual([
+      'refund.Order_Ref -> sale.Order_Ref (one_to_one)',
+      'sale.Cust_Code -> shop.Cust_Code (many_to_one)',
+    ]);
+    // `name` is unique in shops and sales but its values are not contained
+    // either way; `status` repeats; `total` is a measure type: none is a join.
+    expect(inferred.relationships.every((item) => item.evidence[0]!.source === 'shared_key')).toBe(true);
+    expect(inferred.entities.find((entity) => entity.id === 'shop')).toMatchObject({ grain: 'Cust_Code', grainSource: 'unique_column' });
+    expect(inferred.entities.find((entity) => entity.id === 'sale')).toMatchObject({ grain: 'Order_Ref' });
     db.close();
   });
 });
