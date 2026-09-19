@@ -136,6 +136,11 @@ const key = (schema: string | undefined, name: string) => `${(schema ?? '').toLo
 /** Fold the rows of every query into catalog relations. Exported for tests. */
 export function assembleWarehouseCatalog(driver: string, results: Array<{ query: CatalogQuery; rows: Row[] }>): WarehouseCatalogRelationV1[] {
   const includeCatalog = ['snowflake', 'databricks', 'bigquery'].includes(driver.toLowerCase());
+  // Wherever a three-part name is valid SQL, the database is part of the
+  // relation (ids stay as they were): Ask's schema index names these tables
+  // `database.schema.table`, and a table must have one name everywhere or its
+  // columns are not found under the name it was chosen by.
+  const recordDatabase = includeCatalog || ['duckdb', 'postgres', 'postgresql', 'redshift'].includes(driver.toLowerCase());
   const relations = new Map<string, WarehouseCatalogRelationV1>();
   const ensure = (row: Row, catalogOrDatabase: string): WarehouseCatalogRelationV1 | undefined => {
     const schema = text(row, 'table_schema');
@@ -147,10 +152,12 @@ export function assembleWarehouseCatalog(driver: string, results: Array<{ query:
       const database = text(row, 'table_catalog') ?? catalogOrDatabase;
       relation = {
         id: warehouseRelationId({ database: includeCatalog ? database : undefined, schema, name }),
-        ...(includeCatalog && database ? { database } : {}),
+        ...(recordDatabase && database ? { database } : {}),
         ...(schema ? { schema } : {}),
         name,
-        relation: [includeCatalog ? database : undefined, schema, name].filter(Boolean).join('.'),
+        // The name queries use, spelled as the warehouse's own tools and dbt
+        // spell it: three parts wherever that is valid SQL.
+        relation: [recordDatabase ? database : undefined, schema, name].filter(Boolean).join('.'),
         kind: 'table',
         columns: [],
       };

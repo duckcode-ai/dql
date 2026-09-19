@@ -34,9 +34,11 @@ describe('assembling a warehouse catalog from metadata rows', () => {
       ] },
     ]);
     const byName = Object.fromEntries(relations.map((relation) => [relation.name, relation]));
-    expect(byName.customers).toMatchObject({ id: 'warehouse.sales.customers', relation: 'sales.customers', kind: 'table', comment: 'One row per customer', primaryKey: ['customer_id'] });
+    // Three-part, as Ask's schema index and dbt name DuckDB tables; the id is unchanged.
+    expect(byName.customers).toMatchObject({ id: 'warehouse.sales.customers', database: 'memory', relation: 'memory.sales.customers', kind: 'table', comment: 'One row per customer', primaryKey: ['customer_id'] });
     expect(byName.customers!.columns).toEqual([{ name: 'customer_id', type: 'INTEGER', nullable: false }, { name: 'name', type: 'VARCHAR', comment: 'Full name', nullable: true }]);
     expect(byName.orders!.foreignKeys).toEqual([{ columns: ['customer_id'], references: { relation: 'sales.customers', columns: ['customer_id'] } }]);
+    expect(byName.big_orders!.relation).toBe('memory.sales.big_orders');
     expect(byName.big_orders).toMatchObject({ kind: 'view', viewSql: expect.stringContaining('CREATE VIEW') });
   });
 
@@ -74,7 +76,7 @@ describe('assembling a warehouse catalog from metadata rows', () => {
         { constraint_type: 'FOREIGN KEY', constraint_name: 'line_items_order_fk', table_schema: 'public', table_name: 'line_items', column_name: 'order_id', position: 1, ref_schema: 'public', ref_table: 'orders', ref_column: 'id' },
       ] },
     ]);
-    expect(relations[0]).toMatchObject({ relation: 'public.line_items', primaryKey: ['order_id', 'line_no'] });
+    expect(relations[0]).toMatchObject({ relation: 'app.public.line_items', primaryKey: ['order_id', 'line_no'] });
     expect(relations[0]!.foreignKeys).toEqual([{ columns: ['order_id'], references: { relation: 'public.orders', columns: ['id'] }, name: 'line_items_order_fk' }]);
   });
 
@@ -164,6 +166,8 @@ describe('syncing a live SQLite warehouse', () => {
     expect(snapshot.fingerprint).toBe(first.snapshot.fingerprint);
     const byName = Object.fromEntries(snapshot.relations.map((relation) => [relation.name, relation]));
     expect(byName.customers).toMatchObject({ relation: 'main.customers', primaryKey: ['customer_id'] });
+    // SQLite has no three-part names: no database is recorded.
+    expect(byName.customers!.database).toBeUndefined();
     expect(byName.customers!.columns.find((column) => column.name === 'name')).toMatchObject({ nullable: false });
     expect(byName.orders!.foreignKeys).toEqual([{ columns: ['customer_id'], references: { relation: 'main.customers', columns: ['customer_id'] }, name: '0' }]);
     expect(byName.big_orders).toMatchObject({ kind: 'view', viewSql: expect.stringContaining('CREATE VIEW') });
