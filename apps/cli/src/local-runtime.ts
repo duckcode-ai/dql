@@ -797,7 +797,8 @@ export interface ProjectConfig {
   /**
    * Explicit opt-ins for locally evolving App authoring surfaces. Dataset
    * field queries remain off until the project owner enables them, so an
-   * existing App keeps its legacy block semantics after an upgrade.
+   * existing App keeps its legacy block semantics after an upgrade. New
+   * projects are created with `datasets: true` (APP-007).
    */
   apps?: {
     datasets?: boolean;

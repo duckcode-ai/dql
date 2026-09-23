@@ -86,6 +86,9 @@ describe('runInit', () => {
     };
     expect(config.project).toBe('demo-project');
     expect(config.connections).toBeUndefined();
+    // New projects opt in to field-based Dataset tiles (APP-007 keeps
+    // existing projects off until their owner turns it on).
+    expect((config as { apps?: { datasets?: boolean } }).apps).toEqual({ datasets: true });
 
     const notebook = readFileSync(join(projectDir, 'notebooks', 'welcome.dqlnb'), 'utf-8');
     expect(notebook).toContain('DQL');

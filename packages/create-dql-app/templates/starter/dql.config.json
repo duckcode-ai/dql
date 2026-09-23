@@ -13,6 +13,9 @@
     "projectDir": "{{DBT_PROJECT_DIR}}",
     "manifestPath": "target/manifest.json"
   },
+  "apps": {
+    "datasets": true
+  },
   "governance": {
     "required_fields": ["domain", "owner", "description"]
   }
