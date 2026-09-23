@@ -3,6 +3,10 @@ import type { Notifier, NotifierPayload } from '../types.js';
 import { createEmailNotifier } from './email.js';
 import { createFileNotifier } from './file.js';
 import { createSlackNotifier } from './slack.js';
+import { createWebhookNotifier } from './webhook.js';
+
+/** A delivery target: compiled block notifications, or an App schedule's webhook. */
+export type DeliveryTarget = NotificationIR | { type: 'webhook'; recipients: string[] };
 
 export interface NotificationDispatchResult {
   type: string;
@@ -12,7 +16,7 @@ export interface NotificationDispatchResult {
 }
 
 export async function dispatchNotifications(
-  notifications: NotificationIR[],
+  notifications: DeliveryTarget[],
   payload: NotifierPayload,
   projectRoot: string,
 ): Promise<NotificationDispatchResult[]> {
@@ -20,6 +24,7 @@ export async function dispatchNotifications(
     email: createEmailNotifier(),
     slack: createSlackNotifier(),
     file: createFileNotifier(projectRoot),
+    webhook: createWebhookNotifier(),
   };
 
   const out: NotificationDispatchResult[] = [];

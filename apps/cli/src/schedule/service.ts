@@ -3,6 +3,7 @@ import { buildManifest } from '@duckcodeailabs/dql-core';
 import { findProjectRoot, loadProjectConfig, normalizeProjectConnection } from '../local-runtime.js';
 import { discoverScheduledBlocks } from './discovery.js';
 import { runAppDashboard, runBlock } from './runner.js';
+import { createRuntimePageRunner, type AppPageRunner } from './app-page-run.js';
 import type { ScheduledAppDashboard, ScheduledBlock } from './types.js';
 
 export interface ServiceOptions {
@@ -70,6 +71,21 @@ export async function startScheduleService(options: ServiceOptions = {}): Promis
     tasks.push({ stop: () => task.stop() });
   }
 
+  // One loopback App runtime serves every scheduled page for the life of the
+  // service, started on the first run and closed on stop.
+  let appRuntime: Promise<{ url: string; close: () => Promise<void> }> | undefined;
+  const pageRunner: AppPageRunner = async (appId, dashboardId) => {
+    appRuntime ??= import('../commands/notebook.js')
+      .then(({ startProjectRuntime }) => startProjectRuntime(projectRoot, { preferredPort: 0, host: '127.0.0.1' }))
+      .catch((error: unknown) => {
+        // A failed start is retried by the next scheduled run.
+        appRuntime = undefined;
+        throw error;
+      });
+    const runtime = await appRuntime;
+    return createRuntimePageRunner(runtime.url)(appId, dashboardId);
+  };
+
   for (const appSchedule of apps) {
     if (!nodeCron.validate(appSchedule.cron)) {
       console.error(`[schedule] invalid cron "${appSchedule.cron}" on ${appSchedule.appId}/${appSchedule.scheduleId}, skipping`);
@@ -84,6 +100,7 @@ export async function startScheduleService(options: ServiceOptions = {}): Promis
             projectRoot,
             trigger: 'cron',
             scheduleId: appSchedule.scheduleId,
+            pageRunner,
           });
           const failed = record.queries.filter((q) => q.error).length;
           const tag = record.error ? 'error' : failed > 0 ? `tile-errors:${failed}` : 'ok';
@@ -102,6 +119,7 @@ export async function startScheduleService(options: ServiceOptions = {}): Promis
     apps,
     async stop() {
       for (const t of tasks) t.stop();
+      if (appRuntime) await appRuntime.then((runtime) => runtime.close(), () => undefined);
     },
   };
 }

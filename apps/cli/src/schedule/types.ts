@@ -63,6 +63,6 @@ export interface NotifierPayload {
 }
 
 export interface Notifier {
-  type: 'email' | 'slack' | 'file';
+  type: 'email' | 'slack' | 'file' | 'webhook';
   send(recipients: string[], payload: NotifierPayload): Promise<{ delivered: boolean; error?: string }>;
 }

@@ -3,21 +3,14 @@ import { join } from 'node:path';
 import { compile } from '@duckcodeailabs/dql-compiler';
 import type { NotificationIR } from '@duckcodeailabs/dql-compiler';
 import type { QueryExecutor, ConnectionConfig } from '@duckcodeailabs/dql-connectors';
-import {
-  buildManifest,
-  isBlockIdRef,
-  loadDashboardDocument,
-  resolveSemanticLayerAsync,
-  type DashboardGridItem,
-  type ManifestBlock,
-} from '@duckcodeailabs/dql-core';
-import { buildExecutionPlan } from '@duckcodeailabs/dql-notebook';
-import { findProjectRoot, loadProjectConfig, prepareLocalExecution, resolveProjectSemanticConfig } from '../local-runtime.js';
+import { buildManifest } from '@duckcodeailabs/dql-core';
+import { findProjectRoot, loadProjectConfig, prepareLocalExecution } from '../local-runtime.js';
 import { runtimeVariables } from '../governance-runtime.js';
 import { isDigestOutput, runDigestBuild } from '../digest.js';
 import { evaluateAlerts } from './alerts.js';
 import { deriveBlockName } from './discovery.js';
-import { dispatchNotifications } from './notifiers/index.js';
+import { dispatchNotifications, type DeliveryTarget } from './notifiers/index.js';
+import { createRuntimePageRunner, summarizeAppPageRun, type AppPageRunner } from './app-page-run.js';
 import { writeRunRecord } from './runs.js';
 import type { NotifierPayload, QueryRunResult, RunRecord } from './types.js';
 
@@ -154,10 +147,9 @@ export async function runBlock(absPath: string, options: RunOptions): Promise<Ru
 export async function runAppDashboard(
   appId: string,
   dashboardId: string,
-  options: RunOptions & { scheduleId?: string },
+  options: RunOptions & { scheduleId?: string; pageRunner?: AppPageRunner },
 ): Promise<RunRecord> {
   const projectRoot = options.projectRoot ?? findProjectRoot(process.cwd());
-  const projectConfig = loadProjectConfig(projectRoot);
   const trigger = options.trigger ?? 'manual';
   const previewRows = options.previewRows ?? 3;
   const startedAt = new Date().toISOString();
@@ -166,6 +158,7 @@ export async function runAppDashboard(
   let queries: QueryRunResult[] = [];
   let notifications: Awaited<ReturnType<typeof dispatchNotifications>> = [];
   let error: string | undefined;
+  let ephemeral: { close: () => Promise<void> } | undefined;
 
   try {
     const manifest = buildManifest({ projectRoot });
@@ -174,71 +167,33 @@ export async function runAppDashboard(
     if (!app) throw new Error(`App not found: ${appId}`);
     if (!dashboard) throw new Error(`Dashboard not found: ${appId}/${dashboardId}`);
 
-    const loadedDashboard = loadDashboardDocument(join(projectRoot, dashboard.filePath)).document;
-    if (!loadedDashboard) throw new Error(`Dashboard file could not be loaded: ${dashboard.filePath}`);
-
-    const semantic = await resolveSemanticLayerAsync(resolveProjectSemanticConfig(projectConfig, projectRoot), projectRoot);
-    const semanticLayer = semantic.layer;
-
-    for (const item of loadedDashboard.layout.items) {
-      if (!item.block) continue;
-      const t0 = Date.now();
-      const manifestBlock = resolveDashboardItemBlock(item, manifest.blocks);
-      if (!manifestBlock) {
-        queries.push({
-          chartId: item.i,
-          sql: '',
-          rowCount: 0,
-          durationMs: Date.now() - t0,
-          error: `Unresolved block reference: ${JSON.stringify(item.block)}`,
-        });
-        continue;
-      }
-
-      try {
-        const source = readFileSync(join(projectRoot, manifestBlock.filePath), 'utf-8');
-        const plan = buildExecutionPlan(
-          { id: item.i, type: 'dql', source, title: item.title ?? manifestBlock.name },
-          { semanticLayer, driver: options.connection.driver },
-        );
-        if (!plan) throw new Error('Block produced no executable query');
-        const prepared = prepareLocalExecution(plan.sql, options.connection, projectRoot, projectConfig);
-        const result = await options.executor.executeQuery(
-          prepared.sql,
-          plan.sqlParams ?? [],
-          runtimeVariables(plan.variables),
-          prepared.connection,
-        );
-        queries.push({
-          chartId: item.i,
-          sql: plan.sql,
-          rowCount: result.rows.length,
-          durationMs: Date.now() - t0,
-          preview: result.rows.slice(0, previewRows) as Array<Record<string, unknown>>,
-        });
-      } catch (err) {
-        queries.push({
-          chartId: item.i,
-          sql: manifestBlock.sql,
-          rowCount: 0,
-          durationMs: Date.now() - t0,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+    // Scheduled pages run through the App runtime, exactly as a reader sees
+    // them: every tile kind, the page's default filters, and the same trust
+    // checks. A long-running schedule service passes one shared runtime; a
+    // one-off run starts a loopback runtime for this project and closes it.
+    let pageRunner = options.pageRunner;
+    if (!pageRunner) {
+      const { startProjectRuntime } = await import('../commands/notebook.js');
+      const runtime = await startProjectRuntime(projectRoot, { preferredPort: 0, host: '127.0.0.1' });
+      ephemeral = runtime;
+      pageRunner = createRuntimePageRunner(runtime.url);
     }
+    const tiles = await pageRunner(appId, dashboardId);
+    const summary = summarizeAppPageRun(dashboard.title, tiles, previewRows);
+    queries = summary.queries;
 
-    const notificationTargets: NotificationIR[] = [];
+    const notificationTargets: DeliveryTarget[] = [];
     for (const delivery of (app.schedules ?? []).find((s) => s.id === options.scheduleId)?.deliver ?? []) {
       if (delivery.kind === 'slack') {
         notificationTargets.push({ type: 'slack', recipients: [delivery.channel] });
       } else if (delivery.kind === 'email') {
         notificationTargets.push({ type: 'email', recipients: delivery.to });
+      } else if (delivery.kind === 'webhook') {
+        notificationTargets.push({ type: 'webhook', recipients: [delivery.url] });
       }
     }
 
     if (notificationTargets.length > 0) {
-      const ok = queries.filter((q) => !q.error).length;
-      const failed = queries.length - ok;
       notifications = await dispatchNotifications(
         notificationTargets,
         {
@@ -248,7 +203,7 @@ export async function runAppDashboard(
           alerts: [],
           queries,
           trigger,
-          markdown: `# ${dashboard.title}\n\n${ok} tiles ran successfully${failed ? `, ${failed} failed` : ''}.`,
+          markdown: summary.markdown,
           digestTitle: dashboard.title,
         },
         projectRoot,
@@ -256,6 +211,8 @@ export async function runAppDashboard(
     }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
+  } finally {
+    await ephemeral?.close();
   }
 
   const record: RunRecord = {
@@ -272,14 +229,4 @@ export async function runAppDashboard(
 
   writeRunRecord(projectRoot, record);
   return record;
-}
-
-function resolveDashboardItemBlock(
-  item: DashboardGridItem,
-  blocks: Record<string, ManifestBlock>,
-): ManifestBlock | null {
-  if (!item.block) return null;
-  if (isBlockIdRef(item.block)) return blocks[item.block.blockId] ?? null;
-  const normalized = item.block.ref.replace(/\\/g, '/');
-  return Object.values(blocks).find((b) => b.filePath.replace(/\\/g, '/') === normalized) ?? null;
 }
