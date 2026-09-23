@@ -846,7 +846,7 @@ export function DashboardRenderer({
         <div style={{ flex: 1, minWidth: 0 }}>
         {embeddedHeader ? null : (
           <>
-            <h2 style={{ margin: 0, fontSize: 20, lineHeight: 1.18, fontWeight: 780 }}>{dashboard.metadata.title}</h2>
+            <h2 style={{ margin: 0, fontSize: 20, lineHeight: 1.18, fontWeight: 600 }}>{dashboard.metadata.title}</h2>
             {dashboard.metadata.description ? (
               <div style={{ fontSize: 13, opacity: 0.72, marginTop: 4, maxWidth: 680, lineHeight: 1.4 }}>
                 {dashboard.metadata.description}
@@ -925,7 +925,7 @@ export function DashboardRenderer({
       {activeCrossFilters.length > 0 ? (
         <div
           aria-label="Selected result marks"
-          style={{ margin: '8px 0', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11.5 }}
+          style={{ margin: '8px 0', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 12 }}
         >
           <span style={{ color: 'var(--text-secondary)' }}>Selected marks</span>
           {activeCrossFilters.map((filter) => (
@@ -977,7 +977,7 @@ export function DashboardRenderer({
             justifyContent: 'center',
           }}
         >
-          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>
             {hiddenReviewTileCount > 0 || hiddenPresentationTileCount > 0 ? 'No stakeholder-ready tiles yet' : 'Build this dashboard page'}
           </div>
           <div style={{ maxWidth: 520, opacity: 0.68, lineHeight: 1.45 }}>
@@ -1033,15 +1033,15 @@ export function DashboardRenderer({
                 {section.kind !== 'exec_summary' ? (
                   <div style={{ marginBottom: 10 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <h3 style={{ margin: 0, fontSize: 15, fontWeight: 800, color: 'var(--dql-app-text, #0f172a)' }}>{section.title}</h3>
+                      <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: 'var(--dql-app-text, #0f172a)' }}>{section.title}</h3>
                       {isAppendix ? (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, border: '1px solid rgba(217,119,6,0.4)', color: '#b45309', background: 'rgba(217,119,6,0.08)', borderRadius: 999, padding: '1px 8px', fontSize: 10, fontWeight: 800 }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, border: '1px solid rgba(217,119,6,0.4)', color: '#b45309', background: 'rgba(217,119,6,0.08)', borderRadius: 999, padding: '1px 8px', fontSize: 11, fontWeight: 600 }}>
                           needs review
                         </span>
                       ) : null}
                     </div>
                     {section.narrative ? (
-                      <p style={{ margin: '4px 0 0', fontSize: 12.5, lineHeight: 1.5, color: 'var(--dql-app-text-muted, #64748b)', maxWidth: 860 }}>{section.narrative}</p>
+                      <p style={{ margin: '4px 0 0', fontSize: 13, lineHeight: 1.5, color: 'var(--dql-app-text-muted, #64748b)', maxWidth: 860 }}>{section.narrative}</p>
                     ) : null}
                   </div>
                 ) : null}
@@ -1602,7 +1602,7 @@ function DashboardTile({
             {!isCompactMetric ? (
               <span
                 style={{
-                  fontSize: 10,
+                  fontSize: 11,
                   padding: '2px 8px',
                   borderRadius: 999,
                   background: 'var(--surface-hover, rgba(0,0,0,0.06))',
@@ -1635,7 +1635,7 @@ function DashboardTile({
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, minWidth: 0 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               {editable ? (
-                <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 780, lineHeight: 1.25, minWidth: 0 }}>
+                <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 600, lineHeight: 1.25, minWidth: 0 }}>
                   <TileTitleInput value={generatedTitle ?? ''} compact={isCompactMetric} onCommit={(next) => renameTile(next)} />
                 </div>
               ) : (
@@ -1643,7 +1643,7 @@ function DashboardTile({
                   title={generatedTitle}
                   style={{
                     fontSize: isCompactMetric ? 12 : 13,
-                    fontWeight: 780,
+                    fontWeight: 600,
                     lineHeight: 1.25,
                     minWidth: 0,
                     overflow: 'hidden',
@@ -1678,7 +1678,7 @@ function DashboardTile({
             transition: 'padding 120ms ease',
           }}
         >
-          <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 600, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {editable ? (
               <TileTitleInput
                 value={item.title ?? blockRef ?? ''}
@@ -1719,7 +1719,7 @@ function DashboardTile({
               ) : null}
             </div>
           ) : !isCompactMetric ? (
-            <div style={{ marginTop: 5, fontSize: 10.5, opacity: 0.58, fontFamily: 'var(--font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{blockRef}</div>
+            <div style={{ marginTop: 5, fontSize: 11, opacity: 0.58, fontFamily: 'var(--font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{blockRef}</div>
           ) : null}
         </div>
       )}
@@ -1818,7 +1818,7 @@ function TileInsightCaption({ item, tile, themeMode }: { item: DashboardLayoutIt
   const caption = useMemo(() => computeTileInsight(tile, item), [item, tile]);
   if (!caption) return null;
   return (
-    <div style={{ padding: '4px 10px 8px', fontSize: 11.5, color: t.textMuted, lineHeight: 1.4, display: 'flex', gap: 5, alignItems: 'baseline' }}>
+    <div style={{ padding: '4px 10px 8px', fontSize: 12, color: t.textMuted, lineHeight: 1.4, display: 'flex', gap: 5, alignItems: 'baseline' }}>
       <span style={{ color: t.accent }}>•</span>
       <span>{caption}</span>
     </div>
@@ -2033,7 +2033,7 @@ const generatedVizOverflowStyle: React.CSSProperties = {
   background: 'transparent',
   color: 'inherit',
   font: 'inherit',
-  fontSize: 10.5,
+  fontSize: 11,
   cursor: 'pointer',
   maxWidth: 74,
 };
@@ -2093,7 +2093,7 @@ function BusinessStoryPanel({
         <div style={dashboardStoryIconStyle}><Sparkles size={15} strokeWidth={2.2} /></div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={dashboardStoryKickerStyle}>Business Story · current filters</div>
-          <h2 style={{ ...dashboardStoryTitleStyle, fontSize: 19 }}>{story.headline}</h2>
+          <h2 style={{ ...dashboardStoryTitleStyle, fontSize: 20 }}>{story.headline}</h2>
         </div>
         <TrustPill trust={story.trustState} />
       </div>
@@ -2104,7 +2104,7 @@ function BusinessStoryPanel({
           </p>
         ))}
         {story.implication ? (
-          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55, fontWeight: 650 }}>What this means: {storyInlineText(story.implication)}</p>
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55, fontWeight: 600 }}>What this means: {storyInlineText(story.implication)}</p>
         ) : null}
       </div>
       <div style={{ ...dashboardStoryChipRowStyle, marginTop: 14 }}>
@@ -2184,8 +2184,8 @@ const reviewAppendixStyle: CSSProperties = {
 const reviewAppendixSummaryStyle: CSSProperties = {
   cursor: 'pointer',
   padding: '12px 16px',
-  fontSize: 12.5,
-  fontWeight: 760,
+  fontSize: 13,
+  fontWeight: 600,
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'space-between',
@@ -2196,7 +2196,7 @@ const reviewAppendixGridStyle: CSSProperties = {
   display: 'grid',
   gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
   gap: 10,
-  fontSize: 11.5,
+  fontSize: 12,
   lineHeight: 1.45,
   color: 'var(--dql-app-text-muted, var(--text-secondary, #64748b))',
 };
@@ -2211,8 +2211,8 @@ const askHintStyle: CSSProperties = {
   gap: 4,
   padding: '3px 8px',
   borderRadius: 999,
-  fontSize: 10.5,
-  fontWeight: 700,
+  fontSize: 11,
+  fontWeight: 600,
   color: 'var(--dql-app-accent, var(--accent, #4f46e5))',
   background: 'var(--dql-app-accent-soft, rgba(79,70,229,0.12))',
   border: '1px solid var(--dql-app-accent, rgba(79,70,229,0.4))',
@@ -2419,7 +2419,7 @@ export function TileBody({
     <button
       type="button"
       onClick={(event) => { event.stopPropagation(); onNavigate(); }}
-      style={{ marginTop: 6, alignSelf: 'flex-start', border: '1px solid var(--border-default)', borderRadius: 6, background: 'var(--bg-1)', color: 'var(--accent)', padding: '5px 8px', fontSize: 11, fontWeight: 720, cursor: 'pointer' }}
+      style={{ marginTop: 6, alignSelf: 'flex-start', border: '1px solid var(--border-default)', borderRadius: 6, background: 'var(--bg-1)', color: 'var(--accent)', padding: '5px 8px', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
     >
       Open configured details
     </button>
@@ -2447,7 +2447,7 @@ export function TileBody({
         <button
           type="button"
           onClick={(event) => { event.stopPropagation(); onDrillBack(); }}
-          style={{ border: '1px solid var(--border-default)', borderRadius: 6, background: 'var(--bg-1)', color: 'var(--accent)', padding: '5px 8px', fontSize: 11, fontWeight: 720, cursor: 'pointer' }}
+          style={{ border: '1px solid var(--border-default)', borderRadius: 6, background: 'var(--bg-1)', color: 'var(--accent)', padding: '5px 8px', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
         >
           Back
         </button>
@@ -2554,7 +2554,7 @@ export function TileEvidencePanel({
       >
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 800 }}>{item.title ?? tile.title ?? artifact?.name ?? 'App tile'}</div>
+            <div style={{ fontSize: 16, fontWeight: 600 }}>{item.title ?? tile.title ?? artifact?.name ?? 'App tile'}</div>
             <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-secondary)' }}>{sourceLabel} · {artifact?.trustState === 'certified' && !tile.repair ? 'Certified' : 'Review required'}</div>
           </div>
           <button type="button" onClick={onClose} aria-label="Close details" style={iconTileButtonStyle}><X size={14} /></button>
@@ -2579,7 +2579,7 @@ export function TileEvidencePanel({
         </div>
         <div style={{ minHeight: 180, maxHeight: '56vh', overflow: 'auto' }}>
           {tab === 'how' ? (
-            <div style={{ display: 'grid', gap: 12, fontSize: 12.5, lineHeight: 1.5 }}>
+            <div style={{ display: 'grid', gap: 12, fontSize: 13, lineHeight: 1.5 }}>
               <EvidenceRow label="Source" value={artifact?.sourcePath ?? tile.citation?.path ?? tile.citation?.name ?? sourceLabel} />
               <EvidenceRow label="Result" value={runEvidence.result} />
               {tile.dataset?.sourceId ? <EvidenceRow label="Dataset source" value={`${tile.dataset.sourceId}${tile.dataset.sourceRevision ? ` · ${tile.dataset.sourceRevision}` : ''}`} /> : null}
@@ -2730,7 +2730,7 @@ function TileSizeMenu({
           onClick={() => onPick(preset.id)}
           style={tileSizeMenuItemStyle}
         >
-          <span style={{ fontSize: 12, fontWeight: 750 }}>{preset.label}</span>
+          <span style={{ fontSize: 12, fontWeight: 600 }}>{preset.label}</span>
           <span style={{ fontSize: 11, opacity: 0.66 }}>{preset.description}</span>
         </button>
       ))}
@@ -2862,7 +2862,7 @@ function TileSettingsPanel({
     >
       <header style={tileSettingsHeaderStyle}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 820 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 600 }}>
             <SlidersHorizontal size={14} /> Tile settings
           </div>
           <div style={{ marginTop: 2, color: 'var(--text-tertiary)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -2960,7 +2960,7 @@ function TileSettingsPanel({
       <details style={tileSettingsDetailsStyle}>
         <summary style={tileSettingsSummaryStyle}>Why this visualization</summary>
         <div style={tileDisplayContractStyle}>
-          <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-secondary)' }}>
+          <div style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--text-secondary)' }}>
             {genUi?.rationale ?? item.display?.rationale ?? 'This visualization is constrained by the governed result fields and the saved App display contract.'}
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
@@ -3007,7 +3007,7 @@ function ColumnPickList({
 }) {
   return (
     <div style={{ display: 'grid', gap: 4, minWidth: 0 }}>
-      <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', opacity: 0.58 }}>{title}</div>
+      <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', opacity: 0.58 }}>{title}</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
         {columns.length === 0 ? <span style={{ fontSize: 11, opacity: 0.55 }}>None</span> : columns.slice(0, 10).map((column) => (
           <button key={column} type="button" onClick={() => onPick(column)} style={fieldChipStyle}>
@@ -3083,7 +3083,7 @@ function AddTileMenuItem({
 }) {
   return (
     <button type="button" onClick={onClick} style={addMenuItemStyle}>
-      <span style={{ fontSize: 12, fontWeight: 700 }}>{title}</span>
+      <span style={{ fontSize: 12, fontWeight: 600 }}>{title}</span>
       <span style={{ fontSize: 11, opacity: 0.66 }}>{description}</span>
     </button>
   );
@@ -3111,7 +3111,7 @@ function GeneratedTextTile({
           {isTrust ? <AlertTriangle size={15} /> : isResearch ? <Sparkles size={15} /> : <ShieldCheck size={15} />}
         </span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 780, lineHeight: 1.25 }}>{title ?? genUi.insightTitle}</div>
+          <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.25 }}>{title ?? genUi.insightTitle}</div>
           <div style={{ marginTop: 6, fontSize: 13, lineHeight: 1.45, color: theme.textSecondary }}>
             {summary}
           </div>
@@ -3161,7 +3161,7 @@ function GeneratedEvidenceTable({
 
   return (
     <div style={generatedEvidenceStyle}>
-      <div style={{ fontSize: 11.5, color: theme.textSecondary }}>
+      <div style={{ fontSize: 12, color: theme.textSecondary }}>
         {rowCount} {rowCount === 1 ? 'row' : 'rows'} across {columns.length} {columns.length === 1 ? 'field' : 'fields'}
       </div>
       <div style={generatedEvidenceRowsStyle}>
@@ -3171,7 +3171,7 @@ function GeneratedEvidenceTable({
           return (
             <div key={index} style={generatedEvidenceRowStyle}>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 760, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
                 {detailColumns.length ? (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 4 }}>
                     {detailColumns.map((column) => (
@@ -3255,10 +3255,10 @@ function AiPinSummary({
       {dataView ? dataView : (
         <>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 10.5, fontWeight: 800, color: pin.certification === 'certified' ? '#15803d' : '#b45309', background: pin.certification === 'certified' ? 'rgba(22,163,74,0.1)' : 'rgba(245,158,11,0.12)', border: `1px solid ${pin.certification === 'certified' ? 'rgba(22,163,74,0.22)' : 'rgba(245,158,11,0.24)'}`, borderRadius: 999, padding: '3px 7px' }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: pin.certification === 'certified' ? '#15803d' : '#b45309', background: pin.certification === 'certified' ? 'rgba(22,163,74,0.1)' : 'rgba(245,158,11,0.12)', border: `1px solid ${pin.certification === 'certified' ? 'rgba(22,163,74,0.22)' : 'rgba(245,158,11,0.24)'}`, borderRadius: 999, padding: '3px 7px' }}>
               {pin.certification === 'certified' ? 'Certified' : 'Review required'}
             </span>
-            <span style={{ fontSize: 10.5, color: 'var(--color-text-muted, rgba(0,0,0,0.58))' }}>Pinned report insight</span>
+            <span style={{ fontSize: 11, color: 'var(--color-text-muted, rgba(0,0,0,0.58))' }}>Pinned report insight</span>
           </div>
           <div style={{ minWidth: 0 }}>
             {renderMarkdown(pin.answer, theme)}
@@ -3284,7 +3284,7 @@ function AiPinEvidencePreview({ result }: { result: QueryResult }) {
   if (!columns.length || !rows.length) return null;
   return (
     <div style={{ display: 'grid', gap: 6 }}>
-      <div style={{ color: 'var(--color-text-muted, rgba(0,0,0,0.58))', fontSize: 11, fontWeight: 750 }}>Supporting rows</div>
+      <div style={{ color: 'var(--color-text-muted, rgba(0,0,0,0.58))', fontSize: 11, fontWeight: 600 }}>Supporting rows</div>
       <div style={{ overflow: 'auto', border: '1px solid var(--border-color, rgba(0,0,0,0.08))', borderRadius: 6 }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
           <thead>
@@ -3331,7 +3331,7 @@ function TextTileDialog({
     <div style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,0.36)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ width: 'min(520px, 92vw)', display: 'grid', gap: 12, background: 'var(--color-bg, #fff)', color: 'inherit', borderRadius: 8, boxShadow: '0 18px 60px rgba(0,0,0,0.35)', padding: 16 }}>
         <div>
-          <div style={{ fontSize: 16, fontWeight: 800 }}>{isHeading ? 'Add heading' : 'Add text tile'}</div>
+          <div style={{ fontSize: 16, fontWeight: 600 }}>{isHeading ? 'Add heading' : 'Add text tile'}</div>
           <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
             {isHeading ? 'Create a section heading on this dashboard page.' : 'Create a narrative text tile on this dashboard page.'}
           </div>
@@ -3395,7 +3395,7 @@ function BlockCatalogDialog({
     <div style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,0.36)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ width: 'min(860px, 94vw)', maxHeight: '86vh', display: 'flex', flexDirection: 'column', background: 'var(--color-bg, #fff)', color: 'inherit', borderRadius: 8, overflow: 'hidden', boxShadow: '0 18px 60px rgba(0,0,0,0.35)' }}>
         <div style={{ padding: 14, borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.1))', display: 'flex', gap: 10, alignItems: 'center' }}>
-          <div style={{ fontSize: 15, fontWeight: 700, flex: 1 }}>Add Certified Block</div>
+          <div style={{ fontSize: 16, fontWeight: 600, flex: 1 }}>Add Certified Block</div>
           <button type="button" onClick={onClose} style={toolbarButtonStyle(false)}>Close</button>
         </div>
         <div style={{ padding: 14, borderBottom: '1px solid var(--border-color, rgba(0,0,0,0.08))' }}>
@@ -3417,10 +3417,10 @@ function BlockCatalogDialog({
               style={{ textAlign: 'left', border: '1px solid var(--border-color, rgba(0,0,0,0.1))', borderRadius: 7, background: 'transparent', color: 'inherit', padding: 10, cursor: 'pointer' }}
             >
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
-                <span style={{ fontSize: 13, fontWeight: 700 }}>{block.name}</span>
-                <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 999, background: 'rgba(63,185,80,0.14)', color: '#2ea043' }}>{block.status}</span>
-                <span style={{ fontSize: 10, opacity: 0.68 }}>{block.domain}</span>
-                <span style={{ fontSize: 10, opacity: 0.68 }}>{block.chartType ?? 'table'}</span>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{block.name}</span>
+                <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 999, background: 'rgba(63,185,80,0.14)', color: '#2ea043' }}>{block.status}</span>
+                <span style={{ fontSize: 11, opacity: 0.68 }}>{block.domain}</span>
+                <span style={{ fontSize: 11, opacity: 0.68 }}>{block.chartType ?? 'table'}</span>
               </div>
               <div style={{ fontSize: 12, opacity: 0.72 }}>{block.description || block.path}</div>
             </button>
@@ -3438,7 +3438,7 @@ function ScopedLineagePanel({ lineage }: { lineage: any | null }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
-        <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', opacity: 0.62, marginBottom: 6 }}>App Lineage</div>
+        <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'uppercase', opacity: 0.62, marginBottom: 6 }}>App Lineage</div>
         <div style={{ fontSize: 12, opacity: 0.72 }}>Terms and business views connect the App back to DQL blocks, dbt models, and source tables.</div>
       </div>
       {breadcrumbs.length > 0 && (
@@ -3465,14 +3465,14 @@ function ScopedLineagePanel({ lineage }: { lineage: any | null }) {
                   background: NODE_TYPE_COLORS[node.type] ?? '#8b949e',
                   borderRadius: 3,
                   padding: '1px 4px',
-                  fontSize: 9,
-                  fontWeight: 800,
+                  fontSize: 11,
+                  fontWeight: 600,
                   flexShrink: 0,
                 }}
               >
                 {TYPE_LABELS[node.type] ?? node.type.slice(0, 4).toUpperCase()}
               </span>
-              <div style={{ fontSize: 12, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</div>
+              <div style={{ fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</div>
             </div>
             <div style={{ fontSize: 11, opacity: 0.62, fontFamily: 'monospace', marginTop: 4 }}>
               {TYPE_TITLES[node.type] ?? node.type} · {node.id}
@@ -3488,7 +3488,7 @@ function LineageStat({ label, value }: { label: string; value: number }) {
   return (
     <div style={{ border: '1px solid var(--border-color, rgba(0,0,0,0.08))', borderRadius: 6, padding: 8 }}>
       <div style={{ fontSize: 11, opacity: 0.62 }}>{label}</div>
-      <div style={{ fontSize: 18, fontWeight: 800 }}>{value}</div>
+      <div style={{ fontSize: 20, fontWeight: 600 }}>{value}</div>
     </div>
   );
 }
@@ -3565,7 +3565,7 @@ const saveStatusStyle = (color: string): React.CSSProperties => ({
   alignItems: 'center',
   gap: 7,
   padding: '5px 12px',
-  fontSize: 11.5,
+  fontSize: 12,
   color,
   borderBottom: '1px solid var(--border-subtle)',
 });
@@ -3576,7 +3576,7 @@ const saveStatusDismissStyle: React.CSSProperties = {
   color: 'inherit',
   cursor: 'pointer',
   fontSize: 11,
-  fontWeight: 700,
+  fontWeight: 600,
   textDecoration: 'underline',
   padding: 0,
 };
@@ -3658,7 +3658,7 @@ function toolbarButtonStyle(active: boolean): CSSProperties {
     padding: '7px 10px',
     cursor: 'pointer',
     fontSize: 12,
-    fontWeight: 720,
+    fontWeight: 600,
     display: 'inline-flex',
     alignItems: 'center',
     gap: 6,
@@ -3699,8 +3699,8 @@ const tileEvidenceButtonStyle: CSSProperties = {
   color: 'var(--text-secondary)',
   padding: '4px 8px',
   cursor: 'pointer',
-  fontSize: 10.5,
-  fontWeight: 720,
+  fontSize: 11,
+  fontWeight: 600,
 };
 
 const tileRepairButtonStyle: CSSProperties = {
@@ -3745,7 +3745,7 @@ function tileEvidenceTabStyle(active: boolean): CSSProperties {
     padding: '5px 9px',
     cursor: 'pointer',
     fontSize: 11,
-    fontWeight: 750,
+    fontWeight: 600,
   };
 }
 
@@ -3801,8 +3801,8 @@ const dashboardStoryIconStyle: CSSProperties = {
 };
 
 const dashboardStoryKickerStyle: CSSProperties = {
-  fontSize: 10.5,
-  fontWeight: 820,
+  fontSize: 11,
+  fontWeight: 600,
   letterSpacing: 0,
   textTransform: 'uppercase',
   color: 'var(--dql-app-muted, rgba(15,23,42,0.58))',
@@ -3810,15 +3810,15 @@ const dashboardStoryKickerStyle: CSSProperties = {
 
 const dashboardStoryTitleStyle: CSSProperties = {
   margin: '2px 0 0',
-  fontSize: 15,
+  fontSize: 16,
   lineHeight: 1.25,
-  fontWeight: 820,
+  fontWeight: 600,
   color: 'var(--dql-app-text, inherit)',
 };
 
 const dashboardStorySummaryStyle: CSSProperties = {
   margin: 0,
-  fontSize: 13.5,
+  fontSize: 14,
   lineHeight: 1.48,
   color: 'var(--dql-app-muted, rgba(15,23,42,0.72))',
 };
@@ -3837,7 +3837,7 @@ const dashboardStoryChipStyle: CSSProperties = {
   color: 'var(--dql-app-muted, rgba(15,23,42,0.68))',
   padding: '3px 8px',
   fontSize: 11,
-  fontWeight: 720,
+  fontWeight: 600,
   lineHeight: 1.2,
   maxWidth: '100%',
   overflow: 'hidden',
@@ -3858,8 +3858,8 @@ const storyActionButtonStyle: CSSProperties = {
   background: 'var(--dql-app-surface, var(--surface, #fff))',
   color: 'var(--dql-app-text, var(--text-primary, #0f172a))',
   padding: '6px 10px',
-  fontSize: 11.5,
-  fontWeight: 720,
+  fontSize: 12,
+  fontWeight: 600,
   cursor: 'pointer',
 };
 
@@ -3896,7 +3896,7 @@ const primaryBuilderButtonStyle: CSSProperties = {
   padding: '7px 11px',
   cursor: 'pointer',
   fontSize: 12,
-  fontWeight: 700,
+  fontWeight: 600,
 };
 
 const addMenuItemStyle: CSSProperties = {
@@ -3972,8 +3972,8 @@ const tileSettingsSectionStyle: CSSProperties = {
 };
 
 const tileSettingsSectionHeadingStyle: CSSProperties = {
-  fontSize: 10.5,
-  fontWeight: 820,
+  fontSize: 11,
+  fontWeight: 600,
   textTransform: 'uppercase',
   letterSpacing: '0.055em',
   color: 'var(--text-tertiary)',
@@ -3988,8 +3988,8 @@ const tileSettingsGridStyle: CSSProperties = {
 const tileSettingsLabelStyle: CSSProperties = {
   display: 'grid',
   gap: 3,
-  fontSize: 10,
-  fontWeight: 700,
+  fontSize: 11,
+  fontWeight: 600,
   opacity: 0.78,
 };
 
@@ -4022,8 +4022,8 @@ const tileSettingsSummaryStyle: CSSProperties = {
   cursor: 'pointer',
   padding: '11px 0 0',
   color: 'var(--text-secondary)',
-  fontSize: 11.5,
-  fontWeight: 760,
+  fontSize: 12,
+  fontWeight: 600,
 };
 
 function recommendButtonStyle(busy: boolean): CSSProperties {
@@ -4034,7 +4034,7 @@ function recommendButtonStyle(busy: boolean): CSSProperties {
     borderRadius: 5,
     padding: '5px 7px',
     fontSize: 11,
-    fontWeight: 750,
+    fontWeight: 600,
     display: 'inline-flex',
     alignItems: 'center',
     gap: 5,
@@ -4061,7 +4061,7 @@ const fieldChipStyle: CSSProperties = {
   background: 'var(--surface, rgba(0,0,0,0.02))',
   color: 'inherit',
   padding: '2px 5px',
-  fontSize: 10,
+  fontSize: 11,
   cursor: 'pointer',
   maxWidth: '100%',
   overflow: 'hidden',
@@ -4087,8 +4087,8 @@ const generatedMetaPillStyle: CSSProperties = {
   background: 'rgba(148,163,184,0.10)',
   color: 'var(--dql-app-muted, rgba(15,23,42,0.70))',
   padding: '2px 7px',
-  fontSize: 10,
-  fontWeight: 720,
+  fontSize: 11,
+  fontWeight: 600,
   lineHeight: 1.1,
 };
 
@@ -4211,7 +4211,7 @@ const generatedEvidenceMetricStyle: CSSProperties = {
   gap: 1,
   minWidth: 82,
   textAlign: 'left',
-  fontSize: 10.5,
+  fontSize: 11,
 };
 
 const generatedEvidenceStatusStyle: CSSProperties = {

@@ -96,20 +96,20 @@ export function AppBuildProposalPanel({
   return (
     <div style={{ display: 'grid', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary }}>Build Brief</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: t.textPrimary }}>Build Brief</span>
         <span style={{ fontSize: 11, color: t.textMuted }}>
           {proposal.coverage.certifiedTiles} certified
           {proposal.coverage.semanticTiles > 0 ? ` · ${proposal.coverage.semanticTiles} governed semantic` : ''}
           {proposal.coverage.generatedTiles > 0 ? ` · ${proposal.coverage.generatedTiles} exploratory` : ''}
           {proposal.coverage.gaps > 0 ? ` · ${proposal.coverage.gaps} uncovered` : ''}
         </span>
-        <span style={{ fontSize: 10.5, color: t.textMuted }}>
+        <span style={{ fontSize: 11, color: t.textMuted }}>
           {proposal.intent.target === 'personal' ? 'Personal Draft' : 'Shared Project target'} · starts private
         </span>
       </div>
 
       <label style={{ display: 'grid', gap: 3 }}>
-        <span style={{ fontSize: 10.5, color: t.textMuted, fontWeight: 700 }}>{nameLabel}</span>
+        <span style={{ fontSize: 11, color: t.textMuted, fontWeight: 600 }}>{nameLabel}</span>
         <input
           value={name}
           onChange={(event) => setName(event.target.value)}
@@ -136,7 +136,7 @@ export function AppBuildProposalPanel({
           <div key={tile.id} style={{ ...tileRowStyle(t), opacity: 0.75 }}>
             <ShieldAlert size={13} color={t.warning} style={{ flexShrink: 0, marginTop: 2 }} />
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: t.textSecondary }}>{tile.title}</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: t.textSecondary }}>{tile.title}</div>
               <div style={{ fontSize: 11, color: t.textMuted, marginTop: 1 }}>{tile.error}</div>
             </div>
           </div>
@@ -145,11 +145,11 @@ export function AppBuildProposalPanel({
 
       {proposal.gaps.length > 0 ? (
         <div style={{ display: 'grid', gap: 4 }}>
-          <div style={{ fontSize: 11, fontWeight: 800, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
             Not covered yet
           </div>
           {proposal.gaps.map((gap) => (
-            <div key={gap.id} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textMuted }}>
+            <div key={gap.id} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 12, color: t.textMuted }}>
               <FileSearch size={12} style={{ flexShrink: 0, marginTop: 2 }} />
               <span style={{ lineHeight: 1.4 }}>{gap.question}</span>
             </div>
@@ -165,11 +165,11 @@ export function AppBuildProposalPanel({
             border: `1px solid ${t.headerBorder}`, background: 'var(--status-warning-bg, rgba(180,120,0,0.08))',
           }}
         >
-          <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
             {unbuildable.length === 1 ? '1 selected tile will not be built' : `${unbuildable.length} selected tiles will not be built`}
           </div>
           {unbuildable.map((tile) => (
-            <div key={tile.id} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textSecondary }}>
+            <div key={tile.id} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 12, color: t.textSecondary }}>
               <ShieldAlert size={12} style={{ flexShrink: 0, marginTop: 2 }} />
               <span style={{ lineHeight: 1.45 }}><b>{tile.title}</b> — {tile.reason}</span>
             </div>
@@ -274,18 +274,18 @@ function ProposalTileRow({
           </select>
         </div>
         {tile.description && !compact ? (
-          <div style={{ fontSize: 11.5, color: t.textSecondary, marginTop: 2, lineHeight: 1.4 }}>{tile.description}</div>
+          <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 2, lineHeight: 1.4 }}>{tile.description}</div>
         ) : null}
         {tile.question && tile.question !== tile.title ? (
           <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>Answers: {tile.question}</div>
         ) : null}
         {!compact ? (
-          <div style={{ fontSize: 10.5, color: tile.preflight.status === 'passed' ? t.success : tile.preflight.status === 'blocked' ? t.error : t.textMuted, marginTop: 2 }}>
+          <div style={{ fontSize: 11, color: tile.preflight.status === 'passed' ? t.success : tile.preflight.status === 'blocked' ? t.error : t.textMuted, marginTop: 2 }}>
             Preflight: {tile.preflight.status.replace('_', ' ')} · {tile.preflight.message}
           </div>
         ) : null}
         {tile.repair ? (
-          <div style={{ fontSize: 10.5, color: tile.repair.status === 'repaired' ? t.warning : t.error, marginTop: 3, lineHeight: 1.4 }}>
+          <div style={{ fontSize: 11, color: tile.repair.status === 'repaired' ? t.warning : t.error, marginTop: 3, lineHeight: 1.4 }}>
             Repair evidence: {tile.repair.message}
           </div>
         ) : null}
@@ -293,14 +293,14 @@ function ProposalTileRow({
           <button
             type="button"
             onClick={() => setOpen((value) => !value)}
-            style={{ border: 'none', background: 'transparent', color: t.accent, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10.5, fontWeight: 700, padding: 0, marginTop: 4, fontFamily: t.font }}
+            style={{ border: 'none', background: 'transparent', color: t.accent, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 11, fontWeight: 600, padding: 0, marginTop: 4, fontFamily: t.font }}
           >
             {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
             <Code2 size={11} /> {open ? 'Hide details' : 'Show SQL & preview'}
           </button>
         ) : null}
         {open && tile.answer ? (
-          <div style={{ fontSize: 11.5, color: t.textSecondary, marginTop: 5, lineHeight: 1.4 }}>{tile.answer}</div>
+          <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 5, lineHeight: 1.4 }}>{tile.answer}</div>
         ) : null}
         {open && tile.sql ? (
           <pre style={sqlStyle(t)}>{tile.sql}</pre>
@@ -318,11 +318,11 @@ function MiniPreviewTable({ preview, t }: { preview: NonNullable<AppBuildProposa
   const rows = preview.rows.slice(0, 5);
   return (
     <div style={{ marginTop: 5, overflow: 'auto', border: `1px solid ${t.headerBorder}`, borderRadius: 6 }}>
-      <table style={{ borderCollapse: 'collapse', fontSize: 10.5, fontFamily: t.fontMono, width: '100%' }}>
+      <table style={{ borderCollapse: 'collapse', fontSize: 11, fontFamily: t.fontMono, width: '100%' }}>
         <thead>
           <tr>
             {columns.map((column) => (
-              <th key={column} style={{ textAlign: 'left', padding: '3px 8px', color: t.textMuted, borderBottom: `1px solid ${t.headerBorder}`, fontWeight: 700, whiteSpace: 'nowrap' }}>{column}</th>
+              <th key={column} style={{ textAlign: 'left', padding: '3px 8px', color: t.textMuted, borderBottom: `1px solid ${t.headerBorder}`, fontWeight: 600, whiteSpace: 'nowrap' }}>{column}</th>
             ))}
           </tr>
         </thead>
@@ -339,7 +339,7 @@ function MiniPreviewTable({ preview, t }: { preview: NonNullable<AppBuildProposa
         </tbody>
       </table>
       {typeof preview.rowCount === 'number' && preview.rowCount > rows.length ? (
-        <div style={{ fontSize: 10, color: t.textMuted, padding: '3px 8px' }}>{preview.rowCount} rows total</div>
+        <div style={{ fontSize: 11, color: t.textMuted, padding: '3px 8px' }}>{preview.rowCount} rows total</div>
       ) : null}
     </div>
   );
@@ -373,8 +373,8 @@ function badgeStyle(color: string): React.CSSProperties {
     background: `${color}12`,
     borderRadius: 999,
     padding: '1px 7px',
-    fontSize: 9.5,
-    fontWeight: 800,
+    fontSize: 11,
+    fontWeight: 600,
   };
 }
 
@@ -387,7 +387,7 @@ function sqlStyle(t: Theme): React.CSSProperties {
     background: t.editorBg,
     borderRadius: 6,
     padding: 8,
-    fontSize: 10.5,
+    fontSize: 11,
     fontFamily: t.fontMono,
     color: t.textSecondary,
     lineHeight: 1.45,
@@ -403,8 +403,8 @@ function createButtonStyle(t: Theme, enabled: boolean): React.CSSProperties {
     border: 'none',
     borderRadius: 8,
     padding: '8px 14px',
-    fontSize: 12.5,
-    fontWeight: 800,
+    fontSize: 13,
+    fontWeight: 600,
     fontFamily: t.font,
     cursor: enabled ? 'pointer' : 'default',
     background: enabled ? t.accent : `${t.accent}55`,
@@ -432,8 +432,8 @@ function tileTitleInputStyle(t: Theme): React.CSSProperties {
     color: t.textPrimary,
     borderRadius: 5,
     padding: '1px 4px',
-    fontSize: 12.5,
-    fontWeight: 750,
+    fontSize: 13,
+    fontWeight: 600,
     fontFamily: t.font,
     minWidth: 0,
     flex: '1 1 180px',
@@ -447,7 +447,7 @@ function tileVizSelectStyle(t: Theme): React.CSSProperties {
     color: t.textMuted,
     borderRadius: 999,
     padding: '1px 6px',
-    fontSize: 9.5,
+    fontSize: 11,
     fontFamily: t.font,
     cursor: 'pointer',
   };

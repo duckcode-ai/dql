@@ -62,7 +62,7 @@ export function PersonaSwitcher({ app }: { app: AppDocumentSummary['app'] | null
             [{state.activePersona.roles.join(', ')}]
           </span>
         )}
-        <span style={{ fontSize: 10, opacity: 0.6 }}>▾</span>
+        <span style={{ fontSize: 11, opacity: 0.6 }}>▾</span>
       </button>
       {open && (
         <div

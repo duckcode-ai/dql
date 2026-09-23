@@ -17,8 +17,8 @@ export const APP_STYLES = `
   --dql-app-ink: var(--color-text-primary, #0f172a);
   --dql-app-muted: var(--color-text-secondary, #64748b);
   --dql-app-faint: var(--color-text-tertiary, #94a3b8);
-  --dql-app-accent: var(--color-accent-blue, #2563eb);
-  --dql-app-accent-soft: var(--accent-dim, rgba(37, 99, 235, 0.10));
+  --dql-app-accent: var(--color-accent-blue, #0b7a75);
+  --dql-app-accent-soft: var(--accent-dim, rgba(11, 122, 117, 0.10));
   --dql-app-deep: #111827;
   --dql-app-green: var(--color-status-success, #16a34a);
   --dql-app-green-soft: var(--status-success-bg, rgba(22, 163, 74, 0.08));
@@ -64,16 +64,16 @@ export const APP_STYLES = `
 
 .dql-apps-createhead h1 {
   margin: 0;
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1.2;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
 .dql-apps-createhead p {
   margin: 3px 0 0;
   color: var(--dql-app-faint);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.55;
   max-width: 720px;
 }
@@ -82,7 +82,7 @@ export const APP_STYLES = `
 .dql-apps-composer {
   background: var(--dql-app-surface);
   border: 1px solid var(--dql-app-line-2);
-  border-radius: 14px;
+  border-radius: 12px;
   box-shadow: 0 1px 2px rgba(26, 26, 26, 0.03), 0 6px 22px rgba(26, 26, 26, 0.05);
   display: flex;
   flex-direction: column;
@@ -99,12 +99,12 @@ export const APP_STYLES = `
   align-items: center;
   gap: 2px 7px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   color: var(--dql-app-muted);
   padding: 8px 10px;
   text-align: left;
-  font: 750 11.5px var(--font-ui);
+  font: 600 12px var(--font-ui);
   cursor: pointer;
 }
 .dql-apps-targets button.on {
@@ -115,13 +115,13 @@ export const APP_STYLES = `
 .dql-apps-targets button small {
   grid-column: 2;
   color: var(--dql-app-faint);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
 }
 .dql-apps-composer textarea {
   border: 0; background: transparent; resize: none; outline: none;
   padding: 13px 15px 4px;
-  font-size: 13.5px; line-height: 1.5;
+  font-size: 14px; line-height: 1.5;
   color: var(--dql-app-ink); font-family: inherit;
 }
 .dql-apps-composer-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px 10px 12px; }
@@ -131,7 +131,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 5px;
   color: var(--dql-app-muted);
-  font-size: 10.5px;
+  font-size: 11px;
   cursor: pointer;
 }
 .dql-apps-explore-toggle input { accent-color: var(--dql-app-accent); }
@@ -140,7 +140,7 @@ export const APP_STYLES = `
   padding: 4px 9px; border-radius: 8px;
   border: 1px solid var(--dql-app-line);
   background: var(--dql-app-canvas);
-  font-size: 11.5px; color: var(--dql-app-muted); white-space: nowrap;
+  font-size: 12px; color: var(--dql-app-muted); white-space: nowrap;
 }
 .dql-apps-composer-chip svg { color: var(--dql-app-green); }
 .dql-apps-composer-blank {
@@ -148,11 +148,11 @@ export const APP_STYLES = `
   height: 30px; padding: 0 11px;
   border-radius: 8px; border: 1px solid var(--dql-app-line);
   background: var(--dql-app-surface); color: var(--dql-app-muted);
-  font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: inherit;
+  font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit;
 }
 .dql-apps-composer-blank:hover { background: var(--dql-app-surface-muted); }
 .dql-apps-composer-send {
-  width: 34px; height: 34px; border-radius: 10px; border: 0;
+  width: 34px; height: 34px; border-radius: 8px; border: 0;
   background: var(--dql-app-accent); color: #fff;
   display: inline-flex; align-items: center; justify-content: center;
   cursor: pointer; box-shadow: 0 1px 5px rgba(107, 93, 211, 0.3);
@@ -160,29 +160,29 @@ export const APP_STYLES = `
 .dql-apps-composer-send:hover { filter: brightness(0.95); }
 .dql-apps-composer-send:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
 .dql-apps-try { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.dql-apps-try > span { font-size: 10.5px; color: var(--dql-app-faint); }
+.dql-apps-try > span { font-size: 11px; color: var(--dql-app-faint); }
 .dql-apps-try button {
   border: 1px solid var(--dql-app-line);
   background: var(--dql-app-surface);
   color: var(--dql-app-muted);
   border-radius: 999px; padding: 3.5px 11px;
-  font-size: 11px; font-weight: 550; cursor: pointer; font-family: inherit;
+  font-size: 11px; font-weight: 500; cursor: pointer; font-family: inherit;
 }
 .dql-apps-try button:hover { border-color: var(--dql-app-accent); color: var(--dql-app-accent); background: var(--dql-app-accent-soft); }
 .dql-apps-local-drafts { border:1px solid var(--border-subtle); border-radius:12px; background:var(--bg-0); overflow:hidden; }
 .dql-apps-local-drafts > header { min-height:48px; padding:0 14px; border-bottom:1px solid var(--border-subtle); display:flex; align-items:center; justify-content:space-between; }
 .dql-apps-local-drafts > header div { display:grid; gap:2px; }
-.dql-apps-local-drafts > header span { font-size:11px; font-weight:800; }
-.dql-apps-local-drafts > header small { color:var(--text-tertiary); font-size:9px; }
-.dql-apps-local-drafts > header b { min-width:22px; height:22px; border-radius:999px; background:var(--bg-2); display:flex; align-items:center; justify-content:center; color:var(--text-secondary); font-size:9px; }
+.dql-apps-local-drafts > header span { font-size:11px; font-weight:600; }
+.dql-apps-local-drafts > header small { color:var(--text-tertiary); font-size:11px; }
+.dql-apps-local-drafts > header b { min-width:22px; height:22px; border-radius:999px; background:var(--bg-2); display:flex; align-items:center; justify-content:center; color:var(--text-secondary); font-size:11px; }
 .dql-apps-local-drafts > div { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
 .dql-apps-local-drafts > div > button { min-width:0; border:0; border-bottom:1px solid var(--border-subtle); background:transparent; padding:12px 14px; display:grid; grid-template-columns:34px minmax(0,1fr) auto 16px; gap:9px; align-items:center; text-align:left; color:var(--text-primary); }
 .dql-apps-local-drafts > div > button:nth-child(odd) { border-right:1px solid var(--border-subtle); }
 .dql-apps-local-drafts > div > button:hover { background:var(--bg-1); }
-.dql-apps-local-drafts .draft-mark { width:32px; height:32px; border-radius:9px; background:var(--accent-dim); color:var(--accent); display:flex; align-items:center; justify-content:center; }
+.dql-apps-local-drafts .draft-mark { width:32px; height:32px; border-radius:8px; background:var(--accent-dim); color:var(--accent); display:flex; align-items:center; justify-content:center; }
 .dql-apps-local-drafts button > div { min-width:0; display:grid; gap:3px; }
 .dql-apps-local-drafts button strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
-.dql-apps-local-drafts button small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-tertiary); font-size:9px; }
+.dql-apps-local-drafts button small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-tertiary); font-size:11px; }
 @media (max-width:760px) { .dql-apps-local-drafts > div { grid-template-columns:1fr; } .dql-apps-local-drafts > div > button:nth-child(odd) { border-right:0; } }
 
 .dql-apps-btn {
@@ -194,7 +194,7 @@ export const APP_STYLES = `
   align-items: center;
   justify-content: center;
   gap: 7px;
-  font: 750 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -230,7 +230,7 @@ export const APP_STYLES = `
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font: 850 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-apps-ai-entry-head span {
@@ -253,12 +253,12 @@ export const APP_STYLES = `
   min-height: 112px;
   resize: vertical;
   border: 1px solid var(--dql-app-line-2);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   color: var(--dql-app-ink);
   outline: 0;
   padding: 13px 14px;
-  font: 540 15px/1.5 var(--font-ui);
+  font: 500 16px/1.5 var(--font-ui);
 }
 
 .dql-apps-ai-entry-box textarea:focus {
@@ -269,7 +269,7 @@ export const APP_STYLES = `
 .dql-apps-ai-entry-box button {
   height: 46px;
   border: 0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--dql-app-accent);
   color: #fff;
   padding: 0 16px;
@@ -277,7 +277,7 @@ export const APP_STYLES = `
   align-items: center;
   justify-content: center;
   gap: 7px;
-  font: 800 12.5px var(--font-ui);
+  font: 600 13px var(--font-ui);
   cursor: pointer;
   box-shadow: 0 12px 26px rgba(79, 99, 215, 0.2);
 }
@@ -310,7 +310,7 @@ export const APP_STYLES = `
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font: 750 11.5px var(--font-ui);
+  font: 600 12px var(--font-ui);
   cursor: pointer;
 }
 
@@ -336,13 +336,13 @@ export const APP_STYLES = `
 .dql-apps-sectionhead span,
 .dql-app-eyebrow {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0;
   text-transform: uppercase;
 }
 
 .dql-apps-sectionhead i { flex: 1; border-top: 1px solid var(--dql-app-line); }
-.dql-apps-sectionhead b { font-family: var(--font-mono); font-size: 10px; color: var(--dql-app-faint); }
+.dql-apps-sectionhead b { font-family: var(--font-mono); font-size: 11px; color: var(--dql-app-faint); }
 
 .dql-apps-library-head {
   margin-top: 28px;
@@ -351,10 +351,10 @@ export const APP_STYLES = `
   justify-content: space-between;
   gap: 24px;
 }
-.dql-apps-library-head h2 { margin: 5px 0 0; font-size: 25px; line-height: 1.15; letter-spacing: -.025em; }
-.dql-apps-library-head p { max-width: 650px; margin: 7px 0 0; color: var(--text-tertiary); font-size: 11.5px; line-height: 1.55; }
+.dql-apps-library-head h2 { margin: 5px 0 0; font-size: 24px; line-height: 1.15; letter-spacing: -.025em; }
+.dql-apps-library-head p { max-width: 650px; margin: 7px 0 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.55; }
 .dql-apps-library-summary { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
-.dql-apps-library-summary span { display: inline-flex; align-items: baseline; gap: 5px; border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--bg-0); color: var(--text-tertiary); padding: 6px 10px; font-size: 9.5px; white-space: nowrap; }
+.dql-apps-library-summary span { display: inline-flex; align-items: baseline; gap: 5px; border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--bg-0); color: var(--text-tertiary); padding: 6px 10px; font-size: 11px; white-space: nowrap; }
 .dql-apps-library-summary strong { color: var(--text-primary); font-size: 11px; }
 
 .dql-apps-libbar {
@@ -381,11 +381,11 @@ export const APP_STYLES = `
   padding: 6px 12px;
   cursor: pointer;
   color: var(--dql-app-muted);
-  font: 800 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-apps-filter-tabs button.on { background: var(--dql-app-surface); color: var(--dql-app-ink); box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); }
-.dql-apps-filter-tabs span { margin-left: 5px; color: var(--dql-app-accent); font-family: var(--font-mono); font-size: 10px; }
+.dql-apps-filter-tabs span { margin-left: 5px; color: var(--dql-app-accent); font-family: var(--font-mono); font-size: 11px; }
 
 .dql-apps-search {
   flex: 1;
@@ -396,7 +396,7 @@ export const APP_STYLES = `
   gap: 8px;
   background: var(--dql-app-surface);
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   padding: 0 12px;
   color: var(--dql-app-faint);
 }
@@ -440,7 +440,7 @@ export const APP_STYLES = `
 }
 
 .dql-app-card-labels { min-width: 0; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-.dql-app-visibility { display: inline-flex; align-items: center; gap: 4px; min-height: 22px; padding: 0 7px; border: 1px solid var(--border-subtle); border-radius: 999px; font-size: 8.5px; font-weight: 750; white-space: nowrap; }
+.dql-app-visibility { display: inline-flex; align-items: center; gap: 4px; min-height: 22px; padding: 0 7px; border: 1px solid var(--border-subtle); border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .dql-app-visibility.private { color: var(--text-secondary); background: var(--bg-2); }
 .dql-app-visibility.shared { color: var(--accent); border-color: color-mix(in srgb,var(--accent) 25%,var(--border-subtle)); background: var(--accent-dim); }
 .dql-app-draft-card { border-color: color-mix(in srgb,var(--accent) 26%,var(--border-subtle)); }
@@ -451,7 +451,7 @@ export const APP_STYLES = `
 .dql-app-star {
   width: 28px;
   height: 28px;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--dql-app-line);
   background: var(--dql-app-surface);
   color: var(--dql-app-faint);
@@ -462,7 +462,7 @@ export const APP_STYLES = `
 }
 
 .dql-app-star.on { color: var(--dql-app-accent); background: var(--dql-app-accent-soft); border-color: rgba(37, 99, 235, 0.35); }
-.dql-app-card h3 { margin: 13px 0 0; font-size: 17px; line-height: 1.2; }
+.dql-app-card h3 { margin: 13px 0 0; font-size: 16px; line-height: 1.2; }
 .dql-app-card p { min-height: 54px; margin: 7px 0 0; color: var(--dql-app-muted); font-size: 12px; line-height: 1.5; }
 
 .dql-app-card-mini {
@@ -473,7 +473,7 @@ export const APP_STYLES = `
 }
 
 .dql-app-card-mini span {
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   padding: 7px 9px;
 }
@@ -481,13 +481,13 @@ export const APP_STYLES = `
 .dql-app-card-mini small {
   display: block;
   font-family: var(--font-mono);
-  font-size: 7.5px;
+  font-size: 11px;
   letter-spacing: 0;
   text-transform: uppercase;
   color: var(--dql-app-muted);
 }
 
-.dql-app-card-mini b { display: block; margin-top: 1px; font-size: 15px; }
+.dql-app-card-mini b { display: block; margin-top: 1px; font-size: 16px; }
 
 .dql-app-card-signals {
   margin-top: 12px;
@@ -495,7 +495,7 @@ export const APP_STYLES = `
   flex-wrap: wrap;
   gap: 7px;
   color: var(--dql-app-muted);
-  font: 700 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
 }
 
 .dql-app-card-signals span {
@@ -505,7 +505,7 @@ export const APP_STYLES = `
   min-height: 24px;
   padding: 4px 8px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-surface-muted);
   white-space: nowrap;
 }
@@ -519,12 +519,12 @@ export const APP_STYLES = `
   border-top: 1px solid var(--dql-app-line);
   background: var(--dql-app-surface-muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--dql-app-muted);
 }
 
 .dql-app-card-depth span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dql-app-card-depth button { border: 0; background: transparent; color: var(--dql-app-accent); cursor: pointer; font: 800 11px var(--font-ui); }
+.dql-app-card-depth button { border: 0; background: transparent; color: var(--dql-app-accent); cursor: pointer; font: 600 11px var(--font-ui); }
 .dql-app-card-act {
   display: inline-flex;
   align-items: center;
@@ -533,10 +533,10 @@ export const APP_STYLES = `
   min-height: 26px;
   padding: 0 10px;
   border: 1px solid var(--dql-app-line) !important;
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--dql-app-surface) !important;
   color: var(--dql-app-muted) !important;
-  font: 650 11px var(--font-ui) !important;
+  font: 600 11px var(--font-ui) !important;
   transition: border-color 0.12s ease, color 0.12s ease;
 }
 .dql-app-card-act:hover {
@@ -572,8 +572,8 @@ export const APP_STYLES = `
   background: var(--dql-app-green-soft);
   color: var(--dql-app-green);
   font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 600;
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -640,7 +640,7 @@ export const APP_STYLES = `
   gap: 6px;
   justify-content: flex-start;
   color: var(--dql-app-ink);
-  font: 750 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-back-label span {
@@ -670,12 +670,12 @@ export const APP_STYLES = `
 .dql-app-name-input input {
   width: 240px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 5px 8px;
   outline: 0;
   background: transparent;
   color: var(--dql-app-ink);
-  font: 800 16px var(--font-ui);
+  font: 600 16px var(--font-ui);
 }
 
 .dql-app-name-input input:focus { border-color: var(--dql-app-accent); background: var(--dql-app-control); }
@@ -702,7 +702,7 @@ export const APP_STYLES = `
   padding: 6px 12px;
   color: var(--dql-app-muted);
   cursor: pointer;
-  font: 750 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-mode-seg button.on { background: var(--dql-app-deep); color: #fff; }
@@ -719,7 +719,7 @@ export const APP_STYLES = `
   background: var(--dql-app-control);
   color: var(--dql-app-ink);
   cursor: pointer;
-  font: 750 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-customize-btn:hover {
@@ -763,7 +763,7 @@ export const APP_STYLES = `
 
 .dql-app-share-popover b {
   color: var(--dql-app-ink);
-  font: 850 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-share-popover textarea {
@@ -771,7 +771,7 @@ export const APP_STYLES = `
   min-height: 92px;
   resize: none;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   color: var(--dql-app-ink);
   padding: 8px;
@@ -820,7 +820,7 @@ export const APP_STYLES = `
   justify-content: center;
   background: var(--dql-app-accent);
   color: #fff;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .dql-app-create-workspace {
@@ -887,7 +887,7 @@ export const APP_STYLES = `
   background: transparent;
   color: var(--dql-app-ink);
   padding: 0;
-  font: 520 18px/1.45 var(--font-ui);
+  font: 500 20px/1.45 var(--font-ui);
 }
 
 .dql-app-ai-start-send {
@@ -939,7 +939,7 @@ export const APP_STYLES = `
 
 .dql-app-ai-context-card {
   border: 1px solid var(--dql-app-line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
   overflow: hidden;
@@ -1010,14 +1010,14 @@ export const APP_STYLES = `
 .dql-app-ai-filter-preview small {
   display: block;
   color: var(--dql-app-faint);
-  font: 800 9.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
   margin-bottom: 8px;
 }
 
 .dql-app-ai-filter-preview b {
   color: var(--dql-app-accent);
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1.1;
 }
 
@@ -1064,7 +1064,7 @@ export const APP_STYLES = `
 .dql-app-ai-generated-head p {
   margin: 4px 0 0;
   color: var(--dql-app-muted);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .dql-app-ai-generated-grid {
@@ -1076,7 +1076,7 @@ export const APP_STYLES = `
 
 .dql-app-ai-plan-compact {
   border: 1px solid var(--dql-app-line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   overflow: hidden;
   box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
@@ -1104,8 +1104,8 @@ export const APP_STYLES = `
   background: var(--dql-app-surface);
 }
 
-.dql-app-panel-head span { font-weight: 850; font-size: 14px; }
-.dql-app-panel-head b { margin-left: auto; color: var(--dql-app-faint); font: 500 10px var(--font-mono); text-transform: uppercase; letter-spacing: 0; }
+.dql-app-panel-head span { font-weight: 600; font-size: 14px; }
+.dql-app-panel-head b { margin-left: auto; color: var(--dql-app-faint); font: 500 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0; }
 
 .dql-app-agent-scroll,
 .dql-app-plan-list {
@@ -1127,7 +1127,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 7px;
   color: var(--dql-app-ink);
-  font: 850 13px var(--font-ui);
+  font: 600 13px var(--font-ui);
 }
 
 .dql-app-ai-brief > span svg { color: var(--dql-app-accent); }
@@ -1141,7 +1141,7 @@ export const APP_STYLES = `
 .dql-app-ai-result {
   margin-top: 5px;
   border: 1px solid rgba(22, 163, 74, 0.26);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-green-soft);
   color: var(--dql-app-ink);
   padding: 8px 10px;
@@ -1153,7 +1153,7 @@ export const APP_STYLES = `
   display: block;
   margin-top: 3px;
   color: var(--dql-app-muted);
-  font: 700 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
 }
 
 .dql-app-composer {
@@ -1179,7 +1179,7 @@ export const APP_STYLES = `
 
 .dql-app-suggestions > span {
   color: var(--dql-app-faint);
-  font: 750 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 
@@ -1191,7 +1191,7 @@ export const APP_STYLES = `
   color: var(--dql-app-muted);
   padding: 2px 0;
   cursor: pointer;
-  font: 750 11.5px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-suggestions button:hover,
@@ -1206,7 +1206,7 @@ export const APP_STYLES = `
 .dql-app-modal textarea {
   width: 100%;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   color: var(--dql-app-ink);
   outline: 0;
@@ -1220,9 +1220,9 @@ export const APP_STYLES = `
   min-height: 130px;
   background: var(--dql-app-surface);
   border-color: var(--dql-app-line-2);
-  border-radius: 10px;
+  border-radius: 8px;
   padding: 11px 12px;
-  font-size: 13.5px;
+  font-size: 14px;
 }
 .dql-app-form-grid.two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .dql-app-form-grid label,
@@ -1231,7 +1231,7 @@ export const APP_STYLES = `
   display: grid;
   gap: 5px;
   color: var(--dql-app-muted);
-  font: 700 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0;
 }
@@ -1256,7 +1256,7 @@ export const APP_STYLES = `
 
 .dql-app-ai-context summary span {
   color: var(--dql-app-muted);
-  font: 800 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 
@@ -1267,7 +1267,7 @@ export const APP_STYLES = `
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--dql-app-ink);
-  font: 750 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-ai-context summary svg {
@@ -1290,7 +1290,7 @@ export const APP_STYLES = `
   display: grid;
   gap: 5px;
   color: var(--dql-app-muted);
-  font: 700 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 
@@ -1299,7 +1299,7 @@ export const APP_STYLES = `
   width: 100%;
   height: 34px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-surface-muted);
   color: var(--dql-app-ink);
   outline: 0;
@@ -1320,7 +1320,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 6px;
   color: var(--dql-app-muted);
-  font: 750 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-ai-send-row span svg {
@@ -1345,7 +1345,7 @@ export const APP_STYLES = `
   border-bottom: 1px solid var(--dql-app-line);
 }
 
-.dql-app-preview-head h2 { margin: 0; font-size: 19px; }
+.dql-app-preview-head h2 { margin: 0; font-size: 20px; }
 .dql-app-preview-filters {
   display: flex;
   gap: 7px;
@@ -1359,7 +1359,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 6px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   color: var(--dql-app-muted);
   padding: 4px 9px;
@@ -1412,7 +1412,7 @@ export const APP_STYLES = `
 .dql-app-preview-tile-head span,
 .dql-app-preview-tile-foot {
   color: var(--dql-app-faint);
-  font: 700 9px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0;
 }
@@ -1426,7 +1426,7 @@ export const APP_STYLES = `
   padding: 10px;
 }
 
-.dql-app-preview-tile-body strong { font-size: 26px; }
+.dql-app-preview-tile-body strong { font-size: 24px; }
 .dql-app-preview-tile-body small { color: var(--dql-app-muted); }
 .dql-app-preview-source {
   display: grid;
@@ -1453,7 +1453,7 @@ export const APP_STYLES = `
 .dql-app-preview-source p {
   margin: 4px 0 0;
   color: var(--dql-app-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.4;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1470,7 +1470,7 @@ export const APP_STYLES = `
   width: 26px;
   height: 26px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   color: var(--dql-app-muted);
   display: inline-flex;
@@ -1506,7 +1506,7 @@ export const APP_STYLES = `
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font: 850 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
   color: var(--dql-app-ink);
 }
 .dql-app-review-backlog-head b {
@@ -1519,7 +1519,7 @@ export const APP_STYLES = `
   justify-content: center;
   background: var(--dql-app-orange-soft);
   color: var(--dql-app-orange);
-  font: 800 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
 }
 .dql-app-review-backlog-grid {
   display: grid;
@@ -1536,13 +1536,13 @@ export const APP_STYLES = `
 }
 .dql-app-review-backlog-item b {
   display: block;
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.25;
 }
 .dql-app-review-backlog-item p {
   margin: 5px 0 0;
   color: var(--dql-app-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.4;
 }
 .dql-app-review-backlog-item > div:last-child {
@@ -1556,7 +1556,7 @@ export const APP_STYLES = `
   background: var(--dql-app-accent-soft);
   color: var(--dql-app-accent);
   padding: 3px 7px;
-  font: 750 10px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 .dql-app-planner-flow {
   border: 1px solid var(--dql-app-line);
@@ -1570,12 +1570,12 @@ export const APP_STYLES = `
   align-items: center;
   gap: 7px;
   color: var(--dql-app-accent);
-  font: 850 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 .dql-app-planner-flow p {
   margin: 7px 0 0;
   color: var(--dql-app-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.42;
 }
 .dql-app-planner-flow-steps {
@@ -1600,12 +1600,12 @@ export const APP_STYLES = `
   justify-content: center;
   background: var(--dql-app-accent-soft);
   color: var(--dql-app-accent);
-  font: 850 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
 }
 .dql-app-plan-group-label {
   margin: 14px 0 4px;
   color: var(--dql-app-faint);
-  font: 850 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 .dql-app-plan-item {
@@ -1617,26 +1617,26 @@ export const APP_STYLES = `
 }
 
 .dql-app-plan-item span { flex: 1; min-width: 0; }
-.dql-app-plan-item b { display: block; font: 700 11.5px var(--font-mono); }
-.dql-app-plan-item small { display: block; color: var(--dql-app-faint); font-size: 10px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dql-app-plan-item em { color: var(--dql-app-faint); font: 700 9px var(--font-mono); text-transform: uppercase; font-style: normal; }
+.dql-app-plan-item b { display: block; font: 600 12px var(--font-mono); }
+.dql-app-plan-item small { display: block; color: var(--dql-app-faint); font-size: 11px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dql-app-plan-item em { color: var(--dql-app-faint); font: 600 11px var(--font-mono); text-transform: uppercase; font-style: normal; }
 
 .dql-app-plan-session,
 .dql-app-plan-warning,
 .dql-app-plan-task {
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   padding: 8px 9px;
   background: var(--dql-app-surface-muted);
   color: var(--dql-app-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
 .dql-app-plan-session span {
   display: block;
   color: var(--dql-app-ink);
-  font-weight: 800;
+  font-weight: 600;
 }
 
 .dql-app-plan-session small {
@@ -1667,7 +1667,7 @@ export const APP_STYLES = `
   display: flex;
   align-items: baseline;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--dql-app-muted);
   margin: 5px 0;
 }
@@ -1679,9 +1679,9 @@ export const APP_STYLES = `
 
 .dql-app-error {
   border: 1px solid rgba(220, 38, 38, 0.24);
-  border-radius: 6px;
+  border-radius: 8px;
   background: rgba(220, 38, 38, 0.06);
-  color: #b91c1c;
+  color: var(--status-error);
   padding: 8px 10px;
   font-size: 12px;
   line-height: 1.45;
@@ -1710,13 +1710,13 @@ export const APP_STYLES = `
   align-items: center;
   gap: 7px;
   color: var(--dql-app-ink);
-  font: 850 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-palette-title b {
   margin-left: auto;
   color: var(--dql-app-faint);
-  font: 700 9.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 
@@ -1725,7 +1725,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 8px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   color: var(--dql-app-muted);
   padding: 8px 10px;
@@ -1746,7 +1746,7 @@ export const APP_STYLES = `
 .dql-app-palette button {
   width: 100%;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   color: var(--dql-app-ink);
   padding: 9px 10px;
@@ -1762,7 +1762,7 @@ export const APP_STYLES = `
 .dql-app-palette-icon {
   width: 25px;
   height: 25px;
-  border-radius: 6px;
+  border-radius: 8px;
   background: #f1f5f9;
   color: var(--dql-app-accent);
   display: inline-flex;
@@ -1772,13 +1772,13 @@ export const APP_STYLES = `
 }
 
 .dql-app-palette span:nth-child(2) { flex: 1; min-width: 0; }
-.dql-app-palette b { display: block; font: 700 11px var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dql-app-palette small { display: block; color: var(--dql-app-faint); font-size: 10px; }
-.dql-app-palette i { color: var(--dql-app-green); font: 700 9px var(--font-mono); text-transform: uppercase; font-style: normal; }
+.dql-app-palette b { display: block; font: 600 11px var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dql-app-palette small { display: block; color: var(--dql-app-faint); font-size: 11px; }
+.dql-app-palette i { color: var(--dql-app-green); font: 600 11px var(--font-mono); text-transform: uppercase; font-style: normal; }
 .dql-app-palette-more {
   color: var(--dql-app-faint);
   text-align: center;
-  font: 700 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   padding: 8px 0 2px;
 }
 
@@ -1791,7 +1791,7 @@ export const APP_STYLES = `
   backdrop-filter: blur(10px);
 }
 
-.dql-app-crumb { color: var(--dql-app-muted); font: 700 11.5px var(--font-mono); }
+.dql-app-crumb { color: var(--dql-app-muted); font: 600 12px var(--font-mono); }
 .dql-app-filterbar {
   position: relative;
   z-index: 3;
@@ -1818,7 +1818,7 @@ export const APP_STYLES = `
 
 .dql-app-filter-select span {
   color: var(--dql-app-faint);
-  font: 700 9px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -1829,7 +1829,7 @@ export const APP_STYLES = `
   background: transparent;
   color: var(--dql-app-ink);
   outline: 0;
-  font: 750 12.5px var(--font-ui);
+  font: 600 13px var(--font-ui);
   min-width: 0;
   max-width: 110px;
 }
@@ -1840,7 +1840,7 @@ export const APP_STYLES = `
 
 .dql-app-filter-empty {
   color: var(--dql-app-faint);
-  font: 750 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-filter-picker {
@@ -1851,7 +1851,7 @@ export const APP_STYLES = `
 }
 
 .dql-app-filter-coverage-hint {
-  font: 700 10.5px var(--font-ui);
+  font: 600 11px var(--font-ui);
   color: var(--dql-app-faint);
 }
 
@@ -1861,7 +1861,7 @@ export const APP_STYLES = `
   gap: 8px;
   flex-wrap: wrap;
   width: 100%;
-  font: 700 10.5px var(--font-ui);
+  font: 600 11px var(--font-ui);
   color: var(--dql-app-faint);
 }
 
@@ -1882,14 +1882,14 @@ export const APP_STYLES = `
 }
 
 .dql-app-filter-editor-name {
-  font: 750 11.5px var(--font-ui);
+  font: 600 12px var(--font-ui);
   min-width: 120px;
 }
 
 /* Coverage is the honest part: a filter reaching some tiles must not look like
    one reaching all of them. */
 .dql-app-filter-coverage {
-  font: 700 10.5px var(--font-ui);
+  font: 600 11px var(--font-ui);
   padding: 2px 7px;
   border-radius: 999px;
   color: var(--status-success);
@@ -1917,13 +1917,13 @@ export const APP_STYLES = `
 .dql-app-filter-error {
   width: 100%;
   color: var(--status-error);
-  font: 700 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-filter-note {
   margin-left: auto;
   color: var(--dql-app-faint);
-  font: 700 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1937,7 +1937,7 @@ export const APP_STYLES = `
   gap: 8px;
   color: var(--dql-app-muted);
   cursor: pointer;
-  font: 800 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-toggle i {
@@ -1999,26 +1999,26 @@ export const APP_STYLES = `
   align-items: center;
   gap: 6px;
   color: var(--dql-app-muted);
-  font: 750 11.5px var(--font-ui);
+  font: 600 12px var(--font-ui);
   text-transform: capitalize;
 }
 
 .dql-app-title-row h1 {
   margin: 0;
-  font-size: 26px;
+  font-size: 24px;
   line-height: 1.1;
-  font-weight: 820;
+  font-weight: 600;
 }
 
 /* Reads as the heading until you focus it, so the page does not look like a form. */
 .dql-app-title-input {
   margin: 0;
   width: 100%;
-  font: 820 26px/1.1 var(--font-ui);
+  font: 600 24px/1.1 var(--font-ui);
   color: inherit;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: 8px;
   padding: 1px 6px;
   margin-left: -6px;
 }
@@ -2049,7 +2049,7 @@ export const APP_STYLES = `
   display: inline-flex;
   align-items: center;
   color: var(--dql-app-faint);
-  font: 700 11.5px var(--font-mono);
+  font: 600 12px var(--font-mono);
 }
 
 /* The App-name rename sitting in the meta row: inherits that row's small
@@ -2091,7 +2091,7 @@ export const APP_STYLES = `
   min-height: 32px;
   display: inline-flex;
   align-items: center;
-  font: 750 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-section-tabs {
@@ -2109,7 +2109,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  font: 750 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-section-tabs button {
@@ -2145,7 +2145,7 @@ export const APP_STYLES = `
 .dql-app-section-tabs b {
   color: var(--dql-app-accent);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .dql-app-page-picker {
@@ -2159,7 +2159,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 6px;
   color: var(--dql-app-faint);
-  font: 800 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 
@@ -2171,7 +2171,7 @@ export const APP_STYLES = `
   outline: 0;
   background: transparent;
   color: var(--dql-app-ink);
-  font: 800 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
   text-overflow: ellipsis;
 }
 
@@ -2179,7 +2179,7 @@ export const APP_STYLES = `
   width: 26px;
   height: 26px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--dql-app-accent-soft);
   color: var(--dql-app-accent);
   display: inline-flex;
@@ -2216,7 +2216,7 @@ export const APP_STYLES = `
 }
 .dql-app-filter-row-copy { display: grid; gap: 2px; min-width: 170px; }
 .dql-app-filter-row-copy b { font-size: 12px; color: var(--dql-app-ink); }
-.dql-app-filter-row-copy span { font-size: 10.5px; color: var(--dql-app-faint); }
+.dql-app-filter-row-copy span { font-size: 11px; color: var(--dql-app-faint); }
 .dql-app-filter-row .dql-app-topbar-filters { flex: 1; }
 .dql-app-filter-row-actions { display: flex; gap: 7px; margin-left: auto; }
 
@@ -2230,7 +2230,7 @@ export const APP_STYLES = `
   height: calc(100vh - 142px);
   max-height: calc(100vh - 142px);
   border: 1px solid var(--dql-app-line);
-  border-radius: 16px;
+  border-radius: 12px;
   background: var(--dql-app-surface);
   overflow: hidden;
   box-shadow: 0 20px 60px rgba(15, 23, 42, 0.14);
@@ -2275,7 +2275,7 @@ export const APP_STYLES = `
 
 .dql-app-assistant-focus span {
   color: var(--dql-app-muted);
-  font: 800 9.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -2288,7 +2288,7 @@ export const APP_STYLES = `
   background: var(--dql-app-surface);
   color: var(--dql-app-ink);
   padding: 0 10px;
-  font: 750 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
   cursor: pointer;
 }
 
@@ -2304,7 +2304,7 @@ export const APP_STYLES = `
   gap: 5px;
   padding: 0 9px;
   cursor: pointer;
-  font: 800 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-assistant-context-btn.on,
@@ -2361,7 +2361,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 6px;
   color: var(--dql-app-green);
-  font: 850 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-one-ai-status > div {
@@ -2384,7 +2384,7 @@ export const APP_STYLES = `
   border-radius: 999px;
   background: var(--dql-app-surface);
   color: var(--dql-app-faint);
-  font: 750 10.5px var(--font-ui);
+  font: 600 11px var(--font-ui);
   padding: 4px 8px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2431,7 +2431,7 @@ export const APP_STYLES = `
   background: var(--dql-app-surface);
   color: var(--dql-app-ink);
   padding: 12px 13px;
-  font: 500 13.5px/1.45 var(--font-ui);
+  font: 500 14px/1.45 var(--font-ui);
   outline: none;
 }
 
@@ -2451,7 +2451,7 @@ export const APP_STYLES = `
   justify-content: center;
   gap: 6px;
   padding: 8px 10px;
-  font-weight: 750;
+  font-weight: 600;
 }
 
 .dql-app-direct-ask-row button {
@@ -2474,7 +2474,7 @@ export const APP_STYLES = `
 
 .dql-app-direct-quick button {
   color: var(--dql-app-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   padding: 7px 9px;
   white-space: nowrap;
   width: 100%;
@@ -2498,7 +2498,7 @@ export const APP_STYLES = `
   max-width: calc(100% - 42px);
   margin: 0 16px 0 42px;
   border: 1px solid rgba(79, 99, 215, 0.28);
-  border-radius: 14px 14px 5px 14px;
+  border-radius: 12px 12px 4px 12px;
   background: var(--dql-app-accent);
   color: #fff;
   padding: 10px 12px;
@@ -2507,7 +2507,7 @@ export const APP_STYLES = `
 
 .dql-app-user-message span {
   display: block;
-  font: 850 9.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
   opacity: .72;
@@ -2516,14 +2516,14 @@ export const APP_STYLES = `
 .dql-app-user-message p {
   margin: 4px 0 0;
   color: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .dql-app-copilot-welcome span {
   color: var(--dql-app-accent);
-  font: 850 10.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -2531,13 +2531,13 @@ export const APP_STYLES = `
 .dql-app-copilot-welcome p {
   margin: 0;
   color: var(--dql-app-muted);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.48;
 }
 
 .dql-app-direct-answer {
   border: 1px solid var(--dql-app-line);
-  border-radius: 14px 14px 14px 5px;
+  border-radius: 12px 12px 12px 4px;
   background: var(--dql-app-surface);
   margin: 0 42px 0 16px;
   padding: 12px;
@@ -2554,7 +2554,7 @@ export const APP_STYLES = `
 .dql-app-direct-answer p {
   margin: 0;
   color: var(--dql-app-ink);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -2571,13 +2571,13 @@ export const APP_STYLES = `
   border-radius: 999px;
   padding: 3px 7px;
   color: var(--dql-app-muted);
-  font-size: 10.5px;
+  font-size: 11px;
   background: var(--dql-app-surface);
 }
 
 .dql-app-direct-followups button {
   cursor: pointer;
-  font-weight: 750;
+  font-weight: 600;
 }
 
 .dql-app-direct-followups button:hover {
@@ -2597,14 +2597,14 @@ export const APP_STYLES = `
   gap: 8px;
   margin-top: 12px;
   border: 1px solid rgba(79, 99, 215, 0.18);
-  border-radius: 11px;
+  border-radius: 12px;
   background: color-mix(in srgb, var(--dql-app-accent-soft) 58%, var(--dql-app-surface));
   padding: 10px;
 }
 
 .dql-app-copilot-next-step > span {
   color: var(--dql-app-accent);
-  font: 850 10.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 
@@ -2626,8 +2626,8 @@ export const APP_STYLES = `
 }
 
 .dql-app-analysis-handoff > span {
-  color: #15803d;
-  font: 850 10.5px var(--font-mono);
+  color: var(--status-success);
+  font: 600 11px var(--font-mono);
   letter-spacing: .02em;
   text-transform: uppercase;
 }
@@ -2635,7 +2635,7 @@ export const APP_STYLES = `
 .dql-app-analysis-handoff p {
   margin: 0;
   color: var(--dql-app-ink);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -2655,7 +2655,7 @@ export const APP_STYLES = `
 .dql-app-context-composer {
   margin: 0 16px;
   border: 1px solid rgba(79, 99, 215, 0.28);
-  border-radius: 14px;
+  border-radius: 12px;
   background: var(--dql-app-surface);
   box-shadow: 0 16px 44px rgba(79, 99, 215, 0.11);
   padding: 12px;
@@ -2716,7 +2716,7 @@ export const APP_STYLES = `
   background: var(--dql-app-surface-muted);
   color: var(--dql-app-muted);
   padding: 4px 8px;
-  font: 750 10px var(--font-ui);
+  font: 600 11px var(--font-ui);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2739,7 +2739,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 7px;
   color: var(--dql-app-muted);
-  font: 750 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -2748,14 +2748,14 @@ export const APP_STYLES = `
 .dql-app-copilot-hero h3 {
   margin: 6px 0 0;
   color: var(--dql-app-ink);
-  font-size: 19px;
+  font-size: 20px;
   line-height: 1.15;
 }
 
 .dql-app-copilot-hero p {
   margin: 6px 0 0;
   color: var(--dql-app-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.42;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -2766,7 +2766,7 @@ export const APP_STYLES = `
 .dql-app-copilot-decision {
   margin-top: 8px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   padding: 7px 9px;
 }
@@ -2775,7 +2775,7 @@ export const APP_STYLES = `
 .dql-app-copilot-facts small {
   display: block;
   color: var(--dql-app-muted);
-  font: 750 9px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -2784,7 +2784,7 @@ export const APP_STYLES = `
   display: block;
   margin-top: 3px;
   color: var(--dql-app-ink);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.32;
 }
 
@@ -2797,7 +2797,7 @@ export const APP_STYLES = `
 
 .dql-app-copilot-facts span {
   min-width: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   padding: 6px 8px;
 }
@@ -2806,7 +2806,7 @@ export const APP_STYLES = `
   display: block;
   margin-top: 2px;
   color: var(--dql-app-ink);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.25;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2823,13 +2823,13 @@ export const APP_STYLES = `
 .dql-app-explain-head span,
 .dql-app-ex-label {
   color: var(--dql-app-muted);
-  font: 700 9px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
 
-.dql-app-explain-head h3 { margin: 3px 0 0; font-size: 17px; }
-.dql-app-explain-head p { margin: 5px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.45; }
+.dql-app-explain-head h3 { margin: 3px 0 0; font-size: 16px; }
+.dql-app-explain-head p { margin: 5px 0 0; color: var(--dql-app-muted); font-size: 12px; line-height: 1.45; }
 .dql-app-ex-section { padding: 13px 16px; border-bottom: 1px solid var(--dql-app-line); }
 .dql-app-ex-section.compact { padding-top: 11px; padding-bottom: 11px; }
 .dql-app-copilot-controls {
@@ -2844,7 +2844,7 @@ export const APP_STYLES = `
 
 .dql-app-copilot-focus span {
   color: var(--dql-app-muted);
-  font: 700 9px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -2854,11 +2854,11 @@ export const APP_STYLES = `
   min-width: 0;
   height: 34px;
   border: 1px solid var(--dql-app-line-2);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   color: var(--dql-app-ink);
   padding: 0 10px;
-  font: 800 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-copilot-empty {
@@ -2883,7 +2883,7 @@ export const APP_STYLES = `
 .dql-app-copilot-brief span {
   display: inline-flex;
   color: var(--dql-app-green);
-  font: 750 9px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -2899,7 +2899,7 @@ export const APP_STYLES = `
 .dql-app-copilot-brief p {
   margin: 4px 0 0;
   color: var(--dql-app-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -2933,7 +2933,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 5px;
   cursor: pointer;
-  font: 800 10.5px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-copilot-prompts button:hover {
@@ -2958,7 +2958,7 @@ export const APP_STYLES = `
   padding: 0 12px;
   cursor: pointer;
   color: var(--dql-app-muted);
-  font: 800 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
   list-style: none;
 }
 
@@ -2975,7 +2975,7 @@ export const APP_STYLES = `
   min-width: 0;
   max-width: 160px;
   color: var(--dql-app-faint);
-  font: 700 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3003,7 +3003,7 @@ export const APP_STYLES = `
 .dql-app-keyvalue-inline b {
   min-width: 0;
   color: var(--dql-app-muted);
-  font-weight: 700;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3013,7 +3013,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 9px;
   padding: 5px 0;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .dql-app-block-cite span { flex: 1; min-width: 0; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3024,19 +3024,19 @@ export const APP_STYLES = `
   align-items: center;
   gap: 8px;
   padding: 5px 0;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .dql-app-flow-node span {
   width: 28px;
   height: 23px;
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--dql-app-accent-soft);
   color: var(--dql-app-accent);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font: 700 8px var(--font-mono);
+  font: 600 11px var(--font-mono);
 }
 
 .dql-app-flow-node b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3093,12 +3093,12 @@ export const APP_STYLES = `
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 800 11.5px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-focus-list button b {
   color: var(--dql-app-faint);
-  font: 700 8.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 
@@ -3114,7 +3114,7 @@ export const APP_STYLES = `
 .dql-app-rail-title button {
   height: 26px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   color: var(--dql-app-muted);
   display: inline-flex;
@@ -3122,7 +3122,7 @@ export const APP_STYLES = `
   gap: 5px;
   padding: 0 8px;
   cursor: pointer;
-  font: 800 10.5px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-drilldown-grid {
@@ -3142,7 +3142,7 @@ export const APP_STYLES = `
   justify-items: center;
   gap: 5px;
   cursor: pointer;
-  font: 800 10.5px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-drilldown-grid button:hover {
@@ -3173,12 +3173,12 @@ export const APP_STYLES = `
 
 .dql-app-gapcard {
   margin: 12px;
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-orange-soft);
   padding: 11px 12px;
 }
 
-.dql-app-gapcard p { margin: 6px 0 0; color: var(--dql-app-muted); font-size: 11.5px; line-height: 1.45; }
+.dql-app-gapcard p { margin: 6px 0 0; color: var(--dql-app-muted); font-size: 12px; line-height: 1.45; }
 .dql-app-research-shell {
   display: grid;
   gap: 14px;
@@ -3231,7 +3231,7 @@ export const APP_STYLES = `
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-weight: 850;
+  font-weight: 600;
 }
 
 .dql-app-research-head > div {
@@ -3243,7 +3243,7 @@ export const APP_STYLES = `
 .dql-app-research-head b {
   color: var(--dql-app-faint);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .dql-app-research-head button {
@@ -3254,7 +3254,7 @@ export const APP_STYLES = `
   color: var(--dql-app-muted);
   padding: 0 9px;
   cursor: pointer;
-  font: 800 10px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-research-head button:hover {
@@ -3266,14 +3266,14 @@ export const APP_STYLES = `
 .dql-app-research-new {
   height: 32px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   color: var(--dql-app-ink);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  font: 800 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
   cursor: pointer;
 }
 
@@ -3282,13 +3282,13 @@ export const APP_STYLES = `
 .dql-app-research-group-label {
   margin: 4px 2px 1px;
   color: var(--dql-app-faint);
-  font: 850 9.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
 .dql-app-research-items button {
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: 8px;
   background: transparent;
   color: var(--dql-app-ink);
   text-align: left;
@@ -3330,8 +3330,8 @@ export const APP_STYLES = `
   white-space: nowrap;
 }
 
-.dql-app-research-items span { font-weight: 800; font-size: 12px; }
-.dql-app-research-items small { margin-top: 3px; color: var(--dql-app-muted); font-size: 10.5px; }
+.dql-app-research-items span { font-weight: 600; font-size: 12px; }
+.dql-app-research-items small { margin-top: 3px; color: var(--dql-app-muted); font-size: 11px; }
 .dql-app-research-titlebar { align-items: flex-start; margin-bottom: 14px; }
 .dql-app-research-titlebar h2 {
   margin: 2px 0 0;
@@ -3349,7 +3349,7 @@ export const APP_STYLES = `
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  font: 800 12px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-research-status.opening {
@@ -3365,7 +3365,7 @@ export const APP_STYLES = `
 
 .dql-app-research-status small {
   color: var(--dql-app-muted);
-  font: 700 11px/1.35 var(--font-ui);
+  font: 600 11px/1.35 var(--font-ui);
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -3387,7 +3387,7 @@ export const APP_STYLES = `
 
 .dql-app-report-toolbar span {
   color: var(--dql-app-faint);
-  font: 850 9.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 
@@ -3432,7 +3432,7 @@ export const APP_STYLES = `
 
 .dql-app-research-creating > span {
   color: var(--dql-app-accent);
-  font: 850 10.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -3465,7 +3465,7 @@ export const APP_STYLES = `
   background: var(--dql-app-surface-muted);
   color: var(--dql-app-muted);
   padding: 5px 9px;
-  font: 750 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
 }
 
 .dql-app-research-report {
@@ -3496,7 +3496,7 @@ export const APP_STYLES = `
   align-items: center;
   gap: 7px;
   color: var(--dql-app-muted);
-  font: 850 10px var(--font-mono);
+  font: 600 11px var(--font-mono);
   text-transform: uppercase;
 }
 
@@ -3533,13 +3533,13 @@ export const APP_STYLES = `
   background: var(--dql-app-surface);
   color: var(--dql-app-muted);
   padding: 6px 10px;
-  font-size: 11.5px;
+  font-size: 12px;
   max-width: 100%;
 }
 
 .dql-app-report-context-line b {
   color: var(--dql-app-ink);
-  font-weight: 850;
+  font-weight: 600;
 }
 
 .dql-app-report-route {
@@ -3548,7 +3548,7 @@ export const APP_STYLES = `
   gap: 10px;
   margin-top: 14px;
   border: 1px solid rgba(79, 99, 215, 0.18);
-  border-radius: 10px;
+  border-radius: 8px;
   background: rgba(79, 99, 215, 0.055);
   padding: 10px 12px;
   max-width: 900px;
@@ -3563,7 +3563,7 @@ export const APP_STYLES = `
 .dql-app-report-route span {
   display: block;
   color: var(--dql-app-accent);
-  font: 850 10.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: .02em;
   text-transform: uppercase;
 }
@@ -3571,7 +3571,7 @@ export const APP_STYLES = `
 .dql-app-report-route p {
   margin: 5px 0 0;
   color: var(--dql-app-ink);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -3605,7 +3605,7 @@ export const APP_STYLES = `
   display: inline-flex;
   align-items: center;
   cursor: pointer;
-  font: 800 11.5px var(--font-ui);
+  font: 600 12px var(--font-ui);
 }
 
 .dql-app-report-review-actions summary::-webkit-details-marker {
@@ -3626,7 +3626,7 @@ export const APP_STYLES = `
   top: calc(100% + 6px);
   min-width: 220px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   box-shadow: var(--dql-app-shadow);
   padding: 8px;
@@ -3645,9 +3645,9 @@ export const APP_STYLES = `
   gap: 8px;
   margin-top: 14px;
   border: 1px solid rgba(217, 119, 6, 0.24);
-  border-radius: 9px;
+  border-radius: 8px;
   background: rgba(251, 191, 36, 0.12);
-  color: #92400e;
+  color: var(--status-warning);
   padding: 10px 12px;
   font-size: 12px;
   line-height: 1.45;
@@ -3670,13 +3670,13 @@ export const APP_STYLES = `
 .dql-app-report-section h3 {
   margin: 0 0 12px;
   color: var(--dql-app-ink);
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.25;
 }
 
 .dql-app-report-paper {
   color: var(--dql-app-ink);
-  font-size: 14.5px;
+  font-size: 14px;
   line-height: 1.78;
   padding: 26px 54px 20px;
 }
@@ -3685,7 +3685,7 @@ export const APP_STYLES = `
 .dql-app-report-paper h3 {
   margin: 18px 0 8px;
   color: var(--dql-app-ink);
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1.22;
 }
 
@@ -3719,7 +3719,7 @@ export const APP_STYLES = `
 
 .dql-app-report-dynamic-head span {
   color: var(--dql-app-muted);
-  font: 850 9.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -3739,7 +3739,7 @@ export const APP_STYLES = `
 .dql-app-report-memo-body p {
   margin: 0;
   color: var(--dql-app-ink);
-  font-size: 14.5px;
+  font-size: 14px;
   line-height: 1.72;
 }
 
@@ -3753,7 +3753,7 @@ export const APP_STYLES = `
 
 .dql-app-report-dynamic-section li {
   color: var(--dql-app-ink);
-  font-size: 14.5px;
+  font-size: 14px;
   line-height: 1.6;
 }
 
@@ -3797,7 +3797,7 @@ export const APP_STYLES = `
 
 .dql-app-report-number {
   border: 1px solid var(--dql-app-line);
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   padding: 13px;
   min-width: 0;
@@ -3810,7 +3810,7 @@ export const APP_STYLES = `
 }
 
 .dql-app-report-number span {
-  font: 850 9.5px var(--font-mono);
+  font: 600 11px var(--font-mono);
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -3819,7 +3819,7 @@ export const APP_STYLES = `
   display: block;
   margin-top: 7px;
   color: var(--dql-app-ink);
-  font-size: 23px;
+  font-size: 24px;
   line-height: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3827,7 +3827,7 @@ export const APP_STYLES = `
 
 .dql-app-report-number small {
   margin-top: 7px;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -3856,7 +3856,7 @@ export const APP_STYLES = `
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font: 850 12px var(--font-mono);
+  font: 600 12px var(--font-mono);
 }
 
 .dql-app-report-driver b {
@@ -3868,7 +3868,7 @@ export const APP_STYLES = `
 .dql-app-report-driver em {
   margin-left: 8px;
   color: var(--dql-app-accent);
-  font: 850 12px var(--font-mono);
+  font: 600 12px var(--font-mono);
   font-style: normal;
 }
 
@@ -3900,7 +3900,7 @@ export const APP_STYLES = `
 .dql-app-report-driver-bar b {
   min-width: 0;
   color: var(--dql-app-ink);
-  font-size: 13.5px;
+  font-size: 14px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3909,7 +3909,7 @@ export const APP_STYLES = `
 .dql-app-report-driver-bar span {
   flex: none;
   color: var(--dql-app-accent);
-  font: 850 11px var(--font-mono);
+  font: 600 11px var(--font-mono);
 }
 
 .dql-app-report-driver-bar i {
@@ -3948,7 +3948,7 @@ export const APP_STYLES = `
 
 .dql-app-report-appendix summary span {
   color: var(--dql-app-ink);
-  font: 850 14px var(--font-ui);
+  font: 600 14px var(--font-ui);
 }
 
 .dql-app-report-appendix summary small {
@@ -4013,7 +4013,7 @@ export const APP_STYLES = `
   border-radius: 999px;
   background: var(--dql-app-surface);
   color: var(--dql-app-muted);
-  font: 800 11px var(--font-ui);
+  font: 600 11px var(--font-ui);
   padding: 5px 9px;
   cursor: pointer;
 }
@@ -4071,7 +4071,7 @@ export const APP_STYLES = `
 .dql-app-research-assumptions p {
   margin: 0;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-surface);
   padding: 9px;
   color: var(--dql-app-muted);
@@ -4097,14 +4097,14 @@ export const APP_STYLES = `
   padding: 8px 9px;
   border-bottom: 1px solid var(--dql-app-line);
   text-align: left;
-  font-size: 11.5px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
 .dql-app-research-table th {
   color: var(--dql-app-muted);
   background: var(--dql-app-control);
-  font-weight: 850;
+  font-weight: 600;
 }
 
 .dql-app-research-next {
@@ -4130,7 +4130,7 @@ export const APP_STYLES = `
 .dql-app-panel-card > span {
   width: 30px;
   height: 30px;
-  border-radius: 7px;
+  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4197,11 +4197,11 @@ export const APP_STYLES = `
   cursor: pointer;
 }
 .dql-app-page-explore.on { border-color: var(--dql-app-accent); background: var(--dql-app-accent-soft); }
-.dql-app-page-explore > span { grid-row: 1 / span 2; display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid var(--dql-app-line-2); border-radius: 5px; }
+.dql-app-page-explore > span { grid-row: 1 / span 2; display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid var(--dql-app-line-2); border-radius: 4px; }
 .dql-app-page-explore.on > span { border-color: var(--dql-app-accent); color: var(--dql-app-accent); }
 .dql-app-page-explore b { font-size: 12px; }
 .dql-app-page-explore small,
-.dql-app-page-source-policy { color: var(--dql-app-muted); font-size: 10.5px; line-height: 1.35; }
+.dql-app-page-source-policy { color: var(--dql-app-muted); font-size: 11px; line-height: 1.35; }
 
 @media (max-width: 1120px) {
   .dql-apps-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -4247,7 +4247,7 @@ export const APP_STYLES = `
   }
   .dql-app-toggle {
     gap: 6px;
-    font-weight: 750;
+    font-weight: 600;
   }
   .dql-app-review-backlog-grid {
     grid-template-columns: 1fr;
@@ -4391,7 +4391,7 @@ export const APP_STYLES = `
   }
   .dql-app-ai-start-card textarea {
     min-height: 150px;
-    font-size: 15px;
+    font-size: 16px;
     padding-bottom: 48px;
   }
   .dql-app-ai-start-send {
@@ -4464,7 +4464,7 @@ export const APP_STYLES = `
     flex-direction: column;
   }
   .dql-app-report-hero h2 {
-    font-size: 26px;
+    font-size: 24px;
     line-height: 1.08;
     overflow-wrap: anywhere;
   }
@@ -4524,14 +4524,14 @@ export const APP_STYLES = `
   flex-direction: column;
   gap: 16px;
 }
-.dql-app-flow-head h2 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; color: var(--dql-app-ink); }
-.dql-app-flow-head p { margin: 3px 0 0; font-size: 12.5px; color: var(--dql-app-faint); }
+.dql-app-flow-head h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; color: var(--dql-app-ink); }
+.dql-app-flow-head p { margin: 3px 0 0; font-size: 13px; color: var(--dql-app-faint); }
 .dql-app-flow-bubble {
   align-self: flex-end;
   max-width: 78%;
   background: var(--dql-app-surface-muted);
   color: var(--dql-app-ink);
-  border-radius: 16px 16px 4px 16px;
+  border-radius: 12px 12px 4px 12px;
   padding: 10px 14px;
   font-size: 13px;
   line-height: 1.5;
@@ -4551,32 +4551,32 @@ export const APP_STYLES = `
 .dql-app-buildbody { display: flex; flex-direction: column; gap: 7px; padding-top: 4px; min-width: 0; }
 .dql-app-buildbody.wide { flex: 1; gap: 10px; }
 .dql-app-shimmer {
-  font-size: 13.5px; font-weight: 700; letter-spacing: -0.01em;
+  font-size: 14px; font-weight: 600; letter-spacing: -0.01em;
   background-image: linear-gradient(100deg, var(--dql-app-ink) 25%, var(--dql-app-accent) 50%, var(--dql-app-ink) 75%);
   background-size: 220% 100%;
   -webkit-background-clip: text; background-clip: text;
   color: transparent; -webkit-text-fill-color: transparent;
   animation: dql-app-shimmer 2.4s linear infinite;
 }
-.dql-app-buildsteps { display: flex; flex-direction: column; gap: 5px; font-size: 11.5px; color: var(--dql-app-faint); line-height: 1.45; }
+.dql-app-buildsteps { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--dql-app-faint); line-height: 1.45; }
 .dql-app-buildsteps > span { display: inline-flex; align-items: center; gap: 6px; animation: dql-app-step 0.3s ease-out both; }
 .dql-app-buildsteps .ok { color: var(--dql-app-green); flex: none; }
-.dql-app-buildsteps code { font-family: var(--font-mono); font-size: 10.5px; }
+.dql-app-buildsteps code { font-family: var(--font-mono); font-size: 11px; }
 .dql-app-buildsteps .dot { width: 5px; height: 5px; border-radius: 999px; background: var(--dql-app-accent); margin: 0 3px; flex: none; }
-.dql-app-proposal-lede { font-size: 13.5px; line-height: 1.6; color: var(--dql-app-ink); }
+.dql-app-proposal-lede { font-size: 14px; line-height: 1.6; color: var(--dql-app-ink); }
 .dql-app-buildbrief-name {
   display: grid;
   grid-template-columns: auto minmax(180px, 1fr);
   align-items: center;
   gap: 9px;
   color: var(--dql-app-faint);
-  font-size: 10.5px;
-  font-weight: 750;
+  font-size: 11px;
+  font-weight: 600;
 }
 .dql-app-buildbrief-name input {
   min-width: 0;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   color: var(--dql-app-ink);
   padding: 6px 8px;
@@ -4592,7 +4592,7 @@ export const APP_STYLES = `
   color: var(--dql-app-muted);
   cursor: pointer;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 600;
 }
 .dql-app-buildbrief-edit > div { display: grid; gap: 6px; margin-top: 8px; }
 .dql-app-buildbrief-edit label { display: grid; grid-template-columns: minmax(0, 1fr) 130px; gap: 7px; }
@@ -4600,7 +4600,7 @@ export const APP_STYLES = `
 .dql-app-buildbrief-edit select {
   min-width: 0;
   border: 1px solid var(--dql-app-line);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--dql-app-control);
   color: var(--dql-app-ink);
   padding: 5px 7px;
@@ -4608,7 +4608,7 @@ export const APP_STYLES = `
 }
 .dql-app-proposal-card {
   border: 1px solid var(--dql-app-line);
-  border-radius: 11px;
+  border-radius: 12px;
   background: var(--dql-app-surface);
   overflow: hidden;
 }
@@ -4623,7 +4623,7 @@ export const APP_STYLES = `
 .dql-app-proposal-row:hover { background: var(--dql-app-canvas); }
 .dql-app-proposal-row.off { background: var(--dql-app-canvas); }
 .dql-app-prop-check {
-  width: 16px; height: 16px; border-radius: 4.5px;
+  width: 16px; height: 16px; border-radius: 4px;
   border: 1.5px solid var(--dql-app-line-2);
   background: var(--dql-app-surface);
   color: #fff;
@@ -4632,28 +4632,28 @@ export const APP_STYLES = `
 }
 .dql-app-prop-check.on { border-color: var(--dql-app-accent); background: var(--dql-app-accent); }
 .dql-app-prop-glyph {
-  width: 26px; height: 26px; border-radius: 6px;
+  width: 26px; height: 26px; border-radius: 8px;
   background: var(--dql-app-accent-soft); color: var(--dql-app-accent);
   display: inline-flex; align-items: center; justify-content: center;
   flex: none; font-size: 13px;
 }
 .dql-app-prop-glyph.green { background: var(--dql-app-green-soft); color: var(--dql-app-green); }
 .dql-app-prop-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.dql-app-prop-name b { font-size: 12.5px; font-weight: 650; color: var(--dql-app-ink); font-family: var(--font-mono); }
+.dql-app-prop-name b { font-size: 13px; font-weight: 600; color: var(--dql-app-ink); font-family: var(--font-mono); }
 .dql-app-prop-name small { font-size: 11px; color: var(--dql-app-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dql-app-prop-badge {
   flex: none; border-radius: 999px; padding: 2px 8px;
-  font-size: 9.5px; font-weight: 700;
+  font-size: 11px; font-weight: 600;
 }
 .dql-app-prop-badge.certified { border: 1px solid rgba(46, 139, 87, 0.33); color: var(--dql-app-green); background: var(--dql-app-green-soft); }
 .dql-app-prop-badge.draft { border: 1px solid rgba(178, 107, 31, 0.31); color: var(--dql-app-orange); background: var(--dql-app-orange-soft); }
-.dql-app-prop-viz { flex: none; font-size: 10.5px; color: var(--dql-app-faint); }
+.dql-app-prop-viz { flex: none; font-size: 11px; color: var(--dql-app-faint); }
 .dql-app-addmore {
   display: flex; align-items: center; gap: 7px;
   width: 100%; padding: 10px 13px;
   border: 0; background: none;
   color: var(--dql-app-accent);
-  font-size: 12px; font-weight: 650; cursor: pointer; font-family: inherit; text-align: left;
+  font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; text-align: left;
 }
 .dql-app-addmore:hover { background: var(--dql-app-accent-soft); }
 .dql-app-addmore-panel { border-top: 1px solid var(--dql-app-line); animation: dql-app-fadein 0.15s ease-out; }
@@ -4677,10 +4677,10 @@ export const APP_STYLES = `
 }
 .dql-app-addmore-row:hover { background: var(--dql-app-accent-soft); }
 .dql-app-addmore-row span { flex: 1; min-width: 0; font-size: 12px; font-family: var(--font-mono); color: var(--dql-app-ink); }
-.dql-app-addmore-row small { flex: none; font-size: 10.5px; color: var(--dql-app-faint); }
+.dql-app-addmore-row small { flex: none; font-size: 11px; color: var(--dql-app-faint); }
 .dql-app-addmore-hint { padding: 9px 13px; font-size: 11px; color: var(--dql-app-faint); }
 .dql-app-detected { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--dql-app-faint); }
-.dql-app-detected-label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; font-size: 9.5px; }
+.dql-app-detected-label { font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px; }
 .dql-app-detected-pill {
   border: 1px solid var(--dql-app-line);
   background: var(--dql-app-surface);
@@ -4699,7 +4699,7 @@ export const APP_STYLES = `
   height: 34px; padding: 0 16px;
   border-radius: 8px; border: 0;
   background: var(--dql-app-accent); color: #fff;
-  font-size: 12.5px; font-weight: 650; cursor: pointer; font-family: inherit;
+  font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
   box-shadow: 0 1px 5px rgba(107, 93, 211, 0.3);
 }
 .dql-app-flow-build:hover { filter: brightness(0.95); }
@@ -4716,13 +4716,13 @@ export const APP_STYLES = `
   display: inline-flex; align-items: center; gap: 2px;
   padding: 2px;
   border: 1px solid var(--dql-app-line);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dql-app-canvas);
 }
 .dql-app-modeseg button {
-  border: 0; border-radius: 5px;
+  border: 0; border-radius: 4px;
   padding: 4px 12px;
-  font-size: 11.5px; font-weight: 600;
+  font-size: 12px; font-weight: 600;
   cursor: pointer; font-family: inherit;
   display: inline-flex; align-items: center; gap: 5px;
   background: transparent; color: var(--dql-app-faint);
@@ -4733,59 +4733,59 @@ export const APP_STYLES = `
 .dql-app-context-menu { position: relative; margin-left: 4px; }
 .dql-app-context-menu > summary {
   list-style: none; display: inline-flex; align-items: center; gap: 6px;
-  min-height: 30px; padding: 0 10px; border-radius: 7px; cursor: pointer;
-  color: var(--text-secondary); font-size: 11.5px; font-weight: 650;
+  min-height: 30px; padding: 0 10px; border-radius: 8px; cursor: pointer;
+  color: var(--text-secondary); font-size: 12px; font-weight: 600;
 }
 .dql-app-context-menu > summary::-webkit-details-marker { display: none; }
 .dql-app-context-menu[open] > summary { background: var(--bg-2); color: var(--text-primary); }
 .dql-app-context-menu > div {
   position: absolute; z-index: 80; top: calc(100% + 7px); left: 0; width: 230px;
-  padding: 6px; border: 1px solid var(--border-default); border-radius: 10px;
+  padding: 6px; border: 1px solid var(--border-default); border-radius: 8px;
   background: var(--bg-1); box-shadow: 0 16px 42px rgba(15,23,42,.18);
 }
 .dql-app-context-menu > div button {
   width: 100%; display: grid; grid-template-columns: 18px 1fr auto; align-items: center;
-  gap: 7px; min-height: 34px; padding: 0 9px; border: 0; border-radius: 7px;
+  gap: 7px; min-height: 34px; padding: 0 9px; border: 0; border-radius: 8px;
   background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer;
 }
 .dql-app-context-menu > div button:hover,
 .dql-app-context-menu > div button.on { background: var(--bg-2); color: var(--text-primary); }
-.dql-app-context-menu > div button b { font-size: 10px; color: var(--text-tertiary); }
+.dql-app-context-menu > div button b { font-size: 11px; color: var(--text-tertiary); }
 
 .dql-apps-source-policy {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 10px 12px; border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-secondary); font-size: 11.5px;
+  color: var(--text-secondary); font-size: 12px;
 }
-.dql-apps-source-policy > span { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; }
+.dql-apps-source-policy > span { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
 .dql-app-build-frame,
-.dql-app-clarifications { border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--bg-1); padding: 12px; }
+.dql-app-clarifications { border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-1); padding: 12px; }
 .dql-app-build-frame header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .dql-app-build-frame header strong { font-size: 12px; color: var(--text-primary); }
-.dql-app-build-frame header span { font-size: 10.5px; color: var(--text-tertiary); }
+.dql-app-build-frame header span { font-size: 11px; color: var(--text-tertiary); }
 .dql-app-build-frame dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 11px 0 0; }
-.dql-app-build-frame dl > div { min-width: 0; padding: 8px; border-radius: 7px; background: var(--bg-2); }
-.dql-app-build-frame dt { margin-bottom: 3px; color: var(--text-tertiary); font-size: 9.5px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
+.dql-app-build-frame dl > div { min-width: 0; padding: 8px; border-radius: 8px; background: var(--bg-2); }
+.dql-app-build-frame dt { margin-bottom: 3px; color: var(--text-tertiary); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
 .dql-app-build-frame dd { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
 .dql-app-clarifications { display: grid; gap: 10px; }
 .dql-app-clarifications > strong { color: var(--text-primary); font-size: 12px; }
 .dql-app-clarifications > div { display: grid; gap: 6px; }
-.dql-app-clarifications > div > span { color: var(--text-secondary); font-size: 11.5px; }
+.dql-app-clarifications > div > span { color: var(--text-secondary); font-size: 12px; }
 .dql-app-clarifications > div > div { display: flex; flex-wrap: wrap; gap: 5px; }
-.dql-app-clarifications button { border: 1px solid var(--border-default); border-radius: 999px; background: var(--bg-2); color: var(--text-secondary); padding: 4px 8px; cursor: pointer; font-size: 10.5px; }
+.dql-app-clarifications button { border: 1px solid var(--border-default); border-radius: 999px; background: var(--bg-2); color: var(--text-secondary); padding: 4px 8px; cursor: pointer; font-size: 11px; }
 .dql-app-clarifications button:hover { border-color: var(--accent); color: var(--accent); }
-.dql-app-clarifications small { color: var(--text-tertiary); font-size: 10px; }
+.dql-app-clarifications small { color: var(--text-tertiary); font-size: 11px; }
 
 .dql-app-card-menu { position: relative; }
 .dql-app-card-menu > div {
   position: absolute; z-index: 50; right: 0; bottom: calc(100% + 5px); min-width: 150px;
-  padding: 5px; border: 1px solid var(--border-default); border-radius: 9px;
+  padding: 5px; border: 1px solid var(--border-default); border-radius: 8px;
   background: var(--bg-1); box-shadow: 0 12px 34px rgba(15,23,42,.2);
 }
 .dql-app-card-menu > div button {
   width: 100%; min-height: 32px; display: flex; align-items: center; gap: 7px;
-  padding: 0 9px; border: 0; border-radius: 6px; background: transparent;
-  color: var(--text-secondary); cursor: pointer; font: 600 11.5px var(--font-ui);
+  padding: 0 9px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--text-secondary); cursor: pointer; font: 600 12px var(--font-ui);
 }
 .dql-app-card-menu > div button.danger { color: var(--status-error); }
 .dql-app-card-menu > div button:hover { background: var(--bg-2); }
@@ -4796,29 +4796,29 @@ export const APP_STYLES = `
 }
 .dql-app-delete-dialog {
   width: min(480px, 100%); display: grid; gap: 16px; padding: 22px;
-  border: 1px solid var(--border-default); border-radius: 14px;
+  border: 1px solid var(--border-default); border-radius: 12px;
   background: var(--bg-1); color: var(--text-primary);
   box-shadow: 0 24px 70px rgba(15,23,42,.3);
 }
 .dql-app-delete-heading { display: flex; align-items: flex-start; gap: 12px; }
 .dql-app-delete-heading h2 { margin: 1px 0 0; font-size: 16px; }
-.dql-app-delete-heading p { margin: 5px 0 0; color: var(--text-tertiary); font-size: 11.5px; line-height: 1.5; }
+.dql-app-delete-heading p { margin: 5px 0 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.5; }
 .dql-app-delete-icon {
   flex: 0 0 auto; width: 36px; height: 36px; display: grid; place-items: center;
-  border: 1px solid var(--status-error-border); border-radius: 9px;
+  border: 1px solid var(--status-error-border); border-radius: 8px;
   background: var(--status-error-bg); color: var(--status-error);
 }
-.dql-app-delete-confirm { display: grid; gap: 7px; color: var(--text-secondary); font-size: 11.5px; }
+.dql-app-delete-confirm { display: grid; gap: 7px; color: var(--text-secondary); font-size: 12px; }
 .dql-app-delete-confirm strong { color: var(--text-primary); }
 .dql-app-delete-confirm input {
   height: 38px; padding: 0 11px; border: 1px solid var(--border-default); border-radius: 8px;
   outline: none; background: var(--bg-2); color: var(--text-primary); font: 12px var(--font-ui);
 }
 .dql-app-delete-confirm input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
-.dql-app-delete-error { color: var(--status-error); font-size: 11.5px; }
+.dql-app-delete-error { color: var(--status-error); font-size: 12px; }
 .dql-app-delete-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .dql-app-delete-actions button {
-  min-height: 35px; padding: 0 14px; border-radius: 8px; cursor: pointer; font: 650 11.5px var(--font-ui);
+  min-height: 35px; padding: 0 14px; border-radius: 8px; cursor: pointer; font: 600 12px var(--font-ui);
 }
 .dql-app-delete-actions button.secondary { border: 1px solid var(--border-default); background: var(--bg-2); color: var(--text-secondary); }
 .dql-app-delete-actions button.danger { border: 1px solid var(--status-error-border); background: var(--status-error); color: white; }
@@ -4826,10 +4826,10 @@ export const APP_STYLES = `
 .dql-app-delete-undo {
   position: fixed; z-index: 1850; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 10px;
   max-width: min(520px, calc(100vw - 44px)); padding: 11px 12px 11px 14px;
-  border: 1px solid var(--border-default); border-radius: 10px; background: var(--bg-1);
-  color: var(--text-secondary); box-shadow: 0 16px 46px rgba(15,23,42,.24); font-size: 11.5px;
+  border: 1px solid var(--border-default); border-radius: 8px; background: var(--bg-1);
+  color: var(--text-secondary); box-shadow: 0 16px 46px rgba(15,23,42,.24); font-size: 12px;
 }
-.dql-app-delete-undo button { border: 0; background: transparent; color: var(--accent); font-weight: 750; cursor: pointer; }
+.dql-app-delete-undo button { border: 0; background: transparent; color: var(--accent); font-weight: 600; cursor: pointer; }
 
 /* Reader view: page tabs, filter chips, one ⋯ menu per tile. */
 .dql-app-page-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; }
@@ -4839,28 +4839,28 @@ export const APP_STYLES = `
 .dql-app-page-tabs > .dql-app-page-add { width: 30px; padding: 0; display: grid; place-items: center; }
 .dql-app-filter-row { gap: 8px; padding: 0; border: 0; background: transparent; }
 .dql-app-filter-row .dql-app-filter-select { height: 32px; background: var(--dql-app-surface); border-color: var(--dql-app-line); }
-.dql-app-filter-row .dql-app-filter-select span { font: 500 12.5px var(--font-ui); text-transform: none; color: var(--dql-app-muted); }
+.dql-app-filter-row .dql-app-filter-select span { font: 500 13px var(--font-ui); text-transform: none; color: var(--dql-app-muted); }
 .dql-app-filter-row .dql-app-filter-select select, .dql-app-filter-row .dql-app-filter-select input { font: 600 13px var(--font-ui); max-width: 160px; }
 .dql-app-filter-reset { height: 32px; padding: 0 8px; border: 0; background: transparent; color: var(--dql-app-accent); font: 600 13px var(--font-ui); cursor: pointer; }
 .dql-tile-menu-anchor { position: absolute; top: 8px; right: 8px; z-index: 6; transition: opacity 120ms ease; }
 .dql-tile-menu-anchor:focus-within { opacity: 1 !important; }
-.dql-tile-menu-button { width: 28px; height: 28px; border: 0; border-radius: 7px; background: var(--dql-app-surface); color: var(--dql-app-muted); display: grid; place-items: center; cursor: pointer; }
+.dql-tile-menu-button { width: 28px; height: 28px; border: 0; border-radius: 8px; background: var(--dql-app-surface); color: var(--dql-app-muted); display: grid; place-items: center; cursor: pointer; }
 .dql-tile-menu-button:hover, .dql-tile-menu-button[aria-expanded="true"] { background: var(--dql-app-control); color: var(--dql-app-ink); }
-.dql-tile-menu { position: absolute; top: 32px; right: 0; width: 224px; padding: 6px; display: grid; border: 1px solid var(--dql-app-line-2); border-radius: 10px; background: var(--dql-app-surface); box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16); }
-.dql-tile-menu button { height: 32px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; color: var(--dql-app-ink); font: 13px var(--font-ui); text-align: left; cursor: pointer; }
+.dql-tile-menu { position: absolute; top: 32px; right: 0; width: 224px; padding: 6px; display: grid; border: 1px solid var(--dql-app-line-2); border-radius: 8px; background: var(--dql-app-surface); box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16); }
+.dql-tile-menu button { height: 32px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border: 0; border-radius: 8px; background: transparent; color: var(--dql-app-ink); font: 13px var(--font-ui); text-align: left; cursor: pointer; }
 .dql-tile-menu button:hover { background: var(--dql-app-control); }
 .dql-tile-menu hr { border: 0; border-top: 1px solid var(--dql-app-line); margin: 5px 0; }
 .dql-tile-menu-label { padding: 4px 9px 2px; color: var(--dql-app-faint); font: 600 11px var(--font-ui); text-transform: uppercase; letter-spacing: .05em; }
 .dql-tile-menu button.on { color: var(--dql-app-accent); font-weight: 600; }
 .dql-app-filter-multi { position: relative; padding: 0; }
 .dql-app-filter-multi-trigger { height: 100%; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 0; background: transparent; color: var(--dql-app-ink); cursor: pointer; }
-.dql-app-filter-row .dql-app-filter-select .dql-app-filter-multi-label { font: 500 12.5px var(--font-ui); color: var(--dql-app-muted); }
+.dql-app-filter-row .dql-app-filter-select .dql-app-filter-multi-label { font: 500 13px var(--font-ui); color: var(--dql-app-muted); }
 .dql-app-filter-multi-trigger b { font: 600 13px var(--font-ui); }
 .dql-app-filter-multi.is-set { border-color: color-mix(in srgb, var(--dql-app-accent) 40%, var(--dql-app-line)); background: var(--dql-app-accent-soft); }
-.dql-app-filter-multi-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; min-width: 200px; padding: 6px; display: grid; gap: 2px; border: 1px solid var(--dql-app-line-2); border-radius: 10px; background: var(--dql-app-surface); box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16); }
-.dql-app-filter-multi-menu label { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: 7px; font: 13px var(--font-ui); color: var(--dql-app-ink); cursor: pointer; }
+.dql-app-filter-multi-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; min-width: 200px; padding: 6px; display: grid; gap: 2px; border: 1px solid var(--dql-app-line-2); border-radius: 8px; background: var(--dql-app-surface); box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16); }
+.dql-app-filter-multi-menu label { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: 8px; font: 13px var(--font-ui); color: var(--dql-app-ink); cursor: pointer; }
 .dql-app-filter-multi-menu label:hover, .dql-app-filter-multi-menu label.on { background: var(--dql-app-control); }
 .dql-app-filter-multi-menu input { accent-color: var(--dql-app-accent); }
-.dql-app-filter-multi-menu button { justify-self: start; margin-top: 4px; border: 0; background: transparent; color: var(--dql-app-accent); font: 600 12.5px var(--font-ui); cursor: pointer; }
-.dql-apps-waterline .dql-kpi-value { font-family: var(--font-ui) !important; font-weight: 650 !important; letter-spacing: -.02em; color: var(--dql-app-ink) !important; }
+.dql-app-filter-multi-menu button { justify-self: start; margin-top: 4px; border: 0; background: transparent; color: var(--dql-app-accent); font: 600 13px var(--font-ui); cursor: pointer; }
+.dql-apps-waterline .dql-kpi-value { font-family: var(--font-ui) !important; font-weight: 600 !important; letter-spacing: -.02em; color: var(--dql-app-ink) !important; }
 `;
