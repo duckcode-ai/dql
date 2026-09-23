@@ -141,7 +141,11 @@ function cartesianOption(
   // A time axis runs left to right. The shared DATE_NAME_RE also matches
   // words like "category", so the orientation uses whole name parts or the
   // values themselves.
-  const timeAxis = isLine || TIME_NAME_RE.test(labelCol) || categories.every((value) => /^\d{4}-\d{2}(-\d{2})?(T|$)/.test(value));
+  const timeLabels = TIME_NAME_RE.test(labelCol) || categories.every((value) => /^\d{4}-\d{2}(-\d{2})?(T|$)/.test(value));
+  const timeAxis = isLine || timeLabels;
+  // Queries need not return periods in order; a time axis is drawn oldest
+  // to newest unless the author chose a sort.
+  if (timeLabels && (!style.sort || style.sort === 'none')) categories = chronological(categories);
   if (!isLine) categories = categories.slice(0, config?.maxItems ?? DEFAULT_MAX_CATEGORIES);
   // Long category lists read better as horizontal bars; dates stay on x.
   const horizontal = !isLine && !timeAxis;
@@ -486,4 +490,15 @@ function prettyName(value: string): string {
 
 function unique(values: string[]): string[] {
   return Array.from(new Set(values));
+}
+
+/** Order period labels by time when every label reads as a date or a number; otherwise keep them. */
+export function chronological(categories: string[]): string[] {
+  const numeric = categories.every((value) => value.trim() !== '' && Number.isFinite(Number(value)));
+  const keys = categories.map((value) => (numeric ? Number(value) : Date.parse(value)));
+  if (keys.some((key) => !Number.isFinite(key))) return categories;
+  return categories
+    .map((value, index) => ({ value, key: keys[index]!, index }))
+    .sort((a, b) => a.key - b.key || a.index - b.index)
+    .map((entry) => entry.value);
 }

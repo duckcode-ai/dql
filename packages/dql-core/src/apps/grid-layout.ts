@@ -117,3 +117,21 @@ export function nudgeGridItem<T extends GridBox>(items: T[], id: string, dx: num
   }
   return settleGridLayout(items, cols);
 }
+
+/**
+ * The first cell, top to bottom then left to right, where a `w` x `h` box
+ * fits without overlapping `items`. A new tile fills a gap in the page
+ * before it goes under everything.
+ */
+export function firstFreeGridCell(items: GridBox[], w: number, h: number, cols: number): { x: number; y: number } {
+  const width = Math.min(Math.max(1, Math.round(w)), Math.max(1, Math.floor(cols)));
+  const height = Math.min(Math.max(1, Math.round(h)), MAX_TILE_ROWS);
+  const bottom = items.reduce((max, item) => Math.max(max, item.y + item.h), 0);
+  for (let y = 0; y <= bottom; y += 1) {
+    for (let x = 0; x + width <= cols; x += 1) {
+      const candidate = { i: '\u0000candidate', x, y, w: width, h: height };
+      if (!items.some((item) => gridBoxesOverlap(candidate, item))) return { x, y };
+    }
+  }
+  return { x: 0, y: bottom };
+}

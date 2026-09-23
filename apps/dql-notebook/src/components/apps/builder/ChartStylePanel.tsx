@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { DashboardVizStyle } from '@duckcodeailabs/dql-core/apps/viz-style';
 
 const CARTESIAN = new Set(['bar', 'grouped_bar', 'stacked_bar', 'line', 'area']);
@@ -58,7 +58,25 @@ export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChan
   const [notes, setNotes] = useState<Note[]>(() => (current.annotations ?? []).map((note) => ({ at: note.at, text: note.text })));
 
   const set = (patch: Partial<DashboardVizStyle>) => onChange(compactVizStyle({ ...current, ...patch }));
-  const commitMarks = (nextLines = lines, nextBands = bands, nextNotes = notes) => set(styleMarksFromRows(nextLines, nextBands, nextNotes));
+  // Rows typed since the last save. The panel closes when another tile is
+  // selected, sometimes without a blur first, so it saves them on the way out.
+  const pending = useRef(false);
+  const commitMarks = (nextLines = lines, nextBands = bands, nextNotes = notes) => {
+    pending.current = false;
+    set(styleMarksFromRows(nextLines, nextBands, nextNotes));
+  };
+  const latest = useRef({ commitMarks, disabled });
+  latest.current = { commitMarks, disabled };
+  useEffect(() => () => {
+    if (pending.current && !latest.current.disabled) latest.current.commitMarks();
+  }, []);
+  const edit = <T,>(setRows: (rows: T[]) => void) => (rows: T[]) => {
+    pending.current = true;
+    setRows(rows);
+  };
+  const editLines = edit(setLines);
+  const editBands = edit(setBands);
+  const editNotes = edit(setNotes);
   const format = current.format ?? (legacyFormat === 'currency' || legacyFormat === 'percent' ? legacyFormat : 'number');
 
   return <section className="chart-style-panel" aria-label="Chart style">
@@ -117,9 +135,9 @@ export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChan
       <span className="chart-style-heading">Reference lines</span>
       {lines.map((line, index) => <div key={`line-${index}`} className="chart-style-row">
         <input aria-label="Reference value" inputMode="decimal" placeholder="Value" disabled={disabled} value={line.value}
-          onChange={(event) => setLines(lines.map((item, i) => (i === index ? { ...item, value: event.target.value } : item)))} />
+          onChange={(event) => editLines(lines.map((item, i) => (i === index ? { ...item, value: event.target.value } : item)))} />
         <input aria-label="Reference label" placeholder="Label" disabled={disabled} value={line.label}
-          onChange={(event) => setLines(lines.map((item, i) => (i === index ? { ...item, label: event.target.value } : item)))} />
+          onChange={(event) => editLines(lines.map((item, i) => (i === index ? { ...item, label: event.target.value } : item)))} />
         <button type="button" aria-label="Remove reference line" disabled={disabled} onClick={() => { const next = lines.filter((_, i) => i !== index); setLines(next); commitMarks(next); }}>×</button>
       </div>)}
       <button type="button" className="chart-style-add" disabled={disabled} onClick={() => setLines([...lines, { value: '', label: '' }])}>Add reference line</button>
@@ -127,11 +145,11 @@ export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChan
       <span className="chart-style-heading">Target bands</span>
       {bands.map((band, index) => <div key={`band-${index}`} className="chart-style-row">
         <input aria-label="Band from" inputMode="decimal" placeholder="From" disabled={disabled} value={band.from}
-          onChange={(event) => setBands(bands.map((item, i) => (i === index ? { ...item, from: event.target.value } : item)))} />
+          onChange={(event) => editBands(bands.map((item, i) => (i === index ? { ...item, from: event.target.value } : item)))} />
         <input aria-label="Band to" inputMode="decimal" placeholder="To" disabled={disabled} value={band.to}
-          onChange={(event) => setBands(bands.map((item, i) => (i === index ? { ...item, to: event.target.value } : item)))} />
+          onChange={(event) => editBands(bands.map((item, i) => (i === index ? { ...item, to: event.target.value } : item)))} />
         <input aria-label="Band label" placeholder="Label" disabled={disabled} value={band.label}
-          onChange={(event) => setBands(bands.map((item, i) => (i === index ? { ...item, label: event.target.value } : item)))} />
+          onChange={(event) => editBands(bands.map((item, i) => (i === index ? { ...item, label: event.target.value } : item)))} />
         <button type="button" aria-label="Remove band" disabled={disabled} onClick={() => { const next = bands.filter((_, i) => i !== index); setBands(next); commitMarks(lines, next); }}>×</button>
       </div>)}
       <button type="button" className="chart-style-add" disabled={disabled} onClick={() => setBands([...bands, { from: '', to: '', label: '' }])}>Add target band</button>
@@ -139,9 +157,9 @@ export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChan
       <span className="chart-style-heading">Notes on the timeline</span>
       {notes.map((note, index) => <div key={`note-${index}`} className="chart-style-row">
         <input aria-label="Note position" placeholder="2026-07-14" disabled={disabled} value={note.at}
-          onChange={(event) => setNotes(notes.map((item, i) => (i === index ? { ...item, at: event.target.value } : item)))} />
+          onChange={(event) => editNotes(notes.map((item, i) => (i === index ? { ...item, at: event.target.value } : item)))} />
         <input aria-label="Note text" placeholder="What happened" disabled={disabled} value={note.text}
-          onChange={(event) => setNotes(notes.map((item, i) => (i === index ? { ...item, text: event.target.value } : item)))} />
+          onChange={(event) => editNotes(notes.map((item, i) => (i === index ? { ...item, text: event.target.value } : item)))} />
         <button type="button" aria-label="Remove note" disabled={disabled} onClick={() => { const next = notes.filter((_, i) => i !== index); setNotes(next); commitMarks(lines, bands, next); }}>×</button>
       </div>)}
       <button type="button" className="chart-style-add" disabled={disabled} onClick={() => setNotes([...notes, { at: '', text: '' }])}>Add note</button>

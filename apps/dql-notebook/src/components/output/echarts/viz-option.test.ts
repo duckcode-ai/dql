@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { QueryResult } from '../../../store/types';
 import { DQL_SERIES_DARK, DQL_SERIES_LIGHT } from '../chart-palettes';
-import { buildVizOption, MAX_SERIES } from './viz-option';
+import { buildVizOption, chronological, MAX_SERIES } from './viz-option';
 import { renderOptionToSvg } from './EChartsChart';
 
 const monthly: QueryResult = {
@@ -55,6 +55,18 @@ describe('buildVizOption (RFC 0008 step 4)', () => {
     // A column named "category" is not a date.
     const category = buildVizOption({ chartType: 'bar', result: { ...regions, columns: ['category', 'revenue'], rows: regions.rows.map((row) => ({ category: row.region, revenue: row.revenue })) }, themeMode: 'paper', config: { chart: 'bar' } })!;
     expect((category.option.yAxis as any).type).toBe('category');
+  });
+
+  it('draws periods oldest to newest even when the query returns them out of order', () => {
+    const shuffled = { ...monthly, rows: [monthly.rows[0], monthly.rows[2], monthly.rows[1], monthly.rows[3]] };
+    const line = buildVizOption({ chartType: 'line', result: shuffled, themeMode: 'paper', config: { chart: 'line' } })!;
+    expect((line.option.xAxis as any).data).toEqual(['Jun 2026', 'Jul 2026', 'Aug 2026', 'Sep 2026']);
+    expect(series(line.option)[0].data.map((point: any) => point?.value ?? point)).toEqual([1.53, 1.46, 1.39, 1.36]);
+    // An explicit sort still wins, and named categories keep query order.
+    const sorted = buildVizOption({ chartType: 'bar', result: shuffled, themeMode: 'paper', config: { chart: 'bar', style: { sort: 'asc' } } })!;
+    expect((sorted.option.xAxis as any).data[0]).toBe('Sep 2026');
+    expect(chronological(['US', 'EU'])).toEqual(['US', 'EU']);
+    expect(chronological(['2024', '2022', '2023'])).toEqual(['2022', '2023', '2024']);
   });
 
   it('labels only the last mark when asked, and sorts by value', () => {

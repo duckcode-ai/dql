@@ -35,6 +35,7 @@ export { readDashboardVizStyle } from './viz-style.js';
 export {
   clampGridBox,
   compactGridLayout,
+  firstFreeGridCell,
   gridBoxesOverlap,
   moveGridItem,
   nudgeGridItem,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  firstFreeGridCell,
   gridBoxesOverlap,
   moveGridItem,
   nudgeGridItem,
@@ -63,5 +64,12 @@ describe('App page grid (RFC 0008 step 5)', () => {
     expect(at(placeGridCopy(items, items[0]!, box('copy', 0, 0, 4, 2), 12), 'copy')).toEqual([4, 0, 4, 2]);
     const full = [box('a', 0, 0, 12, 2)];
     expect(at(placeGridCopy(full, full[0]!, box('copy', 0, 0, 12, 2), 12), 'copy')).toEqual([0, 2, 12, 2]);
+  });
+
+  it('puts a new tile in the first gap that fits, otherwise under the page', () => {
+    const items = [box('wide', 0, 0, 12, 2), box('left', 0, 2, 6, 4), box('right', 6, 2, 6, 4), box('table', 0, 6, 6, 4)];
+    expect(firstFreeGridCell(items, 6, 4, 12)).toEqual({ x: 6, y: 6 });
+    expect(firstFreeGridCell(items, 12, 3, 12)).toEqual({ x: 0, y: 10 });
+    expect(firstFreeGridCell([], 4, 2, 12)).toEqual({ x: 0, y: 0 });
   });
 });

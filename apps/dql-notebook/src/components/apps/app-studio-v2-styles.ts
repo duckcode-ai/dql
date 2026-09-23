@@ -529,7 +529,7 @@ export const APP_STUDIO_V2_STYLES = `
 .preview-table i { display:grid; grid-template-columns:1fr 1.6fr .7fr; gap:8px; }
 .preview-table span { height:9px; border-radius:4px; background:var(--bg-3); }
 .live-component-preview { height:calc(100% - 39px); min-height:150px; overflow:auto; padding:5px 8px 8px; box-sizing:border-box; cursor:default; }
-.live-component-preview > div:not(.dataset-mark-controls) { width:100%; height:100%; }
+.live-component-preview > .live-component-body, .live-component-body > div { width:100%; height:100%; }
 .dataset-mark-controls { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin:5px 0 0; padding:5px; border-top:1px solid var(--border-subtle); }
 .dataset-mark-controls > span { color:var(--text-tertiary); font-size:11px; font-weight:600; }
 .dataset-mark-controls button { border:1px solid var(--border-default); border-radius:99px; background:var(--bg-1); color:var(--text-secondary); padding:3px 5px; font-size:11px; }
@@ -1157,14 +1157,16 @@ export const APP_STUDIO_V2_STYLES = `
 }
 /* RFC 0008 step 5: the placed canvas. Tiles sit in the cells their author gave them. */
 .studio-page-grid.placed { gap:12px; align-items:stretch; }
+.studio-draft-slot { margin-bottom:12px; }
 .studio-page-grid.placed .studio-component-card { min-height:0; display:flex; flex-direction:column; }
 .studio-page-grid.placed .studio-component-card > :not(header):not(.tile-resize-handle) { min-height:0; }
-.studio-page-grid.placed .studio-tile-preview-interactions, .studio-page-grid.placed .tile-text { flex:1; overflow:auto; }
+.studio-page-grid.placed .tile-text { flex:1; overflow:auto; }
+.studio-page-grid.placed .studio-tile-preview-interactions { flex:1 1 0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
 .studio-page-grid.placed .preview-state, .studio-page-grid.placed .preview-skeleton { min-height:0; height:100%; box-sizing:border-box; }
-.studio-page-grid.placed .live-component-preview { height:100%; min-height:0; display:flex; flex-direction:column; }
-.studio-page-grid.placed .live-component-preview > :first-child { flex:1 1 auto; height:auto; min-height:0; }
-.studio-page-grid.placed .live-component-preview > :not(:first-child) { flex:none; }
-.studio-page-grid.placed .live-component-preview > button { align-self:flex-start; }
+.studio-page-grid.placed .live-component-preview { flex:1 1 0; height:auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+.studio-page-grid.placed .live-component-preview > .live-component-body { flex:1 1 0; height:auto; min-height:0; overflow:hidden; }
+.studio-page-grid.placed .live-component-preview > :not(.live-component-body) { flex:none; }
+.studio-page-grid.placed .preview-state, .studio-page-grid.placed .preview-skeleton { flex:1 1 0; }
 .studio-edit .studio-page-grid.placed .studio-component-card > header { cursor:grab; touch-action:none; user-select:none; }
 .studio-page-grid.arranging, .studio-page-grid.arranging * { cursor:grabbing !important; user-select:none; }
 .studio-page-grid.arranging { background-image:linear-gradient(to right, var(--border-subtle) 1px, transparent 1px); background-size:calc((100% + 12px) / 12) 100%; }

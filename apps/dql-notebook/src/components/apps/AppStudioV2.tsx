@@ -55,7 +55,7 @@ import {
   tileBodyHeight,
   type CanvasShortcut,
 } from './builder/canvas-interactions';
-import { moveGridItem, nudgeGridItem, placeGridCopy, resizeGridItem, settleGridLayout } from '@duckcodeailabs/dql-core/apps/grid-layout';
+import { firstFreeGridCell, moveGridItem, nudgeGridItem, placeGridCopy, resizeGridItem, settleGridLayout } from '@duckcodeailabs/dql-core/apps/grid-layout';
 import { projectProposal, type ProposedPage } from './builder/proposal-preview';
 import { EMPTY_TILE_QUERY, autoTileView, defaultTileTitle, tileVisualization, toggleFieldInQuery } from './builder/field-query';
 import { FiltersPanel, mergeStudioDateRanges, linkedComponentCount, type StudioFilterConfiguration } from './builder/GlobalFilterBar';
@@ -907,6 +907,14 @@ export function AppStudioV2({
     void createDraft();
   }, [baseAppId, draft, initialDraftId, startImmediately]);
 
+  /** A page can rerun single tiles only while its current results are whole and unexplored. */
+  const canRerunTilesOnly = (pageId: string) => {
+    const run = previewRunsByPage[pageId];
+    return Boolean(run && !run.incomplete
+      && !(previewCrossFiltersByPage[pageId]?.length)
+      && !(previewHierarchyDrillsByPage[pageId]?.length));
+  };
+
   const mutate = async (operations: AppStudioDraftOperation[], recordHistory = true) => {
     if (!draft || operations.length === 0) return null;
     setBusy(true);
@@ -918,10 +926,8 @@ export function AppStudioV2({
       const pageId = activePage?.id;
       const priorRun = pageId ? previewRunsByPage[pageId] : undefined;
       // Editing, adding or removing a tile reruns only that tile; the rest of
-      // the page keeps its results. Page-wide edits, or a page explored with
-      // marks or drills, still rerun everything.
-      const plan = !keepVisiblePreview && pageId && priorRun && !priorRun.incomplete
-        && !(previewCrossFiltersByPage[pageId]?.length) && !(previewHierarchyDrillsByPage[pageId]?.length)
+      // the page keeps its results. Page-wide edits still rerun everything.
+      const plan = !keepVisiblePreview && pageId && canRerunTilesOnly(pageId)
         ? incrementalPreviewPlan(operations, pageId)
         : undefined;
       const result = await api.patchAppBuild(draft.id, draft.revision, operations, draft.proposalHash);
@@ -1490,13 +1496,24 @@ export function AppStudioV2({
           }],
         });
         const addedTileId = result.tileIds[0];
-        const addedTile = result.draft.pages.find((page) => page.id === activePage.id)?.layout.items.find((item) => item.i === addedTileId);
+        const composedPage = result.draft.pages.find((page) => page.id === activePage.id);
+        const addedTile = composedPage?.layout.items.find((item) => item.i === addedTileId);
+        const followUp: AppStudioDraftOperation[] = [];
         if (datasetVisualization && addedTile && addedTile.viz.type !== datasetVisualization) {
-          // Keep the chart the author built (a date reads as a line), in the
-          // same undo step as the add.
-          const patched = await api.patchAppBuild(result.draft.id, result.draft.revision, [{
-            type: 'update_tile', pageId: activePage.id, tileId: addedTile.i, patch: { viz: { ...addedTile.viz, type: datasetVisualization } },
-          }], result.draft.proposalHash);
+          // Keep the chart the author built (a date reads as a line).
+          followUp.push({ type: 'update_tile', pageId: activePage.id, tileId: addedTile.i, patch: { viz: { ...addedTile.viz, type: datasetVisualization } } });
+        }
+        if (composedPage && addedTile) {
+          // The new tile fills the first gap it fits instead of going under the page.
+          const others = settleGridLayout(composedPage.layout.items.filter((item) => item.i !== addedTile.i), CANVAS_COLUMNS);
+          const spot = firstFreeGridCell(others, addedTile.w, addedTile.h, CANVAS_COLUMNS);
+          if (spot.y < addedTile.y || (spot.y === addedTile.y && spot.x !== addedTile.x)) {
+            followUp.push({ type: 'update_tile', pageId: activePage.id, tileId: addedTile.i, patch: { x: spot.x, y: spot.y } });
+          }
+        }
+        if (followUp.length) {
+          // Same undo step as the add.
+          const patched = await api.patchAppBuild(result.draft.id, result.draft.revision, followUp, result.draft.proposalHash);
           result = { ...result, draft: patched.draft };
         }
         setDraft(result.draft);
@@ -1509,6 +1526,11 @@ export function AppStudioV2({
           sourceFeedbackTimerRef.current = null;
         }, 1800);
         setSavedMessage(`${kind === 'chart' ? 'Chart' : humanize(kind)} added · loading data…`);
+        if (addedTileId && canRerunTilesOnly(activePage.id)) {
+          // The rest of the page keeps its results; only the new tile runs.
+          await runPreviewForDraft(result.draft, activePage.id, undefined, undefined, { affectedTileIds: [addedTileId], edit: true });
+          return true;
+        }
         previewSequenceRef.current += 1;
         setPreviewRunsByPage({});
         setFilterOptionsByPage({});
@@ -2535,7 +2557,8 @@ export function AppStudioV2({
       ?? null
     : null;
   /** Tiles can be dragged and resized on the Desktop canvas while editing a saved page. */
-  const canArrange = editing && !projectedPage && breakpoint === 'wide';
+  const placedGrid = breakpoint === 'wide' && !projectedPage;
+  const canArrange = editing && placedGrid;
   canvasKeyHandlerRef.current = (event) => {
     if (!editing || projectedPage || publishReviewOpen || deleteConfirmOpen) return;
     // The tile with keyboard focus wins over the selected one. Keys pressed
@@ -2567,7 +2590,9 @@ export function AppStudioV2({
     if (!grid) return;
     const origin = visibleItems.find((item) => item.i === tile.i);
     if (!origin) return;
-    event.preventDefault();
+    // A resize handle owns the press; a header press still moves focus, so an
+    // open field elsewhere blurs and saves (the header does not select text).
+    if (kind !== 'move') event.preventDefault();
     const width = grid.getBoundingClientRect().width;
     const next: CanvasGesture = {
       pageId: activePage.id,
@@ -2805,13 +2830,16 @@ export function AppStudioV2({
               <span>Use “Edit with AI” on a Dataset tile. Clicking a chart keeps its own behavior and does not select the tile.</span>
             </div> : null}
             {projectedPage ? <div className={`proposal-banner ${proposalSummaryText(projectedPage).removed ? 'warn' : ''}`} role="status"><Sparkles size={14} /><span><strong>AI proposal</strong> · {proposalSummaryText(projectedPage).text}. Nothing is saved until you apply.</span></div> : null}
+            {/* On the placed grid the tile being built sits above the page, where
+                it is seen first, instead of taking an automatic cell below it. */}
+            {placedGrid && editing && draftTile && activeDescriptor ? <div className="studio-draft-slot"><DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /></div> : null}
             <div
               ref={gridRef}
-              className={`studio-page-grid ${breakpoint === 'wide' && !projectedPage ? 'placed' : ''} ${gesture ? 'arranging' : ''}`}
-              style={breakpoint === 'wide' && !projectedPage ? { gridAutoRows: `${rowPx}px` } : undefined}
+              className={`studio-page-grid ${placedGrid ? 'placed' : ''} ${gesture ? 'arranging' : ''}`}
+              style={placedGrid ? { gridAutoRows: `${rowPx}px` } : undefined}
               aria-describedby={canArrange && visibleItems.length ? 'studio-canvas-keys' : undefined}
             >
-              {editing && draftTile && activeDescriptor ? <DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /> : null}
+              {!placedGrid && editing && draftTile && activeDescriptor ? <DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /> : null}
               {projectedPage ? projectedPage.items.map((item) => item.change === 'added' || item.change === 'updated'
                 ? <ProposedTileCard
                   key={item.tile.i}
@@ -3752,11 +3780,22 @@ export function StudioTilePreview({
   // while this frame's measured height follows its own content. Sizing the
   // chart from the rows keeps it stable: it can neither grow nor shrink the
   // frame it sits in.
-  // On the placed canvas the rows fix the card; controls under the chart
-  // take their share first so the axis is never cut off.
-  const chartHeight = placedChartHeight !== undefined
-    ? Math.max(96, placedChartHeight - (hasNavigation ? 34 : 0) - (linkProposal && onLinkField ? 36 : 0))
+  // On the placed canvas the grid rows fix the card, and the chart area is
+  // whatever the notices and controls leave (a flex item with a zero basis).
+  // Its size never depends on the chart, so measuring it is safe there.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [bodyHeight, setBodyHeight] = useState<number | null>(null);
+  const placed = placedChartHeight !== undefined;
+  const chartHeight = placed
+    ? Math.max(96, bodyHeight ?? placedChartHeight)
     : Math.max(120, tile.h * 68 - 56);
+  useEffect(() => {
+    const node = bodyRef.current;
+    if (!placed || !node || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => setBodyHeight(Math.floor(entry.contentRect.height)));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [placed, run]);
   const [markActionId, setMarkActionId] = useState<string>('filter');
   useEffect(() => {
     const node = frameRef.current;
@@ -3810,9 +3849,11 @@ export function StudioTilePreview({
     : undefined;
   return (
     <div ref={frameRef} className="live-component-preview" onClick={(event) => event.stopPropagation()}>
-      {chart === 'table' || chart === 'pivot'
-        ? <TableOutput result={run.result} themeMode={themeMode} maxHeight={height} initialPageSize={10} onRowClick={onRowSelect} />
-        : <ChartOutput result={run.result} themeMode={themeMode} chartConfig={{ ...chartConfig, title: undefined }} availableHeight={chartHeight} availableWidth={width} onMarkSelect={onRowSelect} />}
+      <div ref={bodyRef} className="live-component-body">
+        {chart === 'table' || chart === 'pivot'
+          ? <TableOutput result={run.result} themeMode={themeMode} maxHeight={placed ? chartHeight : height} initialPageSize={10} onRowClick={onRowSelect} />
+          : <ChartOutput result={run.result} themeMode={themeMode} chartConfig={{ ...chartConfig, title: undefined }} availableHeight={chartHeight} availableWidth={width} onMarkSelect={onRowSelect} />}
+      </div>
       {selectableFields.length ? <div className={`dataset-mark-controls marks ${selectedForTile.length ? 'has-selection' : ''}`} aria-label="Cross-filter selection">
         <span>Select a result mark</span>
         {selectableFields.flatMap((field) => uniquePreviewValues(run.result!.rows, field).slice(0, 6).map((value) => ({ field, value }))).map(({ field, value }) => <button key={`${field}:${String(value)}`} type="button" className={selectedForTile.some((filter) => filter.field === field && filter.values.some((candidate) => JSON.stringify(candidate) === JSON.stringify(value))) ? 'on' : ''} onClick={() => onSelectDatasetMark?.(field, [value])}>{humanize(field)}: {String(value)}</button>)}
