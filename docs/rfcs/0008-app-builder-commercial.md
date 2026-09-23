@@ -59,6 +59,7 @@ Each step lands as its own commits with tests and leaves `main` releasable.
 | 3a. Page AI | Done | Targets the open page; add mode by default; Keep/Skip per proposed tile; only proposed tiles can be removed |
 | 3b. App copilot scope | Done | Server resolves the App's domain and states the reader's filters in the question |
 | 3c. Schedules | Done | Full-page runs through the App runtime; webhook delivery; digest with values, trust and failures |
+| 4. Viz spec v2 | Done | `viz.style` validated in core and drafts; ECharts 6.1 draws 10 chart types everywhere ChartOutput is used, SVG kept for the rest and as fallback; Studio style panel; planner may style components |
 | 3d. Retire legacy paths | Deferred | The in-place editor is still the only place a published App shows review-required AI pins; Studio must show them first. `app-planner.ts` exports a type live code uses. The chat builder backs the `build_dql_app` MCP tool. |
 
 ## File format
@@ -67,10 +68,12 @@ All additions are optional fields on `.dqld` version 3 until step 5, which
 introduces version 4 only if the single-layout change needs it.
 
 - **Tile `description`** (markdown, readers see it) and `owner`.
-- **`viz` v2** — `mark`, `x`, `y`, `color`, `stack`, `format`, `labels`
-  (`none | last | all`), `referenceLines[]`, `bands[]`, `annotations[]`
-  (`{at, text}`, stored in git), `table.rules[]` (colour scale, data bars,
-  delta arrows). No second y-axis: two measures are indexed to one axis.
+- **`viz.style`** (built in step 4) — `labels` (`none | last | all`), `stack`,
+  `format` (`number | compact | currency | percent`), `palette`, `legend`,
+  `sort`, `referenceLines[]`, `bands[]`, `annotations[]` (`{at, text}`, kept
+  in git). Encodings stay in `viz.options` (`x`, `y`, `color`). Table rules
+  (colour scales, data bars) are still to come. No second y-axis: two
+  measures are indexed to one axis.
 - **App `theme`** in `dql.app.json` — `{ base: "paper" | "obsidian" |
   "editorial" | "brand", accent?, series? }`. Brand palettes are validated
   on save.
