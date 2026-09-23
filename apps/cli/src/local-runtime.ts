@@ -216,6 +216,7 @@ import {
 } from '@duckcodeailabs/dql-core/datasets/source-authoring.node';
 import { dump as dumpYaml, load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
+import { scopeAppCopilotRequest } from './app-copilot-scope.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
@@ -15462,6 +15463,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (isAskContinuationMode(parsed.request.requestedMode)) {
           markUnavailablePluralPriorResultSet(parsed.request);
         }
+        // An App copilot question is asked from one App and one filtered
+        // view. The server resolves that App's domain and filter labels from
+        // its files (never from the browser) and states the view in the
+        // question, so Ask applies each filter or says it could not.
+        scopeAppCopilotRequest(projectRoot, parsed.request, {
+          knownDomain: (domain) => Boolean(projectSnapshot().manifest?.domains?.[domain]),
+        });
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
         // REQUEST IDENTITY. A browser that lost its stream before the accepted
         // event used to resubmit and start a second run doing the same work.
