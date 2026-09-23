@@ -915,13 +915,26 @@ export function AppStudioV2({
       && !(previewHierarchyDrillsByPage[pageId]?.length));
   };
 
-  const mutate = async (operations: AppStudioDraftOperation[], recordHistory = true) => {
-    if (!draft || operations.length === 0) return null;
+  // Saves run one at a time against the newest draft. Two quick edits (a
+  // blur that saves one field while the next field saves) used to send the
+  // same revision twice, and the second failed with a proposal conflict.
+  const latestDraftRef = useRef(draft);
+  latestDraftRef.current = draft;
+  const mutationQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const mutate = (operations: AppStudioDraftOperation[], recordHistory = true): Promise<AppStudioBuildDraft | null> => {
+    if (!draft || operations.length === 0) return Promise.resolve(null);
+    const queued = mutationQueueRef.current.then(() => applyMutation(operations, recordHistory));
+    mutationQueueRef.current = queued.catch(() => undefined);
+    return queued;
+  };
+  const applyMutation = async (operations: AppStudioDraftOperation[], recordHistory: boolean) => {
+    const current = latestDraftRef.current;
+    if (!current) return null;
     setBusy(true);
     setSavedMessage('Saving…');
     setError(null);
     try {
-      const previous = draft;
+      const previous = current;
       const keepVisiblePreview = operations.every(isPresentationOnlyOperation);
       const pageId = activePage?.id;
       const priorRun = pageId ? previewRunsByPage[pageId] : undefined;
@@ -930,7 +943,8 @@ export function AppStudioV2({
       const plan = !keepVisiblePreview && pageId && canRerunTilesOnly(pageId)
         ? incrementalPreviewPlan(operations, pageId)
         : undefined;
-      const result = await api.patchAppBuild(draft.id, draft.revision, operations, draft.proposalHash);
+      const result = await api.patchAppBuild(current.id, current.revision, operations, current.proposalHash);
+      latestDraftRef.current = result.draft;
       setDraft(result.draft);
       setAutopilotReview(null);
       if (plan && pageId && priorRun) {
@@ -3523,10 +3537,14 @@ function BuildFrameInspector({ draft, prompt, previewRun, onPrompt, onAskAi, onS
 export function ComponentInspector({ initialTab = 'data', tile, run, pageId, page, pages, sources, dataset, disabled, onOpenSources, onSaveDatasetTileAsBlock, savingDatasetTileAsBlock, savedDatasetReviewDraft, onReplaceDatasetTileWithBlock = () => undefined, replacingDatasetTileWithBlock = false, onPreviewLegacySemanticConversion = () => undefined, previewingLegacySemanticConversion = false, semanticTileConversionPreview, onAcceptLegacySemanticConversion = () => undefined, acceptingLegacySemanticConversion = false, onRefreshDatasetTile, onUpdate, onUpdateInteractions, onDelete }: { initialTab?: 'data' | 'visual' | 'interactions'; tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]; run?: DashboardRunResponse['tiles'][number]; pageId: string; page: AppStudioBuildDraft['pages'][number]; pages: AppStudioBuildDraft['pages']; sources: AppStudioBuildDraft['sources']; dataset?: DatasetDescriptor; disabled: boolean; onOpenSources: () => void; onSaveDatasetTileAsBlock: () => void; savingDatasetTileAsBlock: boolean; savedDatasetReviewDraft?: Extract<DatasetTileSaveAsBlockResponse, { ok: true }>; onReplaceDatasetTileWithBlock?: () => void; replacingDatasetTileWithBlock?: boolean; onPreviewLegacySemanticConversion?: () => void; previewingLegacySemanticConversion?: boolean; semanticTileConversionPreview?: Extract<SemanticTileConversionPreviewResponse, { ok: true }>; onAcceptLegacySemanticConversion?: () => void; acceptingLegacySemanticConversion?: boolean; onRefreshDatasetTile: () => void; onUpdate: (patch: Partial<typeof tile>) => void; onUpdateInteractions: (interactions: AppStudioBuildDraft['pages'][number]['interactions']) => void; onDelete: () => void }): JSX.Element {
   const [title, setTitle] = useState(tile.title ?? '');
   const [markdown, setMarkdown] = useState(tile.text?.markdown ?? '');
+  const [description, setDescription] = useState(tile.description ?? '');
+  const [owner, setOwner] = useState(tile.owner ?? '');
   const [visualizationFeedback, setVisualizationFeedback] = useState<string | null>(null);
   const [tab, setTab] = useState<'data' | 'visual' | 'interactions'>(initialTab);
   useEffect(() => setTitle(tile.title ?? ''), [tile.i, tile.title]);
   useEffect(() => setMarkdown(tile.text?.markdown ?? ''), [tile.i, tile.text?.markdown]);
+  useEffect(() => setDescription(tile.description ?? ''), [tile.i, tile.description]);
+  useEffect(() => setOwner(tile.owner ?? ''), [tile.i, tile.owner]);
   useEffect(() => setVisualizationFeedback(null), [tile.i]);
   const options = tile.viz.options ?? {};
   const columns = run?.result?.columns ?? [];
@@ -3562,6 +3580,14 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
   const rowCount = run?.status === 'ok' ? run.result?.rowCount ?? run.result?.rows.length ?? 0 : undefined;
   return <div className="inspector-body">
     <section className="inspector-title"><label htmlFor={`tile-title-${tile.i}`}>Title</label><input id={`tile-title-${tile.i}`} value={title} onChange={(event) => setTitle(event.target.value)} onBlur={() => { if (title.trim() !== (tile.title ?? '')) onUpdate({ title: title.trim() }); }} /></section>
+    {dataTile ? <section className="inspector-docs">
+      <label htmlFor={`tile-description-${tile.i}`}>Description</label>
+      {/* An empty string clears the field: a missing key would leave the old text in the draft. */}
+      <textarea id={`tile-description-${tile.i}`} rows={2} maxLength={2000} placeholder="What this shows and how to read it" value={description} onChange={(event) => setDescription(event.target.value)} onBlur={() => { if (description.trim() !== (tile.description ?? '')) onUpdate({ description: description.trim() }); }} />
+      <label htmlFor={`tile-owner-${tile.i}`}>Owner</label>
+      <input id={`tile-owner-${tile.i}`} maxLength={120} placeholder="Who answers for these numbers" value={owner} onChange={(event) => setOwner(event.target.value)} onBlur={() => { if (owner.trim() !== (tile.owner ?? '')) onUpdate({ owner: owner.trim() }); }} />
+      <small className="field-help">Readers see the description under the title and the owner in the tile’s receipt.</small>
+    </section> : null}
     {dataTile ? <div className="inspector-tabs" role="tablist" aria-label="Tile settings">{([['data', 'Data'], ['visual', 'Visual'], ['interactions', 'Interactions']] as const).map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>{label}</button>)}</div> : null}
     {!dataTile ? <>
     {tile.text ? <section><label>Content</label><textarea rows={7} value={markdown} onChange={(event) => setMarkdown(event.target.value)} onBlur={() => { if (markdown !== tile.text?.markdown) onUpdate({ text: { markdown } }); }} /><small className="field-help">Safe Markdown only. Executable HTML and JavaScript are not supported.</small></section> : null}
@@ -4070,7 +4096,7 @@ function sourceKindLabel(kind: AppStudioBuildDraft['sources'][number]['kind']): 
 function isPresentationOnlyOperation(operation: AppStudioDraftOperation): boolean {
   if (operation.type === 'set_layout') return true;
   if (operation.type !== 'update_tile') return false;
-  const allowed = new Set(['title', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
+  const allowed = new Set(['title', 'description', 'owner', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
   return Object.keys(operation.patch).every((key) => allowed.has(key));
 }
 

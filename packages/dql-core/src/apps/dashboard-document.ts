@@ -332,6 +332,13 @@ export type DashboardGridItem = {
   w: number;
   h: number;
   /**
+   * What the tile shows and how to read it, in markdown. Readers see it under
+   * the title (RFC 0008 step 6).
+   */
+  description?: string;
+  /** Who answers for this tile's numbers, as a name or team. */
+  owner?: string;
+  /**
    * Canonical AppBuildDraft source binding. App Studio v3 writes this for
    * every data tile; legacy published dashboards remain readable without it.
    */
@@ -888,6 +895,24 @@ function readDashboardFilterTimezone(raw: unknown, index: number, err: (m: strin
   }
 }
 
+/** Tile descriptions are short markdown notes, not documents. */
+export const MAX_TILE_DESCRIPTION = 2000;
+export const MAX_TILE_OWNER = 120;
+
+function readTileText(value: unknown, path: string, max: number, err: (message: string) => void): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') {
+    err(`${path} must be a string.`);
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length > max) {
+    err(`${path} must be at most ${max} characters.`);
+    return undefined;
+  }
+  return trimmed || undefined;
+}
+
 function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['layout'] {
   if (typeof raw !== 'object' || raw === null) {
     err('layout must be an object');
@@ -979,6 +1004,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const review = readTileReview(it.review, i, err);
     const trustState = enumOrUndefined(it.trustState, `layout.items[${i}].trustState`, ['certified', 'review_required', 'draft_ready'] as const, err);
     const reviewStatus = enumOrUndefined(it.reviewStatus, `layout.items[${i}].reviewStatus`, ['certified', 'draft_ready', 'review_required'] as const, err);
+    const description = readTileText(it.description, `layout.items[${i}].description`, MAX_TILE_DESCRIPTION, err);
+    const owner = readTileText(it.owner, `layout.items[${i}].owner`, MAX_TILE_OWNER, err);
 
     items.push({
       i: it.i,
@@ -1006,6 +1033,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       ...(trustState ? { trustState } : {}),
       ...(reviewStatus ? { reviewStatus } : {}),
       title: typeof it.title === 'string' ? it.title : undefined,
+      ...(description ? { description } : {}),
+      ...(owner ? { owner } : {}),
       ...(typeof it.sectionId === 'string' && it.sectionId ? { sectionId: it.sectionId } : {}),
     });
   }

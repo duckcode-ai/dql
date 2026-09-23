@@ -921,6 +921,8 @@ export const APP_STUDIO_V2_STYLES = `
 .inspector-title > label { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
 .inspector-body .inspector-title input { width:calc(100% + 12px); max-width:none; margin:0 -6px; padding:4px 6px; border-color:transparent; background:transparent; font-size:16px; font-weight:600; }
 .inspector-body .inspector-title input:hover { border-color:var(--border-subtle); }
+.inspector-docs { display:grid; gap:6px; }
+.inspector-docs textarea { resize:vertical; min-height:52px; }
 .inspector-body .inspector-title input:focus { border-color:var(--accent); background:var(--bg-2); }
 .inspector-tabs { position:sticky; top:0; z-index:2; display:flex; gap:2px; margin:-6px -16px 0; padding:0 12px; border-bottom:1px solid var(--border-subtle); background:var(--bg-2); }
 .inspector-tabs button { height:36px; padding:0 10px; border:0; background:transparent; color:var(--text-secondary); font-size:13px; font-weight:500; }

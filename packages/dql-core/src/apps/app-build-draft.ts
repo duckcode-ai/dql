@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DashboardDocument, DashboardFilter, DashboardGridItem, DashboardGridLayout } from './dashboard-document.js';
 import { datasetTileVisualizationCompatibility } from './tile-query.js';
 import { readDashboardVizStyle } from './viz-style.js';
+import { MAX_TILE_DESCRIPTION, MAX_TILE_OWNER } from './dashboard-document.js';
 import { settleGridLayout } from './grid-layout.js';
 import type { DatasetDescriptor } from '../datasets/descriptor.js';
 import type { MetricCapabilityContract } from '../contracts/analytical.js';
@@ -319,7 +320,7 @@ function reconcileCoverageReferences(draft: AppBuildDraft): AppBuildDraft {
 function operationPreservesSettledData(draft: AppBuildDraft, operation: AppBuildDraftOperation): boolean {
   if (operation.type === 'set_preview_receipt' || operation.type === 'clear_preview_receipt') return true;
   if (operation.type === 'update_tile') {
-    const presentationKeys = new Set(['title', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
+    const presentationKeys = new Set(['title', 'description', 'owner', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
     return Object.keys(operation.patch).every((key) => presentationKeys.has(key));
   }
   if (operation.type !== 'set_layout') return false;
@@ -642,6 +643,12 @@ function assertAppBuildDraftPolicy(draft: Omit<AppBuildDraft, 'proposalHash'> | 
         const problems: string[] = [];
         readDashboardVizStyle(tile.viz.style, `Tile ${page.id}/${tile.i} viz.style`, (message) => problems.push(message));
         if (problems.length) throw new Error(problems.join('; '));
+      }
+      for (const [field, max] of [['description', MAX_TILE_DESCRIPTION], ['owner', MAX_TILE_OWNER]] as const) {
+        const value = tile[field];
+        if (value !== undefined && (typeof value !== 'string' || value.length > max)) {
+          throw new Error(`Tile ${page.id}/${tile.i} ${field} must be text of at most ${max} characters.`);
+        }
       }
       // Dataset field tiles are a v3-only contract. Existing v1/v2 drafts
       // retain their historic renderer semantics; new or edited v3 tiles

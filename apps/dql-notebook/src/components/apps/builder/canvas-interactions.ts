@@ -29,7 +29,7 @@ export function cellsFromPixels(deltaPx: number, cellPx: number): number {
   return Math.round(deltaPx / cellPx) || 0;
 }
 
-const PRESENTATION_KEYS = new Set(['title', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
+const PRESENTATION_KEYS = new Set(['title', 'description', 'owner', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
 
 export interface IncrementalPreviewPlan {
   /** Tiles whose results must run again. */

@@ -4842,6 +4842,36 @@ export const APP_STYLES = `
 .dql-app-filter-row .dql-app-filter-select span { font: 500 13px var(--font-ui); text-transform: none; color: var(--dql-app-muted); }
 .dql-app-filter-row .dql-app-filter-select select, .dql-app-filter-row .dql-app-filter-select input { font: 600 13px var(--font-ui); max-width: 160px; }
 .dql-app-filter-reset { height: 32px; padding: 0 8px; border: 0; background: transparent; color: var(--dql-app-accent); font: 600 13px var(--font-ui); cursor: pointer; }
+/* RFC 0008 step 6: trust labels, receipts and the Trust Lens in the reader. */
+.dql-trust-anchor { position: relative; display: inline-flex; }
+.dql-trust-badge { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border: 1px solid var(--dql-app-line-2); border-radius: 999px; background: var(--dql-app-surface); color: var(--dql-app-ink); font: 500 11px var(--font-ui); font-variant-numeric: tabular-nums; cursor: pointer; white-space: nowrap; }
+.dql-trust-badge:hover, .dql-trust-badge[aria-expanded="true"] { background: var(--dql-app-control); }
+.dql-trust-badge:focus-visible, .dql-trust-lens-toggle:focus-visible, .dql-receipt button:focus-visible { outline: 2px solid var(--dql-app-accent); outline-offset: 2px; }
+.dql-trust-badge.certified svg, .dql-receipt-state.certified svg, .dql-trust-count.certified svg { color: var(--trust-certified, #0b7a75); }
+.dql-trust-badge.governed svg, .dql-receipt-state.governed svg, .dql-trust-count.governed svg { color: var(--trust-governed, #3659c9); }
+.dql-trust-badge.review svg, .dql-receipt-state.review svg, .dql-trust-count.review svg { color: var(--trust-review, #b26b1f); }
+.dql-trust-badge.blocked svg, .dql-receipt-state.blocked svg, .dql-trust-count.blocked svg { color: var(--trust-blocked, #c14545); }
+.dql-trust-badge.review { border-style: dashed; }
+.dql-trust-age { color: var(--dql-app-muted); font-weight: 400; }
+.dql-receipt { position: absolute; top: 28px; left: 0; z-index: 40; width: min(340px, 80vw); padding: 12px; border: 1px solid var(--dql-app-line-2); border-radius: 8px; background: var(--dql-app-surface); box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16); color: var(--dql-app-ink); font: 400 12px/1.45 var(--font-ui); cursor: default; }
+.dql-receipt header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dql-receipt-state { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
+.dql-receipt-close { width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--dql-app-muted); cursor: pointer; }
+.dql-receipt-close:hover { background: var(--dql-app-control); color: var(--dql-app-ink); }
+.dql-receipt > p { margin: 6px 0 10px; color: var(--dql-app-muted); }
+.dql-receipt dl { margin: 0; display: grid; gap: 6px; }
+.dql-receipt dl > div { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 8px; }
+.dql-receipt dt { color: var(--dql-app-muted); }
+.dql-receipt dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.dql-receipt dd.code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; user-select: all; }
+.dql-receipt-more { margin-top: 10px; height: 28px; padding: 0 10px; border: 1px solid var(--dql-app-line-2); border-radius: 8px; background: var(--dql-app-surface); color: var(--dql-app-accent); font: 600 12px var(--font-ui); cursor: pointer; }
+.dql-receipt-more:hover { background: var(--dql-app-accent-soft); }
+.dql-trust-lens-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; color: var(--dql-app-muted); font: 400 12px var(--font-ui); font-variant-numeric: tabular-nums; }
+.dql-trust-summary { color: var(--dql-app-ink); font-weight: 500; }
+.dql-trust-count { display: inline-flex; align-items: center; gap: 4px; }
+.dql-trust-lens-toggle { margin-left: auto; height: 26px; padding: 0 10px; border: 1px solid var(--dql-app-line-2); border-radius: 999px; background: var(--dql-app-surface); color: var(--dql-app-ink); font: 500 12px var(--font-ui); cursor: pointer; }
+.dql-trust-lens-toggle.on { border-color: var(--dql-app-accent); background: var(--dql-app-accent-soft); color: var(--dql-app-accent); }
+.dql-tile-description { margin: 4px 0 0; color: var(--dql-app-muted); font: 400 12px/1.4 var(--font-ui); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; }
 .dql-tile-menu-anchor { position: absolute; top: 8px; right: 8px; z-index: 6; transition: opacity 120ms ease; }
 .dql-tile-menu-anchor:focus-within { opacity: 1 !important; }
 .dql-tile-menu-button { width: 28px; height: 28px; border: 0; border-radius: 8px; background: var(--dql-app-surface); color: var(--dql-app-muted); display: grid; place-items: center; cursor: pointer; }

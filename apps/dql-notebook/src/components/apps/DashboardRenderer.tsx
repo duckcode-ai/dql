@@ -28,6 +28,8 @@ import {
   normalizeViz, roleForDisplayComponent, textTileDisplay, uniqueStrings, type DqlGenUiMetadata,
 } from './dashboard-tile-model';
 import { autoLayoutDashboardItems, autoLayoutRank, layoutScore, packDashboardItems, reorderTileForDrop } from './dashboard-layout';
+import { readerTileFreshness, readerTileReceipt, readerTileTrust, readerTrustCounts } from './reader-trust';
+import { plainDescription, ReaderTrustBadge, TrustLensBar } from './ReaderTrust';
 import {
   autoTileSizeForItem, autoTileSizeForViz, clamp, narrowTileMinHeight, normalizeSizePreset,
   presetMatches, tileSizeForPreset, tileSizePatch, TILE_SIZE_PRESETS, type TileSizePresetId,
@@ -194,6 +196,12 @@ export function DashboardRenderer({
   const { state } = useNotebook();
   const t = themes[state.themeMode as NotebookThemeMode];
   const [run, setRun] = useState<DashboardRunResponse | null>(null);
+  /** When each tile's current result arrived, for the reader's freshness label. */
+  const [tileRanAt, setTileRanAt] = useState<Record<string, number>>({});
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [trustLens, setTrustLens] = useState(false);
+  /** Whether the latest partial run came from a reader interaction (a mark or drill). */
+  const [partialFromInteraction, setPartialFromInteraction] = useState(false);
   const [activeCrossFilters, setActiveCrossFilters] = useState<DashboardDatasetCrossFilter[]>([]);
   const [activeHierarchyDrills, setActiveHierarchyDrills] = useState<DashboardDatasetHierarchyDrill[]>([]);
   const [crossFilterNotice, setCrossFilterNotice] = useState<string | null>(null);
@@ -304,6 +312,24 @@ export function DashboardRenderer({
     () => (editable || storySections || run?.partial || run?.incomplete ? null : buildDashboardStory(visibleItems, tileResults, runVariables)),
     [editable, run?.incomplete, run?.partial, runVariables, storySections, tileResults, visibleItems],
   );
+  useEffect(() => {
+    if (editable) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [editable]);
+  const trustCounts = useMemo(
+    () => (editable || !run ? [] : readerTrustCounts((storyItems ?? visibleItems).map((item) => readerTileTrust(item, tileResults.get(item.i))))),
+    [editable, run, storyItems, tileResults, visibleItems],
+  );
+  const readerContext = useMemo<ReaderTileContext | undefined>(
+    () => (editable ? undefined : {
+      ranAtByTile: tileRanAt,
+      nowMs,
+      run: run ? { runId: run.runId, snapshotId: run.snapshotId, filterFingerprint: run.filterFingerprint } : null,
+      trustLens,
+    }),
+    [editable, nowMs, run, tileRanAt, trustLens],
+  );
 
   useEffect(() => {
     setPendingLayoutItems(null);
@@ -354,7 +380,11 @@ export function DashboardRenderer({
       const result = await api.runDashboard(appId, dashboard.id, nextVariables, nextCrossFilters, {
         runScope: runScopeRef.current,
         ...(schedule?.tileId ? { tileId: schedule.tileId } : {}),
-        ...(schedule?.affectedTileIds?.length ? { affectedTileIds: schedule.affectedTileIds } : { visibleTileIds: visibleTileIdsRef.current }),
+        // A bounded run never earns the page story, even when its set happens
+        // to name every tile, so only send the bound when a tile is hidden.
+        ...(schedule?.affectedTileIds?.length
+          ? { affectedTileIds: schedule.affectedTileIds }
+          : visibleTileIdsRef.current.length < dashboard.layout.items.length ? { visibleTileIds: visibleTileIdsRef.current } : {}),
         ...(nextHierarchyDrills.length ? { datasetDrills: nextHierarchyDrills } : {}),
       });
       if (!isCurrent()) return null;
@@ -363,6 +393,17 @@ export function DashboardRenderer({
         : result;
       setRun(accepted);
       if (accepted) latestSettledRunRef.current = accepted;
+      if (result) {
+        const settledAt = Date.now();
+        const ranIds = result.partial ? (result.executedTileIds ?? result.tiles.map((entry) => entry.tileId)) : result.tiles.map((entry) => entry.tileId);
+        setTileRanAt((current) => {
+          const next: Record<string, number> = result.partial && boundedRefresh ? { ...current } : {};
+          for (const tileId of ranIds) next[tileId] = settledAt;
+          return next;
+        });
+        setNowMs(settledAt);
+        setPartialFromInteraction(Boolean(result.partial && boundedRefresh));
+      }
       setBusinessStory(result?.partial || result?.incomplete ? null : result?.story ?? null);
       latestRunIdRef.current = result?.runId ?? null;
       onRunChange?.(accepted);
@@ -947,11 +988,14 @@ export function DashboardRenderer({
           <Filter size={13} /> {crossFilterNotice}
         </div>
       ) : null}
-      {run?.partial ? (
+      {run?.partial && (editable || partialFromInteraction) ? (
         <div role="status" style={{ ...saveStatusStyle('var(--text-secondary)'), marginBottom: 8 }}>
-          <Activity size={13} /> Refreshed a bounded set of components. Run the full dashboard before using a combined story or publication evidence.
+          <Activity size={13} /> {editable
+            ? 'Refreshed a bounded set of components. Run the full dashboard before using a combined story or publication evidence.'
+            : 'Updated the tiles linked to your selection. The page summary returns when you reset the selection.'}
         </div>
       ) : null}
+      {!editable ? <TrustLensBar counts={trustCounts} on={trustLens} onToggle={() => setTrustLens((current) => !current)} /> : null}
       {run?.incomplete ? (
         <div role="status" style={{ ...saveStatusStyle('var(--text-secondary)'), marginBottom: 8 }}>
           <AlertTriangle size={13} /> {run.incomplete.message}
@@ -1070,6 +1114,7 @@ export function DashboardRenderer({
                       onAskBlock={onAskBlock}
                       onAskChart={onAskChart}
                       runId={run?.runId}
+                      reader={readerContext}
                       onMove={() => undefined}
                       onDragMove={() => undefined}
                       onDragEnd={() => undefined}
@@ -1133,6 +1178,7 @@ export function DashboardRenderer({
               onAskBlock={onAskBlock}
               onAskChart={onAskChart}
               runId={run?.runId}
+              reader={readerContext}
               onMove={(point) => void moveTileToPoint(item.i, point)}
               onDragMove={(point) => updateDragPreview(item.i, point)}
               onDragEnd={clearDragPreview}
@@ -1250,6 +1296,14 @@ export function dashboardTileFilterNotices(input: {
   };
 }
 
+/** What a reader tile needs to show its trust label, freshness and receipt. */
+interface ReaderTileContext {
+  ranAtByTile: Record<string, number>;
+  nowMs: number;
+  run: { runId: string; snapshotId: string; filterFingerprint: string } | null;
+  trustLens: boolean;
+}
+
 function DashboardTile({
   item,
   tile,
@@ -1278,9 +1332,12 @@ function DashboardTile({
   onDrillDatasetMark,
   onDrillBack,
   onNavigate,
+  reader,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
+  /** Reader-only trust context: freshness clock, run identity, Trust Lens. */
+  reader?: ReaderTileContext;
   loading: boolean;
   error: string | null;
   themeMode: ThemeMode;
@@ -1314,7 +1371,12 @@ function DashboardTile({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<'how' | 'dql' | 'sql'>('how');
+  const [receiptOpen, setReceiptOpen] = useState(false);
   const blockId = getDashboardItemBlockId(item);
+  const readerTrust = !editable && reader && !loading ? readerTileTrust(item, tile) : null;
+  const readerFreshness = readerTrust && reader ? readerTileFreshness(tile, reader.ranAtByTile[item.i], reader.nowMs) : null;
+  const readerReceipt = readerTrust && reader ? readerTileReceipt(item, tile, reader.run, reader.ranAtByTile[item.i]) : [];
+  const readerDescription = !editable && item.description ? plainDescription(item.description) : '';
   const canAskChart = canAskDatasetChart(tile, editable, runId, Boolean(onAskChart));
   const canAsk = canAskChart || Boolean(!editable && blockId && onAskBlock);
   const blockRef = blockId
@@ -1412,6 +1474,7 @@ function DashboardTile({
   // Readers switch between the allowed views from the tile's ⋯ menu.
   const viewerVizChoices = !editable && tile?.result && generatedVizOptions.length > 1 ? generatedVizOptions : [];
   const canInspect = Boolean(tile && tile.tileType !== 'text' && (tile.artifact || tile.result || tile.citation || tile.repair));
+  const kpiOpensReceipt = Boolean(readerTrust && tile?.status === 'ok' && activeChart === 'kpi');
   // Readers reach Ask, evidence, notebook, and CSV from one ⋯ menu per tile.
   const showAskHint = Boolean(editable && canAsk && (hovered || selected));
   const [tileMenuOpen, setTileMenuOpen] = useState(false);
@@ -1507,6 +1570,8 @@ function DashboardTile({
         background: isGeneratedUi
           ? tileSurfaceForGenUi(generatedComponent)
           : 'var(--dql-app-surface, var(--surface, rgba(0,0,0,0.02)))',
+        outline: readerTrust && reader?.trustLens ? `2px ${readerTrust.state === 'certified' || readerTrust.state === 'governed' ? 'solid' : 'dashed'} var(--trust-${readerTrust.state})` : undefined,
+        outlineOffset: readerTrust && reader?.trustLens ? 2 : undefined,
         border: selected || dragOffset
           ? '1.5px solid var(--dql-app-accent, var(--accent, #4f46e5))'
           : isGeneratedUi
@@ -1656,8 +1721,9 @@ function DashboardTile({
                   {generatedTitle}
                 </div>
               )}
+              {readerDescription ? <p className="dql-tile-description" title={readerDescription}>{readerDescription}</p> : null}
               <div style={generatedMetaRowStyle}>
-                {generatedTrust ? <TrustPill trust={generatedTrust} /> : null}
+                {readerTrust ? <ReaderTrustBadge trust={readerTrust} freshness={readerFreshness} receipt={readerReceipt} open={receiptOpen} onOpenChange={setReceiptOpen} onShowEvidence={canInspect && tile ? () => openEvidence('how') : undefined} /> : generatedTrust ? <TrustPill trust={generatedTrust} /> : null}
                 {repair ? (
                   <span style={generatedMetaPillStyle} title={repair.message}>
                     <Wrench size={9} /> {repair.status === 'repaired' ? `${repair.mode === 'ai' ? 'AI ' : ''}repaired · review` : 'repair blocked'}
@@ -1687,6 +1753,7 @@ function DashboardTile({
               />
             ) : <span>{item.title ?? blockRef}</span>}
           </div>
+          {readerDescription ? <p className="dql-tile-description" title={readerDescription}>{readerDescription}</p> : null}
           {unfilteredNotice ? (
             <div style={{ marginTop: 5 }}>
               <span style={generatedMetaPillStyle} title={unfilteredNotice.detail}>
@@ -1708,7 +1775,17 @@ function DashboardTile({
               </span>
             </div>
           ) : null}
-          {aiPinTrust || repair ? (
+          {readerTrust ? (
+            <div style={{ marginTop: 5, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <ReaderTrustBadge trust={readerTrust} freshness={readerFreshness} receipt={readerReceipt} open={receiptOpen} onOpenChange={setReceiptOpen} onShowEvidence={canInspect && tile ? () => openEvidence('how') : undefined} />
+              {aiPinTrust ? <span style={generatedMetaPillStyle}>AI generated</span> : null}
+              {repair ? (
+                <span style={generatedMetaPillStyle} title={repair.message}>
+                  <Wrench size={9} /> {repair.status === 'repaired' ? `${repair.mode === 'ai' ? 'AI ' : ''}repaired · review` : 'repair blocked'}
+                </span>
+              ) : null}
+            </div>
+          ) : aiPinTrust || repair ? (
             <div style={{ marginTop: 5, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               {aiPinTrust ? <TrustPill trust={aiPinTrust} /> : null}
               {aiPinTrust ? <span style={generatedMetaPillStyle}>AI generated</span> : null}
@@ -1744,7 +1821,11 @@ function DashboardTile({
           fontSize: 12,
           opacity: tile?.status === 'ok' ? 1 : 0.7,
           fontStyle: tile?.status === 'ok' ? 'normal' : 'italic',
+          cursor: kpiOpensReceipt ? 'pointer' : undefined,
         }}
+        // A KPI's number opens its receipt; the trust label is the keyboard route.
+        onClick={kpiOpensReceipt ? (event) => { event.stopPropagation(); setReceiptOpen(true); } : undefined}
+        title={kpiOpensReceipt ? 'Where this number comes from' : undefined}
       >
         <TileBody
           item={renderedItem}
@@ -3510,8 +3591,9 @@ export function getGeneratedVizOptions(
 }
 
 function tileSurfaceForGenUi(component?: string): string {
-  if (component === 'TrustCallout') return 'linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,251,235,0.72))';
-  if (component === 'RankingPanel' || component === 'TrendPanel' || component === 'PivotTable') return 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.86))';
+  // Theme surfaces only: fixed white gradients made light text unreadable on dark themes.
+  if (component === 'TrustCallout') return 'var(--dql-app-orange-soft, var(--dql-app-surface))';
+  if (component === 'RankingPanel' || component === 'TrendPanel' || component === 'PivotTable') return 'var(--dql-app-surface)';
   if (component === 'BusinessBrief') return 'var(--dql-app-surface, rgba(255,255,255,0.90))';
   return 'var(--dql-app-surface, var(--surface, rgba(255,255,255,0.84)))';
 }
@@ -3773,7 +3855,7 @@ const dashboardEditHintStyle: CSSProperties = {
 const dashboardStoryStripStyle: CSSProperties = {
   border: '1px solid var(--dql-app-line-2, var(--border-color, rgba(15,23,42,0.10)))',
   borderRadius: 10,
-  background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.88))',
+  background: 'var(--dql-app-surface, var(--surface))',
   boxShadow: '0 8px 24px rgba(15,23,42,0.05)',
   padding: 14,
   marginBottom: 12,
@@ -4095,9 +4177,10 @@ const generatedMetaPillStyle: CSSProperties = {
 function trustPillStyle(certified: boolean): CSSProperties {
   return {
     ...generatedMetaPillStyle,
-    border: certified ? '1px solid rgba(22,163,74,0.26)' : '1px solid rgba(217,119,6,0.28)',
-    background: certified ? 'rgba(22,163,74,0.10)' : 'rgba(245,158,11,0.12)',
-    color: certified ? '#15803d' : '#b45309',
+    // Certified shares the brand teal (RFC 0008); review is the status amber.
+    border: `1px solid color-mix(in srgb, var(${certified ? '--trust-certified' : '--trust-review'}) 32%, transparent)`,
+    background: `color-mix(in srgb, var(${certified ? '--trust-certified' : '--trust-review'}) 10%, transparent)`,
+    color: `var(${certified ? '--trust-certified' : '--trust-review'})`,
     gap: 4,
   };
 }

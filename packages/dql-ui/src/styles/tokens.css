@@ -94,6 +94,11 @@
   --status-info:        var(--accent);
   --status-info-bg:     var(--accent-dim);
   --status-info-border: rgba(79, 139, 255, 0.30);
+  /* Reader trust labels (RFC 0008 step 6): certified shares the brand teal. */
+  --trust-certified: var(--accent);
+  --trust-governed:  #8aa2f8;
+  --trust-review:    var(--status-warning);
+  --trust-blocked:   var(--status-error);
 
   --pk: #e3b341;
   --fk: #a29bff;
@@ -221,6 +226,11 @@
   --status-info:        var(--accent);
   --status-info-bg:     var(--accent-dim);
   --status-info-border: rgba(11, 122, 117, 0.30);
+  /* Reader trust labels (RFC 0008 step 6): certified shares the brand teal. */
+  --trust-certified: var(--accent);
+  --trust-governed:  #3659c9;
+  --trust-review:    var(--status-warning);
+  --trust-blocked:   var(--status-error);
 
   --pk: #b26b1f;
   --fk: #0b7a75;
@@ -338,6 +348,11 @@
   --status-info:        var(--accent);
   --status-info-bg:     var(--accent-dim);
   --status-info-border: rgba(11, 122, 117, 0.30);
+  /* Reader trust labels (RFC 0008 step 6): certified shares the brand teal. */
+  --trust-certified: var(--accent);
+  --trust-governed:  #3659c9;
+  --trust-review:    var(--status-warning);
+  --trust-blocked:   var(--status-error);
 
   --pk: #ca8a04;
   --fk: #7c3aed;

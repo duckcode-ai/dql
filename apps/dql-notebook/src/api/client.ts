@@ -2373,6 +2373,10 @@ export interface DashboardDocumentResponse {
       items: Array<{
         i: string;
         x: number; y: number; w: number; h: number;
+        /** Markdown note readers see under the title. */
+        description?: string;
+        /** Who answers for this tile's numbers. */
+        owner?: string;
         sourceId?: string;
         sourceRevision?: string;
         block?: { blockId?: string; ref?: string; version?: string };

@@ -61,6 +61,7 @@ Each step lands as its own commits with tests and leaves `main` releasable.
 | 3c. Schedules | Done | Full-page runs through the App runtime; webhook delivery; digest with values, trust and failures |
 | 4. Viz spec v2 | Done | `viz.style` validated in core and drafts; ECharts 6.1 draws 10 chart types everywhere ChartOutput is used, SVG kept for the rest and as fallback; Studio style panel; planner may style components |
 | 5. Canvas | Done | One grid engine in core (`apps/grid-layout`): a tile keeps the cell it was given, only overlaps move, empty rows close. Used by the draft reducer on save, the Studio canvas (drag by header, resize from edges, arrow keys, Shift+arrows, duplicate, Delete, undo) and the reader, which no longer re-ranks tiles. Editing, adding or removing a tile reruns only that tile; publishing still needs a full page run. Undo survives a reload (per draft, in the browser). Loading tiles show a skeleton of their shape. Tablet and phone layouts stay derived. |
+| 6. Reader trust | Done | One reader vocabulary (certified, governed, needs review, blocked) worked out from run evidence (`reader-trust.ts`), with trust colour tokens in every theme. Every data tile shows its label and freshness; the label, or a KPI's number, opens a receipt (source, owner, filters, rows, time, result and SQL fingerprints, snapshot, run) that links to the query and SQL. Trust Lens outlines tiles by trust and the page says how many are certified. Tiles gain `description` and `owner`, edited in Studio. The reader asks for a full run when no tile is hidden, so the page story shows again on a normal open; author-only wording left the reader. Studio saves run one at a time, fixing a conflict when two fields saved together. |
 | 3d. Retire legacy paths | Deferred | The in-place editor is still the only place a published App shows review-required AI pins; Studio must show them first. `app-planner.ts` exports a type live code uses. The chat builder backs the `build_dql_app` MCP tool. |
 
 ## File format
@@ -70,7 +71,7 @@ version change: `layout.items` already carried `x, y, w, h`; saves now keep
 them instead of re-packing rows. The derived tablet and phone projections are
 still written to the file; storing only the desktop layout is a later clean-up.
 
-- **Tile `description`** (markdown, readers see it) and `owner`.
+- **Tile `description`** (markdown, readers see it as plain text, at most 2000 characters) and `owner` (at most 120) — built in step 6.
 - **`viz.style`** (built in step 4) — `labels` (`none | last | all`), `stack`,
   `format` (`number | compact | currency | percent`), `palette`, `legend`,
   `sort`, `referenceLines[]`, `bands[]`, `annotations[]` (`{at, text}`, kept
