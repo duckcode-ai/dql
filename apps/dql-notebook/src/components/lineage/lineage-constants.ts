@@ -49,7 +49,7 @@ export const NODE_TYPE_COLORS: Record<string, string> = {
   term: '#0a6b5e',
   block: '#b26b1f',
   business_view: '#c14545',
-  metric: '#6b5dd3',
+  metric: '#5b4fd1',
   dimension: '#0a6b5e',
   domain: '#7c5cff',
   chart: '#c14590',

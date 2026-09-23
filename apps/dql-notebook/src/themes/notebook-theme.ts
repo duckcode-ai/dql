@@ -100,7 +100,7 @@ const VAR_FOR: Record<keyof Theme, string> = {
 };
 
 // Fallback values used for SSR / build-time access where `document` is
-// not available. Mirror the default (Hex-paper) theme so SSR doesn't flash.
+// not available. Mirror the default paper theme so SSR doesn't flash.
 const FALLBACK: Record<keyof Theme, string> = {
   appBg: '#fbfaf7',
   sidebarBg: '#fbfaf7',
@@ -109,18 +109,18 @@ const FALLBACK: Record<keyof Theme, string> = {
   headerBorder: '#e9e6e0',
   cellBg: '#ffffff',
   cellBorder: '#e9e6e0',
-  cellBorderActive: '#6b5dd3',
+  cellBorderActive: '#0b7a75',
   cellBorderRunning: '#2e8b57',
   textPrimary: '#1a1a1a',
   textSecondary: '#4a4a52',
-  textMuted: '#8a8d96',
+  textMuted: '#6b6e76',
   editorBg: '#fbfaf7',
   editorBorder: '#e9e6e0',
   tableBorder: '#f0eee9',
   tableHeaderBg: '#faf9f7',
   tableRowHover: '#f3f0ea',
-  accent: '#6b5dd3',
-  accentHover: '#5c4fc2',
+  accent: '#0b7a75',
+  accentHover: '#09625e',
   success: '#2e8b57',
   error: '#c14545',
   warning: '#b26b1f',
@@ -128,7 +128,7 @@ const FALLBACK: Record<keyof Theme, string> = {
   btnBorder: '#e9e6e0',
   btnHover: '#f3f0ea',
   sidebarItemHover: '#f3f0ea',
-  sidebarItemActive: '#f3f0fb',
+  sidebarItemActive: '#e6f2f1',
   scrollbarThumb: '#d9d5cc',
   modalBg: '#ffffff',
   modalOverlay: 'rgba(26,26,26,0.40)',

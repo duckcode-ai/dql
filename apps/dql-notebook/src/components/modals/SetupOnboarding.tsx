@@ -190,7 +190,7 @@ export function SetupOnboarding({
   return (
     <div role="dialog" aria-modal="true" aria-label="Guided Setup" style={{ position: 'fixed', inset: 0, zIndex: 1000, background: t.appBg, color: t.textPrimary, display: 'flex', flexDirection: 'column', fontFamily: t.font }}>
       <header style={{ height: 54, flexShrink: 0, borderBottom: `1px solid ${t.headerBorder}`, background: t.headerBg, display: 'flex', alignItems: 'center', gap: 11, padding: '0 20px' }}>
-        <span style={{ width: 29, height: 29, borderRadius: 7, background: 'linear-gradient(135deg, #5b8cff 0%, #7c5cff 100%)', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontFamily: t.fontMono, fontSize: 10, fontWeight: 800 }}>DQL</span>
+        <span style={{ width: 29, height: 29, borderRadius: 7, background: '#0b7a75', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontFamily: t.fontMono, fontSize: 10, fontWeight: 800 }}>DQL</span>
         <div>
           <div style={{ fontSize: 13.5, fontWeight: 700 }}>{launchTitle}</div>
           <div style={{ fontSize: 10.5, color: t.textMuted }}>Project → Database → optional AI → Finish</div>

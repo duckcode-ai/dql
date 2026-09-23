@@ -70,7 +70,7 @@ function DQLLogo({ t }: { t: Theme }) {
         width: 28,
         height: 28,
         borderRadius: 6,
-        background: 'linear-gradient(135deg, #5b8cff 0%, #7c5cff 100%)',
+        background: '#0b7a75',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

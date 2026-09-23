@@ -93,7 +93,7 @@ export function CellChrome({
   className,
   style,
 }: CellChromeProps) {
-  const pillColor = typeColor ?? 'var(--color-accent-blue, #388bfd)';
+  const pillColor = typeColor ?? 'var(--color-accent-blue, #0b7a75)';
   const edge = accent ?? idleBorder ?? 'var(--color-border-subtle, rgba(148,163,184,0.18))';
   const idle = idleBorder ?? 'var(--color-border-subtle, rgba(148,163,184,0.18))';
   const bg = background ?? 'var(--color-bg-1, rgba(22,27,34,0.5))';

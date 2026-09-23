@@ -331,7 +331,7 @@ export function DbtOnboardingFlow({
         @keyframes dql-setup-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
       `}</style>
       <div style={{ height: 52, flexShrink: 0, background: t.cellBg, borderBottom: `1px solid ${t.cellBorder}`, display: 'flex', alignItems: 'center', padding: '0 18px', gap: 10, userSelect: 'none' }}>
-        <div style={{ width: 28, height: 28, borderRadius: 6, background: 'linear-gradient(135deg, #5b8cff 0%, #7c5cff 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        <div style={{ width: 28, height: 28, borderRadius: 6, background: '#0b7a75', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <span style={{ color: '#fff', fontSize: 10, fontWeight: 700, fontFamily: t.fontMono, letterSpacing: '-0.5px' }}>DQL</span>
         </div>
         <h2 id="dbt-onboarding-title" style={{ margin: 0, fontSize: 13.5, fontWeight: 650, color: t.textPrimary, fontFamily: t.font, whiteSpace: 'nowrap' }}>Set up your workspace</h2>

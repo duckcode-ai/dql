@@ -42,16 +42,26 @@
   --border-subtle: #1b1f28;
   --border-default: #232833;
   --border-strong: #2c3240;
-  --border-focus: #5b8cff;
+  --border-focus: #2bb3a9;
 
   --text-primary: #e6e8ee;
   --text-secondary: #9aa0ae;
   --text-tertiary: #626878;
   --text-muted: #4a5060;
 
-  --accent: #5b8cff;
-  --accent-hover: #7aa2ff;
-  --accent-dim: rgba(91, 140, 255, 0.14);
+  --accent: #2bb3a9;             /* DuckCode deep teal, lifted for dark */
+  --accent-hover: #4cc7bd;
+  --accent-dim: rgba(43, 179, 169, 0.14);
+  /* Chart series, dark surfaces (checked for colour-blind separation;
+     assigned in order, never cycled — see chart-palettes.ts). */
+  --chart-1: #1fa396;
+  --chart-2: #5577f0;
+  --chart-3: #cc7d18;
+  --chart-4: #b060aa;
+  --chart-5: #84972a;
+  --chart-6: #2e9cc4;
+  --chart-7: #d9636f;
+  --chart-8: #7a6ee6;
   --accent-fg: #0b0d12;
   --accent-on: #0b0d12; /* legacy alias — prefer --accent-fg */
 
@@ -174,20 +184,30 @@
   --border-subtle: #f0eee9;
   --border-default: #e9e6e0;
   --border-strong: #d9d5cc;
-  --border-focus: #6b5dd3;
+  --border-focus: #0b7a75;
 
   --text-primary: #1a1a1a;
   --text-secondary: #4a4a52;
-  --text-tertiary: #8a8d96;
+  --text-tertiary: #6b6e76;      /* 5:1 on white; #8a8d96 was 3.4:1 */
   --text-muted: #b0b2ba;
 
-  --accent: #6b5dd3;            /* Hex purple */
-  --accent-hover: #5c4fc2;
-  --accent-dim: #f3f0fb;         /* Hex --accent-wash */
+  --accent: #0b7a75;            /* DuckCode deep teal; also the certified colour */
+  --accent-hover: #09625e;
+  --accent-dim: #e6f2f1;
+  /* Chart series, light surfaces (checked for colour-blind separation;
+     assigned in order, never cycled — see chart-palettes.ts). */
+  --chart-1: #00897b;
+  --chart-2: #3659c9;
+  --chart-3: #e08a1a;
+  --chart-4: #a24c9c;
+  --chart-5: #879a22;
+  --chart-6: #35a3c9;
+  --chart-7: #c95563;
+  --chart-8: #5b4fd1;
   --accent-fg: #ffffff;
   --accent-on: #ffffff;
 
-  --bg-hover: rgba(107, 93, 211, 0.06);
+  --bg-hover: rgba(11, 122, 117, 0.06);
 
   --status-error:        #c14545;
   --status-error-bg:     #fbf2f2;
@@ -200,16 +220,16 @@
   --status-success-border: rgba(46, 139, 87, 0.30);
   --status-info:        var(--accent);
   --status-info-bg:     var(--accent-dim);
-  --status-info-border: rgba(107, 93, 211, 0.30);
+  --status-info-border: rgba(11, 122, 117, 0.30);
 
   --pk: #b26b1f;
-  --fk: #6b5dd3;
+  --fk: #0b7a75;
   --idx: #2e8b57;
   --nn: #8a8d96;
-  --nullable: #6b5dd3;
+  --nullable: #0b7a75;
 
-  --cat-users: #6b5dd3;
-  --cat-users-soft: #f3f0fb;
+  --cat-users: #5b4fd1;
+  --cat-users-soft: rgba(91, 79, 209, 0.10);
   --cat-billing: #2e8b57;
   --cat-billing-soft: #e8f4ee;
   --cat-product: #f0a04b;
@@ -223,11 +243,11 @@
 
   --rel-line: #e9e6e0;
   --rel-line-strong: #b0b2ba;
-  --rel-line-active: #6b5dd3;
+  --rel-line-active: #0b7a75;
   --rel-line-dim: rgba(233, 230, 224, 0.5);
 
   /* SQL syntax palette (Hex light — purple kw, amber strings, etc.) */
-  --sql-keyword:     #6b5dd3;
+  --sql-keyword:     #3659c9;
   --sql-type:        #2e8b57;
   --sql-string:      #b26b1f;
   --sql-number:      #0a6b5e;
@@ -243,14 +263,14 @@
   /* Per-cell-kind accent dots (ported verbatim from hex-cells.jsx) */
   --cell-md:       #4a4a52;
   --cell-sql:      #3b8ef0;
-  --cell-chart:    #6b5dd3;
+  --cell-chart:    #0b7a75;
   --cell-filter:   #c14545;
   --cell-pivot:    #e5a84d;
   --cell-table:    #5dd1c8;
   --cell-text:     #4a4a52;
   --cell-chat:     #c14590;
-  --cell-single:   #6b5dd3;
-  --cell-kpi:      #6b5dd3;
+  --cell-single:   #0b7a75;
+  --cell-kpi:      #0b7a75;
   --cell-insight:  #f0a04b;
   --cell-callout:  #c14590;
   --cell-goal:     #2e8b57;
@@ -258,7 +278,7 @@
   --cell-heatmap:  #f0a04b;
   --cell-narrative:#f0a04b;
   --cell-inputs:   #d4a14a;
-  --cell-block:    #6b5dd3;
+  --cell-block:    #0b7a75;
 }
 
 /* ================================================================
@@ -279,16 +299,26 @@
   --border-subtle: rgba(15, 23, 42, 0.08);
   --border-default: rgba(15, 23, 42, 0.14);
   --border-strong: rgba(15, 23, 42, 0.22);
-  --border-focus: #2563eb;
+  --border-focus: #0b7a75;
 
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --text-tertiary: #64748b;
   --text-muted: #94a3b8;
 
-  --accent: #2563eb;
-  --accent-hover: #1d4ed8;
-  --accent-dim: rgba(37, 99, 235, 0.10);
+  --accent: #0b7a75;
+  --accent-hover: #09625e;
+  --accent-dim: rgba(11, 122, 117, 0.10);
+  /* Chart series, light surfaces (checked for colour-blind separation;
+     assigned in order, never cycled — see chart-palettes.ts). */
+  --chart-1: #00897b;
+  --chart-2: #3659c9;
+  --chart-3: #e08a1a;
+  --chart-4: #a24c9c;
+  --chart-5: #879a22;
+  --chart-6: #35a3c9;
+  --chart-7: #c95563;
+  --chart-8: #5b4fd1;
   --accent-fg: #ffffff;
   --accent-on: #ffffff;
 
@@ -307,7 +337,7 @@
   --status-success-border: rgba(22, 163, 74, 0.30);
   --status-info:        var(--accent);
   --status-info-bg:     var(--accent-dim);
-  --status-info-border: rgba(37, 99, 235, 0.30);
+  --status-info-border: rgba(11, 122, 117, 0.30);
 
   --pk: #ca8a04;
   --fk: #7c3aed;
@@ -330,7 +360,7 @@
 
   --rel-line: #cbd5e1;
   --rel-line-strong: #64748b;
-  --rel-line-active: #2563eb;
+  --rel-line-active: #0b7a75;
   --rel-line-dim: rgba(203, 213, 225, 0.5);
 
   /* SQL syntax palette (white) — crisp, modern IDE tones on pure white.
@@ -367,7 +397,7 @@
   --cell-heatmap:  #ea580c;
   --cell-narrative:#ca8a04;
   --cell-inputs:   #64748b;
-  --cell-block:    #2563eb;
+  --cell-block:    #0b7a75;
 }
 
 [data-density="compact"] {
@@ -394,6 +424,7 @@ html, body { height: 100%; }
 body {
   font-family: var(--font-ui);
   font-size: 13px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-primary);
   background: var(--bg-0);
   overflow: hidden;
@@ -468,7 +499,7 @@ input { font: inherit; color: inherit; }
 }
 .brand-mark {
   width: 22px; height: 22px; border-radius: 6px;
-  background: linear-gradient(135deg, #5b8cff 0%, #7c5cff 100%);
+  background: #0b7a75;
   display: grid; place-items: center;
   font-size: 11px; font-weight: 700; color: #fff;
   letter-spacing: -0.02em;

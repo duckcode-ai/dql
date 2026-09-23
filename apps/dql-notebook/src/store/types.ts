@@ -63,7 +63,7 @@ export interface CellChartConfig {
   xLabel?: string;
   yLabel?: string;
   legendPosition?: 'top' | 'bottom' | 'left' | 'right' | 'none';
-  colorPalette?: 'default' | 'warm' | 'cool' | 'mono' | 'pastel' | 'corporate';
+  colorPalette?: 'dql' | 'default' | 'warm' | 'cool' | 'mono' | 'pastel' | 'corporate';
   maxItems?: number;
   format?: 'number' | 'currency' | 'percent' | 'duration';  // KPI/single-value display format
 }

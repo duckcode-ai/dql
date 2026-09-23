@@ -4,6 +4,7 @@ import type { ThemeMode } from '../../themes/notebook-theme';
 import { TableOutput } from './TableOutput';
 import type { QueryResult, CellChartConfig, ResultColumnMeta } from '../../store/types';
 import { formatChartValue, formatDisplayValue } from '../../utils/value-format';
+import { CHART_PALETTE_OPTIONS, getPalette, selectedPaletteOption, sequentialStep } from './chart-palettes';
 
 interface ChartOutputProps {
   result: QueryResult;
@@ -151,43 +152,6 @@ export function detectChartType(result: QueryResult): ChartType {
 
 // ─── Shared Utils ─────────────────────────────────────────────────────────────
 
-const COLOR_PALETTES: Record<string, string[]> = {
-  default: [
-    '#388bfd', '#56d364', '#e3b341', '#f78166', '#a371f7',
-    '#39c5cf', '#ffa657', '#ff7b72', '#89d185', '#d2a8ff',
-    '#58a6ff', '#3fb950',
-  ],
-  warm: [
-    '#f85149', '#f78166', '#ffa657', '#e3b341', '#d29922',
-    '#db6d28', '#ff7b72', '#ffa198', '#ffdfb6', '#e6c174',
-    '#c4a35a', '#b08c3e',
-  ],
-  cool: [
-    '#388bfd', '#58a6ff', '#79c0ff', '#39c5cf', '#56d364',
-    '#3fb950', '#a371f7', '#d2a8ff', '#bc8cff', '#6cb6ff',
-    '#2ea043', '#1f6feb',
-  ],
-  mono: [
-    '#c9d1d9', '#b1bac4', '#8b949e', '#6e7681', '#484f58',
-    '#30363d', '#21262d', '#161b22', '#a0a8b2', '#9e9e9e',
-    '#757575', '#616161',
-  ],
-  pastel: [
-    '#b8d8f8', '#b4e6c8', '#f4e6a0', '#f8c4a4', '#d2b8f0',
-    '#a8e0e0', '#f8d8a0', '#f4b8b4', '#c0e8c0', '#e0d0f8',
-    '#a8d8f8', '#b0e8b0',
-  ],
-  corporate: [
-    '#2563eb', '#16a34a', '#7c3aed', '#0891b2', '#f59e0b',
-    '#dc2626', '#475569', '#0f766e', '#9333ea', '#0284c7',
-    '#65a30d', '#ea580c',
-  ],
-};
-
-function getPalette(name?: string): string[] {
-  return COLOR_PALETTES[name ?? 'default'] ?? COLOR_PALETTES.default;
-}
-
 function abbreviate(n: number, column = 'value', format?: CellChartConfig['format'], meta?: ResultColumnMeta): string {
   return formatChartValue(column, n, format, meta);
 }
@@ -253,7 +217,7 @@ function BarChart({ result, themeMode, chartConfig, availableHeight, availableWi
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
   const maxItems = chartConfig?.maxItems ?? DEFAULT_MAX_ITEMS;
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
 
   const data = result.rows.slice(0, maxItems).map((row) => ({
     label: String(row[labelCol] ?? ''),
@@ -327,7 +291,7 @@ function BarChart({ result, themeMode, chartConfig, availableHeight, availableWi
 function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<string | null>(null);
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
 
   const labelCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : result.columns[0];
   // All numeric columns except the label column become groups
@@ -394,7 +358,7 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
 function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<string | null>(null);
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
 
   const labelCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : result.columns[0];
   const sample = result.rows.slice(0, 5);
@@ -462,7 +426,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
 function LineChart({ result, themeMode, showArea, chartConfig, availableHeight, availableWidth }: { result: QueryResult; themeMode: ThemeMode; showArea?: boolean; chartConfig?: CellChartConfig; availableHeight?: number; availableWidth?: number }) {
   const t = themes[themeMode];
   const [tooltip, setTooltip] = useState<{ x: number; y: number; label: string; value: number } | null>(null);
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
   const lineColor = palette[0] ?? t.accent;
 
   const { labelCol: xCol, valueCol: yCol } = pickColumns(result, chartConfig);
@@ -561,7 +525,7 @@ function LineChart({ result, themeMode, showArea, chartConfig, availableHeight, 
 function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
 
   const xCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : result.columns[0];
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : result.columns[1];
@@ -659,7 +623,7 @@ function PieDonutChart({ result, themeMode, chartConfig, isDonut }: { result: Qu
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
 
   const rawData = result.rows.slice(0, MAX_PIE_SLICES).map((row) => ({
     label: String(row[labelCol] ?? ''),
@@ -743,14 +707,8 @@ function HeatmapChart({ result, themeMode }: { result: QueryResult; themeMode: T
   const CELL_H = 24;
   const LABEL_W = 100;
 
-  function heatColor(val: number): string {
-    const t = (val - minVal) / range;
-    // Blue (#388bfd) to Red (#f85149) gradient
-    const r = Math.round(56 + t * (248 - 56));
-    const g = Math.round(139 + t * (81 - 139));
-    const b = Math.round(253 + t * (73 - 253));
-    return `rgb(${r},${g},${b})`;
-  }
+  // Magnitude is one hue, light to dark; each step names its readable text colour.
+  const heatStep = (val: number) => sequentialStep((val - minVal) / range, themeMode);
 
   return (
     <div style={{ padding: '8px 0', overflowX: 'auto' }}>
@@ -778,10 +736,10 @@ function HeatmapChart({ result, themeMode }: { result: QueryResult; themeMode: T
                 return (
                   <g key={ci} onMouseEnter={() => setHovered({ r: ri, c: ci })} onMouseLeave={() => setHovered(null)}>
                     <rect x={LABEL_W + ci * CELL_W} y={y} width={CELL_W - 1} height={CELL_H - 1} rx={2}
-                      fill={heatColor(val)} opacity={isH ? 1 : 0.85} stroke={isH ? t.accent : 'none'} strokeWidth={isH ? 1.5 : 0} />
+                      fill={heatStep(val).fill} opacity={isH ? 1 : 0.85} stroke={isH ? t.accent : 'none'} strokeWidth={isH ? 1.5 : 0} />
                     {isH && (
                       <text x={LABEL_W + ci * CELL_W + CELL_W / 2} y={y + CELL_H / 2 + 4} textAnchor="middle"
-                        fontSize={10} fontFamily={t.fontMono} fill="#fff" fontWeight={600}>
+                        fontSize={10} fontFamily={t.fontMono} fill={heatStep(val).text} fontWeight={600}>
                         {abbreviate(val, col, undefined, metaFor(result, col))}
                       </text>
                     )}
@@ -801,7 +759,7 @@ function HeatmapChart({ result, themeMode }: { result: QueryResult; themeMode: T
 function HistogramChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
   const barColor = palette[0] ?? t.accent;
 
   // Use first numeric column
@@ -890,7 +848,7 @@ function FunnelChart({ result, themeMode, chartConfig }: { result: QueryResult; 
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
 
   const data = result.rows.slice(0, 10).map((row) => ({
     label: String(row[labelCol] ?? ''),
@@ -939,7 +897,7 @@ function FunnelChart({ result, themeMode, chartConfig }: { result: QueryResult; 
 
 function SankeyChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
   const sample = result.rows.slice(0, 20);
   const numericColumns = result.columns.filter((column) => isMeasureColumn(result, column) && sample.some((row) => isNumericValue(row[column])));
@@ -1210,7 +1168,7 @@ function formatKpiValue(column: string, raw: unknown, values: unknown[], format?
 
 function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
   const t = themes[themeMode];
-  const palette = getPalette(chartConfig?.colorPalette);
+  const palette = getPalette(chartConfig?.colorPalette, themeMode);
   const row = result.rows[0];
   if (!row) return null;
 
@@ -1311,9 +1269,9 @@ function ChartConfigPopover({
       </label>
       <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
         Color palette
-        <select value={config.colorPalette ?? 'default'} onChange={(e) => onChange({ colorPalette: e.target.value as CellChartConfig['colorPalette'] })} style={{ ...inputStyle, marginTop: 2 }}>
-          {Object.keys(COLOR_PALETTES).map((p) => (
-            <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+        <select value={selectedPaletteOption(config.colorPalette)} onChange={(e) => onChange({ colorPalette: e.target.value as CellChartConfig['colorPalette'] })} style={{ ...inputStyle, marginTop: 2 }}>
+          {CHART_PALETTE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
           ))}
         </select>
       </label>

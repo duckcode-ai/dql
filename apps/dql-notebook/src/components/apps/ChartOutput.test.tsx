@@ -33,9 +33,10 @@ describe('App-sized chart rendering (UI-022)', () => {
       executionTime: 2,
     }, 'light', { chart: 'bar' }, 180));
 
-    expect(markup).toContain('fill="#388bfd"');
-    expect(markup).not.toContain('fill="#56d364"');
-    expect(markup).not.toContain('fill="#e3b341"');
+    // The first DQL series colour for light themes; never one colour per bar.
+    expect(markup).toContain('fill="#00897b"');
+    expect(markup).not.toContain('fill="#3659c9"');
+    expect(markup).not.toContain('fill="#e08a1a"');
   });
 
   it('uses measured narrow width so labels are not scaled from a desktop viewBox', () => {

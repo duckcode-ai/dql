@@ -44,7 +44,7 @@ export function mergeDashboardTileChartConfig(
     chart: normalizeDashboardChartType(options.chart ?? item.viz.type ?? base?.chart),
     y: options.y ?? valueField ?? base?.y,
     title: options.title ?? base?.title ?? item.title,
-    colorPalette: options.colorPalette ?? base?.colorPalette ?? 'corporate',
+    colorPalette: options.colorPalette ?? base?.colorPalette ?? 'dql',
   };
 }
 
