@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DashboardDocument, DashboardFilter, DashboardGridItem, DashboardGridLayout } from './dashboard-document.js';
 import { datasetTileVisualizationCompatibility } from './tile-query.js';
 import { readDashboardVizStyle } from './viz-style.js';
+import { settleGridLayout } from './grid-layout.js';
 import type { DatasetDescriptor } from '../datasets/descriptor.js';
 import type { MetricCapabilityContract } from '../contracts/analytical.js';
 
@@ -462,7 +463,10 @@ function updatePage(draft: AppBuildDraft, pageId: string, update: (page: Dashboa
 
 /** A v1 page is upgraded only when an explicit App Studio edit reaches it. */
 function normalizeEditedPage(page: DashboardDocument): DashboardDocument {
-  const items = packDashboardLayoutItems(page.layout.items, 12);
+  // Tiles keep the cells their author gave them; only overlaps move, and
+  // empty rows close (RFC 0008 step 5). Row-packing here used to discard
+  // every free placement on save.
+  const items = settleGridLayout(page.layout.items, 12);
   const fieldBased = page.version === 3 || Boolean(page.datasets?.length) || items.some((item) => Boolean(item.query));
   return {
     ...page,
@@ -571,7 +575,7 @@ function projectResponsiveLayouts(
     return packDashboardLayoutItems(projected, cols);
   };
   return {
-    wide: { kind: 'grid', cols: 12, rowHeight, items: packDashboardLayoutItems(items, 12) },
+    wide: { kind: 'grid', cols: 12, rowHeight, items },
     medium: { kind: 'grid', cols: 6, rowHeight, items: project(6) },
     narrow: { kind: 'grid', cols: 1, rowHeight, items: project(1) },
   };

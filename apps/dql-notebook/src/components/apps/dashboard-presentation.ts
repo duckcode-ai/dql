@@ -1,12 +1,12 @@
 import type { CellChartConfig, QueryResult } from '../../store/types';
 import type { DashboardDocumentResponse, DashboardRunResponse } from '../../api/client';
 import { coerceTrustState, getDashboardItemBlockId, getDqlGenUi, roleForDisplayComponent } from './dashboard-tile-model';
-import { autoLayoutRank, layoutScore, packDashboardItems } from './dashboard-layout';
+import { settleGridLayout } from '@duckcodeailabs/dql-core/apps/grid-layout';
 import { formatDashboardValue, formatGenUiLabel, isNumericColumn, type DashboardStory } from './dashboard-format';
 
 /**
  * How a dashboard is presented to a stakeholder: which tiles the read-only
- * view hides, how they are ranked, and the deterministic Business Story.
+ * view hides, where they sit, and the deterministic Business Story.
  *
  * Extracted from `DashboardRenderer.tsx`. All pure — no React, no I/O — which
  * is what makes the visibility rules testable.
@@ -43,11 +43,9 @@ export function prepareStakeholderItems(
       && !isRedundantStaticStakeholderTile(item, items, tileResults)
       && !isDuplicateAiPinStakeholderTile(item, items, tileResults);
   });
-  const ranked = [...deduped].sort((a, b) => {
-    const priority = stakeholderTilePriority(b, tileResults.get(b.i), cols) - stakeholderTilePriority(a, tileResults.get(a.i), cols);
-    return priority !== 0 ? priority : layoutScore(a, cols) - layoutScore(b, cols);
-  });
-  return packDashboardItems(ranked, cols);
+  // The reader keeps the author's placement (RFC 0008 step 5). Hidden tiles
+  // leave a gap, which settling closes; nothing is re-ranked.
+  return settleGridLayout(deduped, cols);
 }
 
 function isReviewRequiredAiPinStakeholderTile(item: DashboardLayoutItem, tile?: DashboardRunTile): boolean {
@@ -107,18 +105,6 @@ function stableFingerprintValue(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableFingerprintValue).join(',')}]`;
   const record = value as Record<string, unknown>;
   return `{${Object.keys(record).sort().map((key) => `${key}:${stableFingerprintValue(record[key])}`).join(',')}}`;
-}
-
-function stakeholderTilePriority(item: DashboardLayoutItem, tile: DashboardRunTile | undefined, cols: number): number {
-  let score = 0;
-  if (item.parameterBindings?.length) score += 5000;
-  if (tile?.filters?.applied?.length) score += 4000;
-  if (tile?.certificationStatus === 'certified') score += 1800;
-  if (getDashboardItemBlockId(item)) score += 900;
-  if (tile?.status === 'ok' && tile.result?.rows?.length) score += 500;
-  score -= autoLayoutRank(item) * 80;
-  score -= layoutScore(item, cols) / 1000;
-  return score;
 }
 
 function isRedundantStaticStakeholderTile(

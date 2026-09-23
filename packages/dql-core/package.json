@@ -39,6 +39,10 @@
       "types": "./dist/apps/viz-style.d.ts",
       "import": "./dist/apps/viz-style.js"
     },
+    "./apps/grid-layout": {
+      "types": "./dist/apps/grid-layout.d.ts",
+      "import": "./dist/apps/grid-layout.js"
+    },
     "./datasets/descriptor": {
       "types": "./dist/datasets/descriptor.d.ts",
       "import": "./dist/datasets/descriptor.js"

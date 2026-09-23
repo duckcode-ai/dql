@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import {
-  ArrowLeft, ArrowRight, BarChart3, Blocks, Bot, Check, ChevronDown, Code2, FileText, Filter,
+  ArrowLeft, ArrowRight, BarChart3, Blocks, Bot, Check, ChevronDown, Code2, Copy, FileText, Filter,
   Gauge, Heading, LayoutDashboard, LineChart, Monitor, MoreHorizontal, PanelRight,
   Play, Plus, Redo2, ScatterChart, Search, Settings2, ShieldCheck, Smartphone, Sparkles, Table2,
   Trash2, Type, Undo2, Upload, X,
@@ -42,6 +42,20 @@ import { DataPanel, type DataPanelTarget } from './builder/DataPanel';
 import { DraftTileCard, DraftTileInspector, type DraftTileState } from './builder/DraftTile';
 import { ProposedTileCard } from './builder/ProposedTile';
 import { ChartStylePanel } from './builder/ChartStylePanel';
+import {
+  CANVAS_COLUMNS,
+  CANVAS_GAP_PX,
+  canvasRowHeight,
+  canvasShortcut,
+  cellsFromPixels,
+  copyTileId,
+  incrementalPreviewPlan,
+  loadStudioHistory,
+  saveStudioHistory,
+  tileBodyHeight,
+  type CanvasShortcut,
+} from './builder/canvas-interactions';
+import { moveGridItem, nudgeGridItem, placeGridCopy, resizeGridItem, settleGridLayout } from '@duckcodeailabs/dql-core/apps/grid-layout';
 import { projectProposal, type ProposedPage } from './builder/proposal-preview';
 import { EMPTY_TILE_QUERY, autoTileView, defaultTileTitle, tileVisualization, toggleFieldInQuery } from './builder/field-query';
 import { FiltersPanel, mergeStudioDateRanges, linkedComponentCount, type StudioFilterConfiguration } from './builder/GlobalFilterBar';
@@ -408,7 +422,10 @@ export function AppStudioV2({
   /** Read-only hierarchy exploration state. This is never serialized into the App draft. */
   const [previewHierarchyDrillsByPage, setPreviewHierarchyDrillsByPage] = useState<Record<string, DashboardDatasetHierarchyDrill[]>>({});
   const [filterOptionsByPage, setFilterOptionsByPage] = useState<Record<string, Record<string, StudioFilterAvailability>>>({});
-  const [draggingTileId, setDraggingTileId] = useState<string | null>(null);
+  /** A move or resize in progress on the canvas; its items are drawn until the save lands. */
+  const [gesture, setGesture] = useState<CanvasGesture | null>(null);
+  /** The draft whose undo history has been restored from this browser. */
+  const [historyDraftId, setHistoryDraftId] = useState<string | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [publishReviewOpen, setPublishReviewOpen] = useState(false);
@@ -440,7 +457,12 @@ export function AppStudioV2({
   const [autopilotTileSelectionRequested, setAutopilotTileSelectionRequested] = useState(false);
   /** An immutable universal AgentRun artifact, never an App-side chat draft. */
   const [autopilotReview, setAutopilotReview] = useState<AppAutopilotChangeProposal | null>(null);
-  const draggingTileIdRef = useRef<string | null>(null);
+  const gestureRef = useRef<CanvasGesture | null>(null);
+  const canvasRef = useRef<HTMLElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
+  /** Set each render once the canvas state is known; the listeners below call through it. */
+  const canvasKeyHandlerRef = useRef<((event: KeyboardEvent) => void) | null>(null);
+  const commitGestureRef = useRef<((gesture: CanvasGesture) => void) | null>(null);
   const immediateStartRef = useRef(false);
   const previewSequenceRef = useRef(0);
   const previewRunScopeRef = useRef(createAppStudioPreviewRunScope());
@@ -623,15 +645,22 @@ export function AppStudioV2({
     }
     return () => { cancelled = true; };
   }, [activePage, filterOptionsByPage]);
+  // While editing, Auto keeps the Desktop grid (the layout the author
+  // arranges) until the canvas is phone-sized; opening a side pane must not
+  // swap in the derived tablet layout mid-edit.
   const breakpoint: StudioBreakpoint = previewMode === 'auto'
-    ? workspaceWidth < 720 ? 'narrow' : workspaceWidth < 1120 ? 'medium' : 'wide'
+    ? workspaceWidth < 720 ? 'narrow' : studioView === 'edit' || workspaceWidth >= 1120 ? 'wide' : 'medium'
     : previewMode;
   const visibleItems = useMemo(() => {
     if (!activePage) return [];
     const projection = activePage.layout.responsive?.[breakpoint];
     const columns = breakpoint === 'wide' ? 12 : breakpoint === 'medium' ? 6 : 1;
-    return packStudioItems(collapseTemplateIntroductions(projection?.items ?? activePage.layout.items, draft?.template), columns);
+    const items = collapseTemplateIntroductions(projection?.items ?? activePage.layout.items, draft?.template);
+    // Desktop shows the author's placement; tablet and phone stay derived.
+    return breakpoint === 'wide' ? settleGridLayout(items, CANVAS_COLUMNS) : packStudioItems(items, columns);
   }, [activePage, breakpoint, draft?.template]);
+  const canvasItems = gesture && gesture.pageId === activePage?.id ? gesture.items : visibleItems;
+  const rowPx = canvasRowHeight(activePage?.layout.rowHeight);
   const selectedTile = activePage?.layout.items.find((item) => item.i === selectedTileId) ?? null;
   const selectedDatasetTile = selectedTile?.sourceId && selectedTile.query ? selectedTile : null;
   const autopilotRepairAvailability = appAutopilotRepairShortcutAvailability(selectedDatasetTile, previewRun);
@@ -886,10 +915,35 @@ export function AppStudioV2({
     try {
       const previous = draft;
       const keepVisiblePreview = operations.every(isPresentationOnlyOperation);
+      const pageId = activePage?.id;
+      const priorRun = pageId ? previewRunsByPage[pageId] : undefined;
+      // Editing, adding or removing a tile reruns only that tile; the rest of
+      // the page keeps its results. Page-wide edits, or a page explored with
+      // marks or drills, still rerun everything.
+      const plan = !keepVisiblePreview && pageId && priorRun && !priorRun.incomplete
+        && !(previewCrossFiltersByPage[pageId]?.length) && !(previewHierarchyDrillsByPage[pageId]?.length)
+        ? incrementalPreviewPlan(operations, pageId)
+        : undefined;
       const result = await api.patchAppBuild(draft.id, draft.revision, operations, draft.proposalHash);
       setDraft(result.draft);
       setAutopilotReview(null);
-      if (!keepVisiblePreview) {
+      if (plan && pageId && priorRun) {
+        const dropped = new Set(plan.dropTileIds);
+        const kept = new Set(priorRun.tiles.map((tile) => tile.tileId).filter((tileId) => !dropped.has(tileId)));
+        const page = result.draft.pages.find((candidate) => candidate.id === pageId);
+        // Any data tile without a current result reruns, which also recovers a
+        // tile whose earlier bounded run was superseded.
+        const rerun = (page?.layout.items ?? []).filter((item) => isDataTile(item) && !kept.has(item.i)).map((item) => item.i);
+        previewSequenceRef.current += 1;
+        setPreviewing(false);
+        setPreviewRunsByPage((current) => {
+          const run = current[pageId];
+          if (!run) return current;
+          return { ...current, [pageId]: { ...run, partial: true, facts: [], tiles: run.tiles.filter((tile) => kept.has(tile.tileId)) } };
+        });
+        setSavedDatasetReviewDrafts((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !dropped.has(key.slice(pageId.length + 1)))));
+        if (rerun.length) void runPreviewForDraft(result.draft, pageId, undefined, undefined, { affectedTileIds: rerun, edit: true });
+      } else if (!keepVisiblePreview) {
         previewSequenceRef.current += 1;
         setPreviewRunsByPage({});
         setPreviewHierarchyDrillsByPage({});
@@ -1647,20 +1701,85 @@ export function AppStudioV2({
     await mutate(operations);
   };
 
-  const moveTileBefore = async (targetTileId: string) => {
-    const movingTileId = draggingTileIdRef.current ?? draggingTileId;
-    if (!activePage || !movingTileId || movingTileId === targetTileId) return;
-    const current = [...activePage.layout.items];
-    const from = current.findIndex((item) => item.i === movingTileId);
-    const to = current.findIndex((item) => item.i === targetTileId);
-    if (from < 0 || to < 0) return;
-    const [moved] = current.splice(from, 1);
-    current.splice(to, 0, moved);
-    const ordered = current.map((item, index) => ({ ...item, x: 0, y: index }));
-    const next = await mutate([{ type: 'set_layout', pageId: activePage.id, layout: { ...activePage.layout, items: packStudioItems(ordered, 12) } }]);
-    draggingTileIdRef.current = null;
-    setDraggingTileId(null);
-    if (next) setSavedMessage('Layout saved · preview preserved');
+  /** Save new tile positions from the canvas. The reducer settles them again, so the file matches. */
+  const commitCanvasLayout = async (items: AppStudioBuildDraft['pages'][number]['layout']['items'], message: string) => {
+    if (!activePage) return null;
+    const positions = new Map(items.map((item) => [item.i, item]));
+    const changed = activePage.layout.items.some((item) => {
+      const next = positions.get(item.i);
+      return next && (next.x !== item.x || next.y !== item.y || next.w !== item.w || next.h !== item.h);
+    });
+    if (!changed) return draft;
+    const nextItems = activePage.layout.items.map((item) => {
+      const next = positions.get(item.i);
+      return next ? { ...item, x: next.x, y: next.y, w: next.w, h: next.h } : item;
+    });
+    const next = await mutate([{ type: 'set_layout', pageId: activePage.id, layout: { ...activePage.layout, items: nextItems } }]);
+    if (next) setSavedMessage(message);
+    return next;
+  };
+
+  const duplicateTile = async (tileId: string) => {
+    if (!activePage) return;
+    const source = visibleItems.find((item) => item.i === tileId) ?? activePage.layout.items.find((item) => item.i === tileId);
+    if (!source) return;
+    const copyId = copyTileId(activePage.layout.items, source.i);
+    const copy = { ...source, i: copyId, title: source.title ? `${source.title} (copy)` : source.title };
+    const placed = placeGridCopy(breakpoint === 'wide' ? visibleItems : settleGridLayout(activePage.layout.items, CANVAS_COLUMNS), source, copy, CANVAS_COLUMNS);
+    const position = placed.find((item) => item.i === copyId) ?? copy;
+    const positions = new Map(placed.map((item) => [item.i, item]));
+    const next = await mutate([
+      { type: 'add_tile', pageId: activePage.id, tile: { ...copy, x: position.x, y: position.y } },
+      {
+        type: 'set_layout',
+        pageId: activePage.id,
+        layout: {
+          ...activePage.layout,
+          items: [...activePage.layout.items, { ...copy, x: position.x, y: position.y }].map((item) => {
+            const at = positions.get(item.i);
+            return at ? { ...item, x: at.x, y: at.y, w: at.w, h: at.h } : item;
+          }),
+        },
+      },
+    ]);
+    if (next) {
+      setSelectedTileId(copyId);
+      setSavedMessage('Tile duplicated');
+      // Keyboard focus follows the copy, so the next shortcut acts on it.
+      window.requestAnimationFrame(() => {
+        const card = [...(gridRef.current?.querySelectorAll<HTMLElement>('[data-tile-id]') ?? [])].find((node) => node.dataset.tileId === copyId);
+        card?.focus();
+      });
+    }
+  };
+
+  const removeTile = async (tileId: string) => {
+    if (!activePage) return;
+    const next = await mutate([{ type: 'remove_tile', pageId: activePage.id, tileId }]);
+    if (next) setSelectedTileId((current) => current === tileId ? null : current);
+  };
+
+  const runCanvasShortcut = async (shortcut: CanvasShortcut, targetTileId: string | null) => {
+    if (shortcut.kind === 'undo') return undo();
+    if (shortcut.kind === 'redo') return redo();
+    if (shortcut.kind === 'deselect') {
+      setSelectedTileId(null);
+      setTileMenuId(null);
+      return;
+    }
+    const tile = targetTileId ? visibleItems.find((item) => item.i === targetTileId) : undefined;
+    if (!tile) return;
+    setSelectedTileId(tile.i);
+    if (shortcut.kind === 'duplicate') return duplicateTile(tile.i);
+    if (shortcut.kind === 'remove') return removeTile(tile.i);
+    if (breakpoint !== 'wide') {
+      setSavedMessage('Switch the preview to Desktop to arrange tiles');
+      return;
+    }
+    const next = shortcut.kind === 'move'
+      ? nudgeGridItem(visibleItems, tile.i, shortcut.dx, shortcut.dy, CANVAS_COLUMNS)
+      : resizeGridItem(visibleItems, tile.i, tile.w + shortcut.dw, tile.h + shortcut.dh, CANVAS_COLUMNS);
+    await commitCanvasLayout(next, shortcut.kind === 'move' ? 'Tile moved · preview preserved' : 'Tile resized · preview preserved');
   };
 
   const approveSemanticPreview = async () => {
@@ -1958,6 +2077,8 @@ export function AppStudioV2({
     interaction?: {
       hierarchyDrills?: DashboardDatasetHierarchyDrill[];
       affectedTileIds?: string[];
+      /** A rerun of just the tiles an edit changed. */
+      edit?: boolean;
       /** Explicit user refresh bypasses the optional local result cache. */
       refresh?: boolean;
     },
@@ -2055,7 +2176,9 @@ export function AppStudioV2({
             : current);
         }
         if (settlement.kind === 'incomplete') setPublishIssues([settlement.message]);
-        setSavedMessage(settlement.message);
+        setSavedMessage(interaction?.edit && result.partial && settlement.kind === 'unavailable'
+          ? `Updated ${affectedTileIds.length === 1 ? '1 tile' : `${affectedTileIds.length} tiles`} · Run the whole page before publishing`
+          : settlement.message);
         return null;
       }
       const recorded = await api.patchAppBuild(targetDraft.id, targetDraft.revision, [{
@@ -2294,6 +2417,72 @@ export function AppStudioV2({
     return () => window.clearTimeout(timer);
   }, [activePage?.id, draft?.revision, proposal]);
 
+  // Undo survives a reload: the stacks are kept per draft in this browser.
+  useEffect(() => {
+    if (!draft?.id || historyDraftId === draft.id) return;
+    const stored = loadStudioHistory(draft.id);
+    setUndoStack(stored.undo);
+    setRedoStack(stored.redo);
+    setHistoryDraftId(draft.id);
+  }, [draft?.id, historyDraftId]);
+  useEffect(() => {
+    if (!historyDraftId || historyDraftId !== draft?.id) return;
+    saveStudioHistory(historyDraftId, { undo: undoStack, redo: redoStack });
+  }, [historyDraftId, draft?.id, undoStack, redoStack]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => canvasKeyHandlerRef.current?.(event);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Pointer tracking for a move or resize. The preview settles on every step,
+  // so neighbours make room while the pointer is still down.
+  const gestureActive = Boolean(gesture && !gesture.committing);
+  useEffect(() => {
+    if (!gestureActive) return;
+    const onMove = (event: PointerEvent) => {
+      const current = gestureRef.current;
+      if (!current || current.committing || event.pointerId !== current.pointerId) return;
+      const dx = cellsFromPixels(event.clientX - current.startX, current.columnPx);
+      const dy = cellsFromPixels(event.clientY - current.startY, current.rowStepPx);
+      const { origin } = current;
+      const items = current.kind === 'move'
+        ? moveGridItem(current.base, origin.i, origin.x + dx, origin.y + dy, CANVAS_COLUMNS)
+        : resizeGridItem(
+          current.base,
+          origin.i,
+          origin.w + (current.kind === 'resize-s' ? 0 : dx),
+          origin.h + (current.kind === 'resize-e' ? 0 : dy),
+          CANVAS_COLUMNS,
+        );
+      const next = { ...current, items, moved: current.moved || dx !== 0 || dy !== 0 };
+      gestureRef.current = next;
+      setGesture(next);
+    };
+    const onEnd = (event: PointerEvent) => {
+      const current = gestureRef.current;
+      if (!current || event.pointerId !== current.pointerId) return;
+      if (event.type === 'pointercancel' || !current.moved) {
+        gestureRef.current = null;
+        setGesture(null);
+        return;
+      }
+      const committing = { ...current, committing: true };
+      gestureRef.current = committing;
+      setGesture(committing);
+      commitGestureRef.current?.(committing);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
+    };
+  }, [gestureActive]);
+
   useEffect(() => () => {
     if (filterPreviewTimerRef.current !== null) window.clearTimeout(filterPreviewTimerRef.current);
     if (sourceFeedbackTimerRef.current !== null) window.clearTimeout(sourceFeedbackTimerRef.current);
@@ -2345,6 +2534,60 @@ export function AppStudioV2({
       ?? projectedPages[0]
       ?? null
     : null;
+  /** Tiles can be dragged and resized on the Desktop canvas while editing a saved page. */
+  const canArrange = editing && !projectedPage && breakpoint === 'wide';
+  canvasKeyHandlerRef.current = (event) => {
+    if (!editing || projectedPage || publishReviewOpen || deleteConfirmOpen) return;
+    // The tile with keyboard focus wins over the selected one. Keys pressed
+    // on a control inside a tile (a chart mark, a table row) stay with it.
+    const element = event.target instanceof Element ? event.target : null;
+    const card = element?.closest('[data-tile-id]') ?? null;
+    const targetTileId = card?.getAttribute('data-tile-id') ?? selectedTileId;
+    const shortcut = canvasShortcut(event, Boolean(targetTileId));
+    if (!shortcut) return;
+    const history = shortcut.kind === 'undo' || shortcut.kind === 'redo';
+    if (!history && card && card !== element) return;
+    const onCanvas = !element || element === document.body || Boolean(canvasRef.current?.contains(element));
+    if (!history && !onCanvas) return;
+    event.preventDefault();
+    if (busy || gesture) return;
+    void runCanvasShortcut(shortcut, targetTileId);
+  };
+  commitGestureRef.current = (finished) => {
+    const message = finished.kind === 'move' ? 'Tile moved · preview preserved' : 'Tile resized · preview preserved';
+    void commitCanvasLayout(finished.items, message).finally(() => {
+      if (gestureRef.current === finished) gestureRef.current = null;
+      setGesture((current) => current === finished || current?.committing ? null : current);
+    });
+  };
+  const startGesture = (event: ReactPointerEvent<HTMLElement>, tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number], kind: CanvasGesture['kind']) => {
+    if (!canArrange || busy || gesture || event.button !== 0 || !activePage) return;
+    if (kind === 'move' && (event.target as HTMLElement).closest('button, a, input, select, textarea, [role="menu"]')) return;
+    const grid = gridRef.current;
+    if (!grid) return;
+    const origin = visibleItems.find((item) => item.i === tile.i);
+    if (!origin) return;
+    event.preventDefault();
+    const width = grid.getBoundingClientRect().width;
+    const next: CanvasGesture = {
+      pageId: activePage.id,
+      kind,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      columnPx: (width + CANVAS_GAP_PX) / CANVAS_COLUMNS,
+      rowStepPx: rowPx + CANVAS_GAP_PX,
+      origin,
+      base: visibleItems,
+      items: visibleItems,
+      moved: false,
+      committing: false,
+    };
+    gestureRef.current = next;
+    setGesture(next);
+    setSelectedTileId(tile.i);
+    setTileMenuId(null);
+  };
   // Declined tiles are not changes the author will apply.
   const proposalChangeCount = Math.max(0, (projectedPages?.reduce((total, page) => total + page.changeCount, 0) ?? 0)
     - (projectedPages?.reduce((total, page) => total + page.items.filter((item) => item.change === 'added' && skippedProposalTileIds.has(item.tile.i)).length, 0) ?? 0));
@@ -2448,10 +2691,22 @@ export function AppStudioV2({
     ['medium', 'Tablet', PanelRight],
     ['narrow', 'Phone', Smartphone],
   ];
-  const renderTile = (tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number], extraClass = '', badge: ReactNode = null) => (
-                <article key={tile.i} role="group" aria-label={`App component: ${tile.title || humanize(tile.i)}`} draggable={editing && !projectedPage} className={`studio-component-card ${extraClass} ${editing && selectedTileId === tile.i ? 'selected' : ''} ${draggingTileId === tile.i ? 'dragging' : ''} ${tile.text ? 'text-tile' : ''}`} style={{ '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: tile.text ? undefined : breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties} onDragStart={() => { draggingTileIdRef.current = tile.i; setDraggingTileId(tile.i); }} onDragEnd={() => { draggingTileIdRef.current = null; setDraggingTileId(null); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void moveTileBefore(tile.i); }} onClick={() => { if (!editing || projectedPage) return; setSelectedTileId(tile.i); setDraftTile(null); setSettingsOpen(false); setCopilotOpen(false); }}>
-                  <header>
-                    {editing ? <span className="drag-handle" aria-hidden="true">⠿</span> : null}
+  const renderTile = (tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number], extraClass = '', badge: ReactNode = null, placed = false) => {
+    return (
+                <article
+                  key={tile.i}
+                  role="group"
+                  aria-label={`App component: ${tile.title || humanize(tile.i)}`}
+                  data-tile-id={tile.i}
+                  tabIndex={editing && !projectedPage ? 0 : undefined}
+                  className={`studio-component-card ${extraClass} ${editing && selectedTileId === tile.i ? 'selected' : ''} ${gesture?.origin.i === tile.i ? 'gesturing' : ''} ${tile.text ? 'text-tile' : ''}`}
+                  style={placed
+                    ? { gridColumn: `${tile.x + 1} / span ${tile.w}`, gridRow: `${tile.y + 1} / span ${tile.h}` }
+                    : { '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: tile.text ? undefined : breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties}
+                  onClick={() => { if (!editing || projectedPage) return; setSelectedTileId(tile.i); setDraftTile(null); setSettingsOpen(false); setCopilotOpen(false); }}
+                >
+                  <header onPointerDown={placed ? (event) => startGesture(event, tile, 'move') : undefined}>
+                    {editing ? <span className="drag-handle" aria-hidden="true" title={canArrange ? 'Drag to move. Arrow keys move the selected tile.' : undefined}>⠿</span> : null}
                     {badge}
                     <strong>{tile.title || humanize(tile.i)}</strong>
                     <span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} title={tile.trustState === 'certified' ? 'Certified source' : tile.trustState === 'review_required' ? 'Needs review before publishing' : 'Draft'} />
@@ -2463,16 +2718,23 @@ export function AppStudioV2({
                         {tile.query ? <button type="button" role="menuitem" onClick={() => { setDqlTileId(tile.i); setTileMenuId(null); }}><Code2 size={14} /> View DQL and SQL</button> : null}
                         {tile.sourceId && tile.query ? <button type="button" role="menuitem" onClick={() => askAiAboutTile(tile.i)}><Sparkles size={14} /> {editing ? 'Change with AI' : 'Ask about this tile'}</button> : null}
                         {editing ? <button type="button" role="menuitem" onClick={() => { setSelectedTileId(tile.i); setTileMenuId(null); setCopilotOpen(false); }}><Settings2 size={14} /> Tile settings</button> : null}
-                        {editing ? <><hr /><button type="button" role="menuitem" className="danger" onClick={() => { setTileMenuId(null); void mutate([{ type: 'remove_tile', pageId: activePage!.id, tileId: tile.i }]).then(() => setSelectedTileId((current) => current === tile.i ? null : current)); }}><Trash2 size={14} /> Remove tile</button></> : null}
+                        {editing ? <button type="button" role="menuitem" onClick={() => { setTileMenuId(null); void duplicateTile(tile.i); }}><Copy size={14} /> Duplicate <kbd>{modifierKeyLabel()}D</kbd></button> : null}
+                        {editing ? <><hr /><button type="button" role="menuitem" className="danger" onClick={() => { setTileMenuId(null); void removeTile(tile.i); }}><Trash2 size={14} /> Remove tile <kbd>Del</kbd></button></> : null}
                       </div> : null}
                     </div>
                   </header>
                   {unsupportedTileFilters(tile).map((binding) => <div key={binding.filter} className="tile-filter-notice"><Filter size={11} /><span>{binding.unsupportedReason ?? `${humanize(binding.filter)} does not affect this component.`}</span></div>)}
                   {datasetTileNotices(previewRun?.tiles.find((item) => item.tileId === tile.i)).map((notice) => <div key={notice.key} className={`tile-filter-notice ${notice.kind}`} title={notice.detail}><Filter size={11} /><span><strong>{notice.label}</strong> · {notice.detail}</span></div>)}
                   {dqlTileId === tile.i ? <div className="studio-tile-dql" onClick={(event) => event.stopPropagation()}>{(() => { const runTile = previewRun?.tiles.find((item) => item.tileId === tile.i); const evidence = runTile && tile.query && isCurrentDatasetTileEvidence(tile, runTile) ? presentDatasetTileEvidence(runTile) : undefined; return evidence ? <DatasetTileExecutionEvidence presentation={evidence} /> : <p>Run a preview to see the Dataset query and the SQL it compiled to.</p>; })()}</div> : null}
-                  {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} /></div>}
+                  {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} chartHeight={placed ? tileBodyHeight(tile.h, rowPx) : undefined} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} /></div>}
+                  {placed && canArrange ? <>
+                    <span className="tile-resize-handle e" aria-hidden="true" onPointerDown={(event) => { event.stopPropagation(); startGesture(event, tile, 'resize-e'); }} />
+                    <span className="tile-resize-handle s" aria-hidden="true" onPointerDown={(event) => { event.stopPropagation(); startGesture(event, tile, 'resize-s'); }} />
+                    <span className="tile-resize-handle se" aria-hidden="true" title="Drag to resize. Shift + arrow keys resize the selected tile." onPointerDown={(event) => { event.stopPropagation(); startGesture(event, tile, 'resize'); }} />
+                  </> : null}
                 </article>
   );
+  };
 
   return (
     <div className={`dql-studio-v2 ${projectedPages ? 'has-proposal' : ''} studio-${studioView} right-${rightPane}`}>
@@ -2526,7 +2788,7 @@ export function AppStudioV2({
       <main ref={workspaceRef} className="studio-workspace">
         {error ? <div className="studio-error floating" role="alert">{error}<button type="button" onClick={() => setError(null)}>×</button></div> : null}
         <div className={`studio-canvas-frame ${breakpoint} preview-mode-${previewMode}`}>
-          <section className="studio-canvas" aria-label="App canvas" onClick={(event) => { if (event.target === event.currentTarget) { setSelectedTileId(null); setTileMenuId(null); } }}>
+          <section ref={canvasRef} className="studio-canvas" aria-label="App canvas" onClick={(event) => { if (event.target === event.currentTarget) { setSelectedTileId(null); setTileMenuId(null); } }}>
             <header className="studio-page-heading">
               <div><h1>{projectedPage?.title ?? activePage?.metadata.title ?? 'Overview'}</h1>{!projectedPage?.isNew && activePage?.metadata.description ? <p>{activePage.metadata.description}</p> : null}</div>
               {editing && !projectedPages ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
@@ -2543,7 +2805,12 @@ export function AppStudioV2({
               <span>Use “Edit with AI” on a Dataset tile. Clicking a chart keeps its own behavior and does not select the tile.</span>
             </div> : null}
             {projectedPage ? <div className={`proposal-banner ${proposalSummaryText(projectedPage).removed ? 'warn' : ''}`} role="status"><Sparkles size={14} /><span><strong>AI proposal</strong> · {proposalSummaryText(projectedPage).text}. Nothing is saved until you apply.</span></div> : null}
-            <div className="studio-page-grid">
+            <div
+              ref={gridRef}
+              className={`studio-page-grid ${breakpoint === 'wide' && !projectedPage ? 'placed' : ''} ${gesture ? 'arranging' : ''}`}
+              style={breakpoint === 'wide' && !projectedPage ? { gridAutoRows: `${rowPx}px` } : undefined}
+              aria-describedby={canArrange && visibleItems.length ? 'studio-canvas-keys' : undefined}
+            >
               {editing && draftTile && activeDescriptor ? <DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /> : null}
               {projectedPage ? projectedPage.items.map((item) => item.change === 'added' || item.change === 'updated'
                 ? <ProposedTileCard
@@ -2569,9 +2836,10 @@ export function AppStudioV2({
                   item.change === 'removed' ? 'proposal-removed' : projectedPage.linkedTileIds.has(item.tile.i) ? 'proposal-linked' : '',
                   item.change === 'removed' ? <span className="proposal-badge removed">WILL BE REMOVED</span> : projectedPage.linkedTileIds.has(item.tile.i) ? <span className="proposal-badge link">PROPOSED LINK</span> : null,
                 ))
-                : visibleItems.map((tile) => renderTile(tile))}
+                : canvasItems.map((tile) => renderTile(tile, '', null, breakpoint === 'wide'))}
               {!visibleItems.length && !draftTile && !projectedPage ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>This page is empty</strong><p>{editing ? 'Pick a governed Dataset in the Data panel, then choose the fields you want to see. You can also ask AI to draft the page.' : 'Switch to Edit to add tiles to this page.'}</p>{editing ? <div className="empty-actions"><button type="button" className="primary" onClick={openAddTile}><Plus size={14} /> Add tile</button><button type="button" onClick={() => { setAiScope('page'); setCopilotOpen(true); }}><Sparkles size={14} /> Draft with AI</button></div> : null}</div> : null}
             </div>
+            {canArrange && visibleItems.length ? <p id="studio-canvas-keys" className="studio-canvas-keys">Drag a tile by its header or resize it from its edges. With a tile selected: arrow keys move it, Shift + arrows resize, {modifierKeyLabel()}D duplicates, Delete removes, {modifierKeyLabel()}Z undoes.</p> : null}
           </section>
         </div>
       </main>
@@ -3324,8 +3592,19 @@ function DatasetTileExecutionEvidence({ presentation }: { presentation: DatasetT
   </div>;
 }
 
-function StaticComponentPreview({ loading }: { loading: boolean }): JSX.Element {
-  if (loading) return <div className="preview-state loading"><span className="preview-loading-mark"><Play size={15} /></span><strong>Running governed preview…</strong><span>Loading current data with this App’s filters and source policy.</span></div>;
+function StaticComponentPreview({ loading, view }: { loading: boolean; view?: string }): JSX.Element {
+  if (loading) {
+    // The skeleton takes the tile's final shape, so the page does not jump
+    // when results arrive.
+    const shape = view === 'single_value' || view === 'kpi' ? 'kpi' : view === 'table' || view === 'pivot' ? 'table' : view === 'line' || view === 'area' ? 'line' : 'bars';
+    return <div className={`preview-skeleton ${shape}`} role="status" aria-busy="true">
+      <span className="visually-hidden">Running governed preview…</span>
+      {shape === 'kpi' ? <><i className="sk-value" /><i className="sk-caption" /></> : null}
+      {shape === 'table' ? Array.from({ length: 5 }, (_, index) => <i key={index} className="sk-row" />) : null}
+      {shape === 'bars' ? <div className="sk-bars">{[62, 84, 48, 72, 36, 58].map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div> : null}
+      {shape === 'line' ? <svg className="sk-line" viewBox="0 0 200 80" preserveAspectRatio="none" aria-hidden="true"><path d="M0 60 L30 48 L60 54 L90 30 L120 38 L150 20 L200 26" /></svg> : null}
+    </div>;
+  }
   return <div className="preview-state idle"><span className="preview-idle-mark"><Play size={15} /></span><strong>Preview is not loaded</strong><span>App Studio runs this automatically when the data tile is added. Use Run preview to refresh an older draft.</span></div>;
 }
 
@@ -3447,11 +3726,14 @@ export function StudioTilePreview({
   hasNavigation = false,
   linkProposal,
   onLinkField,
+  chartHeight: placedChartHeight,
 }: {
   tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number];
   run?: DashboardRunResponse['tiles'][number];
   loading: boolean;
   themeMode: ThemeMode;
+  /** Chart height from the tile's grid rows on the placed canvas. */
+  chartHeight?: number;
   crossFilterFields?: string[];
   activeCrossFilters?: StudioDatasetCrossFilter[];
   onSelectDatasetMark?: (field: string, values: unknown[]) => void;
@@ -3470,7 +3752,11 @@ export function StudioTilePreview({
   // while this frame's measured height follows its own content. Sizing the
   // chart from the rows keeps it stable: it can neither grow nor shrink the
   // frame it sits in.
-  const chartHeight = Math.max(120, tile.h * 68 - 56);
+  // On the placed canvas the rows fix the card; controls under the chart
+  // take their share first so the axis is never cut off.
+  const chartHeight = placedChartHeight !== undefined
+    ? Math.max(96, placedChartHeight - (hasNavigation ? 34 : 0) - (linkProposal && onLinkField ? 36 : 0))
+    : Math.max(120, tile.h * 68 - 56);
   const [markActionId, setMarkActionId] = useState<string>('filter');
   useEffect(() => {
     const node = frameRef.current;
@@ -3482,7 +3768,7 @@ export function StudioTilePreview({
     observer.observe(node);
     return () => observer.disconnect();
   }, [run]);
-  if (!run) return <StaticComponentPreview loading={loading} />;
+  if (!run) return <StaticComponentPreview loading={loading} view={tile.viz.type} />;
   if (run.status !== 'ok' && run.error?.startsWith('APP_DATASETS_FEATURE_DISABLED')) {
     return <div className="preview-state error"><strong>Field-based tiles are off</strong><span>Turn them on from the Sources panel to run this tile.</span></div>;
   }
@@ -3748,7 +4034,31 @@ function isPresentationOnlyOperation(operation: AppStudioDraftOperation): boolea
 }
 
 function pageHasDataTiles(page: AppStudioBuildDraft['pages'][number]): boolean {
-  return page.layout.items.some((item) => Boolean(item.block || item.semantic || item.draftAnalysis || item.query));
+  return page.layout.items.some(isDataTile);
+}
+
+function isDataTile(item: AppStudioBuildDraft['pages'][number]['layout']['items'][number]): boolean {
+  return Boolean(item.block || item.semantic || item.draftAnalysis || item.query);
+}
+
+interface CanvasGesture {
+  pageId: string;
+  kind: 'move' | 'resize' | 'resize-e' | 'resize-s';
+  pointerId: number;
+  startX: number;
+  startY: number;
+  columnPx: number;
+  rowStepPx: number;
+  origin: AppStudioBuildDraft['pages'][number]['layout']['items'][number];
+  base: AppStudioBuildDraft['pages'][number]['layout']['items'];
+  items: AppStudioBuildDraft['pages'][number]['layout']['items'];
+  moved: boolean;
+  /** The pointer is up and the new layout is being saved. */
+  committing: boolean;
+}
+
+function modifierKeyLabel(): string {
+  return typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
 }
 
 function unsupportedTileFilters(tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]) {

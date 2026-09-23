@@ -60,12 +60,15 @@ Each step lands as its own commits with tests and leaves `main` releasable.
 | 3b. App copilot scope | Done | Server resolves the App's domain and states the reader's filters in the question |
 | 3c. Schedules | Done | Full-page runs through the App runtime; webhook delivery; digest with values, trust and failures |
 | 4. Viz spec v2 | Done | `viz.style` validated in core and drafts; ECharts 6.1 draws 10 chart types everywhere ChartOutput is used, SVG kept for the rest and as fallback; Studio style panel; planner may style components |
+| 5. Canvas | Done | One grid engine in core (`apps/grid-layout`): a tile keeps the cell it was given, only overlaps move, empty rows close. Used by the draft reducer on save, the Studio canvas (drag by header, resize from edges, arrow keys, Shift+arrows, duplicate, Delete, undo) and the reader, which no longer re-ranks tiles. Editing, adding or removing a tile reruns only that tile; publishing still needs a full page run. Undo survives a reload (per draft, in the browser). Loading tiles show a skeleton of their shape. Tablet and phone layouts stay derived. |
 | 3d. Retire legacy paths | Deferred | The in-place editor is still the only place a published App shows review-required AI pins; Studio must show them first. `app-planner.ts` exports a type live code uses. The chat builder backs the `build_dql_app` MCP tool. |
 
 ## File format
 
-All additions are optional fields on `.dqld` version 3 until step 5, which
-introduces version 4 only if the single-layout change needs it.
+All additions are optional fields on `.dqld` version 3. Step 5 needed no
+version change: `layout.items` already carried `x, y, w, h`; saves now keep
+them instead of re-packing rows. The derived tablet and phone projections are
+still written to the file; storing only the desktop layout is a later clean-up.
 
 - **Tile `description`** (markdown, readers see it) and `owner`.
 - **`viz.style`** (built in step 4) — `labels` (`none | last | all`), `stack`,

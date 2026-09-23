@@ -1155,5 +1155,39 @@ export const APP_STUDIO_V2_STYLES = `
   .dataset-source-grain > label, .dataset-source-grain > small { grid-column:auto; }
   .studio-readiness-card > footer { display:grid; grid-template-columns:1fr 1fr; }
 }
-@media (prefers-reduced-motion:reduce) { .studio-canvas-frame, .policy-toggle i:after, .studio-review-toggle i:after, .dql-studio-v2-loading .loading-mark, .preview-state.loading .preview-loading-mark { transition:none; animation:none; } }
+/* RFC 0008 step 5: the placed canvas. Tiles sit in the cells their author gave them. */
+.studio-page-grid.placed { gap:12px; align-items:stretch; }
+.studio-page-grid.placed .studio-component-card { min-height:0; display:flex; flex-direction:column; }
+.studio-page-grid.placed .studio-component-card > :not(header):not(.tile-resize-handle) { min-height:0; }
+.studio-page-grid.placed .studio-tile-preview-interactions, .studio-page-grid.placed .tile-text { flex:1; overflow:auto; }
+.studio-page-grid.placed .preview-state, .studio-page-grid.placed .preview-skeleton { min-height:0; height:100%; box-sizing:border-box; }
+.studio-page-grid.placed .live-component-preview { height:100%; min-height:0; display:flex; flex-direction:column; }
+.studio-page-grid.placed .live-component-preview > :first-child { flex:1 1 auto; height:auto; min-height:0; }
+.studio-page-grid.placed .live-component-preview > :not(:first-child) { flex:none; }
+.studio-page-grid.placed .live-component-preview > button { align-self:flex-start; }
+.studio-edit .studio-page-grid.placed .studio-component-card > header { cursor:grab; touch-action:none; user-select:none; }
+.studio-page-grid.arranging, .studio-page-grid.arranging * { cursor:grabbing !important; user-select:none; }
+.studio-page-grid.arranging { background-image:linear-gradient(to right, var(--border-subtle) 1px, transparent 1px); background-size:calc((100% + 12px) / 12) 100%; }
+.studio-component-card.gesturing { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-dim), 0 12px 32px color-mix(in srgb,var(--text-primary) 12%,transparent); z-index:5; }
+.studio-component-card:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.tile-resize-handle { position:absolute; z-index:4; touch-action:none; }
+.tile-resize-handle.e { top:12px; right:-4px; bottom:12px; width:8px; cursor:ew-resize; }
+.tile-resize-handle.s { left:12px; right:12px; bottom:-4px; height:8px; cursor:ns-resize; }
+.tile-resize-handle.se { right:-4px; bottom:-4px; width:14px; height:14px; cursor:nwse-resize; }
+.tile-resize-handle.se::after { content:''; position:absolute; right:6px; bottom:6px; width:8px; height:8px; border-right:2px solid var(--text-tertiary); border-bottom:2px solid var(--text-tertiary); border-radius:0 0 4px 0; opacity:0; transition:opacity .12s; }
+.studio-component-card:hover .tile-resize-handle.se::after, .studio-component-card.selected .tile-resize-handle.se::after { opacity:1; }
+.tile-menu kbd { margin-left:auto; font:inherit; font-size:12px; color:var(--text-tertiary); }
+.studio-canvas-keys { margin:12px 0 0; color:var(--text-tertiary); font-size:12px; line-height:1.5; }
+.visually-hidden { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+.preview-skeleton { min-height:130px; padding:12px 14px 14px; display:flex; flex-direction:column; gap:8px; }
+.preview-skeleton i { display:block; border-radius:4px; background:var(--bg-0); animation:studio-skeleton 1.4s ease-in-out infinite; }
+.preview-skeleton .sk-value { width:44%; height:32px; }
+.preview-skeleton .sk-caption { width:28%; height:12px; }
+.preview-skeleton .sk-row { height:20px; }
+.preview-skeleton .sk-bars { flex:1; min-height:96px; display:flex; align-items:flex-end; gap:8px; }
+.preview-skeleton .sk-bars i { flex:1; border-radius:4px 4px 0 0; }
+.preview-skeleton .sk-line { flex:1; width:100%; min-height:96px; }
+.preview-skeleton .sk-line path { fill:none; stroke:var(--border-default); stroke-width:3; vector-effect:non-scaling-stroke; animation:studio-skeleton 1.4s ease-in-out infinite; }
+@keyframes studio-skeleton { 50% { opacity:.45; } }
+@media (prefers-reduced-motion:reduce) { .studio-canvas-frame, .policy-toggle i:after, .studio-review-toggle i:after, .dql-studio-v2-loading .loading-mark, .preview-state.loading .preview-loading-mark, .preview-skeleton i, .preview-skeleton path { transition:none; animation:none; } }
 `;

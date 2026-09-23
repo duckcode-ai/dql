@@ -32,6 +32,18 @@ export type {
 } from './app-document.js';
 
 export { readDashboardVizStyle } from './viz-style.js';
+export {
+  clampGridBox,
+  compactGridLayout,
+  gridBoxesOverlap,
+  moveGridItem,
+  nudgeGridItem,
+  placeGridCopy,
+  resizeGridItem,
+  settleGridLayout,
+  MAX_TILE_ROWS,
+} from './grid-layout.js';
+export type { GridBox } from './grid-layout.js';
 export type {
   DashboardVizStyle,
   DashboardVizReferenceLine,

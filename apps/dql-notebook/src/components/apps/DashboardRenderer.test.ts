@@ -425,6 +425,23 @@ describe('Stakeholder view hides review-required pins, edit mode does not (UI-01
     // Adding a certified result must not vanish from the page it was added to.
     expect(visible.map((item) => item.i).sort()).toEqual(['ai-pin-1', 'revenue']);
   });
+
+  it('keeps the author placement and closes the gap a hidden tile leaves (RFC 0008 step 5)', () => {
+    const tile = (i: string, x: number, y: number, w: number, h: number, extra: Record<string, unknown> = {}) => ({ i, x, y, w, h, title: i, viz: { type: 'bar' }, ...extra });
+    const items = [
+      tile('chart', 0, 0, 8, 4, { block: { blockId: 'b1' } }),
+      tile('kpi', 8, 0, 4, 2, { block: { blockId: 'b2' } }),
+      tile('pin', 0, 4, 12, 3, { aiPin: { question: 'q' } }),
+      tile('table', 0, 7, 12, 3, { block: { blockId: 'b3' } }),
+    ];
+    const results = new Map([['pin', { tileId: 'pin', status: 'ok', tileType: 'aiPin', aiPin: { certification: 'ai_generated', reviewStatus: 'needs_review' } }]] as never);
+    const visible = prepareStakeholderItems(items as never, results as never, 12);
+    expect(visible.map((item) => [item.i, item.x, item.y, item.w, item.h])).toEqual([
+      ['chart', 0, 0, 8, 4],
+      ['kpi', 8, 0, 4, 2],
+      ['table', 0, 4, 12, 3],
+    ]);
+  });
 });
 
 describe('Reader tile CSV download', () => {
