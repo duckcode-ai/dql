@@ -1,3 +1,4 @@
+import type { DashboardVizStyle } from '@duckcodeailabs/dql-core/apps/viz-style';
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
 import { normalizeDqlArtifactReference, type DqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
@@ -2401,7 +2402,7 @@ export interface DashboardDocumentResponse {
         };
         /** Declarative, server-validated Dataset field selection. */
         query?: TileQuery;
-        viz: { type: string; options?: Record<string, unknown> };
+        viz: { type: string; options?: Record<string, unknown>; style?: DashboardVizStyle };
         display?: DashboardDisplayMetadata;
         filterBindings?: DashboardTileFilterBinding[];
         parameterBindings?: DashboardTileParameterBinding[];

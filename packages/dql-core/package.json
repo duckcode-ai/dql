@@ -35,6 +35,10 @@
       "types": "./dist/apps/tile-query.d.ts",
       "import": "./dist/apps/tile-query.js"
     },
+    "./apps/viz-style": {
+      "types": "./dist/apps/viz-style.d.ts",
+      "import": "./dist/apps/viz-style.js"
+    },
     "./datasets/descriptor": {
       "types": "./dist/datasets/descriptor.d.ts",
       "import": "./dist/datasets/descriptor.js"

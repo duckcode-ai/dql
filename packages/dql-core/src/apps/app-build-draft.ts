@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DashboardDocument, DashboardFilter, DashboardGridItem, DashboardGridLayout } from './dashboard-document.js';
 import { datasetTileVisualizationCompatibility } from './tile-query.js';
+import { readDashboardVizStyle } from './viz-style.js';
 import type { DatasetDescriptor } from '../datasets/descriptor.js';
 import type { MetricCapabilityContract } from '../contracts/analytical.js';
 
@@ -632,6 +633,11 @@ function assertAppBuildDraftPolicy(draft: Omit<AppBuildDraft, 'proposalHash'> | 
     for (const tile of page.layout.items) {
       if (tile.sourceId && !sourceIds.has(tile.sourceId)) {
         throw new Error(`Tile ${page.id}/${tile.i} references missing source ${tile.sourceId}`);
+      }
+      if (tile.viz.style !== undefined) {
+        const problems: string[] = [];
+        readDashboardVizStyle(tile.viz.style, `Tile ${page.id}/${tile.i} viz.style`, (message) => problems.push(message));
+        if (problems.length) throw new Error(problems.join('; '));
       }
       // Dataset field tiles are a v3-only contract. Existing v1/v2 drafts
       // retain their historic renderer semantics; new or edited v3 tiles

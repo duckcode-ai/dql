@@ -15,6 +15,7 @@ import {
   validateTileQuery,
 } from '@duckcodeailabs/dql-core';
 import type { AppSourceCatalogRecord } from './app-source-catalog.js';
+import { readDashboardVizStyle, type DashboardVizStyle } from '@duckcodeailabs/dql-core';
 
 export type AppBuilderComponentRole = AppBuildRequirement['role'];
 export type AppBuilderComponentView = 'kpi' | 'line' | 'bar' | 'table';
@@ -32,6 +33,8 @@ export interface AppBuilderPlannedComponent {
   requirementIds: string[];
   role: AppBuilderComponentRole;
   view: AppBuilderComponentView;
+  /** Optional chart styling, validated like a page file's `viz.style`. */
+  style?: DashboardVizStyle;
   rationale: string;
 }
 
@@ -810,7 +813,8 @@ function appBuilderSystemPrompt(): string {
     'Return JSON only with keys frame, requirements, components, pages, filters, navigation, crossFilters, and detailDrills.',
     'frame: {goal, decision?, audience?, metrics[], dimensions[], grain?, timeRange?, comparison?, filters[], desiredOutput?, clarificationQuestions?}.',
     'requirements: [{id, question, role, required, measures[], dimensions[], filters[], grain?}]. role is kpi, trend, breakdown, detail, narrative, or evidence.',
-    'components: [{id, title, sourceId, query?, requirementIds[], role, view, rationale}]. query is a TileQuery using only the approved Dataset fields on that source card. view is kpi, line, bar, or table.',
+    'components: [{id, title, sourceId, query?, requirementIds[], role, view, style?, rationale}]. query is a TileQuery using only the approved Dataset fields on that source card. view is kpi, line, bar, or table.',
+    'style is optional chart styling: {labels?: none|last|all, format?: number|compact|currency|percent, sort?: none|asc|desc, stack?: boolean, referenceLines?: [{value, label?}], bands?: [{from, to, label?}]}. Add a reference line or band only for a target or threshold the user stated; never invent one.',
     'pages: [{id, title, componentIds[], sections:[{id,title,kind,componentIds[]}]}]. section kind is exec_summary, kpi_band, insight, or appendix. Every component must appear on one page.',
     'filters: [{id,label,field,scope,pageId?,componentIds[]}]. field must be one exact approved physical Dataset field for every named component; scope is page or app.',
     'navigation: [{fromComponentId,toPageId}]. crossFilters: [{fromComponentId,fromField,toComponentId,toField}], where fromField is an exact selected dimension output and toField is an exact approved physical target field on the same page.',
@@ -935,6 +939,8 @@ function normalizeComponents(
     // fall back to a legacy block tile when its governed descriptor cannot
     // express the requested component.
     if (candidate.capabilities.dataset && !query) return [];
+    // Style is presentation only: malformed fields are dropped, never fatal.
+    const style = readDashboardVizStyle(record.style, `components[${index}].style`, () => undefined);
     return [{
       id,
       title: datasetComponentTitle(stringValue(record.title) ?? id, candidate.capabilities.dataset, query, role),
@@ -943,6 +949,7 @@ function normalizeComponents(
       requirementIds: selectedRequirementIds,
       role,
       view,
+      ...(style ? { style } : {}),
       rationale: stringValue(record.rationale) ?? 'Selected from the bounded App source candidate set.',
     }];
   });

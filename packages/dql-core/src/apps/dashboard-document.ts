@@ -15,6 +15,7 @@
  * Either form may also pin a git SHA (`"version": "git:abc123"`).
  */
 
+import { readDashboardVizStyle, type DashboardVizStyle } from './viz-style.js';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import {
@@ -120,6 +121,8 @@ export type DashboardVizConfig = {
     | 'heading';
   /** Free-form per-renderer options (axes, colors, etc.). */
   options?: Record<string, unknown>;
+  /** Typed chart styling shared by the Studio style panel and App AI (RFC 0008). */
+  style?: DashboardVizStyle;
 };
 
 export type DashboardDisplayMode = 'manual' | 'ai_generated' | 'block_hint';
@@ -962,6 +965,7 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       }
     }
 
+    const vizStyle = readDashboardVizStyle(vizRaw.style, `layout.items[${i}].viz.style`, err);
     const display = readDisplayMetadata(it.display, i, allowedViz, err);
     const semanticTileConversionProvenance = readSemanticTileConversionProvenance(
       it.semanticTileConversionProvenance,
@@ -988,7 +992,11 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       ...(semanticTileConversionProvenance ? { semanticTileConversionProvenance } : {}),
       ...(draftAnalysis ? { draftAnalysis } : {}),
       ...(query ? { query } : {}),
-      viz: { type: vizRaw.type as DashboardVizConfig['type'], options: opts },
+      viz: {
+        type: vizRaw.type as DashboardVizConfig['type'],
+        options: opts,
+        ...(vizStyle ? { style: vizStyle } : {}),
+      },
       ...(display ? { display } : {}),
       ...(filterBindings.length > 0 ? { filterBindings } : {}),
       ...(parameterBindings.length > 0 ? { parameterBindings } : {}),

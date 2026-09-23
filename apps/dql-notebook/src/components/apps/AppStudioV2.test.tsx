@@ -71,8 +71,8 @@ describe('Studio Dataset mark interaction (APP-041)', () => {
       />,
     );
 
-    expect(markup).toContain('role="button"');
-    expect(markup).toContain('aria-label="Select CA"');
+    // Each mark is a real button, reachable by keyboard.
+    expect(markup).toContain('<button type="button" aria-label="Select CA">');
   });
 
   it('shows the server-declared unsaved hierarchy drill and Back control on an actual Dataset result', async () => {

@@ -1,3 +1,4 @@
+import type { DashboardVizStyle } from '@duckcodeailabs/dql-core/apps/viz-style';
 // v1.3.2 — three Luna themes (obsidian dark, paper warm light, white plain light).
 // `dark`/`light`/`midnight`/`arctic` kept as aliases so persisted state from
 // earlier v1.3 releases still loads; normalize in the reducer / App effect.
@@ -47,6 +48,8 @@ export type CellType =
 export type CellStatus = 'idle' | 'running' | 'success' | 'error';
 
 export interface CellChartConfig {
+  /** Typed styling from a dashboard tile's `viz.style` (RFC 0008): labels, stacking, reference lines, bands, notes. */
+  style?: DashboardVizStyle;
   chart?: string;   // bar | line | area | pie | donut | scatter | heatmap | funnel | sankey | waterfall | histogram | gauge | stacked-bar | grouped-bar | kpi | table
   /** Who selected the chart. Agent suggestions are validated against returned data; authored/user choices are retained. */
   decisionSource?: 'authored' | 'agent' | 'data' | 'user';

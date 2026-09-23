@@ -3,7 +3,7 @@ import { CHART_TYPE_OPTIONS } from '../output/ChartOutput';
 
 type DashboardTileChartInput = {
   title?: string;
-  viz: { type?: string; options?: Record<string, unknown> };
+  viz: { type?: string; options?: Record<string, unknown>; style?: CellChartConfig['style'] };
 };
 
 /**
@@ -44,7 +44,8 @@ export function mergeDashboardTileChartConfig(
     chart: normalizeDashboardChartType(options.chart ?? item.viz.type ?? base?.chart),
     y: options.y ?? valueField ?? base?.y,
     title: options.title ?? base?.title ?? item.title,
-    colorPalette: options.colorPalette ?? base?.colorPalette ?? 'dql',
+    colorPalette: options.colorPalette ?? item.viz.style?.palette ?? base?.colorPalette ?? 'dql',
+    ...(item.viz.style ? { style: item.viz.style } : {}),
   };
 }
 

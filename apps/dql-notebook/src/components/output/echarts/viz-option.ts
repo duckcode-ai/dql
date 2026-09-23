@@ -1,0 +1,489 @@
+import type { EChartsOption } from 'echarts';
+import type { DashboardVizStyle } from '@duckcodeailabs/dql-core/apps/viz-style';
+import type { CellChartConfig, QueryResult } from '../../../store/types';
+import type { ThemeMode } from '../../../themes/notebook-theme';
+import { formatChartValue } from '../../../utils/value-format';
+import {
+  abbreviate,
+  categoryColumns,
+  chartNumericValue,
+  formatCategoryLabel,
+  measureColumns,
+  metaFor,
+  pickColumns,
+  type ChartType,
+} from '../chart-helpers';
+import { SEQUENTIAL_DARK, SEQUENTIAL_LIGHT, getPalette, isDarkThemeMode } from '../chart-palettes';
+
+/** Chart types drawn by ECharts. KPI, table, sankey, waterfall, gauge and histogram keep their SVG renderers. */
+export const ECHARTS_CHART_TYPES: ReadonlySet<ChartType> = new Set<ChartType>([
+  'bar', 'grouped-bar', 'stacked-bar', 'line', 'area', 'scatter', 'pie', 'donut', 'heatmap', 'funnel',
+]);
+
+/** At most eight series: the validated palette has eight colours and never cycles. */
+export const MAX_SERIES = 8;
+const DEFAULT_MAX_CATEGORIES = 20;
+const TIME_NAME_RE = /(^|_)(date|day|week|month|quarter|year|time|period)(_|$)/i;
+
+export interface VizOptionInput {
+  chartType: ChartType;
+  result: QueryResult;
+  themeMode: ThemeMode;
+  config?: CellChartConfig;
+  /** Server-side rendering has no animation. */
+  animate?: boolean;
+}
+
+export interface VizOptionOutput {
+  option: EChartsOption;
+  /** The raw category values in drawing order, for click and keyboard selection. */
+  categories: string[];
+  /** The result row behind each category, for cross-filtering. */
+  rowForCategory: Map<string, Record<string, unknown>>;
+  /** Formatted category labels, used for accessible mark buttons. */
+  categoryLabels: string[];
+  /** Series left out because a chart shows at most eight. */
+  droppedSeries: number;
+}
+
+type Tokens = { text: string; muted: string; grid: string; axis: string; surface: string; tooltip: string; band: string };
+
+const LIGHT: Tokens = { text: '#1a1a1a', muted: '#6b6e76', grid: '#f0eee9', axis: '#d9d5cc', surface: '#ffffff', tooltip: '#ffffff', band: 'rgba(0,137,123,0.08)' };
+const DARK: Tokens = { text: '#e6e8ee', muted: '#9aa0ae', grid: '#1e2330', axis: '#2c3240', surface: '#161a23', tooltip: '#1c212d', band: 'rgba(43,179,169,0.12)' };
+const FONT = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+const UNAVAILABLE = '—';
+
+/**
+ * The ECharts option for one chart, built only from the result, the chart
+ * settings and the theme. Pure, so it is tested without a browser and the
+ * same option renders interactively in the page and as SVG on the server.
+ * Returns undefined for chart types ECharts does not draw here.
+ */
+export function buildVizOption({ chartType, result, themeMode, config, animate = true }: VizOptionInput): VizOptionOutput | undefined {
+  if (!ECHARTS_CHART_TYPES.has(chartType) || result.rows.length === 0) return undefined;
+  const style: DashboardVizStyle = config?.style ?? {};
+  const tokens = isDarkThemeMode(themeMode) ? DARK : LIGHT;
+  const palette = getPalette(style.palette ?? config?.colorPalette, themeMode).slice(0, MAX_SERIES);
+  const { labelCol, valueCol } = pickColumns(result, config);
+  const format = numberFormatter(result, valueCol, style, config);
+  const base: EChartsOption = {
+    animation: animate,
+    animationDuration: 300,
+    color: palette,
+    textStyle: { fontFamily: FONT, color: tokens.text },
+    aria: { enabled: true, decal: { show: false } },
+    tooltip: {
+      backgroundColor: tokens.tooltip,
+      borderColor: tokens.axis,
+      textStyle: { color: tokens.text, fontFamily: FONT, fontSize: 12 },
+      extraCssText: 'box-shadow: 0 8px 24px rgba(0,0,0,.12); border-radius: 8px;',
+    },
+  };
+
+  if (chartType === 'pie' || chartType === 'donut') return pieOption(base, result, labelCol, valueCol, chartType === 'donut', tokens, palette, format, config);
+  if (chartType === 'funnel') return funnelOption(base, result, labelCol, valueCol, tokens, palette, format, config);
+  if (chartType === 'scatter') return scatterOption(base, result, tokens, format);
+  if (chartType === 'heatmap') return heatmapOption(base, result, themeMode, tokens, format);
+  return cartesianOption(base, chartType, result, labelCol, valueCol, style, tokens, format, config);
+}
+
+// ─── Bars, lines and areas ────────────────────────────────────────────────────
+
+function cartesianOption(
+  base: EChartsOption,
+  chartType: ChartType,
+  result: QueryResult,
+  labelCol: string,
+  valueCol: string,
+  style: DashboardVizStyle,
+  tokens: Tokens,
+  format: (value: number) => string,
+  config?: CellChartConfig,
+): VizOptionOutput {
+  const isLine = chartType === 'line' || chartType === 'area';
+  const stacked = chartType === 'stacked-bar' || Boolean(style.stack);
+  const colorCol = config?.color && result.columns.includes(config.color) && config.color !== labelCol ? config.color : undefined;
+  const measures = seriesMeasures(result, labelCol, valueCol, chartType, config);
+
+  // Categories in query order, one row kept per category for selection.
+  const rowForCategory = new Map<string, Record<string, unknown>>();
+  for (const row of result.rows) {
+    const key = String(row[labelCol] ?? '');
+    if (!rowForCategory.has(key)) rowForCategory.set(key, row);
+  }
+  let categories = Array.from(rowForCategory.keys());
+
+  // Series: one per measure, or one per value of the colour field.
+  let series: Array<{ name: string; values: Map<string, number | null> }>;
+  if (colorCol) {
+    const byColour = new Map<string, Map<string, number | null>>();
+    for (const row of result.rows) {
+      const name = String(row[colorCol] ?? '');
+      const values = byColour.get(name) ?? new Map<string, number | null>();
+      values.set(String(row[labelCol] ?? ''), chartNumericValue(row[valueCol]));
+      byColour.set(name, values);
+    }
+    series = Array.from(byColour, ([name, values]) => ({ name, values }));
+  } else {
+    series = measures.map((measure) => ({
+      name: measure,
+      values: new Map(result.rows.map((row) => [String(row[labelCol] ?? ''), chartNumericValue(row[measure])])),
+    }));
+  }
+  const droppedSeries = Math.max(0, series.length - MAX_SERIES);
+  series = series.slice(0, MAX_SERIES);
+
+  if (style.sort && style.sort !== 'none' && series[0]) {
+    const first = series[0].values;
+    const direction = style.sort === 'asc' ? 1 : -1;
+    categories = [...categories].sort((a, b) => direction * ((first.get(a) ?? -Infinity) - (first.get(b) ?? -Infinity)));
+  }
+  // A time axis runs left to right. The shared DATE_NAME_RE also matches
+  // words like "category", so the orientation uses whole name parts or the
+  // values themselves.
+  const timeAxis = isLine || TIME_NAME_RE.test(labelCol) || categories.every((value) => /^\d{4}-\d{2}(-\d{2})?(T|$)/.test(value));
+  if (!isLine) categories = categories.slice(0, config?.maxItems ?? DEFAULT_MAX_CATEGORIES);
+  // Long category lists read better as horizontal bars; dates stay on x.
+  const horizontal = !isLine && !timeAxis;
+  const categoryLabels = categories.map((value) => formatCategoryLabel(value, labelCol, 16));
+
+  const labelsMode = style.labels ?? 'none';
+  const lastIndex = categories.length - 1;
+  const seriesOptions = series.map((entry, seriesIndex) => {
+    const topOfStack = !stacked || seriesIndex === series.length - 1;
+    const data = categories.map((category, index) => {
+      const value = entry.values.get(category) ?? null;
+      const showLabel = labelsMode === 'all' || (labelsMode === 'last' && index === lastIndex && topOfStack);
+      if (value === null) {
+        // Unavailable is not zero: no mark, a dash where the value would be.
+        return isLine
+          ? null
+          : { value: 0, unavailable: true, itemStyle: { opacity: 0 }, label: { show: true, formatter: UNAVAILABLE, color: tokens.muted } };
+      }
+      if (isLine && index === lastIndex) {
+        return { value, symbol: 'circle', symbolSize: 8, itemStyle: { borderColor: tokens.surface, borderWidth: 2 }, ...(showLabel ? { label: { show: true } } : {}) };
+      }
+      return showLabel ? { value, label: { show: true } } : value;
+    });
+    const common = {
+      name: colorCol ? entry.name : prettyName(entry.name),
+      data,
+      emphasis: { focus: 'series' as const },
+      label: {
+        show: false,
+        color: tokens.text,
+        fontSize: 11,
+        position: (isLine ? 'top' : horizontal ? 'right' : 'top') as 'top' | 'right',
+        formatter: (params: { value: unknown }) => format(Number(params.value)),
+      },
+    };
+    if (isLine) {
+      return {
+        ...common,
+        type: 'line' as const,
+        showSymbol: true,
+        symbol: 'none',
+        lineStyle: { width: 2 },
+        connectNulls: false,
+        ...(stacked ? { stack: 'total' } : {}),
+        ...(chartType === 'area' ? { areaStyle: { opacity: stacked ? 0.85 : 0.12 } } : {}),
+      };
+    }
+    return {
+      ...common,
+      type: 'bar' as const,
+      barMaxWidth: 28,
+      ...(stacked ? { stack: 'total' } : {}),
+      itemStyle: {
+        // 4px rounded data end, square at the baseline; a surface-coloured
+        // edge keeps stacked segments apart.
+        borderRadius: topOfStack ? (horizontal ? [0, 4, 4, 0] : [4, 4, 0, 0]) : 0,
+        ...(stacked ? { borderColor: tokens.surface, borderWidth: 1 } : {}),
+      },
+    };
+  });
+  const marks = markLayers(style, categories, labelCol, horizontal, tokens, format);
+  if (seriesOptions[0]) Object.assign(seriesOptions[0], marks);
+
+  const categoryAxis = {
+    type: 'category' as const,
+    data: categoryLabels,
+    ...(horizontal ? { inverse: true } : {}),
+    axisLine: { lineStyle: { color: tokens.axis } },
+    axisTick: { show: false },
+    axisLabel: { color: tokens.muted, fontSize: 11, hideOverlap: true },
+  };
+  const valueAxis = {
+    type: 'value' as const,
+    axisLabel: { color: tokens.muted, fontSize: 11, formatter: (value: number) => format(value) },
+    splitLine: { lineStyle: { color: tokens.grid } },
+  };
+  const showLegend = series.length > 1 && style.legend !== 'none';
+  const option: EChartsOption = {
+    ...base,
+    grid: { left: 8, right: 24, top: showLegend && (style.legend ?? 'top') === 'top' ? 36 : 16, bottom: 8, containLabel: true },
+    legend: showLegend ? legendOption(style.legend ?? 'top', tokens) : { show: false },
+    tooltip: {
+      ...(base.tooltip as object),
+      trigger: 'axis',
+      axisPointer: { type: isLine ? 'line' : 'shadow', lineStyle: { color: tokens.axis } },
+      valueFormatter: (value: unknown) => (value === null || value === undefined ? 'Unavailable' : format(Number(value))),
+    },
+    xAxis: horizontal ? valueAxis : categoryAxis,
+    yAxis: horizontal ? categoryAxis : valueAxis,
+    series: seriesOptions as EChartsOption['series'],
+  };
+  return { option, categories, rowForCategory, categoryLabels, droppedSeries };
+}
+
+/** Reference lines, target bands and dated notes, drawn on the first series. */
+function markLayers(
+  style: DashboardVizStyle,
+  categories: string[],
+  labelCol: string,
+  horizontal: boolean,
+  tokens: Tokens,
+  format: (value: number) => string,
+): Record<string, unknown> {
+  const valueKey = horizontal ? 'xAxis' : 'yAxis';
+  const categoryKey = horizontal ? 'yAxis' : 'xAxis';
+  const lines: Array<Record<string, unknown>> = (style.referenceLines ?? []).map((line) => ({
+    [valueKey]: line.value,
+    name: line.label ?? format(line.value),
+    lineStyle: { type: 'dashed', color: tokens.muted, width: 1 },
+    label: { formatter: line.label ? `${line.label} · ${format(line.value)}` : format(line.value), color: tokens.muted, fontSize: 11, position: 'insideEndTop' },
+  }));
+  for (const note of style.annotations ?? []) {
+    const index = categories.findIndex((category) => category === note.at || category.startsWith(note.at)
+      || formatCategoryLabel(category, labelCol, 32) === note.at);
+    if (index < 0) continue;
+    lines.push({
+      [categoryKey]: index,
+      name: note.text,
+      lineStyle: { type: 'dotted', color: tokens.text, width: 1 },
+      // ECharts sets text along a vertical mark line; it reads bottom to top
+      // beside the line, near its top.
+      label: { formatter: note.text, color: tokens.text, fontSize: 11, position: 'insideEndTop' },
+    });
+  }
+  const bands = (style.bands ?? []).map((band) => ([
+    { [valueKey]: band.from, name: band.label ?? '', itemStyle: { color: tokens.band }, label: { color: tokens.muted, fontSize: 11, position: 'insideTopLeft' } },
+    { [valueKey]: band.to },
+  ]));
+  return {
+    ...(lines.length ? { markLine: { symbol: 'none', silent: true, data: lines } } : {}),
+    ...(bands.length ? { markArea: { silent: true, data: bands } } : {}),
+  };
+}
+
+// ─── Parts of a whole ─────────────────────────────────────────────────────────
+
+function pieOption(
+  base: EChartsOption,
+  result: QueryResult,
+  labelCol: string,
+  valueCol: string,
+  donut: boolean,
+  tokens: Tokens,
+  palette: string[],
+  format: (value: number) => string,
+  config?: CellChartConfig,
+): VizOptionOutput {
+  const rowForCategory = new Map<string, Record<string, unknown>>();
+  const slices = result.rows.flatMap((row) => {
+    const value = chartNumericValue(row[valueCol]);
+    const name = String(row[labelCol] ?? '');
+    if (value === null || value <= 0) return [];
+    if (!rowForCategory.has(name)) rowForCategory.set(name, row);
+    return [{ name, value }];
+  }).sort((a, b) => b.value - a.value);
+  // Eight colours never cycle: a ninth slice onwards folds into "Other".
+  const limit = Math.min(config?.maxItems ?? MAX_SERIES, MAX_SERIES);
+  const kept = slices.length > limit ? slices.slice(0, limit - 1) : slices;
+  const other = slices.slice(kept.length).reduce((sum, slice) => sum + slice.value, 0);
+  const data = [
+    ...kept.map((slice) => ({ name: slice.name, value: slice.value })),
+    ...(other > 0 ? [{ name: 'Other', value: other }] : []),
+  ];
+  const categories = data.map((slice) => slice.name);
+  const option: EChartsOption = {
+    ...base,
+    color: palette,
+    tooltip: { ...(base.tooltip as object), trigger: 'item', valueFormatter: (value: unknown) => format(Number(value)) },
+    legend: { show: false },
+    series: [{
+      type: 'pie',
+      radius: donut ? ['52%', '76%'] : ['0%', '76%'],
+      center: ['50%', '52%'],
+      padAngle: 1,
+      itemStyle: { borderColor: tokens.surface, borderWidth: 2 },
+      label: { color: tokens.text, fontSize: 11, formatter: '{b}  {d}%' },
+      labelLine: { lineStyle: { color: tokens.axis } },
+      data,
+    }],
+  };
+  return { option, categories, rowForCategory, categoryLabels: categories.map((value) => formatCategoryLabel(value, labelCol, 32)), droppedSeries: 0 };
+}
+
+function funnelOption(
+  base: EChartsOption,
+  result: QueryResult,
+  labelCol: string,
+  valueCol: string,
+  tokens: Tokens,
+  palette: string[],
+  format: (value: number) => string,
+  config?: CellChartConfig,
+): VizOptionOutput {
+  const rowForCategory = new Map<string, Record<string, unknown>>();
+  const stages = result.rows.flatMap((row) => {
+    const value = chartNumericValue(row[valueCol]);
+    const name = String(row[labelCol] ?? '');
+    if (value === null) return [];
+    if (!rowForCategory.has(name)) rowForCategory.set(name, row);
+    return [{ name, value }];
+  }).slice(0, config?.maxItems ?? DEFAULT_MAX_CATEGORIES);
+  const top = stages[0]?.value || 1;
+  const option: EChartsOption = {
+    ...base,
+    tooltip: { ...(base.tooltip as object), trigger: 'item', valueFormatter: (value: unknown) => format(Number(value)) },
+    series: [{
+      type: 'funnel',
+      sort: 'none',
+      left: 0, width: '62%', top: 8, bottom: 8,
+      gap: 2,
+      // Stages are one thing measured at each step: one colour. Labels sit
+      // beside the shape in text colour, readable in both themes.
+      itemStyle: { color: palette[0], borderColor: tokens.surface, borderWidth: 1 },
+      labelLine: { lineStyle: { color: tokens.axis } },
+      label: {
+        position: 'right',
+        color: tokens.text,
+        fontSize: 11,
+        formatter: (params: { name: string; value: unknown }) => `${params.name}  ${Math.round((Number(params.value) / top) * 100)}%`,
+      },
+      data: stages,
+    }],
+  };
+  const categories = stages.map((stage) => stage.name);
+  return { option, categories, rowForCategory, categoryLabels: categories, droppedSeries: 0 };
+}
+
+// ─── Two measures, and magnitude over two categories ─────────────────────────
+
+function scatterOption(base: EChartsOption, result: QueryResult, tokens: Tokens, format: (value: number) => string): VizOptionOutput | undefined {
+  const measures = measureColumns(result);
+  if (measures.length < 2) return undefined;
+  const [xCol, yCol] = measures as [string, string];
+  const points = result.rows.flatMap((row) => {
+    const x = chartNumericValue(row[xCol]);
+    const y = chartNumericValue(row[yCol]);
+    return x === null || y === null ? [] : [[x, y]];
+  });
+  const axis = (name: string) => ({
+    type: 'value' as const,
+    name: prettyName(name),
+    nameTextStyle: { color: tokens.muted, fontSize: 11 },
+    axisLabel: { color: tokens.muted, fontSize: 11, formatter: (value: number) => format(value) },
+    splitLine: { lineStyle: { color: tokens.grid } },
+  });
+  const option: EChartsOption = {
+    ...base,
+    grid: { left: 8, right: 24, top: 24, bottom: 8, containLabel: true },
+    tooltip: { ...(base.tooltip as object), trigger: 'item' },
+    xAxis: axis(xCol),
+    yAxis: axis(yCol),
+    series: [{ type: 'scatter', symbolSize: 8, itemStyle: { opacity: 0.85, borderColor: tokens.surface, borderWidth: 1 }, data: points }],
+  };
+  return { option, categories: [], rowForCategory: new Map(), categoryLabels: [], droppedSeries: 0 };
+}
+
+function heatmapOption(base: EChartsOption, result: QueryResult, themeMode: ThemeMode, tokens: Tokens, format: (value: number) => string): VizOptionOutput | undefined {
+  const categories = categoryColumns(result);
+  const measures = measureColumns(result);
+  const rowCol = categories[0] ?? result.columns[0]!;
+  let xLabels: string[];
+  let yLabels: string[];
+  const cells: Array<[number, number, number | null]> = [];
+  if (categories.length >= 2 && measures.length >= 1) {
+    // Long form: two categories and one measure.
+    const colCol = categories[1]!;
+    const measure = measures[0]!;
+    xLabels = unique(result.rows.map((row) => String(row[colCol] ?? '')));
+    yLabels = unique(result.rows.map((row) => String(row[rowCol] ?? '')));
+    for (const row of result.rows) {
+      cells.push([xLabels.indexOf(String(row[colCol] ?? '')), yLabels.indexOf(String(row[rowCol] ?? '')), chartNumericValue(row[measure])]);
+    }
+  } else {
+    // Wide form: one row label, each measure a column.
+    if (measures.length === 0) return undefined;
+    xLabels = measures;
+    yLabels = result.rows.map((row) => String(row[rowCol] ?? ''));
+    result.rows.forEach((row, y) => measures.forEach((measure, x) => cells.push([x, y, chartNumericValue(row[measure])])));
+  }
+  const values = cells.map((cell) => cell[2]).filter((value): value is number => value !== null);
+  const ramp = (isDarkThemeMode(themeMode) ? SEQUENTIAL_DARK : SEQUENTIAL_LIGHT).map((step) => step.fill);
+  const option: EChartsOption = {
+    ...base,
+    grid: { left: 8, right: 16, top: 8, bottom: 40, containLabel: true },
+    tooltip: { ...(base.tooltip as object), trigger: 'item', valueFormatter: (value: unknown) => (value === null ? 'Unavailable' : format(Number(value))) },
+    xAxis: { type: 'category', data: xLabels.map(prettyName), axisLabel: { color: tokens.muted, fontSize: 11 }, axisTick: { show: false }, axisLine: { show: false } },
+    yAxis: { type: 'category', data: yLabels, inverse: true, axisLabel: { color: tokens.muted, fontSize: 11 }, axisTick: { show: false }, axisLine: { show: false } },
+    visualMap: {
+      min: values.length ? Math.min(...values) : 0,
+      max: values.length ? Math.max(...values) : 1,
+      calculable: false,
+      orient: 'horizontal',
+      left: 'center',
+      bottom: 0,
+      itemHeight: 120,
+      textStyle: { color: tokens.muted, fontSize: 11 },
+      inRange: { color: ramp },
+      formatter: (value: unknown) => format(Number(value)),
+    },
+    series: [{ type: 'heatmap', data: cells, itemStyle: { borderColor: tokens.surface, borderWidth: 2, borderRadius: 3 } }],
+  };
+  return { option, categories: [], rowForCategory: new Map(), categoryLabels: [], droppedSeries: 0 };
+}
+
+// ─── Shared ──────────────────────────────────────────────────────────────────
+
+function seriesMeasures(result: QueryResult, labelCol: string, valueCol: string, chartType: ChartType, config?: CellChartConfig): string[] {
+  if (config?.y && result.columns.includes(config.y) && chartType === 'bar') return [config.y];
+  const measures = measureColumns(result).filter((column) => column !== labelCol);
+  if (chartType === 'bar' && !config?.style?.stack) return [valueCol];
+  const ordered = config?.metrics?.filter((metric) => measures.includes(metric)) ?? [];
+  return ordered.length ? ordered : measures.length ? measures : [valueCol];
+}
+
+function numberFormatter(result: QueryResult, valueCol: string, style: DashboardVizStyle, config?: CellChartConfig): (value: number) => string {
+  const meta = metaFor(result, valueCol);
+  return (value: number) => {
+    if (!Number.isFinite(value)) return UNAVAILABLE;
+    switch (style.format) {
+      case 'compact':
+        return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+      case 'currency':
+      case 'percent':
+      case 'number':
+        return formatChartValue(valueCol, value, style.format, meta);
+      default:
+        return abbreviate(value, valueCol, config?.format, meta);
+    }
+  };
+}
+
+function legendOption(position: 'top' | 'right' | 'bottom' | 'none', tokens: Tokens): EChartsOption['legend'] {
+  const common = { show: true, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: tokens.muted, fontSize: 11 } };
+  if (position === 'right') return { ...common, orient: 'vertical', right: 0, top: 'middle' };
+  if (position === 'bottom') return { ...common, bottom: 0, left: 'center' };
+  return { ...common, top: 0, left: 0 };
+}
+
+function prettyName(value: string): string {
+  return value.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function unique(values: string[]): string[] {
+  return Array.from(new Set(values));
+}

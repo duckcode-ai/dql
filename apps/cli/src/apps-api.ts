@@ -4183,7 +4183,7 @@ export async function proposeAppBuildDraftOperations(
       sourceId: source.sourceId,
       sourceRevision: source.sourceRevision,
       ...(query ? { query } : { block: { ref: source.executionRef } }),
-      viz: { type: component.view },
+      viz: { type: component.view, ...(component.style ? { style: component.style } : {}) },
       title: component.title,
       sourceClass: source.kind === 'semantic' ? 'governed_semantic' : certified ? 'certified_block' : 'exploratory_analysis',
       filterBindings: source.capabilities.filters.map((filter) => ({

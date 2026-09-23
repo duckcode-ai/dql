@@ -2391,7 +2391,9 @@ describe('Apps command center API helpers', () => {
         { id: 'orders', question: 'Order count', role: 'kpi', required: true, measures: ['order_count'], dimensions: [], filters: [] },
       ],
       components: [
-        { id: 'revenue-kpi', title: 'Revenue', sourceId: source.sourceId, requirementIds: ['revenue'], role: 'kpi', view: 'kpi', rationale: 'Total', query: { dimensions: [], measures: [{ measure: 'revenue' }] } },
+        { id: 'revenue-kpi', title: 'Revenue', sourceId: source.sourceId, requirementIds: ['revenue'], role: 'kpi', view: 'kpi', rationale: 'Total', query: { dimensions: [], measures: [{ measure: 'revenue' }] },
+          // The planner may style a chart; a malformed field is dropped, not fatal.
+          style: { format: 'compact', referenceLines: [{ value: 1000, label: 'Target' }], labels: 'sometimes' } },
         { id: 'orders-kpi', title: 'Order count', sourceId: source.sourceId, requirementIds: ['orders'], role: 'kpi', view: 'kpi', rationale: 'Count', query: { dimensions: [], measures: [{ measure: 'order_count' }] } },
       ],
       pages: [{ id: 'overview', title: 'Planner title', componentIds: ['revenue-kpi', 'orders-kpi'], sections: [{ id: 'kpis', title: 'Key metrics', kind: 'kpi_band', componentIds: ['revenue-kpi', 'orders-kpi'] }] }],
@@ -2410,6 +2412,9 @@ describe('Apps command center API helpers', () => {
     // The hand-built tile, title and description stay; new tiles go below it.
     expect(regions.metadata).toMatchObject({ title: 'Regions', description: 'Hand-written page' });
     expect(regions.layout.items.map((item: any) => item.i)).toEqual([handTileId, 'revenue-kpi', 'orders-kpi']);
+    // AI-written style lands on the tile exactly as the Studio panel writes it.
+    expect(regions.layout.items[1].viz).toEqual({ type: 'kpi', style: { format: 'compact', referenceLines: [{ value: 1000, label: 'Target' }] } });
+    expect(regions.layout.items[2].viz).toEqual({ type: 'kpi' });
     const handTile = regions.layout.items[0];
     expect(regions.layout.items[1].y).toBeGreaterThanOrEqual(handTile.y + handTile.h);
     // The App goal is the author's, not the planner's.

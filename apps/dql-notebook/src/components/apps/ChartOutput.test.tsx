@@ -15,8 +15,10 @@ describe('App-sized chart rendering (UI-022)', () => {
       executionTime: 4,
     }, 'light', { chart: 'bar', x: 'month', y: 'gross_revenue' }, 240));
 
+    // Business month labels, never raw ISO instants; ECharts thins labels
+    // that would overlap, so not every month is printed.
     expect(markup).toContain('Jan 2024');
-    expect(markup).toContain('Dec 2024');
+    expect(markup.match(/[A-Z][a-z]{2} 2024/g)!.length).toBeGreaterThanOrEqual(4);
     expect(markup).not.toContain('2024-01-01T00:0');
     expect(markup).toContain('height="236"');
   });
@@ -64,9 +66,9 @@ describe('App-sized chart rendering (UI-022)', () => {
     const interactive = renderToStaticMarkup(renderChart('bar', result, 'light', { chart: 'bar' }, 180, undefined, () => undefined));
     const passive = renderToStaticMarkup(renderChart('bar', result, 'light', { chart: 'bar' }, 180));
 
-    expect(interactive).toContain('role="button"');
-    expect(interactive).toContain('aria-label="Select CA"');
-    expect(passive).not.toContain('role="button"');
+    // A real button per mark: Tab reaches it and a screen reader names it.
+    expect(interactive).toContain('<button type="button" aria-label="Select CA">');
+    expect(passive).not.toContain('<button');
   });
 
   it('renders a null drilled measure as unavailable while retaining a real zero', () => {
@@ -88,6 +90,5 @@ describe('App-sized chart rendering (UI-022)', () => {
     expect(markup).toContain('O-101');
     expect(markup).toContain('>—</text>');
     expect(markup).toContain('$0');
-    expect(markup).toContain('width="2"');
   });
 });

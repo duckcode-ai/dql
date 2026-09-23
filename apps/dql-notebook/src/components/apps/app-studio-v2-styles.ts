@@ -1055,6 +1055,17 @@ export const APP_STUDIO_V2_STYLES = `
 .proposal-banner.warn { border-color:color-mix(in srgb,var(--status-warning) 45%,var(--border-default)); background:color-mix(in srgb,var(--status-warning) 7%,var(--bg-2)); }
 .proposal-tile { border:1.5px dashed var(--accent) !important; background:color-mix(in srgb,var(--accent-dim) 45%,var(--bg-2)) !important; cursor:default !important; }
 .proposal-badge { flex:none; padding:3px 7px; border-radius:4px; background:var(--accent); color:var(--accent-fg); font-size:11px; font-weight:600; letter-spacing:.05em; }
+.chart-style-panel { display:grid; gap:8px; }
+.chart-style-grid { display:grid; grid-template-columns:minmax(0,96px) minmax(0,1fr); gap:6px 8px; align-items:center; }
+.chart-style-grid label { font-size:12px; font-weight:400; color:var(--text-secondary); }
+.chart-style-grid select, .chart-style-row input { width:100%; box-sizing:border-box; height:28px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); color:var(--text-primary); font:inherit; font-size:12px; padding:0 8px; }
+.chart-style-check { display:flex; align-items:center; gap:8px; font-size:12px; font-weight:400; color:var(--text-secondary); }
+.chart-style-check input { accent-color:var(--accent); width:auto !important; flex:none; margin:0; }
+.chart-style-marks { display:grid; gap:6px; border-top:1px solid var(--border-subtle); padding-top:8px; }
+.chart-style-heading { font-size:12px; font-weight:500; color:var(--text-primary); }
+.chart-style-row { display:flex; gap:6px; align-items:center; }
+.chart-style-row button { flex:none; width:28px; height:28px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); color:var(--text-secondary); cursor:pointer; }
+.chart-style-add { justify-self:start; border:0; background:transparent; color:var(--accent); font:inherit; font-size:12px; font-weight:500; padding:0; cursor:pointer; }
 .proposal-keep { margin-left:auto; display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:500; color:var(--text-secondary); cursor:pointer; }
 .proposal-keep input { accent-color:var(--accent); }
 .proposal-tile.skipped { opacity:.5; border-style:dotted !important; background:var(--bg-2) !important; }

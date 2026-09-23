@@ -5,6 +5,23 @@ import { TableOutput } from './TableOutput';
 import type { QueryResult, CellChartConfig, ResultColumnMeta } from '../../store/types';
 import { formatChartValue, formatDisplayValue } from '../../utils/value-format';
 import { CHART_PALETTE_OPTIONS, getPalette, selectedPaletteOption, sequentialStep } from './chart-palettes';
+import { EChartsChart } from './echarts/EChartsChart';
+import { ECHARTS_CHART_TYPES } from './echarts/viz-option';
+import {
+  DATE_NAME_RE,
+  abbreviate,
+  isNumericValue,
+  categoryColumns,
+  chartNumericValue,
+  formatCategoryLabel,
+  formatDateLabel,
+  isMeasureColumn,
+  measureColumns,
+  metaFor,
+  pickColumns,
+  resolveChartType,
+  type ChartType,
+} from './chart-helpers';
 
 interface ChartOutputProps {
   result: QueryResult;
@@ -22,11 +39,8 @@ interface ChartOutputProps {
   onMarkSelect?: (row: Record<string, unknown>) => void;
 }
 
-export type ChartType =
-  | 'bar' | 'line' | 'area' | 'pie' | 'donut'
-  | 'scatter' | 'heatmap' | 'funnel' | 'waterfall'
-  | 'histogram' | 'gauge' | 'stacked-bar' | 'grouped-bar'
-  | 'sankey' | 'kpi' | 'table';
+export type { ChartType } from './chart-helpers';
+export { categoryColumns, detectChartType, isMeasureColumn, measureColumns, resolveChartType } from './chart-helpers';
 
 export const CHART_TYPE_OPTIONS: { value: ChartType; label: string }[] = [
   { value: 'bar', label: 'Bar' },
@@ -45,166 +59,6 @@ export const CHART_TYPE_OPTIONS: { value: ChartType; label: string }[] = [
   { value: 'gauge', label: 'Gauge' },
   { value: 'kpi', label: 'KPI' },
 ];
-
-const DATE_NAME_RE = /date|time|at|day|month|year/i;
-const LABEL_NAME_RE = /^(label|name|category|status|type|group)$/i;
-const VALUE_NAME_RE = /^(value|count|total|revenue|amount|sum|avg|price|quantity|sales)$/i;
-
-function isNumericValue(v: unknown): boolean {
-  if (typeof v === 'number') return true;
-  if (typeof v === 'string') return v.trim() !== '' && !isNaN(Number(v));
-  return false;
-}
-
-function isStringLike(v: unknown): boolean {
-  return typeof v === 'string' || typeof v === 'number';
-}
-
-const IDENTIFIER_NAME_RE = /(^|_)(id|key|uuid|code)$/i;
-
-/**
- * WHAT A CHART MAY PLOT AS A VALUE.
- *
- * A six-digit player id is a number at runtime and an identity in meaning: put
- * it on a value axis and it dwarfs the measure beside it, which is exactly how
- * a correct table became a misleading chart. The executed result carries its
- * own contract (`columnsMeta`: the kind, and the ref that owns the column), so
- * a key or a label is a dimension whatever its runtime type. Without a
- * contract, an identifier name and then the values decide, as before.
- */
-export function isMeasureColumn(result: QueryResult, column: string): boolean {
-  const meta = result.columnsMeta?.find((item) => item.name === column);
-  if (meta) {
-    if (meta.kind === 'text' || meta.kind === 'date' || meta.kind === 'boolean') return false;
-    if (meta.ref?.startsWith('dimension:') || meta.ref?.startsWith('entity:')) return false;
-    if (meta.ref?.startsWith('metric:') || meta.ref?.startsWith('measure:')) return true;
-    return !IDENTIFIER_NAME_RE.test(column);
-  }
-  if (IDENTIFIER_NAME_RE.test(column)) return false;
-  return result.rows.slice(0, 5).some((row) => isNumericValue(row[column]));
-}
-
-export function measureColumns(result: QueryResult): string[] {
-  return result.columns.filter((column) => isMeasureColumn(result, column));
-}
-
-export function categoryColumns(result: QueryResult): string[] {
-  return result.columns.filter((column) => !isMeasureColumn(result, column));
-}
-
-const VALID_CHART_TYPES = new Set<string>([
-  'bar', 'line', 'area', 'pie', 'donut', 'scatter', 'heatmap',
-  'funnel', 'waterfall', 'histogram', 'gauge', 'stacked-bar',
-  'grouped-bar', 'sankey', 'kpi', 'table',
-]);
-
-/**
- * Resolve chart type: explicit config takes priority, heuristics as fallback.
- */
-export function resolveChartType(result: QueryResult, chartConfig?: CellChartConfig): ChartType {
-  if (chartConfig?.chart) {
-    const c = chartConfig.chart.toLowerCase().replace(/_/g, '-');
-    if (VALID_CHART_TYPES.has(c)) return c as ChartType;
-  }
-  return detectChartType(result);
-}
-
-/** Heuristic chart type detection from result columns and sample rows */
-export function detectChartType(result: QueryResult): ChartType {
-  const { columns, rows } = result;
-  if (columns.length < 2 || rows.length === 0) return 'table';
-
-  const col0 = columns[0];
-  const col1 = columns[1];
-  const sample = rows.slice(0, 5);
-
-  // A chart needs something to measure; a table of identities is a table.
-  if (measureColumns(result).length === 0) return 'table';
-  const col1AllNumeric = isMeasureColumn(result, col1) && sample.every((r) => isNumericValue(r[col1]));
-  const col0AllString = sample.every((r) => isStringLike(r[col0]));
-
-  // Line chart: col[0] is date-like name and col[1] is numeric
-  if (DATE_NAME_RE.test(col0) && col1AllNumeric && col0AllString) {
-    return 'line';
-  }
-
-  // Bar chart: label/name/category col + value/count/total/revenue/amount col
-  const labelCol = columns.find((c) => LABEL_NAME_RE.test(c));
-  const valueCol = columns.find((c) => VALUE_NAME_RE.test(c) && isMeasureColumn(result, c));
-  if (labelCol && valueCol) {
-    const valueAllNumeric = sample.every((r) => isNumericValue(r[valueCol]));
-    if (valueAllNumeric) return 'bar';
-  }
-
-  // Scatter: two numeric columns
-  const col0AllNumeric = isMeasureColumn(result, col0) && sample.every((r) => isNumericValue(r[col0]));
-  if (col0AllNumeric && col1AllNumeric && columns.length >= 2) {
-    return 'scatter';
-  }
-
-  // Bar chart: exactly 2 columns, col[0] string, col[1] numeric
-  if (columns.length === 2 && col0AllString && col1AllNumeric) {
-    return 'bar';
-  }
-
-  return 'table';
-}
-
-// ─── Shared Utils ─────────────────────────────────────────────────────────────
-
-function abbreviate(n: number, column = 'value', format?: CellChartConfig['format'], meta?: ResultColumnMeta): string {
-  return formatChartValue(column, n, format, meta);
-}
-
-/** A chart must distinguish an unavailable measure from the real number zero. */
-function chartNumericValue(value: unknown): number | null {
-  if (value === null || value === undefined || value === '') return null;
-  const numeric = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
-}
-
-/** The units contract for one column, when the result carries one. */
-function metaFor(result: QueryResult | undefined, column: string | undefined): ResultColumnMeta | undefined {
-  return column ? result?.columnsMeta?.find((meta) => meta.name === column) : undefined;
-}
-
-function formatDateLabel(val: string, maxLen = 8, monthBucket = false): string {
-  // DATE values arrive as midnight-UTC ISO timestamps. Format in UTC so
-  // "2026-01-01T00:00:00.000Z" doesn't render as "Dec 31" in western
-  // timezones (and "2026-01-01" doesn't render as the previous day).
-  if (/^\d{4}-\d{2}(-\d{2})?/.test(val)) {
-    const monthOnly = /^\d{4}-\d{2}$/.test(val);
-    const d = new Date(monthOnly ? `${val}-01T00:00:00Z` : val);
-    if (!isNaN(d.getTime())) {
-      return d.toLocaleDateString('en-US', monthOnly || monthBucket
-        ? { year: 'numeric', month: 'short', timeZone: 'UTC' }
-        : { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
-    }
-  }
-  return String(val).length > maxLen ? String(val).slice(0, maxLen) : String(val);
-}
-
-function formatCategoryLabel(value: string, column: string, maxLen = 16): string {
-  if (DATE_NAME_RE.test(column) || /^\d{4}-\d{2}(-\d{2})?(T|$)/.test(value)) {
-    return formatDateLabel(value, maxLen, /month/i.test(column));
-  }
-  return value.length > maxLen ? `${value.slice(0, Math.max(1, maxLen - 1))}…` : value;
-}
-
-function pickColumns(result: QueryResult, chartConfig?: CellChartConfig) {
-  const categories = categoryColumns(result);
-  const measures = measureColumns(result);
-  const labelCol =
-    (chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : undefined) ??
-    result.columns.find((c) => LABEL_NAME_RE.test(c)) ??
-    // A label beats the key it belongs to: names read, ids do not.
-    categories.find((c) => /name|label|title/i.test(c)) ?? categories[0] ?? result.columns[0];
-  const valueCol =
-    (chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : undefined) ??
-    result.columns.find((c) => VALUE_NAME_RE.test(c) && isMeasureColumn(result, c)) ??
-    measures.find((c) => c !== labelCol) ?? result.columns[1];
-  return { labelCol, valueCol };
-}
 
 type ThemeRef = ReturnType<typeof themes['dark'] extends infer T ? () => T : never>;
 
@@ -1337,6 +1191,25 @@ export function ChartOutput({ result, themeMode, chartConfig, availableHeight, a
 }
 
 export function renderChart(chartType: ChartType, result: QueryResult, themeMode: ThemeMode, chartConfig?: CellChartConfig, availableHeight?: number, availableWidth?: number, onMarkSelect?: (row: Record<string, unknown>) => void): React.ReactElement | null {
+  const svgChart = renderSvgChart(chartType, result, themeMode, chartConfig, availableHeight, availableWidth, onMarkSelect);
+  if (!ECHARTS_CHART_TYPES.has(chartType)) return svgChart;
+  // Standard charts are drawn by ECharts from the DQL chart settings (RFC 0008
+  // step 4); the SVG chart stays as the fallback for data ECharts cannot draw.
+  return (
+    <EChartsChart
+      chartType={chartType}
+      result={result}
+      themeMode={themeMode}
+      config={chartConfig}
+      availableHeight={availableHeight}
+      availableWidth={availableWidth}
+      onMarkSelect={onMarkSelect}
+      fallback={svgChart}
+    />
+  );
+}
+
+function renderSvgChart(chartType: ChartType, result: QueryResult, themeMode: ThemeMode, chartConfig?: CellChartConfig, availableHeight?: number, availableWidth?: number, onMarkSelect?: (row: Record<string, unknown>) => void): React.ReactElement | null {
   // Reorder columns based on explicit config
   const xCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : undefined;
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : undefined;

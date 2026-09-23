@@ -31,6 +31,14 @@ export type {
   AppDocumentLoadResult,
 } from './app-document.js';
 
+export { readDashboardVizStyle } from './viz-style.js';
+export type {
+  DashboardVizStyle,
+  DashboardVizReferenceLine,
+  DashboardVizBand,
+  DashboardVizAnnotation,
+} from './viz-style.js';
+
 export {
   parseDashboardDocument,
   loadDashboardDocument,

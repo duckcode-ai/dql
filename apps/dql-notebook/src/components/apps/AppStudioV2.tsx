@@ -41,6 +41,7 @@ import { DatasetTileBuilder } from './builder/DatasetTileBuilder';
 import { DataPanel, type DataPanelTarget } from './builder/DataPanel';
 import { DraftTileCard, DraftTileInspector, type DraftTileState } from './builder/DraftTile';
 import { ProposedTileCard } from './builder/ProposedTile';
+import { ChartStylePanel } from './builder/ChartStylePanel';
 import { projectProposal, type ProposedPage } from './builder/proposal-preview';
 import { EMPTY_TILE_QUERY, autoTileView, defaultTileTitle, tileVisualization, toggleFieldInQuery } from './builder/field-query';
 import { FiltersPanel, mergeStudioDateRanges, linkedComponentCount, type StudioFilterConfiguration } from './builder/GlobalFilterBar';
@@ -3278,7 +3279,17 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
     {dataTile && tab === 'visual' ? <>
     <section><label>Chart</label><div className="chart-type-grid" role="radiogroup" aria-label="Chart type">{CHART_TYPE_OPTIONS.map(([type, label]) => { const active = tile.viz.type === type || (type === 'single_value' && tile.viz.type === 'kpi'); return <button key={type} type="button" role="radio" aria-checked={active} className={active ? 'on' : ''} disabled={disabled} onClick={() => { if (!active) updateVisualization(type); }}>{chartTypeIcon(type)}<span>{label}</span></button>; })}</div>{savedDatasetVisualization && !savedDatasetVisualization.compatible ? <small className="dataset-builder-error" role="alert">{savedDatasetVisualization.message} Choose Table to keep all selected fields visible.</small> : null}{visualizationFeedback ? <small className="dataset-interaction-message" role="status">{visualizationFeedback}</small> : null}</section>
     {!tile.text ? <section className="field-mapping"><label>Field mapping</label><div><span>X / category</span><select value={String(options.x ?? '')} onChange={(event) => setOption('x', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><div><span>Y / value</span><select value={String(options.y ?? '')} onChange={(event) => setOption('y', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><small className="field-help">Run preview to load the exact result fields.</small></section> : null}
-    {!tile.text ? <section className="format-grid"><label>Formatting</label><div><span>Number</span><select value={String(options.format ?? 'number')} onChange={(event) => setOption('format', event.target.value)}><option value="number">Number</option><option value="currency">Currency</option><option value="percent">Percent</option><option value="duration">Duration</option></select></div><div><span>Legend</span><select value={String(options.legendPosition ?? 'right')} onChange={(event) => setOption('legendPosition', event.target.value)}><option value="top">Top</option><option value="right">Right</option><option value="bottom">Bottom</option><option value="none">Hidden</option></select></div></section> : null}
+    {!tile.text ? <ChartStylePanel
+      key={tile.i}
+      vizType={tile.viz.type}
+      style={tile.viz.style}
+      legacyFormat={typeof options.format === 'string' ? options.format : undefined}
+      disabled={disabled}
+      onChange={(style) => {
+        const { style: _previous, ...viz } = tile.viz;
+        onUpdate({ viz: style ? { ...viz, style } : viz });
+      }}
+    /> : null}
     <section><label>Responsive size</label><div className="size-buttons">{[['Compact', 3, 2], ['Standard', 6, 4], ['Wide', 12, 4], ['Tall', 6, 7]].map(([label, w, h]) => <button key={label} type="button" onClick={() => onUpdate({ w: Number(w), h: Number(h) })}>{label}</button>)}</div></section>
     </> : null}
     {dataTile && tab === 'interactions' ? (tile.query && dataset
@@ -3455,6 +3466,11 @@ export function StudioTilePreview({
   const frameRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(560);
   const [height, setHeight] = useState(190);
+  // The card's height comes from its grid rows (see studio-component-card),
+  // while this frame's measured height follows its own content. Sizing the
+  // chart from the rows keeps it stable: it can neither grow nor shrink the
+  // frame it sits in.
+  const chartHeight = Math.max(120, tile.h * 68 - 56);
   const [markActionId, setMarkActionId] = useState<string>('filter');
   useEffect(() => {
     const node = frameRef.current;
@@ -3478,7 +3494,13 @@ export function StudioTilePreview({
     return <div className="preview-state error"><strong>Dataset visualization needs attention</strong><span>{visualization.message} Choose Table or change the Dataset field selection before running this component.</span></div>;
   }
   const chart = tile.viz.type === 'single_value' ? 'kpi' : tile.viz.type;
-  const chartConfig = { ...(run.chartConfig ?? {}), ...(tile.viz.options ?? {}), chart } as CellChartConfig;
+  const chartConfig = {
+    ...(run.chartConfig ?? {}),
+    ...(tile.viz.options ?? {}),
+    chart,
+    // The draft's own style wins: the author sees the change before any rerun.
+    ...(tile.viz.style ? { style: tile.viz.style, ...(tile.viz.style.palette ? { colorPalette: tile.viz.style.palette } : {}) } : {}),
+  } as CellChartConfig;
   const hierarchy = run.dataset?.hierarchy;
   const hierarchyCandidates = (hierarchy?.candidates ?? []).filter((candidate) => (
     run.result!.rows.some((row) => row[candidate.fromAlias] !== undefined && row[candidate.fromAlias] !== null)
@@ -3504,7 +3526,7 @@ export function StudioTilePreview({
     <div ref={frameRef} className="live-component-preview" onClick={(event) => event.stopPropagation()}>
       {chart === 'table' || chart === 'pivot'
         ? <TableOutput result={run.result} themeMode={themeMode} maxHeight={height} initialPageSize={10} onRowClick={onRowSelect} />
-        : <ChartOutput result={run.result} themeMode={themeMode} chartConfig={{ ...chartConfig, title: undefined }} availableHeight={height} availableWidth={width} onMarkSelect={onRowSelect} />}
+        : <ChartOutput result={run.result} themeMode={themeMode} chartConfig={{ ...chartConfig, title: undefined }} availableHeight={chartHeight} availableWidth={width} onMarkSelect={onRowSelect} />}
       {selectableFields.length ? <div className={`dataset-mark-controls marks ${selectedForTile.length ? 'has-selection' : ''}`} aria-label="Cross-filter selection">
         <span>Select a result mark</span>
         {selectableFields.flatMap((field) => uniquePreviewValues(run.result!.rows, field).slice(0, 6).map((value) => ({ field, value }))).map(({ field, value }) => <button key={`${field}:${String(value)}`} type="button" className={selectedForTile.some((filter) => filter.field === field && filter.values.some((candidate) => JSON.stringify(candidate) === JSON.stringify(value))) ? 'on' : ''} onClick={() => onSelectDatasetMark?.(field, [value])}>{humanize(field)}: {String(value)}</button>)}
