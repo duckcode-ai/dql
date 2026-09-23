@@ -49,6 +49,18 @@ Each step lands as its own commits with tests and leaves `main` releasable.
 | 9. Canvas pages | Page `kind: "canvas"`: sandboxed HTML plus named bindings, each a tile query; no naked numbers | binding and sandbox tests |
 | 10. Distribution | Share links, PDF / PNG / signed HTML, rendered digests, monitors, visual PR diff | per feature |
 
+## Progress
+
+| Step | State | Notes |
+| ---- | ----- | ----- |
+| 0. Branch | Done | RFC 0007 series rebased onto `main`, DuckDB data-loss fix included; two calendar-dependent Ask trace tests fixed (they failed on `main` too) |
+| 1. Brand tokens | Done | Teal in every theme, validated chart series and heatmap ramp, tabular digits, no purple or gradient mark left |
+| 2. App type and colour system | Done | Scale, weights, radii and status tokens pinned by `app-type-system.test.ts` |
+| 3a. Page AI | Done | Targets the open page; add mode by default; Keep/Skip per proposed tile; only proposed tiles can be removed |
+| 3b. App copilot scope | Done | Server resolves the App's domain and states the reader's filters in the question |
+| 3c. Schedules | Done | Full-page runs through the App runtime; webhook delivery; digest with values, trust and failures |
+| 3d. Retire legacy paths | Deferred | The in-place editor is still the only place a published App shows review-required AI pins; Studio must show them first. `app-planner.ts` exports a type live code uses. The chat builder backs the `build_dql_app` MCP tool. |
+
 ## File format
 
 All additions are optional fields on `.dqld` version 3 until step 5, which
