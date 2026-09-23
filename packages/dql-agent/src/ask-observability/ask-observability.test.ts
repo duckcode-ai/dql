@@ -50,6 +50,10 @@ function memoryObserver(input: { runId: string; mode?: 'ask' | 'research' } = { 
   return { store, observer };
 }
 
+
+const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1_000;
+const NO_AGE_LIMIT = { detailMaxAgeMs: TEN_YEARS_MS, summaryMaxAgeMs: TEN_YEARS_MS };
+
 describe('AskTraceSqliteStoreV1 and observer', () => {
   it('records W3C-shaped IDs, pre-pruning lifecycle evidence, and a compact run reference', () => {
     const { store, observer } = memoryObserver({ runId: 'run-office-fixture' });
@@ -634,7 +638,8 @@ describe.runIf(sqliteAvailable())('AskTraceSqliteStoreV1 lifecycle (supported SQ
     const envelope = makeEnvelope('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'run-interrupted');
     expect(store.begin(envelope).accepted).toBe(true);
     store.close();
-    const restarted = new AskTraceSqliteStoreV1({ path });
+    // Fixture traces carry fixed 2026 dates; age retention must not depend on today.
+    const restarted = new AskTraceSqliteStoreV1({ path, ...NO_AGE_LIMIT });
     expect(restarted.getByRun('run-interrupted')?.envelope).toMatchObject({ status: 'interrupted', recordingStatus: 'partial' });
     restarted.close();
   });
@@ -863,6 +868,8 @@ describe.runIf(sqliteAvailable())('AskTraceSqliteStoreV1 lifecycle (supported SQ
       maxDetailedTraces: 1,
       maxSummaryTraces: 2,
       queueCap: 32,
+      // Only the count caps are under test; fixed fixture dates must not age out.
+      ...NO_AGE_LIMIT,
     });
     const complete = (traceId: string, runId: string, startedAt: string) => {
       const envelope = { ...makeEnvelope(traceId, runId), startedAt };
