@@ -3234,6 +3234,12 @@ export interface AppStudioAiProposal {
     providerId?: string;
   };
   operations: AppStudioDraftOperation[];
+  /** `add` keeps the page's tiles; absent on proposals stored before it existed. */
+  mode?: 'add' | 'replace';
+  targetPageId?: string;
+  prompt?: string;
+  /** Tiles this proposal adds; the author can decline any of them. */
+  proposedTileIds?: string[];
   defaultSelectedSourceIds?: string[];
   candidateSourceIds?: string[];
   warnings?: string[];
@@ -7476,7 +7482,16 @@ export const api = {
 
   async proposeAppBuildChanges(
     id: string,
-    input: { prompt: string; expectedRevision: number; proposalHash: string; selectedBlockIds?: string[] },
+    input: {
+      prompt: string;
+      expectedRevision: number;
+      proposalHash: string;
+      selectedBlockIds?: string[];
+      /** The page the author has open; the plan lands there. */
+      pageId?: string;
+      /** `add` (default) keeps existing tiles; `replace` rebuilds the page. */
+      mode?: 'add' | 'replace';
+    },
   ): Promise<{ ok: true; proposal: AppStudioAiProposal }> {
     return request(`/api/app-builds/${encodeURIComponent(id)}/ai-proposals`, {
       method: 'POST',
@@ -7609,7 +7624,7 @@ export const api = {
     expectedRevision: number;
     expectedProposalHash: string;
   } & (
-    | { mode: 'ai'; proposalId: string; selectedSourceIds: string[] }
+    | { mode: 'ai'; proposalId: string; selectedSourceIds: string[]; rejectedTileIds?: string[] }
     | { mode: 'manual'; enableReviewRequired?: boolean; selections: Array<{ sourceId: string; pageId?: string; view: 'kpi' | 'chart' | 'table'; query?: TileQuery; title?: string }> }
   )): Promise<{ ok: true; draft: AppStudioBuildDraft; pageIds: string[]; tileIds: string[] }> {
     return request(`/api/app-builds/${encodeURIComponent(id)}/compose`, {

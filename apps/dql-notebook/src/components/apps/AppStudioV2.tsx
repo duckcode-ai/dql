@@ -374,6 +374,11 @@ export function AppStudioV2({
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [proposal, setProposal] = useState<AppStudioAiProposal | null>(null);
+  /** Proposed tiles the author declined; cleared whenever the proposal changes. */
+  const [skippedProposalTileIds, setSkippedProposalTileIds] = useState<ReadonlySet<string>>(() => new Set());
+  /** Page AI adds to the open page unless the author asks to rebuild it. */
+  const [replacePageWithAi, setReplacePageWithAi] = useState(false);
+  useEffect(() => { setSkippedProposalTileIds(new Set()); }, [proposal?.id]);
   const [selectedProposalSourceIds, setSelectedProposalSourceIds] = useState<Set<string>>(new Set());
   const [proposalAddingSourceId, setProposalAddingSourceId] = useState<string | null>(null);
   const [aiActivity, setAiActivity] = useState<AppStudioAiActivity | null>(null);
@@ -726,11 +731,14 @@ export function AppStudioV2({
     setBusy(true);
     setError(null);
     try {
+      const targetPageId = base.pages.some((page) => page.id === activePageId) ? activePageId : base.pages[0]?.id;
       const result = await api.proposeAppBuildChanges(base.id, {
         prompt: nextPrompt.trim() || base.frame.goal,
         expectedRevision: base.revision,
         proposalHash: base.proposalHash,
         selectedBlockIds: requiredSourceIds,
+        ...(targetPageId ? { pageId: targetPageId } : {}),
+        mode: replacePageWithAi ? 'replace' : 'add',
       });
       setProposal(result.proposal);
       setAiActivity(null);
@@ -1124,6 +1132,7 @@ export function AppStudioV2({
         expectedProposalHash: draft.proposalHash,
         proposalId: proposal.id,
         selectedSourceIds: Array.from(selectedProposalSourceIds),
+        ...(skippedProposalTileIds.size > 0 ? { rejectedTileIds: Array.from(skippedProposalTileIds) } : {}),
       });
       const next = result.draft;
       setDraft(next);
@@ -1133,7 +1142,7 @@ export function AppStudioV2({
       setFilterOptionsByPage({});
       setProposal(null);
       setName(next.name);
-      const generatedPage = next.pages[0];
+      const generatedPage = next.pages.find((page) => page.id === proposal.targetPageId) ?? next.pages[0];
       setActivePageId(generatedPage?.id ?? activePageId);
       if (generatedPage && pageHasDataTiles(generatedPage)) {
         setSavedMessage('App generated · loading governed data…');
@@ -2335,7 +2344,9 @@ export function AppStudioV2({
       ?? projectedPages[0]
       ?? null
     : null;
-  const proposalChangeCount = projectedPages?.reduce((total, page) => total + page.changeCount, 0) ?? 0;
+  // Declined tiles are not changes the author will apply.
+  const proposalChangeCount = Math.max(0, (projectedPages?.reduce((total, page) => total + page.changeCount, 0) ?? 0)
+    - (projectedPages?.reduce((total, page) => total + page.items.filter((item) => item.change === 'added' && skippedProposalTileIds.has(item.tile.i)).length, 0) ?? 0));
   const gridColumns = breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12;
   const datasetItemForSource = (sourceId?: string) => sourceId
     ? datasetItems.find((item) => (item.sourceId ?? item.id) === sourceId) ?? null
@@ -2534,7 +2545,24 @@ export function AppStudioV2({
             <div className="studio-page-grid">
               {editing && draftTile && activeDescriptor ? <DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /> : null}
               {projectedPage ? projectedPage.items.map((item) => item.change === 'added' || item.change === 'updated'
-                ? <ProposedTileCard key={item.tile.i} tile={item.tile} change={item.change} before={item.before} descriptor={datasetItemForSource(item.tile.sourceId)?.capabilities?.dataset as DatasetDescriptor | undefined} columns={gridColumns} themeMode={themeMode} />
+                ? <ProposedTileCard
+                  key={item.tile.i}
+                  tile={item.tile}
+                  change={item.change}
+                  before={item.before}
+                  descriptor={datasetItemForSource(item.tile.sourceId)?.capabilities?.dataset as DatasetDescriptor | undefined}
+                  columns={gridColumns}
+                  themeMode={themeMode}
+                  kept={!skippedProposalTileIds.has(item.tile.i)}
+                  onToggleKept={proposal?.proposedTileIds?.includes(item.tile.i)
+                    ? () => setSkippedProposalTileIds((current) => {
+                      const next = new Set(current);
+                      if (next.has(item.tile.i)) next.delete(item.tile.i);
+                      else next.add(item.tile.i);
+                      return next;
+                    })
+                    : undefined}
+                />
                 : renderTile(
                   item.tile,
                   item.change === 'removed' ? 'proposal-removed' : projectedPage.linkedTileIds.has(item.tile.i) ? 'proposal-linked' : '',
@@ -2644,8 +2672,12 @@ export function AppStudioV2({
         {aiScope === 'page' ? <section className="studio-ai-page-scope">
           <label htmlFor="studio-ai-page-prompt">Describe the page or the change you want</label>
           <textarea id="studio-ai-page-prompt" value={prompt} rows={5} onChange={(event) => setPrompt(event.target.value)} placeholder="Revenue and order trends by region for the weekly business review" />
-          <small>AI plans tiles from governed Datasets only. You review the plan before anything changes.</small>
-          <button type="button" className="primary" disabled={busy || previewing} onClick={() => void requestAiProposal()}><Sparkles size={13} /> Propose page changes</button>
+          <small>AI plans tiles from governed Datasets only. New tiles are added below what is already here, and you keep or skip each one before anything changes.</small>
+          <label htmlFor="studio-ai-replace-page" className="studio-ai-replace">
+            <input id="studio-ai-replace-page" type="checkbox" checked={replacePageWithAi} onChange={(event) => setReplacePageWithAi(event.target.checked)} />
+            Rebuild this page instead (replaces its current tiles)
+          </label>
+          <button type="button" className="primary" disabled={busy || previewing} onClick={() => void requestAiProposal()}><Sparkles size={13} /> {replacePageWithAi ? 'Propose a new page' : 'Propose additions'}</button>
         </section> : null}
         {aiScope === 'tile' && autopilotReview ? <AppAutopilotReviewCard
           proposal={autopilotReview}

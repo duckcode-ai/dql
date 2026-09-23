@@ -789,6 +789,8 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         expectedRevision?: number;
         proposalHash?: string;
         selectedBlockIds?: string[];
+        pageId?: string;
+        mode?: AppBuildProposalMode;
       }>(req);
       if (body.expectedRevision !== current.revision || body.proposalHash !== current.proposalHash) {
         sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh before asking AI to change this draft.' });
@@ -797,6 +799,8 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       const proposal = await proposeAppBuildDraftOperations(projectRoot, current, {
         prompt: cleanString(body.prompt) || current.frame.goal,
         selectedBlockIds: body.selectedBlockIds,
+        pageId: body.pageId,
+        mode: body.mode,
       }, { generateGovernedAnswer: ctx.generateGovernedAnswer, planAppBuild: ctx.planAppBuild, datasetsEnabled: ctx.datasetsEnabled });
       writeAppBuildDraftAiProposal(projectRoot, proposal);
       sendJson(res, 201, { ok: true, proposal });
@@ -870,8 +874,11 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         ...(body.additionalSourceIds ?? []),
       ].map(cleanString).filter(Boolean));
       const proposal = await proposeAppBuildDraftOperations(projectRoot, current, {
-        prompt: [current.frame.goal, answerText.length ? `Clarification decisions: ${answerText.join('; ')}` : ''].filter(Boolean).join('\n'),
+        prompt: [previous.prompt || current.frame.goal, answerText.length ? `Clarification decisions: ${answerText.join('; ')}` : ''].filter(Boolean).join('\n'),
         selectedBlockIds: selectedSourceIds,
+        // A revision answers the same request: same page, same add/replace choice.
+        pageId: previous.targetPageId,
+        mode: previous.mode ?? 'replace',
       }, { generateGovernedAnswer: ctx.generateGovernedAnswer, planAppBuild: ctx.planAppBuild, datasetsEnabled: ctx.datasetsEnabled });
       proposal.defaultSelectedSourceIds = selectedSourceIds.filter((sourceId) => proposal.operations.some((operation) => (
         operation.type === 'upsert_source' && operation.source.id === sourceId
@@ -3021,6 +3028,8 @@ export async function proposeAppAiBuild(
   }
 }
 
+export type AppBuildProposalMode = 'add' | 'replace';
+
 export interface AppBuildDraftAiProposal {
   id: string;
   draftId: string;
@@ -3032,6 +3041,18 @@ export interface AppBuildDraftAiProposal {
    */
   plannerProvenance: AppBuilderPlannerProvenance;
   operations: AppBuildDraftOperation[];
+  /**
+   * `add` keeps the target page's tiles, title, sections and story and only
+   * proposes new tiles; `replace` rebuilds the page from the plan. Stored
+   * proposals written before this field existed behave as `replace`.
+   */
+  mode?: AppBuildProposalMode;
+  /** The page the author asked about; the first planned page lands here. */
+  targetPageId?: string;
+  /** The author's request, reused when clarifications revise the proposal. */
+  prompt?: string;
+  /** Tiles this proposal adds. Only these can be deselected at compose. */
+  proposedTileIds?: string[];
   /** Governed sources start selected; generated review DQL is always opt-in. */
   defaultSelectedSourceIds?: string[];
   /** Complete bounded candidate set used by the App-specific planning call. */
@@ -3137,7 +3158,13 @@ export type AppBuildComposeRequest = {
   expectedRevision: number;
   expectedProposalHash: string;
 } & (
-  | { mode: 'ai'; proposalId: string; selectedSourceIds: string[] }
+  | {
+    mode: 'ai';
+    proposalId: string;
+    selectedSourceIds: string[];
+    /** Proposed tiles the author declined; existing tiles are never removed here. */
+    rejectedTileIds?: string[];
+  }
   | {
     mode: 'manual';
     enableReviewRequired?: boolean;
@@ -3965,10 +3992,19 @@ function materializeAppBuildProposalReviewAnalyses(
 export async function proposeAppBuildDraftOperations(
   projectRoot: string,
   draft: AppBuildDraft,
-  input: { prompt: string; selectedBlockIds?: string[] },
+  input: { prompt: string; selectedBlockIds?: string[]; pageId?: string; mode?: AppBuildProposalMode },
   hooks?: AppBuildHooks,
 ): Promise<AppBuildDraftAiProposal> {
   const prompt = cleanString(input.prompt) || draft.frame.goal;
+  const mode: AppBuildProposalMode = input.mode === 'replace' ? 'replace' : 'add';
+  const requestedPageId = cleanString(input.pageId);
+  const initialPage = requestedPageId
+    ? draft.pages.find((candidate) => candidate.id === requestedPageId)
+    : draft.pages[0];
+  if (requestedPageId && !initialPage) {
+    throw new Error(`APP_BUILD_PAGE_NOT_FOUND: page ${requestedPageId} is not in this App draft; refresh and try again.`);
+  }
+  if (!initialPage) throw new Error('The App draft needs a page before AI can compose it.');
   const {
     datasetPlannedQueryCoversRequirement,
     ensureAgentProjectReady,
@@ -3995,8 +4031,8 @@ export async function proposeAppBuildDraftOperations(
     ...resolvedRequired.items,
     ...shortlistAppSources(projectRoot, prompt, {
     sourcePolicy: draft.sourcePolicy,
-    domains: draft.pages[0]?.metadata.domain && draft.pages[0].metadata.domain !== 'general'
-      ? [draft.pages[0].metadata.domain]
+    domains: initialPage.metadata.domain && initialPage.metadata.domain !== 'general'
+      ? [initialPage.metadata.domain]
       : undefined,
     }).items,
   ]).slice(0, 12);
@@ -4005,7 +4041,7 @@ export async function proposeAppBuildDraftOperations(
     candidates,
     requiredSourceIds: resolvedRequired.items.map((source) => source.sourceId),
     sourcePolicy: draft.sourcePolicy,
-    domain: draft.pages[0]?.metadata.domain,
+    domain: initialPage.metadata.domain,
     audience: draft.frame.audience,
     complete: hooks?.planAppBuild,
   });
@@ -4013,12 +4049,11 @@ export async function proposeAppBuildDraftOperations(
   if (hooks?.datasetsEnabled === false && brief.components.some((component) => byId.get(component.sourceId)?.capabilities.dataset)) {
     throw new Error('APP_DATASETS_FEATURE_DISABLED: enable apps.datasets in dql.config.json before asking AI to author field-based Dataset tiles.');
   }
-  const initialPage = draft.pages[0];
-  if (!initialPage) throw new Error('The App draft needs a page before AI can compose it.');
   type PlannedPageState = {
     planId: string;
     pageId: string;
     page: DashboardDocument;
+    keepMetadata: boolean;
     structuralItems: DashboardGridItem[];
     plannedItems: DashboardGridItem[];
     reservedItems: DashboardGridItem[];
@@ -4030,7 +4065,9 @@ export async function proposeAppBuildDraftOperations(
   const pageIdForPlan = (preferred: string, index: number): string => {
     const direct = draft.pages.find((candidate) => candidate.id === preferred && !assignedExistingPageIds.has(candidate.id));
     const first = index === 0 && !assignedExistingPageIds.has(initialPage.id) ? initialPage : undefined;
-    const existing = direct ?? first;
+    // The author asked about one page: the plan's first page lands there even
+    // when the planner named it after a different existing page.
+    const existing = requestedPageId ? first ?? direct : direct ?? first;
     if (existing) {
       assignedExistingPageIds.add(existing.id);
       return existing.id;
@@ -4064,7 +4101,11 @@ export async function proposeAppBuildDraftOperations(
       datasets: [],
       layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [] },
     };
-    const structuralItems = base.layout.items.filter((item) => Boolean(item.text));
+    // Add mode keeps every existing tile; replace mode keeps only text tiles.
+    const structuralItems = mode === 'add'
+      ? [...base.layout.items]
+      : base.layout.items.filter((item) => Boolean(item.text));
+    const keepMetadata = mode === 'add' && Boolean(existing);
     const datasetBindings = [...(base.datasets ?? [])];
     return {
       planId: plannedPage.id,
@@ -4072,8 +4113,11 @@ export async function proposeAppBuildDraftOperations(
       page: {
         ...base,
         ...(datasetBindings.length > 0 ? { version: 3 as const, datasets: datasetBindings } : {}),
-        metadata: { ...base.metadata, title: plannedPage.title, description: brief.frame.decision || brief.frame.goal },
+        metadata: keepMetadata
+          ? base.metadata
+          : { ...base.metadata, title: plannedPage.title, description: brief.frame.decision || brief.frame.goal },
       },
+      keepMetadata,
       structuralItems,
       plannedItems: [],
       reservedItems: [...structuralItems],
@@ -4168,22 +4212,36 @@ export async function proposeAppBuildDraftOperations(
   const nextPages = pageStates.map((state) => {
     const items = [...state.structuralItems, ...state.plannedItems];
     const plannedPage = brief.pages.find((candidate) => candidate.id === state.planId)!;
-    return {
-      ...state.page,
-      ...(state.datasetBindings.length > 0 ? { version: 3 as const, datasets: state.datasetBindings } : {}),
-      metadata: { ...state.page.metadata, title: plannedPage.title, description: brief.frame.decision || brief.frame.goal },
-      sections: plannedPage.sections.map((section, index) => ({
-        id: section.id,
-        title: section.title,
-        kind: section.kind,
-        order: index,
-      })),
-      story: {
+    const plannedSections = plannedPage.sections.map((section, index) => ({
+      id: section.id,
+      title: section.title,
+      kind: section.kind,
+      order: index,
+    }));
+    const existingSections = state.keepMetadata ? state.page.sections ?? [] : [];
+    const sections = [
+      ...existingSections,
+      ...plannedSections
+        .filter((section) => !existingSections.some((existingSection) => existingSection.id === section.id))
+        .map((section, index) => ({ ...section, order: existingSections.length + index })),
+    ];
+    const plannedTileIds = state.plannedItems.map((item) => item.i);
+    const story = state.keepMetadata && state.page.story
+      ? { ...state.page.story, eligibleTileIds: unique([...(state.page.story.eligibleTileIds ?? []), ...plannedTileIds]) }
+      : {
         version: 1 as const,
         goal: brief.frame.goal,
         ...(brief.frame.audience ? { audience: brief.frame.audience } : {}),
-        eligibleTileIds: state.plannedItems.map((item) => item.i),
-      },
+        eligibleTileIds: plannedTileIds,
+      };
+    return {
+      ...state.page,
+      ...(state.datasetBindings.length > 0 ? { version: 3 as const, datasets: state.datasetBindings } : {}),
+      metadata: state.keepMetadata
+        ? state.page.metadata
+        : { ...state.page.metadata, title: plannedPage.title, description: brief.frame.decision || brief.frame.goal },
+      sections,
+      story,
       layout: {
         ...state.page.layout,
         items,
@@ -4327,15 +4385,20 @@ export async function proposeAppBuildDraftOperations(
       },
       };
     });
+  // Add mode keeps the App's goal and earlier requirements; new requirement
+  // ids that collide with existing ones are renamed rather than overwriting.
+  const { frame: proposedFrame, requirements: proposedRequirements, coverage: proposedCoverage } = mode === 'add'
+    ? mergeAddModeRequirements(draft, brief.frame, brief.requirements, coverage)
+    : { frame: brief.frame, requirements: brief.requirements, coverage };
   const operations: AppBuildDraftOperation[] = [
     {
       type: 'set_frame',
-      frame: brief.frame,
+      frame: proposedFrame,
     },
     {
       type: 'set_requirements',
-      requirements: brief.requirements,
-      coverage,
+      requirements: proposedRequirements,
+      coverage: proposedCoverage,
     },
     ...sourceOperations,
     ...nextPages.map((page) => ({ type: 'upsert_page' as const, page })),
@@ -4350,6 +4413,10 @@ export async function proposeAppBuildDraftOperations(
     baseProposalHash: draft.proposalHash,
     plannerProvenance: brief.plannerProvenance,
     operations,
+    mode,
+    targetPageId: initialPage.id,
+    prompt,
+    proposedTileIds: pageStates.flatMap((state) => state.plannedItems.map((item) => item.i)),
     defaultSelectedSourceIds: plannedSources
       .filter((source) => source.eligibility.localPreview)
       .map((source) => source.sourceId),
@@ -6655,7 +6722,15 @@ async function composeStoredAppBuildDraft(
         throw new Error(`APP_BUILD_REVIEW_POLICY_REQUIRED: enable review-required sources before adding ${source.qualifiedIdentity ?? source.sourceRef}.`);
       }
     }
-    const selectedOperations = operationsForSelectedAppBuildSources(proposal.operations, selected);
+    const rejected = new Set(unique((request.rejectedTileIds ?? []).map(cleanString).filter(Boolean)));
+    if (proposal.proposedTileIds) {
+      const unknown = Array.from(rejected).filter((tileId) => !proposal.proposedTileIds!.includes(tileId));
+      if (unknown.length) throw new Error(`APP_BUILD_TILE_NOT_IN_PROPOSAL: ${unknown.join(', ')}`);
+    }
+    const selectedOperations = operationsForSelectedAppBuildSources(proposal.operations, selected, {
+      proposedTileIds: proposal.proposedTileIds,
+      rejectedTileIds: rejected,
+    });
     // The plan is immutable intent, not source authority. Re-resolving a
     // source protects against provider-supplied capabilities, but it must not
     // silently upgrade a server-issued proposal to a newer Dataset revision or
@@ -6674,7 +6749,11 @@ async function composeStoredAppBuildDraft(
     return {
       draft: next,
       pageIds: pages.map((page) => page.id),
-      tileIds: pages.flatMap((page) => page.layout.items.filter((item) => item.sourceId && selected.has(item.sourceId)).map((item) => item.i)),
+      tileIds: pages.flatMap((page) => page.layout.items
+        .filter((item) => (proposal.proposedTileIds
+          ? proposal.proposedTileIds.includes(item.i)
+          : Boolean(item.sourceId && selected.has(item.sourceId))))
+        .map((item) => item.i)),
     };
   }
 
@@ -6837,28 +6916,91 @@ async function composeStoredAppBuildDraft(
   return { draft: next, pageIds: Array.from(pageIds), tileIds };
 }
 
+/**
+ * Add-mode proposals extend an App rather than re-plan it: the author's goal
+ * and earlier requirements stay, the plan only contributes what is new, and a
+ * planner requirement id that already exists is renamed so it cannot replace
+ * the earlier requirement or its coverage.
+ */
+function mergeAddModeRequirements(
+  draft: AppBuildDraft,
+  plannedFrame: AppBuildDraft['frame'],
+  plannedRequirements: AppBuildDraft['requirements'],
+  plannedCoverage: AppBuildDraft['coverage'],
+): { frame: AppBuildDraft['frame']; requirements: AppBuildDraft['requirements']; coverage: AppBuildDraft['coverage'] } {
+  const current = draft.frame;
+  const frame: AppBuildDraft['frame'] = {
+    ...plannedFrame,
+    goal: cleanString(current.goal) || plannedFrame.goal,
+    ...(cleanString(current.decision) ? { decision: current.decision } : {}),
+    ...(cleanString(current.audience) ? { audience: current.audience } : {}),
+    metrics: unique([...(current.metrics ?? []), ...plannedFrame.metrics]),
+    dimensions: unique([...(current.dimensions ?? []), ...plannedFrame.dimensions]),
+    filters: unique([...(current.filters ?? []), ...plannedFrame.filters]),
+  };
+  const taken = new Set(draft.requirements.map((requirement) => requirement.id));
+  const renamed = new Map<string, string>();
+  const added = plannedRequirements.map((requirement) => {
+    let id = requirement.id;
+    for (let suffix = 2; taken.has(id); suffix += 1) id = `${requirement.id}-${suffix}`;
+    taken.add(id);
+    renamed.set(requirement.id, id);
+    return id === requirement.id ? requirement : { ...requirement, id };
+  });
+  const addedCoverage = plannedCoverage.map((item) => ({ ...item, requirementId: renamed.get(item.requirementId) ?? item.requirementId }));
+  return {
+    frame,
+    requirements: [...draft.requirements, ...added],
+    coverage: [...draft.coverage, ...addedCoverage],
+  };
+}
+
 function operationsForSelectedAppBuildSources(
   operations: AppBuildDraftOperation[],
   selected: Set<string>,
+  options: { proposedTileIds?: string[]; rejectedTileIds?: Set<string> } = {},
 ): AppBuildDraftOperation[] {
-  const keptComponentIds = new Set(operations.flatMap((operation) => {
-    if (operation.type === 'upsert_page') {
-      return operation.page.layout.items.filter((item) => !item.sourceId || selected.has(item.sourceId)).map((item) => item.i);
-    }
-    if (operation.type === 'add_tile' && (!operation.tile.sourceId || selected.has(operation.tile.sourceId))) return [operation.tile.i];
+  const proposed = options.proposedTileIds ? new Set(options.proposedTileIds) : undefined;
+  const rejected = options.rejectedTileIds ?? new Set<string>();
+  // Only tiles the proposal added can be dropped here. Proposals stored
+  // before `proposedTileIds` existed rebuilt the whole page, so every tile on
+  // it was proposed.
+  const removesTile = (item: DashboardGridItem): boolean => {
+    if (proposed && !proposed.has(item.i)) return false;
+    return rejected.has(item.i) || Boolean(item.sourceId && !selected.has(item.sourceId));
+  };
+  const removedTileIds = new Set(operations.flatMap((operation) => {
+    if (operation.type === 'upsert_page') return operation.page.layout.items.filter(removesTile).map((item) => item.i);
+    if (operation.type === 'add_tile' && removesTile(operation.tile)) return [operation.tile.i];
     return [];
   }));
+  const keptComponentIds = new Set(operations.flatMap((operation) => {
+    if (operation.type === 'upsert_page') return operation.page.layout.items.filter((item) => !removedTileIds.has(item.i)).map((item) => item.i);
+    if (operation.type === 'add_tile' && !removedTileIds.has(operation.tile.i)) return [operation.tile.i];
+    return [];
+  }));
+  const keptCoverage = (item: AppBuildDraft['coverage'][number]) => {
+    const sourceIds = item.sourceIds.filter((sourceId) => selected.has(sourceId));
+    const componentIds = item.componentIds.filter((componentId) => keptComponentIds.has(componentId));
+    return { ...item, sourceIds, componentIds, status: sourceIds.length && componentIds.length ? item.status : 'gap' as const };
+  };
   return operations.flatMap((operation): AppBuildDraftOperation[] => {
     if (operation.type === 'upsert_source') return selected.has(operation.source.id) ? [operation] : [];
+    if (operation.type === 'add_tile') return removedTileIds.has(operation.tile.i) ? [] : [operation];
     if (operation.type === 'set_review_task') {
+      if (operation.task.tileId && removedTileIds.has(operation.task.tileId)) return [];
       return !operation.task.sourceId || selected.has(operation.task.sourceId) ? [operation] : [];
     }
     if (operation.type === 'upsert_page') {
-      const items = operation.page.layout.items.filter((item) => !item.sourceId || selected.has(item.sourceId));
+      const items = operation.page.layout.items.filter((item) => !removedTileIds.has(item.i));
+      const story = operation.page.story
+        ? { ...operation.page.story, eligibleTileIds: (operation.page.story.eligibleTileIds ?? []).filter((id) => !removedTileIds.has(id)) }
+        : undefined;
       return [{
         ...operation,
         page: {
           ...operation.page,
+          ...(story ? { story } : {}),
           layout: {
             ...operation.page.layout,
             items,
@@ -6867,28 +7009,46 @@ function operationsForSelectedAppBuildSources(
         },
       }];
     }
-    if (operation.type === 'set_requirements') {
-      const coverage = (operation.coverage ?? []).map((item) => {
-        const sourceIds = item.sourceIds.filter((sourceId) => selected.has(sourceId));
-        const componentIds = item.componentIds.filter((componentId) => keptComponentIds.has(componentId));
-        return {
-          ...item,
-          sourceIds,
-          componentIds,
-          status: sourceIds.length && componentIds.length ? item.status : 'gap' as const,
-        };
-      });
-      return [{ ...operation, coverage }];
-    }
-    if (operation.type === 'set_coverage') {
+    if (operation.type === 'set_filter') {
+      const filter = operation.filter;
+      const scopedTileIds = filter.scope && 'tileIds' in filter.scope ? filter.scope.tileIds : undefined;
+      const keptScope = scopedTileIds?.filter((id) => !removedTileIds.has(id));
+      const bindings = filter.datasetBindings
+        ? Object.fromEntries(Object.entries(filter.datasetBindings).flatMap(([datasetId, binding]) => {
+          if (!binding.tileIds) return [[datasetId, binding]];
+          const tileIds = binding.tileIds.filter((id) => !removedTileIds.has(id));
+          return tileIds.length > 0 ? [[datasetId, { ...binding, tileIds }]] : [];
+        }))
+        : undefined;
+      // A page filter that only served declined tiles has nothing left to filter.
+      if (scopedTileIds && scopedTileIds.length > 0 && keptScope?.length === 0) return [];
       return [{
         ...operation,
-        coverage: operation.coverage.map((item) => {
-          const sourceIds = item.sourceIds.filter((sourceId) => selected.has(sourceId));
-          const componentIds = item.componentIds.filter((componentId) => keptComponentIds.has(componentId));
-          return { ...item, sourceIds, componentIds, status: sourceIds.length && componentIds.length ? item.status : 'gap' as const };
-        }),
+        filter: {
+          ...filter,
+          ...(keptScope && filter.scope ? { scope: { ...filter.scope, tileIds: keptScope } } : {}),
+          ...(bindings ? { datasetBindings: bindings } : {}),
+        },
       }];
+    }
+    if (operation.type === 'set_interactions') {
+      const interactions = operation.interactions ? structuredClone(operation.interactions) : operation.interactions;
+      if (interactions?.crossFilter) {
+        interactions.crossFilter = {
+          ...interactions.crossFilter,
+          mappings: interactions.crossFilter.mappings.filter((mapping) => !removedTileIds.has(mapping.fromTileId)),
+        };
+      }
+      if (interactions?.navigate) {
+        interactions.navigate = interactions.navigate.filter((entry) => !removedTileIds.has(entry.fromTile));
+      }
+      return [{ ...operation, interactions }];
+    }
+    if (operation.type === 'set_requirements') {
+      return [{ ...operation, coverage: (operation.coverage ?? []).map(keptCoverage) }];
+    }
+    if (operation.type === 'set_coverage') {
+      return [{ ...operation, coverage: operation.coverage.map(keptCoverage) }];
     }
     return [operation];
   });

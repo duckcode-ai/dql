@@ -2346,6 +2346,130 @@ describe('Apps command center API helpers', () => {
     });
   });
 
+  it('RFC-0008 page AI adds to the page the author has open and lets them decline single tiles', async () => {
+    const root = createProject();
+    writeDatasetBlock(root, 'commerce/order-lines.dql');
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Regional App', goal: 'Understand revenue by region', authoringMode: 'manual',
+      sourcePolicy: 'governed_only', domain: 'commerce',
+    });
+    const draft = (created.payload as any).draft;
+    const catalog = await invokeAppsApi(root, `/api/app-builds/${draft.id}/source-candidates?limit=50`, 'GET', {});
+    const source = (catalog.payload as any).items.find((item: any) => item.capabilities?.dataset?.id);
+
+    // A second page with one tile the author built by hand.
+    const withPage = await invokeAppsApi(root, `/api/app-builds/${draft.id}`, 'PATCH', {
+      expectedRevision: draft.revision,
+      operations: [{
+        type: 'upsert_page',
+        page: {
+          version: 3, id: 'regions', datasets: [],
+          metadata: { title: 'Regions', description: 'Hand-written page', domain: 'commerce' },
+          layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [] },
+        },
+      }],
+    });
+    expect(withPage.status).toBe(200);
+    const paged = (withPage.payload as any).draft;
+    const manual = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'manual', expectedRevision: paged.revision, expectedProposalHash: paged.proposalHash,
+      selections: [{
+        sourceId: source.sourceId, pageId: 'regions', view: 'chart', title: 'Revenue by region',
+        query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
+      }],
+    });
+    expect(manual.status).toBe(200);
+    const before = (manual.payload as any).draft;
+    const handTileId = before.pages.find((page: any) => page.id === 'regions').layout.items[0].i;
+    const overviewBefore = before.pages.find((page: any) => page.id === 'overview');
+
+    // The planner names its page "overview", but the author asked on Regions.
+    const provider = async () => JSON.stringify({
+      frame: { goal: 'A different goal the planner made up' },
+      requirements: [
+        { id: 'revenue', question: 'Revenue', role: 'kpi', required: true, measures: ['revenue'], dimensions: [], filters: [] },
+        { id: 'orders', question: 'Order count', role: 'kpi', required: true, measures: ['order_count'], dimensions: [], filters: [] },
+      ],
+      components: [
+        { id: 'revenue-kpi', title: 'Revenue', sourceId: source.sourceId, requirementIds: ['revenue'], role: 'kpi', view: 'kpi', rationale: 'Total', query: { dimensions: [], measures: [{ measure: 'revenue' }] } },
+        { id: 'orders-kpi', title: 'Order count', sourceId: source.sourceId, requirementIds: ['orders'], role: 'kpi', view: 'kpi', rationale: 'Count', query: { dimensions: [], measures: [{ measure: 'order_count' }] } },
+      ],
+      pages: [{ id: 'overview', title: 'Planner title', componentIds: ['revenue-kpi', 'orders-kpi'], sections: [{ id: 'kpis', title: 'Key metrics', kind: 'kpi_band', componentIds: ['revenue-kpi', 'orders-kpi'] }] }],
+      filters: [], navigation: [], crossFilters: [], detailDrills: [],
+    });
+    const proposed = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals`, 'POST', {
+      prompt: 'Add headline KPIs', expectedRevision: before.revision, proposalHash: before.proposalHash, pageId: 'regions',
+    }, { planAppBuild: provider });
+    expect(proposed.status).toBe(201);
+    const proposal = (proposed.payload as any).proposal;
+    expect(proposal).toMatchObject({ mode: 'add', targetPageId: 'regions', prompt: 'Add headline KPIs' });
+    expect(proposal.proposedTileIds).toEqual(['revenue-kpi', 'orders-kpi']);
+    const pageOps = proposal.operations.filter((operation: any) => operation.type === 'upsert_page');
+    expect(pageOps.map((operation: any) => operation.page.id)).toEqual(['regions']);
+    const regions = pageOps[0].page;
+    // The hand-built tile, title and description stay; new tiles go below it.
+    expect(regions.metadata).toMatchObject({ title: 'Regions', description: 'Hand-written page' });
+    expect(regions.layout.items.map((item: any) => item.i)).toEqual([handTileId, 'revenue-kpi', 'orders-kpi']);
+    const handTile = regions.layout.items[0];
+    expect(regions.layout.items[1].y).toBeGreaterThanOrEqual(handTile.y + handTile.h);
+    // The App goal is the author's, not the planner's.
+    expect(proposal.operations.find((operation: any) => operation.type === 'set_frame').frame.goal).toBe('Understand revenue by region');
+
+    const unknownTile = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'ai', proposalId: proposal.id, selectedSourceIds: [source.sourceId], rejectedTileIds: [handTileId],
+      expectedRevision: before.revision, expectedProposalHash: before.proposalHash,
+    });
+    expect(unknownTile.status).toBe(409);
+    expect((unknownTile.payload as any).error).toContain('APP_BUILD_TILE_NOT_IN_PROPOSAL');
+
+    const composed = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'ai', proposalId: proposal.id, selectedSourceIds: [source.sourceId], rejectedTileIds: ['orders-kpi'],
+      expectedRevision: before.revision, expectedProposalHash: before.proposalHash,
+    });
+    expect(composed.status).toBe(200);
+    expect((composed.payload as any).tileIds).toEqual(['revenue-kpi']);
+    const saved = (composed.payload as any).draft;
+    expect(saved.pages.find((page: any) => page.id === 'regions').layout.items.map((item: any) => item.i))
+      .toEqual([handTileId, 'revenue-kpi']);
+    // Overview was never touched.
+    expect(saved.pages.find((page: any) => page.id === 'overview')).toEqual(overviewBefore);
+    // Earlier requirements survive; the declined tile's requirement stays a gap.
+    const coverage = new Map(saved.coverage.map((item: any) => [item.requirementId, item.status]));
+    expect(coverage.get('revenue')).toBe('covered');
+    expect(coverage.get('orders')).toBe('gap');
+  });
+
+  it('RFC-0008 replace mode still rebuilds the page from the plan when the author asks for it', async () => {
+    const root = createProject();
+    writeDatasetBlock(root, 'commerce/order-lines.dql');
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Replace App', goal: 'Revenue overview', authoringMode: 'manual', sourcePolicy: 'governed_only', domain: 'commerce',
+    });
+    const draft = (created.payload as any).draft;
+    const catalog = await invokeAppsApi(root, `/api/app-builds/${draft.id}/source-candidates?limit=50`, 'GET', {});
+    const source = (catalog.payload as any).items.find((item: any) => item.capabilities?.dataset?.id);
+    const manual = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      mode: 'manual', expectedRevision: draft.revision, expectedProposalHash: draft.proposalHash,
+      selections: [{ sourceId: source.sourceId, pageId: 'overview', view: 'chart', title: 'Old chart', query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] } }],
+    });
+    const before = (manual.payload as any).draft;
+    const provider = async () => JSON.stringify({
+      frame: { goal: 'Revenue overview' },
+      requirements: [{ id: 'revenue', question: 'Revenue', role: 'kpi', required: true, measures: ['revenue'], dimensions: [], filters: [] }],
+      components: [{ id: 'revenue-kpi', title: 'Revenue', sourceId: source.sourceId, requirementIds: ['revenue'], role: 'kpi', view: 'kpi', rationale: 'Total', query: { dimensions: [], measures: [{ measure: 'revenue' }] } }],
+      pages: [{ id: 'overview', title: 'Overview', componentIds: ['revenue-kpi'], sections: [] }],
+      filters: [], navigation: [], crossFilters: [], detailDrills: [],
+    });
+    const proposed = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals`, 'POST', {
+      prompt: 'Start over with one KPI', expectedRevision: before.revision, proposalHash: before.proposalHash, mode: 'replace',
+    }, { planAppBuild: provider });
+    const proposal = (proposed.payload as any).proposal;
+    expect(proposal.mode).toBe('replace');
+    const page = proposal.operations.find((operation: any) => operation.type === 'upsert_page').page;
+    expect(page.layout.items.map((item: any) => item.i)).toEqual(['revenue-kpi']);
+  });
+
+
   it('APP-065 prepares and atomically applies a source-pinned universal App Autopilot Dataset change', async () => {
     const root = createProject();
     writeDatasetBlock(root, 'commerce/order-lines.dql');

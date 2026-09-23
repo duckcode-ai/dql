@@ -673,6 +673,8 @@ export const APP_STUDIO_V2_STYLES = `
 .studio-ai-page-scope small { color:var(--text-tertiary); font-size:12px; }
 .studio-ai-page-scope .primary { justify-self:start; display:inline-flex; align-items:center; gap:6px; border:0; border-radius:8px; background:var(--accent); color:var(--accent-fg); font:inherit; font-size:13px; font-weight:600; padding:7px 12px; cursor:pointer; }
 .studio-ai-page-scope .primary:disabled { opacity:.55; cursor:default; }
+.studio-ai-page-scope .studio-ai-replace { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:400; color:var(--text-secondary); }
+.studio-ai-page-scope .studio-ai-replace input { accent-color:var(--accent); }
 .studio-copilot-loading { padding:18px; color:var(--text-tertiary); font-size:13px; }
 .studio-copilot-change { margin:12px; display:grid; gap:10px; border:1px solid var(--border-default); border-radius:12px; background:var(--bg-1); padding:12px; }
 .studio-copilot-change > header { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
@@ -1053,6 +1055,10 @@ export const APP_STUDIO_V2_STYLES = `
 .proposal-banner.warn { border-color:color-mix(in srgb,var(--status-warning) 45%,var(--border-default)); background:color-mix(in srgb,var(--status-warning) 7%,var(--bg-2)); }
 .proposal-tile { border:1.5px dashed var(--accent) !important; background:color-mix(in srgb,var(--accent-dim) 45%,var(--bg-2)) !important; cursor:default !important; }
 .proposal-badge { flex:none; padding:3px 7px; border-radius:4px; background:var(--accent); color:var(--accent-fg); font-size:11px; font-weight:600; letter-spacing:.05em; }
+.proposal-keep { margin-left:auto; display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:500; color:var(--text-secondary); cursor:pointer; }
+.proposal-keep input { accent-color:var(--accent); }
+.proposal-tile.skipped { opacity:.5; border-style:dotted !important; background:var(--bg-2) !important; }
+.proposal-tile.skipped .proposal-badge { background:var(--bg-3); color:var(--text-secondary); }
 .proposal-badge.updated, .proposal-badge.link { background:var(--accent-dim); color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent); }
 .proposal-badge.removed { background:color-mix(in srgb,var(--status-error) 10%,var(--bg-2)); color:var(--status-error); }
 .proposal-was { color:var(--text-tertiary); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }

@@ -20,6 +20,8 @@ export function ProposedTileCard({
   descriptor,
   columns,
   themeMode,
+  kept = true,
+  onToggleKept,
 }: {
   tile: Tile;
   change: Extract<ProposedTileChange, 'added' | 'updated'>;
@@ -28,12 +30,16 @@ export function ProposedTileCard({
   /** Grid columns available at the current preview width. */
   columns: number;
   themeMode: ThemeMode;
+  /** False when the author declined this proposed tile. */
+  kept?: boolean;
+  /** Present only for tiles the author may decline on their own. */
+  onToggleKept?: () => void;
 }): JSX.Element {
   const title = tile.title || humanize(tile.i);
   const renamed = change === 'updated' && before && (before.title || humanize(before.i)) !== title;
   const bodyHeight = Math.max(120, tile.h * 68 - 64);
   return <article
-    className={`studio-component-card proposal-tile ${change}`}
+    className={`studio-component-card proposal-tile ${change}${kept ? '' : ' skipped'}`}
     aria-label={`${change === 'added' ? 'Proposed tile' : 'Proposed change'}: ${title}`}
     style={{ '--studio-tile-width': Math.min(tile.w, columns), minHeight: tile.text ? undefined : Math.max(150, tile.h * 68) } as CSSProperties}
   >
@@ -41,6 +47,12 @@ export function ProposedTileCard({
       <span className={`proposal-badge ${change}`}>{change === 'added' ? 'PROPOSED' : 'PROPOSED CHANGE'}</span>
       <strong>{title}</strong>
       {renamed ? <small className="proposal-was">was “{before!.title || humanize(before!.i)}”</small> : null}
+      {onToggleKept
+        ? <label className="proposal-keep">
+          <input type="checkbox" checked={kept} onChange={onToggleKept} aria-label={`Keep ${title}`} />
+          Keep
+        </label>
+        : null}
     </header>
     <div className="draft-body" style={{ minHeight: tile.text ? 0 : bodyHeight }}>
       {tile.text
