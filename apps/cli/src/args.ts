@@ -13,6 +13,10 @@ export interface CLIFlags {
   apply?: boolean;
   /** `dql app verify --trust-key <file>`: a public key PEM the snapshot must be signed by. */
   trustKey?: string;
+  /** `dql app diff --html <file>`: write the visual review report. */
+  htmlReport?: string;
+  /** `dql app diff --markdown <file>`: write a PR comment. */
+  markdownReport?: string;
   /** `dql propose --plan` — print the deterministic plan; write nothing. */
   plan?: boolean;
   port: number | null;
@@ -277,6 +281,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.outDir = argv[++i];
     } else if (arg === '--trust-key' && i + 1 < argv.length) {
       flags.trustKey = argv[++i];
+    } else if (arg === '--html' && i + 1 < argv.length) {
+      flags.htmlReport = argv[++i];
+    } else if (arg === '--markdown' && i + 1 < argv.length) {
+      flags.markdownReport = argv[++i];
     } else if (arg === '--reasoning-effort' && i + 1 < argv.length) {
       flags.reasoningEffort = argv[++i];
     } else if ((arg === '--analysis-depth' || arg === '--depth') && i + 1 < argv.length) {

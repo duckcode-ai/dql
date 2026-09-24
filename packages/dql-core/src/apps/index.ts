@@ -187,3 +187,5 @@ export { READER_TRUST_LABELS, isDataTileForTrust, readerTileTrust, readerTrustCo
 export type { ReaderTrust, ReaderTrustItem, ReaderTrustState, ReaderTrustTile } from './reader-trust.js';
 export { evaluateMonitors, readAppMonitors, MAX_MONITORS_PER_SCHEDULE } from './monitors.js';
 export type { AppMonitor, AppMonitorCondition, MonitorEvaluation, MonitorPreviousValue, MonitorStatus } from './monitors.js';
+export { diffDashboardPages, diffAppDeliveries, renderLayoutDiffSvg, NUMBER_ASPECTS } from './app-diff.js';
+export type { PageDiff, PageAspect, TileAspect, TileBox, TileChange, TileChangeKind } from './app-diff.js';

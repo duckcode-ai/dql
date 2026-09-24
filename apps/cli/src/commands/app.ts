@@ -15,6 +15,7 @@
  *   dql app reindex [path]
  *   dql app verify <snapshot.html> [--trust-key <public.pem>] [--format json]
  *   dql app key
+ *   dql app diff [base] [head] [--html <file>] [--markdown <file>] [--check] [--format json]
  */
 
 import {
@@ -40,6 +41,7 @@ import {
 } from "@duckcodeailabs/dql-core";
 import type { CLIFlags } from "../args.js";
 import { readSnapshotPublicKey, verifySnapshot, type SnapshotVerification } from "../snapshot/app-snapshot.js";
+import { runAppDiff } from "./app-diff.js";
 import { findProjectRoot } from "../local-runtime.js";
 import {
   createStoredAppBuildDraft,
@@ -72,9 +74,11 @@ export async function runApp(
       return runAppVerify(rest, flags);
     case "key":
       return runAppKey(flags);
+    case "diff":
+      return runAppDiff(rest, flags);
     default:
       throw new Error(
-        "Usage: dql app <new|ls|show|build|reindex|verify|key> [args]\n" +
+        "Usage: dql app <new|ls|show|build|reindex|verify|key|diff> [args]\n" +
           "  dql app new <id> --domain <domain> [--owner <user>]\n" +
           '  dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]\n' +
           "  dql app ls [path]\n" +
@@ -82,7 +86,8 @@ export async function runApp(
           "  dql app build [path]\n" +
           "  dql app reindex [path]\n" +
           "  dql app verify <snapshot.html> [--trust-key <public.pem>] [--format json]\n" +
-          "  dql app key",
+          "  dql app key\n" +
+          "  dql app diff [base] [head] [--html <file>] [--markdown <file>] [--check]",
       );
   }
 }
