@@ -1,4 +1,5 @@
 import React, { lazy, Suspense, useCallback, useRef, useState, useEffect } from 'react';
+import { readAppPageLink, withAppPageLink } from '../apps/app-links';
 import { useShallow } from 'zustand/react/shallow';
 import { CommandPalette } from '../palette/CommandPalette';
 import { InspectorPanel } from './InspectorPanel';
@@ -56,6 +57,10 @@ export function AppShell() {
     sidebarOpen: store.sidebarOpen,
     sidebarPanel: store.sidebarPanel,
     themeMode: store.themeMode,
+    activeAppId: store.activeAppId,
+    activeAppDraftId: store.activeAppDraftId,
+    activeAppExperience: store.activeAppExperience,
+    activeDashboardId: store.activeDashboardId,
   })));
   const dispatch = useDispatch();
   const t = themes[state.themeMode];
@@ -134,6 +139,21 @@ export function AppShell() {
     const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
     if (next !== current) window.history.replaceState(window.history.state, '', next);
   }, [state.mainView]);
+
+  // A page link (`?app=<id>&page=<id>`, RFC 0008 step 10) opens that page in
+  // the reader once, on load.
+  useEffect(() => {
+    const link = readAppPageLink(window.location.href);
+    if (link) dispatch({ type: 'OPEN_APP', appId: link.appId, ...(link.pageId ? { dashboardId: link.pageId } : {}), experience: 'view', section: 'dashboards' });
+  }, [dispatch]);
+
+  // While a published page is open for reading, the address bar is its link.
+  useEffect(() => {
+    const reading = state.mainView === 'apps' && state.activeAppId && !state.activeAppDraftId && state.activeAppExperience === 'view';
+    const next = withAppPageLink(window.location.href, reading ? { appId: state.activeAppId!, pageId: state.activeDashboardId } : null);
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (next !== current) window.history.replaceState(window.history.state, '', next);
+  }, [state.activeAppDraftId, state.activeAppExperience, state.activeAppId, state.activeDashboardId, state.mainView]);
 
   // Global keyboard shortcuts
   useKeyboardShortcuts();

@@ -59,6 +59,7 @@ import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '..
 import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH } from '../agent/AiSidePanel';
 import { usePersistedAgentThreadId } from '../agent/usePersistedAgentThreadId';
+import { appPageUrl } from './app-links';
 import { AppBuildProposalPanel, defaultProposalSelection, type AppBuildBriefEdits } from './AppBuildProposalPanel';
 import { AppStudioLaunchSurface, AppStudioV2, type AppStudioLaunchConfig } from './AppStudioV2';
 import { APP_STYLES } from './app-styles';
@@ -3275,13 +3276,14 @@ function buildAppShareText(
   const appId = app?.id ?? dashboardApp?.id ?? appDoc?.app.id ?? 'app';
   const appName = app?.name ?? dashboardApp?.name ?? appDoc?.app.name ?? 'DQL App';
   const dashboard = dashboardDoc?.dashboard.metadata.title ?? appDoc?.dashboards[0]?.title ?? 'Overview';
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'local DQL';
+  const origin = typeof window !== 'undefined' ? window.location.origin : null;
+  const pageId = dashboardDoc?.dashboard.id ?? appDoc?.dashboards[0]?.id ?? null;
   return [
     appName,
     `App ID: ${appId}`,
     `Dashboard: ${dashboard}`,
     `Domain: ${app?.domain ?? dashboardApp?.domain ?? appDoc?.app.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'unknown'}`,
-    `Open locally: ${origin}`,
+    `Open: ${origin ? appPageUrl(origin, { appId, pageId }) : 'local DQL'}`,
   ].join('\n');
 }
 

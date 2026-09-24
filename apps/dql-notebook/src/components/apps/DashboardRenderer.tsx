@@ -37,6 +37,7 @@ import { DriverPanel, DriverView } from './DriverView';
 import { StoryView, storyEditionSummary } from './StoryView';
 import { SnapshotExportMenu, type SnapshotFormat } from './SnapshotExportMenu';
 import { PageAlertsMenu } from './PageAlertsMenu';
+import { ShareLinkMenu } from './ShareLinkMenu';
 import { buildSnapshotBody, downloadFile, printSnapshot, snapshotToPng } from './snapshot-export';
 import { CanvasPageFrame } from './CanvasPageFrame';
 import { buildStoryBindingCatalog, type StoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
@@ -1140,6 +1141,7 @@ export function DashboardRenderer({
           onToggle={() => setTrustLens((current) => !current)}
           actions={(
             <>
+              <ShareLinkMenu appId={appId} pageId={dashboard.id} />
               <PageAlertsMenu appId={appId} dashboardId={dashboard.id} runId={run && !run.partial && !run.incomplete ? run.runId : null} catalog={runCatalog} />
               <SnapshotExportMenu disabledReason={snapshotBlockedReason} onExport={exportSnapshot} />
             </>

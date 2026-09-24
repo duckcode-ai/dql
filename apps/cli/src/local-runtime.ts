@@ -17583,6 +17583,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // Where a reader's page link can be opened (RFC 0008 step 10). A loopback
+    // server is reachable only from this computer; a server shared on the
+    // network is reached through its allowed origins with the access token the
+    // asking browser already holds.
+    if (req.method === 'GET' && path === '/api/server/share') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(serializeJSON(loopback
+        ? { network: false, origins: [] }
+        : { network: true, origins: [...allowedOrigins], ...(authToken ? { token: authToken } : {}) }));
+      return;
+    }
+
     // The project's snapshot signing key, public half only (RFC 0008 step 10).
     if (req.method === 'GET' && path === '/api/apps/snapshot-key') {
       const key = readSnapshotPublicKey(projectRoot);

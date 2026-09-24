@@ -4910,6 +4910,12 @@ export const APP_STYLES = `
 .dql-alerts-panel button:focus-visible, .dql-alerts-form select:focus-visible, .dql-alerts-form input:focus-visible { outline: 2px solid var(--dql-app-accent); outline-offset: 2px; }
 .dql-alerts-status { margin: 0; font-size: 12px; }
 .dql-alerts-status.error { color: var(--status-error, #c14545); }
+.dql-share-row { display: grid; gap: 4px; }
+.dql-share-row label { color: var(--dql-app-muted); font-size: 12px; }
+.dql-share-row input { min-width: 0; height: 30px; padding: 0 8px; border: 1px solid var(--dql-app-line-2); border-radius: 8px; background: var(--dql-app-control); color: var(--dql-app-ink); font: 12px var(--font-mono, ui-monospace, monospace); }
+.dql-share-copy { flex: none !important; display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px; border: 1px solid var(--dql-app-line-2); border-radius: 8px; background: var(--dql-app-surface); color: var(--dql-app-ink); font: 500 12px var(--font-ui); cursor: pointer; }
+.dql-share-copy:hover { background: var(--dql-app-control); }
+.dql-share-row input:focus-visible, .dql-share-copy:focus-visible { outline: 2px solid var(--dql-app-accent); outline-offset: 2px; }
 .dql-tile-description { margin: 4px 0 0; color: var(--dql-app-muted); font: 400 12px/1.4 var(--font-ui); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; }
 .dql-tile-menu-anchor { position: absolute; top: 8px; right: 8px; z-index: 6; transition: opacity 120ms ease; }
 .dql-tile-menu-anchor:focus-within { opacity: 1 !important; }

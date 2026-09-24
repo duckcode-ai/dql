@@ -8493,6 +8493,15 @@ export const api = {
     });
   },
 
+  /** Where page links can be opened: this computer only, or the network origins and token. */
+  async getShareOrigins(): Promise<{ network: boolean; origins: string[]; token?: string }> {
+    try {
+      return await request<{ network: boolean; origins: string[]; token?: string }>('/api/server/share');
+    } catch {
+      return { network: false, origins: [] };
+    }
+  },
+
   /** The alerts on a page and the schedules that check them. */
   async getPageMonitors(appId: string, dashboardId: string): Promise<PageMonitorsResponseV1> {
     return request<PageMonitorsResponseV1>(`/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/monitors`);
