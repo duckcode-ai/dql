@@ -201,17 +201,175 @@ function dedupeIssues(issues: CanvasIssue[]): CanvasIssue[] {
  * not return shows as a dash.
  */
 export function fillCanvasHtml(checkedHtml: string, catalog: StoryBindingCatalog, drawTile: (tileId: string, height?: number) => string): string {
+  // An editor's path annotation (annotateCanvasHtml) rides along so the
+  // Studio can tell which source element a click landed on.
+  const pathOf = (attrs: string) => {
+    const path = /data-dql-path="([\d.]*)"/.exec(attrs)?.[1];
+    return path === undefined ? '' : ` data-dql-path="${path}"`;
+  };
   return checkedHtml
     .replace(/<dql-value([^>]*)><\/dql-value>/g, (_, attrs: string) => {
       const key = decode(/bind="([^"]*)"/.exec(attrs)?.[1] ?? '');
       const binding = catalog[key];
       return binding
-        ? `<span class="dql-value" title="${escapeHtml(binding.label)}">${escapeHtml(binding.display)}</span>`
-        : `<span class="dql-value missing" title="${escapeHtml(`${key} is not in this run's results`)}">—</span>`;
+        ? `<span class="dql-value" data-bind="${escapeHtml(key)}"${pathOf(attrs)} title="${escapeHtml(binding.label)}">${escapeHtml(binding.display)}</span>`
+        : `<span class="dql-value missing" data-bind="${escapeHtml(key)}"${pathOf(attrs)} title="${escapeHtml(`${key} is not in this run's results`)}">—</span>`;
     })
     .replace(/<dql-tile([^>]*)><\/dql-tile>/g, (_, attrs: string) => {
       const id = decode(/tile="([^"]*)"/.exec(attrs)?.[1] ?? '');
       const height = Number(/height="(\d+)"/.exec(attrs)?.[1]) || undefined;
-      return `<div class="dql-tile" data-tile="${escapeHtml(id)}">${drawTile(id, height)}</div>`;
+      return `<div class="dql-tile" data-tile="${escapeHtml(id)}"${pathOf(attrs)}>${drawTile(id, height)}</div>`;
     });
+}
+
+// ─── Editing a canvas as a tree (Custom layout editing in Studio) ───────────
+
+/** A checked canvas as a tree. Paths are child indexes from the root. */
+export type CanvasNode =
+  | { kind: 'element'; tag: string; attrs: Array<[string, string]>; children: CanvasNode[] }
+  | { kind: 'text'; text: string };
+export type CanvasPath = number[];
+
+/**
+ * Read markup into a tree. Pass checked markup (`checkCanvasHtml(...).html`):
+ * the tree keeps what it is given and does not check it again.
+ */
+export function parseCanvasHtml(html: string): CanvasNode[] {
+  const root: CanvasNode[] = [];
+  const stack: Array<Extract<CanvasNode, { kind: 'element' }>> = [];
+  const add = (node: CanvasNode) => (stack.at(-1)?.children ?? root).push(node);
+  for (const token of tokenize(html, [])) {
+    if (token.kind === 'text') {
+      if (token.text) add({ kind: 'text', text: token.text });
+      continue;
+    }
+    if (token.kind === 'close') {
+      const at = stack.map((node) => node.tag).lastIndexOf(token.tag);
+      if (at >= 0) stack.length = at;
+      continue;
+    }
+    const node: CanvasNode = { kind: 'element', tag: token.tag, attrs: token.attrs, children: [] };
+    add(node);
+    if (!token.selfClosing && !VOID_TAGS.has(token.tag)) stack.push(node);
+  }
+  return root;
+}
+
+/** Write a tree back as markup. `annotate` adds `data-dql-path` for an editor; never save annotated markup. */
+export function serializeCanvasNodes(nodes: CanvasNode[], options: { annotate?: boolean } = {}, prefix: CanvasPath = [], inStyle = false): string {
+  return nodes.map((node, index) => {
+    if (node.kind === 'text') return inStyle ? node.text : escapeHtml(node.text);
+    const path = [...prefix, index];
+    const attrs = node.attrs.map(([name, value]) => (value === '' && name === 'reversed' ? name : `${name}="${escapeHtml(value)}"`));
+    if (options.annotate && node.tag !== 'style') attrs.push(`data-dql-path="${path.join('.')}"`);
+    const open = `<${node.tag}${attrs.length ? ` ${attrs.join(' ')}` : ''}>`;
+    if (VOID_TAGS.has(node.tag)) return open;
+    return `${open}${serializeCanvasNodes(node.children, options, path, node.tag === 'style')}</${node.tag}>`;
+  }).join('');
+}
+
+/** Checked markup with a `data-dql-path` on every element, for an editor to map clicks back to the source. */
+export function annotateCanvasHtml(checkedHtml: string): string {
+  return serializeCanvasNodes(parseCanvasHtml(checkedHtml), { annotate: true });
+}
+
+export function canvasNodeAt(nodes: CanvasNode[], path: CanvasPath): CanvasNode | undefined {
+  let list = nodes;
+  let node: CanvasNode | undefined;
+  for (const index of path) {
+    node = list[index];
+    if (!node) return undefined;
+    list = node.kind === 'element' ? node.children : [];
+  }
+  return node;
+}
+
+function updateChildren(nodes: CanvasNode[], parent: CanvasPath, update: (children: CanvasNode[]) => CanvasNode[]): CanvasNode[] {
+  if (!parent.length) return update(nodes);
+  const [head, ...rest] = parent as [number, ...number[]];
+  return nodes.map((node, index) => (index === head && node.kind === 'element'
+    ? { ...node, children: updateChildren(node.children, rest, update) }
+    : node));
+}
+
+const isBlockSibling = (node: CanvasNode | undefined) => node?.kind === 'element' && node.tag !== 'style';
+const CONTAINER_TAGS = new Set(['section', 'article', 'main', 'div', 'header', 'footer', 'aside', 'nav']);
+
+/**
+ * Where new pieces go: the page's main container. A layout wrapped in one
+ * <article> or <main> puts new pieces inside it, not after it.
+ */
+export function canvasContainerPath(nodes: CanvasNode[]): CanvasPath {
+  const path: CanvasPath = [];
+  let list = nodes;
+  for (;;) {
+    const elements = list.map((node, index) => ({ node, index })).filter(({ node }) => isBlockSibling(node));
+    const only = elements.length === 1 ? elements[0]! : undefined;
+    if (!only || only.node.kind !== 'element' || !CONTAINER_TAGS.has(only.node.tag)) return path;
+    // A lone container of inline text is a piece, not the page's frame.
+    if (!only.node.children.some((child) => child.kind === 'element' && !INLINE_TAGS.has(child.tag))) return path;
+    path.push(only.index);
+    list = only.node.children;
+  }
+}
+
+/** Move a piece before the previous piece or after the next one. Returns its new path, or null at the edge. */
+export function moveCanvasNode(nodes: CanvasNode[], path: CanvasPath, direction: -1 | 1): { nodes: CanvasNode[]; path: CanvasPath } | null {
+  if (!path.length) return null;
+  const parent = path.slice(0, -1);
+  const index = path.at(-1)!;
+  const siblings = parent.length ? (canvasNodeAt(nodes, parent) as Extract<CanvasNode, { kind: 'element' }> | undefined)?.children : nodes;
+  if (!siblings?.[index]) return null;
+  let target = index + direction;
+  while (target >= 0 && target < siblings.length && !isBlockSibling(siblings[target])) target += direction;
+  if (target < 0 || target >= siblings.length) return null;
+  const next = updateChildren(nodes, parent, (children) => {
+    const copy = [...children];
+    const [moved] = copy.splice(index, 1);
+    copy.splice(target, 0, moved!);
+    return copy;
+  });
+  return { nodes: next, path: [...parent, target] };
+}
+
+export function removeCanvasNode(nodes: CanvasNode[], path: CanvasPath): CanvasNode[] {
+  if (!path.length) return nodes;
+  return updateChildren(nodes, path.slice(0, -1), (children) => children.filter((_, index) => index !== path.at(-1)));
+}
+
+export function replaceCanvasNode(nodes: CanvasNode[], path: CanvasPath, replacement: CanvasNode): CanvasNode[] {
+  if (!path.length) return nodes;
+  return updateChildren(nodes, path.slice(0, -1), (children) => children.map((child, index) => (index === path.at(-1) ? replacement : child)));
+}
+
+/** Insert pieces after `after`, or at the end of the page's main container. Returns the first new piece's path. */
+export function insertCanvasNodes(nodes: CanvasNode[], inserted: CanvasNode[], after?: CanvasPath): { nodes: CanvasNode[]; path: CanvasPath } {
+  const parent = after?.length ? after.slice(0, -1) : canvasContainerPath(nodes);
+  let at = 0;
+  const next = updateChildren(nodes, parent, (children) => {
+    at = after?.length ? after.at(-1)! + 1 : children.length;
+    return [...children.slice(0, at), ...inserted, ...children.slice(at)];
+  });
+  return { nodes: next, path: [...parent, at] };
+}
+
+const INLINE_TAGS = new Set(['span', 'strong', 'em', 'b', 'i', 'small', 'mark', 'br', 'dql-value']);
+const TEXT_TAGS = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'li', 'blockquote', 'figcaption', 'dt', 'dd', 'span', 'small', 'strong', 'em', 'td', 'th']);
+
+export type CanvasPieceKind = 'tile' | 'value' | 'heading' | 'text' | 'list' | 'table' | 'rule' | 'group';
+
+/** What a piece is, for the editor's label and tools. Text pieces can be typed into. */
+export function canvasPieceKind(node: CanvasNode): CanvasPieceKind {
+  if (node.kind === 'text') return 'text';
+  if (node.tag === 'dql-tile') return 'tile';
+  if (node.tag === 'dql-value') return 'value';
+  if (/^h[1-4]$/.test(node.tag)) return 'heading';
+  if (node.tag === 'ul' || node.tag === 'ol' || node.tag === 'dl') return 'list';
+  if (node.tag === 'table') return 'table';
+  if (node.tag === 'hr') return 'rule';
+  if (TEXT_TAGS.has(node.tag)) return 'text';
+  // A box of words and numbers (a figure card) is typed into like text.
+  const inline = node.children.every((child) => child.kind === 'text' || INLINE_TAGS.has(child.tag)
+    || (child.kind === 'element' && TEXT_TAGS.has(child.tag) && child.children.every((inner) => inner.kind === 'text' || (inner.kind === 'element' && INLINE_TAGS.has(inner.tag)))));
+  return inline && node.children.length > 0 ? 'text' : 'group';
 }

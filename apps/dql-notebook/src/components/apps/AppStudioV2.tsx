@@ -50,7 +50,8 @@ import { StoryView } from './StoryView';
 import { StoryEditor } from './builder/StoryEditor';
 import { CanvasEditor } from './builder/CanvasEditor';
 import { PageFormatPicker } from './builder/PageFormatPicker';
-import { CanvasPageFrame } from './CanvasPageFrame';
+import { CanvasPageFrame, type CanvasFrameEditing } from './CanvasPageFrame';
+import { checkCanvasHtml, insertCanvasNodes, parseCanvasHtml, serializeCanvasNodes, type CanvasNode } from '@duckcodeailabs/dql-core/apps/canvas-page';
 import { buildStoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { DriverTileSettings } from './builder/DriverTileSettings';
 import { driverProbeFor, filtersForNewDriverTile } from './driver-probe';
@@ -1556,6 +1557,22 @@ export function AppStudioV2({
             followUp.push({ type: 'update_tile', pageId: activePage.id, tileId: addedTile.i, patch: { x: spot.x, y: spot.y } });
           }
         }
+        if (composedPage && addedTile) {
+          // A page shown as a report or a custom layout shows the new tile
+          // there too, at the end, so the author sees what they added.
+          const shownAs = composedPage.narrative?.presentation;
+          const tileNode: CanvasNode = { kind: 'element', tag: 'dql-tile', attrs: [['tile', addedTile.i]], children: [] };
+          const layout = shownAs === 'canvas' && composedPage.canvas?.html ? checkCanvasHtml(composedPage.canvas.html) : null;
+          if (composedPage.canvas && layout && layout.issues.length === 0) {
+            followUp.push({ type: 'set_canvas', pageId: activePage.id, canvas: { ...composedPage.canvas, html: serializeCanvasNodes(insertCanvasNodes(parseCanvasHtml(layout.html), [tileNode]).nodes), generatedBy: 'author' } });
+          }
+          if (shownAs === 'story' && composedPage.narrative && !composedPage.narrative.blocks.some((block) => block.kind === 'tile' && block.tileId === addedTile.i)) {
+            const taken = new Set(composedPage.narrative.blocks.map((block) => block.id));
+            let n = composedPage.narrative.blocks.length + 1;
+            while (taken.has(`b${n}`)) n += 1;
+            followUp.push({ type: 'set_narrative', pageId: activePage.id, narrative: { ...composedPage.narrative, blocks: [...composedPage.narrative.blocks, { id: `b${n}`, kind: 'tile', tileId: addedTile.i }] } });
+          }
+        }
         if (followUp.length) {
           // Same undo step as the add.
           const patched = await api.patchAppBuild(result.draft.id, result.draft.revision, followUp, result.draft.proposalHash);
@@ -2693,8 +2710,8 @@ export function AppStudioV2({
     }
   };
   const canvasProposalForPage = canvasProposal && canvasProposal.pageId === activePage?.id ? canvasProposal.result : null;
-  const renderCanvas = (canvas: NonNullable<typeof canvasProposalForPage>['canvas']) => activePage ? (
-    <CanvasPageFrame canvas={canvas} catalog={storyCatalog} items={activePage.layout.items} tiles={previewRun?.tiles ?? []} themeMode={themeMode} loading={previewing} />
+  const renderCanvas = (canvas: NonNullable<typeof canvasProposalForPage>['canvas'], canvasEditing?: CanvasFrameEditing) => activePage ? (
+    <CanvasPageFrame canvas={canvas} catalog={storyCatalog} items={activePage.layout.items} tiles={previewRun?.tiles ?? []} themeMode={themeMode} loading={previewing} {...(canvasEditing ? { editing: canvasEditing } : {})} />
   ) : null;
   const canvasArea = activePage ? (
     editing ? <div className="studio-canvas-page">
@@ -2724,6 +2741,8 @@ export function AppStudioV2({
           onDraft={(instruction) => void draftCanvas(instruction)}
           drafting={canvasDrafting}
           draftBlockedReason={storyDraftBlocked}
+          selectedTileId={selectedTileId}
+          onSelectTile={(tileId) => { setSelectedTileId(tileId); setSettingsOpen(false); setTileMenuId(null); }}
         />}
     </div> : activePage.canvas ? renderCanvas(activePage.canvas) : <p className="studio-story-empty">This custom layout is empty.</p>
   ) : null;
@@ -3056,6 +3075,8 @@ export function AppStudioV2({
               <span>Use “Edit with AI” on a Dataset tile. Clicking a chart keeps its own behavior and does not select the tile.</span>
             </div> : null}
             {projectedPage ? <div className={`proposal-banner ${proposalSummaryText(projectedPage).removed ? 'warn' : ''}`} role="status"><Sparkles size={14} /><span><strong>AI proposal</strong> · {proposalSummaryText(projectedPage).text}. Nothing is saved until you apply.</span></div> : null}
+            {/* A report or custom layout shows the tile being built above it; Add to page puts it at the end. */}
+            {(canvasMode || storyMode) && editing && draftTile && activeDescriptor ? <div className="studio-draft-slot"><DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} onResult={setDraftResult} /></div> : null}
             {canvasMode ? canvasArea : storyMode ? storyArea : <>
             {/* On the placed grid the tile being built sits above the page, where
                 it is seen first, instead of taking an automatic cell below it. */}

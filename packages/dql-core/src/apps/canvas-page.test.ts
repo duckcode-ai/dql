@@ -55,7 +55,7 @@ describe('governed HTML pages (RFC 0008 step 9)', () => {
   it('fills bindings with escaped values and tiles with DQL-drawn markup', () => {
     const checked = checkCanvasHtml('<p><dql-value bind="kpi.revenue"></dql-value> <dql-value bind="kpi.gone"></dql-value></p><dql-tile tile="kpi"></dql-tile>');
     const filled = fillCanvasHtml(checked.html, catalog, (id) => `<svg data-id="${id}"></svg>`);
-    expect(filled).toBe('<p><span class="dql-value" title="kpi — revenue">$145</span> <span class="dql-value missing" title="kpi.gone is not in this run&#39;s results">—</span></p><div class="dql-tile" data-tile="kpi"><svg data-id="kpi"></svg></div>');
+    expect(filled).toBe('<p><span class="dql-value" data-bind="kpi.revenue" title="kpi — revenue">$145</span> <span class="dql-value missing" data-bind="kpi.gone" title="kpi.gone is not in this run&#39;s results">—</span></p><div class="dql-tile" data-tile="kpi"><svg data-id="kpi"></svg></div>');
   });
 
   it('stores a checked canvas in the page file and refuses unsafe markup in drafts', () => {

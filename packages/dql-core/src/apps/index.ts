@@ -181,8 +181,11 @@ export {
 } from './story-bindings.js';
 export type { StoryBinding, StoryBindingCatalog, StoryBindingTileInput, StoryTextIssue } from './story-bindings.js';
 
-export { checkCanvasHtml, fillCanvasHtml, escapeHtml, MAX_CANVAS_HTML } from './canvas-page.js';
-export type { CanvasIssue, CheckedCanvas } from './canvas-page.js';
+export {
+  checkCanvasHtml, fillCanvasHtml, escapeHtml, MAX_CANVAS_HTML, annotateCanvasHtml, canvasContainerPath, canvasNodeAt, canvasPieceKind,
+  insertCanvasNodes, moveCanvasNode, parseCanvasHtml, removeCanvasNode, replaceCanvasNode, serializeCanvasNodes,
+} from './canvas-page.js';
+export type { CanvasIssue, CanvasNode, CanvasPath, CanvasPieceKind, CheckedCanvas } from './canvas-page.js';
 export { READER_TRUST_LABELS, isDataTileForTrust, readerTileTrust, readerTrustCounts, readerTrustSummary } from './reader-trust.js';
 export type { ReaderTrust, ReaderTrustItem, ReaderTrustState, ReaderTrustTile } from './reader-trust.js';
 export { evaluateMonitors, readAppMonitors, MAX_MONITORS_PER_SCHEDULE } from './monitors.js';

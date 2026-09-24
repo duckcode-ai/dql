@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ShieldCheck } from 'lucide-react';
-import { checkCanvasHtml, escapeHtml, fillCanvasHtml } from '@duckcodeailabs/dql-core/apps/canvas-page';
+import { annotateCanvasHtml, checkCanvasHtml, escapeHtml, fillCanvasHtml } from '@duckcodeailabs/dql-core/apps/canvas-page';
 import type { StoryBindingCatalog } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import type { DashboardCanvasV1, DashboardDocumentResponse, DashboardRunResponse } from '../../api/client';
 import type { CellChartConfig, QueryResult } from '../../store/types';
@@ -13,6 +13,21 @@ import { formatDriverNumber } from './driver-probe';
 
 type LayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 type RunTile = DashboardRunResponse['tiles'][number];
+
+/**
+ * Editing a Custom layout in Studio. Every element carries its source path,
+ * the host attaches its own listeners to the frame (the page itself still
+ * runs no scripts), and the frame holds still while the author types.
+ */
+export interface CanvasFrameEditing {
+  onFrameLoad: (frame: HTMLIFrameElement, remeasure: () => void) => void;
+  /** Keep the current frame while the author is typing in it. */
+  frozen: boolean;
+  /** Bumped to throw away unsaved typing and redraw from the saved layout. */
+  revision: number;
+  /** Drawn over the frame: the selected piece's toolbar. */
+  overlay?: ReactNode;
+}
 
 /**
  * A governed HTML page (RFC 0008 step 9). The page's own markup runs in a
@@ -29,6 +44,7 @@ export function CanvasPageFrame({
   themeMode,
   trust,
   loading = false,
+  editing,
 }: {
   canvas: DashboardCanvasV1;
   catalog: StoryBindingCatalog;
@@ -38,6 +54,7 @@ export function CanvasPageFrame({
   /** e.g. "all 7 tiles certified". */
   trust?: string | null;
   loading?: boolean;
+  editing?: CanvasFrameEditing;
 }): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -52,17 +69,27 @@ export function CanvasPageFrame({
   }, []);
   // Re-check on every render: a page file is trusted only after the checker says so.
   const checked = useMemo(() => checkCanvasHtml(canvas.html), [canvas.html]);
+  const annotate = Boolean(editing);
+  const frozenDoc = useRef('');
   const srcDoc = useMemo(() => {
+    if (editing?.frozen && frozenDoc.current) return frozenDoc.current;
     if (checked.issues.length) return '';
     // Charts are drawn at a panel-friendly width and only ever shrink to
     // fit: a page lays tiles out in columns the host cannot measure.
     const chartWidth = Math.min(Math.max(360, width - 40), 640);
-    const filled = fillCanvasHtml(checked.html, catalog, (tileId, tileHeight) => drawCanvasTile(items.find((item) => item.i === tileId), tiles.find((tile) => tile.tileId === tileId), catalog, themeMode, chartWidth, tileHeight));
-    return canvasDocument(filled, themeVariables(hostRef.current));
-  }, [catalog, checked, items, themeMode, tiles, width]);
+    const filled = fillCanvasHtml(annotate ? annotateCanvasHtml(checked.html) : checked.html, catalog, (tileId, tileHeight) => drawCanvasTile(items.find((item) => item.i === tileId), tiles.find((tile) => tile.tileId === tileId), catalog, themeMode, chartWidth, tileHeight));
+    // A revision change must redraw even when the markup is the same.
+    const doc = canvasDocument(filled, themeVariables(hostRef.current)) + (editing ? `<!--${editing.revision}-->` : '');
+    frozenDoc.current = doc;
+    return doc;
+  }, [catalog, checked, items, themeMode, tiles, width, annotate, editing?.frozen, editing?.revision]);
   const measure = () => {
     const doc = frameRef.current?.contentDocument;
     if (doc?.documentElement) setHeight(Math.max(200, Math.ceil(doc.documentElement.scrollHeight) + 2));
+  };
+  const loaded = () => {
+    measure();
+    if (editing && frameRef.current) editing.onFrameLoad(frameRef.current, measure);
   };
   const values = checked.bindings.length;
   const tileCount = checked.tiles.length;
@@ -79,6 +106,7 @@ export function CanvasPageFrame({
       ) : loading && tiles.length === 0 ? (
         <div className="dql-canvas-loading" role="status" aria-busy="true"><span className="visually-hidden">Loading the page's data…</span></div>
       ) : (
+        <div className="dql-canvas-stage">
         <iframe
           ref={frameRef}
           title="Governed page"
@@ -88,9 +116,11 @@ export function CanvasPageFrame({
           sandbox="allow-same-origin"
           referrerPolicy="no-referrer"
           srcDoc={srcDoc}
-          onLoad={measure}
+          onLoad={loaded}
           style={{ width: '100%', height, border: 0, display: 'block', background: 'transparent' }}
         />
+        {editing?.overlay}
+        </div>
       )}
     </div>
   );
@@ -154,5 +184,6 @@ const CANVAS_FRAME_STYLES = `
 .dql-canvas-badge svg { color: var(--trust-certified, #0b7a75); }
 .dql-canvas-note { margin-left: auto; }
 .dql-canvas-error { margin: 0; padding: 12px; border: 1px solid var(--status-error-border, rgba(193,69,69,.3)); border-radius: 8px; color: var(--status-error, #c14545); font-size: 13px; }
+.dql-canvas-stage { position: relative; }
 .dql-canvas-loading { height: 320px; border-radius: 12px; background: var(--dql-app-control, var(--bg-0)); }
 `;

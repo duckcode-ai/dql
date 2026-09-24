@@ -79,7 +79,7 @@ describe('signed snapshot bodies (RFC 0008 step 10)', () => {
       rowHeight: 80,
       canvas: { version: 1, html: '<section><h1>Board pack</h1><p>Revenue <dql-value bind="revenue.revenue"></dql-value></p><dql-tile tile="trend"></dql-tile></section>' },
     });
-    expect(page.body).toContain('<span class="dql-value" title="revenue — revenue">$145</span>');
+    expect(page.body).toContain('<span class="dql-value" data-bind="revenue.revenue" title="revenue — revenue">$145</span>');
     expect(page.body).toContain('<div class="dql-tile" data-tile="trend">');
     expect(page.tileIds.sort()).toEqual(['revenue', 'trend']);
     expect(page.body).not.toMatch(ACTIVE);

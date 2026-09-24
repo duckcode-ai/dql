@@ -2,6 +2,8 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { checkCanvasHtml } from '@duckcodeailabs/dql-core/apps/canvas-page';
 import type { StoryBindingCatalog } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import type { DashboardCanvasV1 } from '../../../api/client';
+import type { CanvasFrameEditing } from '../CanvasPageFrame';
+import { CanvasLayoutSurface } from './CanvasLayoutSurface';
 
 /**
  * Studio's governed HTML page editor (RFC 0008 step 9). Design shows the
@@ -18,17 +20,22 @@ export function CanvasEditor({
   onDraft,
   drafting,
   draftBlockedReason,
+  selectedTileId = null,
+  onSelectTile = () => undefined,
 }: {
   canvas: DashboardCanvasV1 | undefined;
   catalog: StoryBindingCatalog;
   pageTiles: Array<{ tileId: string; title: string }>;
   disabled: boolean;
-  /** Renders a canvas the way readers see it. */
-  preview: (canvas: DashboardCanvasV1) => ReactNode;
+  /** Renders a canvas the way readers see it; with `editing`, as the in-place editor. */
+  preview: (canvas: DashboardCanvasV1, editing?: CanvasFrameEditing) => ReactNode;
   onChange: (canvas: DashboardCanvasV1) => void;
   onDraft: (instruction: string) => void;
   drafting: boolean;
   draftBlockedReason?: string | null;
+  /** The tile whose settings are open, so a tile picked in the layout opens them. */
+  selectedTileId?: string | null;
+  onSelectTile?: (tileId: string | null) => void;
 }): JSX.Element {
   const [tab, setTab] = useState<'design' | 'code'>('design');
   const [html, setHtml] = useState(canvas?.html ?? '');
@@ -43,43 +50,69 @@ export function CanvasEditor({
     onChange({ version: 1, html, generatedBy: 'author' });
   };
   const startFromTemplate = () => {
-    const figures = Object.values(catalog).filter((binding) => binding.kind === 'number' && !binding.key.includes('[')).slice(0, 3);
+    // Only a tile's own single number makes a headline figure, captioned with the tile's title; a
+    // grouped tile's "leader" or a driver's parts read oddly out of context and stay in their tiles.
+    const figures = Object.values(catalog)
+      .filter((binding) => binding.kind === 'number' && /^[^.[\]]+\.[^.[\]]+$/.test(binding.key) && !/\.(leader_value|current|prior|change|change_percent|top_member_change)$/.test(binding.key))
+      .filter((binding, index, all) => all.findIndex((other) => other.tileId === binding.tileId) === index)
+      .slice(0, 4)
+      .map((binding) => ({ ...binding, label: pageTiles.find((tile) => tile.tileId === binding.tileId)?.title ?? binding.label }));
     const next = [
       '<style>.page{display:grid;gap:20px}.band{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.figure{padding:14px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface)}.figure strong{display:block;font-size:24px}</style>',
       '<article class="page">',
-      '<h1>Headline</h1>',
+      '<h1>Page title</h1>',
       figures.length ? `<section class="band">${figures.map((binding) => `<div class="figure"><small>${binding.label.replace(/[<>&"]/g, '').replace(/\S*\d\S*/g, '')}</small><strong><dql-value bind="${binding.key}"></dql-value></strong></div>`).join('')}</section>` : '',
-      ...pageTiles.slice(0, 3).map((tile) => `<dql-tile tile="${tile.tileId}"></dql-tile>`),
+      ...pageTiles.slice(0, 12).map((tile) => `<dql-tile tile="${tile.tileId}"></dql-tile>`),
       '</article>',
     ].join('\n');
     setHtml(next);
-    setTab('code');
     if (checkCanvasHtml(next).issues.length === 0) onChange({ version: 1, html: next, generatedBy: 'author' });
   };
+  const saved = canvas?.html ?? '';
+  const savedIssues = saved ? checkCanvasHtml(saved, { catalog, tileIds }).issues.filter((issue) => issue.code !== 'UNKNOWN_BINDING') : [];
   return (
     <div className="studio-canvas-editor">
-      <section className="studio-story-draft" aria-label="Design the layout with AI">
-        <input
-          aria-label="What should the layout show?"
-          placeholder="Optional: what should the page show, and for whom?"
-          value={instruction}
-          disabled={disabled || drafting}
-          onChange={(event) => setInstruction(event.target.value)}
-        />
-        <button type="button" className="primary" disabled={disabled || drafting || Boolean(draftBlockedReason)} onClick={() => onDraft(instruction.trim())}>
-          {drafting ? 'Designing…' : canvas ? 'Redesign layout with AI' : 'Design layout with AI'}
-        </button>
-        <small className="field-help">{draftBlockedReason ?? 'The model designs layout and wording only: data comes in through bound values and DQL-drawn tiles, and every draft is checked (no scripts, no network, no typed-in figures). A local model can take a few minutes.'}</small>
-      </section>
-      <div className="studio-canvas-tabs" role="tablist" aria-label="Layout view">
-        <button type="button" role="tab" aria-selected={tab === 'design'} className={tab === 'design' ? 'on' : ''} onClick={() => setTab('design')}>Design</button>
-        <button type="button" role="tab" aria-selected={tab === 'code'} className={tab === 'code' ? 'on' : ''} onClick={() => setTab('code')}>HTML (advanced)</button>
-        {!canvas && !html ? <button type="button" className="studio-canvas-template" disabled={disabled} onClick={startFromTemplate}>Start from a template</button> : null}
+      <div className="layout-topbar">
+        <form className="layout-ai" aria-label="Design the layout with AI" onSubmit={(event) => { event.preventDefault(); onDraft(instruction.trim()); }}>
+          <input
+            aria-label="What should the layout show?"
+            placeholder={canvas ? 'Ask AI to redesign: what should change?' : 'Describe the layout you want (optional)'}
+            value={instruction}
+            disabled={disabled || drafting}
+            onChange={(event) => setInstruction(event.target.value)}
+          />
+          <button type="submit" className="primary" disabled={disabled || drafting || Boolean(draftBlockedReason)} title={draftBlockedReason ?? 'AI arranges the layout and wording. Numbers stay bound to your data, and every design is checked before you see it. A local model can take a few minutes.'}>
+            {drafting ? 'Designing…' : canvas ? 'Redesign layout with AI' : 'Design layout with AI'}
+          </button>
+        </form>
+        <div className="studio-canvas-tabs" role="tablist" aria-label="Layout view">
+          <button type="button" role="tab" aria-selected={tab === 'design'} className={tab === 'design' ? 'on' : ''} onClick={() => setTab('design')}>Layout</button>
+          <button type="button" role="tab" aria-selected={tab === 'code'} className={tab === 'code' ? 'on' : ''} onClick={() => setTab('code')}>HTML (advanced)</button>
+        </div>
       </div>
+      {draftBlockedReason ? <small className="field-help">{draftBlockedReason}</small> : null}
       {tab === 'design'
-        ? (html.trim() && blocking.length === 0
-          ? preview({ version: 1, html, ...(canvas?.generatedBy ? { generatedBy: canvas.generatedBy } : {}), ...(canvas?.model ? { model: canvas.model } : {}) })
-          : <p className="studio-story-empty">{html.trim() ? 'The HTML has problems; open HTML (advanced) to fix them.' : 'No layout yet. Design it with AI, or start from a template.'}</p>)
+        ? (saved.trim() && savedIssues.length === 0
+          ? <CanvasLayoutSurface
+            html={saved}
+            catalog={catalog}
+            tiles={pageTiles}
+            disabled={disabled}
+            selectedTileId={selectedTileId}
+            preview={(editing) => preview({ version: 1, html: saved, ...(canvas?.generatedBy ? { generatedBy: canvas.generatedBy } : {}), ...(canvas?.model ? { model: canvas.model } : {}) }, editing)}
+            onSave={(next) => onChange({ version: 1, html: next, generatedBy: 'author' })}
+            onSelectTile={onSelectTile}
+          />
+          : saved.trim()
+            ? <div className="layout-empty"><strong>This layout's HTML has a problem</strong><span>{savedIssues[0]?.message}</span><button type="button" onClick={() => setTab('code')}>Open HTML (advanced)</button></div>
+            : <div className="layout-empty">
+              <strong>Start your custom layout</strong>
+              <span>Arrange this page's numbers and tiles your way. You can edit every part afterwards by clicking it.</span>
+              <div>
+                <button type="button" className="primary" disabled={disabled || !pageTiles.length} onClick={startFromTemplate}>Start from this page's tiles</button>
+                <button type="button" disabled={disabled || drafting || Boolean(draftBlockedReason)} onClick={() => onDraft(instruction.trim())}>{drafting ? 'Designing…' : 'Design with AI'}</button>
+              </div>
+            </div>)
         : <div className="studio-canvas-code">
           <textarea aria-label="Page markup" spellCheck={false} disabled={disabled} value={html} onChange={(event) => setHtml(event.target.value)} onBlur={save} />
           <p className="field-help">Show figures with <code>{'<dql-value bind="…"></dql-value>'}</code> and tiles with <code>{'<dql-tile tile="…"></dql-tile>'}</code>. Values on this page: {Object.keys(catalog).length}; tiles: {pageTiles.map((tile) => tile.tileId).join(', ') || 'none'}.</p>
