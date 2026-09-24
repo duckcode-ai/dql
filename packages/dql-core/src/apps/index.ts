@@ -191,6 +191,11 @@ export { diffDashboardPages, diffAppDeliveries, renderLayoutDiffSvg, NUMBER_ASPE
 export type { PageDiff, PageAspect, TileAspect, TileBox, TileChange, TileChangeKind } from './app-diff.js';
 export {
   SHELVES, SHELF_LABELS, addFieldByClick, chartFromEncoding, defaultShelfFor, encodingFromQuery, encodingHas, encodingQueryIssues,
-  encodingChartColumns, fieldKey, isMeasureRef, placeOnShelf, queryFromEncoding, readDashboardVizEncoding, refName, removeField, removeFromShelf, shelfAccepts, shelfContents,
+  encodingChartColumns, fieldKey, isMeasureRef, outputAlias, placeOnShelf, queryFromEncoding, readDashboardVizEncoding, refName, removeField, removeFromShelf, shelfAccepts, shelfContents,
 } from './viz-encoding.js';
 export type { DashboardVizEncoding, EncodedChart, EncodedChartColumns, FieldFormatKind, ShelfFieldRef, ShelfFieldSettings, ShelfId } from './viz-encoding.js';
+export {
+  SHOW_ME_CHARTS, SHOW_ME_LABELS, SHOW_ME_MAX_SERIES, SHOW_ME_MAX_SLICES, applyShowMe, showMe, showMeFactsFromDescriptor, showMeFirstChoice,
+  showMeInputFromEncoding, showMeInputFromQuery,
+} from './show-me.js';
+export type { ShowMeChart, ShowMeDimension, ShowMeFacts, ShowMeInput, ShowMeMeasure, ShowMeSuggestion, ShowMeVizType } from './show-me.js';

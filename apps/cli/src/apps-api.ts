@@ -57,6 +57,9 @@ import {
   datasetPhysicalField,
   normalizeTileQuery,
   datasetTileVisualizationCompatibility,
+  showMeFactsFromDescriptor,
+  showMeFirstChoice,
+  showMeInputFromQuery,
   tileQueryOutputAliases,
   tileQueryValidationRuns,
   validateTileQuery,
@@ -4138,6 +4141,7 @@ export async function proposeAppBuildDraftOperations(
     const certified = source.lifecycle === 'certified';
     const descriptor = source.capabilities.dataset;
     let query: TileQuery | undefined;
+    let viz: DashboardGridItem['viz'] = { type: component.view };
     if (descriptor) {
       const normalized = normalizeTileQuery(component.query);
       const validation = normalized ? validateTileQuery(descriptor, normalized) : undefined;
@@ -4146,7 +4150,14 @@ export async function proposeAppBuildDraftOperations(
         warnings.push(`${component.title} was not added because its Dataset query is not covered by the current source contract: ${detail}`);
         continue;
       }
-      const visualization = datasetTileVisualizationCompatibility(normalized, component.view);
+      // Show Me (RFC 0009) picks the chart for the fields and lays them on
+      // shelves: a distinct count is never stacked or sliced, and two units
+      // never share an axis. A detail or evidence component stays a table.
+      const choice = component.role === 'detail' || component.role === 'evidence'
+        ? undefined
+        : showMeFirstChoice(showMeInputFromQuery(normalized, showMeFactsFromDescriptor(descriptor)));
+      viz = { type: choice?.viz ?? 'table', ...(choice?.encoding ? { encoding: choice.encoding } : {}) };
+      const visualization = datasetTileVisualizationCompatibility(normalized, viz.type);
       if (!visualization.compatible) {
         warnings.push(`${component.title} was not added because ${visualization.message}`);
         continue;
@@ -4178,12 +4189,12 @@ export async function proposeAppBuildDraftOperations(
       i: tileId,
       x: (itemIndex % 2) * 6,
       y: pageState.structuralItems.reduce((max, item) => Math.max(max, item.y + item.h), 0) + Math.floor(itemIndex / 2) * 4,
-      w: component.view === 'kpi' ? 3 : 6,
-      h: component.view === 'kpi' ? 2 : 4,
+      w: viz.type === 'kpi' || viz.type === 'single_value' ? 3 : 6,
+      h: viz.type === 'kpi' || viz.type === 'single_value' ? 2 : 4,
       sourceId: source.sourceId,
       sourceRevision: source.sourceRevision,
       ...(query ? { query } : { block: { ref: source.executionRef } }),
-      viz: { type: component.view, ...(component.style ? { style: component.style } : {}) },
+      viz: { ...viz, ...(component.style ? { style: component.style } : {}) },
       title: component.title,
       sourceClass: source.kind === 'semantic' ? 'governed_semantic' : certified ? 'certified_block' : 'exploratory_analysis',
       filterBindings: source.capabilities.filters.map((filter) => ({

@@ -2383,6 +2383,42 @@ describe('Apps command center API helpers', () => {
     });
   });
 
+  it('RFC-0009 Show Me picks the chart for AI tiles and lays their fields on shelves', async () => {
+    const root = createProject();
+    writeDatasetBlock(root, 'commerce/order-lines.dql');
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Regional App', goal: 'Understand revenue by region', authoringMode: 'manual',
+      sourcePolicy: 'governed_only', domain: 'commerce',
+    });
+    const draft = (created.payload as any).draft;
+    const catalog = await invokeAppsApi(root, `/api/app-builds/${draft.id}/source-candidates?limit=50`, 'GET', {});
+    const source = (catalog.payload as any).items.find((item: any) => item.capabilities?.dataset?.id);
+    const byRegion = { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] };
+    const provider = async () => JSON.stringify({
+      frame: { goal: 'Revenue by region' },
+      requirements: [
+        { id: 'breakdown', question: 'Revenue by region', role: 'breakdown', required: true, measures: ['revenue'], dimensions: ['region'], filters: [] },
+        { id: 'rows', question: 'Revenue rows by region', role: 'detail', required: true, measures: ['revenue'], dimensions: ['region'], filters: [] },
+      ],
+      components: [
+        // Region is not a date: a line would join categories as if in time order.
+        { id: 'by-region', title: 'Revenue by region', sourceId: source.sourceId, requirementIds: ['breakdown'], role: 'breakdown', view: 'line', rationale: 'Split', query: byRegion },
+        { id: 'region-table', title: 'Revenue table', sourceId: source.sourceId, requirementIds: ['rows'], role: 'detail', view: 'bar', rationale: 'Rows', query: byRegion },
+      ],
+      pages: [{ id: 'overview', title: 'Overview', componentIds: ['by-region', 'region-table'], sections: [{ id: 'main', title: 'Revenue', kind: 'grid', componentIds: ['by-region', 'region-table'] }] }],
+      filters: [], navigation: [], crossFilters: [], detailDrills: [],
+    });
+    const proposed = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals`, 'POST', {
+      prompt: 'Revenue by region', expectedRevision: draft.revision, proposalHash: draft.proposalHash,
+    }, { planAppBuild: provider });
+    expect(proposed.status).toBe(201);
+    const page = (proposed.payload as any).proposal.operations.find((operation: any) => operation.type === 'upsert_page').page;
+    const tile = (id: string) => page.layout.items.find((item: any) => item.i === id);
+    expect(tile('by-region').viz).toEqual({ type: 'bar', encoding: { version: 1, columns: [{ measure: 'revenue' }], rows: [{ dimension: 'region' }] } });
+    // A detail component stays a table.
+    expect(tile('region-table').viz).toEqual({ type: 'table' });
+  });
+
   it('RFC-0008 page AI adds to the page the author has open and lets them decline single tiles', async () => {
     const root = createProject();
     writeDatasetBlock(root, 'commerce/order-lines.dql');
@@ -2450,8 +2486,9 @@ describe('Apps command center API helpers', () => {
     expect(regions.metadata).toMatchObject({ title: 'Regions', description: 'Hand-written page' });
     expect(regions.layout.items.map((item: any) => item.i)).toEqual([handTileId, 'revenue-kpi', 'orders-kpi']);
     // AI-written style lands on the tile exactly as the Studio panel writes it.
-    expect(regions.layout.items[1].viz).toEqual({ type: 'kpi', style: { format: 'compact', referenceLines: [{ value: 1000, label: 'Target' }] } });
-    expect(regions.layout.items[2].viz).toEqual({ type: 'kpi' });
+    // Show Me (RFC 0009) picks the chart and lays the fields on shelves.
+    expect(regions.layout.items[1].viz).toEqual({ type: 'single_value', encoding: { version: 1, columns: [], rows: [{ measure: 'revenue' }] }, style: { format: 'compact', referenceLines: [{ value: 1000, label: 'Target' }] } });
+    expect(regions.layout.items[2].viz).toEqual({ type: 'single_value', encoding: { version: 1, columns: [], rows: [{ measure: 'order_count' }] } });
     const handTile = regions.layout.items[0];
     expect(regions.layout.items[1].y).toBeGreaterThanOrEqual(handTile.y + handTile.h);
     // The App goal is the author's, not the planner's.

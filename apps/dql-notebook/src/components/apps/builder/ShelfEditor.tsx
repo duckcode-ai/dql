@@ -19,7 +19,10 @@ import {
   type ShelfFieldRef,
   type ShelfId,
 } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import { applyShowMe } from '@duckcodeailabs/dql-core/apps/show-me';
+import type { QueryResult } from '../../../store/types';
 import { descriptorTimeField, descriptorTimeGrain, isTimeField } from './field-query';
+import { ShowMePanel, currentShowMeChart, tileShowMe } from './ShowMe';
 import { humanize } from './studio-ui';
 
 /** The drag payload a field carries between the Data pane and the shelves. */
@@ -58,16 +61,24 @@ const FORMATS: Array<[FieldFormatKind | 'auto', string]> = [['auto', 'Automatic'
 export interface ShelfChange {
   encoding: DashboardVizEncoding;
   query: TileQuery;
+  /** The chart type picked in Show Me. Absent when a field moved: the caller reads the type off the shelves. */
+  visualization?: string;
 }
 
 /** One sentence on what the shelves draw, for the author. */
-export function describeEncodedChart(encoding: DashboardVizEncoding, isTime: (field: string) => boolean): string {
+export function describeEncodedChart(encoding: DashboardVizEncoding, isTime: (field: string) => boolean, visualization?: string): string {
   const chart = chartFromEncoding(encoding, isTime);
   if (chart.kind === 'kpi') return 'Shows one number.';
   if (chart.kind === 'table') return chart.reason;
   if (chart.kind === 'scatter') return `A scatter of ${humanize(chart.y)} against ${humanize(chart.x)}.`;
   if (chart.kind === 'heatmap') return `A heatmap of ${humanize(chart.value)} by ${humanize(chart.x)} and ${humanize(chart.y)}.`;
-  const shape = chart.line ? 'A line over' : chart.orientation === 'horizontal' ? 'Horizontal bars by' : 'Bars by';
+  // The stored chart type decides the marks; the shelves decide the axis.
+  const type = (visualization ?? '').replace(/-/g, '_');
+  if (type === 'table' || type === 'pivot') return 'A table of every value.';
+  if (type === 'pie' || type === 'donut' || type === 'funnel') return `A ${type} of ${humanize(chart.measures[0] ?? '')} by ${humanize(chart.category)}.`;
+  const bars = type === 'bar' || type === 'grouped_bar' || type === 'stacked_bar';
+  const marks = type === 'stacked_bar' ? 'Stacked bars' : type === 'grouped_bar' ? 'Side-by-side bars' : chart.orientation === 'horizontal' ? 'Horizontal bars' : 'Bars';
+  const shape = type === 'area' ? 'An area over' : chart.line && !bars ? 'A line over' : `${marks} ${isTime(chart.category) ? 'over' : 'by'}`;
   const series = encoding.color && !isMeasureRef(encoding.color) ? `, split by ${humanize(refName(encoding.color))}` : chart.measures.length > 1 ? `, ${chart.measures.length} series` : '';
   return `${shape} ${humanize(chart.category)}${series}.`;
 }
@@ -86,11 +97,17 @@ export function ShelfEditor({
   disabled,
   onChange,
   onFilterField,
+  visualization,
+  result,
 }: {
   descriptor: DatasetDescriptor;
   encoding: DashboardVizEncoding;
   query: TileQuery;
   disabled: boolean;
+  /** The tile's chart type. Given, Show Me ranks the charts under the shelves. */
+  visualization?: string;
+  /** The tile's last result: how many values each dimension has, for Show Me. */
+  result?: QueryResult;
   /** Returns a refusal message when the change is not allowed. */
   onChange: (change: ShelfChange) => string | void;
   onFilterField?: (field: string) => void;
@@ -103,8 +120,8 @@ export function ShelfEditor({
   const contents = shelfContents(encoding);
   useEffect(() => setRefusal(null), [JSON.stringify(encoding)]);
 
-  const apply = (next: DashboardVizEncoding, nextQuery?: TileQuery) => {
-    const message = onChange({ encoding: next, query: nextQuery ?? queryFromEncoding(next, query, timeGrainFor) });
+  const apply = (next: DashboardVizEncoding, nextQuery?: TileQuery, nextVisualization?: string) => {
+    const message = onChange({ encoding: next, query: nextQuery ?? queryFromEncoding(next, query, timeGrainFor), ...(nextVisualization ? { visualization: nextVisualization } : {}) });
     setRefusal(message || null);
   };
   const dropOn = (shelf: ShelfId, event: DragEvent) => {
@@ -186,8 +203,16 @@ export function ShelfEditor({
       <div className="shelf-marks" role="group" aria-label="Marks">
         {MARKS.map((shelf) => renderShelf(shelf, true))}
       </div>
-      <p className="shelf-reading" aria-live="polite">{describeEncodedChart(encoding, isTime)}</p>
+      <p className="shelf-reading" aria-live="polite">{describeEncodedChart(encoding, isTime, visualization)}</p>
       {refusal ? <small className="dataset-builder-error" role="alert">{refusal}</small> : null}
+      {visualization !== undefined ? (
+        <ShowMePanel
+          suggestions={tileShowMe(descriptor, encoding, query, result)}
+          current={currentShowMeChart(visualization, encoding, isTime)}
+          disabled={disabled}
+          onPick={(suggestion) => apply(applyShowMe(encoding, suggestion), undefined, suggestion.viz)}
+        />
+      ) : null}
     </section>
   );
 }

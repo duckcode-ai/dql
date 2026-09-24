@@ -34,7 +34,7 @@ import {
   type TileQuery,
 } from '@duckcodeailabs/dql-core/apps/tile-query';
 import type { AppSummary } from '../../store/types';
-import type { CellChartConfig } from '../../store/types';
+import type { CellChartConfig, QueryResult } from '../../store/types';
 import type { ThemeMode } from '../../themes/notebook-theme';
 import { themes } from '../../themes/notebook-theme';
 import { AiSidePanel } from '../agent/AiSidePanel';
@@ -72,6 +72,8 @@ import { EMPTY_TILE_QUERY, autoTileView, defaultTileTitle, descriptorTimeField, 
 import { addFieldByClick, encodingFromQuery, encodingHas, queryFromEncoding, removeField } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import type { ShelfChange } from './builder/ShelfEditor';
 import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import { applyShowMe } from '@duckcodeailabs/dql-core/apps/show-me';
+import { ShowMePanel, currentShowMeChart, tileShowMe } from './builder/ShowMe';
 import { FiltersPanel, mergeStudioDateRanges, linkedComponentCount, type StudioFilterConfiguration } from './builder/GlobalFilterBar';
 import { DatasetInteractionInspector, DatasetTileQueryInspector } from './builder/InteractionLayer';
 import { humanize, messageOf } from './builder/studio-ui';
@@ -462,6 +464,7 @@ export function AppStudioV2({
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** A tile being built from fields; it lives on the canvas until added or cancelled. */
   const [draftTile, setDraftTile] = useState<DraftTileState | null>(null);
+  const [draftResult, setDraftResult] = useState<QueryResult | undefined>();
   /** Dataset the author picked in the Data panel (a selected tile's Dataset wins). */
   const [chosenDatasetKey, setChosenDatasetKey] = useState<string | null>(null);
   /** The Data tab shows one Dataset's fields, or the full governed source catalog. */
@@ -3059,14 +3062,14 @@ export function AppStudioV2({
             {canvasMode ? canvasArea : storyMode ? storyArea : <>
             {/* On the placed grid the tile being built sits above the page, where
                 it is seen first, instead of taking an automatic cell below it. */}
-            {placedGrid && editing && draftTile && activeDescriptor ? <div className="studio-draft-slot"><DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /></div> : null}
+            {placedGrid && editing && draftTile && activeDescriptor ? <div className="studio-draft-slot"><DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} onResult={setDraftResult} /></div> : null}
             <div
               ref={gridRef}
               className={`studio-page-grid ${placedGrid ? 'placed' : ''} ${gesture ? 'arranging' : ''}`}
               style={placedGrid ? { gridAutoRows: `${rowPx}px` } : undefined}
               aria-describedby={canArrange && visibleItems.length ? 'studio-canvas-keys' : undefined}
             >
-              {!placedGrid && editing && draftTile && activeDescriptor ? <DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /> : null}
+              {!placedGrid && editing && draftTile && activeDescriptor ? <DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} onResult={setDraftResult} /> : null}
               {projectedPage ? projectedPage.items.map((item) => item.change === 'added' || item.change === 'updated'
                 ? <ProposedTileCard
                   key={item.tile.i}
@@ -3135,7 +3138,7 @@ export function AppStudioV2({
       </aside> : null}
       {rightPane === 'draft' && draftTile && activeDescriptor && activeDatasetItem ? <aside className="studio-right" aria-label="New tile">
         <header><div><small>NEW TILE</small><strong>Built from {humanize(activeDatasetItem.name)}</strong></div><button type="button" className="ghost-icon" onClick={() => setDraftTile(null)} aria-label="Cancel new tile"><X size={16} /></button></header>
-        <DraftTileInspector descriptor={activeDescriptor} datasetLabel={humanize(activeDatasetItem.name)} draft={draftTile} disabled={busy} onChange={setDraftTile} onCancel={() => setDraftTile(null)} onAdd={() => void commitDraftTile()} />
+        <DraftTileInspector descriptor={activeDescriptor} datasetLabel={humanize(activeDatasetItem.name)} draft={draftTile} disabled={busy} onChange={setDraftTile} onCancel={() => setDraftTile(null)} onAdd={() => void commitDraftTile()} result={draftResult} />
       </aside> : null}
       {rightPane === 'inspector' || rightPane === 'settings' ? <aside className={`studio-right ${selectedTile ? 'has-selection' : ''}`} aria-label={selectedTile ? 'Tile settings' : 'App settings'}>
         <header><div><small>{selectedTile ? tileKindLabel(selectedTile) : 'APP'}</small><strong>{selectedTile ? 'Tile settings' : 'App settings'}</strong></div><button type="button" className="ghost-icon" onClick={() => { setSelectedTileId(null); setSettingsOpen(false); }} aria-label={selectedTile ? 'Close tile settings' : 'Close App settings'}><X size={16} /></button></header>
@@ -3779,12 +3782,13 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
   // Shelves (RFC 0009): the query follows them, the contract checks it, and
   // the chart type follows what the shelves draw.
   const tileEncoding = tile.query ? (tile.viz.encoding ?? encodingFromQuery(tile.query, tile.viz.type)) : undefined;
-  const updateShelves = ({ encoding, query }: ShelfChange): string | void => {
+  const updateShelves = ({ encoding, query, visualization }: ShelfChange): string | void => {
     if (!dataset) return 'This tile has no Dataset.';
     if (!query.measures.length) return 'A tile needs at least one measure. Add another before removing this one.';
     const validation = validateTileQuery(dataset, query);
     if (!tileQueryValidationRuns(validation)) return validation.diagnostics[0]?.message ?? 'The Dataset does not cover that field combination.';
-    const type = vizTypeForEncoding(encoding, descriptorTimeField(dataset), tile.viz.type);
+    // A Show Me pick names its chart; a moved field keeps the chart when the shelves still read that way.
+    const type = visualization ?? vizTypeForEncoding(encoding, descriptorTimeField(dataset), tile.viz.type);
     const compatibility = datasetTileVisualizationCompatibility(query, type);
     setVisualizationFeedback(compatibility.compatible ? null : `${compatibility.message} Shown as a Table.`);
     onUpdate({ query, viz: { ...tile.viz, type: (compatibility.compatible ? type : 'table') as typeof tile.viz.type, encoding } });
@@ -3823,12 +3827,12 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
     <section><label>Responsive size</label><div className="size-buttons">{[['Compact', 3, 2], ['Standard', 6, 4], ['Wide', 12, 4], ['Tall', 6, 7]].map(([label, w, h]) => <button key={label} type="button" onClick={() => onUpdate({ w: Number(w), h: Number(h) })}>{label}</button>)}</div></section>
     </> : null}
     {dataTile && tab === 'data' ? <>
-    {tile.query && dataset && tileEncoding ? <DatasetTileQueryInspector descriptor={dataset} query={tile.query} visualization={tile.viz.type} encoding={tileEncoding} disabled={disabled} onChange={updateDatasetQuery} onShelves={updateShelves} onOpenSources={onOpenSources} /> : null}
+    {tile.query && dataset && tileEncoding ? <DatasetTileQueryInspector descriptor={dataset} query={tile.query} visualization={tile.viz.type} encoding={tileEncoding} disabled={disabled} onChange={updateDatasetQuery} onShelves={updateShelves} onOpenSources={onOpenSources} result={run?.status === 'ok' ? run.result : undefined} /> : null}
     <section className="data-trust"><label>Data & trust</label><div><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /><strong>{humanize(tile.trustState ?? 'draft_ready')}</strong></div><p>{tile.query && dataset ? `Dataset: ${dataset.label} · ${dataset.kind === 'semantic' ? 'governed semantic source' : 'governed block source'}` : tile.block ? `${tile.trustState === 'certified' ? 'Certified' : 'Review-required'} block: ${'blockId' in tile.block ? tile.block.blockId : tile.block.ref}` : tile.semantic ? `Governed semantic query: ${tile.semantic.id}` : tile.draftAnalysis ? `Review-required DQL: ${tile.draftAnalysis.ref}` : 'Local narrative component'}</p>{tile.sourceEvidence?.slice(0, 2).map((evidence, index) => <small key={`${evidence.source}-${index}`}>{evidence.reason}</small>)}{run ? <small>{run.status === 'ok' ? `Settled on ${run.result?.rowCount ?? run.result?.rows.length ?? 0} rows` : run.error}</small> : null}{grainKeyCheck ? <small>Full-source key check: {grainKeyCheck}</small> : null}{run?.dataset?.cacheDelivery ? <div className="dataset-cache-delivery"><small>Cached {new Date(run.dataset.cacheDelivery.cachedAt).toLocaleString()} · this is not fresh publication or reusable-block evidence.</small><button type="button" disabled={disabled} onClick={onRefreshDatasetTile}>Refresh live data</button></div> : null}{tile.query ? <details className="dataset-dql-receipt"><summary>View execution evidence</summary>{currentDatasetEvidence ? <DatasetTileExecutionEvidence presentation={currentDatasetEvidence} /> : <p>{run ? 'This execution evidence no longer matches the selected Dataset source or query. Run a governed preview to inspect the current Dataset query, executed SQL, binding evidence, and provenance.' : 'Run a governed preview to inspect the current Dataset query, executed SQL, binding evidence, and provenance.'}</p>}</details> : null}{tile.query ? <div className="dataset-reusable-block"><strong>Reusable block</strong><p>Save this settled result as a separate review draft. This App tile stays unchanged and the new block is not certified.</p><button type="button" disabled={disabled || savingDatasetTileAsBlock || replacingDatasetTileWithBlock || !currentDatasetEvidence || Boolean(run?.dataset?.cacheDelivery)} onClick={onSaveDatasetTileAsBlock}>{savingDatasetTileAsBlock ? 'Saving review draft…' : 'Save as reusable review draft'}</button>{savedDatasetReviewDraft ? <div className="dataset-review-replacement"><small>Saved review draft: {savedDatasetReviewDraft.path}</small>{savedDatasetReviewDraft.replacementEligible ? <button type="button" disabled={disabled || savingDatasetTileAsBlock || replacingDatasetTileWithBlock || !currentDatasetEvidence || Boolean(run?.dataset?.cacheDelivery)} onClick={onReplaceDatasetTileWithBlock}>{replacingDatasetTileWithBlock ? 'Proving equivalence…' : 'Replace with this review draft'}</button> : <small>{savedDatasetReviewDraft.replacementMessage ?? 'This saved draft is fixed-value only and cannot replace the interactive Dataset tile.'}</small>}</div> : null}{!currentDatasetEvidence ? <small>Run the current Dataset tile before saving it.</small> : null}{run?.dataset?.cacheDelivery ? <small>Refresh live data before saving or replacing this tile.</small> : null}</div> : null}</section>
     {tile.semantic && !tile.query ? <section className="dataset-reusable-block"><strong>Convert to Dataset query</strong><p>Preview an exact field-query mapping for this legacy semantic tile. DQL runs both paths in one fresh read scope before it can apply the change. The original semantic payload is retained as provenance; this does not certify the source.</p><button type="button" disabled={disabled || previewingLegacySemanticConversion || acceptingLegacySemanticConversion} onClick={onPreviewLegacySemanticConversion}>{previewingLegacySemanticConversion ? 'Proving conversion…' : 'Preview Dataset conversion'}</button>{semanticTileConversionPreview ? <div className="dataset-review-replacement"><small>Mapped source: {semanticTileConversionPreview.candidate.sourceId}</small><small>Mapped query: {semanticTileConversionPreview.candidate.query.measures.map((measure) => measure.measure).join(', ')}{semanticTileConversionPreview.candidate.query.dimensions.length ? ` by ${semanticTileConversionPreview.candidate.query.dimensions.map((dimension) => dimension.field).join(', ')}` : ''}</small><button type="button" disabled={disabled || previewingLegacySemanticConversion || acceptingLegacySemanticConversion} onClick={onAcceptLegacySemanticConversion}>{acceptingLegacySemanticConversion ? 'Rechecking and applying…' : 'Apply Dataset conversion'}</button></div> : <small>Preview first. Unsupported bindings, source drift, or an incomplete comparison stay with the original semantic tile.</small>}</section> : null}
     </> : null}
     {dataTile && tab === 'visual' ? <>
-    <section><label>Chart</label><div className="chart-type-grid" role="radiogroup" aria-label="Chart type">{CHART_TYPE_OPTIONS.map(([type, label]) => { const active = tile.viz.type === type || (type === 'single_value' && tile.viz.type === 'kpi'); return <button key={type} type="button" role="radio" aria-checked={active} className={active ? 'on' : ''} disabled={disabled} onClick={() => { if (!active) updateVisualization(type); }}>{chartTypeIcon(type)}<span>{label}</span></button>; })}</div>{savedDatasetVisualization && !savedDatasetVisualization.compatible ? <small className="dataset-builder-error" role="alert">{savedDatasetVisualization.message} Choose Table to keep all selected fields visible.</small> : null}{visualizationFeedback ? <small className="dataset-interaction-message" role="status">{visualizationFeedback}</small> : null}</section>
+    {tile.query && dataset && tileEncoding ? <section><ShowMePanel suggestions={tileShowMe(dataset, tileEncoding, tile.query, run?.status === 'ok' ? run.result : undefined)} current={currentShowMeChart(tile.viz.type, tileEncoding, descriptorTimeField(dataset))} disabled={disabled} onPick={(suggestion) => { const encoding = applyShowMe(tileEncoding, suggestion); const message = updateShelves({ encoding, query: queryFromEncoding(encoding, tile.query!, descriptorTimeGrain(dataset)), visualization: suggestion.viz }); if (message) setVisualizationFeedback(message); }} />{visualizationFeedback ? <small className="dataset-interaction-message" role="status">{visualizationFeedback}</small> : null}</section> : <section><label>Chart</label><div className="chart-type-grid" role="radiogroup" aria-label="Chart type">{CHART_TYPE_OPTIONS.map(([type, label]) => { const active = tile.viz.type === type || (type === 'single_value' && tile.viz.type === 'kpi'); return <button key={type} type="button" role="radio" aria-checked={active} className={active ? 'on' : ''} disabled={disabled} onClick={() => { if (!active) updateVisualization(type); }}>{chartTypeIcon(type)}<span>{label}</span></button>; })}</div>{savedDatasetVisualization && !savedDatasetVisualization.compatible ? <small className="dataset-builder-error" role="alert">{savedDatasetVisualization.message} Choose Table to keep all selected fields visible.</small> : null}{visualizationFeedback ? <small className="dataset-interaction-message" role="status">{visualizationFeedback}</small> : null}</section>}
     {!tile.text ? <section className="field-mapping"><label>Field mapping</label><div><span>X / category</span><select value={String(options.x ?? '')} onChange={(event) => setOption('x', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><div><span>Y / value</span><select value={String(options.y ?? '')} onChange={(event) => setOption('y', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><small className="field-help">Run preview to load the exact result fields.</small></section> : null}
     {!tile.text ? <ChartStylePanel
       key={tile.i}

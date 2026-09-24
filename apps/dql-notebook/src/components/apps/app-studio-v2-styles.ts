@@ -1257,6 +1257,21 @@ export const APP_STUDIO_V2_STYLES = `
 .shelf.mark .shelf-name { padding-top:0; font-size:11px; }
 .shelf.mark .shelf-pills { min-height:28px; }
 .shelf-reading { margin:0; color:var(--text-secondary); font-size:12px; }
+.show-me { display:grid; gap:6px; padding-top:8px; border-top:1px solid var(--border-subtle); }
+.show-me-title { color:var(--text-secondary); font-size:12px; font-weight:500; }
+.show-me-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(76px,1fr)); gap:4px; }
+.show-me-grid button { position:relative; min-height:52px; padding:6px 4px 4px; border:1px solid var(--border-subtle); border-radius:8px; background:var(--bg-2); color:var(--text-secondary); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; font-size:11px; line-height:1.2; text-align:center; cursor:pointer; }
+.show-me-grid button:hover { border-color:var(--border-strong); color:var(--text-primary); }
+.show-me-grid button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.show-me-grid button.best { border-color:var(--accent); }
+.show-me-grid button.on { border-color:var(--accent); background:var(--accent-dim); color:var(--accent); font-weight:600; }
+.show-me-grid button.unfit { border-style:dashed; background:transparent; color:var(--text-tertiary); cursor:not-allowed; }
+.show-me-grid button.unfit svg { opacity:.5; }
+.show-me-grid button[aria-disabled="true"]:not(.unfit) { cursor:default; }
+.show-me-best { position:absolute; top:-6px; right:4px; padding:0 5px; border-radius:999px; background:var(--accent); color:var(--accent-fg); font-size:11px; font-weight:600; line-height:14px; }
+.show-me-reason { margin:0; min-height:32px; color:var(--text-secondary); font-size:12px; line-height:1.4; }
+.show-me-reason strong { color:var(--text-primary); font-weight:600; }
+.show-me-reason.unfit strong { color:var(--text-secondary); }
 .shelf-menu { position:absolute; top:28px; left:0; z-index:50; width:268px; padding:10px; display:grid; gap:10px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); box-shadow:0 12px 32px rgba(15,23,42,.16); color:var(--text-primary); cursor:default; }
 .shelf-menu-group { display:grid; gap:4px; margin:0; }
 .shelf-menu-label { color:var(--text-secondary); font-size:11px; font-weight:500; }

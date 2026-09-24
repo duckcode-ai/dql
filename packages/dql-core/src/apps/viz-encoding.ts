@@ -430,7 +430,7 @@ function drawnChart(encoding: DashboardVizEncoding, isTime: (dimension: string) 
 }
 
 /** The result column a query entry comes back as (its alias). */
-function outputAlias(query: TileQuery, ref: ShelfFieldRef): string | undefined {
+export function outputAlias(query: TileQuery, ref: ShelfFieldRef): string | undefined {
   if (isMeasureRef(ref)) {
     const measure = query.measures.find((entry) => entry.measure.toLowerCase() === ref.measure.toLowerCase());
     return measure ? measure.alias ?? measure.measure : undefined;

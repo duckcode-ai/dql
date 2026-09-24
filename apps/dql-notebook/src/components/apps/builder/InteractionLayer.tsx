@@ -7,6 +7,7 @@ import { datasetTileVisualizationCompatibility, tileQueryOutputAliases, tileQuer
 import { TileQueryEditor } from '../builder/TileQueryEditor';
 import { ShelfEditor, type ShelfChange } from './ShelfEditor';
 import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import type { QueryResult } from '../../../store/types';
 import { humanize } from './studio-ui';
 
 export function DatasetTileQueryInspector({
@@ -18,10 +19,13 @@ export function DatasetTileQueryInspector({
   onChange,
   onShelves,
   onOpenSources,
+  result,
 }: {
   descriptor: DatasetDescriptor;
   query: TileQuery;
   visualization: string;
+  /** The tile's last result, for Show Me. */
+  result?: QueryResult;
   /** The tile's shelves, or the shelves it already draws as (RFC 0009). */
   encoding: DashboardVizEncoding;
   disabled: boolean;
@@ -71,6 +75,8 @@ export function DatasetTileQueryInspector({
         disabled={disabled}
         onChange={onShelves}
         onFilterField={(field) => { setFilterField(field); setMoreOpen(true); }}
+        visualization={visualization}
+        result={result}
       />
       <small className="field-help">Drag fields from the Data panel onto a shelf, or click one to add it.</small>
     </>}

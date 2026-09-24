@@ -55,6 +55,10 @@
       "types": "./dist/apps/viz-encoding.d.ts",
       "import": "./dist/apps/viz-encoding.js"
     },
+    "./apps/show-me": {
+      "types": "./dist/apps/show-me.d.ts",
+      "import": "./dist/apps/show-me.js"
+    },
     "./apps/reader-trust": {
       "types": "./dist/apps/reader-trust.d.ts",
       "import": "./dist/apps/reader-trust.js"
