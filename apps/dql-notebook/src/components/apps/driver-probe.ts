@@ -107,3 +107,31 @@ export function formatDriverShare(share: string | undefined): string {
   if (!Number.isFinite(number)) return '';
   return `${Math.round(number * 100)}%`;
 }
+
+type PageFilter = NonNullable<DashboardDocumentResponse['dashboard']['filters']>[number];
+
+/**
+ * The page filters a new driver tile must join: every filter that lists the
+ * tile it explains, in its scope or in a Dataset binding's tile list, gains
+ * the driver tile, so "why did it move" answers for the same filtered data.
+ * Filters that apply to all tiles are left as they are.
+ */
+export function filtersForNewDriverTile(filters: PageFilter[] | undefined, sourceTileId: string, driverTileId: string): PageFilter[] {
+  const add = (ids: string[]) => (ids.includes(sourceTileId) && !ids.includes(driverTileId) ? [...ids, driverTileId] : ids);
+  return (filters ?? []).flatMap((filter) => {
+    const scopeIds = filter.scope && 'tileIds' in filter.scope ? filter.scope.tileIds : undefined;
+    const bindings = filter.datasetBindings;
+    const nextScope = scopeIds ? add(scopeIds) : undefined;
+    const nextBindings = bindings
+      ? Object.fromEntries(Object.entries(bindings).map(([id, binding]) => [id, binding.tileIds ? { ...binding, tileIds: add(binding.tileIds) } : binding]))
+      : undefined;
+    const changed = (nextScope && nextScope !== scopeIds)
+      || (bindings && Object.entries(nextBindings!).some(([id, binding]) => binding.tileIds !== bindings[id]!.tileIds));
+    if (!changed) return [];
+    return [{
+      ...filter,
+      ...(nextScope ? { scope: { ...filter.scope, tileIds: nextScope } } : {}),
+      ...(nextBindings ? { datasetBindings: nextBindings } : {}),
+    } as PageFilter];
+  });
+}

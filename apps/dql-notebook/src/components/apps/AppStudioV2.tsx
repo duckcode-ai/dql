@@ -51,7 +51,7 @@ import { CanvasEditor } from './builder/CanvasEditor';
 import { CanvasPageFrame } from './CanvasPageFrame';
 import { buildStoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { DriverTileSettings } from './builder/DriverTileSettings';
-import { driverProbeFor } from './driver-probe';
+import { driverProbeFor, filtersForNewDriverTile } from './driver-probe';
 import {
   CANVAS_COLUMNS,
   CANVAS_GAP_PX,
@@ -1836,7 +1836,11 @@ export function AppStudioV2({
       viz: { type: 'waterfall' },
       title: `Why ${source.title || 'this'} moved`,
     };
-    const next = await mutate([{ type: 'add_tile', pageId: activePage.id, tile }]);
+    // The driver joins the filters its source tile is listed in, so it
+    // explains the same filtered data the reader is looking at.
+    const filterUpdates = filtersForNewDriverTile(activePage.filters, tileId, id)
+      .map((filter) => ({ type: 'set_filter' as const, pageId: activePage.id, filter }));
+    const next = await mutate([{ type: 'add_tile', pageId: activePage.id, tile }, ...filterUpdates]);
     if (next) {
       setSelectedTileId(id);
       setSavedMessage('Driver tile added');

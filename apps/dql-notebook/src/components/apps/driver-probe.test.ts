@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { driverPeriodLabel, driverProbeFor, explainablePeriod, formatDriverNumber, formatDriverShare } from './driver-probe';
+import { driverPeriodLabel, driverProbeFor, explainablePeriod, filtersForNewDriverTile, formatDriverNumber, formatDriverShare } from './driver-probe';
 
 const trend = {
   i: 'trend', x: 0, y: 0, w: 6, h: 4, sourceId: 'ds', viz: { type: 'line' },
@@ -36,5 +36,21 @@ describe('"Why did it move?" probe (RFC 0008 step 7)', () => {
     expect(formatDriverNumber('-1234.5', true)).toBe('−1,235');
     expect(formatDriverNumber(undefined)).toBe('—');
     expect(formatDriverShare('0.333333')).toBe('33%');
+  });
+});
+
+describe('a new driver tile joins its source tile\'s filters (evaluation E1)', () => {
+  it('adds the driver to every filter that lists the source tile, and leaves the rest', () => {
+    const filters = [
+      { id: 'region', type: 'select', datasetBindings: { ds1: { field: 'region', tileIds: ['trend', 'kpi'] }, ds2: { field: 'region' } } },
+      { id: 'segment', type: 'select', scope: { tileIds: ['trend'] } },
+      { id: 'channel', type: 'select', datasetBindings: { ds1: { field: 'channel', tileIds: ['kpi'] } } },
+      { id: 'all', type: 'select', scope: { app: true } },
+    ] as never;
+    const updated = filtersForNewDriverTile(filters, 'trend', 'trend-why');
+    expect(updated.map((filter) => filter.id)).toEqual(['region', 'segment']);
+    expect(updated[0]!.datasetBindings).toEqual({ ds1: { field: 'region', tileIds: ['trend', 'kpi', 'trend-why'] }, ds2: { field: 'region' } });
+    expect(updated[1]!.scope).toEqual({ tileIds: ['trend', 'trend-why'] });
+    expect(filtersForNewDriverTile(updated as never, 'trend', 'trend-why')).toEqual([]);
   });
 });

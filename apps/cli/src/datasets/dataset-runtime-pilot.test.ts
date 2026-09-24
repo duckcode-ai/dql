@@ -3768,6 +3768,29 @@ describe('Driver tiles over a real DuckDB Dataset (RFC 0008 step 7)', () => {
       const stored = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}`, 'GET');
       expect(stored.body.draft.pages[0].layout.items.map((item: any) => item.i)).toEqual([trend.i, 'why-march']);
 
+      // A page filter that lists the tiles it applies to must reach the
+      // probe's comparisons too (evaluation E1: with Region CA selected the
+      // probe explained the whole business). CA had 30 in both months.
+      const current = stored.body.draft;
+      const datasetId = current.pages[0].datasets[0].id;
+      const filtered = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}`, 'PATCH', {
+        expectedRevision: current.revision,
+        expectedProposalHash: current.proposalHash,
+        operations: [{
+          type: 'set_filter',
+          pageId: 'overview',
+          filter: { id: 'region', type: 'multiselect', label: 'Region', scope: { app: true }, datasetBindings: { [datasetId]: { field: 'region', tileIds: [trend.i] } } },
+        }],
+      });
+      expect(filtered.status, filtered.text).toBe(200);
+      const caProbe = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}/dashboards/overview/run`, 'POST', {
+        variables: { region: ['CA'] },
+        driverProbe: { fromTileId: trend.i, driver: { ...driver, dimensions: ['region'] } },
+      });
+      expect(caProbe.status, caProbe.text).toBe(200);
+      expect(caProbe.body.tiles[0].driver.headline).toMatchObject({ current: '30', prior: '30', delta: '0' });
+      expect(caProbe.body.tiles[0].driver.dimensions[0].members.map((member: any) => member.label)).toEqual(['CA']);
+
       // A probe must start from a Dataset tile on the page.
       const refused = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}/dashboards/overview/run`, 'POST', {
         driverProbe: { fromTileId: 'nope', driver },

@@ -516,3 +516,9 @@
   from { opacity: 0; transform: scale(0.98); }
   to   { opacity: 1; transform: scale(1); }
 }
+
+/* No text below 11px. Browsers draw <small> at 80% of its parent, which is
+   9.6px under 12px text; keep the relative size but never below 11px. */
+small {
+  font-size: max(11px, 0.8em);
+}

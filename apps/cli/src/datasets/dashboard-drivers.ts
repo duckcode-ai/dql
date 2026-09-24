@@ -111,17 +111,46 @@ export function expandDashboardDriverItems(input: {
 }
 
 /** Page filters scoped to a driver tile also apply to its comparison tiles. */
+/**
+ * A driver runs as generated comparison queries (`<driver>::driver::…`), so
+ * a filter that lists the tiles it applies to must list those queries too,
+ * both in `scope.tileIds` and in each Dataset binding's `tileIds`. A query
+ * gets a filter when its driver is listed, or when the tile the driver
+ * explains is listed: a reader's probe `<tile>::why` always explains `tile`,
+ * and a Studio driver tile is named `<tile>-why` (Studio also adds new driver
+ * tiles to the source tile's filters).
+ */
 export function withDriverFilterScopes(dashboard: DashboardDocument, owners: Map<string, string>): DashboardDocument {
-  if (!dashboard.filters?.some((filter) => filter.scope?.tileIds?.length)) return dashboard;
+  const filters = dashboard.filters ?? [];
+  if (!filters.some((filter) => filter.scope?.tileIds?.length || Object.values(filter.datasetBindings ?? {}).some((binding) => binding.tileIds))) return dashboard;
+  const tileIds = new Set(dashboard.layout.items.map((item) => item.i));
+  const explains = (owner: string): string[] => {
+    const probe = /^(.*)::why$/.exec(owner)?.[1];
+    if (probe) return [owner, probe];
+    const authored = /^(.*)-why(?:-\d+)?$/.exec(owner)?.[1];
+    return authored && tileIds.has(authored) ? [owner, authored] : [owner];
+  };
   const byOwner = new Map<string, string[]>();
   for (const [id, owner] of owners) byOwner.set(owner, [...(byOwner.get(owner) ?? []), id]);
+  const widen = (listed: string[]): string[] => {
+    const extra = [...byOwner].flatMap(([owner, ids]) => (explains(owner).some((id) => listed.includes(id)) ? ids : []));
+    return extra.length ? [...new Set([...listed, ...extra])] : listed;
+  };
   return {
     ...dashboard,
-    filters: dashboard.filters.map((filter) => {
-      const tileIds = filter.scope?.tileIds;
-      if (!tileIds?.length) return filter;
-      const extra = tileIds.flatMap((id) => byOwner.get(id) ?? []);
-      return extra.length ? { ...filter, scope: { ...filter.scope, tileIds: [...tileIds, ...extra] } } : filter;
+    filters: filters.map((filter) => {
+      const scopeIds = filter.scope?.tileIds;
+      const bindings = filter.datasetBindings
+        ? Object.fromEntries(Object.entries(filter.datasetBindings).map(([datasetId, binding]) => [
+          datasetId,
+          binding.tileIds ? { ...binding, tileIds: widen(binding.tileIds) } : binding,
+        ]))
+        : undefined;
+      return {
+        ...filter,
+        ...(scopeIds?.length ? { scope: { ...filter.scope, tileIds: widen(scopeIds) } } : {}),
+        ...(bindings ? { datasetBindings: bindings } : {}),
+      };
     }),
   };
 }

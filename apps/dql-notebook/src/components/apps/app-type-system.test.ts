@@ -78,3 +78,10 @@ describe('shared components in the reader', () => {
     expect(sizes.filter((size) => size < 11)).toEqual([]);
   });
 });
+
+describe('global type floor', () => {
+  it('keeps <small> at 11px or more everywhere (evaluation B5: a 9.6px drill hint)', () => {
+    const globals = readFileSync(fileURLToPath(new URL('../../../../../packages/dql-ui/src/styles/globals.css', import.meta.url)), 'utf8');
+    expect(globals).toMatch(/small\s*\{\s*font-size:\s*max\(11px,\s*0\.8em\);/);
+  });
+});
