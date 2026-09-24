@@ -1,0 +1,53 @@
+import { describe, expect, it } from 'vitest';
+import { buildStoryBindingCatalog, checkCanvasHtml } from '@duckcodeailabs/dql-core';
+import { canvasDraftUserPrompt, deterministicCanvasPage, draftCanvasPage, type CanvasDraftInput } from './canvas-draft.js';
+
+const input: CanvasDraftInput = {
+  pageTitle: 'Overview',
+  goal: 'Help the sales lead see revenue',
+  catalog: buildStoryBindingCatalog([
+    { tileId: 'revenue', status: 'ok', result: { columns: ['revenue'], rows: [{ revenue: 145 }], columnsMeta: [{ name: 'revenue', kind: 'currency', unit: 'USD' }] } },
+    { tileId: 'trend', status: 'ok', result: { columns: ['month', 'revenue'], rows: [{ month: '2026-02-01', revenue: 30 }, { month: '2026-03-01', revenue: 55 }] } },
+  ], { revenue: 'Revenue', trend: 'Revenue by month' }),
+  tiles: [{ tileId: 'revenue', title: 'Revenue', kind: 'kpi' }, { tileId: 'trend', title: 'Revenue by month', kind: 'line' }],
+  includeValues: false,
+};
+
+describe('governed HTML drafting (RFC 0008 step 9)', () => {
+  it('describes the page with bindings and never values for a hosted model', () => {
+    const prompt = canvasDraftUserPrompt(input);
+    expect(prompt).toContain('revenue.revenue — Revenue — revenue');
+    expect(prompt).toContain('- trend: Revenue by month (line)');
+    expect(prompt).not.toContain('$145');
+  });
+
+  it('accepts a checked page from the model, fenced or not', async () => {
+    const reply = '```html\n<style>.h{font-size:32px}</style><section class="h"><h1>Revenue <dql-value bind="revenue.revenue"></dql-value></h1><dql-tile tile="trend"></dql-tile></section>\n```';
+    const result = await draftCanvasPage(input, async () => reply, { model: 'qwen3.8:27b' });
+    expect(result).toMatchObject({ generatedBy: 'ai', attempts: 1, issues: [] });
+    expect(result.canvas.html).toContain('<dql-tile tile="trend"></dql-tile>');
+    expect(result.canvas.model).toBe('qwen3.8:27b');
+  });
+
+  it('sends unsafe markup back once, then accepts the corrected page', async () => {
+    const replies = [
+      '<div onclick="x()"><script>fetch("/api")</script>Revenue is $145</div>',
+      '<p>Revenue <dql-value bind="revenue.revenue"></dql-value></p>',
+    ];
+    const seen: string[] = [];
+    const result = await draftCanvasPage(input, async (messages) => { seen.push(messages.at(-1)!.content); return replies.shift()!; });
+    expect(result).toMatchObject({ generatedBy: 'ai', attempts: 2 });
+    expect(seen[1]).toContain('<script> is not allowed');
+    expect(seen[1]).toContain('pages cannot run code');
+    expect(seen[1]).toContain('"$145" is a number written into the text');
+  });
+
+  it('falls back to a clean template that passes the same checker', async () => {
+    const result = await draftCanvasPage(input, async () => '<img src="x">');
+    expect(result.generatedBy).toBe('deterministic');
+    const template = deterministicCanvasPage(input);
+    expect(checkCanvasHtml(template.html, { catalog: input.catalog, tileIds: new Set(['revenue', 'trend']) }).issues).toEqual([]);
+    expect(template.html).toContain('<dql-value bind="revenue.revenue"></dql-value>');
+    expect(template.html).toContain('<dql-tile tile="trend"></dql-tile>');
+  });
+});

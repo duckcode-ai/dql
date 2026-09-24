@@ -35,6 +35,7 @@ import { readerTileFreshness, readerTileReceipt, readerTileTrust, readerTrustCou
 import { plainDescription, ReaderTrustBadge, TrustLensBar } from './ReaderTrust';
 import { DriverPanel, DriverView } from './DriverView';
 import { StoryView, storyEditionSummary } from './StoryView';
+import { CanvasPageFrame } from './CanvasPageFrame';
 import { buildStoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { driverProbeFor } from './driver-probe';
 import {
@@ -366,9 +367,11 @@ export function DashboardRenderer({
   // Story layout (RFC 0008 step 8): readers see the page as prose whose
   // figures come from this run, plus the tiles it embeds.
   const storyNarrative = !editable && dashboard.narrative?.presentation === 'story' ? dashboard.narrative : null;
+  // Governed HTML page (RFC 0008 step 9).
+  const canvasPage = !editable && dashboard.narrative?.presentation === 'canvas' && dashboard.canvas ? dashboard.canvas : null;
   const storyCatalog = useMemo(
-    () => (storyNarrative && run ? buildStoryBindingCatalog(run.tiles as StoryBindingTileInput[], Object.fromEntries(dashboard.layout.items.map((item) => [item.i, item.title]))) : {}),
-    [dashboard.layout.items, run, storyNarrative],
+    () => ((storyNarrative || canvasPage) && run ? buildStoryBindingCatalog(run.tiles as StoryBindingTileInput[], Object.fromEntries(dashboard.layout.items.map((item) => [item.i, item.title]))) : {}),
+    [canvasPage, dashboard.layout.items, run, storyNarrative],
   );
   const [storyEditions, setStoryEditions] = useState<StoryEditionV1[] | null>(null);
   useEffect(() => {
@@ -1108,7 +1111,7 @@ export function DashboardRenderer({
         </div>
       ) : null}
 
-      {storyNarrative ? null : !editable && businessStory ? (
+      {storyNarrative || canvasPage ? null : !editable && businessStory ? (
         <BusinessStoryPanel story={businessStory} onResearch={openCopilot} onEvidence={openLineage} />
       ) : dashboardStory ? <DashboardStoryStrip story={dashboardStory} /> : null}
 
@@ -1159,6 +1162,20 @@ export function DashboardRenderer({
             />
           </div>
         </div>
+      ) : canvasPage ? (
+        <CanvasPageFrame
+          canvas={canvasPage}
+          catalog={storyCatalog}
+          items={dashboard.layout.items}
+          tiles={run?.tiles ?? []}
+          themeMode={state.themeMode}
+          loading={loading}
+          trust={trustCounts.length ? (() => {
+            const total = trustCounts.reduce((sum, entry) => sum + entry.count, 0);
+            const certified = trustCounts.find((entry) => entry.state === 'certified')?.count ?? 0;
+            return certified === total ? `all ${total} tiles certified` : `${certified} of ${total} tiles certified`;
+          })() : null}
+        />
       ) : storyNarrative ? (
         <StoryView
           narrative={storyNarrative}

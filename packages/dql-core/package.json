@@ -47,6 +47,10 @@
       "types": "./dist/apps/story-bindings.d.ts",
       "import": "./dist/apps/story-bindings.js"
     },
+    "./apps/canvas-page": {
+      "types": "./dist/apps/canvas-page.d.ts",
+      "import": "./dist/apps/canvas-page.js"
+    },
     "./datasets/descriptor": {
       "types": "./dist/datasets/descriptor.d.ts",
       "import": "./dist/datasets/descriptor.js"

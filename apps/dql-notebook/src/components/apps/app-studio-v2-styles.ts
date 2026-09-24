@@ -956,6 +956,14 @@ export const APP_STUDIO_V2_STYLES = `
 .studio-story-add { display:flex; flex-wrap:wrap; gap:8px; }
 .studio-story-add button { height:30px; padding:0 12px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); color:var(--text-primary); font-size:13px; font-weight:500; }
 .studio-page-grid.story-embed { display:block; }
+/* RFC 0008 step 9: governed HTML pages. */
+.studio-canvas-page, .studio-canvas-editor { display:grid; gap:12px; }
+.studio-canvas-tabs { display:flex; align-items:center; gap:4px; }
+.studio-canvas-tabs button { height:30px; padding:0 12px; border:1px solid transparent; border-radius:8px; background:transparent; color:var(--text-secondary); font-size:13px; font-weight:500; }
+.studio-canvas-tabs button.on { border-color:var(--border-default); background:var(--bg-2); color:var(--text-primary); font-weight:600; }
+.studio-canvas-tabs .studio-canvas-template { margin-left:auto; border-color:var(--border-default); background:var(--bg-2); color:var(--text-primary); }
+.studio-canvas-code { display:grid; gap:8px; }
+.studio-canvas-code textarea { min-height:420px; resize:vertical; padding:10px 12px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); color:var(--text-primary); font:400 12px/1.5 var(--font-mono, ui-monospace, monospace); }
 .studio-page-grid.story-embed .studio-component-card { min-height:260px; }
 .live-component-preview.driver { overflow:auto; }
 .inspector-docs textarea { resize:vertical; min-height:52px; }

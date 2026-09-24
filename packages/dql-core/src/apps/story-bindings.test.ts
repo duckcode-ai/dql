@@ -23,6 +23,9 @@ describe('story bindings (RFC 0008 step 8)', () => {
     expect(catalog['margin.margin_rate']?.display).toBe('51.54%');
     expect(catalog['by-region.revenue[US]']?.value).toBe(70);
     expect(catalog['by-region.leader']?.display).toBe('US');
+    const monthly = buildStoryBindingCatalog([{ tileId: 'm', status: 'ok', result: { columns: ['month', 'revenue'], rows: [{ month: '2026-01-01T00:00:00.000Z', revenue: 60 }, { month: '2026-03-01T00:00:00.000Z', revenue: 55 }] } }]);
+    expect(monthly['m.leader']).toMatchObject({ value: '2026-01-01', display: 'Jan 2026' });
+    expect(monthly['m.revenue[2026-03-01]']?.value).toBe(55);
     expect(catalog['why.change']?.display).toBe('+$10');
     expect(catalog['why.current']?.display).toBe('$40');
     expect(catalog['by-region.revenue[US]']?.display).toBe('70');

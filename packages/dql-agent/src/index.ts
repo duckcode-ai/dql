@@ -2050,3 +2050,10 @@ export {
   STORY_DRAFT_SYSTEM_PROMPT,
 } from './story-draft.js';
 export type { StoryDraftInput, StoryDraftResult, StoryDraftComplete } from './story-draft.js';
+export {
+  draftCanvasPage,
+  deterministicCanvasPage,
+  canvasDraftUserPrompt,
+  CANVAS_DRAFT_SYSTEM_PROMPT,
+} from './canvas-draft.js';
+export type { CanvasDraftInput, CanvasDraftResult } from './canvas-draft.js';

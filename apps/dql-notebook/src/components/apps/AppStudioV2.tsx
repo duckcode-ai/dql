@@ -14,6 +14,7 @@ import {
   type AppStudioBuildDraft,
   type AppStudioDraftOperation,
   type StoryDraftResponseV1,
+  type CanvasDraftResponseV1,
   type ContextAuthoringProposalV1,
   type DatasetAuthoringChange,
   type DatasetTileSaveAsBlockResponse,
@@ -46,6 +47,8 @@ import { ChartStylePanel } from './builder/ChartStylePanel';
 import { DriverView } from './DriverView';
 import { StoryView } from './StoryView';
 import { StoryEditor } from './builder/StoryEditor';
+import { CanvasEditor } from './builder/CanvasEditor';
+import { CanvasPageFrame } from './CanvasPageFrame';
 import { buildStoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { DriverTileSettings } from './builder/DriverTileSettings';
 import { driverProbeFor } from './driver-probe';
@@ -434,6 +437,8 @@ export function AppStudioV2({
   /** A story drafted by AI (or from the data), shown until applied or discarded. */
   const [storyProposal, setStoryProposal] = useState<{ pageId: string; result: StoryDraftResponseV1 } | null>(null);
   const [storyDrafting, setStoryDrafting] = useState(false);
+  const [canvasProposal, setCanvasProposal] = useState<{ pageId: string; result: CanvasDraftResponseV1 } | null>(null);
+  const [canvasDrafting, setCanvasDrafting] = useState(false);
   const lastStoryModel = storyProposal?.result.model ?? null;
   /** The draft whose undo history has been restored from this browser. */
   const [historyDraftId, setHistoryDraftId] = useState<string | null>(null);
@@ -2623,6 +2628,8 @@ export function AppStudioV2({
   const placedGrid = breakpoint === 'wide' && !projectedPage;
   // Story layout (RFC 0008 step 8).
   const storyMode = Boolean(activePage?.narrative?.presentation === 'story' && !projectedPage);
+  // Governed HTML page (RFC 0008 step 9).
+  const canvasMode = Boolean(activePage?.narrative?.presentation === 'canvas' && !projectedPage);
   const storyCatalog = previewRun ? buildStoryBindingCatalog(previewRun.tiles as StoryBindingTileInput[], Object.fromEntries((activePage?.layout.items ?? []).map((item) => [item.i, item.title]))) : {};
   const storyPageTiles = (activePage?.layout.items ?? []).filter((item) => !item.text).map((item) => ({ tileId: item.i, title: item.title || humanize(item.i) }));
   const storyDraftBlocked = !previewRun
@@ -2630,12 +2637,12 @@ export function AppStudioV2({
     : previewRun.partial || previewRun.incomplete
       ? 'Run the whole page first: the last run covered only some tiles.'
       : null;
-  const setPresentation = async (presentation: 'dashboard' | 'story') => {
+  const setPresentation = async (presentation: 'dashboard' | 'story' | 'canvas') => {
     if (!activePage) return;
     const current = activePage.narrative;
     if ((current?.presentation ?? 'dashboard') === presentation) return;
     const next = await mutate([{ type: 'set_narrative', pageId: activePage.id, narrative: { ...(current ?? { version: 1, blocks: [] }), version: 1, presentation } }]);
-    if (next) setSavedMessage(presentation === 'story' ? 'Page shows as a story' : 'Page shows as a dashboard');
+    if (next) setSavedMessage(presentation === 'story' ? 'Page shows as a story' : presentation === 'canvas' ? 'Page shows as a governed HTML page' : 'Page shows as a dashboard');
   };
   const draftStory = async (instruction: string) => {
     if (!draft || !activePage || !previewRun || storyDraftBlocked) return;
@@ -2652,6 +2659,55 @@ export function AppStudioV2({
     }
   };
   const proposalForPage = storyProposal && storyProposal.pageId === activePage?.id ? storyProposal.result : null;
+  const draftCanvas = async (instruction: string) => {
+    if (!draft || !activePage || !previewRun || storyDraftBlocked) return;
+    setCanvasDrafting(true);
+    setError(null);
+    try {
+      const result = await api.draftAppBuildCanvas(draft.id, activePage.id, previewRun.runId, instruction || undefined);
+      if (!result.ok) throw new Error(result.error ?? 'The page could not be designed.');
+      setCanvasProposal({ pageId: activePage.id, result });
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setCanvasDrafting(false);
+    }
+  };
+  const canvasProposalForPage = canvasProposal && canvasProposal.pageId === activePage?.id ? canvasProposal.result : null;
+  const renderCanvas = (canvas: NonNullable<typeof canvasProposalForPage>['canvas']) => activePage ? (
+    <CanvasPageFrame canvas={canvas} catalog={storyCatalog} items={activePage.layout.items} tiles={previewRun?.tiles ?? []} themeMode={themeMode} loading={previewing} />
+  ) : null;
+  const canvasArea = activePage ? (
+    editing ? <div className="studio-canvas-page">
+      {canvasProposalForPage ? <div className={`proposal-banner ${canvasProposalForPage.generatedBy === 'ai' ? '' : 'warn'}`} role="status">
+        <Sparkles size={14} />
+        <span>
+          <strong>{canvasProposalForPage.generatedBy === 'ai' ? `Designed by ${canvasProposalForPage.model ?? 'AI'}` : 'A template from the data'}</strong>
+          {' · '}{canvasProposalForPage.generatedBy === 'ai'
+            ? `checked: no scripts, no network, every figure bound${canvasProposalForPage.attempts > 1 ? ' (second attempt)' : ''} · ${(canvasProposalForPage.elapsedMs / 1000).toFixed(0)} s.`
+            : "the model's designs did not pass the check, so this is a plain layout from the page's values."}
+          {' '}Nothing is saved until you apply.
+        </span>
+        <span className="proposal-banner-actions">
+          <button type="button" className="primary" disabled={busy} onClick={() => { void mutate([{ type: 'set_canvas', pageId: activePage.id, canvas: canvasProposalForPage.canvas }]).then((next) => { if (next) { setCanvasProposal(null); setSavedMessage('Page applied'); } }); }}>Apply</button>
+          <button type="button" onClick={() => setCanvasProposal(null)}>Discard</button>
+        </span>
+      </div> : null}
+      {canvasProposalForPage
+        ? renderCanvas(canvasProposalForPage.canvas)
+        : <CanvasEditor
+          canvas={activePage.canvas}
+          catalog={storyCatalog}
+          pageTiles={storyPageTiles}
+          disabled={busy}
+          preview={renderCanvas}
+          onChange={(canvas) => void mutate([{ type: 'set_canvas', pageId: activePage.id, canvas }])}
+          onDraft={(instruction) => void draftCanvas(instruction)}
+          drafting={canvasDrafting}
+          draftBlockedReason={storyDraftBlocked}
+        />}
+    </div> : activePage.canvas ? renderCanvas(activePage.canvas) : <p className="studio-story-empty">This page has no governed HTML yet.</p>
+  ) : null;
   const storyArea = activePage ? (
     editing ? <div className="studio-story">
       {proposalForPage ? <div className={`proposal-banner ${proposalForPage.generatedBy === 'ai' ? '' : 'warn'}`} role="status">
@@ -2949,10 +3005,11 @@ export function AppStudioV2({
             <header className="studio-page-heading">
               <div><h1>{projectedPage?.title ?? activePage?.metadata.title ?? 'Overview'}</h1>{!projectedPage?.isNew && activePage?.metadata.description ? <p>{activePage.metadata.description}</p> : null}</div>
               {editing && !projectedPages && activePage ? <div className="studio-presentation" role="group" aria-label="Show this page as">
-                <button type="button" aria-pressed={!storyMode} className={!storyMode ? 'on' : ''} disabled={busy} onClick={() => void setPresentation('dashboard')}>Dashboard</button>
+                <button type="button" aria-pressed={!storyMode && !canvasMode} className={!storyMode && !canvasMode ? 'on' : ''} disabled={busy} onClick={() => void setPresentation('dashboard')}>Dashboard</button>
                 <button type="button" aria-pressed={storyMode} className={storyMode ? 'on' : ''} disabled={busy} onClick={() => void setPresentation('story')}>Story</button>
+                <button type="button" aria-pressed={canvasMode} className={canvasMode ? 'on' : ''} disabled={busy} onClick={() => void setPresentation('canvas')} title="A governed HTML page: your layout, DQL's data">Page</button>
               </div> : null}
-              {editing && !projectedPages && !storyMode ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
+              {editing && !projectedPages && !storyMode && !canvasMode ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
             </header>
             {editing && (!fieldsAvailable || dataView === 'sources') && selectedSource && selectedSourceKind ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" disabled={busy || previewing} onClick={() => selectedSource.capabilities?.dataset ? (setPanel('sources'), setPanelOpen(true)) : void addComponent(selectedSourceKind, selectedSource)}>{selectedSource.capabilities?.dataset ? <><Settings2 size={14} /> Choose fields</> : <><Plus size={14} /> {selectedSourceAction}</>}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
             {(activePage?.filters ?? []).length ? <div className="studio-page-filterbar">{activePage!.filters!.map((filter) => <StudioFilterControl key={filter.id} filter={filter} availability={activeFilterOptions[filter.id]} value={previewVariables[filter.id] ?? filter.default} applying={previewing} onChange={(value) => applyFilterValue(filter, value)} />)}</div> : null}
@@ -2966,7 +3023,7 @@ export function AppStudioV2({
               <span>Use “Edit with AI” on a Dataset tile. Clicking a chart keeps its own behavior and does not select the tile.</span>
             </div> : null}
             {projectedPage ? <div className={`proposal-banner ${proposalSummaryText(projectedPage).removed ? 'warn' : ''}`} role="status"><Sparkles size={14} /><span><strong>AI proposal</strong> · {proposalSummaryText(projectedPage).text}. Nothing is saved until you apply.</span></div> : null}
-            {storyMode ? storyArea : <>
+            {canvasMode ? canvasArea : storyMode ? storyArea : <>
             {/* On the placed grid the tile being built sits above the page, where
                 it is seen first, instead of taking an automatic cell below it. */}
             {placedGrid && editing && draftTile && activeDescriptor ? <div className="studio-draft-slot"><DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /></div> : null}
@@ -4224,7 +4281,7 @@ function sourceKindLabel(kind: AppStudioBuildDraft['sources'][number]['kind']): 
 }
 
 function isPresentationOnlyOperation(operation: AppStudioDraftOperation): boolean {
-  if (operation.type === 'set_layout' || operation.type === 'set_narrative') return true;
+  if (operation.type === 'set_layout' || operation.type === 'set_narrative' || operation.type === 'set_canvas') return true;
   if (operation.type !== 'update_tile') return false;
   const allowed = new Set(['title', 'description', 'owner', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
   return Object.keys(operation.patch).every((key) => allowed.has(key));

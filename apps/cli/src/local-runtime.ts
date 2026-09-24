@@ -332,6 +332,7 @@ import {
   computeResultStats,
   buildDeterministicDashboardStory,
   draftStoryNarrative,
+  draftCanvasPage,
   type StoryDraftInput,
   synthesizeAnswer,
   streamOrGenerate,
@@ -17584,11 +17585,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Draft a story for a local App page from its latest complete preview.
     // The model writes around binding keys only; every figure is filled in
     // from governed results when the page runs (RFC 0008 step 8).
-    const storyDraftRoute = path.match(/^\/api\/app-builds\/([^/]+)\/dashboards\/([^/]+)\/story-draft$/);
+    const storyDraftRoute = path.match(/^\/api\/app-builds\/([^/]+)\/dashboards\/([^/]+)\/(story|canvas)-draft$/);
     if (req.method === 'POST' && storyDraftRoute) {
       try {
         const draftId = decodeURIComponent(storyDraftRoute[1]);
         const dashboardId = decodeURIComponent(storyDraftRoute[2]);
+        const kind = storyDraftRoute[3] as 'story' | 'canvas';
         const body = await readJSON(req).catch(() => ({}));
         const runId = typeof body.runId === 'string' ? body.runId : '';
         const evidence = dashboardRunEvidence.get(runId);
@@ -17601,7 +17603,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         if (!evidence || evidence.expiresAt < Date.now() || evidence.appId !== draftId || evidence.dashboardId !== dashboardId || !evidence.storyBindings) {
           res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ ok: false, error: 'Run the whole page first; the story is drafted from its latest complete results.' }));
+          res.end(serializeJSON({ ok: false, error: `Run the whole page first; the ${kind === 'story' ? 'story' : 'page'} is drafted from its latest complete results.` }));
           return;
         }
         const instruction = typeof body.instruction === 'string' ? body.instruction.trim().slice(0, 600) : '';
@@ -17622,22 +17624,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           includeValues: localModel,
         };
         const started = Date.now();
-        const result = await draftStoryNarrative(
-          input,
-          selected
-            ? (messages) => selected.provider.generate(messages, {
-              maxTokens: 1800,
-              temperature: 0.3,
-              responseJsonSchema: { type: 'object', properties: { blocks: { type: 'array' } }, required: ['blocks'] },
-              signal: AbortSignal.timeout(180_000),
-            })
-            : null,
-          { ...(model ? { model } : {}) },
-        );
+        const complete = selected
+          ? (messages: Parameters<typeof selected.provider.generate>[0]) => selected.provider.generate(messages, {
+            maxTokens: kind === 'canvas' ? 4500 : 1800,
+            temperature: 0.3,
+            ...(kind === 'story' ? { responseJsonSchema: { type: 'object', properties: { blocks: { type: 'array' } }, required: ['blocks'] } } : {}),
+            signal: AbortSignal.timeout(kind === 'canvas' ? 300_000 : 180_000),
+          })
+          : null;
+        const result = kind === 'story'
+          ? await draftStoryNarrative(input, complete, { ...(model ? { model } : {}) })
+          : await draftCanvasPage(input, complete, { ...(model ? { model } : {}) });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           ok: true,
-          narrative: result.narrative,
+          ...('narrative' in result ? { narrative: result.narrative } : { canvas: result.canvas }),
           generatedBy: result.generatedBy,
           attempts: result.attempts,
           issues: result.issues.slice(0, 20),

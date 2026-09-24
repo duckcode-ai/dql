@@ -110,7 +110,7 @@ export function buildStoryBindingCatalog(tiles: StoryBindingTileInput[], titles:
       }
       if (best) {
         const member = memberText(best[labelColumn]);
-        add({ key: `${tile.tileId}.leader`, tileId: tile.tileId, label: `${title} — highest ${humanize(labelColumn)} by ${humanize(first)}`, kind: 'text', value: member, display: member });
+        add({ key: `${tile.tileId}.leader`, tileId: tile.tileId, label: `${title} — highest ${humanize(labelColumn)} by ${humanize(first)}`, kind: 'text', value: member, display: readableMember(member) });
         add({ key: `${tile.tileId}.leader_value`, tileId: tile.tileId, label: `${title} — ${humanize(first)} of that leader`, kind: 'number', value: toNumber(best[first]), unit: unitFor(first) });
       }
     }
@@ -203,6 +203,16 @@ function memberText(value: unknown): string {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   const text = String(value ?? '').trim();
   return /^\d{4}-\d{2}-\d{2}T00:00:00(\.000)?Z?$/.test(text) ? text.slice(0, 10) : text.replace(/[{}\]]/g, '');
+}
+
+/** A period start reads as a period ("Jan 2026"); other members as written. */
+function readableMember(member: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(member);
+  if (!match) return member;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return match[3] === '01'
+    ? date.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', year: 'numeric' })
+    : date.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function humanize(value: string): string {

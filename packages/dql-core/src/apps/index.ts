@@ -62,6 +62,7 @@ export {
   dashboardDatasetParameterFilterErrors,
   readDriverDefinition,
   readDashboardNarrative,
+  readDashboardCanvas,
   DASHBOARD_DRIVER_GRAINS,
   MAX_DRIVER_DIMENSIONS,
   DRIVER_ALL_DIMENSIONS,
@@ -152,6 +153,7 @@ export type {
   DashboardDriverGrain,
   DashboardNarrative,
   DashboardNarrativeBlock,
+  DashboardCanvas,
   DashboardDatasetBinding,
   DashboardInteractions,
   DashboardCrossFilterMapping,
@@ -177,3 +179,6 @@ export {
   MAX_STORY_BLOCKS,
 } from './story-bindings.js';
 export type { StoryBinding, StoryBindingCatalog, StoryBindingTileInput, StoryTextIssue } from './story-bindings.js';
+
+export { checkCanvasHtml, fillCanvasHtml, escapeHtml, MAX_CANVAS_HTML } from './canvas-page.js';
+export type { CanvasIssue, CheckedCanvas } from './canvas-page.js';

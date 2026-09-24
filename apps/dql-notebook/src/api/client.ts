@@ -2349,6 +2349,8 @@ export interface DashboardDocumentResponse {
     };
     /** Story layout (RFC 0008 step 8): prose with bound figures and embedded tiles. */
     narrative?: DashboardNarrativeV1;
+    /** Governed HTML page (RFC 0008 step 9). */
+    canvas?: DashboardCanvasV1;
     /** v3 field-builder source registry retained with the Git-owned page. */
     datasets?: Array<{
       id: string;
@@ -2781,10 +2783,22 @@ export interface DashboardDatasetCrossFilter {
 /** Mirrors dql-core DashboardNarrative. */
 export interface DashboardNarrativeV1 {
   version: 1;
-  presentation: 'story' | 'dashboard';
+  presentation: 'story' | 'dashboard' | 'canvas';
   blocks: Array<{ id: string; kind: 'text'; markdown: string } | { id: string; kind: 'tile'; tileId: string }>;
   generatedBy?: 'author' | 'ai' | 'deterministic';
   model?: string;
+}
+
+/** Mirrors dql-core DashboardCanvas: checked markup with <dql-value>/<dql-tile>. */
+export interface DashboardCanvasV1 {
+  version: 1;
+  html: string;
+  generatedBy?: 'author' | 'ai' | 'deterministic';
+  model?: string;
+}
+
+export interface CanvasDraftResponseV1 extends Omit<StoryDraftResponseV1, 'narrative'> {
+  canvas: DashboardCanvasV1;
 }
 
 export interface StoryEditionV1 {
@@ -3294,6 +3308,7 @@ export type AppStudioDraftOperation =
   | { type: 'set_interactions'; pageId: string; interactions?: AppStudioBuildDraft['pages'][number]['interactions'] }
   | { type: 'set_layout'; pageId: string; layout: AppStudioBuildDraft['pages'][number]['layout'] }
   | { type: 'set_narrative'; pageId: string; narrative: DashboardNarrativeV1 | null }
+  | { type: 'set_canvas'; pageId: string; canvas: DashboardCanvasV1 | null }
   | { type: 'set_review_task'; task: AppStudioBuildDraft['reviewTasks'][number] }
   | { type: 'remove_review_task'; taskId: string }
   | { type: 'set_preview_receipt'; receipt: NonNullable<AppStudioBuildDraft['previewReceipt']> };
@@ -8435,6 +8450,14 @@ export const api = {
   async draftAppBuildStory(draftId: string, dashboardId: string, runId: string, instruction?: string): Promise<StoryDraftResponseV1> {
     return request<StoryDraftResponseV1>(
       `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/story-draft`,
+      { method: 'POST', body: JSON.stringify({ runId, ...(instruction ? { instruction } : {}) }) },
+    );
+  },
+
+  /** Draft a governed HTML page for a local App page from its latest complete preview run. */
+  async draftAppBuildCanvas(draftId: string, dashboardId: string, runId: string, instruction?: string): Promise<CanvasDraftResponseV1> {
+    return request<CanvasDraftResponseV1>(
+      `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/canvas-draft`,
       { method: 'POST', body: JSON.stringify({ runId, ...(instruction ? { instruction } : {}) }) },
     );
   },

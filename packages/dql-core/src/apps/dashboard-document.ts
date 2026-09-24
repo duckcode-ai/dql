@@ -1,3 +1,4 @@
+import { checkCanvasHtml } from './canvas-page.js';
 import { MAX_STORY_BLOCKS, validateStoryText } from './story-bindings.js';
 /**
  * Dashboard documents — `apps/<app>/dashboards/<id>.dqld`.
@@ -356,10 +357,18 @@ export type DashboardNarrativeBlock =
 
 export interface DashboardNarrative {
   version: 1;
-  /** `story` shows the blocks instead of the grid; `dashboard` keeps the grid. */
-  presentation: 'story' | 'dashboard';
+  /** `story` shows the blocks, `canvas` the governed HTML page, `dashboard` the grid. */
+  presentation: 'story' | 'dashboard' | 'canvas';
   blocks: DashboardNarrativeBlock[];
   /** Who wrote the current text. AI text is still checked like any other. */
+  generatedBy?: 'author' | 'ai' | 'deterministic';
+  model?: string;
+}
+
+export interface DashboardCanvas {
+  version: 1;
+  /** Canonical, checked markup. */
+  html: string;
   generatedBy?: 'author' | 'ai' | 'deterministic';
   model?: string;
 }
@@ -490,6 +499,12 @@ export interface DashboardDocument {
    * tiles. Every number in the text is a `{{binding}}` to a tile result.
    */
   narrative?: DashboardNarrative;
+  /**
+   * Governed HTML page (RFC 0008 step 9): checked markup whose data comes
+   * only from <dql-value bind> and <dql-tile tile>. Shown when the
+   * narrative's presentation is `canvas`.
+   */
+  canvas?: DashboardCanvas;
   layout: DashboardGridLayout & { responsive?: DashboardResponsiveLayouts };
 }
 
@@ -608,6 +623,7 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
   const story = readStoryEvidencePlan(obj.story, err);
   const layout = readLayout(obj.layout, err);
   const narrative = obj.narrative === undefined ? undefined : readDashboardNarrative(obj.narrative, new Set(layout.items.map((item) => item.i)), err);
+  const canvas = obj.canvas === undefined ? undefined : readDashboardCanvas(obj.canvas, new Set(layout.items.map((item) => item.i)), err);
 
   if (version === 3) {
     validateDashboardV3References(datasets, filters, interactions, layout, err);
@@ -638,6 +654,7 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
       sections: sections.length > 0 ? sections : undefined,
       ...(story ? { story } : {}),
       ...(narrative ? { narrative } : {}),
+      ...(canvas ? { canvas } : {}),
       layout,
     },
     errors: [],
@@ -963,7 +980,7 @@ export function readDashboardNarrative(value: unknown, tileIds: ReadonlySet<stri
   let failed = false;
   const fail = (message: string) => { failed = true; err(`narrative.${message}`); };
   if (raw.version !== 1) fail('version must be 1');
-  if (raw.presentation !== 'story' && raw.presentation !== 'dashboard') fail('presentation must be story|dashboard');
+  if (raw.presentation !== 'story' && raw.presentation !== 'dashboard' && raw.presentation !== 'canvas') fail('presentation must be story|dashboard|canvas');
   if (!Array.isArray(raw.blocks) || raw.blocks.length > MAX_STORY_BLOCKS) fail(`blocks must be a list of at most ${MAX_STORY_BLOCKS} blocks`);
   const blocks: DashboardNarrativeBlock[] = [];
   const seen = new Set<string>();
@@ -988,6 +1005,34 @@ export function readDashboardNarrative(value: unknown, tileIds: ReadonlySet<stri
     version: 1,
     presentation: raw.presentation as DashboardNarrative['presentation'],
     blocks,
+    ...(generatedBy ? { generatedBy } : {}),
+    ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim().slice(0, 120) } : {}),
+  };
+}
+
+/**
+ * Validate a governed HTML page. Unsafe markup and literal numbers are
+ * refused; valid markup is stored in its canonical form.
+ */
+export function readDashboardCanvas(value: unknown, tileIds: ReadonlySet<string>, err: (message: string) => void): DashboardCanvas | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    err('canvas must be an object.');
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  if (raw.version !== 1 || typeof raw.html !== 'string') {
+    err('canvas must be {version: 1, html: "..."}.');
+    return undefined;
+  }
+  const checked = checkCanvasHtml(raw.html, { tileIds });
+  if (checked.issues.length) {
+    for (const issue of checked.issues.slice(0, 10)) err(`canvas: ${issue.message}`);
+    return undefined;
+  }
+  const generatedBy = raw.generatedBy === 'author' || raw.generatedBy === 'ai' || raw.generatedBy === 'deterministic' ? raw.generatedBy : undefined;
+  return {
+    version: 1,
+    html: checked.html,
     ...(generatedBy ? { generatedBy } : {}),
     ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim().slice(0, 120) } : {}),
   };

@@ -45,14 +45,15 @@ const REQUIRED_TEST_FILES = [
 // 170 since the App Dataset registry, period-comparison, and native semantic
 // catalog suites joined the package on top of main (+3 files, +20 tests);
 // 171 with the App driver-analysis suite (RFC 0008 step 7, +1 file, +7 tests);
-// 172 with the story-drafting suite (RFC 0008 step 8, +1 file, +4 tests).
-const EXPECTED_TEST_FILES = 172;
+// 172 with the story-drafting suite (RFC 0008 step 8, +1 file, +4 tests);
+// 173 with the governed-HTML drafting suite (RFC 0008 step 9, +1 file, +4 tests).
+const EXPECTED_TEST_FILES = 173;
 // Keep the aggregate receipt exact. The Ask pipeline suites (intent contract,
 // vocabulary, governed defaults and host proofs, prepare tiers), the engine,
 // observability, retrieval, semantic-proof, research-ledger, conversation and
 // provider-transport regressions total 1,891 non-skipped tests; a future
 // accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2303;
+const EXPECTED_TESTS = 2307;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

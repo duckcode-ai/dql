@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import type { DashboardDocument, DashboardFilter, DashboardGridItem, DashboardGridLayout } from './dashboard-document.js';
 import { datasetTileVisualizationCompatibility } from './tile-query.js';
 import { readDashboardVizStyle } from './viz-style.js';
-import { MAX_TILE_DESCRIPTION, MAX_TILE_OWNER, readDashboardNarrative } from './dashboard-document.js';
-import type { DashboardNarrative } from './dashboard-document.js';
+import { MAX_TILE_DESCRIPTION, MAX_TILE_OWNER, readDashboardCanvas, readDashboardNarrative } from './dashboard-document.js';
+import type { DashboardCanvas, DashboardNarrative } from './dashboard-document.js';
 import { settleGridLayout } from './grid-layout.js';
 import type { DatasetDescriptor } from '../datasets/descriptor.js';
 import type { MetricCapabilityContract } from '../contracts/analytical.js';
@@ -206,6 +206,8 @@ export type AppBuildDraftOperation =
   | { type: 'set_layout'; pageId: string; layout: DashboardGridLayout & { responsive?: DashboardDocument['layout']['responsive'] } }
   /** Story layout (RFC 0008 step 8); `null` removes it. Text with a literal number is refused. */
   | { type: 'set_narrative'; pageId: string; narrative: DashboardNarrative | null }
+  /** Governed HTML page (RFC 0008 step 9); `null` removes it. Unsafe markup is refused. */
+  | { type: 'set_canvas'; pageId: string; canvas: DashboardCanvas | null }
   | { type: 'set_review_task'; task: AppBuildReviewTask }
   | { type: 'remove_review_task'; taskId: string }
   | { type: 'set_preview_receipt'; receipt: AppBuildRunReceipt }
@@ -323,7 +325,7 @@ function reconcileCoverageReferences(draft: AppBuildDraft): AppBuildDraft {
 function operationPreservesSettledData(draft: AppBuildDraft, operation: AppBuildDraftOperation): boolean {
   if (operation.type === 'set_preview_receipt' || operation.type === 'clear_preview_receipt') return true;
   // Story text only presents results; it changes no query.
-  if (operation.type === 'set_narrative') return true;
+  if (operation.type === 'set_narrative' || operation.type === 'set_canvas') return true;
   if (operation.type === 'update_tile') {
     const presentationKeys = new Set(['title', 'description', 'owner', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
     return Object.keys(operation.patch).every((key) => presentationKeys.has(key));
@@ -445,6 +447,16 @@ function applyOperation(draft: AppBuildDraft, operation: AppBuildDraftOperation)
             ? { ...page.narrative, blocks: page.narrative.blocks.filter((block) => block.kind !== 'tile' || block.tileId !== operation.tileId) }
             : undefined;
           return { ...page, ...(narrative ? { narrative } : {}), layout: { ...page.layout, items: page.layout.items.filter((tile) => tile.i !== operation.tileId) } };
+        }
+        if (operation.type === 'set_canvas') {
+          if (operation.canvas === null) {
+            const { canvas: _removed, ...rest } = page;
+            return rest;
+          }
+          const errors: string[] = [];
+          const canvas = readDashboardCanvas(operation.canvas, new Set(page.layout.items.map((tile) => tile.i)), (message) => errors.push(message));
+          if (!canvas) throw new Error(errors.join(' ') || 'The page markup is not valid.');
+          return { ...page, canvas };
         }
         if (operation.type === 'set_narrative') {
           if (operation.narrative === null) {
