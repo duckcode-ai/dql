@@ -324,6 +324,37 @@ export type DashboardInteractions = {
   navigate?: DashboardNavigateInteraction[];
 };
 
+/**
+ * "Why did it move?" (RFC 0008 step 7): explain one period's change in a
+ * Dataset measure against the period before it, member by member, for a few
+ * dimensions. Every number comes from governed Dataset comparison queries;
+ * the split is arithmetic, not AI.
+ */
+export interface DashboardDriverDefinition {
+  version: 1;
+  /** Approved Dataset measure field. */
+  measure: string;
+  /** Approved Dataset time field. */
+  timeField: string;
+  grain: DashboardDriverGrain;
+  /** A local calendar date (YYYY-MM-DD) inside the period being explained. */
+  anchor: string;
+  comparison: 'previous_period' | 'previous_year';
+  /**
+   * Approved dimension fields to break the change down by, most useful
+   * first. `["*"]` lets the runtime use the Dataset's approved dimensions.
+   */
+  dimensions: string[];
+  /** IANA zone for period boundaries; UTC when absent. */
+  timezone?: string;
+}
+
+export type DashboardDriverGrain = 'day' | 'week' | 'month' | 'quarter' | 'year';
+export const DASHBOARD_DRIVER_GRAINS: readonly DashboardDriverGrain[] = ['day', 'week', 'month', 'quarter', 'year'];
+export const MAX_DRIVER_DIMENSIONS = 6;
+/** Use every approved dimension of the Dataset (up to the maximum). */
+export const DRIVER_ALL_DIMENSIONS = '*';
+
 export type DashboardGridItem = {
   /** Stable layout id — used by the grid editor for positioning persistence. */
   i: string;
@@ -338,6 +369,8 @@ export type DashboardGridItem = {
   description?: string;
   /** Who answers for this tile's numbers, as a name or team. */
   owner?: string;
+  /** A driver tile over this item's Dataset (`sourceId`). */
+  driver?: DashboardDriverDefinition;
   /**
    * Canonical AppBuildDraft source binding. App Studio v3 writes this for
    * every data tile; legacy published dashboards remain readable without it.
@@ -895,6 +928,48 @@ function readDashboardFilterTimezone(raw: unknown, index: number, err: (m: strin
   }
 }
 
+/** Validate a driver definition; the runtime checks the fields against the Dataset. */
+export function readDriverDefinition(value: unknown, path: string, err: (message: string) => void): DashboardDriverDefinition | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    err(`${path} must be an object.`);
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  const before = { count: 0 };
+  const fail = (message: string) => { before.count += 1; err(`${path}.${message}`); };
+  const text = (key: string) => (typeof raw[key] === 'string' && (raw[key] as string).trim() ? (raw[key] as string).trim() : undefined);
+  const measure = text('measure');
+  const timeField = text('timeField');
+  const anchor = text('anchor');
+  const grain = text('grain') as DashboardDriverGrain | undefined;
+  const comparison = raw.comparison ?? 'previous_period';
+  const timezone = raw.timezone === undefined ? undefined : text('timezone');
+  if (raw.version !== 1) fail('version must be 1');
+  if (!measure) fail('measure must name a Dataset measure');
+  if (!timeField) fail('timeField must name a Dataset time field');
+  if (!grain || !DASHBOARD_DRIVER_GRAINS.includes(grain)) fail(`grain must be one of ${DASHBOARD_DRIVER_GRAINS.join('|')}`);
+  if (!anchor || !/^\d{4}-\d{2}-\d{2}$/.test(anchor)) fail('anchor must be a date (YYYY-MM-DD)');
+  if (comparison !== 'previous_period' && comparison !== 'previous_year') fail('comparison must be previous_period|previous_year');
+  if (raw.timezone !== undefined && !timezone) fail('timezone must be an IANA zone name');
+  const dimensions = Array.isArray(raw.dimensions)
+    ? Array.from(new Set(raw.dimensions.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '').map((entry) => entry.trim())))
+    : [];
+  if (!Array.isArray(raw.dimensions) || dimensions.length === 0 || dimensions.length > MAX_DRIVER_DIMENSIONS) {
+    fail(`dimensions must list 1 to ${MAX_DRIVER_DIMENSIONS} dimension fields`);
+  }
+  if (before.count > 0) return undefined;
+  return {
+    version: 1,
+    measure: measure!,
+    timeField: timeField!,
+    grain: grain!,
+    anchor: anchor!,
+    comparison: comparison as DashboardDriverDefinition['comparison'],
+    dimensions,
+    ...(timezone ? { timezone } : {}),
+  };
+}
+
 /** Tile descriptions are short markdown notes, not documents. */
 export const MAX_TILE_DESCRIPTION = 2000;
 export const MAX_TILE_OWNER = 120;
@@ -1005,6 +1080,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const trustState = enumOrUndefined(it.trustState, `layout.items[${i}].trustState`, ['certified', 'review_required', 'draft_ready'] as const, err);
     const reviewStatus = enumOrUndefined(it.reviewStatus, `layout.items[${i}].reviewStatus`, ['certified', 'draft_ready', 'review_required'] as const, err);
     const description = readTileText(it.description, `layout.items[${i}].description`, MAX_TILE_DESCRIPTION, err);
+    const driver = it.driver === undefined ? undefined : readDriverDefinition(it.driver, `layout.items[${i}].driver`, err);
+    if (driver && !(typeof it.sourceId === 'string' && it.sourceId)) err(`layout.items[${i}].driver needs the tile's Dataset sourceId.`);
     const owner = readTileText(it.owner, `layout.items[${i}].owner`, MAX_TILE_OWNER, err);
 
     items.push({
@@ -1035,6 +1112,7 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       title: typeof it.title === 'string' ? it.title : undefined,
       ...(description ? { description } : {}),
       ...(owner ? { owner } : {}),
+      ...(driver ? { driver } : {}),
       ...(typeof it.sectionId === 'string' && it.sectionId ? { sectionId: it.sectionId } : {}),
     });
   }

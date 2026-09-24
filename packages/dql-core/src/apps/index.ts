@@ -60,6 +60,12 @@ export {
   isBlockIdRef,
   extractDashboardBlockRefs,
   dashboardDatasetParameterFilterErrors,
+  readDriverDefinition,
+  DASHBOARD_DRIVER_GRAINS,
+  MAX_DRIVER_DIMENSIONS,
+  DRIVER_ALL_DIMENSIONS,
+  MAX_TILE_DESCRIPTION,
+  MAX_TILE_OWNER,
 } from './dashboard-document.js';
 
 export {
@@ -141,6 +147,8 @@ export type {
   DashboardTileParameterBinding,
   DashboardTileSourceEvidence,
   DashboardGridItem,
+  DashboardDriverDefinition,
+  DashboardDriverGrain,
   DashboardDatasetBinding,
   DashboardInteractions,
   DashboardCrossFilterMapping,

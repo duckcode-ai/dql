@@ -288,3 +288,38 @@ function parseInstant(value: string): Date | undefined {
   const parsed = new Date(value);
   return Number.isFinite(parsed.getTime()) ? parsed : undefined;
 }
+
+const CALENDAR_GRAINS = new Set(['day', 'week', 'month', 'quarter', 'year']);
+
+/**
+ * Exact start-inclusive/end-exclusive instants for the period that contains
+ * `anchor` (a local calendar date, YYYY-MM-DD) and the period it is compared
+ * with, in `timezone`. Used where a person picked the period, such as the
+ * last point on a trend chart (RFC 0008 step 7).
+ */
+export function calendarComparisonBounds(input: {
+  anchor: string;
+  grain: string;
+  timezone: string;
+  comparison: 'previous_period' | 'previous_year';
+}): { current: { start: string; end: string }; prior: { start: string; end: string } } | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(input.anchor.trim());
+  const grain = input.grain.trim().toLowerCase();
+  if (!match || !CALENDAR_GRAINS.has(grain)) return undefined;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: input.timezone });
+  } catch {
+    return undefined;
+  }
+  const local = { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+  if (local.month < 1 || local.month > 12 || local.day < 1 || local.day > daysInMonth(local.year, local.month)) return undefined;
+  const start = startOfGrain(local, grain, input.timezone);
+  const end = endOfGrain(local, grain, input.timezone);
+  const prior = input.comparison === 'previous_year'
+    ? shiftZonedYears(start, end, input.timezone, -1)
+    : previousPeriod(start, end, input.timezone, grain);
+  return {
+    current: { start: start.toISOString(), end: end.toISOString() },
+    prior: { start: prior.start.toISOString(), end: prior.end.toISOString() },
+  };
+}

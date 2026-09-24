@@ -263,6 +263,18 @@ export {
   buildDatasetComparisonPlan,
   executeDatasetComparisonPlan,
   loadDatasetGrainProofs,
+  planDriverQueries,
+  foldDriverAnalysis,
+  driverTotalTileId,
+  driverDimensionTileId,
+  isDriverExecutionTileId,
+} from './datasets/index.js';
+export type {
+  DriverAnalysisV1,
+  DriverDimensionV1,
+  DriverMemberV1,
+  DriverQueryPlan,
+  DriverQueryPlanResult,
 } from './datasets/index.js';
 export type {
   DatasetBindingAuthority,
@@ -384,7 +396,7 @@ export type {
   AnalyticalErrorOrigin,
   AnalyticalErrorStage,
 } from './analytical-error.js';
-export { resolveAnalyticalPeriods } from './analytical-period-resolution.js';
+export { resolveAnalyticalPeriods, calendarComparisonBounds } from './analytical-period-resolution.js';
 export type {
   AnalyticalFreshnessObservationV1,
   AnalyticalFreshnessRequestV1,

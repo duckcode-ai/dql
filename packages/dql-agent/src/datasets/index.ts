@@ -27,3 +27,21 @@ export {
 export type {
   DatasetComparisonPlanResult,
 } from './period-comparison.js';
+
+export {
+  planDriverQueries,
+  foldDriverAnalysis,
+  driverTotalTileId,
+  driverDimensionTileId,
+  isDriverExecutionTileId,
+  DRIVER_MEASURE_ALIAS,
+  DRIVER_MEMBER_ALIAS,
+  DRIVER_MEMBERS_SHOWN,
+} from './driver-analysis.js';
+export type {
+  DriverAnalysisV1,
+  DriverDimensionV1,
+  DriverMemberV1,
+  DriverQueryPlan,
+  DriverQueryPlanResult,
+} from './driver-analysis.js';

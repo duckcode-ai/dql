@@ -3708,6 +3708,80 @@ async function startPilotProject(prefix: string) {
   return pilot;
 }
 
+describe('Driver tiles over a real DuckDB Dataset (RFC 0008 step 7)', () => {
+  duckDbIt('explains a month-over-month change by member, from a saved driver tile and from a reader probe', async () => {
+    const connectorRoot = requireConfiguredDuckDbConnectorRoot();
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-datasets-drivers-'));
+    const databasePath = join(projectRoot, 'app-datasets-pilot.duckdb');
+    const connection: ConnectionConfig = { driver: 'duckdb', filepath: databasePath, moduleSearchPaths: [connectorRoot] };
+    const executor = new QueryExecutor();
+    let server: Server | undefined;
+    try {
+      cpSync(fixtureRoot, projectRoot, { recursive: true });
+      const projectConnectorRoot = join(projectRoot, '.dql', 'connectors');
+      mkdirSync(projectConnectorRoot, { recursive: true });
+      symlinkSync(join(connectorRoot, 'node_modules'), join(projectConnectorRoot, 'node_modules'), 'dir');
+      execFileSync(process.execPath, [seedWarehouse, '--seed', join(projectRoot, 'seeds', 'seed.json'), '--connector-root', connectorRoot, '--out', databasePath], { stdio: 'pipe' });
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor, connection, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const { draft: composed, page } = await composeBlockTiles(base, 'Driver App', [
+        ['Revenue by region', 'chart', { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] }],
+      ]);
+      const trend = page.layout.items[0];
+      const driver = { version: 1, measure: 'revenue', timeField: 'order_date', grain: 'month', anchor: '2026-03-01', comparison: 'previous_period', dimensions: ['region', 'customer_id', 'order_date'] };
+
+      // A saved driver tile runs as governed comparisons and folds into one result.
+      const added = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}`, 'PATCH', {
+        expectedRevision: composed.revision,
+        expectedProposalHash: composed.proposalHash,
+        operations: [{
+          type: 'add_tile',
+          pageId: 'overview',
+          tile: { i: 'why-march', x: 0, y: 4, w: 12, h: 6, sourceId: trend.sourceId, sourceRevision: trend.sourceRevision, driver, viz: { type: 'waterfall' }, title: 'Why revenue moved in March' },
+        }],
+      });
+      expect(added.status, added.text).toBe(200);
+      const run = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}/dashboards/overview/run`, 'POST', { fullRun: true });
+      expect(run.status, run.text).toBe(200);
+      expect(run.body.tiles.map((tile: any) => tile.tileId)).toEqual([trend.i, 'why-march']);
+      const tile = run.body.tiles.find((candidate: any) => candidate.tileId === 'why-march');
+      expect(tile).toMatchObject({ status: 'ok', tileType: 'driver' });
+      expect(tile.driver.headline).toMatchObject({ current: '40', prior: '30', delta: '10' });
+      expect(tile.driver.dimensions.map((dimension: any) => dimension.field)).toEqual(['region', 'customer_id']);
+      expect(tile.driver.dimensions[0]).toMatchObject({ reconciles: true, concentration: 1 });
+      expect(tile.driver.dimensions[0].members[0]).toMatchObject({ label: 'US', delta: '10', role: 'driver' });
+      expect(tile.driver.dimensions[1].reconciles).toBe(true);
+      expect(tile.driver.unavailable).toEqual([{ field: 'order_date', reason: 'a time field; the periods already cover time' }]);
+      expect(tile.dataset).toMatchObject({ trust: 'certified' });
+      expect(tile.driverEvidence.every((entry: any) => entry.status === 'ok' && entry.executedSqlFingerprint)).toBe(true);
+      expect(run.body.incomplete).toBeUndefined();
+
+      // A reader's probe runs bounded from a Dataset tile and leaves the App unchanged.
+      const probe = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}/dashboards/overview/run`, 'POST', {
+        driverProbe: { fromTileId: trend.i, driver: { ...driver, dimensions: ['region'] } },
+      });
+      expect(probe.status, probe.text).toBe(200);
+      expect(probe.body.partial).toBe(true);
+      expect(probe.body.tiles).toHaveLength(1);
+      expect(probe.body.tiles[0]).toMatchObject({ tileId: `${trend.i}::why`, tileType: 'driver', status: 'ok' });
+      expect(probe.body.tiles[0].driver.summary).toBe('Revenue rose by 10. The largest move was US (region): +10, 100% of the change.');
+      const stored = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}`, 'GET');
+      expect(stored.body.draft.pages[0].layout.items.map((item: any) => item.i)).toEqual([trend.i, 'why-march']);
+
+      // A probe must start from a Dataset tile on the page.
+      const refused = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}/dashboards/overview/run`, 'POST', {
+        driverProbe: { fromTileId: 'nope', driver },
+      });
+      expect(refused.status).toBe(400);
+      expect(refused.text).toContain('Dataset tile on this page');
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+      await executor.disconnect();
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  }, 90_000);
+});
+
 async function createDraftAndCandidates(base: string, name: string) {
   const created = await request(base, '/api/app-builds', 'POST', {
     name, goal: 'Check governed Dataset tiles.', domain: 'commerce', authoringMode: 'manual', sourcePolicy: 'governed_only', template: 'blank',

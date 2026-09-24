@@ -2377,6 +2377,8 @@ export interface DashboardDocumentResponse {
         description?: string;
         /** Who answers for this tile's numbers. */
         owner?: string;
+        /** A "Why did it move?" driver tile (RFC 0008 step 7). */
+        driver?: DashboardDriverDefinitionV1;
         sourceId?: string;
         sourceRevision?: string;
         block?: { blockId?: string; ref?: string; version?: string };
@@ -2612,7 +2614,11 @@ export interface DashboardRunResponse {
   tiles: Array<{
     tileId: string;
     status: 'ok' | 'unauthorized' | 'error' | 'unresolved' | 'stale';
-    tileType?: 'block' | 'text' | 'aiPin' | 'semantic' | 'dataset' | 'draftAnalysis';
+    tileType?: 'block' | 'text' | 'aiPin' | 'semantic' | 'dataset' | 'draftAnalysis' | 'driver';
+    /** A driver tile's analysis: the change, split by member for each dimension. */
+    driver?: DashboardDriverAnalysisV1;
+    /** Per-dimension evidence for a driver tile's governed comparison queries. */
+    driverEvidence?: Array<{ field: string; status: string; resultFingerprint?: string; executedSqlFingerprint?: string }>;
     blockId?: string;
     blockPath?: string;
     certificationStatus?: string | null;
@@ -2770,6 +2776,39 @@ export interface DashboardDatasetCrossFilter {
  * browser tab. Tile lists are advisory scheduling bounds; server-side source,
  * filter, and receipt validation remains authoritative.
  */
+/** Mirrors dql-core DashboardDriverDefinition. */
+export interface DashboardDriverDefinitionV1 {
+  version: 1;
+  measure: string;
+  timeField: string;
+  grain: 'day' | 'week' | 'month' | 'quarter' | 'year';
+  anchor: string;
+  comparison: 'previous_period' | 'previous_year';
+  dimensions: string[];
+  timezone?: string;
+}
+
+/** Mirrors dql-agent DriverAnalysisV1; numbers are exact decimals as text. */
+export interface DashboardDriverAnalysisV1 {
+  version: 1;
+  measure: { field: string; label: string; additivity: 'additive' | 'ratio' | 'non_additive' };
+  grain: string;
+  periods: { current: { start: string; end: string }; prior: { start: string; end: string } };
+  headline: { current?: string; prior?: string; delta?: string; percentDelta?: string };
+  dimensions: Array<{
+    field: string;
+    label: string;
+    members: Array<{ label: string; current?: string; prior?: string; delta?: string; share?: string; role: 'driver' | 'offset' | 'flat'; status: 'both' | 'new' | 'gone'; other?: boolean }>;
+    memberCount: number;
+    reconciles: boolean;
+    residual?: string;
+    concentration: number;
+  }>;
+  unavailable: Array<{ field: string; reason: string; detail?: string }>;
+  missingPeriod?: 'current' | 'prior';
+  summary: string;
+}
+
 export interface DashboardRunOptions {
   runScope?: string;
   /** Bypass the optional local Dataset delivery cache for a fresh live run. */
@@ -2785,6 +2824,8 @@ export interface DashboardRunOptions {
    * cannot be created from an interaction run.
    */
   datasetDrills?: DashboardDatasetHierarchyDrill[];
+  /** "Why did it move?" for one Dataset tile; runs bounded and changes nothing (RFC 0008 step 7). */
+  driverProbe?: { fromTileId: string; driver: DashboardDriverDefinitionV1 };
 }
 
 /**
@@ -8265,7 +8306,7 @@ export const api = {
     // so the viewer shows why a page did not run, not a generic failure.
     return request<DashboardRunResponse>(
       `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
-      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}) }) },
+      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}), ...(options?.driverProbe ? { driverProbe: options.driverProbe } : {}) }) },
     );
   },
 
@@ -8278,7 +8319,7 @@ export const api = {
   ): Promise<DashboardRunResponse> {
     return request<DashboardRunResponse>(
       `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
-      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}) }) },
+      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}), ...(options?.driverProbe ? { driverProbe: options.driverProbe } : {}) }) },
     );
   },
 

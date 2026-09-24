@@ -537,6 +537,7 @@ import {
   type SemanticTileConversionPreviewRequest,
   type SemanticTileConversionPreviewResponse,
 } from './apps-api.js';
+import { dashboardDriverProbeItem, expandDashboardDriverItems, foldDashboardDriverTiles, withDriverFilterScopes } from './datasets/dashboard-drivers.js';
 import { compileDatasetTileQuery, type CompiledDatasetTileQuery } from './datasets/tile-query-compiler.js';
 import { summarizeDatasetChartFacts } from './datasets/dataset-chart-fact-summary.js';
 import { planDatasetTilePromotion, type DatasetTileBoundParameter } from './datasets/dataset-tile-promotion.js';
@@ -17876,6 +17877,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: `Dashboard "${dashboardId}" not found in ${runSurface === 'app-builds' ? 'local App draft' : 'App'} "${appId}"` }));
           return;
         }
+        // "Why did it move?" (RFC 0008 step 7): a reader asks for a driver
+        // analysis of one Dataset tile. The probe joins this page run as one
+        // transient driver tile, so it gets the page's filters and access
+        // checks, runs bounded, and never changes the App.
+        if (!mcpRequest && body && typeof body === 'object' && (body as Record<string, unknown>).driverProbe !== undefined) {
+          let probe: DashboardGridItem;
+          try {
+            probe = dashboardDriverProbeItem(loaded.dashboard, (body as Record<string, unknown>).driverProbe);
+          } catch (error) {
+            throw new DashboardRunRequestError(error instanceof Error ? error.message : String(error));
+          }
+          // Both loaders build a fresh document per request, so the probe never
+          // reaches the stored App or draft.
+          loaded.dashboard = { ...loaded.dashboard, layout: { ...loaded.dashboard.layout, items: [...loaded.dashboard.layout.items, probe] } };
+          const probeBody = body as Record<string, unknown>;
+          if (probeBody.fullRun || probeBody.visibleTileIds || probeBody.affectedTileIds || probeBody.datasetDrills) {
+            throw new DashboardRunRequestError('A driver probe runs on its own; it cannot be combined with other scheduling bounds.');
+          }
+          probeBody.tileId = probe.i;
+        }
         // Local drafts can outlive parser upgrades or be restored from an
         // earlier SQLite state. Do not let a v3 field Dataset query bypass the
         // document parser simply because it came from local draft storage.
@@ -18181,6 +18202,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             sourceId: item.sourceId ?? null,
             sourceRevision: item.sourceRevision ?? null,
             query: item.query ?? null,
+            driver: item.driver ?? null,
             filterBindings: item.filterBindings ?? [],
             parameterBindings: item.parameterBindings ?? [],
           })),
@@ -18195,7 +18217,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // miss cannot reference a temporal-dead-zone response identifier.
         const runId = `app_run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const datasetSourceIds = Array.from(new Set(itemsToRun
-          .filter((item) => Boolean(item.query && item.sourceId))
+          .filter((item) => Boolean((item.query || item.driver) && item.sourceId))
           .map((item) => item.sourceId!)));
         if (datasetSourceIds.length > 0) {
           try {
@@ -18239,13 +18261,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             datasetSetupError = error instanceof Error ? error.message : String(error);
           }
         }
+        // A driver tile runs as governed Dataset comparisons: one for the whole
+        // measure and one per dimension. They run as ordinary Dataset tiles
+        // (same contract checks, filters, cache and evidence) and fold back
+        // into the driver tile before anything else sees the results.
+        const driverExpansion = expandDashboardDriverItems({
+          items: itemsToRun,
+          descriptorFor: (item) => (item.sourceId ? datasetSourceById.get(item.sourceId)?.capabilities.dataset : undefined),
+          sourceErrorFor: (item) => datasetSetupError ?? (item.sourceId ? datasetSourceErrors.get(item.sourceId) : undefined),
+        });
+        const executionItems = driverExpansion.executionItems;
+        const executionDashboard = driverExpansion.runs.size > 0
+          ? withDriverFilterScopes(loaded.dashboard, driverExpansion.executionOwners)
+          : loaded.dashboard;
         let nextTileIndex = 0;
         // App preview is a multi-source execution, so isolate each tile's
         // failure and run a small fixed pool. Four avoids serial 4k-catalog
         // behavior without flooding the configured warehouse.
         const runTileWorker = async () => {
-          while (dashboardRunIsCurrent() && nextTileIndex < itemsToRun.length) {
-            const item = itemsToRun[nextTileIndex++];
+          while (dashboardRunIsCurrent() && nextTileIndex < executionItems.length) {
+            const item = executionItems[nextTileIndex++];
             if (!item) continue;
           if (item.text) {
             tiles.push({
@@ -18597,7 +18632,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 throw new Error('Connect the selected source before running this Dataset tile.');
               }
               const filterResolution = resolveDashboardDatasetFilters({
-                dashboard: loaded.dashboard,
+                dashboard: executionDashboard,
                 item,
                 descriptor: discoveryDescriptor,
                 values: dashboardVariables,
@@ -18618,7 +18653,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               // dashboard parameters and explicit tile parameter bindings
               // remain valid source inputs.
               const datasetSourceParameters = dashboardDatasetSourceParameterValues({
-                dashboard: loaded.dashboard,
+                dashboard: executionDashboard,
                 dashboardValues: dashboardVariables,
                 boundParameters,
               });
@@ -19586,7 +19621,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               if (missingModels.length) throw new Error(`Semantic definition changed; missing model(s): ${missingModels.join(', ')}`);
               const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
               const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer, projectRoot);
-              const activeFilters = dashboardSemanticFiltersForTile(loaded.dashboard, item, dashboardVariables);
+              const activeFilters = dashboardSemanticFiltersForTile(executionDashboard, item, dashboardVariables);
               const staticFilters = (item.semantic.filters ?? []).map((filter) => ({
                 dimension: filter.field,
                 operator: filter.operator,
@@ -19799,7 +19834,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               sqlParams: blockPlan?.sqlParams ?? [],
               variables: { ...(blockPlan?.variables ?? {}), ...dashboardVariables },
               block,
-              dashboard: loaded.dashboard,
+              dashboard: executionDashboard,
               tileId: item.i,
               tileFilterBindings: item.filterBindings,
             });
@@ -19950,7 +19985,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         };
         try {
           await Promise.all(Array.from(
-            { length: Math.min(4, itemsToRun.length) },
+            { length: Math.min(4, executionItems.length) },
             () => runTileWorker(),
           ));
         } finally {
@@ -19963,6 +19998,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             await state.scope.close();
           }));
         }
+        if (driverExpansion.runs.size > 0) foldDashboardDriverTiles(tiles, driverExpansion.runs);
         tiles.sort((left, right) => (tileOrder.get(left.tileId) ?? 0) - (tileOrder.get(right.tileId) ?? 0));
         localApps.current?.close();
         const completionSnapshot = projectSnapshot();

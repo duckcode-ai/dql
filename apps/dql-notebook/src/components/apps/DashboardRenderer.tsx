@@ -8,6 +8,8 @@ import {
   type DashboardDatasetHierarchyDrill,
   type DashboardDocumentResponse,
   type DashboardRunResponse,
+  type DashboardDriverAnalysisV1,
+  type DashboardDriverDefinitionV1,
   type DashboardStoryBrief,
 } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -30,6 +32,8 @@ import {
 import { autoLayoutDashboardItems, autoLayoutRank, layoutScore, packDashboardItems, reorderTileForDrop } from './dashboard-layout';
 import { readerTileFreshness, readerTileReceipt, readerTileTrust, readerTrustCounts } from './reader-trust';
 import { plainDescription, ReaderTrustBadge, TrustLensBar } from './ReaderTrust';
+import { DriverPanel, DriverView } from './DriverView';
+import { driverProbeFor } from './driver-probe';
 import {
   autoTileSizeForItem, autoTileSizeForViz, clamp, narrowTileMinHeight, normalizeSizePreset,
   presetMatches, tileSizeForPreset, tileSizePatch, TILE_SIZE_PRESETS, type TileSizePresetId,
@@ -200,6 +204,13 @@ export function DashboardRenderer({
   const [tileRanAt, setTileRanAt] = useState<Record<string, number>>({});
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [trustLens, setTrustLens] = useState(false);
+  /** The open "Why did it move?" panel, if any. */
+  const [driverPanel, setDriverPanel] = useState<{
+    item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
+    definition: DashboardDriverDefinitionV1;
+    state: { status: 'loading' } | { status: 'ready'; analysis: DashboardDriverAnalysisV1; tile: DashboardRunResponse['tiles'][number] } | { status: 'error'; message: string };
+  } | null>(null);
+  const driverRequestRef = useRef(0);
   /** Whether the latest partial run came from a reader interaction (a mark or drill). */
   const [partialFromInteraction, setPartialFromInteraction] = useState(false);
   const [activeCrossFilters, setActiveCrossFilters] = useState<DashboardDatasetCrossFilter[]>([]);
@@ -321,6 +332,34 @@ export function DashboardRenderer({
     () => (editable || !run ? [] : readerTrustCounts((storyItems ?? visibleItems).map((item) => readerTileTrust(item, tileResults.get(item.i))))),
     [editable, run, storyItems, tileResults, visibleItems],
   );
+  const runDriverProbe = useCallback(async (
+    item: DashboardDocumentResponse['dashboard']['layout']['items'][number],
+    definition: DashboardDriverDefinitionV1,
+  ) => {
+    const requestId = driverRequestRef.current + 1;
+    driverRequestRef.current = requestId;
+    setDriverPanel({ item, definition, state: { status: 'loading' } });
+    try {
+      // No runScope: the probe must not supersede the page's own run.
+      const result = await api.runDashboard(appId, dashboard.id, runVariables, undefined, { driverProbe: { fromTileId: item.i, driver: definition } });
+      if (driverRequestRef.current !== requestId) return;
+      const tile = result.tiles.find((candidate) => candidate.tileType === 'driver');
+      setDriverPanel({
+        item,
+        definition,
+        state: tile?.status === 'ok' && tile.driver
+          ? { status: 'ready', analysis: tile.driver, tile }
+          : { status: 'error', message: tile?.error ?? 'The comparison did not run.' },
+      });
+    } catch (cause) {
+      if (driverRequestRef.current !== requestId) return;
+      setDriverPanel({ item, definition, state: { status: 'error', message: cause instanceof Error ? cause.message : String(cause) } });
+    }
+  }, [appId, dashboard.id, runVariables]);
+  const explainChange = useCallback((item: DashboardDocumentResponse['dashboard']['layout']['items'][number], tile: DashboardRunResponse['tiles'][number]) => {
+    const definition = driverProbeFor(item, tile);
+    if (definition) void runDriverProbe(item, definition);
+  }, [runDriverProbe]);
   const readerContext = useMemo<ReaderTileContext | undefined>(
     () => (editable ? undefined : {
       ranAtByTile: tileRanAt,
@@ -996,6 +1035,19 @@ export function DashboardRenderer({
         </div>
       ) : null}
       {!editable ? <TrustLensBar counts={trustCounts} on={trustLens} onToggle={() => setTrustLens((current) => !current)} /> : null}
+      {driverPanel ? (
+        <DriverPanel
+          title={driverPanel.state.status === 'ready' ? driverPanel.state.analysis.measure.label.toLowerCase() : driverPanel.definition.measure.replace(/_/g, ' ')}
+          definition={driverPanel.definition}
+          state={driverPanel.state}
+          onComparison={(comparison) => void runDriverProbe(driverPanel.item, { ...driverPanel.definition, comparison })}
+          onClose={() => { driverRequestRef.current += 1; setDriverPanel(null); }}
+          footer={driverPanel.state.status === 'ready' ? (() => {
+            const trust = readerTileTrust(driverPanel.item, driverPanel.state.tile);
+            return trust ? <span className={`dql-trust-badge ${trust.state}`} style={{ justifySelf: 'start', cursor: 'default' }}>{trust.label} · {trust.detail}</span> : null;
+          })() : null}
+        />
+      ) : null}
       {run?.incomplete ? (
         <div role="status" style={{ ...saveStatusStyle('var(--text-secondary)'), marginBottom: 8 }}>
           <AlertTriangle size={13} /> {run.incomplete.message}
@@ -1115,6 +1167,7 @@ export function DashboardRenderer({
                       onAskChart={onAskChart}
                       runId={run?.runId}
                       reader={readerContext}
+                      onExplainChange={editable ? undefined : explainChange}
                       onMove={() => undefined}
                       onDragMove={() => undefined}
                       onDragEnd={() => undefined}
@@ -1179,6 +1232,7 @@ export function DashboardRenderer({
               onAskChart={onAskChart}
               runId={run?.runId}
               reader={readerContext}
+              onExplainChange={editable ? undefined : explainChange}
               onMove={(point) => void moveTileToPoint(item.i, point)}
               onDragMove={(point) => updateDragPreview(item.i, point)}
               onDragEnd={clearDragPreview}
@@ -1333,7 +1387,10 @@ function DashboardTile({
   onDrillBack,
   onNavigate,
   reader,
+  onExplainChange,
 }: {
+  /** Reader: "Why did it move?" for a trend tile, with its driver definition. */
+  onExplainChange?: (item: DashboardDocumentResponse['dashboard']['layout']['items'][number], tile: DashboardRunResponse['tiles'][number]) => void;
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
   /** Reader-only trust context: freshness clock, run identity, Trust Lens. */
@@ -1610,7 +1667,7 @@ function DashboardTile({
           <Sparkles size={11} strokeWidth={2} /> {canAskChart ? 'Ask about chart' : 'Ask AI'}
         </button>
       ) : null}
-      {!editable && (canInspect || canAsk || tileResult || viewerVizChoices.length) ? (
+      {!editable && (canInspect || canAsk || tileResult || viewerVizChoices.length || onExplainChange) ? (
         <div className="dql-tile-menu-anchor" style={{ opacity: hovered || tileMenuOpen ? 1 : 0 }} onClick={(event) => event.stopPropagation()}>
           <button type="button" className="dql-tile-menu-button" aria-label={`Actions for ${item.title ?? 'tile'}`} aria-haspopup="menu" aria-expanded={tileMenuOpen} onClick={() => setTileMenuOpen((open) => !open)} onFocus={() => setHovered(true)}>
             <MoreHorizontal size={15} />
@@ -1619,6 +1676,7 @@ function DashboardTile({
             <div className="dql-tile-menu" role="menu" onMouseLeave={() => setTileMenuOpen(false)}>
               {canInspect ? <button type="button" role="menuitem" onClick={() => openEvidence('how')}><ShieldCheck size={14} /> How this was computed</button> : null}
               {canInspect && (item.query || blockId) ? <button type="button" role="menuitem" onClick={() => openEvidence('dql')}><Code2 size={14} /> View DQL</button> : null}
+              {onExplainChange && tile && driverProbeFor(item, tile) ? <button type="button" role="menuitem" onClick={() => { setTileMenuOpen(false); onExplainChange(item, tile); }}><Activity size={14} /> Why did it move?</button> : null}
               {canAsk ? <button type="button" role="menuitem" onClick={() => { setTileMenuOpen(false); askAboutTile(); }}><Sparkles size={14} /> {canAskChart ? 'Ask about this chart' : 'Ask AI about this'}</button> : null}
               {canOpenNotebook && tile ? <button type="button" role="menuitem" onClick={() => { setTileMenuOpen(false); onOpenNotebook?.(tile); }}><FileText size={14} /> Open in notebook</button> : null}
               {viewerVizChoices.length ? <><hr /><small className="dql-tile-menu-label">Show as</small>{viewerVizChoices.map((option) => <button key={option.value} type="button" role="menuitemradio" aria-checked={activeChart === option.value} className={activeChart === option.value ? 'on' : ''} onClick={() => { setTileMenuOpen(false); switchGeneratedViz(option.value); }}>{option.label}</button>)}</> : null}
@@ -2427,6 +2485,9 @@ export function TileBody({
       ) : null}
     </div>
   );
+  if (tile.tileType === 'driver' && tile.driver) {
+    return <div style={{ width: '100%', overflow: 'auto' }}><DriverView analysis={tile.driver} compact={Boolean(item.h && item.h <= 4)} /></div>;
+  }
   if (!tile.result) {
     return tile.tileType === 'aiPin' && tile.aiPin
       ? <AiPinSummary pin={tile.aiPin} themeMode={themeMode} />

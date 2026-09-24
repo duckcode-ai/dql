@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import {
-  ArrowLeft, ArrowRight, BarChart3, Blocks, Bot, Check, ChevronDown, Code2, Copy, FileText, Filter,
+  Activity, ArrowLeft, ArrowRight, BarChart3, Blocks, Bot, Check, ChevronDown, Code2, Copy, FileText, Filter,
   Gauge, Heading, LayoutDashboard, LineChart, Monitor, MoreHorizontal, PanelRight,
   Play, Plus, Redo2, ScatterChart, Search, Settings2, ShieldCheck, Smartphone, Sparkles, Table2,
   Trash2, Type, Undo2, Upload, X,
@@ -42,6 +42,9 @@ import { DataPanel, type DataPanelTarget } from './builder/DataPanel';
 import { DraftTileCard, DraftTileInspector, type DraftTileState } from './builder/DraftTile';
 import { ProposedTileCard } from './builder/ProposedTile';
 import { ChartStylePanel } from './builder/ChartStylePanel';
+import { DriverView } from './DriverView';
+import { DriverTileSettings } from './builder/DriverTileSettings';
+import { driverProbeFor } from './driver-probe';
 import {
   CANVAS_COLUMNS,
   CANVAS_GAP_PX,
@@ -1789,6 +1792,44 @@ export function AppStudioV2({
     }
   };
 
+  /**
+   * "Why did it move?" as a tile (RFC 0008 step 7): explain the latest
+   * complete period of a trend tile, broken down by the Dataset's approved
+   * dimensions. The new tile takes the first gap wide enough for it.
+   */
+  const addDriverTile = async (tileId: string) => {
+    if (!activePage) return;
+    const source = activePage.layout.items.find((item) => item.i === tileId);
+    const definition = source ? driverProbeFor(source, previewRun?.tiles.find((item) => item.tileId === tileId)) : null;
+    if (!source || !definition) return;
+    const taken = new Set(activePage.layout.items.map((item) => item.i));
+    let id = `${tileId}-why`;
+    for (let n = 2; taken.has(id); n += 1) id = `${tileId}-why-${n}`;
+    const settled = settleGridLayout(activePage.layout.items, CANVAS_COLUMNS);
+    const spot = firstFreeGridCell(settled, 12, 6, CANVAS_COLUMNS);
+    const tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number] = {
+      i: id,
+      x: spot.x,
+      y: spot.y,
+      w: 12,
+      h: 6,
+      sourceId: source.sourceId,
+      ...(source.sourceRevision ? { sourceRevision: source.sourceRevision } : {}),
+      ...(source.filterBindings ? { filterBindings: source.filterBindings } : {}),
+      ...(source.trustState ? { trustState: source.trustState } : {}),
+      ...(source.reviewStatus ? { reviewStatus: source.reviewStatus } : {}),
+      ...(source.sourceClass ? { sourceClass: source.sourceClass } : {}),
+      driver: definition,
+      viz: { type: 'waterfall' },
+      title: `Why ${source.title || 'this'} moved`,
+    };
+    const next = await mutate([{ type: 'add_tile', pageId: activePage.id, tile }]);
+    if (next) {
+      setSelectedTileId(id);
+      setSavedMessage('Driver tile added');
+    }
+  };
+
   const removeTile = async (tileId: string) => {
     if (!activePage) return;
     const next = await mutate([{ type: 'remove_tile', pageId: activePage.id, tileId }]);
@@ -2757,6 +2798,7 @@ export function AppStudioV2({
                         {tile.query ? <button type="button" role="menuitem" onClick={() => { setDqlTileId(tile.i); setTileMenuId(null); }}><Code2 size={14} /> View DQL and SQL</button> : null}
                         {tile.sourceId && tile.query ? <button type="button" role="menuitem" onClick={() => askAiAboutTile(tile.i)}><Sparkles size={14} /> {editing ? 'Change with AI' : 'Ask about this tile'}</button> : null}
                         {editing ? <button type="button" role="menuitem" onClick={() => { setSelectedTileId(tile.i); setTileMenuId(null); setCopilotOpen(false); }}><Settings2 size={14} /> Tile settings</button> : null}
+                        {editing && driverProbeFor(tile, previewRun?.tiles.find((item) => item.tileId === tile.i)) ? <button type="button" role="menuitem" onClick={() => { setTileMenuId(null); void addDriverTile(tile.i); }}><Activity size={14} /> Explain the latest change</button> : null}
                         {editing ? <button type="button" role="menuitem" onClick={() => { setTileMenuId(null); void duplicateTile(tile.i); }}><Copy size={14} /> Duplicate <kbd>{modifierKeyLabel()}D</kbd></button> : null}
                         {editing ? <><hr /><button type="button" role="menuitem" className="danger" onClick={() => { setTileMenuId(null); void removeTile(tile.i); }}><Trash2 size={14} /> Remove tile <kbd>Del</kbd></button></> : null}
                       </div> : null}
@@ -3576,11 +3618,12 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
   const savedDatasetVisualization = tile.query && dataset
     ? datasetTileVisualizationCompatibility(tile.query, tile.viz.type)
     : undefined;
-  const dataTile = !tile.text;
+  const driverTile = Boolean(tile.driver);
+  const dataTile = !tile.text && !driverTile;
   const rowCount = run?.status === 'ok' ? run.result?.rowCount ?? run.result?.rows.length ?? 0 : undefined;
   return <div className="inspector-body">
     <section className="inspector-title"><label htmlFor={`tile-title-${tile.i}`}>Title</label><input id={`tile-title-${tile.i}`} value={title} onChange={(event) => setTitle(event.target.value)} onBlur={() => { if (title.trim() !== (tile.title ?? '')) onUpdate({ title: title.trim() }); }} /></section>
-    {dataTile ? <section className="inspector-docs">
+    {dataTile || driverTile ? <section className="inspector-docs">
       <label htmlFor={`tile-description-${tile.i}`}>Description</label>
       {/* An empty string clears the field: a missing key would leave the old text in the draft. */}
       <textarea id={`tile-description-${tile.i}`} rows={2} maxLength={2000} placeholder="What this shows and how to read it" value={description} onChange={(event) => setDescription(event.target.value)} onBlur={() => { if (description.trim() !== (tile.description ?? '')) onUpdate({ description: description.trim() }); }} />
@@ -3589,7 +3632,8 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
       <small className="field-help">Readers see the description under the title and the owner in the tile’s receipt.</small>
     </section> : null}
     {dataTile ? <div className="inspector-tabs" role="tablist" aria-label="Tile settings">{([['data', 'Data'], ['visual', 'Visual'], ['interactions', 'Interactions']] as const).map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>{label}</button>)}</div> : null}
-    {!dataTile ? <>
+    {driverTile && tile.driver ? <DriverTileSettings driver={tile.driver} disabled={disabled} onChange={(driver) => onUpdate({ driver })} /> : null}
+    {!dataTile && !driverTile ? <>
     {tile.text ? <section><label>Content</label><textarea rows={7} value={markdown} onChange={(event) => setMarkdown(event.target.value)} onBlur={() => { if (markdown !== tile.text?.markdown) onUpdate({ text: { markdown } }); }} /><small className="field-help">Safe Markdown only. Executable HTML and JavaScript are not supported.</small></section> : null}
     <section><label>Responsive size</label><div className="size-buttons">{[['Compact', 3, 2], ['Standard', 6, 4], ['Wide', 12, 4], ['Tall', 6, 7]].map(([label, w, h]) => <button key={label} type="button" onClick={() => onUpdate({ w: Number(w), h: Number(h) })}>{label}</button>)}</div></section>
     </> : null}
@@ -3834,6 +3878,9 @@ export function StudioTilePreview({
     return () => observer.disconnect();
   }, [run]);
   if (!run) return <StaticComponentPreview loading={loading} view={tile.viz.type} />;
+  if (run.status === 'ok' && run.tileType === 'driver' && run.driver) {
+    return <div className="live-component-preview driver"><DriverView analysis={run.driver} compact={tile.h <= 4} /></div>;
+  }
   if (run.status !== 'ok' && run.error?.startsWith('APP_DATASETS_FEATURE_DISABLED')) {
     return <div className="preview-state error"><strong>Field-based tiles are off</strong><span>Turn them on from the Sources panel to run this tile.</span></div>;
   }
@@ -4076,6 +4123,7 @@ function proposalSummaryText(page: ProposedPage): { text: string; removed: numbe
 function tileKindLabel(tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]): string {
   if (tile.viz.type === 'heading') return 'HEADING';
   if (tile.text) return 'TEXT';
+  if (tile.driver) return 'DRIVERS';
   const labels: Record<string, string> = { single_value: 'KPI', kpi: 'KPI', bar: 'BAR CHART', line: 'LINE CHART', area: 'AREA CHART', scatter: 'SCATTER', heatmap: 'HEATMAP', table: 'TABLE', pivot: 'PIVOT TABLE' };
   return labels[tile.viz.type] ?? humanize(tile.viz.type).toUpperCase();
 }
@@ -4105,7 +4153,7 @@ function pageHasDataTiles(page: AppStudioBuildDraft['pages'][number]): boolean {
 }
 
 function isDataTile(item: AppStudioBuildDraft['pages'][number]['layout']['items'][number]): boolean {
-  return Boolean(item.block || item.semantic || item.draftAnalysis || item.query);
+  return Boolean(item.block || item.semantic || item.draftAnalysis || item.query || item.driver);
 }
 
 interface CanvasGesture {
