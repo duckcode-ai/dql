@@ -62,7 +62,9 @@ describe('a clicked mark (RFC 0009 step 6a)', () => {
     expect(bare.find((item) => item.id === 'drill-by')?.disabled).toContain('does not list');
     expect(bare.find((item) => item.id === 'explain')?.disabled).toContain('no time field');
     expect(bare.some((item) => item.id === 'details')).toBe(true);
-    expect(askAboutMarkQuestion(mark, 'Revenue by month and region', '$70')).toBe('In "Revenue by month and region", Revenue for February 2026 · Region US is $70. What explains this value, and what should I look at next?');
+    // No figure rides in the question: which values a model sees is the governed answer path's decision.
+    expect(askAboutMarkQuestion(mark, 'Revenue by month and region')).toBe('In "Revenue by month and region", what explains Revenue for February 2026 · Region US, and what should I look at next?');
+    expect(askAboutMarkQuestion(mark, 'Revenue by month and region')).not.toMatch(/\$|\b70\b/);
   });
 });
 

@@ -116,7 +116,7 @@ export function useMarkInteractions(host: {
     else if (id === 'rows') setExplore({ item, tile, mark, path: [step], mode: 'rows' });
     // A period is explained at its own date, not filtered to it.
     else if (id === 'explain') setExplore({ item, tile, mark, path: [{ ...step, filters: step.filters.filter((filter) => filter.op === 'eq') }], mode: 'explain' });
-    else if (id === 'ask') host.ask?.(item, askAboutMarkQuestion(mark, item.title ?? 'this chart', formattedMeasure(mark, tile)));
+    else if (id === 'ask') host.ask?.(item, askAboutMarkQuestion(mark, item.title ?? 'this chart'));
   };
 
   const overlays = (

@@ -279,11 +279,15 @@ export function markMenuItems(input: {
   return items;
 }
 
-/** A question for AI about one mark, with its value and scope written out. */
-export function askAboutMarkQuestion(mark: MarkContext, title: string, formattedValue?: string): string {
+/**
+ * A question for AI about one mark. It names what the reader clicked but
+ * carries no figure: the governed answer path decides which result values a
+ * model may see (only a model on this machine sees them), so the question
+ * must not smuggle one in.
+ */
+export function askAboutMarkQuestion(mark: MarkContext, title: string): string {
   const measure = mark.measure ? humanize(mark.measure.name) : title;
-  const value = formattedValue ?? (mark.measure?.value !== undefined && mark.measure.value !== null ? String(mark.measure.value) : undefined);
-  return `In "${title}", ${measure} for ${describeMark(mark)}${value ? ` is ${value}` : ''}. What explains this value, and what should I look at next?`;
+  return `In "${title}", what explains ${measure} for ${describeMark(mark)}, and what should I look at next?`;
 }
 
 // ─── Calendar helpers (UTC calendar periods, as the driver runtime uses) ────
