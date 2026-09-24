@@ -1011,6 +1011,12 @@ export interface LocalServerOptions {
    */
   captureServer?: (server: import('node:http').Server) => void;
   /**
+   * Random id for this server start, echoed by `/api/health`. Another DQL
+   * process on the project (`dql schedule`) checks it before running through
+   * this server, so a reused pid or port is never mistaken for it.
+   */
+  instanceId?: string;
+  /**
    * Test/embedding seam for deterministic agent-run execution without a live LLM.
    * Production callers leave this unset and use the default governed executors.
   */
@@ -13141,6 +13147,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         versionStatus,
         retrievalHealth,
         askRuntimeMode: askAgentRuntimeMode,
+        ...(opts.instanceId ? { instanceId: opts.instanceId } : {}),
       }));
       return;
     }

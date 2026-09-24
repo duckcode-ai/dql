@@ -26,15 +26,22 @@ export type AppPageRunner = (appId: string, dashboardId: string) => Promise<AppP
  * full-page run endpoint the App reader uses, so every tile kind (blocks,
  * Datasets, semantic queries) runs with the same checks and defaults, and a
  * tile that needs review is never delivered as if it were certified.
+ *
+ * A runtime bound beyond loopback answers API calls only with its bearer
+ * token (`DQL_SERVER_TOKEN`); pass it as `token`.
  */
-export function createRuntimePageRunner(runtimeBase: string, fetchImpl: typeof fetch = fetch): AppPageRunner {
+export function createRuntimePageRunner(runtimeBase: string, fetchImpl: typeof fetch = fetch, token?: string): AppPageRunner {
   const base = runtimeBase.replace(/\/$/, '');
   return async (appId, dashboardId) => {
     const response = await fetchImpl(
       `${base}/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ fullRun: true, variables: {} }),
       },
     );

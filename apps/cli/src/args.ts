@@ -54,6 +54,8 @@ export interface CLIFlags {
   user?: string;
   /** Local runtime URL for agent block execution. */
   runtimeUrl?: string;
+  /** `dql notebook --no-schedules`: do not run the project's App schedules in the notebook. */
+  schedules?: boolean;
   runtime?: string;
   /** Execute generated SQL previews during eval. Default false for route-only eval. */
   execute?: boolean;
@@ -177,6 +179,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.open = true;
     } else if (arg === '--no-open') {
       flags.open = false;
+    } else if (arg === '--no-schedules') {
+      flags.schedules = false;
     } else if (arg === '--check') {
       flags.check = true;
     } else if (arg === '--format' && i + 1 < argv.length) {

@@ -158,8 +158,8 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | Command | What it does |
 | --- | --- |
 | `dql schedule list [path]` | List local schedules declared by DQL blocks |
-| `dql schedule run [path]` | Run due local schedules once |
-| `dql schedule start [path]` | Start the local scheduler |
+| `dql schedule run [path]` | Run due local schedules once; `dql schedule run <appId> [scheduleId]` runs one App schedule (through a running `dql notebook` when there is one) |
+| `dql schedule start [path]` | Start the local scheduler (App schedules are left to a running `dql notebook`, which runs them itself) |
 | `dql schedule status [path]` | Show local scheduler status |
 | `dql schedule stop [path]` | Stop the local scheduler |
 | `dql slack serve [path]` | Run the Slack slash-command bot through the governed answer loop |
@@ -189,6 +189,7 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | `--format json\|text` | Output format (default: text) |
 | `--verbose` | Detailed output |
 | `--open` / `--no-open` | Auto-open the browser on `preview`/`serve` |
+| `--no-schedules` | `dql notebook` does not run the project's App schedules |
 | `--check` | For `fmt`: non-zero exit if changes needed |
 | `--input <path>` | Source for scaffold-style migrations |
 | `--out-dir <path>` | Output directory for `build` |

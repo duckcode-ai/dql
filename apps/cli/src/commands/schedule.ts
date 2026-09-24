@@ -6,7 +6,8 @@ import type { CLIFlags } from '../args.js';
 import { findProjectRoot, loadProjectConfig, normalizeProjectConnection } from '../local-runtime.js';
 import { discoverScheduledBlocks } from '../schedule/discovery.js';
 import { runAppDashboard, runBlock } from '../schedule/runner.js';
-import { createRuntimePageRunner } from '../schedule/app-page-run.js';
+import { createRuntimePageRunner, type AppPageRunner } from '../schedule/app-page-run.js';
+import { findRunningNotebook, notebookPageRunner, serverTokenFor } from '../schedule/notebook-runtime.js';
 import { listRunRecords } from '../schedule/runs.js';
 import { startScheduleService } from '../schedule/service.js';
 
@@ -221,17 +222,33 @@ async function runScheduleStart(flags: CLIFlags): Promise<void> {
 
   const service = await startScheduleService();
   writePidfile(projectRoot);
+  const notebook = await findRunningNotebook(projectRoot);
 
   if (flags.format === 'json') {
-    console.log(JSON.stringify({ started: true, pid: process.pid, blocks: service.blocks }, null, 2));
-  } else if (service.blocks.length === 0) {
-    console.log('No scheduled blocks found. Add @schedule(...) to a .dql file and restart.');
+    console.log(JSON.stringify({
+      started: true,
+      pid: process.pid,
+      blocks: service.blocks,
+      apps: service.apps,
+      ...(notebook ? { notebook: { pid: notebook.descriptor.pid, url: notebook.url, appSchedules: notebook.descriptor.appSchedules } } : {}),
+    }, null, 2));
+  } else if (service.blocks.length === 0 && service.apps.length === 0) {
+    console.log('No schedules found. Add @schedule(...) to a .dql file or a schedule to an App, then restart.');
+    await service.stop();
     removePidfile(projectRoot);
     return;
   } else {
-    console.log(`[schedule] running ${service.blocks.length} block(s) (pid ${process.pid}). Ctrl+C or 'dql schedule stop' to end.`);
+    console.log(`[schedule] running ${service.blocks.length} block(s) and ${service.apps.length} App schedule(s) (pid ${process.pid}). Ctrl+C or 'dql schedule stop' to end.`);
     for (const b of service.blocks) {
       console.log(`  - ${b.name}  cron="${b.schedule.cron}"`);
+    }
+    for (const app of service.apps) {
+      console.log(`  - app ${app.appId}/${app.scheduleId} (${app.dashboardId})  cron="${app.cron}"`);
+    }
+    if (notebook?.descriptor.appSchedules) {
+      console.log(`  App schedules are run by dql notebook (pid ${notebook.descriptor.pid}) while it is open; this service runs them after it stops.`);
+    } else if (notebook) {
+      console.log(`  App pages run through dql notebook (pid ${notebook.descriptor.pid}) while it is open.`);
     }
   }
 
@@ -270,16 +287,19 @@ async function runAppScheduleOnce(
   }
   const projectConfig = loadProjectConfig(projectRoot);
   const connection = normalizeProjectConnection(projectConfig.defaultConnection ?? { driver: 'duckdb' }, projectRoot);
-  // With --runtime-url the run goes through an App runtime that is already
-  // serving this project (for example `dql notebook`), which matters for
-  // DuckDB: only one process may open the database file.
+  // The page runs through an App runtime already serving this project when
+  // there is one — `--runtime-url`, or a running `dql notebook` found through
+  // `.dql/local/notebook.json` — which DuckDB needs: only one process may
+  // open the database file. Otherwise the run starts its own loopback runtime.
+  const route = await resolveAppPageRoute(projectRoot, flags.runtimeUrl);
+  if (route.via && flags.format !== 'json') console.log(`  Running through ${route.via}`);
   const record = await runAppDashboard(app.id, schedule.dashboard, {
     executor: new QueryExecutor(),
     connection,
     projectRoot,
     trigger: 'manual',
     scheduleId: schedule.id,
-    ...(flags.runtimeUrl ? { pageRunner: createRuntimePageRunner(flags.runtimeUrl) } : {}),
+    ...(route.pageRunner ? { pageRunner: route.pageRunner } : {}),
   });
   if (flags.format === 'json') {
     console.log(JSON.stringify(record, null, 2));
@@ -287,9 +307,10 @@ async function runAppScheduleOnce(
   }
   const failed = record.queries.filter((query) => query.error).length;
   const firing = (record.monitors ?? []).filter((monitor) => monitor.status === 'breached');
-  if (failed && record.queries.some((query) => /could not set lock on file/i.test(query.error ?? ''))) {
-    console.log('  DuckDB is open in another DQL process (usually `dql notebook`). Stop it, or run through it:');
-    console.log(`    dql schedule run ${app.id} ${schedule.id} --runtime-url http://127.0.0.1:<notebook port>`);
+  if (failed && !route.pageRunner && record.queries.some((query) => /could not set lock on file/i.test(query.error ?? ''))) {
+    console.log('  DuckDB is open in another process that did not announce itself (for example `dql schedule start`, or');
+    console.log('  a notebook from an older DQL). Stop it, or run through a runtime serving this project:');
+    console.log(`    dql schedule run ${app.id} ${schedule.id} --runtime-url http://127.0.0.1:<port>`);
   }
   console.log(`  ${record.block} → ${record.error ? `error: ${record.error}` : failed ? `${failed} tile(s) did not run` : 'ok'}`);
   console.log(`  tiles: ${record.queries.length} (${record.queries.length - failed} ok)`);
@@ -302,4 +323,34 @@ async function runAppScheduleOnce(
   for (const notification of record.notifications) {
     console.log(`    ${notification.type} → ${notification.recipients.join(', ') || '(default)'} [${notification.delivered ? 'sent' : `failed: ${notification.error}`}]`);
   }
+}
+
+const LOOPBACK_URL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+/**
+ * Where a one-off App schedule run sends its page: `--runtime-url` when
+ * given, else the `dql notebook` running on this project, else nowhere
+ * (`runAppDashboard` then starts a loopback runtime of its own). A runtime
+ * beyond loopback gets `DQL_SERVER_TOKEN` as its bearer token.
+ */
+export async function resolveAppPageRoute(
+  projectRoot: string,
+  runtimeUrl: string | undefined,
+  options: { env?: NodeJS.ProcessEnv; find?: typeof findRunningNotebook } = {},
+): Promise<{ pageRunner?: AppPageRunner; via?: string }> {
+  if (runtimeUrl) {
+    let loopback = false;
+    try {
+      loopback = LOOPBACK_URL_HOSTS.has(new URL(runtimeUrl).hostname);
+    } catch {
+      throw new Error(`--runtime-url is not a URL: ${runtimeUrl}`);
+    }
+    return { pageRunner: createRuntimePageRunner(runtimeUrl, fetch, serverTokenFor(loopback, options.env)), via: runtimeUrl };
+  }
+  const notebook = await (options.find ?? findRunningNotebook)(projectRoot);
+  if (!notebook) return {};
+  return {
+    pageRunner: notebookPageRunner(notebook, { env: options.env }),
+    via: `dql notebook (pid ${notebook.descriptor.pid}) at ${notebook.url}`,
+  };
 }

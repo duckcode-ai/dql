@@ -15,6 +15,8 @@ import {
   startLocalServer,
 } from '../local-runtime.js';
 import { maybeOpenBrowser } from '../open-browser.js';
+import { createRuntimePageRunner } from '../schedule/app-page-run.js';
+import { findRunningNotebook, localRuntimeUrl, writeNotebookDescriptor } from '../schedule/notebook-runtime.js';
 
 const COMMAND_DIR = dirname(fileURLToPath(import.meta.url));
 // Bundled assets are always at dist/assets/ relative to the CLI dist root
@@ -33,7 +35,12 @@ export interface ProjectRuntimeHandle {
   url: string;
   /** Private per-runtime capability used only by the short-lived CLI Ask client. */
   askTraceCapability: string;
-  /** Stop the HTTP listener so the process can exit (no-op if already closed). */
+  /** Random per start; `/api/health` echoes it (see `schedule/notebook-runtime.ts`). */
+  instanceId: string;
+  /**
+   * Stop the HTTP listener and disconnect the warehouse, so the process can
+   * exit and a DuckDB file is free for the next process (no-op if closed).
+   */
   close: () => Promise<void>;
 }
 
@@ -51,6 +58,7 @@ export async function startProjectRuntime(
   const connection = resolveNotebookConnection(config, projectRoot);
   const host = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const askTraceCapability = randomUUID();
+  const instanceId = randomUUID();
   let server: Server | undefined;
   const port = await startLocalServer({
     rootDir: NOTEBOOK_APP_DIR,
@@ -61,17 +69,20 @@ export async function startProjectRuntime(
     host,
     askAgentRuntimeMode: opts.askAgentRuntimeMode,
     trustedCliTraceToken: askTraceCapability,
+    instanceId,
     captureServer: (created) => { server = created; },
   });
   const printHost = host === '0.0.0.0' ? '127.0.0.1' : host;
+  let closed: Promise<void> | undefined;
   return {
     port,
     url: `http://${printHost}:${port}`,
     askTraceCapability,
-    close: () => new Promise<void>((resolveClose) => {
+    instanceId,
+    close: () => (closed ??= new Promise<void>((resolveClose) => {
       if (!server) return resolveClose();
       server.close(() => resolveClose());
-    }),
+    }).then(() => executor.disconnect().catch(() => undefined))),
   };
 }
 
@@ -116,11 +127,13 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
   // through UNRESOLVED: resolving an absent flag to the default would outrank
   // the project's own `agent.askRuntimeMode` and make the config key dead.
   if (flags.askRuntimeMode !== undefined) resolveAskAgentRuntimeMode(flags.askRuntimeMode);
-  const { port, url } = await startProjectRuntime(projectRoot, {
+  const runtime = await startProjectRuntime(projectRoot, {
     preferredPort: flags.port ?? config.preview?.port ?? 3474,
     host,
     askAgentRuntimeMode: flags.askRuntimeMode as AskAgentRuntimeMode | undefined,
   });
+  const { port, url } = runtime;
+  const schedules = await startNotebookAppSchedules(projectRoot, runtime, host, flags.schedules !== false);
 
   // Auto-open only on loopback. In a container or on a remote host, opening
   // the host's browser is either useless or wrong.
@@ -143,6 +156,81 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
   } else if (host !== '127.0.0.1') {
     console.log(`    Bound on ${host}:${port} — open the URL above from your host.`);
   }
+  if (schedules.message) console.log(`    ${schedules.message}`);
   console.log('    Press Ctrl+C to stop.');
   console.log('');
+}
+
+/**
+ * The notebook announces itself in `.dql/local/notebook.json` and runs the
+ * project's App schedules on its own runtime. `dql schedule run|start` read
+ * the file and run through this server instead of opening the project's
+ * database a second time, which DuckDB does not allow. Block (.dql)
+ * schedules stay with `dql schedule start`.
+ */
+async function startNotebookAppSchedules(
+  projectRoot: string,
+  runtime: ProjectRuntimeHandle,
+  host: string,
+  enabled: boolean,
+): Promise<{ message?: string }> {
+  const other = await findRunningNotebook(projectRoot);
+  if (other && other.descriptor.pid !== process.pid) {
+    return { message: `Another dql notebook (pid ${other.descriptor.pid}) serves this project; it runs the App schedules.` };
+  }
+  const selfUrl = localRuntimeUrl(host, runtime.port);
+  const loopback = LOOPBACK_HOSTS.has(host);
+  const removeDescriptor = writeNotebookDescriptor(projectRoot, {
+    version: 1,
+    pid: process.pid,
+    host,
+    port: runtime.port,
+    url: selfUrl,
+    instanceId: runtime.instanceId,
+    startedAt: new Date().toISOString(),
+    appSchedules: enabled,
+  });
+
+  let scheduler: { stop: () => void; apps: unknown[] } | undefined;
+  if (enabled) {
+    const [{ startAppScheduler, runScheduledApp }, nodeCron] = await Promise.all([
+      import('../schedule/service.js'),
+      import('node-cron' as string) as Promise<typeof import('node-cron')>,
+    ]);
+    const config = loadProjectConfig(projectRoot);
+    const connection = normalizeProjectConnection(config.defaultConnection ?? { driver: 'duckdb' }, projectRoot);
+    // Pages run through this server's own page-run endpoint, exactly as a
+    // reader's full run; beyond loopback that endpoint needs the token.
+    const pageRunner = createRuntimePageRunner(selfUrl, fetch, loopback ? undefined : process.env.DQL_SERVER_TOKEN);
+    const executor = new QueryExecutor();
+    scheduler = startAppScheduler({
+      projectRoot,
+      cron: nodeCron,
+      run: (schedule) => runScheduledApp(schedule, { projectRoot, executor, connection, pageRunner }),
+    });
+  }
+
+  let stopped = false;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    scheduler?.stop();
+    removeDescriptor();
+  };
+  // The descriptor must not outlive the notebook. Exit right away on a
+  // signal: closing the server would wait on browsers' open event streams,
+  // and the process exiting releases the database anyway.
+  process.once('exit', stop);
+  for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
+    process.once(signal, () => {
+      stop();
+      process.exit(code);
+    });
+  }
+
+  if (!enabled) return { message: 'App schedules are off in this notebook (--no-schedules); dql schedule runs them through it.' };
+  const count = scheduler?.apps.length ?? 0;
+  return count > 0
+    ? { message: `Running ${count} App schedule${count === 1 ? '' : 's'} while this notebook is open.` }
+    : {};
 }

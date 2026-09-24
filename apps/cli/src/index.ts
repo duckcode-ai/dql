@@ -126,6 +126,7 @@ const HELP = `
     --verbose                       Show detailed output
     --open                          Open the preview or served bundle in a browser
     --no-open                       Do not open the browser automatically
+    --no-schedules                  For "notebook": do not run App schedules while it is open
     --check                         For "fmt": check-only and exit 1 if changes needed
     --input <path>                  Source path for scaffold-style migration commands
     --out-dir <path>                Output directory for "build"
