@@ -13,7 +13,7 @@ interface TableOutputProps {
   initialPageSize?: number;
   /** Optional App-level selection hook. It receives the actual settled row;
    * callers remain responsible for matching it to an explicit field mapping. */
-  onRowClick?: (row: Record<string, unknown>) => void;
+  onRowClick?: (row: Record<string, unknown>, pointer?: { x: number; y: number }) => void;
 }
 
 const PAGE_SIZES = [10, 25, 50, 100, 500] as const;
@@ -323,7 +323,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
                   key={rowIdx}
                   onMouseEnter={() => setHoveredRow(rowIdx)}
                   onMouseLeave={() => setHoveredRow(null)}
-                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                  onClick={onRowClick ? (event) => onRowClick(row, { x: event.clientX, y: event.clientY }) : undefined}
                   style={{ transition: 'background 0.1s', cursor: onRowClick ? 'pointer' : undefined }}
                 >
                   {result.columns.map((col) => {

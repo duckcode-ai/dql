@@ -201,6 +201,7 @@ export function buildDatasetCrossFilter(
   tile: DashboardTile,
   field: string,
   values: unknown[],
+  options: { exclude?: boolean } = {},
 ): { crossFilter?: DashboardDatasetCrossFilter; error?: string } {
   if (!tile.query || !tile.sourceId || !tile.sourceRevision) {
     return { error: 'This result is not backed by a source-qualified Dataset tile.' };
@@ -211,7 +212,11 @@ export function buildDatasetCrossFilter(
   const mappings = page.interactions?.crossFilter?.mappings.filter((mapping) => (
     mapping.fromTileId === tile.i && mapping.fromField === output.alias
   )) ?? [];
-  if (mappings.length === 0) return { error: `No explicit Dataset mapping is configured for ${field}.` };
+  // Keep only / Exclude on the tile's own Dataset needs no mapping: it is the
+  // same Dataset and the same field (RFC 0009 step 6a). A period is not a value.
+  const own = tile.query.dimensions.some((dimension) => !dimension.timeGrain && (dimension.alias ?? dimension.field) === output.alias)
+    && Boolean(ownDatasetBinding(page, tile));
+  if (mappings.length === 0 && !own) return { error: `No explicit Dataset mapping is configured for ${field}.` };
   const unknownTarget = mappings.find((mapping) => !page.datasets?.some((dataset) => dataset.id === mapping.toDataset));
   if (unknownTarget) return { error: `The mapping for ${field} refers to a Dataset that is no longer on this page.` };
   const selected = uniqueDatasetMarkValues(values);
@@ -223,8 +228,14 @@ export function buildDatasetCrossFilter(
       fromSourceRevision: tile.sourceRevision,
       field: output.alias,
       values: selected,
+      ...(options.exclude ? { exclude: true } : {}),
     },
   };
+}
+
+/** The page's Dataset binding a tile runs on, if any. */
+export function ownDatasetBinding(page: DashboardPage, tile: DashboardTile) {
+  return page.datasets?.find((dataset) => dataset.sourceId === tile.sourceId && dataset.sourceRevision === tile.sourceRevision);
 }
 
 /** Replace one source-field selection while preserving other selected marks. */
@@ -263,6 +274,10 @@ export function datasetAffectedTileIds(
   const affected = new Set<string>();
   for (const crossFilter of crossFilters) {
     affected.add(crossFilter.fromTileId);
+    // Keep only / Exclude reach every tile on the origin's own Dataset.
+    const origin = page.layout.items.find((tile) => tile.i === crossFilter.fromTileId);
+    const own = origin ? ownDatasetBinding(page, origin) : undefined;
+    if (own) for (const tile of page.layout.items) if (tile.sourceId === own.sourceId && tile.sourceRevision === own.sourceRevision) affected.add(tile.i);
     const mappings = page.interactions?.crossFilter?.mappings ?? [];
     for (const mapping of mappings) {
       if (mapping.fromTileId !== crossFilter.fromTileId || mapping.fromField !== crossFilter.field) continue;

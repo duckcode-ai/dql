@@ -550,7 +550,7 @@ import {
 import { listStoryEditions, recordStoryEdition, storyEditionScope } from './story/story-editions.js';
 import { addPageMonitor, listPageMonitors, MonitorStoreError, removePageMonitor } from './schedule/app-monitor-store.js';
 import { loadOrCreateSnapshotKey, readSnapshotPublicKey, signSnapshot, snapshotBodyIssues, snapshotFigures, snapshotFileName } from './snapshot/app-snapshot.js';
-import { dashboardDriverProbeItem, expandDashboardDriverItems, foldDashboardDriverTiles, withDriverFilterScopes } from './datasets/dashboard-drivers.js';
+import { dashboardDriverProbeItem, dashboardExploreProbeItem, expandDashboardDriverItems, foldDashboardDriverTiles, withDriverFilterScopes } from './datasets/dashboard-drivers.js';
 import { compileDatasetTileQuery, type CompiledDatasetTileQuery } from './datasets/tile-query-compiler.js';
 import { summarizeDatasetChartFacts } from './datasets/dataset-chart-fact-summary.js';
 import { planDatasetTilePromotion, type DatasetTileBoundParameter } from './datasets/dataset-tile-promotion.js';
@@ -18157,6 +18157,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           probeBody.tileId = probe.i;
         }
+        // Explore (RFC 0009 step 6a): a reader drills one Dataset tile by any
+        // approved field or reads its rows. The view joins this run as one
+        // transient tile, exactly like the driver probe above.
+        if (!mcpRequest && body && typeof body === 'object' && (body as Record<string, unknown>).exploreProbe !== undefined) {
+          const probeBody = body as Record<string, unknown>;
+          if (probeBody.driverProbe !== undefined || probeBody.fullRun || probeBody.visibleTileIds || probeBody.affectedTileIds || probeBody.datasetDrills) {
+            throw new DashboardRunRequestError('An Explore view runs on its own; it cannot be combined with other scheduling bounds.');
+          }
+          let probe: DashboardGridItem;
+          try {
+            probe = dashboardExploreProbeItem(loaded.dashboard, probeBody.exploreProbe);
+          } catch (error) {
+            throw new DashboardRunRequestError(error instanceof Error ? error.message : String(error));
+          }
+          loaded.dashboard = { ...loaded.dashboard, layout: { ...loaded.dashboard.layout, items: [...loaded.dashboard.layout.items, probe] } };
+          probeBody.tileId = probe.i;
+        }
         // Local drafts can outlive parser upgrades or be restored from an
         // earlier SQLite state. Do not let a v3 field Dataset query bypass the
         // document parser simply because it came from local draft storage.
@@ -18531,8 +18548,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           sourceErrorFor: (item) => datasetSetupError ?? (item.sourceId ? datasetSourceErrors.get(item.sourceId) : undefined),
         });
         const executionItems = driverExpansion.executionItems;
-        const executionDashboard = driverExpansion.runs.size > 0
-          ? withDriverFilterScopes(loaded.dashboard, driverExpansion.executionOwners)
+        // Filters scoped to a tile also reach the views that explain or explore it.
+        const scopedOwners = new Map(driverExpansion.executionOwners);
+        for (const item of executionItems) if (item.i.endsWith('::explore')) scopedOwners.set(item.i, item.i);
+        const executionDashboard = scopedOwners.size > 0
+          ? withDriverFilterScopes(loaded.dashboard, scopedOwners)
           : loaded.dashboard;
         let nextTileIndex = 0;
         // App preview is a multi-source execution, so isolate each tile's
@@ -19575,6 +19595,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                         interactionQueryFingerprint: tileQueryHash(effectiveDatasetQuery),
                       } : {}),
                     },
+                    explore: { fields: datasetExploreFields(descriptor) },
                     queryFingerprint,
                     filterFingerprint,
                     executionFingerprint: tileExecutionFingerprint,
@@ -19802,6 +19823,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                         interactionQueryFingerprint: tileQueryHash(effectiveDatasetQuery),
                       } : {}),
                     },
+                    explore: { fields: datasetExploreFields(discoveryDescriptor) },
                     queryFingerprint: semanticQueryFingerprint,
                     filterFingerprint: semanticFilterFingerprint,
                     executionFingerprint: tileExecutionFingerprint,
@@ -28780,7 +28802,7 @@ function parseDashboardDatasetCrossFilters(value: unknown): DashboardDatasetCros
     if (record.values.some((candidateValue) => candidateValue !== null && !['string', 'number', 'boolean'].includes(typeof candidateValue))) {
       throw new DashboardRunRequestError(`crossFilters[${index}].values must contain only scalar Dataset values.`);
     }
-    return { field, values: [...record.values], fromTileId, fromSourceId, fromSourceRevision };
+    return { field, values: [...record.values], fromTileId, fromSourceId, fromSourceRevision, ...(record.exclude === true ? { exclude: true } : {}) };
   });
 }
 
@@ -29184,6 +29206,25 @@ function decorateDatasetResult(
  * relationship: both hierarchy identity and adjacent declared level are
  * required again when the interaction request is replayed.
  */
+/**
+ * The approved fields a reader may drill by or read in rows (RFC 0009 step
+ * 6a). Names and roles only; every query built from them is validated
+ * against the Dataset contract again when it runs.
+ */
+function datasetExploreFields(descriptor: DatasetDescriptor): Array<{ name: string; role: string; type: string; grains?: string[]; primary?: boolean }> {
+  return descriptor.fields.flatMap((field) => {
+    if (field.kind !== 'physical' || field.status !== 'approved') return [];
+    const time = field.role === 'time' || field.type === 'date' || field.type === 'timestamp';
+    return [{
+      name: field.name,
+      role: time ? 'time' : field.role,
+      type: field.type,
+      ...(time && field.time?.grains?.length ? { grains: [...field.time.grains] } : {}),
+      ...(time && field.time?.primary ? { primary: true } : {}),
+    }];
+  });
+}
+
 function datasetHierarchyDrillCandidates(
   descriptor: DatasetDescriptor,
   query: TileQuery,

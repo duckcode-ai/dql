@@ -2700,6 +2700,8 @@ export interface DashboardRunResponse {
         }>;
         interactionQueryFingerprint?: string;
       };
+      /** Approved fields a reader may drill by or read in rows (RFC 0009 step 6a). */
+      explore?: { fields: Array<{ name: string; role: string; type: string; grains?: string[]; primary?: boolean }> };
       errors?: string[];
     };
     error?: string;
@@ -2775,6 +2777,8 @@ export interface DashboardDatasetCrossFilter {
   fromSourceRevision: string;
   field: string;
   values: unknown[];
+  /** Leave these values out instead of keeping only them. */
+  exclude?: boolean;
 }
 
 /**
@@ -2882,6 +2886,8 @@ export interface DashboardDriverDefinitionV1 {
   comparison: 'previous_period' | 'previous_year';
   dimensions: string[];
   timezone?: string;
+  /** What the reader is looking at: drills and the clicked mark, as filters on approved fields. */
+  filters?: Array<{ field: string; op: 'eq' | 'neq' | 'in' | 'not_in'; values: Array<string | number | boolean> }>;
 }
 
 /** Mirrors dql-agent DriverAnalysisV1; numbers are exact decimals as text. */
@@ -2894,7 +2900,7 @@ export interface DashboardDriverAnalysisV1 {
   dimensions: Array<{
     field: string;
     label: string;
-    members: Array<{ label: string; current?: string; prior?: string; delta?: string; share?: string; role: 'driver' | 'offset' | 'flat'; status: 'both' | 'new' | 'gone'; other?: boolean }>;
+    members: Array<{ label: string; value?: string | number | boolean; current?: string; prior?: string; delta?: string; share?: string; role: 'driver' | 'offset' | 'flat'; status: 'both' | 'new' | 'gone'; other?: boolean }>;
     memberCount: number;
     reconciles: boolean;
     residual?: string;
@@ -2922,6 +2928,8 @@ export interface DashboardRunOptions {
   datasetDrills?: DashboardDatasetHierarchyDrill[];
   /** "Why did it move?" for one Dataset tile; runs bounded and changes nothing (RFC 0008 step 7). */
   driverProbe?: { fromTileId: string; driver: DashboardDriverDefinitionV1 };
+  /** A drill view of one Dataset tile by any approved field, or its rows; runs bounded and changes nothing (RFC 0009 step 6a). */
+  exploreProbe?: { fromTileId: string; query: TileQuery };
 }
 
 /**
@@ -8404,7 +8412,7 @@ export const api = {
     // so the viewer shows why a page did not run, not a generic failure.
     return request<DashboardRunResponse>(
       `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
-      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}), ...(options?.driverProbe ? { driverProbe: options.driverProbe } : {}) }) },
+      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}), ...(options?.driverProbe ? { driverProbe: options.driverProbe } : {}), ...(options?.exploreProbe ? { exploreProbe: options.exploreProbe } : {}) }) },
     );
   },
 
@@ -8417,7 +8425,7 @@ export const api = {
   ): Promise<DashboardRunResponse> {
     return request<DashboardRunResponse>(
       `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
-      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}), ...(options?.driverProbe ? { driverProbe: options.driverProbe } : {}) }) },
+      { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, ...(crossFilters?.length ? { crossFilters } : {}), ...(options?.runScope ? { runScope: options.runScope } : {}), ...(options?.refresh ? { refresh: true } : {}), ...(options?.fullRun ? { fullRun: true } : {}), ...(options?.tileId ? { tileId: options.tileId } : {}), ...(options?.visibleTileIds !== undefined ? { visibleTileIds: options.visibleTileIds } : {}), ...(options?.affectedTileIds !== undefined ? { affectedTileIds: options.affectedTileIds } : {}), ...(options?.datasetDrills?.length ? { datasetDrills: options.datasetDrills } : {}), ...(options?.driverProbe ? { driverProbe: options.driverProbe } : {}), ...(options?.exploreProbe ? { exploreProbe: options.exploreProbe } : {}) }) },
     );
   },
 

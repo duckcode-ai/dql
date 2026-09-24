@@ -352,7 +352,17 @@ export interface DashboardDriverDefinition {
   dimensions: string[];
   /** IANA zone for period boundaries; UTC when absent. */
   timezone?: string;
+  /**
+   * What the reader is looking at when they ask: their selections, drills
+   * and the clicked mark, as filters on approved fields. Both periods are
+   * filtered the same way, so the explanation describes the numbers on
+   * screen. The runtime validates them like any tile filter.
+   */
+  filters?: Array<{ field: string; op: 'eq' | 'neq' | 'in' | 'not_in'; values: Array<string | number | boolean> }>;
 }
+
+/** At most this many filters narrow one explanation. */
+export const MAX_DRIVER_FILTERS = 12;
 
 export type DashboardNarrativeBlock =
   | { id: string; kind: 'text'; markdown: string }
@@ -1070,6 +1080,21 @@ export function readDriverDefinition(value: unknown, path: string, err: (message
   if (!Array.isArray(raw.dimensions) || dimensions.length === 0 || dimensions.length > MAX_DRIVER_DIMENSIONS) {
     fail(`dimensions must list 1 to ${MAX_DRIVER_DIMENSIONS} dimension fields`);
   }
+  const filters: NonNullable<DashboardDriverDefinition['filters']> = [];
+  if (raw.filters !== undefined) {
+    if (!Array.isArray(raw.filters) || raw.filters.length > MAX_DRIVER_FILTERS) fail(`filters must list at most ${MAX_DRIVER_FILTERS} filters`);
+    else raw.filters.forEach((entry, index) => {
+      const filter = entry && typeof entry === 'object' && !Array.isArray(entry) ? entry as Record<string, unknown> : {};
+      const field = typeof filter.field === 'string' ? filter.field.trim() : '';
+      const op = filter.op;
+      const values = Array.isArray(filter.values) ? filter.values.filter((value): value is string | number | boolean => ['string', 'number', 'boolean'].includes(typeof value)) : [];
+      if (!field || (op !== 'eq' && op !== 'neq' && op !== 'in' && op !== 'not_in') || values.length === 0 || values.length > 200) {
+        fail(`filters[${index}] must name a field, an operator (eq|neq|in|not_in) and 1 to 200 values`);
+        return;
+      }
+      filters.push({ field, op, values });
+    });
+  }
   if (before.count > 0) return undefined;
   return {
     version: 1,
@@ -1080,6 +1105,7 @@ export function readDriverDefinition(value: unknown, path: string, err: (message
     comparison: comparison as DashboardDriverDefinition['comparison'],
     dimensions,
     ...(timezone ? { timezone } : {}),
+    ...(filters.length ? { filters } : {}),
   };
 }
 

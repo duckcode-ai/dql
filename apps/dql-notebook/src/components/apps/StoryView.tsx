@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { splitStoryText, type StoryBindingCatalog } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import type { DashboardNarrativeV1, StoryEditionV1 } from '../../api/client';
+import { NUMBER_RECEIPT_STYLES, ReceiptValue, type NumberReceiptInfo } from './NumberReceipt';
 
 /**
  * A story page (RFC 0008 step 8): prose with every figure bound to a tile
@@ -8,7 +9,12 @@ import type { DashboardNarrativeV1, StoryEditionV1 } from '../../api/client';
  * from the current run's catalog; a binding the run did not return shows as
  * a dash, never an old number.
  */
-export function StoryText({ markdown, catalog }: { markdown: string; catalog: StoryBindingCatalog }): JSX.Element {
+export function StoryText({ markdown, catalog, receiptFor }: {
+  markdown: string;
+  catalog: StoryBindingCatalog;
+  /** Each bound number explains itself: what it is, its tile, trust and filters (RFC 0009 step 6a). */
+  receiptFor?: (key: string) => NumberReceiptInfo | null;
+}): JSX.Element {
   const paragraphs = markdown.split(/\n{2,}/).map((paragraph) => paragraph.trim()).filter(Boolean);
   return (
     <>
@@ -19,7 +25,7 @@ export function StoryText({ markdown, catalog }: { markdown: string; catalog: St
           if (part.kind === 'text') return <InlineMarkdown key={partIndex} text={part.text} />;
           const binding = catalog[part.key];
           return binding
-            ? <span key={partIndex} className="dql-story-value" tabIndex={0} title={binding.label}>{binding.display}</span>
+            ? <ReceiptValue key={partIndex} className="dql-story-value" info={receiptFor?.(part.key) ?? null} fallbackTitle={binding.label}>{binding.display}</ReceiptValue>
             : <span key={partIndex} className="dql-story-value missing" tabIndex={0} title={`{{${part.key}}} is not in this run's results`}>—</span>;
         });
         return heading ? <h3 key={index}>{content}</h3> : <p key={index}>{content}</p>;
@@ -85,6 +91,7 @@ export function StoryView({
   renderTile,
   edition,
   trust,
+  receiptFor,
 }: {
   narrative: DashboardNarrativeV1;
   catalog: StoryBindingCatalog;
@@ -92,10 +99,12 @@ export function StoryView({
   edition?: StoryEditionSummary | null;
   /** e.g. "All 6 tiles certified". */
   trust?: string | null;
+  receiptFor?: (key: string) => NumberReceiptInfo | null;
 }): JSX.Element {
   return (
     <article className="dql-story">
       <style>{STORY_STYLES}</style>
+      {receiptFor ? <style>{NUMBER_RECEIPT_STYLES}</style> : null}
       {edition !== undefined ? (
         <header className="dql-story-edition" aria-label="Edition">
           <span>{edition?.current ? `Edition of ${when(edition.current.createdAt)}` : 'Current edition'}{trust ? ` · ${trust}` : ''}</span>
@@ -115,7 +124,7 @@ export function StoryView({
       ) : null}
       {narrative.blocks.map((block) => (
         block.kind === 'text'
-          ? <section key={block.id} className="dql-story-text"><StoryText markdown={block.markdown} catalog={catalog} /></section>
+          ? <section key={block.id} className="dql-story-text"><StoryText markdown={block.markdown} catalog={catalog} {...(receiptFor ? { receiptFor } : {})} /></section>
           : <figure key={block.id} className="dql-story-tile">{renderTile(block.tileId)}</figure>
       ))}
       <footer className="dql-story-footer">

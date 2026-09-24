@@ -69,3 +69,34 @@ describe('relative date dashboard filters on dataset tiles', () => {
     expect(resolveFor('order_date', 'next_week', new Date('2026-03-10T00:00:00Z')).errors[0]?.code).toBe('FILTER_VALUE_INVALID');
   });
 });
+
+describe('keep only and exclude from a clicked mark (RFC 0009 step 6a)', () => {
+  const page = (mappings: unknown[] = []) => ({
+    version: 3, id: 'overview', title: 'Overview', metadata: {},
+    datasets: [
+      { id: 'orders', sourceId: 'app:block:commerce:orders', sourceRevision: 'r1', snapshotId: 's1', contractFingerprint: 'c1' },
+      { id: 'other', sourceId: 'app:block:commerce:customers', sourceRevision: 'r9', snapshotId: 's9', contractFingerprint: 'c9' },
+    ],
+    interactions: mappings.length ? { crossFilter: { enabled: true, mappings } } : undefined,
+    layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [
+      { i: 'regions', x: 0, y: 0, w: 6, h: 4, sourceId: 'app:block:commerce:orders', sourceRevision: 'r1', query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'orders' }] }, viz: { type: 'bar' } },
+      { i: 'monthly', x: 6, y: 0, w: 6, h: 4, sourceId: 'app:block:commerce:orders', sourceRevision: 'r1', query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }], measures: [{ measure: 'orders' }] }, viz: { type: 'line' } },
+    ] },
+  }) as unknown as DashboardDocument;
+  const click = (field: string, exclude?: boolean, fromTileId = 'regions') => ({ fromTileId, fromSourceId: 'app:block:commerce:orders', fromSourceRevision: 'r1', field, values: ['US'], ...(exclude ? { exclude } : {}) });
+  const resolve = (doc: DashboardDocument, crossFilter: ReturnType<typeof click>) => resolveDashboardDatasetFilters({ dashboard: doc, item: doc.layout.items[1]!, descriptor, values: {}, crossFilters: [crossFilter] });
+
+  it('filters every tile on the same Dataset by the same field, without an author mapping', () => {
+    expect(resolve(page(), click('region')).filters).toEqual([{ field: 'region', op: 'eq', values: ['US'] }]);
+  });
+
+  it('excludes with not-equal', () => {
+    expect(resolve(page(), click('region', true)).filters).toEqual([{ field: 'region', op: 'neq', values: ['US'] }]);
+  });
+
+  it('never treats a period as a value, and still needs a mapping to reach another Dataset', () => {
+    const period = resolve(page(), click('order_date_month', false, 'monthly'));
+    expect(period.filters).toEqual([]);
+    expect(period.unbound[0]?.code).toBe('CROSS_FILTER_UNSUPPORTED');
+  });
+});

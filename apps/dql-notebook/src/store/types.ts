@@ -75,6 +75,8 @@ export interface CellChartConfig {
   labelColumns?: string[];
   /** Extra measures shown in the tooltip. */
   tooltipColumns?: string[];
+  /** A quiet last line in every tooltip, e.g. "Certified · Orders Dataset". */
+  tooltipFooter?: string;
 }
 
 export type FilterOperation =

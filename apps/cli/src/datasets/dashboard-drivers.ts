@@ -8,10 +8,12 @@
  * execution evidence are therefore exactly the Dataset tile path.
  */
 import {
+  normalizeTileQuery,
   readDriverDefinition,
   type DashboardDocument,
   type DashboardGridItem,
   type DatasetDescriptor,
+  type TileQuery,
 } from '@duckcodeailabs/dql-core';
 import {
   driverDimensionTileId,
@@ -58,6 +60,40 @@ export function dashboardDriverProbeItem(dashboard: DashboardDocument, raw: unkn
   };
 }
 
+/**
+ * The transient tile a reader's Explore panel adds to one run (RFC 0009 step
+ * 6a): a drill view of one Dataset tile, as a field query on the same
+ * Dataset. Like the driver probe it joins the page run, so it gets the
+ * page's filters (scoped to the source tile too), access checks and contract
+ * validation, and it never changes the App.
+ */
+export function dashboardExploreProbeItem(dashboard: DashboardDocument, raw: unknown): DashboardGridItem {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new DriverProbeError('exploreProbe must name a tile and a field query.');
+  const probe = raw as Record<string, unknown>;
+  const fromTileId = typeof probe.fromTileId === 'string' ? probe.fromTileId.trim() : '';
+  const source = dashboard.layout.items.find((item) => item.i === fromTileId);
+  if (!source || !source.sourceId || !source.query) throw new DriverProbeError('An Explore view must start from a Dataset tile on this page.');
+  const query = normalizeTileQuery(probe.query);
+  if (!query) throw new DriverProbeError('exploreProbe.query is not a valid field query.');
+  return {
+    i: `${source.i}::explore`,
+    x: 0,
+    y: 0,
+    w: 12,
+    h: 6,
+    sourceId: source.sourceId,
+    ...(source.sourceRevision ? { sourceRevision: source.sourceRevision } : {}),
+    ...(source.filterBindings ? { filterBindings: source.filterBindings } : {}),
+    ...(source.parameterBindings ? { parameterBindings: source.parameterBindings } : {}),
+    ...(source.sourceClass ? { sourceClass: source.sourceClass } : {}),
+    ...(source.trustState ? { trustState: source.trustState } : {}),
+    ...(source.reviewStatus ? { reviewStatus: source.reviewStatus } : {}),
+    query,
+    viz: { type: query.detail ? 'table' : 'bar' },
+    title: `Explore ${source.title ?? 'this tile'}`,
+  };
+}
+
 /** Replace each driver tile with the governed comparison tiles that feed it. */
 export function expandDashboardDriverItems(input: {
   items: DashboardGridItem[];
@@ -82,6 +118,19 @@ export function expandDashboardDriverItems(input: {
     if (planned.status !== 'ready') {
       runs.set(item.i, { item, error: planned.reason });
       continue;
+    }
+    // The reader's selections, drills and clicked mark narrow both periods
+    // alike. A field held to one value explains nothing, so it is not a
+    // breakdown.
+    const narrow = item.driver.filters ?? [];
+    if (narrow.length) {
+      const held = new Set(narrow.filter((filter) => (filter.op === 'eq' || filter.op === 'in') && filter.values.length === 1).map((filter) => filter.field.toLowerCase()));
+      const withFilters = (query: TileQuery): TileQuery => ({ ...query, filters: [...(query.filters ?? []), ...narrow.map((filter) => ({ field: filter.field, op: filter.op, values: [...filter.values] }))] });
+      planned.plan = {
+        ...planned.plan,
+        total: withFilters(planned.plan.total),
+        dimensions: planned.plan.dimensions.filter((dimension) => !held.has(dimension.field.toLowerCase())).map((dimension) => ({ ...dimension, query: withFilters(dimension.query) })),
+      };
     }
     runs.set(item.i, { item, plan: planned.plan });
     const base: Omit<DashboardGridItem, 'i' | 'query'> = {
@@ -125,7 +174,7 @@ export function withDriverFilterScopes(dashboard: DashboardDocument, owners: Map
   if (!filters.some((filter) => filter.scope?.tileIds?.length || Object.values(filter.datasetBindings ?? {}).some((binding) => binding.tileIds))) return dashboard;
   const tileIds = new Set(dashboard.layout.items.map((item) => item.i));
   const explains = (owner: string): string[] => {
-    const probe = /^(.*)::why$/.exec(owner)?.[1];
+    const probe = /^(.*)::(?:why|explore)$/.exec(owner)?.[1];
     if (probe) return [owner, probe];
     const authored = /^(.*)-why(?:-\d+)?$/.exec(owner)?.[1];
     return authored && tileIds.has(authored) ? [owner, authored] : [owner];

@@ -127,6 +127,8 @@ export function planDriverQueries(definition: DashboardDriverDefinition, descrip
 
 export interface DriverMemberV1 {
   label: string;
+  /** The member's own value, so a reader can drill into it exactly (absent for "Other"). */
+  value?: string | number | boolean;
   /** Exact decimals as text; absent when the member has no value in the period. */
   current?: string;
   prior?: string;
@@ -229,6 +231,7 @@ export function foldDriverAnalysis(input: {
     const rest = table.rows.slice(DRIVER_MEMBERS_SHOWN);
     const listed: DriverMemberV1[] = shown.map((row) => ({
       label: row.label,
+      ...(typeof row.value === 'string' || typeof row.value === 'number' || typeof row.value === 'boolean' ? { value: row.value } : {}),
       ...(row.current !== undefined ? { current: text(row.current) } : {}),
       ...(row.prior !== undefined ? { prior: text(row.prior) } : {}),
       ...(row.delta !== undefined ? { delta: text(row.delta) } : {}),

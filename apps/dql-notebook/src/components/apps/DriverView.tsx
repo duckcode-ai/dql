@@ -9,7 +9,14 @@ import { driverPeriodLabel, formatDriverNumber, formatDriverShare } from './driv
  * and green), bars are scaled per dimension, and the shares come straight
  * from the governed comparison results.
  */
-export function DriverView({ analysis, compact = false }: { analysis: DashboardDriverAnalysisV1; compact?: boolean }): JSX.Element {
+type DriverMember = DashboardDriverAnalysisV1['dimensions'][number]['members'][number];
+
+export function DriverView({ analysis, compact = false, onMember }: {
+  analysis: DashboardDriverAnalysisV1;
+  compact?: boolean;
+  /** Look inside one contributor: the explanation drills into it (RFC 0009 step 6a). */
+  onMember?: (dimension: { field: string; label: string }, member: DriverMember) => void;
+}): JSX.Element {
   const period = `${driverPeriodLabel(analysis.periods.current.start, analysis.grain)} vs ${driverPeriodLabel(analysis.periods.prior.start, analysis.grain)}`;
   const delta = Number(analysis.headline.delta ?? NaN);
   const dimensions = compact ? analysis.dimensions.slice(0, 2) : analysis.dimensions;
@@ -43,10 +50,17 @@ export function DriverView({ analysis, compact = false }: { analysis: DashboardD
                 const width = largest > 0 ? Math.max(2, (Math.abs(value) / largest) * 100) : 0;
                 return (
                   <li key={member.label} className={member.other ? 'other' : undefined}>
-                    <span className="dql-driver-member" title={member.label}>
-                      {member.label}
-                      {member.status === 'new' ? <em> new</em> : member.status === 'gone' ? <em> gone</em> : null}
-                    </span>
+                    {onMember && member.value !== undefined && !member.other ? (
+                      <button type="button" className="dql-driver-member" title={`Look inside ${member.label}`} onClick={() => onMember({ field: dimension.field, label: dimension.label }, member)}>
+                        {member.label}
+                        {member.status === 'new' ? <em> new</em> : member.status === 'gone' ? <em> gone</em> : null}
+                      </button>
+                    ) : (
+                      <span className="dql-driver-member" title={member.label}>
+                        {member.label}
+                        {member.status === 'new' ? <em> new</em> : member.status === 'gone' ? <em> gone</em> : null}
+                      </span>
+                    )}
                     <span className="dql-driver-track" aria-hidden="true">
                       <i className={value > 0 ? 'up' : value < 0 ? 'down' : 'flat'} style={{ width: `${width / 2}%` }} />
                     </span>
@@ -129,6 +143,8 @@ export function DriverPanel({
 }
 
 const DRIVER_STYLES = `
+button.dql-driver-member { padding: 0; border: 0; background: none; color: var(--dql-app-accent, var(--accent)); font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); text-underline-offset: 3px; }
+button.dql-driver-member:hover, button.dql-driver-member:focus-visible { text-decoration-color: currentColor; outline: none; }
 .dql-driver { --drv-ink: var(--dql-app-ink, var(--text-primary)); --drv-muted: var(--dql-app-muted, var(--text-secondary)); --drv-line: var(--dql-app-line, var(--border-subtle)); --drv-up: var(--trust-governed, #3659c9); --drv-down: #c2651f; display: grid; gap: 12px; min-width: 0; color: var(--drv-ink); font: 400 13px/1.45 var(--font-ui, inherit); font-variant-numeric: tabular-nums; }
 .dql-driver.compact { gap: 8px; font-size: 12px; }
 .dql-driver-summary { margin: 0; font-size: 14px; font-weight: 500; text-wrap: pretty; }

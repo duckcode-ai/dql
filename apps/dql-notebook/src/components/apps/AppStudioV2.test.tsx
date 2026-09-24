@@ -104,7 +104,7 @@ describe('Studio Dataset mark interaction (APP-041)', () => {
 
     expect(markup).toContain('Explore hierarchy · unsaved');
     expect(markup).toContain('Click a Customer Id mark to drill to Order Id.');
-    expect(markup).toContain('>Back<');
+    expect(markup).toContain('>Up one level<');
     expect(markup).toContain('aria-label="Select C-001"');
   });
 

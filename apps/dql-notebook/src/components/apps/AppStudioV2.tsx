@@ -74,7 +74,10 @@ import { EMPTY_TILE_QUERY, autoTileView, defaultTileTitle, descriptorTimeField, 
 import { addFieldByClick, encodingFromQuery, encodingHas, queryFromEncoding, removeField } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import type { ShelfChange } from './builder/ShelfEditor';
 import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
-import { applyShowMe } from '@duckcodeailabs/dql-core/apps/show-me';
+import { applyShowMe, showMeFactsFromDescriptor, showMeFirstChoice, showMeInputFromQuery } from '@duckcodeailabs/dql-core/apps/show-me';
+import { useMarkInteractions } from './useMarkInteractions';
+import { numberReceiptInfo } from './NumberReceipt';
+import type { MarkPointer } from '../output/echarts/EChartsChart';
 import { ShowMePanel, currentShowMeChart, tileShowMe } from './builder/ShowMe';
 import { FiltersPanel, mergeStudioDateRanges, linkedComponentCount, type StudioFilterConfiguration } from './builder/GlobalFilterBar';
 import { DatasetInteractionInspector, DatasetTileQueryInspector } from './builder/InteractionLayer';
@@ -235,6 +238,7 @@ type StudioDatasetCrossFilter = {
   fromSourceRevision: string;
   field: string;
   values: unknown[];
+  exclude?: boolean;
 };
 
 type AppStudioAiActivity = {
@@ -2403,12 +2407,15 @@ export function AppStudioV2({
     }, 320);
   };
 
-  const applyDatasetCrossFilter = (tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number], field: string, values: unknown[]) => {
+  const applyDatasetCrossFilter = (tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number], field: string, values: unknown[], exclude = false) => {
     if (!draft || !activePage || !tile.query || !tile.sourceId || !tile.sourceRevision) return;
     const output = tileQueryOutputAliases(tile.query).find((candidate) => candidate.kind === 'dimension' && candidate.alias === field);
     const mappings = activePage.interactions?.crossFilter?.mappings.filter((mapping) => mapping.fromTileId === tile.i && mapping.fromField === field) ?? [];
     const distinctValues = [...new Map(values.filter((value) => value !== undefined && value !== null).map((value) => [JSON.stringify(value), value])).values()];
-    if (!output || mappings.length === 0 || distinctValues.length === 0) {
+    // Keep only / Exclude on the tile's own Dataset needs no mapping (RFC 0009 step 6a).
+    const own = tile.query.dimensions.some((dimension) => !dimension.timeGrain && (dimension.alias ?? dimension.field) === field)
+      && Boolean(activePage.datasets?.some((dataset) => dataset.sourceId === tile.sourceId && dataset.sourceRevision === tile.sourceRevision));
+    if (!output || (mappings.length === 0 && !own) || distinctValues.length === 0) {
       setSavedMessage(`No explicit Dataset mapping is configured for ${humanize(field)}. Open this tile’s interaction settings to map it.`);
       return;
     }
@@ -2418,6 +2425,7 @@ export function AppStudioV2({
       fromSourceRevision: tile.sourceRevision,
       field: output.alias,
       values: distinctValues,
+      ...(exclude ? { exclude: true } : {}),
     };
     const nextForPage = [
       ...previewCrossFilters.filter((candidate) => !(candidate.fromTileId === tile.i && candidate.field === output.alias)),
@@ -2434,7 +2442,7 @@ export function AppStudioV2({
     });
     previewSequenceRef.current += 1;
     setPreviewing(false);
-    setSavedMessage(`${humanize(field)} selection applied to its mapped Dataset tiles.`);
+    setSavedMessage(`${exclude ? 'Leaving out' : 'Keeping only'} ${humanize(field)} ${distinctValues.map(String).join(', ')} in this preview.`);
     void runPreviewForDraft(draft, activePage.id, previewVariables, nextForPage);
   };
 
@@ -2614,6 +2622,40 @@ export function AppStudioV2({
     if (sourceFeedbackTimerRef.current !== null) window.clearTimeout(sourceFeedbackTimerRef.current);
   }, []);
 
+  // ─── The click menu and Explore panel (RFC 0009 step 6a) ────────────────
+  const { openMarkMenu, overlays: markOverlays } = useMarkInteractions({
+    themeMode,
+    runProbe: (options) => {
+      if (!draft || !activePage) return Promise.reject(new Error('Open a page first.'));
+      return api.runAppBuildPreview(draft.id, activePage.id, previewVariablesForPage(activePage, previewVariablesByPage[activePage.id] ?? {}), previewCrossFilters, options);
+    },
+    drillsFor: (tileId) => previewHierarchyDrills.find((drill) => drill.tileId === tileId)?.steps,
+    keepOrExclude: (item, field, value, exclude) => {
+      const tile = activePage?.layout.items.find((candidate) => candidate.i === item.i);
+      if (tile) applyDatasetCrossFilter(tile, field, [value], exclude);
+    },
+    drillDown: (item, candidate, row) => {
+      const tile = activePage?.layout.items.find((entry) => entry.i === item.i);
+      if (tile) exploreDatasetHierarchy(tile, candidate, row);
+    },
+    hasDetailsPage: (tileId) => Boolean(activePage?.interactions?.navigate?.some((interaction) => interaction.fromTile === tileId)),
+    openDetailsPage: (tileId) => {
+      const tile = activePage?.layout.items.find((candidate) => candidate.i === tileId);
+      if (tile) navigateFromDatasetTile(tile);
+    },
+    ...(activePage?.interactions?.detail?.columns?.length ? { authoredColumns: activePage.interactions.detail.columns } : {}),
+    label: humanize,
+    saveAsTile: (item, query, title) => {
+      const source = datasetItemForSource(item.sourceId);
+      const descriptor = item.sourceId ? draft?.sources.find((candidate) => candidate.id === item.sourceId)?.capabilities?.dataset : undefined;
+      if (!source) { setError('This tile\'s Dataset is not in the Data panel.'); return; }
+      // Show Me picks the chart for the saved view, as it does for any new tile.
+      const choice = !query.detail && descriptor ? showMeFirstChoice(showMeInputFromQuery(query, showMeFactsFromDescriptor(descriptor as DatasetDescriptor))) : undefined;
+      const view = query.detail || choice?.viz === 'table' ? 'table' : choice?.viz === 'single_value' ? 'kpi' : 'chart';
+      void addComponent(view, source, query, title, (choice?.viz ?? 'table') as AppStudioBuildDraft['pages'][number]['layout']['items'][number]['viz']['type'], choice?.encoding);
+    },
+  });
+
   if (!draft) {
     return <div className="dql-studio-v2-loading">
       <style>{APP_STUDIO_V2_STYLES}</style>
@@ -2710,8 +2752,10 @@ export function AppStudioV2({
     }
   };
   const canvasProposalForPage = canvasProposal && canvasProposal.pageId === activePage?.id ? canvasProposal.result : null;
+  // Numbers in a report or layout preview explain themselves, as readers will see them.
+  const numberReceiptFor = (key: string) => numberReceiptInfo(storyCatalog[key], activePage?.layout.items ?? [], previewRun ?? null, undefined, storyCatalog);
   const renderCanvas = (canvas: NonNullable<typeof canvasProposalForPage>['canvas'], canvasEditing?: CanvasFrameEditing) => activePage ? (
-    <CanvasPageFrame canvas={canvas} catalog={storyCatalog} items={activePage.layout.items} tiles={previewRun?.tiles ?? []} themeMode={themeMode} loading={previewing} {...(canvasEditing ? { editing: canvasEditing } : {})} />
+    <CanvasPageFrame canvas={canvas} catalog={storyCatalog} items={activePage.layout.items} tiles={previewRun?.tiles ?? []} themeMode={themeMode} loading={previewing} {...(canvasEditing ? { editing: canvasEditing } : { onMark: (item, tile, row, pointer) => openMarkMenu(item, tile, row, pointer, []), receiptFor: numberReceiptFor })} />
   ) : null;
   const canvasArea = activePage ? (
     editing ? <div className="studio-canvas-page">
@@ -2776,7 +2820,7 @@ export function AppStudioV2({
           draftBlockedReason={storyDraftBlocked}
           providerLabel={lastStoryModel}
         />}
-    </div> : <StoryView narrative={activePage.narrative ?? { version: 1, presentation: 'story', blocks: [] }} catalog={storyCatalog} renderTile={(tileId) => renderStoryTile(tileId)} />
+    </div> : <StoryView narrative={activePage.narrative ?? { version: 1, presentation: 'story', blocks: [] }} catalog={storyCatalog} receiptFor={numberReceiptFor} renderTile={(tileId) => renderStoryTile(tileId)} />
   ) : null;
   const canArrange = editing && placedGrid;
   canvasKeyHandlerRef.current = (event) => {
@@ -2995,7 +3039,7 @@ export function AppStudioV2({
                   {unsupportedTileFilters(tile).map((binding) => <div key={binding.filter} className="tile-filter-notice"><Filter size={11} /><span>{binding.unsupportedReason ?? `${humanize(binding.filter)} does not affect this component.`}</span></div>)}
                   {datasetTileNotices(previewRun?.tiles.find((item) => item.tileId === tile.i)).map((notice) => <div key={notice.key} className={`tile-filter-notice ${notice.kind}`} title={notice.detail}><Filter size={11} /><span><strong>{notice.label}</strong> · {notice.detail}</span></div>)}
                   {dqlTileId === tile.i ? <div className="studio-tile-dql" onClick={(event) => event.stopPropagation()}>{(() => { const runTile = previewRun?.tiles.find((item) => item.tileId === tile.i); const evidence = runTile && tile.query && isCurrentDatasetTileEvidence(tile, runTile) ? presentDatasetTileEvidence(runTile) : undefined; return evidence ? <DatasetTileExecutionEvidence presentation={evidence} /> : <p>Run a preview to see the Dataset query and the SQL it compiled to.</p>; })()}</div> : null}
-                  {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} chartHeight={placed ? tileBodyHeight(tile.h, rowPx) : undefined} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} /></div>}
+                  {tile.text ? <div className={tile.viz.type === 'heading' ? 'tile-heading' : 'tile-text'}>{tile.text.markdown.replace(/^#+\s*/, '')}</div> : <div className="studio-tile-preview-interactions" onClick={(event) => event.stopPropagation()}><StudioTilePreview tile={tile} run={previewRun?.tiles.find((item) => item.tileId === tile.i)} loading={previewing} themeMode={themeMode} chartHeight={placed ? tileBodyHeight(tile.h, rowPx) : undefined} crossFilterFields={datasetCrossFilterFields(activePage!, tile)} activeCrossFilters={previewCrossFilters} onSelectDatasetMark={(field, values) => applyDatasetCrossFilter(tile, field, values)} onDrillDatasetMark={(candidate, row) => exploreDatasetHierarchy(tile, candidate, row)} onDrillBack={() => returnFromDatasetHierarchy(tile.i)} onNavigate={() => navigateFromDatasetTile(tile)} hasNavigation={Boolean(activePage!.interactions?.navigate?.some((interaction) => interaction.fromTile === tile.i))} linkProposal={datasetLinkProposal(activePage!, tile)} onLinkField={() => linkDatasetTileField(tile)} onMark={(row, at, candidates) => openMarkMenu(tile, previewRun?.tiles.find((item) => item.tileId === tile.i), row, at, candidates)} /></div>}
                   {placed && canArrange ? <>
                     <span className="tile-resize-handle e" aria-hidden="true" onPointerDown={(event) => { event.stopPropagation(); startGesture(event, tile, 'resize-e'); }} />
                     <span className="tile-resize-handle s" aria-hidden="true" onPointerDown={(event) => { event.stopPropagation(); startGesture(event, tile, 'resize-s'); }} />
@@ -3004,6 +3048,7 @@ export function AppStudioV2({
                 </article>
   );
   };
+
 
   return (
     <div className={`dql-studio-v2 ${projectedPages ? 'has-proposal' : ''} studio-${studioView} right-${rightPane}`}>
@@ -3309,6 +3354,7 @@ export function AppStudioV2({
         onCancel={() => setDatasetRebindPrompt(null)}
         onConfirm={() => void refreshDatasetBinding(datasetRebindPrompt.sourceId, true)}
       /> : null}
+      {markOverlays}
       {deleteConfirmOpen ? <div className="proposal-scrim" role="dialog" aria-modal="true" aria-label="Delete local App draft"><section className="studio-delete-card"><span className="delete-mark"><Trash2 size={18} /></span><h2>Delete this local draft?</h2><p><strong>{draft.name}</strong> will leave the App list. Its pages, components, and local history move to a recovery bundle so you can Undo.</p><footer><button type="button" onClick={() => setDeleteConfirmOpen(false)} disabled={busy}>Cancel</button><button type="button" className="danger" onClick={() => void deleteLocalDraft()} disabled={busy}>{busy ? 'Deleting…' : 'Delete draft'}</button></footer></section></div> : null}
     </div>
   );
@@ -4032,7 +4078,10 @@ export function StudioTilePreview({
   linkProposal,
   onLinkField,
   chartHeight: placedChartHeight,
+  onMark,
 }: {
+  /** A clicked mark opens the click menu (RFC 0009 step 6a). */
+  onMark?: (row: Record<string, unknown>, at: MarkPointer | undefined, hierarchyCandidates: RuntimeDatasetHierarchyDrillCandidate[]) => void;
   tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number];
   run?: DashboardRunResponse['tiles'][number];
   loading: boolean;
@@ -4116,9 +4165,11 @@ export function StudioTilePreview({
   ));
   const selectableFields = crossFilterFields.filter((field) => run.result!.columns.includes(field));
   const selectedForTile = activeCrossFilters.filter((filter) => filter.fromTileId === tile.i);
-  const markActions = datasetMarkActions(selectableFields, hierarchyCandidates);
+  const markActions = onMark ? [] : datasetMarkActions(selectableFields, hierarchyCandidates);
   const selectedMarkAction = markActions.find((action) => action.id === markActionId) ?? markActions[0];
-  const onRowSelect = selectedMarkAction
+  const onRowSelect = onMark && tile.query && !tile.query.detail
+    ? (row: Record<string, unknown>, at?: MarkPointer) => onMark(row, at, hierarchyCandidates)
+    : selectedMarkAction
     ? (row: Record<string, unknown>) => {
       if (selectedMarkAction.kind === 'drill') {
         const candidate = selectedMarkAction.candidate;
@@ -4149,11 +4200,12 @@ export function StudioTilePreview({
           {markActions.map((action) => <option key={action.id} value={action.id}>{action.kind === 'filter' ? 'Filter linked tiles' : `Drill to ${humanize(action.candidate.toField)}`}</option>)}
         </select></label> : null}
         {selectedMarkAction?.kind === 'drill' ? <small>{markActions.length > 1 ? 'Choose the drill action, then ' : ''}Click a {humanize(selectedMarkAction.candidate.fromField)} mark to drill to {humanize(selectedMarkAction.candidate.toField)}.</small> : null}
-        {hierarchy.activeSteps.length > 0 && onDrillBack ? <button type="button" onClick={onDrillBack}>Back</button> : null}
+        {hierarchy.activeSteps.length > 0 ? <small>All › {hierarchy.activeSteps.map((step) => step.values.map(String).join(', ')).join(' › ')}</small> : null}
+        {hierarchy.activeSteps.length > 0 && onDrillBack ? <button type="button" onClick={onDrillBack}>Up one level</button> : null}
       </div> : null}
       {!selectableFields.length && linkProposal && onLinkField ? <div className="dataset-link-hint" role="note">
-        <span>Clicking this {chart === 'table' ? 'table' : 'chart'} filters nothing yet.</span>
-        <button type="button" onClick={onLinkField} title={`Map ${humanize(linkProposal.fieldLabel)} to: ${linkProposal.targetLabels.join(', ')}`}>Link {humanize(linkProposal.fieldLabel)} to {linkProposal.mappings.length === 1 ? linkProposal.targetLabels[0] : `${linkProposal.mappings.length} Datasets`}</button>
+        <span>{onMark ? 'Keep only reaches tiles on this Dataset.' : `Clicking this ${chart === 'table' ? 'table' : 'chart'} filters nothing yet.`}</span>
+        <button type="button" onClick={onLinkField} title={`Map ${humanize(linkProposal.fieldLabel)} to: ${linkProposal.targetLabels.join(', ')}`}>{onMark ? 'Also filter' : 'Link'} {humanize(linkProposal.fieldLabel)} {onMark ? 'on' : 'to'} {linkProposal.mappings.length === 1 ? linkProposal.targetLabels[0] : `${linkProposal.mappings.length} Datasets`}</button>
       </div> : null}
       {hasNavigation ? <button type="button" className="dataset-detail-navigation" onClick={onNavigate}>Open details <ArrowRight size={13} /></button> : null}
     </div>

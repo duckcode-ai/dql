@@ -14,6 +14,8 @@ export interface DashboardDatasetCrossFilterInput {
   fromSourceRevision: string;
   field: string;
   values: unknown[];
+  /** Exclude these values instead of keeping only them (RFC 0009 step 6a). */
+  exclude?: boolean;
 }
 
 export type DatasetFilterIssue = {
@@ -133,6 +135,15 @@ export function resolveDashboardDatasetFilters(input: {
         mapping.toDataset === binding.id
         && mapping.fromField === crossFilter.field
         && mapping.fromTileId === crossFilter.fromTileId);
+      // Keep only / Exclude on the tile's own Dataset needs no mapping: it is
+      // the same Dataset and the same field, not a guess from a similar name.
+      // A time grain's value names a period, not a date, so it never filters
+      // this way.
+      const ownDimension = sourceDataset.id === binding.id
+        ? sourceItem.query?.dimensions.find((dimension) => !dimension.timeGrain
+          && (dimension.alias ?? dimension.field) === crossFilter.field)
+        : undefined;
+      if (mappings.length === 0 && ownDimension) mappings.push({ fromTileId: crossFilter.fromTileId, fromField: crossFilter.field, toDataset: binding.id, toField: ownDimension.field });
       if (mappings.length === 0) {
         unbound.push({
           filterId: crossFilter.fromTileId,
@@ -153,7 +164,9 @@ export function resolveDashboardDatasetFilters(input: {
         }
         filters.push({
           field: field.name,
-          op: crossFilter.values.length > 1 ? 'in' : 'eq',
+          op: crossFilter.exclude
+            ? (crossFilter.values.length > 1 ? 'not_in' : 'neq')
+            : (crossFilter.values.length > 1 ? 'in' : 'eq'),
           values: [...crossFilter.values],
         });
       }

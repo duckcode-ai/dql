@@ -42,6 +42,10 @@ import { buildSnapshotBody, downloadFile, printSnapshot, snapshotToPng } from '.
 import { CanvasPageFrame } from './CanvasPageFrame';
 import { buildStoryBindingCatalog, type StoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { driverProbeFor } from './driver-probe';
+import { drillFilters } from './mark-actions';
+import { useMarkInteractions } from './useMarkInteractions';
+import { numberReceiptInfo, type NumberReceiptInfo } from './NumberReceipt';
+import type { MarkPointer } from '../output/echarts/EChartsChart';
 import {
   autoTileSizeForItem, autoTileSizeForViz, clamp, narrowTileMinHeight, normalizeSizePreset,
   presetMatches, tileSizeForPreset, tileSizePatch, TILE_SIZE_PRESETS, type TileSizePresetId,
@@ -351,7 +355,12 @@ export function DashboardRenderer({
     setDriverPanel({ item, definition, state: { status: 'loading' } });
     try {
       // No runScope: the probe must not supersede the page's own run.
-      const result = await api.runDashboard(appId, dashboard.id, runVariables, undefined, { driverProbe: { fromTileId: item.i, driver: definition } });
+      // The explanation describes what is on screen: the reader's selected
+      // marks and this tile's drill path narrow both periods.
+      const drilled = drillFilters(effectiveHierarchyDrills.find((drill) => drill.tileId === item.i)?.steps)
+        .map((filter) => ({ field: filter.field, op: filter.op as 'eq' | 'in', values: (filter.values ?? []) as Array<string | number | boolean> }));
+      const driver = drilled.length ? { ...definition, filters: [...(definition.filters ?? []), ...drilled] } : definition;
+      const result = await api.runDashboard(appId, dashboard.id, runVariables, effectiveCrossFilters.length ? effectiveCrossFilters : undefined, { driverProbe: { fromTileId: item.i, driver } });
       if (driverRequestRef.current !== requestId) return;
       const tile = result.tiles.find((candidate) => candidate.tileType === 'driver');
       setDriverPanel({
@@ -365,7 +374,7 @@ export function DashboardRenderer({
       if (driverRequestRef.current !== requestId) return;
       setDriverPanel({ item, definition, state: { status: 'error', message: cause instanceof Error ? cause.message : String(cause) } });
     }
-  }, [appId, dashboard.id, runVariables]);
+  }, [appId, dashboard.id, runVariables, effectiveCrossFilters, effectiveHierarchyDrills]);
   const explainChange = useCallback((item: DashboardDocumentResponse['dashboard']['layout']['items'][number], tile: DashboardRunResponse['tiles'][number]) => {
     const definition = driverProbeFor(item, tile);
     if (definition) void runDriverProbe(item, definition);
@@ -381,6 +390,11 @@ export function DashboardRenderer({
     [dashboard.layout.items, editable, run],
   );
   const storyCatalog = storyNarrative || canvasPage ? runCatalog : EMPTY_CATALOG;
+  /** What a number in a Report or Custom layout is, where it comes from and how far to trust it. */
+  const numberReceiptFor = useCallback((key: string): NumberReceiptInfo | null => {
+    const binding = runCatalog[key];
+    return numberReceiptInfo(binding, dashboard.layout.items, run, binding ? tileRanAt[binding.tileId] : undefined, runCatalog);
+  }, [runCatalog, dashboard.layout.items, run, tileRanAt]);
   const [storyEditions, setStoryEditions] = useState<StoryEditionV1[] | null>(null);
   useEffect(() => {
     if (!storyNarrative || !run || run.partial || run.incomplete) return;
@@ -455,6 +469,7 @@ export function DashboardRenderer({
           onSelectDatasetMark={(field, values) => applyDatasetMark(item, field, values)}
           onDrillDatasetMark={(candidate, row) => applyDatasetHierarchyDrill(item, candidate, row)}
           onDrillBack={() => returnFromDatasetHierarchyDrill(item.i)}
+          onMark={(row, at, candidates) => openMarkMenu(item, tileResults.get(item.i), row, at, candidates)}
           onNavigate={dashboard.interactions?.navigate?.some((candidate) => candidate.fromTile === item.i)
             ? () => void navigateFromDatasetTile(item.i)
             : undefined}
@@ -846,13 +861,13 @@ export function DashboardRenderer({
     }
   }, [effectiveCrossFilters, effectiveHierarchyDrills, runLatest, runVariables]);
 
-  const applyDatasetMark = useCallback((item: DashboardLayoutItem, field: string, values: unknown[]) => {
-    const selection = buildDatasetCrossFilter(dashboard, item, field, values);
+  const applyDatasetMark = useCallback((item: DashboardLayoutItem, field: string, values: unknown[], exclude = false) => {
+    const selection = buildDatasetCrossFilter(dashboard, item, field, values, { exclude });
     if (!selection.crossFilter) {
       setCrossFilterNotice(selection.error ?? 'This result mark cannot be applied.');
       return;
     }
-    setCrossFilterNotice(`${field} selection applied to the explicitly mapped Dataset tiles.`);
+    setCrossFilterNotice(`${exclude ? 'Leaving out' : 'Keeping only'} ${formatGenUiLabel(field)} ${values.map(String).join(', ')} on this page.`);
     // A hierarchy path is bound to its source query and effective filter
     // scope. Starting a new mark selection returns it to the authored base
     // query before the server validates the next request.
@@ -872,8 +887,9 @@ export function DashboardRenderer({
     if (activeCrossFilters.length === 0) return;
     setCrossFilterNotice('Selected result marks cleared. Refreshing mapped Dataset tiles…');
     setActiveHierarchyDrills([]);
-    setActiveCrossFilters((current) => {
-      pendingAffectedTileIdsRef.current = datasetAffectedTileIds(dashboard, current);
+    // With every selection cleared the whole page runs again, so its summary returns.
+    setActiveCrossFilters(() => {
+      pendingAffectedTileIdsRef.current = null;
       return [];
     });
   }, [activeCrossFilters.length, dashboard]);
@@ -882,7 +898,7 @@ export function DashboardRenderer({
     setActiveHierarchyDrills([]);
     setActiveCrossFilters((current) => {
       const next = removeDatasetCrossFilter(current, fromTileId, field);
-      pendingAffectedTileIdsRef.current = datasetAffectedTileIds(dashboard, current);
+      pendingAffectedTileIdsRef.current = next.length ? datasetAffectedTileIds(dashboard, current) : null;
       return next;
     });
     setCrossFilterNotice(`${field} result mark cleared. Refreshing mapped Dataset tiles…`);
@@ -935,6 +951,20 @@ export function DashboardRenderer({
     });
     if (outcome && !outcome.ok) setCrossFilterNotice(outcome.error ?? 'The configured detail page could not be opened.');
   }, [dashboard, effectiveCrossFilters, onNavigateDashboard, runVariables]);
+
+  // ─── The click menu and Explore panel (RFC 0009 step 6a) ────────────────
+  const { openMarkMenu, overlays: markOverlays } = useMarkInteractions({
+    themeMode: state.themeMode,
+    runProbe: (options) => api.runDashboard(appId, dashboard.id, runVariables, effectiveCrossFilters.length ? effectiveCrossFilters : undefined, options),
+    drillsFor: (tileId) => effectiveHierarchyDrills.find((drill) => drill.tileId === tileId)?.steps,
+    keepOrExclude: (item, field, value, exclude) => applyDatasetMark(item, field, [value], exclude),
+    drillDown: (item, candidate, row) => applyDatasetHierarchyDrill(item, candidate, row),
+    hasDetailsPage: (tileId) => Boolean(dashboard.interactions?.navigate?.some((candidate) => candidate.fromTile === tileId)),
+    openDetailsPage: (tileId) => void navigateFromDatasetTile(tileId),
+    ...(onAskChart && run?.runId ? { ask: (item: DashboardLayoutItem, question: string) => onAskChart({ tileId: item.i, runId: run.runId, question }) } : {}),
+    ...(dashboard.interactions?.detail?.columns?.length ? { authoredColumns: dashboard.interactions.detail.columns } : {}),
+    label: formatGenUiLabel,
+  });
 
   const openTileInNotebook = useCallback(async (item: DashboardLayoutItem, tile: DashboardRunTile) => {
     if (!canOpenTileInNotebook(tile)) return;
@@ -1116,7 +1146,7 @@ export function DashboardRenderer({
               title="Remove this result-mark filter"
               style={{ ...generatedMetaPillStyle, cursor: 'pointer' }}
             >
-              <Filter size={10} /> {formatGenUiLabel(filter.field)}: {filter.values.map((value) => String(value)).join(', ')} <X size={10} />
+              <Filter size={10} /> {formatGenUiLabel(filter.field)}: {filter.exclude ? 'not ' : ''}{filter.values.map((value) => String(value)).join(', ')} <X size={10} />
             </button>
           ))}
           <button type="button" onClick={clearDatasetMarks} style={toolbarButtonStyle(false)}>Reset marks</button>
@@ -1148,6 +1178,7 @@ export function DashboardRenderer({
           )}
         />
       ) : null}
+      {markOverlays}
       {driverPanel ? (
         <DriverPanel
           title={driverPanel.state.status === 'ready' ? driverPanel.state.analysis.measure.label.toLowerCase() : driverPanel.definition.measure.replace(/_/g, ' ')}
@@ -1231,11 +1262,14 @@ export function DashboardRenderer({
             const certified = trustCounts.find((entry) => entry.state === 'certified')?.count ?? 0;
             return certified === total ? `all ${total} tiles certified` : `${certified} of ${total} tiles certified`;
           })() : null}
+          onMark={(item, tile, row, pointer) => openMarkMenu(item, tile, row, pointer, [])}
+          receiptFor={numberReceiptFor}
         />
       ) : storyNarrative ? (
         <StoryView
           narrative={storyNarrative}
           catalog={storyCatalog}
+          receiptFor={numberReceiptFor}
           edition={run && !run.partial && storyEditions ? storyEditionSummary(storyEditions, run, storyCatalog) : null}
           trust={trustCounts.length ? (() => {
             const total = trustCounts.reduce((sum, entry) => sum + entry.count, 0);
@@ -1328,6 +1362,7 @@ export function DashboardRenderer({
                       onSelectDatasetMark={(field, values) => applyDatasetMark(item, field, values)}
                       onDrillDatasetMark={(candidate, row) => applyDatasetHierarchyDrill(item, candidate, row)}
                       onDrillBack={() => returnFromDatasetHierarchyDrill(item.i)}
+                      onMark={(row, at, candidates) => openMarkMenu(item, tileResults.get(item.i), row, at, candidates)}
                       onNavigate={dashboard.interactions?.navigate?.some((candidate) => candidate.fromTile === item.i)
                         ? () => void navigateFromDatasetTile(item.i)
                         : undefined}
@@ -1498,6 +1533,7 @@ function DashboardTile({
   onSelectDatasetMark,
   onDrillDatasetMark,
   onDrillBack,
+  onMark,
   onNavigate,
   reader,
   onExplainChange,
@@ -1534,6 +1570,7 @@ function DashboardTile({
   onSelectDatasetMark?: (field: string, values: unknown[]) => void;
   onDrillDatasetMark?: (candidate: DashboardHierarchyCandidate, row: Record<string, unknown>) => void;
   onDrillBack?: () => void;
+  onMark?: (row: Record<string, unknown>, at: MarkPointer | undefined, hierarchyCandidates: DashboardHierarchyCandidate[]) => void;
   onNavigate?: () => void;
 }): JSX.Element {
   const tileRef = useRef<HTMLDivElement | null>(null);
@@ -2015,6 +2052,8 @@ function DashboardTile({
           onDrillDatasetMark={onDrillDatasetMark}
           onDrillBack={onDrillBack}
           onNavigate={onNavigate}
+          onMark={editable ? undefined : onMark}
+          tooltipFooter={readerTrust ? `${readerTrust.label}${readerFreshness ? ` · ${readerFreshness}` : ''}` : undefined}
         />
       </div>
       {!editable ? <TileInsightCaption item={item} tile={tile} themeMode={themeMode} /> : null}
@@ -2525,6 +2564,8 @@ export function TileBody({
   onDrillDatasetMark,
   onDrillBack,
   onNavigate,
+  onMark,
+  tooltipFooter,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
@@ -2532,6 +2573,10 @@ export function TileBody({
   error: string | null;
   themeMode: ThemeMode;
   genUi?: DqlGenUiMetadata | null;
+  /** A clicked mark opens the click menu (RFC 0009 step 6a) instead of one fixed action. */
+  onMark?: (row: Record<string, unknown>, at: MarkPointer | undefined, hierarchyCandidates: DashboardHierarchyCandidate[]) => void;
+  /** The trust line at the foot of every tooltip. */
+  tooltipFooter?: string;
   editable?: boolean;
   onEditText?: (markdown: string) => void;
   onRetry?: () => void;
@@ -2616,14 +2661,16 @@ export function TileBody({
     </div>;
   }
 
-  const chartConfig = mergeDashboardTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);
+  const chartConfig = { ...mergeDashboardTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined), ...(tooltipFooter ? { tooltipFooter } : {}) };
   const chart = String(chartConfig.chart ?? tile.viz?.type ?? '').toLowerCase();
   const hierarchy = tile.dataset?.hierarchy;
   const hierarchyCandidates = (hierarchy?.candidates ?? []).filter((candidate) => rowValueExists(displayResult.rows, candidate.fromAlias));
   const selectableFields = crossFilterFields.filter((field) => displayResult.columns.includes(field));
-  const markActions = datasetMarkActions(selectableFields, hierarchyCandidates);
+  const markActions = onMark ? [] : datasetMarkActions(selectableFields, hierarchyCandidates);
   const selectedMarkAction = markActions.find((action) => action.id === markActionId) ?? markActions[0];
-  const selectResultRow = selectedMarkAction
+  const selectResultRow = onMark && item.query && !item.query.detail
+    ? (row: Record<string, unknown>, at?: MarkPointer) => onMark(row, at, hierarchyCandidates)
+    : selectedMarkAction
     ? (row: Record<string, unknown>) => {
       if (selectedMarkAction.kind === 'drill') {
         const candidate = selectedMarkAction.candidate;
@@ -2700,13 +2747,18 @@ export function TileBody({
         </small>
       ) : null}
       {hierarchy.activeSteps.length > 0 && onDrillBack ? (
-        <button
-          type="button"
-          onClick={(event) => { event.stopPropagation(); onDrillBack(); }}
-          style={{ border: '1px solid var(--border-default)', borderRadius: 6, background: 'var(--bg-1)', color: 'var(--accent)', padding: '5px 8px', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
-        >
-          Back
-        </button>
+        <>
+          <small style={{ color: 'var(--text-secondary)' }} aria-label="Drill path">
+            Exploring, not saved · All › {hierarchy.activeSteps.map((step) => step.values.map(String).join(', ')).join(' › ')}
+          </small>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onDrillBack(); }}
+            style={{ border: '1px solid var(--border-default)', borderRadius: 8, background: 'var(--bg-1)', color: 'var(--accent)', padding: '5px 8px', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
+          >
+            Up one level
+          </button>
+        </>
       ) : null}
     </div>
   ) : null;

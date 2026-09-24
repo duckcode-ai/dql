@@ -5,7 +5,7 @@ import { TableOutput } from './TableOutput';
 import type { QueryResult, CellChartConfig, ResultColumnMeta } from '../../store/types';
 import { formatChartValue, formatDisplayValue } from '../../utils/value-format';
 import { CHART_PALETTE_OPTIONS, getPalette, selectedPaletteOption, sequentialStep } from './chart-palettes';
-import { EChartsChart } from './echarts/EChartsChart';
+import { EChartsChart, type MarkPointer } from './echarts/EChartsChart';
 import { ECHARTS_CHART_TYPES } from './echarts/viz-option';
 import {
   DATE_NAME_RE,
@@ -36,7 +36,7 @@ interface ChartOutputProps {
    * result row, never a formatted axis label, so consumers can keep governed
    * field identities and values intact when applying a cross-filter.
    */
-  onMarkSelect?: (row: Record<string, unknown>) => void;
+  onMarkSelect?: (row: Record<string, unknown>, pointer?: MarkPointer) => void;
 }
 
 export type { ChartType } from './chart-helpers';

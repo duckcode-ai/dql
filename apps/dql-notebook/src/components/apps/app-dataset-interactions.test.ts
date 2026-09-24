@@ -62,7 +62,11 @@ describe('published Dataset interactions (APP-041)', () => {
       ...page,
       interactions: { crossFilter: { mappings: [] } },
     } as DashboardDocumentResponse['dashboard'];
-    expect(buildDatasetCrossFilter(noMapping, tile, 'region', ['CA'])).toMatchObject({ error: expect.stringContaining('No explicit Dataset mapping') });
+    // Keep only on the tile's own Dataset is the same field, not a guess (RFC 0009 step 6a).
+    expect(buildDatasetCrossFilter(noMapping, tile, 'region', ['CA']).crossFilter).toMatchObject({ field: 'region', values: ['CA'] });
+    // Without its own Dataset binding on the page, a matching name links nothing.
+    const unbound = { ...noMapping, datasets: [] } as DashboardDocumentResponse['dashboard'];
+    expect(buildDatasetCrossFilter(unbound, tile, 'region', ['CA'])).toMatchObject({ error: expect.stringContaining('No explicit Dataset mapping') });
   });
 
   it('replaces only the same source-qualified result mark', () => {

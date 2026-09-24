@@ -44,6 +44,12 @@ export interface VizOptionOutput {
   categoryLabels: string[];
   /** Series left out because a chart shows at most eight. */
   droppedSeries: number;
+  /**
+   * The exact result row under a clicked mark: the series (a colour value)
+   * as well as the category, a scatter point or a heatmap cell. Falls back to
+   * the category's row when a chart has no finer mark.
+   */
+  rowAt?: (seriesIndex: number, dataIndex: number, data?: unknown) => Record<string, unknown> | undefined;
 }
 
 type Tokens = { text: string; muted: string; grid: string; axis: string; surface: string; tooltip: string; band: string };
@@ -83,7 +89,7 @@ export function buildVizOption({ chartType, result, themeMode, config, animate =
   if (chartType === 'pie' || chartType === 'donut') return pieOption(base, result, labelCol, valueCol, chartType === 'donut', tokens, palette, format, config);
   if (chartType === 'funnel') return funnelOption(base, result, labelCol, valueCol, tokens, palette, format, config);
   if (chartType === 'scatter') return scatterOption(base, result, tokens, format, palette, config);
-  if (chartType === 'heatmap') return heatmapOption(base, result, themeMode, tokens, format);
+  if (chartType === 'heatmap') return heatmapOption(base, result, themeMode, tokens, format, config);
   return cartesianOption(base, chartType, result, labelCol, valueCol, style, tokens, format, config);
 }
 
@@ -115,6 +121,9 @@ function cartesianOption(
 
   // Series: one per measure, or one per value of the colour field.
   let series: Array<{ name: string; values: Map<string, number | null> }>;
+  // The row behind each point of each colour series: a tooltip or a click
+  // on US in January reads US's January row, not the first row of January.
+  const rowsByColour = new Map<string, Map<string, Record<string, unknown>>>();
   if (colorCol) {
     const byColour = new Map<string, Map<string, number | null>>();
     for (const row of result.rows) {
@@ -122,6 +131,9 @@ function cartesianOption(
       const values = byColour.get(name) ?? new Map<string, number | null>();
       values.set(String(row[labelCol] ?? ''), chartNumericValue(row[valueCol]));
       byColour.set(name, values);
+      const rows = rowsByColour.get(name) ?? new Map<string, Record<string, unknown>>();
+      if (!rows.has(String(row[labelCol] ?? ''))) rows.set(String(row[labelCol] ?? ''), row);
+      rowsByColour.set(name, rows);
     }
     series = Array.from(byColour, ([name, values]) => ({ name, values }));
   } else {
@@ -249,14 +261,22 @@ function cartesianOption(
       valueFormatter: (value: unknown) => (value === null || value === undefined ? 'Unavailable' : format(Number(value))),
       // The Tooltip shelf adds measures the chart does not draw.
       ...(config?.tooltipColumns?.length ? {
-        formatter: (params: unknown) => axisTooltip(params, categories, rowForCategory, series.map((entry) => entry.name), colorCol, result, style, config),
+        formatter: (params: unknown) => axisTooltip(params, categories, rowForCategory, series.map((entry) => entry.name), colorCol, result, style, config, rowsByColour, stacked),
+      } : stacked || config?.tooltipFooter ? {
+        formatter: (params: unknown) => axisTooltip(params, categories, rowForCategory, series.map((entry) => entry.name), colorCol, result, style, config, rowsByColour, stacked),
       } : {}),
     },
     xAxis: horizontal ? valueAxis : categoryAxis,
     yAxis: horizontal ? categoryAxis : valueAxis,
     series: seriesOptions as EChartsOption['series'],
   };
-  return { option, categories, rowForCategory, categoryLabels, droppedSeries };
+  const rowAt = (seriesIndex: number, dataIndex: number) => {
+    const category = categories[dataIndex];
+    if (category === undefined) return undefined;
+    const entry = series[seriesIndex];
+    return colorCol && entry ? rowsByColour.get(entry.name)?.get(category) : rowForCategory.get(category);
+  };
+  return { option, categories, rowForCategory, categoryLabels, droppedSeries, rowAt };
 }
 
 /** Reference lines, target bands and dated notes, drawn on the first series. */
@@ -329,10 +349,19 @@ function pieOption(
     ...(other > 0 ? [{ name: 'Other', value: other }] : []),
   ];
   const categories = data.map((slice) => slice.name);
+  const whole = data.reduce((sum, slice) => sum + slice.value, 0);
   const option: EChartsOption = {
     ...base,
     color: palette,
-    tooltip: { ...(base.tooltip as object), trigger: 'item', valueFormatter: (value: unknown) => format(Number(value)) },
+    tooltip: {
+      ...(base.tooltip as object),
+      trigger: 'item',
+      formatter: (params: unknown) => {
+        const { name, value } = params as { name: string; value: number };
+        const share = whole > 0 ? `${Math.round((Number(value) / whole) * 100)}% of the total` : '';
+        return itemTooltip(name, columnName(result, valueCol), Number(value), format, share, rowForCategory.get(name), result, config);
+      },
+    },
     legend: { show: false },
     series: [{
       type: 'pie',
@@ -345,7 +374,7 @@ function pieOption(
       data,
     }],
   };
-  return { option, categories, rowForCategory, categoryLabels: categories.map((value) => formatCategoryLabel(value, labelCol, 32)), droppedSeries: 0 };
+  return { option, categories, rowForCategory, categoryLabels: categories.map((value) => formatCategoryLabel(value, labelCol, 32)), droppedSeries: 0, rowAt: (_series, index) => rowForCategory.get(categories[index] ?? '') };
 }
 
 function funnelOption(
@@ -369,7 +398,14 @@ function funnelOption(
   const top = stages[0]?.value || 1;
   const option: EChartsOption = {
     ...base,
-    tooltip: { ...(base.tooltip as object), trigger: 'item', valueFormatter: (value: unknown) => format(Number(value)) },
+    tooltip: {
+      ...(base.tooltip as object),
+      trigger: 'item',
+      formatter: (params: unknown) => {
+        const { name, value } = params as { name: string; value: number };
+        return itemTooltip(name, columnName(result, valueCol), Number(value), format, `${Math.round((Number(value) / top) * 100)}% of the first step`, rowForCategory.get(name), result, config);
+      },
+    },
     series: [{
       type: 'funnel',
       sort: 'none',
@@ -389,7 +425,7 @@ function funnelOption(
     }],
   };
   const categories = stages.map((stage) => stage.name);
-  return { option, categories, rowForCategory, categoryLabels: categories, droppedSeries: 0 };
+  return { option, categories, rowForCategory, categoryLabels: categories, droppedSeries: 0, rowAt: (_series, index) => rowForCategory.get(categories[index] ?? '') };
 }
 
 // ─── Two measures, and magnitude over two categories ─────────────────────────
@@ -450,7 +486,7 @@ function scatterOption(
       trigger: 'item',
       formatter: (params: unknown) => {
         const data = (params as { data?: { name: string; row: Record<string, unknown> } }).data;
-        return data ? tooltipLines(data) : '';
+        return data ? tooltipLines(data) + tooltipFooterHtml(config) : '';
       },
     },
     xAxis: axis(xCol, xFormat),
@@ -462,16 +498,22 @@ function scatterOption(
       data: points,
     })),
   };
-  return { option, categories: [], rowForCategory: new Map(), categoryLabels: [], droppedSeries: Math.max(0, groups.size - MAX_SERIES) };
+  return {
+    option, categories: [], rowForCategory: new Map(), categoryLabels: [], droppedSeries: Math.max(0, groups.size - MAX_SERIES),
+    rowAt: (_series, _index, data) => (data as { row?: Record<string, unknown> } | undefined)?.row,
+  };
 }
 
-function heatmapOption(base: EChartsOption, result: QueryResult, themeMode: ThemeMode, tokens: Tokens, format: (value: number) => string): VizOptionOutput | undefined {
+function heatmapOption(base: EChartsOption, result: QueryResult, themeMode: ThemeMode, tokens: Tokens, format: (value: number) => string, config?: CellChartConfig): VizOptionOutput | undefined {
   const categories = categoryColumns(result);
   const measures = measureColumns(result);
   const rowCol = categories[0] ?? result.columns[0]!;
   let xLabels: string[];
   let yLabels: string[];
   const cells: Array<[number, number, number | null]> = [];
+  // The row behind each cell, for its tooltip and a click on it.
+  const cellRows: Array<Record<string, unknown>> = [];
+  let valueLabel = measures[0] ?? '';
   if (categories.length >= 2 && measures.length >= 1) {
     // Long form: two categories and one measure.
     const colCol = categories[1]!;
@@ -480,20 +522,31 @@ function heatmapOption(base: EChartsOption, result: QueryResult, themeMode: Them
     yLabels = unique(result.rows.map((row) => String(row[rowCol] ?? '')));
     for (const row of result.rows) {
       cells.push([xLabels.indexOf(String(row[colCol] ?? '')), yLabels.indexOf(String(row[rowCol] ?? '')), chartNumericValue(row[measure])]);
+      cellRows.push(row);
     }
   } else {
     // Wide form: one row label, each measure a column.
     if (measures.length === 0) return undefined;
     xLabels = measures;
     yLabels = result.rows.map((row) => String(row[rowCol] ?? ''));
-    result.rows.forEach((row, y) => measures.forEach((measure, x) => cells.push([x, y, chartNumericValue(row[measure])])));
+    result.rows.forEach((row, y) => measures.forEach((measure, x) => { cells.push([x, y, chartNumericValue(row[measure])]); cellRows.push(row); }));
+    valueLabel = '';
   }
   const values = cells.map((cell) => cell[2]).filter((value): value is number => value !== null);
   const ramp = (isDarkThemeMode(themeMode) ? SEQUENTIAL_DARK : SEQUENTIAL_LIGHT).map((step) => step.fill);
   const option: EChartsOption = {
     ...base,
     grid: { left: 8, right: 16, top: 8, bottom: 40, containLabel: true },
-    tooltip: { ...(base.tooltip as object), trigger: 'item', valueFormatter: (value: unknown) => (value === null ? 'Unavailable' : format(Number(value))) },
+    tooltip: {
+      ...(base.tooltip as object),
+      trigger: 'item',
+      formatter: (params: unknown) => {
+        const { dataIndex, value } = params as { dataIndex: number; value: [number, number, number | null] };
+        const [x, y, cellValue] = value;
+        const name = `${formatCategoryLabel(yLabels[y] ?? '', rowCol, 40)} · ${valueLabel ? formatCategoryLabel(xLabels[x] ?? '', '', 40) : prettyName(xLabels[x] ?? '')}`;
+        return itemTooltip(name, valueLabel ? columnName(result, valueLabel) : prettyName(xLabels[x] ?? ''), cellValue, format, '', cellRows[dataIndex], result, config);
+      },
+    },
     xAxis: { type: 'category', data: xLabels.map(prettyName), axisLabel: { color: tokens.muted, fontSize: 11 }, axisTick: { show: false }, axisLine: { show: false } },
     yAxis: { type: 'category', data: yLabels, inverse: true, axisLabel: { color: tokens.muted, fontSize: 11 }, axisTick: { show: false }, axisLine: { show: false } },
     visualMap: {
@@ -510,7 +563,7 @@ function heatmapOption(base: EChartsOption, result: QueryResult, themeMode: Them
     },
     series: [{ type: 'heatmap', data: cells, itemStyle: { borderColor: tokens.surface, borderWidth: 2, borderRadius: 3 } }],
   };
-  return { option, categories: [], rowForCategory: new Map(), categoryLabels: [], droppedSeries: 0 };
+  return { option, categories: [], rowForCategory: new Map(), categoryLabels: [], droppedSeries: 0, rowAt: (_series, index) => cellRows[index] };
 }
 
 // ─── Shared ──────────────────────────────────────────────────────────────────
@@ -590,24 +643,73 @@ function axisTooltip(
   result: QueryResult,
   style: DashboardVizStyle,
   config: CellChartConfig | undefined,
+  rowsByColour: Map<string, Map<string, Record<string, unknown>>> = new Map(),
+  stacked = false,
 ): string {
-  const list = (Array.isArray(params) ? params : [params]) as Array<{ dataIndex: number; seriesIndex: number; value: unknown; marker?: string; seriesName?: string }>;
-  const index = list[0]?.dataIndex ?? 0;
+  const all = (Array.isArray(params) ? params : [params]) as Array<{ dataIndex: number; seriesIndex: number; value: unknown; data?: unknown; marker?: string; seriesName?: string }>;
+  // A series with no value at this point is drawn as an invisible zero; it has nothing to say here.
+  const list = all.filter((entry) => !(entry.data && typeof entry.data === 'object' && (entry.data as { unavailable?: boolean }).unavailable));
+  const index = all[0]?.dataIndex ?? 0;
   const category = categories[index];
   if (category === undefined) return '';
   const row = rowForCategory.get(category) ?? {};
+  const extras = (config?.tooltipColumns ?? []).filter((column) => result.columns.includes(column) && !seriesNames.includes(column));
+  const extraText = (source: Record<string, unknown>) => extras.map((column) => {
+    const value = chartNumericValue(source[column]);
+    return `${columnName(result, column)} ${value === null ? 'Unavailable' : numberFormatter(result, column, style, config)(value)}`;
+  });
+  const valueOf = (entry: { value: unknown }) => {
+    const raw = typeof entry.value === 'object' && entry.value !== null ? (entry.value as { value?: unknown }).value : entry.value;
+    return raw === null || raw === undefined ? null : Number(raw);
+  };
+  // A stack's parts add up to the bar: each part shows its share, and the total closes the list.
+  const total = stacked ? list.reduce((sum, entry) => sum + (valueOf(entry) ?? 0), 0) : 0;
   const lines = [`<strong>${escapeHtmlText(formatCategoryLabel(category, '', 40))}</strong>`];
   for (const entry of list) {
     const name = seriesNames[entry.seriesIndex] ?? entry.seriesName ?? '';
-    const raw = typeof entry.value === 'object' && entry.value !== null ? (entry.value as { value?: unknown }).value : entry.value;
+    const value = valueOf(entry);
     const formatValue = numberFormatter(result, colorCol ? (config?.y ?? name) : name, style, config);
-    const text = raw === null || raw === undefined ? 'Unavailable' : formatValue(Number(raw));
-    lines.push(`${entry.marker ?? ''}${escapeHtmlText(colorCol ? name : columnName(result, name))}: ${escapeHtmlText(text)}`);
+    const text = value === null ? 'Unavailable' : formatValue(value);
+    const share = stacked && total > 0 && value !== null && value >= 0 ? ` (${Math.round((value / total) * 100)}%)` : '';
+    // Under a colour split, the Tooltip shelf's measures belong to each series' own row.
+    const own = colorCol && extras.length ? rowsByColour.get(name)?.get(category) : undefined;
+    const ownExtras = own ? extraText(own) : [];
+    lines.push(`${entry.marker ?? ''}${escapeHtmlText(colorCol ? name : columnName(result, name))}: ${escapeHtmlText(text + share)}${ownExtras.length ? ` <span style="opacity:.75">· ${escapeHtmlText(ownExtras.join(' · '))}</span>` : ''}`);
   }
+  if (stacked && list.length > 1) {
+    const formatValue = numberFormatter(result, colorCol ? (config?.y ?? seriesNames[0] ?? '') : seriesNames[0] ?? '', style, config);
+    lines.push(`<strong>Total: ${escapeHtmlText(formatValue(total))}</strong>`);
+  }
+  if (!colorCol) {
+    for (const column of extras) {
+      const value = chartNumericValue(row[column]);
+      lines.push(`${escapeHtmlText(columnName(result, column))}: ${escapeHtmlText(value === null ? 'Unavailable' : numberFormatter(result, column, style, config)(value))}`);
+    }
+  }
+  return lines.join('<br/>') + tooltipFooterHtml(config);
+}
+
+/** The tooltip's quiet last line: where the numbers come from and how far to trust them. */
+export function tooltipFooterHtml(config: CellChartConfig | undefined): string {
+  return config?.tooltipFooter ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(128,128,128,.25);font-size:11px;opacity:.8">${escapeHtmlText(config.tooltipFooter)}</div>` : '';
+}
+
+/** A tooltip for one mark: its name, its value (with its share when parts make a whole), the Tooltip shelf, the footer. */
+function itemTooltip(
+  name: string,
+  valueLabel: string,
+  value: number | null,
+  format: (value: number) => string,
+  share: string,
+  row: Record<string, unknown> | undefined,
+  result: QueryResult,
+  config: CellChartConfig | undefined,
+): string {
+  const lines = [`<strong>${escapeHtmlText(name)}</strong>`, `${escapeHtmlText(valueLabel)}: ${escapeHtmlText(value === null ? 'Unavailable' : format(value))}${share ? ` (${escapeHtmlText(share)})` : ''}`];
   for (const column of config?.tooltipColumns ?? []) {
-    if (!result.columns.includes(column) || seriesNames.includes(column)) continue;
-    const value = chartNumericValue(row[column]);
-    lines.push(`${escapeHtmlText(columnName(result, column))}: ${escapeHtmlText(value === null ? 'Unavailable' : numberFormatter(result, column, style, config)(value))}`);
+    if (!row || !result.columns.includes(column) || column === valueLabel) continue;
+    const extra = chartNumericValue(row[column]);
+    lines.push(`${escapeHtmlText(columnName(result, column))}: ${escapeHtmlText(extra === null ? 'Unavailable' : numberFormatter(result, column, {}, config)(extra))}`);
   }
-  return lines.join('<br/>');
+  return lines.join('<br/>') + tooltipFooterHtml(config);
 }

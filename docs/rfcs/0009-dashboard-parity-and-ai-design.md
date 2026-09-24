@@ -261,12 +261,78 @@ Power BI:
 - **Milestone B:** steps 5 and 6, and the rest of steps 3 and 4.
 - **Milestone C:** steps 7, 8 and 9.
 
+## Step 6a: click, drill, explain and tooltips (pulled forward)
+
+The owner asked for tooltips and drill-down as one phase, because they are
+the same moment for a reader: point at a mark, read it, then ask about it.
+Today a click does one fixed thing chosen by the author (filter or drill one
+hierarchy level), nothing appears at the pointer, the rows behind a number
+cannot be seen, "Why did it move?" explains only the latest period and
+ignores the reader's selections, and AI cannot be pointed at one mark.
+Tooltips are missing in Custom layouts, a Tooltip-shelf measure shows the
+wrong number under a colour split, and numbers in text only have the
+browser's plain title.
+
+**Correctness first.**
+
+- A Tooltip-shelf measure under a colour split is shown per series, not the
+  first series' value under the category.
+- A click on a split or stacked chart carries the series (colour value) as
+  well as the category; scatter points and heatmap cells can be clicked.
+- "Why did it move?" and every explanation take the reader's selections,
+  drills and the clicked mark as filters (`driver.filters`, validated like
+  tile filters), so the explanation describes the numbers on screen.
+
+**The click menu.** Clicking a mark (bar, point, slice, cell, table row)
+opens a menu at the pointer instead of doing one fixed thing:
+
+| Action | What it does |
+| --- | --- |
+| Keep only / Exclude | Filter the page to this value, or leave it out. On the tile's own Dataset this needs no mapping (same Dataset, same field); other Datasets follow the author's mappings. |
+| Drill down | Next level of a declared hierarchy, in place, with a breadcrumb. |
+| Drill by… | Any approved dimension of the Dataset, opened in the Explore panel. |
+| See the rows | The records behind this mark, bounded, in the Explore panel. `interactions.detail` columns are used when the author set them. |
+| Open details page | The author's details page with this value carried as a filter. |
+| Explain this | Why this value is what it is (below). |
+| Ask about this | AI with this mark, its value and the active filters filled in. |
+
+**The Explore panel.** A side panel that keeps the path as a breadcrumb
+(*All regions › US › Retail*), draws each level with Show Me's first choice,
+switches between chart and rows, and in Studio saves the view as a tile. It
+runs as a transient tile inside the page run (like the driver probe), so it
+gets the page's filters, access checks and contract validation, and it
+never changes the App.
+
+**Explain this.** For a time mark, the clicked period against the previous
+period or the same period last year; for a category mark, the latest period
+filtered to that member. It shows the change, the contributors as a
+waterfall, and a suggested next step (the contributor that explains most).
+Clicking a contributor drills the explanation further. AI adds words around
+the checked numbers only; values reach a model only when it runs on this
+machine.
+
+**Tooltips.**
+
+- The Tooltip shelf works on pie, donut, funnel and heatmap too.
+- Parts-of-a-whole charts (pie, donut, funnel, stacked) show each part's
+  share of the total.
+- Custom layouts draw live charts, so they have tooltips and the click menu.
+- A number in a Report or Custom layout opens its receipt on hover, tap or
+  keyboard: what it is, its value, its tile, the Dataset and trust, and the
+  filters it ran under.
+
+**Not in this step:** dimensions on the Tooltip shelf, a tooltip text
+editor, charts inside tooltips (Viz in Tooltip), multi-select with Ctrl,
+highlight instead of filter, and saving a drill in a share link. They stay
+in step 6.
+
 ## Progress
 
 | Step | State | Notes |
 | ---- | ----- | ----- |
 | 1. Builder UX v2 | Done | Tiles carry `viz.encoding`: Columns, Rows, Colour, Size, Label, Tooltip, Detail, and a per-field name and number format. The checked query is derived from the shelves and still validated against the Dataset contract; pages and drafts refuse shelves naming fields the query lacks, and tiles without shelves draw exactly as before. Studio's new-tile and selected-tile editors show the shelves: fields arrive by drag from the Data pane or by click (a date runs along Columns, a category lists down Rows or splits a date chart by Colour, a measure takes the other axis), move by drag or from their menu, and the menu sets time grain, sort, filter, number format (compact, currency, percent, decimals) and name. The renderer follows the shelves (orientation, one series per measure, colour split, bubble size, labels, tooltip measures, names and formats in tables, charts, HTML pages and exports), and a line draws single points as dots. Detail with a bar, line or heatmap reads as a table with the reason, because one mark would have to merge several rows. Not in this step: aggregation choice per measure (step 3) and a keyboard path that places a Data-pane field on a named shelf directly (fields can be clicked in, then moved from their menu). |
 | 2. Show Me v2 | Done | `dql-core` `apps/show-me` ranks 13 charts (KPI, line, area, horizontal and vertical bars, side-by-side, stacked, donut, pie, funnel, scatter, heatmap, table) from field roles, counts, the values a dimension has in the tile's last result, additivity from the Dataset contract (a distinct count or ratio is never stacked or sliced; an area needs a measure that adds up over time), negative values (no slices or stacks), and units (two units never share an axis quietly; there is no dual axis). Every chart comes back with a reason it fits or does not. Studio shows the ranking under the shelves and in the Visual tab for Dataset tiles and the new-tile draft: the best is marked, charts that do not fit are greyed out and say why on hover or focus, and a pick rearranges the shelves while keeping Label, Tooltip and field names. The AI planner takes the first choice for every Dataset tile it proposes, with shelves; detail and evidence components stay tables. Exit check: 42 field combinations with the expected first choice (`show-me.test.ts`). Not in this step: value counts at plan time (the planner has no result yet, so a long category over time is offered as lines until the tile runs), and charts step 4 adds (combo, waterfall, map, small multiples). |
+| 6a. Click, drill, explain and tooltips | Done | Correctness: a Tooltip-shelf measure under a colour split shows each series' own value; clicks carry the series, and scatter points and heatmap cells can be clicked (`rowAt`); "Why did it move?" takes the reader's selected marks and the tile's drill path (`driver.filters`, validated like tile filters; a field held to one value is not a breakdown). A click opens a menu at the pointer (Keep only, Exclude, Drill down, Drill by…, See the rows, Open details page, Explain this, Ask about this) in the reader, Studio and Custom layouts. Keep only and Exclude need no mapping on the tile's own Dataset (same field, never a date grain; `exclude` becomes neq/not_in); other Datasets still follow the author's mappings; clearing every selection reruns the whole page. The Explore panel runs as a transient `<tile>::explore` tile in the page run (page filters, scoped filters, access and contract checks) with a breadcrumb, a breakdown by any approved field the run lists (`dataset.explore.fields`), bounded rows (the author's `interactions.detail` columns when set) and Explain (the clicked period against the one before or last year; a tile without a time grain first finds the slice's latest period; contributors are clickable with their exact values and the one carrying at least a quarter of the change is suggested); Studio saves a view as a tile with Show Me's chart. Tooltips: shares and a total on stacks, shares on pie and donut, share of the first step on funnels, the Tooltip shelf on every chart type, series without a value left out, and a trust and freshness line. Custom layouts draw live charts (tooltips and the click menu) inside the sandboxed frame. Numbers in Reports and Custom layouts open a receipt on hover, focus or tap: what the number is in words, the tile, trust, source, owner, filters and when it ran. Not in this step: dimensions on the Tooltip shelf, a tooltip text editor, Viz in Tooltip, Ctrl multi-select, highlight instead of filter, drills in share links, and author toggles for the menu. |
 
 ## Measuring outcomes
 

@@ -5,11 +5,13 @@ import type { StoryBindingCatalog } from '@duckcodeailabs/dql-core/apps/story-bi
 import type { DashboardCanvasV1, DashboardDocumentResponse, DashboardRunResponse } from '../../api/client';
 import type { CellChartConfig, QueryResult } from '../../store/types';
 import type { ThemeMode } from '../../themes/notebook-theme';
-import { renderOptionToSvg } from '../output/echarts/EChartsChart';
+import { mountLiveChart, renderOptionToSvg, type MarkPointer } from '../output/echarts/EChartsChart';
 import { buildVizOption, ECHARTS_CHART_TYPES } from '../output/echarts/viz-option';
 import type { ChartType } from '../output/chart-helpers';
 import { encodedTileResult, mergeDashboardTileChartConfig, normalizeDashboardChartType } from './dashboard-chart-config';
 import { formatDriverNumber } from './driver-probe';
+import { readerTileTrust } from './reader-trust';
+import { NumberReceiptPopover, type NumberReceiptInfo } from './NumberReceipt';
 
 type LayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 type RunTile = DashboardRunResponse['tiles'][number];
@@ -45,6 +47,8 @@ export function CanvasPageFrame({
   trust,
   loading = false,
   editing,
+  onMark,
+  receiptFor,
 }: {
   canvas: DashboardCanvasV1;
   catalog: StoryBindingCatalog;
@@ -55,6 +59,10 @@ export function CanvasPageFrame({
   trust?: string | null;
   loading?: boolean;
   editing?: CanvasFrameEditing;
+  /** A reader clicked a mark in a live chart: open the click menu (RFC 0009 step 6a). Pointer is in window pixels. */
+  onMark?: (item: LayoutItem, tile: RunTile | undefined, row: Record<string, unknown>, pointer: MarkPointer | undefined) => void;
+  /** Each bound number explains itself on hover, focus or tap (RFC 0009 step 6a). */
+  receiptFor?: (key: string) => NumberReceiptInfo | null;
 }): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -87,8 +95,76 @@ export function CanvasPageFrame({
     const doc = frameRef.current?.contentDocument;
     if (doc?.documentElement) setHeight(Math.max(200, Math.ceil(doc.documentElement.scrollHeight) + 2));
   };
+  // Charts in the frame are drawn live by the host, so they have tooltips and
+  // clicks; the static SVG stays for exports and until the frame loads.
+  const liveCharts = useRef<Array<() => void>>([]);
+  const onMarkRef = useRef(onMark);
+  onMarkRef.current = onMark;
+  useEffect(() => () => { liveCharts.current.forEach((dispose) => dispose()); liveCharts.current = []; }, []);
+  const mountCharts = () => {
+    liveCharts.current.forEach((dispose) => dispose());
+    liveCharts.current = [];
+    const frame = frameRef.current;
+    const doc = frame?.contentDocument;
+    if (!frame || !doc) return;
+    for (const box of Array.from(doc.querySelectorAll<HTMLElement>('.dql-tile[data-tile]'))) {
+      const tileId = box.getAttribute('data-tile') ?? '';
+      const item = items.find((candidate) => candidate.i === tileId);
+      const tile = tiles.find((candidate) => candidate.tileId === tileId);
+      const svg = box.querySelector('svg');
+      const built = item && tile ? canvasTileChart(item, tile, themeMode) : null;
+      if (!svg || !built) continue;
+      const height = Number(svg.getAttribute('height')) || 280;
+      const host = doc.createElement('div');
+      host.className = 'dql-tile-live';
+      host.style.cssText = `width:100%;height:${height}px`;
+      svg.replaceWith(host);
+      liveCharts.current.push(mountLiveChart(host, built, editing ? undefined : (row, pointer) => {
+        const rect = frame.getBoundingClientRect();
+        onMarkRef.current?.(item!, tile, row, pointer ? { x: rect.left + pointer.x, y: rect.top + pointer.y } : undefined);
+      }));
+    }
+  };
+  // Numbers in the page explain themselves. The frame runs no scripts, so
+  // the host listens and draws the receipt above the page.
+  const [receipt, setReceipt] = useState<{ info: NumberReceiptInfo; at: { left: number; top: number; bottom: number }; pinned: boolean } | null>(null);
+  const receiptForRef = useRef(receiptFor);
+  receiptForRef.current = receiptFor;
+  const receiptTimer = useRef<number | null>(null);
+  const holdReceipt = () => { if (receiptTimer.current !== null) window.clearTimeout(receiptTimer.current); receiptTimer.current = null; };
+  const dropReceipt = () => { holdReceipt(); receiptTimer.current = window.setTimeout(() => setReceipt((current) => (current?.pinned ? current : null)), 160); };
+  useEffect(() => holdReceipt, []);
+  const wireNumbers = () => {
+    const frame = frameRef.current;
+    const doc = frame?.contentDocument;
+    if (!frame || !doc || editing || !receiptForRef.current) return;
+    const open = (chip: HTMLElement, pinned: boolean) => {
+      const info = receiptForRef.current?.(chip.getAttribute('data-bind') ?? '');
+      if (!info) return;
+      holdReceipt();
+      const frameBox = frame.getBoundingClientRect();
+      const box = chip.getBoundingClientRect();
+      setReceipt((current) => ({ info, at: { left: frameBox.left + box.left, top: frameBox.top + box.top, bottom: frameBox.top + box.bottom }, pinned: pinned || Boolean(current?.pinned && current.info.label === info.label) }));
+    };
+    for (const chip of Array.from(doc.querySelectorAll<HTMLElement>('.dql-value[data-bind]'))) {
+      chip.tabIndex = 0;
+      chip.setAttribute('role', 'button');
+      chip.style.cursor = 'help';
+      chip.style.textDecoration = 'underline dotted';
+      chip.style.textUnderlineOffset = '3px';
+      chip.addEventListener('pointerenter', () => open(chip, false));
+      chip.addEventListener('focus', () => open(chip, false));
+      chip.addEventListener('pointerleave', dropReceipt);
+      chip.addEventListener('blur', dropReceipt);
+      chip.addEventListener('click', () => open(chip, true));
+      chip.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(chip, true); } if (event.key === 'Escape') setReceipt(null); });
+    }
+    doc.addEventListener('mousedown', (event) => { if (!(event.target as Element | null)?.closest?.('.dql-value')) setReceipt(null); });
+  };
   const loaded = () => {
     measure();
+    mountCharts();
+    wireNumbers();
     if (editing && frameRef.current) editing.onFrameLoad(frameRef.current, measure);
   };
   const values = checked.bindings.length;
@@ -122,13 +198,14 @@ export function CanvasPageFrame({
         {editing?.overlay}
         </div>
       )}
+      {receipt ? <NumberReceiptPopover info={receipt.info} at={receipt.at} onClose={() => setReceipt(null)} onPointerEnter={holdReceipt} onPointerLeave={dropReceipt} /> : null}
     </div>
   );
 }
 
 /** The frame's document: a CSP that allows only inline styles and data images, and the host's theme. */
 function canvasDocument(body: string, variables: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"><style>:root{${variables}}html,body{margin:0;background:transparent}body{padding:4px;font:400 15px/1.55 var(--dql-font);color:var(--dql-ink);font-variant-numeric:tabular-nums}.dql-value{font-weight:600}.dql-value.missing{color:var(--dql-muted)}.dql-tile{margin:8px 0;padding:12px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface);overflow:hidden}.dql-tile svg{display:block;width:100%;max-width:640px;height:auto}.dql-tile-title{margin:0 0 8px;font-size:13px;font-weight:600}.dql-tile-kpi{font:600 32px/1.2 var(--dql-font-display)}.dql-tile table{width:100%;border-collapse:collapse;font-size:13px}.dql-tile th,.dql-tile td{padding:4px 8px;border-bottom:1px solid var(--dql-line);text-align:left}.dql-tile td.num{text-align:right}.dql-tile .muted{color:var(--dql-muted);font-size:12px}.dql-tile ol{margin:6px 0 0;padding-left:18px}</style></head><body>${body}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"><style>:root{${variables}}html,body{margin:0;background:transparent}body{padding:4px;font:400 15px/1.55 var(--dql-font);color:var(--dql-ink);font-variant-numeric:tabular-nums}.dql-value{font-weight:600}.dql-value.missing{color:var(--dql-muted)}.dql-tile{margin:8px 0;padding:12px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface);overflow:hidden}.dql-tile svg{display:block;width:100%;max-width:640px;height:auto}.dql-tile-live svg{max-width:none;width:100%;height:100%}.dql-tile-title{margin:0 0 8px;font-size:13px;font-weight:600}.dql-tile-kpi{font:600 32px/1.2 var(--dql-font-display)}.dql-tile table{width:100%;border-collapse:collapse;font-size:13px}.dql-tile th,.dql-tile td{padding:4px 8px;border-bottom:1px solid var(--dql-line);text-align:left}.dql-tile td.num{text-align:right}.dql-tile .muted{color:var(--dql-muted);font-size:12px}.dql-tile ol{margin:6px 0 0;padding-left:18px}</style></head><body>${body}</body></html>`;
 }
 
 function themeVariables(node: HTMLElement | null): string {
@@ -167,14 +244,23 @@ export function drawCanvasTile(item: LayoutItem | undefined, tile: RunTile | und
     const binding = Object.values(catalog).find((entry) => entry.tileId === item.i && entry.kind === 'number');
     return `${title}<div class="dql-tile-kpi">${escapeHtml(binding?.display ?? '—')}</div>`;
   }
-  if (ECHARTS_CHART_TYPES.has(chartType)) {
-    const config = mergeDashboardTileChartConfig(item as never, tile.chartConfig as CellChartConfig | undefined);
-    const built = buildVizOption({ chartType, result, themeMode, config: { ...config, ...(item.viz.style ? { style: item.viz.style } : {}) } as CellChartConfig, animate: false });
-    if (built) return `${title}${renderOptionToSvg(built, Math.max(280, width), height ?? 280)}`;
-  }
+  const built = canvasTileChart(item, tile, themeMode);
+  if (built) return `${title}${renderOptionToSvg(built, Math.max(280, width), height ?? 280)}`;
   const columns = result.columns.slice(0, 8);
   const numeric = new Set(columns.filter((column) => result.rows.every((row) => row[column] === null || typeof row[column] === 'number')));
   return `${title}<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.replace(/_/g, ' '))}</th>`).join('')}</tr></thead><tbody>${result.rows.slice(0, 15).map((row) => `<tr>${columns.map((column) => `<td${numeric.has(column) ? ' class="num"' : ''}>${escapeHtml(row[column] === null || row[column] === undefined ? '—' : String(row[column]))}</td>`).join('')}</tr>`).join('')}</tbody></table>${result.rows.length > 15 ? `<p class="muted">${escapeHtml(`First ${15} of ${result.rows.length} rows`)}</p>` : ''}`;
+}
+
+/** The chart a tile draws on a Custom layout, or null for a KPI, table, driver or empty result. */
+export function canvasTileChart(item: LayoutItem, tile: RunTile, themeMode: ThemeMode) {
+  if (tile.status !== 'ok' || tile.driver) return null;
+  const result = encodedTileResult(item as never, tile.result as QueryResult | undefined);
+  if (!result || result.rows.length === 0) return null;
+  const chartType = normalizeDashboardChartType(item.viz.type) as ChartType;
+  if (chartType === 'kpi' || (result.rows.length === 1 && result.columns.length <= 2) || !ECHARTS_CHART_TYPES.has(chartType)) return null;
+  const config = mergeDashboardTileChartConfig(item as never, tile.chartConfig as CellChartConfig | undefined);
+  const trust = readerTileTrust(item as never, tile);
+  return buildVizOption({ chartType, result, themeMode, config: { ...config, ...(item.viz.style ? { style: item.viz.style } : {}), ...(trust ? { tooltipFooter: trust.label } : {}) } as CellChartConfig, animate: false }) ?? null;
 }
 
 const CANVAS_FRAME_STYLES = `
