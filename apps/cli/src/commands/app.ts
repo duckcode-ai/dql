@@ -13,6 +13,8 @@
  *   dql app show <id> [path]
  *   dql app build [path]
  *   dql app reindex [path]
+ *   dql app verify <snapshot.html> [--trust-key <public.pem>] [--format json]
+ *   dql app key
  */
 
 import {
@@ -37,6 +39,7 @@ import {
   type ManifestApp,
 } from "@duckcodeailabs/dql-core";
 import type { CLIFlags } from "../args.js";
+import { readSnapshotPublicKey, verifySnapshot, type SnapshotVerification } from "../snapshot/app-snapshot.js";
 import { findProjectRoot } from "../local-runtime.js";
 import {
   createStoredAppBuildDraft,
@@ -65,15 +68,21 @@ export async function runApp(
       return runAppBuild(rest[0] ?? null, flags);
     case "reindex":
       return runAppReindex(rest[0] ?? null, flags);
+    case "verify":
+      return runAppVerify(rest, flags);
+    case "key":
+      return runAppKey(flags);
     default:
       throw new Error(
-        "Usage: dql app <new|ls|show|build|reindex> [args]\n" +
+        "Usage: dql app <new|ls|show|build|reindex|verify|key> [args]\n" +
           "  dql app new <id> --domain <domain> [--owner <user>]\n" +
           '  dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]\n' +
           "  dql app ls [path]\n" +
           "  dql app show <id> [path]\n" +
           "  dql app build [path]\n" +
-          "  dql app reindex [path]",
+          "  dql app reindex [path]\n" +
+          "  dql app verify <snapshot.html> [--trust-key <public.pem>] [--format json]\n" +
+          "  dql app key",
       );
   }
 }
@@ -443,3 +452,79 @@ export const __test__ = {
 // reference unused readdirSync/readFileSync to keep imports stable for future use
 void readdirSync;
 void readFileSync;
+
+/**
+ * `dql app verify <file>` — check a signed App snapshot offline (RFC 0008
+ * step 10): the file is unchanged since signing, the signature matches its
+ * manifest, and (with --trust-key, or inside the project that signed it) the
+ * key is one you trust. Exits 1 when any check fails.
+ */
+async function runAppVerify(rest: string[], flags: CLIFlags): Promise<void> {
+  const file = rest.find((arg) => !arg.startsWith("-"));
+  if (!file) throw new Error("Usage: dql app verify <snapshot.html> [--trust-key <public.pem>] [--format json]");
+  const html = readFileSync(resolve(file), "utf-8");
+  const trusted: string[] = [];
+  let pinnedBy: string | null = null;
+  if (flags.trustKey) {
+    trusted.push(readFileSync(resolve(flags.trustKey), "utf-8"));
+    pinnedBy = flags.trustKey;
+  } else {
+    let projectKey: ReturnType<typeof readSnapshotPublicKey> = null;
+    try {
+      projectKey = readSnapshotPublicKey(findProjectRoot(process.cwd()));
+    } catch {
+      projectKey = null;
+    }
+    if (projectKey) {
+      trusted.push(projectKey.publicKeyPem);
+      pinnedBy = "this project's key";
+    }
+  }
+  const result = verifySnapshot(html, trusted);
+  if (flags.format === "json") {
+    console.log(JSON.stringify({ file, pinnedBy, ...result }, null, 2));
+  } else {
+    console.log(renderSnapshotVerification(file, result, pinnedBy));
+  }
+  if (!result.ok) process.exitCode = 1;
+}
+
+export function renderSnapshotVerification(file: string, result: SnapshotVerification, pinnedBy: string | null): string {
+  const mark = (ok: boolean | undefined) => (ok ? "ok  " : "FAIL");
+  const lines = [`${result.ok ? "Verified" : "Not verified"}: ${file}`, ""];
+  lines.push(`  ${mark(result.contentIntact)}  File unchanged since it was signed`);
+  lines.push(`  ${mark(result.signatureValid)}  Signature matches the manifest`);
+  if (result.trustedKey !== undefined) lines.push(`  ${mark(result.trustedKey)}  Signed by ${pinnedBy ?? "a trusted key"}`);
+  else lines.push("  --    Key not pinned (pass --trust-key <public.pem> to require a key)");
+  const manifest = result.manifest;
+  if (manifest) {
+    lines.push("", `  App      ${manifest.app.title} (${manifest.app.id})`);
+    lines.push(`  Page     ${manifest.page.title} (${manifest.page.id})`);
+    lines.push(`  Signed   ${manifest.createdAt} by key ${manifest.key.id}`);
+    lines.push(`  Run      ${manifest.run.id}`);
+    lines.push(`  Result   ${manifest.run.resultFingerprint}`);
+    lines.push(`  Filters  ${manifest.filters.length ? manifest.filters.map((filter) => `${filter.label}: ${filter.value}`).join("; ") : "none"}`);
+    if (manifest.trust.total) lines.push(`  Trust    ${manifest.trust.certified} of ${manifest.trust.total} tiles certified`);
+    if (manifest.figures.length) {
+      lines.push("", `  ${manifest.figures.length} recorded ${manifest.figures.length === 1 ? "figure" : "figures"}:`);
+      for (const figure of manifest.figures.slice(0, 25)) lines.push(`    ${figure.label}: ${figure.display}`);
+      if (manifest.figures.length > 25) lines.push(`    … ${manifest.figures.length - 25} more (--format json lists all)`);
+    }
+  }
+  if (result.problems.length) lines.push("", ...result.problems.map((problem) => `  ${problem}`));
+  return lines.join("\n");
+}
+
+/** `dql app key` — print this project's snapshot public key, to share with people who verify its snapshots. */
+async function runAppKey(flags: CLIFlags): Promise<void> {
+  const key = readSnapshotPublicKey(findProjectRoot(process.cwd()));
+  if (!key) {
+    console.log("This project has not signed a snapshot yet. Export a signed snapshot from an App page to create its key.");
+    return;
+  }
+  if (flags.format === "json") {
+    console.log(JSON.stringify({ keyId: key.id, publicKeyPem: key.publicKeyPem }, null, 2));
+    return;
+  }
+  console.log(`Snapshot signing key ${key.id}\n\n${key.publicKeyPem.trim()}\n\nShare this public key; verify with: dql app verify <snapshot.html> --trust-key <public.pem>`);
+}

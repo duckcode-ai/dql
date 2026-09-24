@@ -1,92 +1,29 @@
 import type { DashboardDocumentResponse, DashboardRunResponse } from '../../api/client';
+import {
+  readerTileTrust as coreReaderTileTrust,
+  isDataTileForTrust as coreIsDataTileForTrust,
+  type ReaderTrust,
+  type ReaderTrustItem,
+  type ReaderTrustTile,
+} from '@duckcodeailabs/dql-core/apps/reader-trust';
 
 /**
- * One trust vocabulary for App readers (RFC 0008 step 6). Every data tile
- * shows exactly one of four states, worked out from the governed run
- * evidence the server returned, never from the tile's own claims alone:
- *
- * - certified: a certified source ran exactly as reviewed
- * - governed:  a governed semantic query (metrics and dimensions from the
- *              model), not individually certified
- * - review:    not certified yet, adapted, out of date, or AI-generated
- * - blocked:   governance or the source stopped this tile from showing data
- *
- * Pure: no React, no I/O.
+ * The reader's trust vocabulary lives in dql-core (RFC 0008 step 6, shared
+ * with signed snapshots and digests in step 10). This module adds what only
+ * the reader needs: freshness and the receipt behind a tile.
  */
-export type ReaderTrustState = 'certified' | 'governed' | 'review' | 'blocked';
-
-export interface ReaderTrust {
-  state: ReaderTrustState;
-  label: string;
-  /** One sentence a reader can act on. */
-  detail: string;
-}
+export { READER_TRUST_LABELS, readerTrustCounts, readerTrustSummary } from '@duckcodeailabs/dql-core/apps/reader-trust';
+export type { ReaderTrust, ReaderTrustState } from '@duckcodeailabs/dql-core/apps/reader-trust';
 
 type LayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 type RunTile = DashboardRunResponse['tiles'][number];
 
-export const READER_TRUST_LABELS: Record<ReaderTrustState, string> = {
-  certified: 'Certified',
-  governed: 'Governed',
-  review: 'Needs review',
-  blocked: 'Blocked',
-};
-
-const trust = (state: ReaderTrustState, detail: string): ReaderTrust => ({ state, label: READER_TRUST_LABELS[state], detail });
-
-/** Text and heading tiles carry no data, so they carry no trust label. */
 export function isDataTileForTrust(item: LayoutItem, tile?: RunTile): boolean {
-  if (item.text || tile?.tileType === 'text') return false;
-  return Boolean(tile || item.block || item.semantic || item.query || item.aiPin || item.draftAnalysis);
+  return coreIsDataTileForTrust(item as ReaderTrustItem, tile as ReaderTrustTile | undefined);
 }
 
 export function readerTileTrust(item: LayoutItem, tile?: RunTile): ReaderTrust | null {
-  if (!isDataTileForTrust(item, tile)) return null;
-  if (!tile) return null;
-  if (tile.status === 'unauthorized') return trust('blocked', 'You do not have access to this data.');
-  if (tile.status === 'unresolved') return trust('blocked', 'This tile’s source could not be found in the project.');
-  if (tile.status === 'error') return trust('blocked', 'This tile could not run with the current source and filters.');
-  if (tile.status === 'stale') return trust('review', 'This result is out of date; refresh the page.');
-  if (tile.repair) return trust('review', 'This tile was repaired automatically and needs a person to check it.');
-
-  if (tile.aiPin || item.aiPin) {
-    const pin = tile.aiPin;
-    return pin?.certification === 'certified' || pin?.reviewStatus === 'certified'
-      ? trust('certified', 'An AI answer that a person reviewed and certified.')
-      : trust('review', 'An AI answer that nobody has reviewed yet.');
-  }
-
-  const dataset = tile.dataset;
-  if (dataset) {
-    const outcome = dataset.validation?.outcome;
-    if (outcome === 'rejected') return trust('blocked', 'The Dataset contract rejected this query.');
-    if (dataset.trust === 'certified' && outcome !== 'needs_review') {
-      return outcome === 'adapted'
-        ? trust('certified', 'Certified Dataset; the query was adapted within its contract.')
-        : trust('certified', 'Runs on a certified Dataset, within its contract.');
-    }
-    return trust('review', outcome === 'needs_review'
-      ? 'The query goes beyond what the Dataset certifies.'
-      : 'The Dataset is not certified yet.');
-  }
-
-  const artifactTrust = tile.artifact?.trustState;
-  const serverTrust = (tile as { trustState?: string }).trustState;
-  if (tile.certificationStatus === 'certified' || artifactTrust === 'certified' || serverTrust === 'certified') {
-    return trust('certified', 'Runs a certified block exactly as it was reviewed.');
-  }
-  if (tile.tileType === 'semantic' || item.semantic || tile.artifact?.sourceKind === 'semantic_query') {
-    return trust('governed', 'Metrics and dimensions come from the governed semantic model.');
-  }
-  return trust('review', 'This source is not certified yet; check it before relying on it.');
-}
-
-/** Counts for the Trust Lens legend, in a fixed order. */
-export function readerTrustCounts(trusts: Array<ReaderTrust | null>): Array<{ state: ReaderTrustState; label: string; count: number }> {
-  const order: ReaderTrustState[] = ['certified', 'governed', 'review', 'blocked'];
-  return order
-    .map((state) => ({ state, label: READER_TRUST_LABELS[state], count: trusts.filter((entry) => entry?.state === state).length }))
-    .filter((entry) => entry.count > 0);
+  return coreReaderTileTrust(item as ReaderTrustItem, tile as ReaderTrustTile | undefined);
 }
 
 /** "just now", "5 min ago", "3 h ago", or a date. */

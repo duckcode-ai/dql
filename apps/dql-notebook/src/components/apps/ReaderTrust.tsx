@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { AlertTriangle, Ban, Landmark, ShieldCheck, X } from 'lucide-react';
 import type { ReaderTrust, ReaderTrustState, ReceiptRow } from './reader-trust';
 
@@ -98,10 +98,13 @@ export function TrustLensBar({
   counts,
   on,
   onToggle,
+  actions,
 }: {
   counts: Array<{ state: ReaderTrustState; label: string; count: number }>;
   on: boolean;
   onToggle: () => void;
+  /** Page actions shown at the end of the bar, such as Export. */
+  actions?: ReactNode;
 }): JSX.Element | null {
   if (!counts.length) return null;
   const total = counts.reduce((sum, entry) => sum + entry.count, 0);
@@ -119,6 +122,7 @@ export function TrustLensBar({
       <button type="button" className={`dql-trust-lens-toggle ${on ? 'on' : ''}`} aria-pressed={on} onClick={onToggle}>
         Trust lens
       </button>
+      {actions}
     </div>
   );
 }

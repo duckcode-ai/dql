@@ -182,3 +182,5 @@ export type { StoryBinding, StoryBindingCatalog, StoryBindingTileInput, StoryTex
 
 export { checkCanvasHtml, fillCanvasHtml, escapeHtml, MAX_CANVAS_HTML } from './canvas-page.js';
 export type { CanvasIssue, CheckedCanvas } from './canvas-page.js';
+export { READER_TRUST_LABELS, isDataTileForTrust, readerTileTrust, readerTrustCounts, readerTrustSummary } from './reader-trust.js';
+export type { ReaderTrust, ReaderTrustItem, ReaderTrustState, ReaderTrustTile } from './reader-trust.js';

@@ -51,6 +51,10 @@
       "types": "./dist/apps/canvas-page.d.ts",
       "import": "./dist/apps/canvas-page.js"
     },
+    "./apps/reader-trust": {
+      "types": "./dist/apps/reader-trust.d.ts",
+      "import": "./dist/apps/reader-trust.js"
+    },
     "./datasets/descriptor": {
       "types": "./dist/datasets/descriptor.d.ts",
       "import": "./dist/datasets/descriptor.js"

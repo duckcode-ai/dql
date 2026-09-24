@@ -4871,6 +4871,20 @@ export const APP_STYLES = `
 .dql-trust-count { display: inline-flex; align-items: center; gap: 4px; }
 .dql-trust-lens-toggle { margin-left: auto; height: 26px; padding: 0 10px; border: 1px solid var(--dql-app-line-2); border-radius: 999px; background: var(--dql-app-surface); color: var(--dql-app-ink); font: 500 12px var(--font-ui); cursor: pointer; }
 .dql-trust-lens-toggle.on { border-color: var(--dql-app-accent); background: var(--dql-app-accent-soft); color: var(--dql-app-accent); }
+/* RFC 0008 step 10: export a signed snapshot, an image or a PDF. */
+.dql-export { position: relative; display: inline-flex; }
+.dql-export-button { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--dql-app-line-2); border-radius: 999px; background: var(--dql-app-surface); color: var(--dql-app-ink); font: 500 12px var(--font-ui); cursor: pointer; }
+.dql-export-button:hover:not(:disabled), .dql-export-button[aria-expanded="true"] { background: var(--dql-app-control); }
+.dql-export-button:disabled { color: var(--dql-app-muted); cursor: not-allowed; }
+.dql-export-button:focus-visible, .dql-export-menu button:focus-visible { outline: 2px solid var(--dql-app-accent); outline-offset: 2px; }
+.dql-export-menu { position: absolute; top: 32px; right: 0; z-index: 40; width: 248px; padding: 6px; display: grid; gap: 2px; border: 1px solid var(--dql-app-line-2); border-radius: 8px; background: var(--dql-app-surface); box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16); }
+.dql-export-menu button { display: flex; align-items: flex-start; gap: 10px; padding: 8px 9px; border: 0; border-radius: 8px; background: transparent; color: var(--dql-app-ink); font: 13px var(--font-ui); text-align: left; cursor: pointer; }
+.dql-export-menu button svg { margin-top: 2px; color: var(--dql-app-muted); flex: none; }
+.dql-export-menu button:hover { background: var(--dql-app-control); }
+.dql-export-menu strong { display: block; font-weight: 500; }
+.dql-export-menu small { display: block; color: var(--dql-app-muted); font-size: 12px; }
+.dql-export-status { position: absolute; top: 32px; right: 0; z-index: 30; width: max-content; max-width: min(460px, 80vw); padding: 8px 10px; border: 1px solid var(--dql-app-line-2); border-radius: 8px; background: var(--dql-app-surface); box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12); color: var(--dql-app-ink); font: 400 12px/1.45 var(--font-ui); }
+.dql-export-status.error { color: var(--status-error, #c14545); }
 .dql-tile-description { margin: 4px 0 0; color: var(--dql-app-muted); font: 400 12px/1.4 var(--font-ui); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; }
 .dql-tile-menu-anchor { position: absolute; top: 8px; right: 8px; z-index: 6; transition: opacity 120ms ease; }
 .dql-tile-menu-anchor:focus-within { opacity: 1 !important; }

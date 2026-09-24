@@ -11,6 +11,8 @@ export interface CLIFlags {
   dryRun?: boolean;
   /** Explicitly apply a migration plan that otherwise defaults to preview-only. */
   apply?: boolean;
+  /** `dql app verify --trust-key <file>`: a public key PEM the snapshot must be signed by. */
+  trustKey?: string;
   /** `dql propose --plan` — print the deterministic plan; write nothing. */
   plan?: boolean;
   port: number | null;
@@ -273,6 +275,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.confirmReviewedIdentifiers = true;
     } else if (arg === '--out' && i + 1 < argv.length) {
       flags.outDir = argv[++i];
+    } else if (arg === '--trust-key' && i + 1 < argv.length) {
+      flags.trustKey = argv[++i];
     } else if (arg === '--reasoning-effort' && i + 1 < argv.length) {
       flags.reasoningEffort = argv[++i];
     } else if ((arg === '--analysis-depth' || arg === '--depth') && i + 1 < argv.length) {

@@ -35,6 +35,8 @@ import { readerTileFreshness, readerTileReceipt, readerTileTrust, readerTrustCou
 import { plainDescription, ReaderTrustBadge, TrustLensBar } from './ReaderTrust';
 import { DriverPanel, DriverView } from './DriverView';
 import { StoryView, storyEditionSummary } from './StoryView';
+import { SnapshotExportMenu, type SnapshotFormat } from './SnapshotExportMenu';
+import { buildSnapshotBody, downloadFile, printSnapshot, snapshotToPng } from './snapshot-export';
 import { CanvasPageFrame } from './CanvasPageFrame';
 import { buildStoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { driverProbeFor } from './driver-probe';
@@ -380,6 +382,41 @@ export function DashboardRenderer({
     void api.getStoryEditions(appId, dashboard.id).then((editions) => { if (!cancelled) setStoryEditions(editions); });
     return () => { cancelled = true; };
   }, [appId, dashboard.id, run?.runId, storyNarrative]);
+  // Export (RFC 0008 step 10): one signed snapshot of the current complete
+  // run; the image and PDF are drawn from the same signed document.
+  const snapshotBlockedReason = loading ? 'Wait for the page to finish loading.'
+    : !run ? 'Run the page first.'
+      : run.partial || run.incomplete ? 'Reset your selection so the whole page shows, then export.'
+        : null;
+  const exportSnapshot = async (format: SnapshotFormat): Promise<string> => {
+    if (!run || snapshotBlockedReason) throw new Error(snapshotBlockedReason ?? 'Run the page first.');
+    const shownItems = storyNarrative || canvasPage
+      ? dashboard.layout.items
+      : prepareStakeholderItems(dashboard.layout.items.filter((item) => !isStakeholderHiddenReviewTile(item)), tileResults, dashboard.layout.cols);
+    const { body, tileIds } = buildSnapshotBody({
+      items: shownItems,
+      tiles: run.tiles,
+      catalog: buildStoryBindingCatalog(run.tiles as StoryBindingTileInput[], Object.fromEntries(dashboard.layout.items.map((item) => [item.i, item.title]))),
+      cols: dashboard.layout.cols,
+      rowHeight: dashboard.layout.rowHeight,
+      narrative: storyNarrative,
+      canvas: canvasPage,
+    });
+    const signed = await api.exportAppSnapshot(appId, dashboard.id, { runId: run.runId, body, tileIds });
+    if (!signed.ok || !signed.html) throw new Error(signed.error ?? 'The snapshot could not be signed.');
+    const proof = `signed by project key ${signed.keyId}, ${signed.figures} ${signed.figures === 1 ? 'figure' : 'figures'} recorded`;
+    if (format === 'html') {
+      downloadFile(signed.fileName, signed.html);
+      return `Saved ${signed.fileName}: ${proof}. Check it with dql app verify.`;
+    }
+    if (format === 'png') {
+      const fileName = signed.fileName.replace(/\.signed\.html$/, '.png');
+      downloadFile(fileName, await snapshotToPng(signed.html));
+      return `Saved ${fileName} from a snapshot ${proof}.`;
+    }
+    await printSnapshot(signed.html);
+    return `Opened the print dialog for a snapshot ${proof}. Choose “Save as PDF” to keep a PDF.`;
+  };
   /** One tile on the grid; the story page embeds tiles through the same path. */
   const renderGridTile = (item: DashboardLayoutItem) => (
         <DashboardTile
@@ -1091,7 +1128,14 @@ export function DashboardRenderer({
             : 'Updated the tiles linked to your selection. The page summary returns when you reset the selection.'}
         </div>
       ) : null}
-      {!editable ? <TrustLensBar counts={trustCounts} on={trustLens} onToggle={() => setTrustLens((current) => !current)} /> : null}
+      {!editable ? (
+        <TrustLensBar
+          counts={trustCounts}
+          on={trustLens}
+          onToggle={() => setTrustLens((current) => !current)}
+          actions={<SnapshotExportMenu disabledReason={snapshotBlockedReason} onExport={exportSnapshot} />}
+        />
+      ) : null}
       {driverPanel ? (
         <DriverPanel
           title={driverPanel.state.status === 'ready' ? driverPanel.state.analysis.measure.label.toLowerCase() : driverPanel.definition.measure.replace(/_/g, ' ')}

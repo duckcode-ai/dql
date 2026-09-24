@@ -2801,6 +2801,16 @@ export interface CanvasDraftResponseV1 extends Omit<StoryDraftResponseV1, 'narra
   canvas: DashboardCanvasV1;
 }
 
+export interface AppSnapshotExportV1 {
+  ok: boolean;
+  html: string;
+  fileName: string;
+  keyId: string;
+  contentSha256: string;
+  figures: number;
+  error?: string;
+}
+
 export interface StoryEditionV1 {
   runId: string;
   createdAt: string;
@@ -8435,6 +8445,19 @@ export const api = {
     }
   },
 
+
+  /**
+   * A signed, self-contained HTML snapshot of a page run (RFC 0008 step 10).
+   * The server records the figures, filters and trust from its own run and
+   * signs them with the project key; the browser supplies only the drawing.
+   */
+  async exportAppSnapshot(appId: string, dashboardId: string, input: { runId: string; body: string; tileIds: string[] }): Promise<AppSnapshotExportV1> {
+    return request<AppSnapshotExportV1>(`/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/snapshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  },
 
   /** Story editions of a published page, newest first. */
   async getStoryEditions(appId: string, dashboardId: string): Promise<StoryEditionV1[]> {

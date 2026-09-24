@@ -145,9 +145,13 @@ import {
   type DatasetDescriptor,
   type StoryBindingCatalog,
   type StoryBindingTileInput,
+  type ReaderTrustItem,
+  type ReaderTrustState,
+  type ReaderTrustTile,
   type TileQuery,
   type TileFilterOperator,
   buildStoryBindingCatalog,
+  readerTileTrust,
   tileQueryHash,
   tileQueryOutputAliases,
   normalizeTileQuery,
@@ -544,6 +548,7 @@ import {
   type SemanticTileConversionPreviewResponse,
 } from './apps-api.js';
 import { listStoryEditions, recordStoryEdition } from './story/story-editions.js';
+import { loadOrCreateSnapshotKey, readSnapshotPublicKey, signSnapshot, snapshotBodyIssues, snapshotFigures, snapshotFileName } from './snapshot/app-snapshot.js';
 import { dashboardDriverProbeItem, expandDashboardDriverItems, foldDashboardDriverTiles, withDriverFilterScopes } from './datasets/dashboard-drivers.js';
 import { compileDatasetTileQuery, type CompiledDatasetTileQuery } from './datasets/tile-query-compiler.js';
 import { summarizeDatasetChartFacts } from './datasets/dataset-chart-fact-summary.js';
@@ -4937,6 +4942,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const dashboardRunEvidence = new Map<string, {
     /** Values a story may bind to, from this run (RFC 0008 step 8). */
     storyBindings?: StoryBindingCatalog;
+    /** Page filters as applied to this run, for snapshots (RFC 0008 step 10). */
+    pageFilters?: Array<{ id: string; label: string; value: string }>;
+    /** The reader trust state of each tile in this run (step 10). */
+    tileTrust?: Record<string, ReaderTrustState | null>;
     appId: string;
     dashboardId: string;
     snapshotId: string;
@@ -17573,6 +17582,72 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // The project's snapshot signing key, public half only (RFC 0008 step 10).
+    if (req.method === 'GET' && path === '/api/apps/snapshot-key') {
+      const key = readSnapshotPublicKey(projectRoot);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(key ? { keyId: key.id, publicKeyPem: key.publicKeyPem } : { keyId: null, publicKeyPem: null }));
+      return;
+    }
+
+    // A signed, self-contained HTML snapshot of a page as the reader saw it.
+    // The browser sends only the run id, its rendering and the tiles it
+    // showed; figures, filters, trust and fingerprints come from the run the
+    // server recorded, and the server signs them with the project key.
+    const snapshotRoute = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/snapshot$/);
+    if (req.method === 'POST' && snapshotRoute) {
+      try {
+        const appId = decodeURIComponent(snapshotRoute[1]);
+        const dashboardId = decodeURIComponent(snapshotRoute[2]);
+        const body = await readJSON(req).catch(() => ({}));
+        const runId = typeof body.runId === 'string' ? body.runId : '';
+        const pageBody = typeof body.body === 'string' ? body.body : '';
+        const evidence = dashboardRunEvidence.get(runId);
+        if (!evidence || evidence.expiresAt < Date.now() || evidence.appId !== appId || evidence.dashboardId !== dashboardId) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'This run is no longer current. Refresh the page, then export again.' }));
+          return;
+        }
+        const issues = pageBody.trim() ? snapshotBodyIssues(pageBody) : ['The page is empty.'];
+        if (issues.length) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: issues.join(' ') }));
+          return;
+        }
+        const manifest = projectSnapshot().manifest;
+        const shownTileIds = Array.isArray(body.tileIds) ? body.tileIds.filter((id: unknown): id is string => typeof id === 'string') : Object.keys(evidence.tileTrust ?? {});
+        const trusts = shownTileIds.flatMap((id: string) => {
+          const state = evidence.tileTrust?.[id];
+          return state ? [state] : [];
+        });
+        const key = loadOrCreateSnapshotKey(projectRoot);
+        const signed = signSnapshot({
+          appId,
+          appTitle: manifest.apps?.[appId]?.name ?? appId,
+          pageId: dashboardId,
+          pageTitle: manifest.dashboards?.[`${appId}/${dashboardId}`]?.title ?? dashboardId,
+          run: { id: runId, snapshotId: evidence.snapshotId, filterFingerprint: evidence.filterFingerprint, resultFingerprint: evidence.resultFingerprint },
+          filters: evidence.pageFilters ?? [],
+          figures: snapshotFigures(evidence.storyBindings),
+          trust: { certified: trusts.filter((state: string) => state === 'certified').length, total: trusts.length },
+          body: pageBody,
+        }, key);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          html: signed.html,
+          fileName: snapshotFileName(appId, dashboardId, signed.manifest.createdAt),
+          keyId: key.id,
+          contentSha256: signed.manifest.contentSha256,
+          figures: signed.manifest.figures.length,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     // Story editions of a published page, newest first (RFC 0008 step 8).
     const storyEditionsRoute = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/story-editions$/);
     if (req.method === 'GET' && storyEditionsRoute) {
@@ -20501,6 +20576,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             tilesWithFilters as StoryBindingTileInput[],
             Object.fromEntries(loaded.dashboard.layout.items.map((item) => [item.i, item.title])),
           ),
+          pageFilters: (loaded.dashboard.filters ?? []).flatMap((filter) => {
+            const value = dashboardVariables[filter.id];
+            if (value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0)) return [];
+            const text = Array.isArray(value) ? value.map(String).join(', ') : typeof value === 'object' ? JSON.stringify(value) : String(value);
+            return [{ id: filter.id, label: filter.label ?? filter.id, value: text.slice(0, 200) }];
+          }),
+          tileTrust: Object.fromEntries(loaded.dashboard.layout.items.map((item) => {
+            const tile = tilesWithFilters.find((candidate) => candidate.tileId === item.i);
+            return [item.i, readerTileTrust(item as ReaderTrustItem, tile as ReaderTrustTile | undefined)?.state ?? null];
+          })),
           expiresAt: Date.now() + 15 * 60_000,
         };
         if (!staleRun && !partialRun) dashboardRunEvidence.set(runId, runEvidence);
