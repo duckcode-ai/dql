@@ -927,6 +927,23 @@ export const APP_STUDIO_V2_STYLES = `
 .studio-page-heading > .studio-presentation, .studio-presentation { display:inline-flex; flex:none; gap:2px; align-self:center; margin-left:auto; margin-right:8px; padding:2px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); }
 .studio-presentation button { height:28px; padding:0 10px; border:0; border-radius:4px; background:transparent; color:var(--text-secondary); font-size:13px; font-weight:500; }
 .studio-presentation button.on { background:var(--accent-dim); color:var(--accent); font-weight:600; }
+.page-format { position:relative; flex:none; align-self:center; margin-left:auto; margin-right:8px; }
+.page-format-button { display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 10px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); color:var(--text-secondary); font-size:13px; cursor:pointer; }
+.page-format-button strong { color:var(--text-primary); font-weight:600; }
+.page-format-button:hover { border-color:var(--border-strong); }
+.page-format-button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.page-format-menu { position:absolute; top:calc(100% + 6px); right:0; z-index:30; width:320px; display:grid; gap:2px; padding:6px; border:1px solid var(--border-default); border-radius:12px; background:var(--bg-2); box-shadow:0 12px 32px rgba(0,0,0,.14); }
+.page-format-menu button { display:grid; grid-template-columns:20px minmax(0,1fr) 16px; align-items:start; gap:10px; padding:8px; border:0; border-radius:8px; background:transparent; color:var(--text-secondary); text-align:left; cursor:pointer; }
+.page-format-menu button svg { margin-top:2px; }
+.page-format-menu button:hover, .page-format-menu button:focus-visible { background:var(--bg-1); outline:none; }
+.page-format-menu button.on { background:var(--accent-dim); color:var(--accent); }
+.page-format-menu button span { display:grid; gap:2px; }
+.page-format-menu button strong { color:var(--text-primary); font-size:13px; font-weight:600; }
+.page-format-menu button small { color:var(--text-secondary); font-size:12px; line-height:1.4; }
+/* The page heading styles its own spans and divs as a title; the format control is not one. */
+.studio-page-heading > .page-format { display:block; }
+.studio-page-heading .page-format span { font-size:inherit; font-weight:inherit; letter-spacing:normal; }
+.page-format-menu p { margin:4px 8px 2px; padding-top:8px; border-top:1px solid var(--border-subtle); color:var(--text-secondary); font-size:12px; line-height:1.4; }
 .studio-story { max-width:820px; margin:0 auto; display:grid; gap:14px; }
 .studio-story .proposal-banner { flex-wrap:wrap; }
 .proposal-banner-actions { display:inline-flex; gap:6px; margin-left:auto; }

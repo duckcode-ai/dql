@@ -49,6 +49,7 @@ import { DriverView } from './DriverView';
 import { StoryView } from './StoryView';
 import { StoryEditor } from './builder/StoryEditor';
 import { CanvasEditor } from './builder/CanvasEditor';
+import { PageFormatPicker } from './builder/PageFormatPicker';
 import { CanvasPageFrame } from './CanvasPageFrame';
 import { buildStoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { DriverTileSettings } from './builder/DriverTileSettings';
@@ -2651,7 +2652,7 @@ export function AppStudioV2({
   const storyCatalog = previewRun ? buildStoryBindingCatalog(previewRun.tiles as StoryBindingTileInput[], Object.fromEntries((activePage?.layout.items ?? []).map((item) => [item.i, item.title]))) : {};
   const storyPageTiles = (activePage?.layout.items ?? []).filter((item) => !item.text).map((item) => ({ tileId: item.i, title: item.title || humanize(item.i) }));
   const storyDraftBlocked = !previewRun
-    ? 'Run the page first: the story is drafted from its latest complete results.'
+    ? 'Run the page first: the report is drafted from its latest complete results.'
     : previewRun.partial || previewRun.incomplete
       ? 'Run the whole page first: the last run covered only some tiles.'
       : null;
@@ -2660,7 +2661,7 @@ export function AppStudioV2({
     const current = activePage.narrative;
     if ((current?.presentation ?? 'dashboard') === presentation) return;
     const next = await mutate([{ type: 'set_narrative', pageId: activePage.id, narrative: { ...(current ?? { version: 1, blocks: [] }), version: 1, presentation } }]);
-    if (next) setSavedMessage(presentation === 'story' ? 'Page shows as a story' : presentation === 'canvas' ? 'Page shows as a governed HTML page' : 'Page shows as a dashboard');
+    if (next) setSavedMessage(`Readers now see this page as ${presentation === 'dashboard' ? 'a dashboard' : presentation === 'story' ? 'a report' : 'a custom layout'}`);
   };
   const draftStory = async (instruction: string) => {
     if (!draft || !activePage || !previewRun || storyDraftBlocked) return;
@@ -2668,7 +2669,7 @@ export function AppStudioV2({
     setError(null);
     try {
       const result = await api.draftAppBuildStory(draft.id, activePage.id, previewRun.runId, instruction || undefined);
-      if (!result.ok) throw new Error(result.error ?? 'The story could not be drafted.');
+      if (!result.ok) throw new Error(result.error ?? 'The report could not be drafted.');
       setStoryProposal({ pageId: activePage.id, result });
     } catch (cause) {
       setError(messageOf(cause));
@@ -2707,7 +2708,7 @@ export function AppStudioV2({
           {' '}Nothing is saved until you apply.
         </span>
         <span className="proposal-banner-actions">
-          <button type="button" className="primary" disabled={busy} onClick={() => { void mutate([{ type: 'set_canvas', pageId: activePage.id, canvas: canvasProposalForPage.canvas }]).then((next) => { if (next) { setCanvasProposal(null); setSavedMessage('Page applied'); } }); }}>Apply</button>
+          <button type="button" className="primary" disabled={busy} onClick={() => { void mutate([{ type: 'set_canvas', pageId: activePage.id, canvas: canvasProposalForPage.canvas }]).then((next) => { if (next) { setCanvasProposal(null); setSavedMessage('Layout applied'); } }); }}>Apply</button>
           <button type="button" onClick={() => setCanvasProposal(null)}>Discard</button>
         </span>
       </div> : null}
@@ -2724,7 +2725,7 @@ export function AppStudioV2({
           drafting={canvasDrafting}
           draftBlockedReason={storyDraftBlocked}
         />}
-    </div> : activePage.canvas ? renderCanvas(activePage.canvas) : <p className="studio-story-empty">This page has no governed HTML yet.</p>
+    </div> : activePage.canvas ? renderCanvas(activePage.canvas) : <p className="studio-story-empty">This custom layout is empty.</p>
   ) : null;
   const storyArea = activePage ? (
     editing ? <div className="studio-story">
@@ -2738,7 +2739,7 @@ export function AppStudioV2({
           {' '}Nothing is saved until you apply.
         </span>
         <span className="proposal-banner-actions">
-          <button type="button" className="primary" disabled={busy} onClick={() => { void mutate([{ type: 'set_narrative', pageId: activePage.id, narrative: { ...proposalForPage.narrative, presentation: 'story' } }]).then((next) => { if (next) { setStoryProposal(null); setSavedMessage('Story applied'); } }); }}>Apply</button>
+          <button type="button" className="primary" disabled={busy} onClick={() => { void mutate([{ type: 'set_narrative', pageId: activePage.id, narrative: { ...proposalForPage.narrative, presentation: 'story' } }]).then((next) => { if (next) { setStoryProposal(null); setSavedMessage('Report applied'); } }); }}>Apply</button>
           <button type="button" onClick={() => setStoryProposal(null)}>Discard</button>
         </span>
       </div> : null}
@@ -3001,7 +3002,7 @@ export function AppStudioV2({
           </div> : null}
           <div className="mode-toggle" role="group" aria-label="Studio mode">
             <button type="button" className={editing ? 'on' : ''} aria-pressed={editing} onClick={() => setStudioView('edit')}>Edit</button>
-            <button type="button" className={!editing ? 'on' : ''} aria-pressed={!editing} onClick={() => { setStudioView('view'); setSelectedTileId(null); setSettingsOpen(false); setTileMenuId(null); }}>View</button>
+            <button type="button" className={!editing ? 'on' : ''} aria-pressed={!editing} onClick={() => { setStudioView('view'); setSelectedTileId(null); setSettingsOpen(false); setTileMenuId(null); }} title="See the page exactly as readers will">Preview</button>
           </div>
           <button type="button" className="preview" onClick={() => void runPreview()} disabled={previewing || busy} aria-label={previewing ? 'Running preview' : 'Run preview'} title="Run every tile on this page again"><Play size={13} /><span>{previewing ? 'Running…' : 'Run'}</span></button>
           <button type="button" className={`copilot ${copilotOpen ? 'on' : ''}`} onClick={() => { if (!copilotOpen) setAiScope(selectedDatasetTile ? 'tile' : 'page'); setCopilotOpen((open) => !open); }} aria-pressed={copilotOpen} aria-label="Ask AI"><Sparkles size={14} /><span>Ask AI</span></button>
@@ -3040,11 +3041,7 @@ export function AppStudioV2({
           <section ref={canvasRef} className="studio-canvas" aria-label="App canvas" onClick={(event) => { if (event.target === event.currentTarget) { setSelectedTileId(null); setTileMenuId(null); } }}>
             <header className="studio-page-heading">
               <div><h1>{projectedPage?.title ?? activePage?.metadata.title ?? 'Overview'}</h1>{!projectedPage?.isNew && activePage?.metadata.description ? <p>{activePage.metadata.description}</p> : null}</div>
-              {editing && !projectedPages && activePage ? <div className="studio-presentation" role="group" aria-label="Show this page as">
-                <button type="button" aria-pressed={!storyMode && !canvasMode} className={!storyMode && !canvasMode ? 'on' : ''} disabled={busy} onClick={() => void setPresentation('dashboard')}>Dashboard</button>
-                <button type="button" aria-pressed={storyMode} className={storyMode ? 'on' : ''} disabled={busy} onClick={() => void setPresentation('story')}>Story</button>
-                <button type="button" aria-pressed={canvasMode} className={canvasMode ? 'on' : ''} disabled={busy} onClick={() => void setPresentation('canvas')} title="A governed HTML page: your layout, DQL's data">Page</button>
-              </div> : null}
+              {editing && !projectedPages && activePage ? <PageFormatPicker value={canvasMode ? 'canvas' : storyMode ? 'story' : 'dashboard'} disabled={busy} onChange={(format) => void setPresentation(format)} /> : null}
               {editing && !projectedPages && !storyMode && !canvasMode ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
             </header>
             {editing && (!fieldsAvailable || dataView === 'sources') && selectedSource && selectedSourceKind ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" disabled={busy || previewing} onClick={() => selectedSource.capabilities?.dataset ? (setPanel('sources'), setPanelOpen(true)) : void addComponent(selectedSourceKind, selectedSource)}>{selectedSource.capabilities?.dataset ? <><Settings2 size={14} /> Choose fields</> : <><Plus size={14} /> {selectedSourceAction}</>}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
@@ -3741,7 +3738,7 @@ function SourcesPanel({
     })}</div>
     {hasMore ? <button type="button" className="source-load-more" onClick={onLoadMore} disabled={loading || disabled}>{loading ? 'Loading…' : 'Load 50 more sources'}</button> : null}
     <div className="panel-section-label"><span>Page elements</span><small>No data required</small></div>
-    <div className="content-quick-add"><button type="button" disabled={disabled} onClick={() => onAddContent('heading')}><Heading size={15} /><span><strong>Heading</strong><small>Organize the story</small></span><Plus size={13} /></button><button type="button" disabled={disabled} onClick={() => onAddContent('text')}><Type size={15} /><span><strong>Text</strong><small>Add context or guidance</small></span><Plus size={13} /></button></div>
+    <div className="content-quick-add"><button type="button" disabled={disabled} onClick={() => onAddContent('heading')}><Heading size={15} /><span><strong>Heading</strong><small>Organize the page</small></span><Plus size={13} /></button><button type="button" disabled={disabled} onClick={() => onAddContent('text')}><Type size={15} /><span><strong>Text</strong><small>Add context or guidance</small></span><Plus size={13} /></button></div>
   </>;
 }
 

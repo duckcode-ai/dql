@@ -65,23 +65,23 @@ export function StoryEditor({
 
   return (
     <div className="studio-story-editor">
-      <section className="studio-story-draft" aria-label="Draft the story with AI">
+      <section className="studio-story-draft" aria-label="Draft the report with AI">
         <input
           id="story-draft-instruction"
-          aria-label="What should the story focus on?"
-          placeholder="Optional: what should the story focus on?"
+          aria-label="What should the report focus on?"
+          placeholder="Optional: what should the report focus on?"
           value={instruction}
           disabled={disabled || drafting}
           onChange={(event) => setInstruction(event.target.value)}
         />
         <button type="button" className="primary" disabled={disabled || drafting || Boolean(draftBlockedReason)} onClick={() => onDraft(instruction.trim())}>
-          {drafting ? 'Drafting…' : blocks.length ? 'Redraft with AI' : 'Draft with AI'}
+          {drafting ? 'Drafting…' : blocks.length ? 'Redraft report with AI' : 'Draft report with AI'}
         </button>
         <small className="field-help">
           {draftBlockedReason ?? `${providerLabel ? `${providerLabel} writes` : 'AI writes'} around the page's values; every figure stays bound to the data, and the draft is checked before you see it.`}
         </small>
       </section>
-      {blocks.length === 0 ? <p className="studio-story-empty">No story yet. Draft it with AI, or add a paragraph and the tiles it should show.</p> : null}
+      {blocks.length === 0 ? <p className="studio-story-empty">No report yet. Draft it with AI, or add a paragraph and the tiles it should show.</p> : null}
       {blocks.map((block, index) => (
         <section key={block.id} className={`studio-story-block ${block.kind}`}>
           <header>
@@ -100,12 +100,12 @@ export function StoryEditor({
       <div className="studio-story-add">
         <button type="button" disabled={disabled} onClick={() => setBlocks([...blocks, { id: nextId(), kind: 'text', markdown: '' }])}>Add paragraph</button>
         <select
-          aria-label="Add a tile to the story"
+          aria-label="Add a tile to the report"
           disabled={disabled || available.length === 0}
           value=""
           onChange={(event) => { if (event.target.value) commit([...blocks, { id: nextId(), kind: 'tile', tileId: event.target.value }]); }}
         >
-          <option value="">{available.length ? 'Add a tile…' : 'Every tile is in the story'}</option>
+          <option value="">{available.length ? 'Add a tile…' : 'Every tile is in the report'}</option>
           {available.map((tile) => <option key={tile.tileId} value={tile.tileId}>{tile.title}</option>)}
         </select>
       </div>

@@ -58,28 +58,28 @@ export function CanvasEditor({
   };
   return (
     <div className="studio-canvas-editor">
-      <section className="studio-story-draft" aria-label="Design the page with AI">
+      <section className="studio-story-draft" aria-label="Design the layout with AI">
         <input
-          aria-label="What should the page show?"
+          aria-label="What should the layout show?"
           placeholder="Optional: what should the page show, and for whom?"
           value={instruction}
           disabled={disabled || drafting}
           onChange={(event) => setInstruction(event.target.value)}
         />
         <button type="button" className="primary" disabled={disabled || drafting || Boolean(draftBlockedReason)} onClick={() => onDraft(instruction.trim())}>
-          {drafting ? 'Designing…' : canvas ? 'Redesign with AI' : 'Design with AI'}
+          {drafting ? 'Designing…' : canvas ? 'Redesign layout with AI' : 'Design layout with AI'}
         </button>
         <small className="field-help">{draftBlockedReason ?? 'The model designs layout and wording only: data comes in through bound values and DQL-drawn tiles, and every draft is checked (no scripts, no network, no typed-in figures). A local model can take a few minutes.'}</small>
       </section>
-      <div className="studio-canvas-tabs" role="tablist" aria-label="Page view">
+      <div className="studio-canvas-tabs" role="tablist" aria-label="Layout view">
         <button type="button" role="tab" aria-selected={tab === 'design'} className={tab === 'design' ? 'on' : ''} onClick={() => setTab('design')}>Design</button>
-        <button type="button" role="tab" aria-selected={tab === 'code'} className={tab === 'code' ? 'on' : ''} onClick={() => setTab('code')}>Code</button>
+        <button type="button" role="tab" aria-selected={tab === 'code'} className={tab === 'code' ? 'on' : ''} onClick={() => setTab('code')}>HTML (advanced)</button>
         {!canvas && !html ? <button type="button" className="studio-canvas-template" disabled={disabled} onClick={startFromTemplate}>Start from a template</button> : null}
       </div>
       {tab === 'design'
         ? (html.trim() && blocking.length === 0
           ? preview({ version: 1, html, ...(canvas?.generatedBy ? { generatedBy: canvas.generatedBy } : {}), ...(canvas?.model ? { model: canvas.model } : {}) })
-          : <p className="studio-story-empty">{html.trim() ? 'The markup has problems; open Code to fix them.' : 'No page yet. Design it with AI, or start from a template.'}</p>)
+          : <p className="studio-story-empty">{html.trim() ? 'The HTML has problems; open HTML (advanced) to fix them.' : 'No layout yet. Design it with AI, or start from a template.'}</p>)
         : <div className="studio-canvas-code">
           <textarea aria-label="Page markup" spellCheck={false} disabled={disabled} value={html} onChange={(event) => setHtml(event.target.value)} onBlur={save} />
           <p className="field-help">Show figures with <code>{'<dql-value bind="…"></dql-value>'}</code> and tiles with <code>{'<dql-tile tile="…"></dql-tile>'}</code>. Values on this page: {Object.keys(catalog).length}; tiles: {pageTiles.map((tile) => tile.tileId).join(', ') || 'none'}.</p>
