@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { compile } from '@duckcodeailabs/dql-compiler';
 import type { NotificationIR } from '@duckcodeailabs/dql-compiler';
 import type { QueryExecutor, ConnectionConfig } from '@duckcodeailabs/dql-connectors';
-import { buildManifest } from '@duckcodeailabs/dql-core';
+import { buildManifest, buildStoryBindingCatalog, loadDashboardDocument, type StoryBindingTileInput } from '@duckcodeailabs/dql-core';
 import { findProjectRoot, loadProjectConfig, prepareLocalExecution } from '../local-runtime.js';
 import { runtimeVariables } from '../governance-runtime.js';
 import { isDigestOutput, runDigestBuild } from '../digest.js';
@@ -11,7 +11,8 @@ import { evaluateAlerts } from './alerts.js';
 import { deriveBlockName } from './discovery.js';
 import { dispatchNotifications, type DeliveryTarget } from './notifiers/index.js';
 import { createRuntimePageRunner, summarizeAppPageRun, type AppPageRunner } from './app-page-run.js';
-import { writeRunRecord } from './runs.js';
+import { writeDigestHtml, writeRunRecord } from './runs.js';
+import { buildAppDigest, readDigestState, writeDigestState, type DigestLayoutItem } from './app-digest.js';
 import type { NotifierPayload, QueryRunResult, RunRecord } from './types.js';
 
 export interface RunOptions {
@@ -156,6 +157,8 @@ export async function runAppDashboard(
   const block = `app/${appId}/${dashboardId}${options.scheduleId ? `#${options.scheduleId}` : ''}`;
 
   let queries: QueryRunResult[] = [];
+  let monitors: RunRecord['monitors'];
+  let digestPath: string | undefined;
   let notifications: Awaited<ReturnType<typeof dispatchNotifications>> = [];
   let error: string | undefined;
   let ephemeral: { close: () => Promise<void> } | undefined;
@@ -181,9 +184,42 @@ export async function runAppDashboard(
     const tiles = await pageRunner(appId, dashboardId);
     const summary = summarizeAppPageRun(dashboard.title, tiles, previewRows);
     queries = summary.queries;
+    const schedule = (app.schedules ?? []).find((s) => s.id === options.scheduleId);
+
+    // The rendered digest and monitors read the page's bound figures, the
+    // same catalog stories and snapshots use (RFC 0008 step 10).
+    const pagePath = isAbsolute(dashboard.filePath) ? dashboard.filePath : join(projectRoot, dashboard.filePath);
+    const items = (loadDashboardDocument(pagePath).document?.layout.items ?? []) as unknown as DigestLayoutItem[];
+    const catalog = buildStoryBindingCatalog(
+      tiles.map((tile) => (tile.raw ?? { tileId: tile.tileId, status: tile.status })) as unknown as StoryBindingTileInput[],
+      Object.fromEntries(items.map((item) => [item.i, item.title])),
+    );
+    const stateKey = options.scheduleId ?? `manual-${dashboardId}`;
+    const previous = readDigestState(projectRoot, appId, stateKey);
+    const digest = buildAppDigest({
+      appTitle: app.name ?? appId,
+      pageTitle: dashboard.title,
+      items,
+      tiles,
+      catalog,
+      monitors: schedule?.monitors ?? [],
+      previous,
+      runAt: startedAt,
+    });
+    monitors = digest.evaluations.map((evaluation) => ({
+      id: evaluation.monitor.id,
+      binding: evaluation.monitor.binding,
+      status: evaluation.status,
+      message: evaluation.message,
+      ...(evaluation.current ? { current: evaluation.current } : {}),
+      ...(evaluation.previous ? { previous: evaluation.previous } : {}),
+    }));
+    // A run with no bound figures (every tile failed) must not wipe the
+    // baseline the next run compares against.
+    if (Object.keys(catalog).length > 0) writeDigestState(projectRoot, appId, stateKey, digest.nextState);
 
     const notificationTargets: DeliveryTarget[] = [];
-    for (const delivery of (app.schedules ?? []).find((s) => s.id === options.scheduleId)?.deliver ?? []) {
+    for (const delivery of schedule?.deliver ?? []) {
       if (delivery.kind === 'slack') {
         notificationTargets.push({ type: 'slack', recipients: [delivery.channel] });
       } else if (delivery.kind === 'email') {
@@ -193,7 +229,13 @@ export async function runAppDashboard(
       }
     }
 
-    if (notificationTargets.length > 0) {
+    // A schedule with `digest: false` speaks only when a monitor fires.
+    const speak = schedule?.digest !== false || digest.firing.length > 0;
+    if (speak) {
+      // Kept beside the run records so a schedule with no targets still
+      // leaves a digest someone can open.
+      digestPath = writeDigestHtml(projectRoot, startedAt, block, digest.subject, digest.html);
+      // With no targets this still appends to the audit log.
       notifications = await dispatchNotifications(
         notificationTargets,
         {
@@ -203,8 +245,11 @@ export async function runAppDashboard(
           alerts: [],
           queries,
           trigger,
-          markdown: summary.markdown,
+          markdown: digest.markdown,
+          html: digest.html,
           digestTitle: dashboard.title,
+          monitors: digest.evaluations,
+          subject: digest.subject,
         },
         projectRoot,
       );
@@ -223,6 +268,8 @@ export async function runAppDashboard(
     trigger,
     queries,
     alerts: [],
+    ...(monitors?.length ? { monitors } : {}),
+    ...(digestPath ? { digestPath } : {}),
     notifications,
     error,
   };

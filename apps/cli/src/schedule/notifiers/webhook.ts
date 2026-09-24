@@ -48,7 +48,20 @@ function webhookBody(payload: NotifierPayload) {
     path: payload.path,
     trigger: payload.trigger,
     startedAt: payload.startedAt,
+    ...(payload.subject ? { subject: payload.subject } : {}),
     markdown: payload.markdown ?? '',
+    ...(payload.html ? { html: payload.html } : {}),
+    ...(payload.monitors ? {
+      monitors: payload.monitors.map((evaluation) => ({
+        id: evaluation.monitor.id,
+        binding: evaluation.monitor.binding,
+        status: evaluation.status,
+        firing: evaluation.status === 'breached',
+        message: evaluation.message,
+        ...(evaluation.current ? { current: evaluation.current } : {}),
+        ...(evaluation.previous ? { previous: evaluation.previous } : {}),
+      })),
+    } : {}),
     tiles: payload.queries.map((query) => ({
       tileId: query.chartId,
       rowCount: query.rowCount,

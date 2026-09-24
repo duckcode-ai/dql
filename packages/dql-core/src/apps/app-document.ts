@@ -10,6 +10,7 @@
  * decorator. Real SSO is layered separately in closed product.
  */
 
+import { readAppMonitors, type AppMonitor } from './monitors.js';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, basename, relative } from 'node:path';
 import { normalizeProductDomainContext, type ProductDomainContext } from './product-domain-context.js';
@@ -70,6 +71,13 @@ export type AppSchedule = {
   /** Optional human-readable description. */
   description?: string;
   enabled?: boolean;
+  /** Figures to watch each time the page runs (RFC 0008 step 10). */
+  monitors?: AppMonitor[];
+  /**
+   * Send the digest every run (default). With `false` the schedule only
+   * speaks when a monitor fires.
+   */
+  digest?: boolean;
 };
 
 export type AppHomepage =
@@ -604,6 +612,8 @@ function readSchedules(raw: unknown, err: (m: string) => void): AppSchedule[] {
       continue;
     }
     const deliver = readDelivery(so.deliver, `schedules[${so.id}]`, err);
+    const monitors = readAppMonitors(so.monitors, `schedules[${so.id}]`, err);
+    if (so.digest !== undefined && typeof so.digest !== 'boolean') err(`schedules[${so.id}].digest must be true or false`);
     out.push({
       id: so.id,
       cron: so.cron,
@@ -611,6 +621,8 @@ function readSchedules(raw: unknown, err: (m: string) => void): AppSchedule[] {
       deliver,
       description: typeof so.description === 'string' ? so.description : undefined,
       enabled: so.enabled === undefined ? true : Boolean(so.enabled),
+      ...(monitors.length ? { monitors } : {}),
+      ...(so.digest === false ? { digest: false } : {}),
     });
   }
   return out;

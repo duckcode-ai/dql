@@ -170,6 +170,7 @@ export type { AppAnalyticalContextV1 } from './app-analytical-context.js';
 
 export {
   buildStoryBindingCatalog,
+  figureLabel,
   validateStoryText,
   splitStoryText,
   storyBindingKeys,
@@ -184,3 +185,5 @@ export { checkCanvasHtml, fillCanvasHtml, escapeHtml, MAX_CANVAS_HTML } from './
 export type { CanvasIssue, CheckedCanvas } from './canvas-page.js';
 export { READER_TRUST_LABELS, isDataTileForTrust, readerTileTrust, readerTrustCounts, readerTrustSummary } from './reader-trust.js';
 export type { ReaderTrust, ReaderTrustItem, ReaderTrustState, ReaderTrustTile } from './reader-trust.js';
+export { evaluateMonitors, readAppMonitors, MAX_MONITORS_PER_SCHEDULE } from './monitors.js';
+export type { AppMonitor, AppMonitorCondition, MonitorEvaluation, MonitorPreviousValue, MonitorStatus } from './monitors.js';

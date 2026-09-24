@@ -14,6 +14,8 @@ export interface AppPageRunTile {
   durationMs?: number;
   sql?: string;
   error?: string;
+  /** The tile as the runtime returned it: bound figures, trust and driver results are read from it. */
+  raw?: Record<string, unknown>;
 }
 
 /** Runs one App page exactly as a reader sees it and returns every tile. */
@@ -65,6 +67,7 @@ function parseTile(raw: unknown): AppPageRunTile {
     durationMs: typeof result.executionTime === 'number' ? result.executionTime : undefined,
     sql: text(result.sql) ?? text(tile.sql),
     error: text(tile.error) ?? text(tile.message) ?? (tile.status && tile.status !== 'ok' ? `Tile status: ${tile.status}` : undefined),
+    raw: tile,
   };
 }
 

@@ -107,6 +107,9 @@ describe('scheduled App page runs (RFC 0008 step 3c)', () => {
       expect.objectContaining({ type: 'webhook', recipients: ['https://hooks.example.test/dql'], delivered: true }),
     ]));
     const sent = JSON.parse((webhook.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
-    expect(sent.markdown).toContain('- Revenue: **4,212,940** (certified)');
+    // The rendered digest (RFC 0008 step 10) says what ran and what did not.
+    expect(sent.markdown).toContain('2 of 3 tiles ran');
+    expect(sent.markdown).toContain('## Did not run\n- Margin rate: The warehouse timed out.');
+    expect(sent.html).toContain('Overview');
   });
 });

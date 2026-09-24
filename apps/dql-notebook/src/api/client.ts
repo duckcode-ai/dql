@@ -2801,6 +2801,40 @@ export interface CanvasDraftResponseV1 extends Omit<StoryDraftResponseV1, 'narra
   canvas: DashboardCanvasV1;
 }
 
+export type AppMonitorConditionV1 =
+  | { kind: 'threshold'; op: '<' | '<=' | '>' | '>='; value: number }
+  | { kind: 'change'; direction: 'up' | 'down' | 'either'; percent: number };
+
+export type AppScheduleDeliveryV1 = { kind: 'slack'; channel: string } | { kind: 'email'; to: string[] } | { kind: 'webhook'; url: string };
+
+export interface AppMonitorV1 {
+  id: string;
+  binding: string;
+  when: AppMonitorConditionV1;
+  label?: string;
+}
+
+/** A schedule that runs a page, with the alerts it checks (RFC 0008 step 10). */
+export interface PageMonitorScheduleV1 {
+  id: string;
+  cron: string;
+  digest: boolean;
+  enabled: boolean;
+  deliver: AppScheduleDeliveryV1[];
+  monitors: AppMonitorV1[];
+  lastRunAt?: string;
+  firingSince: Record<string, string>;
+}
+
+export interface PageMonitorsResponseV1 {
+  ok: boolean;
+  schedules: PageMonitorScheduleV1[];
+  /** Where the change was saved, relative to the project. */
+  path?: string;
+  createdSchedule?: boolean;
+  error?: string;
+}
+
 export interface AppSnapshotExportV1 {
   ok: boolean;
   html: string;
@@ -8457,6 +8491,23 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     });
+  },
+
+  /** The alerts on a page and the schedules that check them. */
+  async getPageMonitors(appId: string, dashboardId: string): Promise<PageMonitorsResponseV1> {
+    return request<PageMonitorsResponseV1>(`/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/monitors`);
+  },
+
+  /** Add an alert on one of the page's figures; it is saved in the App's dql.app.json. */
+  async addPageMonitor(appId: string, dashboardId: string, input: { runId: string; binding: string; when: AppMonitorConditionV1; label?: string; deliver?: AppScheduleDeliveryV1[] }): Promise<PageMonitorsResponseV1> {
+    return request<PageMonitorsResponseV1>(`/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/monitors`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async removePageMonitor(appId: string, dashboardId: string, scheduleId: string, monitorId: string): Promise<PageMonitorsResponseV1> {
+    return request<PageMonitorsResponseV1>(`/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/monitors/${encodeURIComponent(scheduleId)}/${encodeURIComponent(monitorId)}`, { method: 'DELETE' });
   },
 
   /** Story editions of a published page, newest first. */

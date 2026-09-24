@@ -548,6 +548,7 @@ import {
   type SemanticTileConversionPreviewResponse,
 } from './apps-api.js';
 import { listStoryEditions, recordStoryEdition } from './story/story-editions.js';
+import { addPageMonitor, listPageMonitors, MonitorStoreError, removePageMonitor } from './schedule/app-monitor-store.js';
 import { loadOrCreateSnapshotKey, readSnapshotPublicKey, signSnapshot, snapshotBodyIssues, snapshotFigures, snapshotFileName } from './snapshot/app-snapshot.js';
 import { dashboardDriverProbeItem, expandDashboardDriverItems, foldDashboardDriverTiles, withDriverFilterScopes } from './datasets/dashboard-drivers.js';
 import { compileDatasetTileQuery, type CompiledDatasetTileQuery } from './datasets/tile-query-compiler.js';
@@ -17644,6 +17645,71 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Alerts on a page's figures (RFC 0008 step 10). They are stored in the
+    // App's dql.app.json under the schedule that runs the page, so they are
+    // reviewed and shared through git with the rest of the App.
+    const monitorsRoute = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/monitors(?:\/([^/]+)\/([^/]+))?$/);
+    if (monitorsRoute) {
+      const appId = decodeURIComponent(monitorsRoute[1]);
+      const dashboardId = decodeURIComponent(monitorsRoute[2]);
+      const send = (status: number, payload: unknown) => {
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(payload));
+      };
+      try {
+        if (req.method === 'GET' && !monitorsRoute[3]) {
+          send(200, { ok: true, schedules: listPageMonitors(projectRoot, appId, dashboardId) });
+          return;
+        }
+        if (req.method === 'POST' && !monitorsRoute[3]) {
+          const body = await readJSON(req).catch(() => ({}));
+          const runId = typeof body.runId === 'string' ? body.runId : '';
+          const binding = typeof body.binding === 'string' ? body.binding.trim() : '';
+          const evidence = dashboardRunEvidence.get(runId);
+          // An alert can only watch a figure this page actually returns.
+          if (!evidence || evidence.appId !== appId || evidence.dashboardId !== dashboardId || !evidence.storyBindings) {
+            send(409, { ok: false, error: 'Run the whole page first, then add the alert.' });
+            return;
+          }
+          if (!evidence.storyBindings[binding]) {
+            send(400, { ok: false, error: `${binding || 'That figure'} is not a figure on this page.` });
+            return;
+          }
+          const deliver = Array.isArray(body.deliver) ? body.deliver.flatMap((entry: unknown) => {
+            const record = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
+            if (record.kind === 'webhook' && typeof record.url === 'string' && /^https?:\/\//i.test(record.url)) return [{ kind: 'webhook' as const, url: record.url }];
+            if (record.kind === 'slack' && typeof record.channel === 'string' && record.channel.trim()) return [{ kind: 'slack' as const, channel: record.channel.trim() }];
+            if (record.kind === 'email' && Array.isArray(record.to)) {
+              const to = record.to.filter((address): address is string => typeof address === 'string' && /.+@.+/.test(address));
+              return to.length ? [{ kind: 'email' as const, to }] : [];
+            }
+            return [];
+          }) : undefined;
+          const added = addPageMonitor(projectRoot, appId, {
+            dashboardId,
+            binding,
+            when: body.when,
+            ...(typeof body.label === 'string' && body.label.trim() ? { label: body.label.trim() } : {}),
+            ...(typeof body.scheduleId === 'string' && body.scheduleId ? { scheduleId: body.scheduleId } : {}),
+            ...(deliver ? { deliver } : {}),
+          });
+          projectSnapshots.invalidate();
+          send(200, { ok: true, ...added, path: relative(projectRoot, added.path), schedules: listPageMonitors(projectRoot, appId, dashboardId) });
+          return;
+        }
+        if (req.method === 'DELETE' && monitorsRoute[3] && monitorsRoute[4]) {
+          const removed = removePageMonitor(projectRoot, appId, decodeURIComponent(monitorsRoute[3]), decodeURIComponent(monitorsRoute[4]));
+          projectSnapshots.invalidate();
+          send(200, { ok: true, path: relative(projectRoot, removed.path), schedules: listPageMonitors(projectRoot, appId, dashboardId) });
+          return;
+        }
+        send(405, { ok: false, error: 'Method not allowed.' });
+      } catch (error) {
+        send(error instanceof MonitorStoreError ? error.status : 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
       }
       return;
     }

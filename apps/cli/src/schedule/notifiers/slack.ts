@@ -23,7 +23,7 @@ export function createSlackNotifier(): Notifier {
       const channels = recipients.length > 0 ? recipients : ['#default'];
       const text = hasDigest
         ? [
-            `*[DQL Digest] ${payload.digestTitle ?? payload.block}*`,
+            `*${payload.subject ?? `[DQL Digest] ${payload.digestTitle ?? payload.block}`}*`,
             `Generated: ${payload.startedAt} (${payload.trigger})`,
             '',
             truncateMarkdown(payload.markdown as string, 2500),

@@ -36,9 +36,10 @@ import { plainDescription, ReaderTrustBadge, TrustLensBar } from './ReaderTrust'
 import { DriverPanel, DriverView } from './DriverView';
 import { StoryView, storyEditionSummary } from './StoryView';
 import { SnapshotExportMenu, type SnapshotFormat } from './SnapshotExportMenu';
+import { PageAlertsMenu } from './PageAlertsMenu';
 import { buildSnapshotBody, downloadFile, printSnapshot, snapshotToPng } from './snapshot-export';
 import { CanvasPageFrame } from './CanvasPageFrame';
-import { buildStoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
+import { buildStoryBindingCatalog, type StoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { driverProbeFor } from './driver-probe';
 import {
   autoTileSizeForItem, autoTileSizeForViz, clamp, narrowTileMinHeight, normalizeSizePreset,
@@ -99,6 +100,8 @@ const APP_CHART_TYPE_OPTIONS: Array<{ value: ChartType; label: string }> = [
  * authored mismatch rather than passing a multi-field result to a KPI that
  * only shows one value.
  */
+const EMPTY_CATALOG: StoryBindingCatalog = {};
+
 export function datasetTileVisualizationDisplayError(item: DashboardLayoutItem): string | undefined {
   if (!item.query) return undefined;
   const visualization = datasetTileVisualizationCompatibility(item.query, item.viz.type);
@@ -371,10 +374,12 @@ export function DashboardRenderer({
   const storyNarrative = !editable && dashboard.narrative?.presentation === 'story' ? dashboard.narrative : null;
   // Governed HTML page (RFC 0008 step 9).
   const canvasPage = !editable && dashboard.narrative?.presentation === 'canvas' && dashboard.canvas ? dashboard.canvas : null;
-  const storyCatalog = useMemo(
-    () => ((storyNarrative || canvasPage) && run ? buildStoryBindingCatalog(run.tiles as StoryBindingTileInput[], Object.fromEntries(dashboard.layout.items.map((item) => [item.i, item.title]))) : {}),
-    [canvasPage, dashboard.layout.items, run, storyNarrative],
+  // Every figure this run returned: stories, HTML pages, alerts and exports read it.
+  const runCatalog = useMemo(
+    () => (!editable && run ? buildStoryBindingCatalog(run.tiles as StoryBindingTileInput[], Object.fromEntries(dashboard.layout.items.map((item) => [item.i, item.title]))) : {}),
+    [dashboard.layout.items, editable, run],
   );
+  const storyCatalog = storyNarrative || canvasPage ? runCatalog : EMPTY_CATALOG;
   const [storyEditions, setStoryEditions] = useState<StoryEditionV1[] | null>(null);
   useEffect(() => {
     if (!storyNarrative || !run || run.partial || run.incomplete) return;
@@ -396,7 +401,7 @@ export function DashboardRenderer({
     const { body, tileIds } = buildSnapshotBody({
       items: shownItems,
       tiles: run.tiles,
-      catalog: buildStoryBindingCatalog(run.tiles as StoryBindingTileInput[], Object.fromEntries(dashboard.layout.items.map((item) => [item.i, item.title]))),
+      catalog: runCatalog,
       cols: dashboard.layout.cols,
       rowHeight: dashboard.layout.rowHeight,
       narrative: storyNarrative,
@@ -1133,7 +1138,12 @@ export function DashboardRenderer({
           counts={trustCounts}
           on={trustLens}
           onToggle={() => setTrustLens((current) => !current)}
-          actions={<SnapshotExportMenu disabledReason={snapshotBlockedReason} onExport={exportSnapshot} />}
+          actions={(
+            <>
+              <PageAlertsMenu appId={appId} dashboardId={dashboard.id} runId={run && !run.partial && !run.incomplete ? run.runId : null} catalog={runCatalog} />
+              <SnapshotExportMenu disabledReason={snapshotBlockedReason} onExport={exportSnapshot} />
+            </>
+          )}
         />
       ) : null}
       {driverPanel ? (

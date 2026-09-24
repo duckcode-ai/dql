@@ -889,6 +889,17 @@ export interface ManifestApp extends ProductDomainContext {
     >;
     description?: string;
     enabled: boolean;
+    /** Figures watched on each run (RFC 0008 step 10). */
+    monitors?: Array<{
+      id: string;
+      binding: string;
+      when:
+        | { kind: 'threshold'; op: '<' | '<=' | '>' | '>='; value: number }
+        | { kind: 'change'; direction: 'up' | 'down' | 'either'; percent: number };
+      label?: string;
+    }>;
+    /** False when the schedule only speaks when a monitor fires. */
+    digest?: boolean;
   }>;
   /** Dashboard ids declared inside this App. */
   dashboards: string[];

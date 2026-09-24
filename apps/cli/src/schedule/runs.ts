@@ -43,3 +43,17 @@ export function listRunRecords(projectRoot: string, limit = 20): RunRecord[] {
   }
   return records;
 }
+
+/** A rendered digest as a standalone HTML file under `.dql/runs/digests`; returns its project-relative path. */
+export function writeDigestHtml(projectRoot: string, startedAt: string, block: string, title: string, body: string): string {
+  const dir = join(ensureRunsDir(projectRoot), 'digests');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const name = `${startedAt.replace(/[:.]/g, '-')}-${block.replace(/[^a-zA-Z0-9_-]+/g, '_')}.html`;
+  const escaped = title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  writeFileSync(
+    join(dir, name),
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${escaped}</title></head><body style="margin:0;background:#fbfaf7">${body}</body></html>\n`,
+    'utf-8',
+  );
+  return `${RUNS_DIR}/digests/${name}`;
+}

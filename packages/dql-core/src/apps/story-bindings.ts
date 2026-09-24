@@ -118,6 +118,18 @@ export function buildStoryBindingCatalog(tiles: StoryBindingTileInput[], titles:
   return catalog;
 }
 
+/**
+ * A figure's label for lists and alerts: "Revenue — revenue" reads as
+ * "Revenue"; anything more specific is kept.
+ */
+export function figureLabel(label: string): string {
+  const at = label.indexOf(' — ');
+  if (at < 0) return label;
+  const title = label.slice(0, at).trim();
+  const field = label.slice(at + 3).trim();
+  return title.toLowerCase() === field.toLowerCase() ? title : label;
+}
+
 export interface StoryTextIssue {
   code: 'NAKED_NUMBER' | 'UNKNOWN_BINDING' | 'EMPTY_BINDING' | 'TOO_LONG';
   message: string;

@@ -1,10 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
+import { buildManifest } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot, loadProjectConfig, normalizeProjectConnection } from '../local-runtime.js';
 import { discoverScheduledBlocks } from '../schedule/discovery.js';
-import { runBlock } from '../schedule/runner.js';
+import { runAppDashboard, runBlock } from '../schedule/runner.js';
+import { createRuntimePageRunner } from '../schedule/app-page-run.js';
 import { listRunRecords } from '../schedule/runs.js';
 import { startScheduleService } from '../schedule/service.js';
 
@@ -128,11 +130,15 @@ async function runScheduleList(flags: CLIFlags): Promise<void> {
 
 async function runScheduleRun(rest: string[], flags: CLIFlags): Promise<void> {
   const target = rest[0];
-  if (!target) throw new Error('Usage: dql schedule run <path-to-block.dql>');
+  if (!target) throw new Error('Usage: dql schedule run <path-to-block.dql> | dql schedule run <appId> [scheduleId]');
 
   const projectRoot = findProjectRoot(process.cwd());
   const absPath = isAbsolute(target) ? target : resolve(process.cwd(), target);
-  if (!existsSync(absPath)) throw new Error(`File not found: ${target}`);
+  if (!existsSync(absPath)) {
+    const app = buildManifest({ projectRoot }).apps?.[target];
+    if (app) return runAppScheduleOnce(projectRoot, app, rest[1], flags);
+    throw new Error(`File not found: ${target} (and no App has that id)`);
+  }
 
   const projectConfig = loadProjectConfig(projectRoot);
   const connection = normalizeProjectConnection(
@@ -241,4 +247,59 @@ async function runScheduleStart(flags: CLIFlags): Promise<void> {
 
   // Hold the event loop open.
   await new Promise<void>(() => {});
+}
+
+/**
+ * `dql schedule run <appId> [scheduleId]` — run one App schedule now, exactly
+ * as cron would: a full page run, monitors checked, and the digest delivered
+ * to the schedule's targets (RFC 0008 step 10).
+ */
+async function runAppScheduleOnce(
+  projectRoot: string,
+  app: NonNullable<ReturnType<typeof buildManifest>['apps']>[string],
+  scheduleId: string | undefined,
+  flags: CLIFlags,
+): Promise<void> {
+  const schedules = app.schedules ?? [];
+  const schedule = scheduleId ? schedules.find((entry) => entry.id === scheduleId) : schedules.length === 1 ? schedules[0] : undefined;
+  if (!schedule) {
+    const ids = schedules.map((entry) => entry.id).join(', ') || 'none';
+    throw new Error(scheduleId
+      ? `App ${app.id} has no schedule "${scheduleId}". Schedules: ${ids}.`
+      : `App ${app.id} has ${schedules.length} schedules (${ids}); name one: dql schedule run ${app.id} <scheduleId>`);
+  }
+  const projectConfig = loadProjectConfig(projectRoot);
+  const connection = normalizeProjectConnection(projectConfig.defaultConnection ?? { driver: 'duckdb' }, projectRoot);
+  // With --runtime-url the run goes through an App runtime that is already
+  // serving this project (for example `dql notebook`), which matters for
+  // DuckDB: only one process may open the database file.
+  const record = await runAppDashboard(app.id, schedule.dashboard, {
+    executor: new QueryExecutor(),
+    connection,
+    projectRoot,
+    trigger: 'manual',
+    scheduleId: schedule.id,
+    ...(flags.runtimeUrl ? { pageRunner: createRuntimePageRunner(flags.runtimeUrl) } : {}),
+  });
+  if (flags.format === 'json') {
+    console.log(JSON.stringify(record, null, 2));
+    return;
+  }
+  const failed = record.queries.filter((query) => query.error).length;
+  const firing = (record.monitors ?? []).filter((monitor) => monitor.status === 'breached');
+  if (failed && record.queries.some((query) => /could not set lock on file/i.test(query.error ?? ''))) {
+    console.log('  DuckDB is open in another DQL process (usually `dql notebook`). Stop it, or run through it:');
+    console.log(`    dql schedule run ${app.id} ${schedule.id} --runtime-url http://127.0.0.1:<notebook port>`);
+  }
+  console.log(`  ${record.block} → ${record.error ? `error: ${record.error}` : failed ? `${failed} tile(s) did not run` : 'ok'}`);
+  console.log(`  tiles: ${record.queries.length} (${record.queries.length - failed} ok)`);
+  if (record.monitors?.length) {
+    console.log(`  monitors: ${firing.length} firing of ${record.monitors.length}`);
+    for (const monitor of record.monitors) console.log(`    ${monitor.status === 'breached' ? 'FIRING' : monitor.status}: ${monitor.message}`);
+  }
+  if (record.digestPath) console.log(`  digest: ${record.digestPath}`);
+  else console.log('  digest: not sent (this schedule speaks only when an alert fires)');
+  for (const notification of record.notifications) {
+    console.log(`    ${notification.type} → ${notification.recipients.join(', ') || '(default)'} [${notification.delivered ? 'sent' : `failed: ${notification.error}`}]`);
+  }
 }

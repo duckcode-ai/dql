@@ -2479,6 +2479,8 @@ function appDocumentToManifest(
       }),
       description: s.description,
       enabled: s.enabled === undefined ? true : Boolean(s.enabled),
+      ...(s.monitors?.length ? { monitors: s.monitors.map((monitor) => ({ ...monitor, when: { ...monitor.when } })) } : {}),
+      ...(s.digest === false ? { digest: false } : {}),
     })),
     dashboards: dashboardIds,
     notebooks: (app.notebooks ?? []).map((n) => ({

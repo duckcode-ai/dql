@@ -37,6 +37,9 @@ function formatLine(payload: NotifierPayload): string {
       breached: a.breached,
       message: a.alert.message,
     })),
+    ...(payload.monitors?.length
+      ? { monitors: payload.monitors.map((evaluation) => ({ id: evaluation.monitor.id, status: evaluation.status, message: evaluation.message })) }
+      : {}),
     ...(payload.markdown !== undefined
       ? {
           digest: {

@@ -45,6 +45,7 @@ export function createEmailNotifier(): Notifier {
 }
 
 function buildSubject(payload: NotifierPayload): string {
+  if (payload.subject) return payload.subject;
   const breached = payload.alerts.filter((a) => a.breached).length;
   if (payload.markdown) {
     return `[DQL Digest] ${payload.digestTitle ?? payload.block}`;

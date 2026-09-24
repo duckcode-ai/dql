@@ -1,4 +1,5 @@
 import type { ScheduleIR, NotificationIR, AlertIR, DigestDiagnostic } from '@duckcodeailabs/dql-compiler';
+import type { MonitorEvaluation } from '@duckcodeailabs/dql-core';
 
 export interface ScheduledBlock {
   /** Absolute path to the .dql file. */
@@ -42,6 +43,10 @@ export interface RunRecord {
   trigger: 'manual' | 'cron';
   queries: QueryRunResult[];
   alerts: AlertEvaluation[];
+  /** App page monitors checked on this run (RFC 0008 step 10). */
+  monitors?: Array<{ id: string; binding: string; status: MonitorEvaluation['status']; message: string; current?: string; previous?: string }>;
+  /** The rendered digest this run wrote, relative to the project. */
+  digestPath?: string;
   notifications: Array<{ type: string; recipients: string[]; delivered: boolean; error?: string }>;
   error?: string;
 }
@@ -60,6 +65,10 @@ export interface NotifierPayload {
   /** Title/name shown in digest headers, defaults to `block` when absent. */
   digestTitle?: string;
   digestDiagnostics?: DigestDiagnostic[];
+  /** App page monitors checked on this run; `breached` ones are alerts. */
+  monitors?: MonitorEvaluation[];
+  /** A subject line written for this run, e.g. naming the alert that fired. */
+  subject?: string;
 }
 
 export interface Notifier {
