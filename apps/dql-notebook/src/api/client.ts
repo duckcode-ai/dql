@@ -2347,6 +2347,8 @@ export interface DashboardDocumentResponse {
       driverTileIds?: string[];
       vocabulary?: string[];
     };
+    /** Story layout (RFC 0008 step 8): prose with bound figures and embedded tiles. */
+    narrative?: DashboardNarrativeV1;
     /** v3 field-builder source registry retained with the Git-owned page. */
     datasets?: Array<{
       id: string;
@@ -2776,6 +2778,37 @@ export interface DashboardDatasetCrossFilter {
  * browser tab. Tile lists are advisory scheduling bounds; server-side source,
  * filter, and receipt validation remains authoritative.
  */
+/** Mirrors dql-core DashboardNarrative. */
+export interface DashboardNarrativeV1 {
+  version: 1;
+  presentation: 'story' | 'dashboard';
+  blocks: Array<{ id: string; kind: 'text'; markdown: string } | { id: string; kind: 'tile'; tileId: string }>;
+  generatedBy?: 'author' | 'ai' | 'deterministic';
+  model?: string;
+}
+
+export interface StoryEditionV1 {
+  runId: string;
+  createdAt: string;
+  resultFingerprint: string;
+  filterFingerprint: string;
+  values: Record<string, { display: string; value: number | string | null; label: string }>;
+}
+
+export interface StoryDraftResponseV1 {
+  ok: boolean;
+  error?: string;
+  narrative: DashboardNarrativeV1;
+  generatedBy: 'ai' | 'deterministic';
+  attempts: number;
+  issues: string[];
+  provider: string | null;
+  model: string | null;
+  /** True when a model on this machine saw current values. */
+  sawValues: boolean;
+  elapsedMs: number;
+}
+
 /** Mirrors dql-core DashboardDriverDefinition. */
 export interface DashboardDriverDefinitionV1 {
   version: 1;
@@ -3260,6 +3293,7 @@ export type AppStudioDraftOperation =
   | { type: 'remove_filter'; pageId: string; filterId: string }
   | { type: 'set_interactions'; pageId: string; interactions?: AppStudioBuildDraft['pages'][number]['interactions'] }
   | { type: 'set_layout'; pageId: string; layout: AppStudioBuildDraft['pages'][number]['layout'] }
+  | { type: 'set_narrative'; pageId: string; narrative: DashboardNarrativeV1 | null }
   | { type: 'set_review_task'; task: AppStudioBuildDraft['reviewTasks'][number] }
   | { type: 'remove_review_task'; taskId: string }
   | { type: 'set_preview_receipt'; receipt: NonNullable<AppStudioBuildDraft['previewReceipt']> };
@@ -8386,6 +8420,24 @@ export const api = {
     }
   },
 
+
+  /** Story editions of a published page, newest first. */
+  async getStoryEditions(appId: string, dashboardId: string): Promise<StoryEditionV1[]> {
+    try {
+      const result = await request<{ editions: StoryEditionV1[] }>(`/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/story-editions`);
+      return Array.isArray(result.editions) ? result.editions : [];
+    } catch {
+      return [];
+    }
+  },
+
+  /** Draft a story for a local App page from its latest complete preview run. */
+  async draftAppBuildStory(draftId: string, dashboardId: string, runId: string, instruction?: string): Promise<StoryDraftResponseV1> {
+    return request<StoryDraftResponseV1>(
+      `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/story-draft`,
+      { method: 'POST', body: JSON.stringify({ runId, ...(instruction ? { instruction } : {}) }) },
+    );
+  },
 
   async getDashboardStory(appId: string, dashboardId: string, runId: string): Promise<Pick<DashboardRunResponse, 'runId' | 'snapshotId' | 'filterFingerprint' | 'resultFingerprint' | 'personaFingerprint' | 'facts' | 'story'> | null> {
     try {

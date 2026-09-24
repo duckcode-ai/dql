@@ -61,6 +61,7 @@ export {
   extractDashboardBlockRefs,
   dashboardDatasetParameterFilterErrors,
   readDriverDefinition,
+  readDashboardNarrative,
   DASHBOARD_DRIVER_GRAINS,
   MAX_DRIVER_DIMENSIONS,
   DRIVER_ALL_DIMENSIONS,
@@ -149,6 +150,8 @@ export type {
   DashboardGridItem,
   DashboardDriverDefinition,
   DashboardDriverGrain,
+  DashboardNarrative,
+  DashboardNarrativeBlock,
   DashboardDatasetBinding,
   DashboardInteractions,
   DashboardCrossFilterMapping,
@@ -162,3 +165,15 @@ export type {
 } from './dashboard-document.js';
 
 export type { AppAnalyticalContextV1 } from './app-analytical-context.js';
+
+export {
+  buildStoryBindingCatalog,
+  validateStoryText,
+  splitStoryText,
+  storyBindingKeys,
+  formatStoryValue,
+  STORY_BINDING_PATTERN,
+  MAX_STORY_TEXT,
+  MAX_STORY_BLOCKS,
+} from './story-bindings.js';
+export type { StoryBinding, StoryBindingCatalog, StoryBindingTileInput, StoryTextIssue } from './story-bindings.js';

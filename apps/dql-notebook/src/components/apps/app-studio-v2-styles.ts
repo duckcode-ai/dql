@@ -923,6 +923,40 @@ export const APP_STUDIO_V2_STYLES = `
 .inspector-body .inspector-title input:hover { border-color:var(--border-subtle); }
 .inspector-docs { display:grid; gap:6px; }
 .inspector-driver { display:grid; gap:6px; }
+/* RFC 0008 step 8: story pages. */
+.studio-page-heading > .studio-presentation, .studio-presentation { display:inline-flex; flex:none; gap:2px; align-self:center; margin-left:auto; margin-right:8px; padding:2px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); }
+.studio-presentation button { height:28px; padding:0 10px; border:0; border-radius:4px; background:transparent; color:var(--text-secondary); font-size:13px; font-weight:500; }
+.studio-presentation button.on { background:var(--accent-dim); color:var(--accent); font-weight:600; }
+.studio-story { max-width:820px; margin:0 auto; display:grid; gap:14px; }
+.studio-story .proposal-banner { flex-wrap:wrap; }
+.proposal-banner-actions { display:inline-flex; gap:6px; margin-left:auto; }
+.proposal-banner-actions button { height:28px; padding:0 10px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); color:var(--text-primary); font-size:13px; font-weight:600; }
+.proposal-banner-actions button.primary { border-color:var(--accent); background:var(--accent); color:var(--bg-2); }
+.studio-story-editor { display:grid; gap:12px; }
+.studio-story-draft { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px 8px; align-items:center; padding:12px; border:1px solid var(--border-subtle); border-radius:12px; background:var(--bg-2); }
+.studio-story-draft input { height:32px; padding:0 10px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); color:var(--text-primary); font-size:13px; }
+.studio-story-draft button.primary { height:32px; padding:0 12px; border:0; border-radius:8px; background:var(--accent); color:var(--bg-2); font-size:13px; font-weight:600; }
+.studio-story-draft button.primary:disabled { opacity:.55; }
+.studio-story-draft small { grid-column:1/-1; }
+.studio-story-empty { margin:0; color:var(--text-tertiary); font-size:13px; }
+.studio-story-block { display:grid; gap:8px; padding:10px 12px 12px; border:1px solid var(--border-subtle); border-radius:12px; background:var(--bg-2); }
+.studio-story-block > header { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--text-tertiary); font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+.studio-story-block-tools { display:inline-flex; gap:2px; }
+.studio-story-block-tools button { width:26px; height:26px; border:0; border-radius:4px; background:transparent; color:var(--text-secondary); font-size:13px; }
+.studio-story-block-tools button:hover:not(:disabled) { background:var(--bg-0); color:var(--text-primary); }
+.studio-story-text { display:grid; gap:8px; }
+.studio-story-text textarea { min-height:72px; resize:vertical; padding:8px 10px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); color:var(--text-primary); font:400 14px/1.5 var(--font-ui); }
+.studio-story-text-tools select, .studio-story-add select { height:30px; max-width:100%; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); color:var(--text-primary); font-size:13px; }
+.studio-story-issues { margin:0; padding-left:18px; color:var(--status-error); font-size:12px; display:grid; gap:2px; }
+.studio-story-issues li.warn { color:var(--status-warning); }
+.studio-story-preview { padding:8px 10px; border-left:2px solid var(--accent-dim); color:var(--text-primary); font-size:14px; line-height:1.6; display:grid; gap:8px; }
+.studio-story-preview p { margin:0; }
+.studio-story-preview .dql-story-value, .studio-story .dql-story-value { font-weight:600; font-variant-numeric:tabular-nums; border-bottom:1px dotted var(--accent); }
+.studio-story-preview .dql-story-value.missing { color:var(--text-tertiary); border-bottom-style:dashed; }
+.studio-story-add { display:flex; flex-wrap:wrap; gap:8px; }
+.studio-story-add button { height:30px; padding:0 12px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); color:var(--text-primary); font-size:13px; font-weight:500; }
+.studio-page-grid.story-embed { display:block; }
+.studio-page-grid.story-embed .studio-component-card { min-height:260px; }
 .live-component-preview.driver { overflow:auto; }
 .inspector-docs textarea { resize:vertical; min-height:52px; }
 .inspector-body .inspector-title input:focus { border-color:var(--accent); background:var(--bg-2); }

@@ -10,6 +10,7 @@ import {
   type DashboardRunResponse,
   type DashboardDriverAnalysisV1,
   type DashboardDriverDefinitionV1,
+  type StoryEditionV1,
   type DashboardStoryBrief,
 } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -33,6 +34,8 @@ import { autoLayoutDashboardItems, autoLayoutRank, layoutScore, packDashboardIte
 import { readerTileFreshness, readerTileReceipt, readerTileTrust, readerTrustCounts } from './reader-trust';
 import { plainDescription, ReaderTrustBadge, TrustLensBar } from './ReaderTrust';
 import { DriverPanel, DriverView } from './DriverView';
+import { StoryView, storyEditionSummary } from './StoryView';
+import { buildStoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { driverProbeFor } from './driver-probe';
 import {
   autoTileSizeForItem, autoTileSizeForViz, clamp, narrowTileMinHeight, normalizeSizePreset,
@@ -360,6 +363,57 @@ export function DashboardRenderer({
     const definition = driverProbeFor(item, tile);
     if (definition) void runDriverProbe(item, definition);
   }, [runDriverProbe]);
+  // Story layout (RFC 0008 step 8): readers see the page as prose whose
+  // figures come from this run, plus the tiles it embeds.
+  const storyNarrative = !editable && dashboard.narrative?.presentation === 'story' ? dashboard.narrative : null;
+  const storyCatalog = useMemo(
+    () => (storyNarrative && run ? buildStoryBindingCatalog(run.tiles as StoryBindingTileInput[], Object.fromEntries(dashboard.layout.items.map((item) => [item.i, item.title]))) : {}),
+    [dashboard.layout.items, run, storyNarrative],
+  );
+  const [storyEditions, setStoryEditions] = useState<StoryEditionV1[] | null>(null);
+  useEffect(() => {
+    if (!storyNarrative || !run || run.partial || run.incomplete) return;
+    let cancelled = false;
+    void api.getStoryEditions(appId, dashboard.id).then((editions) => { if (!cancelled) setStoryEditions(editions); });
+    return () => { cancelled = true; };
+  }, [appId, dashboard.id, run?.runId, storyNarrative]);
+  /** One tile on the grid; the story page embeds tiles through the same path. */
+  const renderGridTile = (item: DashboardLayoutItem) => (
+        <DashboardTile
+          key={item.i}
+          item={item}
+          tile={tileResults.get(item.i)}
+          loading={loading}
+          error={error}
+          themeMode={state.themeMode}
+          editable={editableCanvas}
+          narrow={narrowGrid}
+          cols={cols}
+          selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
+          onFocusBlock={onBlockFocus}
+          onAskBlock={onAskBlock}
+          onAskChart={onAskChart}
+          runId={run?.runId}
+          reader={readerContext}
+          onExplainChange={editable ? undefined : explainChange}
+          onMove={(point) => void moveTileToPoint(item.i, point)}
+          onDragMove={(point) => updateDragPreview(item.i, point)}
+          onDragEnd={clearDragPreview}
+          onPatch={(patch) => void patchTile(item.i, patch)}
+          onRetry={() => void retryTile(item.i)}
+          retrying={retryingTileId === item.i}
+          retryDisabled={Boolean(retryingTileId && retryingTileId !== item.i)}
+          onOpenNotebook={(nextTile) => void openTileInNotebook(item, nextTile)}
+          activeVariables={runVariables}
+          crossFilterFields={datasetCrossFilterFields(dashboard, item)}
+          onSelectDatasetMark={(field, values) => applyDatasetMark(item, field, values)}
+          onDrillDatasetMark={(candidate, row) => applyDatasetHierarchyDrill(item, candidate, row)}
+          onDrillBack={() => returnFromDatasetHierarchyDrill(item.i)}
+          onNavigate={dashboard.interactions?.navigate?.some((candidate) => candidate.fromTile === item.i)
+            ? () => void navigateFromDatasetTile(item.i)
+            : undefined}
+        />
+  );
   const readerContext = useMemo<ReaderTileContext | undefined>(
     () => (editable ? undefined : {
       ranAtByTile: tileRanAt,
@@ -1054,7 +1108,7 @@ export function DashboardRenderer({
         </div>
       ) : null}
 
-      {!editable && businessStory ? (
+      {storyNarrative ? null : !editable && businessStory ? (
         <BusinessStoryPanel story={businessStory} onResearch={openCopilot} onEvidence={openLineage} />
       ) : dashboardStory ? <DashboardStoryStrip story={dashboardStory} /> : null}
 
@@ -1105,6 +1159,26 @@ export function DashboardRenderer({
             />
           </div>
         </div>
+      ) : storyNarrative ? (
+        <StoryView
+          narrative={storyNarrative}
+          catalog={storyCatalog}
+          edition={run && !run.partial && storyEditions ? storyEditionSummary(storyEditions, run, storyCatalog) : null}
+          trust={trustCounts.length ? (() => {
+            const total = trustCounts.reduce((sum, entry) => sum + entry.count, 0);
+            const certified = trustCounts.find((entry) => entry.state === 'certified')?.count ?? 0;
+            return certified === total ? `all ${total} tiles certified` : `${certified} of ${total} tiles certified`;
+          })() : null}
+          renderTile={(tileId) => {
+            const item = visibleItems.find((candidate) => candidate.i === tileId);
+            if (!item) return null;
+            return (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gridAutoRows: `${rowHeight}px`, gap: 12 }}>
+                {renderGridTile({ ...item, x: 0, y: 0, w: 12 })}
+              </div>
+            );
+          }}
+        />
       ) : storySections ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
           {storySections.map((section) => {
@@ -1215,42 +1289,7 @@ export function DashboardRenderer({
               }}
             />
           )}
-          {visibleItems.map((item) => (
-            <DashboardTile
-              key={item.i}
-              item={item}
-              tile={tileResults.get(item.i)}
-              loading={loading}
-              error={error}
-              themeMode={state.themeMode}
-              editable={editableCanvas}
-              narrow={narrowGrid}
-              cols={cols}
-              selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
-              onFocusBlock={onBlockFocus}
-              onAskBlock={onAskBlock}
-              onAskChart={onAskChart}
-              runId={run?.runId}
-              reader={readerContext}
-              onExplainChange={editable ? undefined : explainChange}
-              onMove={(point) => void moveTileToPoint(item.i, point)}
-              onDragMove={(point) => updateDragPreview(item.i, point)}
-              onDragEnd={clearDragPreview}
-              onPatch={(patch) => void patchTile(item.i, patch)}
-              onRetry={() => void retryTile(item.i)}
-              retrying={retryingTileId === item.i}
-              retryDisabled={Boolean(retryingTileId && retryingTileId !== item.i)}
-              onOpenNotebook={(nextTile) => void openTileInNotebook(item, nextTile)}
-              activeVariables={runVariables}
-              crossFilterFields={datasetCrossFilterFields(dashboard, item)}
-              onSelectDatasetMark={(field, values) => applyDatasetMark(item, field, values)}
-              onDrillDatasetMark={(candidate, row) => applyDatasetHierarchyDrill(item, candidate, row)}
-              onDrillBack={() => returnFromDatasetHierarchyDrill(item.i)}
-              onNavigate={dashboard.interactions?.navigate?.some((candidate) => candidate.fromTile === item.i)
-                ? () => void navigateFromDatasetTile(item.i)
-                : undefined}
-            />
-          ))}
+          {visibleItems.map((item) => renderGridTile(item))}
         </div>
       )}
       {!editable && run ? <ReviewAppendix run={run} variables={runVariables} /> : null}
@@ -1327,7 +1366,8 @@ export function dashboardTileFilterNotices(input: {
   activeVariables?: Record<string, unknown>;
 }) {
   const datasetUnboundNotices = input.tile?.dataset?.unboundFilters ?? [];
-  if (input.item.query) {
+  // Driver tiles run Dataset comparisons with the same page filters.
+  if (input.item.query || input.item.driver) {
     return { unfilteredNotice: null, datasetUnboundNotices };
   }
   const active = Object.entries(input.activeVariables ?? {})

@@ -2042,3 +2042,11 @@ export * from './relationship-validation.js';
 export * from './relationship-suggestions.js';
 export * from './concept-draft.js';
 export { renderPhysicalIdentifier, renderPhysicalRelation } from './governed-relational-compiler.js';
+export {
+  draftStoryNarrative,
+  deterministicStoryNarrative,
+  validateStoryBlocks,
+  storyDraftUserPrompt,
+  STORY_DRAFT_SYSTEM_PROMPT,
+} from './story-draft.js';
+export type { StoryDraftInput, StoryDraftResult, StoryDraftComplete } from './story-draft.js';

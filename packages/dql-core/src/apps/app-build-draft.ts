@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { DashboardDocument, DashboardFilter, DashboardGridItem, DashboardGridLayout } from './dashboard-document.js';
 import { datasetTileVisualizationCompatibility } from './tile-query.js';
 import { readDashboardVizStyle } from './viz-style.js';
-import { MAX_TILE_DESCRIPTION, MAX_TILE_OWNER } from './dashboard-document.js';
+import { MAX_TILE_DESCRIPTION, MAX_TILE_OWNER, readDashboardNarrative } from './dashboard-document.js';
+import type { DashboardNarrative } from './dashboard-document.js';
 import { settleGridLayout } from './grid-layout.js';
 import type { DatasetDescriptor } from '../datasets/descriptor.js';
 import type { MetricCapabilityContract } from '../contracts/analytical.js';
@@ -203,6 +204,8 @@ export type AppBuildDraftOperation =
    * content edit because the next preview must use the new mapping. */
   | { type: 'set_interactions'; pageId: string; interactions?: DashboardDocument['interactions'] }
   | { type: 'set_layout'; pageId: string; layout: DashboardGridLayout & { responsive?: DashboardDocument['layout']['responsive'] } }
+  /** Story layout (RFC 0008 step 8); `null` removes it. Text with a literal number is refused. */
+  | { type: 'set_narrative'; pageId: string; narrative: DashboardNarrative | null }
   | { type: 'set_review_task'; task: AppBuildReviewTask }
   | { type: 'remove_review_task'; taskId: string }
   | { type: 'set_preview_receipt'; receipt: AppBuildRunReceipt }
@@ -319,6 +322,8 @@ function reconcileCoverageReferences(draft: AppBuildDraft): AppBuildDraft {
 
 function operationPreservesSettledData(draft: AppBuildDraft, operation: AppBuildDraftOperation): boolean {
   if (operation.type === 'set_preview_receipt' || operation.type === 'clear_preview_receipt') return true;
+  // Story text only presents results; it changes no query.
+  if (operation.type === 'set_narrative') return true;
   if (operation.type === 'update_tile') {
     const presentationKeys = new Set(['title', 'description', 'owner', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
     return Object.keys(operation.patch).every((key) => presentationKeys.has(key));
@@ -435,7 +440,21 @@ function applyOperation(draft: AppBuildDraft, operation: AppBuildDraftOperation)
           return { ...page, layout: { ...page.layout, items: page.layout.items.map((tile) => tile.i === operation.tileId ? { ...tile, ...operation.patch, i: tile.i } : tile) } };
         }
         if (operation.type === 'remove_tile') {
-          return { ...page, layout: { ...page.layout, items: page.layout.items.filter((tile) => tile.i !== operation.tileId) } };
+          // A story block that embedded the removed tile goes with it.
+          const narrative = page.narrative
+            ? { ...page.narrative, blocks: page.narrative.blocks.filter((block) => block.kind !== 'tile' || block.tileId !== operation.tileId) }
+            : undefined;
+          return { ...page, ...(narrative ? { narrative } : {}), layout: { ...page.layout, items: page.layout.items.filter((tile) => tile.i !== operation.tileId) } };
+        }
+        if (operation.type === 'set_narrative') {
+          if (operation.narrative === null) {
+            const { narrative: _removed, ...rest } = page;
+            return rest;
+          }
+          const errors: string[] = [];
+          const narrative = readDashboardNarrative(operation.narrative, new Set(page.layout.items.map((tile) => tile.i)), (message) => errors.push(message));
+          if (!narrative) throw new Error(errors.join(' ') || 'The story is not valid.');
+          return { ...page, narrative };
         }
         if (operation.type === 'set_filter') {
           return { ...page, filters: upsertById(page.filters ?? [], operation.filter) };

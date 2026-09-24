@@ -95,7 +95,8 @@ export function dashboardFilterCoverage(
     // Field-query tiles use the exact Dataset binding rather than a matching
     // result-column name. A selected component subset is a durable authored
     // scope, so surface an exclusion instead of claiming page-wide coverage.
-    const dataset = item.query && item.sourceId && item.sourceRevision
+    // A driver tile's comparisons run on its Dataset with the same bindings.
+    const dataset = (item.query || item.driver) && item.sourceId && item.sourceRevision
       ? dashboard?.datasets?.find((candidate) => (
         candidate.sourceId === item.sourceId && candidate.sourceRevision === item.sourceRevision
       ))

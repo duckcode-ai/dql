@@ -185,6 +185,11 @@ export function foldDashboardDriverTiles(tiles: RunTile[], runs: Map<string, Das
       })),
       result: {
         columns: ['dimension', 'member', 'current', 'prior', 'change', 'share_of_change'],
+        // The measure's display unit, from the governed comparison's metadata.
+        ...(() => {
+          const meta = (total.result.columnsMeta ?? []).find((entry: { name?: string }) => typeof entry?.name === 'string' && entry.name.endsWith('__current_period'));
+          return meta ? { columnsMeta: ['current', 'prior', 'change'].map((name) => ({ ...meta, name })) } : {};
+        })(),
         rows,
         rowCount: rows.length,
         executionTime: [total, ...dimensionTiles.map(({ tile }) => tile)].reduce((sum, tile) => sum + (Number(tile?.result?.executionTime) || 0), 0),

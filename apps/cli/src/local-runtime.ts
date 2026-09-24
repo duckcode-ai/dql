@@ -143,8 +143,11 @@ import {
   type DashboardDisplayTrustState,
   type DashboardGridItem,
   type DatasetDescriptor,
+  type StoryBindingCatalog,
+  type StoryBindingTileInput,
   type TileQuery,
   type TileFilterOperator,
+  buildStoryBindingCatalog,
   tileQueryHash,
   tileQueryOutputAliases,
   normalizeTileQuery,
@@ -328,6 +331,8 @@ import {
   planAnalyticalPath,
   computeResultStats,
   buildDeterministicDashboardStory,
+  draftStoryNarrative,
+  type StoryDraftInput,
   synthesizeAnswer,
   streamOrGenerate,
   type SynthesizeResultPreview,
@@ -537,6 +542,7 @@ import {
   type SemanticTileConversionPreviewRequest,
   type SemanticTileConversionPreviewResponse,
 } from './apps-api.js';
+import { listStoryEditions, recordStoryEdition } from './story/story-editions.js';
 import { dashboardDriverProbeItem, expandDashboardDriverItems, foldDashboardDriverTiles, withDriverFilterScopes } from './datasets/dashboard-drivers.js';
 import { compileDatasetTileQuery, type CompiledDatasetTileQuery } from './datasets/tile-query-compiler.js';
 import { summarizeDatasetChartFacts } from './datasets/dataset-chart-fact-summary.js';
@@ -3566,6 +3572,16 @@ function conversationStringArray(value: unknown): string[] | undefined {
   return values.length > 0 ? values : undefined;
 }
 
+/** True for a URL on this machine, such as a local Ollama server. */
+function isLoopbackUrl(value: string): boolean {
+  try {
+    const host = new URL(value).hostname.replace(/^\[|\]$/g, '');
+    return host === 'localhost' || host === '::1' || /^127\./.test(host);
+  } catch {
+    return false;
+  }
+}
+
 function isLoopbackOrigin(value: string): boolean {
   try {
     const hostname = new URL(value).hostname;
@@ -4918,6 +4934,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // rather than treating compiled semantic SQL as unrelated generic SQL.
   const compiledSemanticQueries = new Map<string, SemanticRuntimeCompileResult>();
   const dashboardRunEvidence = new Map<string, {
+    /** Values a story may bind to, from this run (RFC 0008 step 8). */
+    storyBindings?: StoryBindingCatalog;
     appId: string;
     dashboardId: string;
     snapshotId: string;
@@ -17554,6 +17572,87 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // Story editions of a published page, newest first (RFC 0008 step 8).
+    const storyEditionsRoute = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/story-editions$/);
+    if (req.method === 'GET' && storyEditionsRoute) {
+      const editions = listStoryEditions(projectRoot, decodeURIComponent(storyEditionsRoute[1]), decodeURIComponent(storyEditionsRoute[2])).reverse();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ editions }));
+      return;
+    }
+
+    // Draft a story for a local App page from its latest complete preview.
+    // The model writes around binding keys only; every figure is filled in
+    // from governed results when the page runs (RFC 0008 step 8).
+    const storyDraftRoute = path.match(/^\/api\/app-builds\/([^/]+)\/dashboards\/([^/]+)\/story-draft$/);
+    if (req.method === 'POST' && storyDraftRoute) {
+      try {
+        const draftId = decodeURIComponent(storyDraftRoute[1]);
+        const dashboardId = decodeURIComponent(storyDraftRoute[2]);
+        const body = await readJSON(req).catch(() => ({}));
+        const runId = typeof body.runId === 'string' ? body.runId : '';
+        const evidence = dashboardRunEvidence.get(runId);
+        const draft = loadStoredAppBuildDraft(projectRoot, draftId);
+        const page = draft?.pages.find((candidate) => candidate.id === dashboardId);
+        if (!draft || !page) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'App draft page not found.' }));
+          return;
+        }
+        if (!evidence || evidence.expiresAt < Date.now() || evidence.appId !== draftId || evidence.dashboardId !== dashboardId || !evidence.storyBindings) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Run the whole page first; the story is drafted from its latest complete results.' }));
+          return;
+        }
+        const instruction = typeof body.instruction === 'string' ? body.instruction.trim().slice(0, 600) : '';
+        const selected = await selectAssistProvider(projectRoot).catch(() => null);
+        const providerConfig = selected ? getEffectiveProviderConfig(projectRoot, selected.id) : undefined;
+        // Result values reach the model only when it runs on this machine.
+        const localModel = selected?.id === 'ollama' && isLoopbackUrl(providerConfig?.baseUrl ?? 'http://127.0.0.1:11434');
+        const model = providerConfig?.model;
+        const input: StoryDraftInput = {
+          pageTitle: page.metadata.title,
+          ...(page.story?.goal || draft.frame.goal ? { goal: page.story?.goal ?? draft.frame.goal } : {}),
+          ...(draft.frame.audience ? { audience: draft.frame.audience } : {}),
+          ...(instruction ? { instruction } : {}),
+          catalog: evidence.storyBindings,
+          tiles: page.layout.items
+            .filter((item) => !item.text && Object.values(evidence.storyBindings!).some((binding) => binding.tileId === item.i))
+            .map((item) => ({ tileId: item.i, title: item.title ?? item.i, kind: item.driver ? 'driver' : String(item.viz.type) })),
+          includeValues: localModel,
+        };
+        const started = Date.now();
+        const result = await draftStoryNarrative(
+          input,
+          selected
+            ? (messages) => selected.provider.generate(messages, {
+              maxTokens: 1800,
+              temperature: 0.3,
+              responseJsonSchema: { type: 'object', properties: { blocks: { type: 'array' } }, required: ['blocks'] },
+              signal: AbortSignal.timeout(180_000),
+            })
+            : null,
+          { ...(model ? { model } : {}) },
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          narrative: result.narrative,
+          generatedBy: result.generatedBy,
+          attempts: result.attempts,
+          issues: result.issues.slice(0, 20),
+          provider: selected?.id ?? null,
+          model: model ?? null,
+          sawValues: localModel,
+          elapsedMs: Date.now() - started,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     const appStoryRun = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/story$/);
     if (req.method === 'POST' && appStoryRun) {
       const body = await readJSON(req).catch(() => ({}));
@@ -20397,9 +20496,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           chartContexts,
           facts: storyResult.facts,
           story: storyResult.story,
+          storyBindings: buildStoryBindingCatalog(
+            tilesWithFilters as StoryBindingTileInput[],
+            Object.fromEntries(loaded.dashboard.layout.items.map((item) => [item.i, item.title])),
+          ),
           expiresAt: Date.now() + 15 * 60_000,
         };
         if (!staleRun && !partialRun) dashboardRunEvidence.set(runId, runEvidence);
+        // A complete run of a published story page is an edition: readers can
+        // see what changed since the last one. Recording never fails a run.
+        if (runSurface === 'apps' && !mcpRequest && !staleRun && !partialRun && !incompleteRun && loaded.dashboard.narrative?.presentation === 'story') {
+          try {
+            recordStoryEdition({
+              projectRoot,
+              appId,
+              dashboardId,
+              narrative: loaded.dashboard.narrative,
+              catalog: runEvidence.storyBindings,
+              runId,
+              resultFingerprint,
+              filterFingerprint,
+            });
+          } catch (error) {
+            console.warn(`[dql] Could not record a story edition for ${appId}/${dashboardId}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         // MCP runs intentionally have no App/chart-answer lifecycle. They use
         // the same execution guards, but their ephemeral result must not enter
         // an App-scoped evidence registry under the synthetic runtime id.

@@ -43,6 +43,10 @@
       "types": "./dist/apps/grid-layout.d.ts",
       "import": "./dist/apps/grid-layout.js"
     },
+    "./apps/story-bindings": {
+      "types": "./dist/apps/story-bindings.d.ts",
+      "import": "./dist/apps/story-bindings.js"
+    },
     "./datasets/descriptor": {
       "types": "./dist/datasets/descriptor.d.ts",
       "import": "./dist/datasets/descriptor.js"

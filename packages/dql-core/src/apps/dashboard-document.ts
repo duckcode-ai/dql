@@ -1,3 +1,4 @@
+import { MAX_STORY_BLOCKS, validateStoryText } from './story-bindings.js';
 /**
  * Dashboard documents — `apps/<app>/dashboards/<id>.dqld`.
  *
@@ -349,6 +350,20 @@ export interface DashboardDriverDefinition {
   timezone?: string;
 }
 
+export type DashboardNarrativeBlock =
+  | { id: string; kind: 'text'; markdown: string }
+  | { id: string; kind: 'tile'; tileId: string };
+
+export interface DashboardNarrative {
+  version: 1;
+  /** `story` shows the blocks instead of the grid; `dashboard` keeps the grid. */
+  presentation: 'story' | 'dashboard';
+  blocks: DashboardNarrativeBlock[];
+  /** Who wrote the current text. AI text is still checked like any other. */
+  generatedBy?: 'author' | 'ai' | 'deterministic';
+  model?: string;
+}
+
 export type DashboardDriverGrain = 'day' | 'week' | 'month' | 'quarter' | 'year';
 export const DASHBOARD_DRIVER_GRAINS: readonly DashboardDriverGrain[] = ['day', 'week', 'month', 'quarter', 'year'];
 export const MAX_DRIVER_DIMENSIONS = 6;
@@ -470,6 +485,11 @@ export interface DashboardDocument {
   sections?: DashboardSection[];
   /** Runtime story evidence contract. Result-specific prose is never persisted. */
   story?: DashboardStoryEvidencePlan;
+  /**
+   * Story layout (RFC 0008 step 8): the page read as prose with embedded
+   * tiles. Every number in the text is a `{{binding}}` to a tile result.
+   */
+  narrative?: DashboardNarrative;
   layout: DashboardGridLayout & { responsive?: DashboardResponsiveLayouts };
 }
 
@@ -587,6 +607,7 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
   const sections = readSections(obj.sections, err);
   const story = readStoryEvidencePlan(obj.story, err);
   const layout = readLayout(obj.layout, err);
+  const narrative = obj.narrative === undefined ? undefined : readDashboardNarrative(obj.narrative, new Set(layout.items.map((item) => item.i)), err);
 
   if (version === 3) {
     validateDashboardV3References(datasets, filters, interactions, layout, err);
@@ -616,6 +637,7 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
       ...(interactions ? { interactions } : {}),
       sections: sections.length > 0 ? sections : undefined,
       ...(story ? { story } : {}),
+      ...(narrative ? { narrative } : {}),
       layout,
     },
     errors: [],
@@ -928,6 +950,49 @@ function readDashboardFilterTimezone(raw: unknown, index: number, err: (m: strin
   }
 }
 
+/**
+ * Validate a story narrative. Text may not contain a literal number: each
+ * figure is a `{{binding}}`, so the story always shows the data it came from.
+ */
+export function readDashboardNarrative(value: unknown, tileIds: ReadonlySet<string>, err: (message: string) => void): DashboardNarrative | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    err('narrative must be an object.');
+    return undefined;
+  }
+  const raw = value as Record<string, unknown>;
+  let failed = false;
+  const fail = (message: string) => { failed = true; err(`narrative.${message}`); };
+  if (raw.version !== 1) fail('version must be 1');
+  if (raw.presentation !== 'story' && raw.presentation !== 'dashboard') fail('presentation must be story|dashboard');
+  if (!Array.isArray(raw.blocks) || raw.blocks.length > MAX_STORY_BLOCKS) fail(`blocks must be a list of at most ${MAX_STORY_BLOCKS} blocks`);
+  const blocks: DashboardNarrativeBlock[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of (Array.isArray(raw.blocks) ? raw.blocks : []).entries()) {
+    const block = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
+    const id = typeof block.id === 'string' && block.id.trim() ? block.id.trim() : '';
+    if (!id || seen.has(id)) { fail(`blocks[${index}].id must be a unique non-empty string`); continue; }
+    seen.add(id);
+    if (block.kind === 'text' && typeof block.markdown === 'string') {
+      for (const issue of validateStoryText(block.markdown)) fail(`blocks[${index}]: ${issue.message}`);
+      blocks.push({ id, kind: 'text', markdown: block.markdown });
+    } else if (block.kind === 'tile' && typeof block.tileId === 'string') {
+      if (!tileIds.has(block.tileId)) fail(`blocks[${index}].tileId ${block.tileId} is not a tile on this page`);
+      blocks.push({ id, kind: 'tile', tileId: block.tileId });
+    } else {
+      fail(`blocks[${index}] must be {kind:"text", markdown} or {kind:"tile", tileId}`);
+    }
+  }
+  const generatedBy = raw.generatedBy === 'author' || raw.generatedBy === 'ai' || raw.generatedBy === 'deterministic' ? raw.generatedBy : undefined;
+  if (failed) return undefined;
+  return {
+    version: 1,
+    presentation: raw.presentation as DashboardNarrative['presentation'],
+    blocks,
+    ...(generatedBy ? { generatedBy } : {}),
+    ...(typeof raw.model === 'string' && raw.model.trim() ? { model: raw.model.trim().slice(0, 120) } : {}),
+  };
+}
+
 /** Validate a driver definition; the runtime checks the fields against the Dataset. */
 export function readDriverDefinition(value: unknown, path: string, err: (message: string) => void): DashboardDriverDefinition | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -1042,9 +1107,15 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const aiPin = aiPinRaw && typeof aiPinRaw.id === 'string'
       ? { id: aiPinRaw.id }
       : null;
-    if (!block && !text && !aiPin && !semantic && !draftAnalysis && !query) {
-      err(`layout.items[${i}] must have a block, semantic, draftAnalysis, text, or aiPin source (or a field-based query)`);
+    // A driver tile (RFC 0008 step 7) takes its data from its Dataset source;
+    // its definition is read and validated below.
+    const hasDriver = it.driver !== undefined && it.driver !== null;
+    if (!block && !text && !aiPin && !semantic && !draftAnalysis && !query && !hasDriver) {
+      err(`layout.items[${i}] must have a block, semantic, draftAnalysis, text, or aiPin source (or a field-based query or driver)`);
       continue;
+    }
+    if (hasDriver && (typeof it.sourceId !== 'string' || !it.sourceId.trim() || typeof it.sourceRevision !== 'string' || !it.sourceRevision.trim())) {
+      err(`layout.items[${i}].driver requires snapshot-bound sourceId and sourceRevision`);
     }
     if (query && (typeof it.sourceId !== 'string' || !it.sourceId.trim() || typeof it.sourceRevision !== 'string' || !it.sourceRevision.trim())) {
       err(`layout.items[${i}].query requires snapshot-bound sourceId and sourceRevision`);

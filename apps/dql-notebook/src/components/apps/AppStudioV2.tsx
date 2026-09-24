@@ -13,6 +13,7 @@ import {
   type AppStudioAiProposal,
   type AppStudioBuildDraft,
   type AppStudioDraftOperation,
+  type StoryDraftResponseV1,
   type ContextAuthoringProposalV1,
   type DatasetAuthoringChange,
   type DatasetTileSaveAsBlockResponse,
@@ -43,6 +44,9 @@ import { DraftTileCard, DraftTileInspector, type DraftTileState } from './builde
 import { ProposedTileCard } from './builder/ProposedTile';
 import { ChartStylePanel } from './builder/ChartStylePanel';
 import { DriverView } from './DriverView';
+import { StoryView } from './StoryView';
+import { StoryEditor } from './builder/StoryEditor';
+import { buildStoryBindingCatalog, type StoryBindingTileInput } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import { DriverTileSettings } from './builder/DriverTileSettings';
 import { driverProbeFor } from './driver-probe';
 import {
@@ -427,6 +431,10 @@ export function AppStudioV2({
   const [filterOptionsByPage, setFilterOptionsByPage] = useState<Record<string, Record<string, StudioFilterAvailability>>>({});
   /** A move or resize in progress on the canvas; its items are drawn until the save lands. */
   const [gesture, setGesture] = useState<CanvasGesture | null>(null);
+  /** A story drafted by AI (or from the data), shown until applied or discarded. */
+  const [storyProposal, setStoryProposal] = useState<{ pageId: string; result: StoryDraftResponseV1 } | null>(null);
+  const [storyDrafting, setStoryDrafting] = useState(false);
+  const lastStoryModel = storyProposal?.result.model ?? null;
   /** The draft whose undo history has been restored from this browser. */
   const [historyDraftId, setHistoryDraftId] = useState<string | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
@@ -2613,6 +2621,69 @@ export function AppStudioV2({
     : null;
   /** Tiles can be dragged and resized on the Desktop canvas while editing a saved page. */
   const placedGrid = breakpoint === 'wide' && !projectedPage;
+  // Story layout (RFC 0008 step 8).
+  const storyMode = Boolean(activePage?.narrative?.presentation === 'story' && !projectedPage);
+  const storyCatalog = previewRun ? buildStoryBindingCatalog(previewRun.tiles as StoryBindingTileInput[], Object.fromEntries((activePage?.layout.items ?? []).map((item) => [item.i, item.title]))) : {};
+  const storyPageTiles = (activePage?.layout.items ?? []).filter((item) => !item.text).map((item) => ({ tileId: item.i, title: item.title || humanize(item.i) }));
+  const storyDraftBlocked = !previewRun
+    ? 'Run the page first: the story is drafted from its latest complete results.'
+    : previewRun.partial || previewRun.incomplete
+      ? 'Run the whole page first: the last run covered only some tiles.'
+      : null;
+  const setPresentation = async (presentation: 'dashboard' | 'story') => {
+    if (!activePage) return;
+    const current = activePage.narrative;
+    if ((current?.presentation ?? 'dashboard') === presentation) return;
+    const next = await mutate([{ type: 'set_narrative', pageId: activePage.id, narrative: { ...(current ?? { version: 1, blocks: [] }), version: 1, presentation } }]);
+    if (next) setSavedMessage(presentation === 'story' ? 'Page shows as a story' : 'Page shows as a dashboard');
+  };
+  const draftStory = async (instruction: string) => {
+    if (!draft || !activePage || !previewRun || storyDraftBlocked) return;
+    setStoryDrafting(true);
+    setError(null);
+    try {
+      const result = await api.draftAppBuildStory(draft.id, activePage.id, previewRun.runId, instruction || undefined);
+      if (!result.ok) throw new Error(result.error ?? 'The story could not be drafted.');
+      setStoryProposal({ pageId: activePage.id, result });
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setStoryDrafting(false);
+    }
+  };
+  const proposalForPage = storyProposal && storyProposal.pageId === activePage?.id ? storyProposal.result : null;
+  const storyArea = activePage ? (
+    editing ? <div className="studio-story">
+      {proposalForPage ? <div className={`proposal-banner ${proposalForPage.generatedBy === 'ai' ? '' : 'warn'}`} role="status">
+        <Sparkles size={14} />
+        <span>
+          <strong>{proposalForPage.generatedBy === 'ai' ? `Drafted by ${proposalForPage.model ?? 'AI'}` : 'Drafted from the data'}</strong>
+          {' · '}{proposalForPage.generatedBy === 'ai'
+            ? `checked: every figure is bound${proposalForPage.attempts > 1 ? ' (second attempt)' : ''}; ${proposalForPage.sawValues ? 'the local model saw current values' : 'the model saw field names only'} · ${(proposalForPage.elapsedMs / 1000).toFixed(0)} s.`
+            : `the model's drafts broke the rules, so this one was written from the page's values alone.`}
+          {' '}Nothing is saved until you apply.
+        </span>
+        <span className="proposal-banner-actions">
+          <button type="button" className="primary" disabled={busy} onClick={() => { void mutate([{ type: 'set_narrative', pageId: activePage.id, narrative: { ...proposalForPage.narrative, presentation: 'story' } }]).then((next) => { if (next) { setStoryProposal(null); setSavedMessage('Story applied'); } }); }}>Apply</button>
+          <button type="button" onClick={() => setStoryProposal(null)}>Discard</button>
+        </span>
+      </div> : null}
+      {proposalForPage
+        ? <StoryView narrative={proposalForPage.narrative} catalog={storyCatalog} renderTile={(tileId) => renderStoryTile(tileId)} />
+        : <StoryEditor
+          narrative={activePage.narrative ?? { version: 1, presentation: 'story', blocks: [] }}
+          catalog={storyCatalog}
+          pageTiles={storyPageTiles}
+          disabled={busy}
+          renderTile={(tileId) => renderStoryTile(tileId)}
+          onChange={(narrative) => void mutate([{ type: 'set_narrative', pageId: activePage.id, narrative }])}
+          onDraft={(instruction) => void draftStory(instruction)}
+          drafting={storyDrafting}
+          draftBlockedReason={storyDraftBlocked}
+          providerLabel={lastStoryModel}
+        />}
+    </div> : <StoryView narrative={activePage.narrative ?? { version: 1, presentation: 'story', blocks: [] }} catalog={storyCatalog} renderTile={(tileId) => renderStoryTile(tileId)} />
+  ) : null;
   const canArrange = editing && placedGrid;
   canvasKeyHandlerRef.current = (event) => {
     if (!editing || projectedPage || publishReviewOpen || deleteConfirmOpen) return;
@@ -2771,6 +2842,11 @@ export function AppStudioV2({
     ['medium', 'Tablet', PanelRight],
     ['narrow', 'Phone', Smartphone],
   ];
+  /** A tile embedded in the story, drawn with the canvas card at full width. */
+  const renderStoryTile = (tileId: string) => {
+    const tile = activePage?.layout.items.find((item) => item.i === tileId);
+    return tile ? <div className="studio-page-grid story-embed">{renderTile({ ...tile, w: 12 }, 'story-embed')}</div> : null;
+  };
   const renderTile = (tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number], extraClass = '', badge: ReactNode = null, placed = false) => {
     return (
                 <article
@@ -2872,7 +2948,11 @@ export function AppStudioV2({
           <section ref={canvasRef} className="studio-canvas" aria-label="App canvas" onClick={(event) => { if (event.target === event.currentTarget) { setSelectedTileId(null); setTileMenuId(null); } }}>
             <header className="studio-page-heading">
               <div><h1>{projectedPage?.title ?? activePage?.metadata.title ?? 'Overview'}</h1>{!projectedPage?.isNew && activePage?.metadata.description ? <p>{activePage.metadata.description}</p> : null}</div>
-              {editing && !projectedPages ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
+              {editing && !projectedPages && activePage ? <div className="studio-presentation" role="group" aria-label="Show this page as">
+                <button type="button" aria-pressed={!storyMode} className={!storyMode ? 'on' : ''} disabled={busy} onClick={() => void setPresentation('dashboard')}>Dashboard</button>
+                <button type="button" aria-pressed={storyMode} className={storyMode ? 'on' : ''} disabled={busy} onClick={() => void setPresentation('story')}>Story</button>
+              </div> : null}
+              {editing && !projectedPages && !storyMode ? <button type="button" className="add-tile" onClick={openAddTile}><Plus size={14} /> Add tile</button> : null}
             </header>
             {editing && (!fieldsAvailable || dataView === 'sources') && selectedSource && selectedSourceKind ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" disabled={busy || previewing} onClick={() => selectedSource.capabilities?.dataset ? (setPanel('sources'), setPanelOpen(true)) : void addComponent(selectedSourceKind, selectedSource)}>{selectedSource.capabilities?.dataset ? <><Settings2 size={14} /> Choose fields</> : <><Plus size={14} /> {selectedSourceAction}</>}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
             {(activePage?.filters ?? []).length ? <div className="studio-page-filterbar">{activePage!.filters!.map((filter) => <StudioFilterControl key={filter.id} filter={filter} availability={activeFilterOptions[filter.id]} value={previewVariables[filter.id] ?? filter.default} applying={previewing} onChange={(value) => applyFilterValue(filter, value)} />)}</div> : null}
@@ -2886,6 +2966,7 @@ export function AppStudioV2({
               <span>Use “Edit with AI” on a Dataset tile. Clicking a chart keeps its own behavior and does not select the tile.</span>
             </div> : null}
             {projectedPage ? <div className={`proposal-banner ${proposalSummaryText(projectedPage).removed ? 'warn' : ''}`} role="status"><Sparkles size={14} /><span><strong>AI proposal</strong> · {proposalSummaryText(projectedPage).text}. Nothing is saved until you apply.</span></div> : null}
+            {storyMode ? storyArea : <>
             {/* On the placed grid the tile being built sits above the page, where
                 it is seen first, instead of taking an automatic cell below it. */}
             {placedGrid && editing && draftTile && activeDescriptor ? <div className="studio-draft-slot"><DraftTileCard sourceId={activeDatasetItem?.sourceId ?? activeDatasetItem?.id} descriptor={activeDescriptor} draft={draftTile} themeMode={themeMode} /></div> : null}
@@ -2924,6 +3005,7 @@ export function AppStudioV2({
               {!visibleItems.length && !draftTile && !projectedPage ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>This page is empty</strong><p>{editing ? 'Pick a governed Dataset in the Data panel, then choose the fields you want to see. You can also ask AI to draft the page.' : 'Switch to Edit to add tiles to this page.'}</p>{editing ? <div className="empty-actions"><button type="button" className="primary" onClick={openAddTile}><Plus size={14} /> Add tile</button><button type="button" onClick={() => { setAiScope('page'); setCopilotOpen(true); }}><Sparkles size={14} /> Draft with AI</button></div> : null}</div> : null}
             </div>
             {canArrange && visibleItems.length ? <p id="studio-canvas-keys" className="studio-canvas-keys">Drag a tile by its header or resize it from its edges. With a tile selected: arrow keys move it, Shift + arrows resize, {modifierKeyLabel()}D duplicates, Delete removes, {modifierKeyLabel()}Z undoes.</p> : null}
+            </>}
           </section>
         </div>
       </main>
@@ -4142,7 +4224,7 @@ function sourceKindLabel(kind: AppStudioBuildDraft['sources'][number]['kind']): 
 }
 
 function isPresentationOnlyOperation(operation: AppStudioDraftOperation): boolean {
-  if (operation.type === 'set_layout') return true;
+  if (operation.type === 'set_layout' || operation.type === 'set_narrative') return true;
   if (operation.type !== 'update_tile') return false;
   const allowed = new Set(['title', 'description', 'owner', 'viz', 'display', 'x', 'y', 'w', 'h', 'sectionId']);
   return Object.keys(operation.patch).every((key) => allowed.has(key));

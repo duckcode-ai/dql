@@ -21,7 +21,7 @@ export function appCertificationRollup(
     // Dataset queries are versioned projections of a saved source. They can
     // count only when that document declares both certified trust and a
     // certified/governed source class; a runtime result never changes this.
-    const hasCertifiedDatasetSource = Boolean(item.query && item.sourceId && item.sourceRevision)
+    const hasCertifiedDatasetSource = Boolean((item.query || item.driver) && item.sourceId && item.sourceRevision)
       && item.trustState === 'certified'
       && item.reviewStatus === 'certified'
       && (item.sourceClass === 'certified_block' || item.sourceClass === 'governed_semantic');
