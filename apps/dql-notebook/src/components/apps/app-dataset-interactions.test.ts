@@ -123,6 +123,10 @@ describe('published Dataset interactions (APP-041)', () => {
     expect(datasetHierarchyDrillCandidates(descriptor, query)).toEqual([
       { hierarchyId: 'commerce_customer_orders', fromField: 'customer_id', fromAlias: 'customer_id', toField: 'order_id' },
     ]);
+    // Never offered when the runtime would refuse it (RFC 0009 evaluation E4):
+    // the next level is already grouped, or the tile shows row details.
+    expect(datasetHierarchyDrillCandidates(descriptor, { ...query, dimensions: [{ field: 'customer_id' }, { field: 'order_id' }] })).toEqual([]);
+    expect(datasetHierarchyDrillCandidates(descriptor, { ...query, detail: true, detailColumns: ['customer_id', 'order_id'], limit: 100 })).toEqual([]);
     expect(buildDatasetHierarchyDrill(descriptor, query, 'customer_id', { customer_id: 'C-001', revenue: 70 })).toMatchObject({
       status: 'ready',
       candidate: { hierarchyId: 'commerce_customer_orders', toField: 'order_id' },

@@ -279,7 +279,7 @@ export function linkedComponentCount(draft: AppStudioBuildDraft, filterId: strin
     if (!filter) return count;
     return count + page.layout.items.filter((tile) => {
       if (filter.scope?.tileIds && !filter.scope.tileIds.includes(tile.i)) return false;
-      if (tile.query && tile.sourceId && tile.sourceRevision) {
+      if ((tile.query || tile.driver) && tile.sourceId && tile.sourceRevision) {
         return Boolean(page.datasets?.some((dataset) => {
           if (dataset.sourceId !== tile.sourceId || dataset.sourceRevision !== tile.sourceRevision) return false;
           const binding = filter.datasetBindings?.[dataset.id];

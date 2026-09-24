@@ -15,7 +15,7 @@
  * outside it, so generated markup can neither fetch data nor fake a badge.
  * Browser-safe: no Node imports, no DOM.
  */
-import { validateStoryText, type StoryBindingCatalog } from './story-bindings.js';
+import { bindingCaption, validateStoryText, type StoryBindingCatalog } from './story-bindings.js';
 
 export const MAX_CANVAS_HTML = 60_000;
 const MAX_DEPTH = 40;
@@ -29,7 +29,9 @@ const ALLOWED_TAGS = new Set([
 const VOID_TAGS = new Set(['br', 'hr']);
 const GLOBAL_ATTRS = new Set(['class', 'id', 'style', 'title', 'role', 'lang', 'dir']);
 const TAG_ATTRS: Record<string, Set<string>> = {
-  'dql-value': new Set(['bind']),
+  // show="label" draws the binding's caption instead of its number, so a
+  // figure's words can never disagree with the number beside them.
+  'dql-value': new Set(['bind', 'show']),
   'dql-tile': new Set(['tile', 'height']),
   th: new Set(['colspan', 'rowspan', 'scope']),
   td: new Set(['colspan', 'rowspan']),
@@ -155,6 +157,10 @@ export function checkCanvasHtml(html: string, page?: { catalog?: StoryBindingCat
         continue;
       }
       if (name === 'style' && UNSAFE_CSS.test(value)) { issues.push({ code: 'UNSAFE_CSS', message: 'Inline styles may not load files or run code.' }); continue; }
+      if (name === 'show' && value !== 'label' && value !== 'value') {
+        issues.push({ code: 'UNSAFE_ATTRIBUTE', message: 'show must be "label" or "value".' });
+        continue;
+      }
       if ((name === 'colspan' || name === 'rowspan' || name === 'start' || name === 'height') && !/^\d{1,4}$/.test(value)) {
         issues.push({ code: 'UNSAFE_ATTRIBUTE', message: `${name} must be a whole number.` });
         continue;
@@ -211,6 +217,9 @@ export function fillCanvasHtml(checkedHtml: string, catalog: StoryBindingCatalog
     .replace(/<dql-value([^>]*)><\/dql-value>/g, (_, attrs: string) => {
       const key = decode(/bind="([^"]*)"/.exec(attrs)?.[1] ?? '');
       const binding = catalog[key];
+      if (/show="label"/.test(attrs)) {
+        return `<span class="dql-value-label" data-bind="${escapeHtml(key)}" data-show="label"${pathOf(attrs)}>${binding ? escapeHtml(bindingCaption(binding, catalog)) : '—'}</span>`;
+      }
       return binding
         ? `<span class="dql-value" data-bind="${escapeHtml(key)}"${pathOf(attrs)} title="${escapeHtml(binding.label)}">${escapeHtml(binding.display)}</span>`
         : `<span class="dql-value missing" data-bind="${escapeHtml(key)}"${pathOf(attrs)} title="${escapeHtml(`${key} is not in this run's results`)}">—</span>`;
@@ -351,6 +360,34 @@ export function insertCanvasNodes(nodes: CanvasNode[], inserted: CanvasNode[], a
     return [...children.slice(0, at), ...inserted, ...children.slice(at)];
   });
   return { nodes: next, path: [...parent, at] };
+}
+
+/**
+ * Change which number a <dql-value> shows, and keep the words about it true:
+ * inside the same piece (`blockPath`), captions bound to the old number
+ * (`show="label"`) follow it, and a caption typed as plain text that names
+ * the old number (`oldCaptions`) becomes a bound caption of the new one.
+ * RFC 0009 evaluation D4: the number changed while its caption kept naming
+ * the old one.
+ */
+export function rebindCanvasValue(nodes: CanvasNode[], valuePath: CanvasPath, blockPath: CanvasPath, newKey: string, oldCaptions: string[] = []): CanvasNode[] {
+  const value = canvasNodeAt(nodes, valuePath);
+  if (value?.kind !== 'element' || value.tag !== 'dql-value') return nodes;
+  const oldKey = value.attrs.find(([name]) => name === 'bind')?.[1];
+  const captions = new Set(oldCaptions.map((caption) => caption.trim().toLowerCase()).filter(Boolean));
+  const boundLabel = (): CanvasNode => ({ kind: 'element', tag: 'dql-value', attrs: [['bind', newKey], ['show', 'label']], children: [] });
+  const relabel = (node: CanvasNode): CanvasNode => {
+    if (node.kind === 'text') return captions.has(node.text.trim().toLowerCase()) ? boundLabel() : node;
+    if (node.tag === 'dql-value') {
+      const bind = node.attrs.find(([name]) => name === 'bind')?.[1];
+      const label = node.attrs.some(([name, attr]) => name === 'show' && attr === 'label');
+      return label && bind === oldKey ? boundLabel() : node;
+    }
+    return { ...node, children: node.children.map(relabel) };
+  };
+  const rebound = replaceCanvasNode(nodes, valuePath, { ...value, attrs: [...value.attrs.filter(([name]) => name !== 'bind'), ['bind', newKey]] });
+  const block = blockPath.length && blockPath.length < valuePath.length ? canvasNodeAt(rebound, blockPath) : undefined;
+  return block?.kind === 'element' ? replaceCanvasNode(rebound, blockPath, relabel(block)) : rebound;
 }
 
 const INLINE_TAGS = new Set(['span', 'strong', 'em', 'b', 'i', 'small', 'mark', 'br', 'dql-value']);

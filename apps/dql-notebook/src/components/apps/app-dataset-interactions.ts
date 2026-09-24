@@ -58,13 +58,16 @@ export function datasetHierarchyDrillCandidates(
   descriptor: DatasetDescriptor,
   query: TileQuery,
 ): DatasetHierarchyDrillCandidate[] {
+  // Never offer a drill the runtime would refuse: row details, or a next level already grouped.
+  if (query.detail) return [];
+  const grouped = new Set(query.dimensions.map((dimension) => dimension.field.toLowerCase()));
   return query.dimensions.flatMap((dimension) => {
     const field = datasetPhysicalFieldForReference(descriptor, dimension.field);
     const hierarchyId = field?.hierarchy?.id;
     if (!field || !hierarchyId) return [];
     const levels = datasetHierarchyFields(descriptor, hierarchyId);
     const next = levels.find((candidate) => candidate.hierarchy?.level === field.hierarchy!.level + 1);
-    if (!next) return [];
+    if (!next || grouped.has(next.name.toLowerCase())) return [];
     const fromAlias = dimension.alias ?? (dimension.timeGrain ? `${field.name}_${dimension.timeGrain}` : field.name);
     return [{ hierarchyId, fromField: field.name, fromAlias, toField: next.name }];
   });

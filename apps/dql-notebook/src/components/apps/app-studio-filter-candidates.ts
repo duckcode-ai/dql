@@ -129,7 +129,7 @@ export function filterTileMappingsForField(
 ): StudioFilterTileMapping[] {
   return pages.flatMap((page) => dataTiles(page).map((tile) => {
     const datasetMapping = datasetMappingForTile(page, tile, fieldId, boundSources);
-    if (tile.query) {
+    if (tile.query || tile.driver) {
       const sourceName = sourceNameForTile(tile, catalog, boundSources);
       if (datasetMapping) {
         return {
@@ -202,7 +202,8 @@ export function studioFilterMappingKey(pageId: string, tileId: string): string {
 }
 
 function dataTiles(page: StudioPage): StudioTile[] {
-  return page.layout.items.filter((tile) => Boolean(tile.block || tile.semantic || tile.draftAnalysis || tile.query));
+  // A driver tile explains a Dataset tile and follows the same Dataset filters.
+  return page.layout.items.filter((tile) => Boolean(tile.block || tile.semantic || tile.draftAnalysis || tile.query || tile.driver));
 }
 
 function governedFieldsForTile(
@@ -238,7 +239,7 @@ function datasetMappingForTile(
   fieldId: string,
   boundSources: AppStudioBuildDraft['sources'],
 ): { datasetId: string; field: string } | null {
-  if (!tile.query || !tile.sourceId || !tile.sourceRevision) return null;
+  if (!(tile.query || tile.driver) || !tile.sourceId || !tile.sourceRevision) return null;
   const source = boundSources.find((candidate) => candidate.id === tile.sourceId);
   const descriptor = source?.capabilities?.dataset;
   const binding = page.datasets?.find((candidate) => (

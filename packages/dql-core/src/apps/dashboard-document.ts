@@ -748,7 +748,9 @@ function validateDashboardV3References(
           err(`filters.${filter.id}.datasetBindings.${datasetId}.tileIds references unknown tile ${tileId}`);
           continue;
         }
-        if (!tile.query || tile.sourceId !== dataset.sourceId || tile.sourceRevision !== dataset.sourceRevision) {
+        // A driver tile runs comparison queries on its source's Dataset, so it
+        // follows that Dataset's filters like a field query does.
+        if (!(tile.query || tile.driver) || tile.sourceId !== dataset.sourceId || tile.sourceRevision !== dataset.sourceRevision) {
           err(`filters.${filter.id}.datasetBindings.${datasetId}.tileIds tile ${tileId} does not resolve to that exact Dataset binding`);
         }
       }

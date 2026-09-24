@@ -7,6 +7,7 @@ import type { CellChartConfig, QueryResult } from '../../store/types';
 import type { ThemeMode } from '../../themes/notebook-theme';
 import { mountLiveChart, renderOptionToSvg, type MarkPointer } from '../output/echarts/EChartsChart';
 import { buildVizOption, ECHARTS_CHART_TYPES } from '../output/echarts/viz-option';
+import { isDarkThemeMode } from '../output/chart-palettes';
 import type { ChartType } from '../output/chart-helpers';
 import { encodedTileResult, mergeDashboardTileChartConfig, normalizeDashboardChartType } from './dashboard-chart-config';
 import { formatDriverNumber } from './driver-probe';
@@ -87,7 +88,7 @@ export function CanvasPageFrame({
     const chartWidth = Math.min(Math.max(360, width - 40), 640);
     const filled = fillCanvasHtml(annotate ? annotateCanvasHtml(checked.html) : checked.html, catalog, (tileId, tileHeight) => drawCanvasTile(items.find((item) => item.i === tileId), tiles.find((tile) => tile.tileId === tileId), catalog, themeMode, chartWidth, tileHeight));
     // A revision change must redraw even when the markup is the same.
-    const doc = canvasDocument(filled, themeVariables(hostRef.current)) + (editing ? `<!--${editing.revision}-->` : '');
+    const doc = canvasDocument(filled, themeVariables(hostRef.current), isDarkThemeMode(themeMode)) + (editing ? `<!--${editing.revision}-->` : '');
     frozenDoc.current = doc;
     return doc;
   }, [catalog, checked, items, themeMode, tiles, width, annotate, editing?.frozen, editing?.revision]);
@@ -204,8 +205,10 @@ export function CanvasPageFrame({
 }
 
 /** The frame's document: a CSP that allows only inline styles and data images, and the host's theme. */
-function canvasDocument(body: string, variables: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"><style>:root{${variables}}html,body{margin:0;background:transparent}body{padding:4px;font:400 15px/1.55 var(--dql-font);color:var(--dql-ink);font-variant-numeric:tabular-nums}.dql-value{font-weight:600}.dql-value.missing{color:var(--dql-muted)}.dql-tile{margin:8px 0;padding:12px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface);overflow:hidden}.dql-tile svg{display:block;width:100%;max-width:640px;height:auto}.dql-tile-live svg{max-width:none;width:100%;height:100%}.dql-tile-title{margin:0 0 8px;font-size:13px;font-weight:600}.dql-tile-kpi{font:600 32px/1.2 var(--dql-font-display)}.dql-tile table{width:100%;border-collapse:collapse;font-size:13px}.dql-tile th,.dql-tile td{padding:4px 8px;border-bottom:1px solid var(--dql-line);text-align:left}.dql-tile td.num{text-align:right}.dql-tile .muted{color:var(--dql-muted);font-size:12px}.dql-tile ol{margin:6px 0 0;padding-left:18px}</style></head><body>${body}</body></html>`;
+function canvasDocument(body: string, variables: string, dark = false): string {
+  // The frame's colour scheme matches the host's: a light scheme inside a dark
+  // page is painted white behind the page's light text (RFC 0009 evaluation).
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="${dark ? 'dark' : 'light'}"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"><style>:root{${variables};color-scheme:${dark ? 'dark' : 'light'}}html,body{margin:0;background:transparent}body{padding:4px;font:400 15px/1.55 var(--dql-font);color:var(--dql-ink);font-variant-numeric:tabular-nums}.dql-value{font-weight:600}.dql-value.missing{color:var(--dql-muted)}.dql-tile{margin:8px 0;padding:12px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface);overflow:hidden}.dql-tile svg{display:block;width:100%;max-width:640px;height:auto}.dql-tile-live svg{max-width:none;width:100%;height:100%}.dql-tile-title{margin:0 0 8px;font-size:13px;font-weight:600}.dql-tile-kpi{font:600 32px/1.2 var(--dql-font-display)}.dql-tile table{width:100%;border-collapse:collapse;font-size:13px}.dql-tile th,.dql-tile td{padding:4px 8px;border-bottom:1px solid var(--dql-line);text-align:left}.dql-tile td.num{text-align:right}.dql-tile .muted{color:var(--dql-muted);font-size:12px}.dql-tile ol{margin:6px 0 0;padding-left:18px}</style></head><body>${body}</body></html>`;
 }
 
 function themeVariables(node: HTMLElement | null): string {

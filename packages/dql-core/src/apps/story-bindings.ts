@@ -130,6 +130,21 @@ export function figureLabel(label: string): string {
   return title.toLowerCase() === field.toLowerCase() ? title : label;
 }
 
+/**
+ * A binding's caption in plain words, as readers see it beside the number:
+ * "Revenue by region — revenue for US" reads "Revenue for US", and a
+ * leader's value names the leader: "Revenue of the top region (US)".
+ */
+export function bindingCaption(binding: Pick<StoryBinding, 'label'> & Partial<Pick<StoryBinding, 'key' | 'tileId'>>, catalog?: StoryBindingCatalog): string {
+  if (binding.key?.endsWith('.leader_value') && binding.tileId && catalog) {
+    const leader = catalog[`${binding.tileId}.leader`];
+    const parts = leader ? / — highest (.+) by (.+)$/.exec(leader.label) : null;
+    if (leader && parts) return `${parts[2]!.charAt(0).toUpperCase()}${parts[2]!.slice(1)} of the top ${parts[1]} (${leader.display})`;
+  }
+  const rest = binding.label.includes(' — ') ? binding.label.slice(binding.label.indexOf(' — ') + 3) : binding.label;
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
+
 export interface StoryTextIssue {
   code: 'NAKED_NUMBER' | 'UNKNOWN_BINDING' | 'EMPTY_BINDING' | 'TOO_LONG';
   message: string;

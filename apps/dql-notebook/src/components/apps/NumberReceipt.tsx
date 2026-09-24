@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import type { StoryBinding, StoryBindingCatalog } from '@duckcodeailabs/dql-core/apps/story-bindings';
+import { bindingCaption, type StoryBinding, type StoryBindingCatalog } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import type { ReaderTrust } from '@duckcodeailabs/dql-core/apps/reader-trust';
 import type { DashboardDocumentResponse, DashboardRunResponse } from '../../api/client';
 import { readerTileReceipt, readerTileTrust, type ReceiptRow } from './reader-trust';
@@ -19,14 +19,7 @@ export interface NumberReceiptInfo {
 
 /** "Revenue by region — revenue for US" reads as "Revenue for US" under its tile's title. */
 export function plainBindingLabel(binding: Pick<StoryBinding, 'label'> & Partial<Pick<StoryBinding, 'key' | 'tileId'>>, catalog?: StoryBindingCatalog): string {
-  // "Revenue of that leader" names the leader: "Revenue of the top customer id (C-001)".
-  if (binding.key?.endsWith('.leader_value') && binding.tileId && catalog) {
-    const leader = catalog[`${binding.tileId}.leader`];
-    const parts = leader ? / — highest (.+) by (.+)$/.exec(leader.label) : null;
-    if (leader && parts) return `${parts[2]!.charAt(0).toUpperCase()}${parts[2]!.slice(1)} of the top ${parts[1]} (${leader.display})`;
-  }
-  const rest = binding.label.includes(' — ') ? binding.label.slice(binding.label.indexOf(' — ') + 3) : binding.label;
-  return rest.charAt(0).toUpperCase() + rest.slice(1);
+  return bindingCaption(binding, catalog);
 }
 
 const READER_ROWS = new Set(['Source', 'Owner', 'Filters', 'Ran', 'Cached at']);

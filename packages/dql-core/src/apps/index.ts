@@ -171,6 +171,7 @@ export type { AppAnalyticalContextV1 } from './app-analytical-context.js';
 
 export {
   buildStoryBindingCatalog,
+  bindingCaption,
   figureLabel,
   validateStoryText,
   splitStoryText,
@@ -184,7 +185,7 @@ export type { StoryBinding, StoryBindingCatalog, StoryBindingTileInput, StoryTex
 
 export {
   checkCanvasHtml, fillCanvasHtml, escapeHtml, MAX_CANVAS_HTML, annotateCanvasHtml, canvasContainerPath, canvasNodeAt, canvasPieceKind,
-  insertCanvasNodes, moveCanvasNode, parseCanvasHtml, removeCanvasNode, replaceCanvasNode, serializeCanvasNodes,
+  insertCanvasNodes, moveCanvasNode, parseCanvasHtml, rebindCanvasValue, removeCanvasNode, replaceCanvasNode, serializeCanvasNodes,
 } from './canvas-page.js';
 export type { CanvasIssue, CanvasNode, CanvasPath, CanvasPieceKind, CheckedCanvas } from './canvas-page.js';
 export { READER_TRUST_LABELS, isDataTileForTrust, readerTileTrust, readerTrustCounts, readerTrustSummary } from './reader-trust.js';

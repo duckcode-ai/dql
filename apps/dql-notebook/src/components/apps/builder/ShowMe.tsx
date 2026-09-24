@@ -113,9 +113,20 @@ export function ShowMePanel({
   const shown = suggestions.find((entry) => entry.chart === pointed)
     ?? suggestions.find((entry) => entry.chart === current)
     ?? suggestions.find((entry) => entry.recommended);
+  // The chart drawn now no longer fits these fields (e.g. more than eight
+  // series): say so, and offer the best one, instead of a quietly incomplete chart.
+  const currentFit = suggestions.find((entry) => entry.chart === current);
+  const best = suggestions.find((entry) => entry.recommended);
+  const misfit = currentFit && !currentFit.available && best && best.chart !== current ? { currentFit, best } : null;
   return (
     <section className="show-me" aria-label="Show Me">
       <span className="show-me-title">Show Me</span>
+      {misfit ? (
+        <div className="show-me-misfit" role="status">
+          <p><strong>{misfit.currentFit.label} no longer fits.</strong> {misfit.currentFit.reason}</p>
+          <button type="button" disabled={disabled} onClick={() => onPick(misfit.best)}>Use {misfit.best.label}</button>
+        </div>
+      ) : null}
       <div className="show-me-grid" role="radiogroup" aria-label="Chart type" onMouseLeave={() => setPointed(null)}>
         {suggestions.map((suggestion) => {
           const Icon = ICONS[suggestion.chart];
@@ -127,7 +138,7 @@ export function ShowMePanel({
               role="radio"
               aria-checked={on}
               aria-disabled={!suggestion.available || disabled}
-              aria-describedby={reasonId}
+              aria-describedby={`${reasonId}-${suggestion.chart}`}
               className={[on && 'on', !suggestion.available && 'unfit', suggestion.recommended && 'best'].filter(Boolean).join(' ') || undefined}
               title={suggestion.reason}
               onMouseEnter={() => setPointed(suggestion.chart)}
@@ -142,8 +153,12 @@ export function ShowMePanel({
           );
         })}
       </div>
+      {/* Each chart carries its own reason, so keyboard focus announces the right one. */}
+      <div className="visually-hidden">
+        {suggestions.map((suggestion) => <span key={suggestion.chart} id={`${reasonId}-${suggestion.chart}`}>{suggestion.available ? suggestion.reason : `Does not fit: ${suggestion.reason}`}</span>)}
+      </div>
       {shown ? (
-        <p id={reasonId} className={`show-me-reason ${shown.available ? '' : 'unfit'}`.trim()} aria-live="polite">
+        <p id={reasonId} className={`show-me-reason ${shown.available ? '' : 'unfit'}`.trim()} aria-hidden="true">
           <strong>{shown.label}{shown.available ? '' : ' does not fit'}</strong>
           {' '}{shown.reason}
         </p>

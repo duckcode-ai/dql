@@ -1322,6 +1322,9 @@ export const APP_STUDIO_V2_STYLES = `
 .show-me-grid button.unfit svg { opacity:.5; }
 .show-me-grid button[aria-disabled="true"]:not(.unfit) { cursor:default; }
 .show-me-best { position:absolute; top:-6px; right:4px; padding:0 5px; border-radius:999px; background:var(--accent); color:var(--accent-fg); font-size:11px; font-weight:600; line-height:14px; }
+.show-me-misfit { display:grid; gap:6px; padding:8px 10px; border:1px solid var(--status-warning-border, rgba(168,100,26,.35)); border-radius:8px; background:var(--status-warning-bg, rgba(211,138,31,.08)); }
+.show-me-misfit p { margin:0; color:var(--text-primary); font-size:12px; line-height:1.4; }
+.show-me-misfit button { justify-self:start; height:28px; padding:0 10px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:var(--accent-fg); font-size:12px; font-weight:600; cursor:pointer; }
 .show-me-reason { margin:0; min-height:32px; color:var(--text-secondary); font-size:12px; line-height:1.4; }
 .show-me-reason strong { color:var(--text-primary); font-weight:600; }
 .show-me-reason.unfit strong { color:var(--text-secondary); }

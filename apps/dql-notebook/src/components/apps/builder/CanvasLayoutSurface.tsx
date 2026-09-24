@@ -8,6 +8,7 @@ import {
   insertCanvasNodes,
   moveCanvasNode,
   parseCanvasHtml,
+  rebindCanvasValue,
   removeCanvasNode,
   replaceCanvasNode,
   serializeCanvasNodes,
@@ -16,7 +17,7 @@ import {
   type CanvasPath,
   type CanvasPieceKind,
 } from '@duckcodeailabs/dql-core/apps/canvas-page';
-import type { StoryBinding, StoryBindingCatalog } from '@duckcodeailabs/dql-core/apps/story-bindings';
+import { bindingCaption, figureLabel, type StoryBinding, type StoryBindingCatalog } from '@duckcodeailabs/dql-core/apps/story-bindings';
 import type { CanvasFrameEditing } from '../CanvasPageFrame';
 
 type PageTile = { tileId: string; title: string };
@@ -41,6 +42,7 @@ const EDIT_STYLES = `
 [contenteditable="true"]:focus{outline-style:solid}
 .dql-value{cursor:pointer;border-radius:4px;box-shadow:0 0 0 2px var(--dql-accent-soft);background:var(--dql-accent-soft)}
 .dql-tile{cursor:pointer}
+.dql-value-label{border-bottom:1px dotted var(--dql-accent)}
 body{padding:10px}
 `;
 
@@ -189,7 +191,8 @@ export function CanvasLayoutSurface({
 
   function startTyping(element: HTMLElement, path: CanvasPath, selectWords = false) {
     element.contentEditable = 'true';
-    element.querySelectorAll<HTMLElement>('.dql-value').forEach((chip) => { chip.contentEditable = 'false'; });
+    // Numbers and their bound captions are data: they move with the words but cannot be typed into.
+    element.querySelectorAll<HTMLElement>('.dql-value, .dql-value-label').forEach((chip) => { chip.contentEditable = 'false'; });
     typingRef.current = { element, path, dirty: false };
     setTyping(true);
     if (selectWords) {
@@ -215,9 +218,10 @@ export function CanvasLayoutSurface({
     setTyping(false);
     if (!dirty) return true;
     const clone = element.cloneNode(true) as HTMLElement;
-    clone.querySelectorAll('.dql-value[data-bind]').forEach((chip) => {
+    clone.querySelectorAll('.dql-value[data-bind], .dql-value-label[data-bind]').forEach((chip) => {
       const value = element.ownerDocument.createElement('dql-value');
       value.setAttribute('bind', chip.getAttribute('data-bind') ?? '');
+      if (chip.classList.contains('dql-value-label')) value.setAttribute('show', 'label');
       chip.replaceWith(value);
     });
     for (const node of [clone, ...Array.from(clone.querySelectorAll('*'))]) {
@@ -421,7 +425,14 @@ export function CanvasLayoutSurface({
     if (kind === 'change-number') {
       const path = latest.current.selected;
       const node = path ? canvasNodeAt(latest.current.nodes, path) : undefined;
-      if (path && node?.kind === 'element') save(replaceCanvasNode(latest.current.nodes, path, { ...node, attrs: [['bind', binding.key]] }), path);
+      if (!path || node?.kind !== 'element') return;
+      // The words about the number change with it: bound captions in the same
+      // piece follow, and a typed caption naming the old number is replaced.
+      const oldKey = node.attrs.find(([name]) => name === 'bind')?.[1] ?? '';
+      const old = latest.current.catalog[oldKey];
+      const oldTile = old ? latest.current.tiles.find((tile) => tile.tileId === old.tileId)?.title : undefined;
+      const captions = old ? [old.label, figureLabel(old.label), bindingCaption(old, latest.current.catalog), wordsOnly(old.label), wordsOnly(bindingCaption(old, latest.current.catalog)), ...(oldTile ? [oldTile] : [])] : [];
+      save(rebindCanvasValue(latest.current.nodes, path, path.slice(0, container.length + 1), binding.key, captions), path);
       return;
     }
     if (kind === 'insert-number' && typingRef.current) {
@@ -444,7 +455,8 @@ export function CanvasLayoutSurface({
       return;
     }
     add([el('div', [
-      el('small', [text(wordsOnly(/^[^.[\]]+\.[^.[\]]+$/.test(binding.key) && !binding.key.endsWith('.leader_value') ? latest.current.tiles.find((tile) => tile.tileId === binding.tileId)?.title ?? binding.label : binding.label))]),
+      // The caption is bound too, so it always names the number beside it.
+      el('small', [el('dql-value', [], [['bind', binding.key], ['show', 'label']])]),
       el('strong', [el('dql-value', [], [['bind', binding.key]])], [['style', 'display:block;font-size:26px;line-height:1.2']]),
     ], [['style', 'display:inline-grid;gap:2px;margin:4px 0;padding:12px 16px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface)']])]);
   }
@@ -477,7 +489,7 @@ export function CanvasLayoutSurface({
       <button type="button" className="icon" onMouseDown={hold} disabled={disabled || !siblingMoves.down} aria-label="Move down" title="Move down (Alt+↓)" onClick={() => move(1)}><ArrowDown size={14} /></button>
       {inFrame ? <button type="button" className="icon" onMouseDown={hold} disabled={disabled} aria-label="Select the section around it" title="Select the section around it" onClick={selectParent}><SquareDashed size={14} /></button> : null}
       <button type="button" className="icon danger" onMouseDown={hold} disabled={disabled} aria-label={selectedKind === 'tile' ? 'Remove from layout' : 'Delete'} title={selectedKind === 'tile' ? 'Remove from this layout. The tile stays on the page.' : 'Delete (Del)'} onClick={remove}><Trash2 size={14} /></button>
-      {popover && (popover.kind === 'insert-number' || popover.kind === 'change-number') ? <NumberList numbers={numbers} tiles={tiles} hold={hold} searchable={popover.kind === 'change-number'} onPick={pickNumber} /> : null}
+      {popover && (popover.kind === 'insert-number' || popover.kind === 'change-number') ? <NumberList numbers={numbers} catalog={catalog} tiles={tiles} hold={hold} searchable={popover.kind === 'change-number'} onPick={pickNumber} /> : null}
     </div>
   ) : null;
 
@@ -489,7 +501,7 @@ export function CanvasLayoutSurface({
         <button type="button" onMouseDown={hold} disabled={disabled} onClick={() => add([el('p', [text('Write something here.')])], true)}><Pilcrow size={14} aria-hidden="true" /> Text</button>
         <span className="layout-addbar-menu">
           <button type="button" onMouseDown={hold} disabled={disabled || !numbers.length} aria-expanded={popover?.kind === 'add-number'} title={numbers.length ? undefined : 'Run the page to list its numbers'} onClick={() => setPopover(popover?.kind === 'add-number' ? null : { kind: 'add-number' })}><Hash size={14} aria-hidden="true" /> Number</button>
-          {popover?.kind === 'add-number' ? <NumberList numbers={numbers} tiles={tiles} hold={hold} searchable onPick={pickNumber} /> : null}
+          {popover?.kind === 'add-number' ? <NumberList numbers={numbers} catalog={catalog} tiles={tiles} hold={hold} searchable onPick={pickNumber} /> : null}
         </span>
         <span className="layout-addbar-menu">
           <button type="button" onMouseDown={hold} disabled={disabled || !tiles.length} aria-expanded={popover?.kind === 'add-tile'} onClick={() => setPopover(popover?.kind === 'add-tile' ? null : { kind: 'add-tile' })}><BarChart3 size={14} aria-hidden="true" /> Tile</button>
@@ -513,15 +525,12 @@ export function CanvasLayoutSurface({
 }
 
 /** Numbers from the page's data, grouped under their tile, with a search when the list is long. */
-export function NumberList({ numbers, tiles, hold, searchable, onPick }: { numbers: StoryBinding[]; tiles: PageTile[]; hold: (event: React.MouseEvent) => void; searchable: boolean; onPick: (binding: StoryBinding) => void }): JSX.Element {
+export function NumberList({ numbers, catalog, tiles, hold, searchable, onPick }: { numbers: StoryBinding[]; catalog?: StoryBindingCatalog; tiles: PageTile[]; hold: (event: React.MouseEvent) => void; searchable: boolean; onPick: (binding: StoryBinding) => void }): JSX.Element {
   const [query, setQuery] = useState('');
   const needle = query.trim().toLowerCase();
   const titleOf = (tileId: string) => tiles.find((tile) => tile.tileId === tileId)?.title ?? tileId;
-  // "Revenue by region — revenue for US" reads as "Revenue for US" under its tile.
-  const short = (binding: StoryBinding) => {
-    const rest = binding.label.includes(' — ') ? binding.label.slice(binding.label.indexOf(' — ') + 3) : binding.label;
-    return rest.charAt(0).toUpperCase() + rest.slice(1);
-  };
+  // "Revenue by region — revenue for US" reads as "Revenue for US" under its tile, and a leader is named.
+  const short = (binding: StoryBinding) => bindingCaption(binding, catalog);
   const shown = numbers.filter((binding) => !needle || binding.label.toLowerCase().includes(needle) || binding.display.toLowerCase().includes(needle));
   const groups = Array.from(new Set(shown.map((binding) => binding.tileId)));
   return (

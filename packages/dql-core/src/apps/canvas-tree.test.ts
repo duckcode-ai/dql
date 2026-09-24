@@ -9,6 +9,7 @@ import {
   insertCanvasNodes,
   moveCanvasNode,
   parseCanvasHtml,
+  rebindCanvasValue,
   removeCanvasNode,
   replaceCanvasNode,
   serializeCanvasNodes,
@@ -93,5 +94,33 @@ describe('editing a Custom layout as a tree', () => {
     expect(kind([1, 3])).toBe('tile');
     expect(canvasPieceKind(el('hr'))).toBe('rule');
     expect(canvasPieceKind(el('ul', [el('li', [text('a')])]))).toBe('list');
+  });
+});
+
+describe('changing a number keeps its caption true (RFC 0009 evaluation D4)', () => {
+  const catalog = {
+    'kpi.orders[US]': { key: 'kpi.orders[US]', tileId: 'kpi', label: 'Order count by region — order count for US', kind: 'number' as const, value: 5, display: '5' },
+    'kpi.orders[CA]': { key: 'kpi.orders[CA]', tileId: 'kpi', label: 'Order count by region — order count for CA', kind: 'number' as const, value: 2, display: '2' },
+  };
+
+  it('draws a bound caption as the words for its number, and refuses other show values', () => {
+    const html = '<div><small><dql-value bind="kpi.orders[US]" show="label"></dql-value></small><strong><dql-value bind="kpi.orders[US]"></dql-value></strong></div>';
+    expect(checkCanvasHtml(html).issues).toEqual([]);
+    const filled = fillCanvasHtml(checkCanvasHtml(html).html, catalog, () => '');
+    expect(filled).toContain('<span class="dql-value-label" data-bind="kpi.orders[US]" data-show="label">Order count for US</span>');
+    expect(filled).toContain('>5</span>');
+    expect(checkCanvasHtml('<dql-value bind="x" show="script"></dql-value>').issues[0]?.code).toBe('UNSAFE_ATTRIBUTE');
+  });
+
+  it('moves a bound caption with its number', () => {
+    const nodes = parseCanvasHtml(checkCanvasHtml('<div><small><dql-value bind="kpi.orders[US]" show="label"></dql-value></small><strong><dql-value bind="kpi.orders[US]"></dql-value></strong></div>').html);
+    const next = serializeCanvasNodes(rebindCanvasValue(nodes, [0, 1, 0], [0], 'kpi.orders[CA]'));
+    expect(next).toBe('<div><small><dql-value bind="kpi.orders[CA]" show="label"></dql-value></small><strong><dql-value bind="kpi.orders[CA]"></dql-value></strong></div>');
+  });
+
+  it('turns a typed caption naming the old number into a bound caption of the new one, and leaves other words alone', () => {
+    const nodes = parseCanvasHtml(checkCanvasHtml('<div><small>Order Count by region — order count for US</small><strong><dql-value bind="kpi.orders[US]"></dql-value></strong><p>Orders by region</p></div>').html);
+    const next = serializeCanvasNodes(rebindCanvasValue(nodes, [0, 1, 0], [0], 'kpi.orders[CA]', ['Order count by region — order count for US']));
+    expect(next).toBe('<div><small><dql-value bind="kpi.orders[CA]" show="label"></dql-value></small><strong><dql-value bind="kpi.orders[CA]"></dql-value></strong><p>Orders by region</p></div>');
   });
 });

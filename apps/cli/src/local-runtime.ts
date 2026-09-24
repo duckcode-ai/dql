@@ -19878,7 +19878,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 tileType: 'dataset',
                 title: item.title ?? discoveryDescriptor?.label ?? 'Dataset tile',
                 error: err instanceof Error ? err.message : String(err),
-                trustState: discoveryDescriptor?.trust ?? 'review_required',
+                // A failed or rejected query has no numbers to trust, whatever
+                // the Dataset's own certification (RFC 0009 evaluation J1).
+                trustState: 'review_required',
                 dataset: {
                   sourceId: item.sourceId,
                   sourceRevision: item.sourceRevision,
@@ -29229,13 +29231,17 @@ function datasetHierarchyDrillCandidates(
   descriptor: DatasetDescriptor,
   query: TileQuery,
 ): Array<{ hierarchyId: string; fromField: string; fromAlias: string; toField: string }> {
+  // A row-detail tile, or a next level the tile already groups by, would be
+  // refused as ambiguous when run, so it is never offered (RFC 0009 E4).
+  if (query.detail) return [];
+  const grouped = new Set(query.dimensions.map((dimension) => dimension.field.toLowerCase()));
   return query.dimensions.flatMap((dimension) => {
     const field = descriptor.fields.find((candidate) => candidate.kind === 'physical'
       && (candidate.name === dimension.field || candidate.qualifiedId === dimension.field));
     if (!field || field.kind !== 'physical' || !field.hierarchy?.id) return [];
     const levels = datasetHierarchyFields(descriptor, field.hierarchy.id);
     const next = levels.find((candidate) => candidate.hierarchy?.level === field.hierarchy!.level + 1);
-    if (!next) return [];
+    if (!next || grouped.has(next.name.toLowerCase())) return [];
     return [{
       hierarchyId: field.hierarchy.id,
       fromField: field.name,

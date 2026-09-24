@@ -3797,6 +3797,57 @@ describe('Driver tiles over a real DuckDB Dataset (RFC 0008 step 7)', () => {
       });
       expect(refused.status).toBe(400);
       expect(refused.text).toContain('Dataset tile on this page');
+
+      // RFC 0009 step 6a. An explanation narrowed to what the reader clicked:
+      // US alone went from nothing to 10, and region is no longer a breakdown.
+      const usProbe = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}/dashboards/overview/run`, 'POST', {
+        driverProbe: { fromTileId: trend.i, driver: { ...driver, dimensions: ['region', 'customer_id'], filters: [{ field: 'region', op: 'eq', values: ['US'] }] } },
+      });
+      expect(usProbe.status, usProbe.text).toBe(200);
+      expect(usProbe.body.tiles[0].driver.headline).toMatchObject({ current: '10', delta: '10' });
+      expect(usProbe.body.tiles[0].driver.dimensions.map((dimension: any) => dimension.field)).toEqual(['customer_id']);
+
+      // Explore runs inside the page run: the Region filter scoped to this
+      // tile reaches the view, so CA's customers only.
+      const explore = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}/dashboards/overview/run`, 'POST', {
+        variables: { region: ['CA'] },
+        exploreProbe: { fromTileId: trend.i, query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] } },
+      });
+      expect(explore.status, explore.text).toBe(200);
+      expect(explore.body.tiles).toHaveLength(1);
+      expect(explore.body.tiles[0]).toMatchObject({ tileId: `${trend.i}::explore`, status: 'ok', trustState: 'certified' });
+      expect(explore.body.tiles[0].result.rows.map((row: any) => row.region)).toEqual(['CA']);
+      expect(explore.body.tiles[0].dataset.explore.fields.map((field: any) => field.name)).toEqual(expect.arrayContaining(['region', 'order_date']));
+
+      // Exclude from a clicked mark on the tile's own Dataset needs no mapping.
+      const excluded = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}/dashboards/overview/run`, 'POST', {
+        crossFilters: [{ fromTileId: trend.i, fromSourceId: trend.sourceId, fromSourceRevision: trend.sourceRevision, field: 'region', values: ['CA'], exclude: true }],
+        exploreProbe: { fromTileId: trend.i, query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] } },
+      });
+      expect(excluded.status, excluded.text).toBe(200);
+      expect(excluded.body.tiles[0].result.rows.map((row: any) => row.region)).toEqual(['US']);
+
+      // A view outside the contract is refused, and a refusal is never certified (evaluation J1).
+      const rejected = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}/dashboards/overview/run`, 'POST', {
+        exploreProbe: { fromTileId: trend.i, query: { dimensions: [{ field: 'not_a_field' }], measures: [{ measure: 'revenue' }] } },
+      });
+      expect(rejected.status, rejected.text).toBe(200);
+      expect(rejected.body.tiles[0]).toMatchObject({ tileId: `${trend.i}::explore`, status: 'error', trustState: 'review_required' });
+      expect(rejected.body.tiles[0].result).toBeUndefined();
+
+      // A driver tile may follow its Dataset's filter, and the page still
+      // saves (evaluation J4: publishing refused a filtered driver).
+      const withDriver = (await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}`, 'GET')).body.draft;
+      const followed = await request(base, `/api/app-builds/${encodeURIComponent(composed.id)}`, 'PATCH', {
+        expectedRevision: withDriver.revision,
+        expectedProposalHash: withDriver.proposalHash,
+        operations: [{
+          type: 'set_filter',
+          pageId: 'overview',
+          filter: { id: 'region', type: 'multiselect', label: 'Region', scope: { app: true }, datasetBindings: { [datasetId]: { field: 'region', tileIds: [trend.i, 'why-march'] } } },
+        }],
+      });
+      expect(followed.status, followed.text).toBe(200);
     } finally {
       await new Promise<void>((done) => server ? server.close(() => done()) : done());
       await executor.disconnect();

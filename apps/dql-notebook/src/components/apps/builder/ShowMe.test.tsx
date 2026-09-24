@@ -76,3 +76,21 @@ describe('Show Me in Studio (RFC 0009 step 2)', () => {
     expect(without).not.toContain('aria-label="Show Me"');
   });
 });
+
+describe('Show Me when the drawn chart no longer fits (RFC 0009 evaluation B1, B4)', () => {
+  it('gives every chart its own accessible reason and offers the best chart in place of one that no longer fits', () => {
+    const result: QueryResult = {
+      columns: ['order_date_month', 'customer', 'revenue'],
+      rows: Array.from({ length: 40 }, (_, index) => ({ order_date_month: '2026-01-01', customer: `C-${index}`, revenue: 10 })),
+      rowCount: 40, executionTime: 1,
+    };
+    const suggestions = tileShowMe(descriptor, overTime, overTimeQuery, result);
+    const markup = renderToStaticMarkup(<ShowMePanel suggestions={suggestions} current="line" disabled={false} onPick={() => undefined} />);
+    expect(markup).toContain('<strong>Line no longer fits.</strong>');
+    expect(markup).toContain('>Use Heatmap</button>');
+    const line = /aria-describedby="([^"]+-line)"/.exec(markup)![1];
+    expect(markup).toContain(`id="${line}">Does not fit: Customer has 40 values`);
+    const kpi = /aria-describedby="([^"]+-kpi)"/.exec(markup)![1];
+    expect(kpi).not.toBe(line);
+  });
+});

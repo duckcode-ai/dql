@@ -61,7 +61,7 @@ export function CanvasEditor({
       '<style>.page{display:grid;gap:20px}.band{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.figure{padding:14px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface)}.figure strong{display:block;font-size:24px}</style>',
       '<article class="page">',
       '<h1>Page title</h1>',
-      figures.length ? `<section class="band">${figures.map((binding) => `<div class="figure"><small>${binding.label.replace(/[<>&"]/g, '').replace(/\S*\d\S*/g, '')}</small><strong><dql-value bind="${binding.key}"></dql-value></strong></div>`).join('')}</section>` : '',
+      figures.length ? `<section class="band">${figures.map((binding) => `<div class="figure"><small><dql-value bind="${binding.key}" show="label"></dql-value></small><strong><dql-value bind="${binding.key}"></dql-value></strong></div>`).join('')}</section>` : '',
       ...pageTiles.slice(0, 12).map((tile) => `<dql-tile tile="${tile.tileId}"></dql-tile>`),
       '</article>',
     ].join('\n');
