@@ -18,6 +18,7 @@ import { MAX_STORY_BLOCKS, validateStoryText } from './story-bindings.js';
  */
 
 import { readDashboardVizStyle, type DashboardVizStyle } from './viz-style.js';
+import { encodingQueryIssues, readDashboardVizEncoding, type DashboardVizEncoding } from './viz-encoding.js';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import {
@@ -125,6 +126,8 @@ export type DashboardVizConfig = {
   options?: Record<string, unknown>;
   /** Typed chart styling shared by the Studio style panel and App AI (RFC 0008). */
   style?: DashboardVizStyle;
+  /** Shelves a Dataset tile is built from (RFC 0009 step 1); the query follows them. */
+  encoding?: DashboardVizEncoding;
 };
 
 export type DashboardDisplayMode = 'manual' | 'ai_generated' | 'block_hint';
@@ -1182,6 +1185,9 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     }
 
     const vizStyle = readDashboardVizStyle(vizRaw.style, `layout.items[${i}].viz.style`, err);
+    const vizEncoding = readDashboardVizEncoding(vizRaw.encoding, `layout.items[${i}].viz.encoding`, err);
+    if (vizEncoding && !query) err(`layout.items[${i}].viz.encoding needs a Dataset field query`);
+    if (vizEncoding && query) for (const issue of encodingQueryIssues(vizEncoding, query)) err(`layout.items[${i}].viz.encoding: ${issue}`);
     const display = readDisplayMetadata(it.display, i, allowedViz, err);
     const semanticTileConversionProvenance = readSemanticTileConversionProvenance(
       it.semanticTileConversionProvenance,
@@ -1216,6 +1222,7 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
         type: vizRaw.type as DashboardVizConfig['type'],
         options: opts,
         ...(vizStyle ? { style: vizStyle } : {}),
+        ...(vizEncoding ? { encoding: vizEncoding } : {}),
       },
       ...(display ? { display } : {}),
       ...(filterBindings.length > 0 ? { filterBindings } : {}),

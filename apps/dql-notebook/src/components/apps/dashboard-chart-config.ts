@@ -1,10 +1,64 @@
-import type { CellChartConfig, QueryResult } from '../../store/types';
+import { encodingChartColumns, type DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import type { TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
+import type { CellChartConfig, QueryResult, ResultColumnMeta } from '../../store/types';
 import { CHART_TYPE_OPTIONS } from '../output/ChartOutput';
 
 type DashboardTileChartInput = {
   title?: string;
-  viz: { type?: string; options?: Record<string, unknown>; style?: CellChartConfig['style'] };
+  query?: TileQuery;
+  viz: { type?: string; options?: Record<string, unknown>; style?: CellChartConfig['style']; encoding?: DashboardVizEncoding };
 };
+
+const timeDimension = (query: TileQuery) => (dimension: string) => query.dimensions.some((entry) => entry.field.toLowerCase() === dimension.toLowerCase() && Boolean(entry.timeGrain));
+
+/**
+ * What a tile's shelves (RFC 0009) tell the renderer, in result columns: the
+ * axes, orientation, colour and size, label and tooltip measures. Empty for a
+ * tile without shelves, which keeps drawing exactly as before.
+ */
+export function encodedChartConfig(item: DashboardTileChartInput): Partial<CellChartConfig> {
+  const encoding = item.viz.encoding;
+  if (!encoding || !item.query) return {};
+  const columns = encodingChartColumns(encoding, item.query, timeDimension(item.query));
+  return {
+    ...(columns.x ? { x: columns.x } : {}),
+    ...(columns.y ? { y: columns.y } : {}),
+    ...(columns.metrics?.length ? { metrics: columns.metrics } : {}),
+    ...(columns.color ? { color: columns.color } : {}),
+    ...(columns.size ? { size: columns.size } : {}),
+    ...(columns.orientation ? { orientation: columns.orientation } : {}),
+    ...(columns.labelColumns.length ? { labelColumns: columns.labelColumns } : {}),
+    ...(columns.tooltipColumns.length ? { tooltipColumns: columns.tooltipColumns } : {}),
+  };
+}
+
+/**
+ * A tile's result with the author's per-field names and formats from its
+ * shelves written into the column metadata, so the table, the chart, the
+ * tooltip and exports all show them.
+ */
+export function encodedTileResult<T extends QueryResult | undefined>(item: DashboardTileChartInput, result: T): T {
+  const encoding = item.viz.encoding;
+  if (!result || !encoding?.fields || !item.query) return result;
+  const { columnSettings } = encodingChartColumns(encoding, item.query, timeDimension(item.query));
+  if (!Object.keys(columnSettings).length) return result;
+  const existing = new Map((result.columnsMeta ?? []).map((meta) => [meta.name, meta]));
+  const columnsMeta: ResultColumnMeta[] = result.columns.map((name) => {
+    const meta: ResultColumnMeta = existing.get(name) ?? { name, kind: 'text' };
+    const settings = columnSettings[name];
+    if (!settings) return meta;
+    const format = settings.format;
+    return {
+      ...meta,
+      ...(settings.label ? { label: settings.label } : {}),
+      ...(format && format.kind !== 'compact' ? { kind: format.kind } : {}),
+      ...(format?.kind === 'compact' ? { notation: 'compact' as const, ...(meta.kind === 'text' ? { kind: 'number' as const } : {}) } : {}),
+      ...(format?.kind === 'percent' && meta.kind !== 'percent' ? { unit: 'fraction' } : {}),
+      ...(format?.decimals !== undefined ? { fixedDecimals: format.decimals } : {}),
+    };
+  }).filter((meta) => meta.kind !== 'text' || meta.label || existing.has(meta.name));
+  return { ...result, columnsMeta };
+}
 
 /**
  * The chart types the client can actually render, derived from the chart engine
@@ -38,11 +92,12 @@ export function mergeDashboardTileChartConfig(
   return {
     ...(base ?? {}),
     ...options,
+    ...encodedChartConfig(item),
     // The dashboard document owns the tile presentation. A reusable block may
     // carry a default chart, but that must not turn an explicitly-authored KPI
     // tile back into the block's bar/line/table visualization.
     chart: normalizeDashboardChartType(options.chart ?? item.viz.type ?? base?.chart),
-    y: options.y ?? valueField ?? base?.y,
+    y: encodedChartConfig(item).y ?? options.y ?? valueField ?? base?.y,
     title: options.title ?? base?.title ?? item.title,
     colorPalette: options.colorPalette ?? item.viz.style?.palette ?? base?.colorPalette ?? 'dql',
     ...(item.viz.style ? { style: item.viz.style } : {}),

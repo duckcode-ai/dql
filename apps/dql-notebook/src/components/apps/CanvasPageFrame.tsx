@@ -8,7 +8,7 @@ import type { ThemeMode } from '../../themes/notebook-theme';
 import { renderOptionToSvg } from '../output/echarts/EChartsChart';
 import { buildVizOption, ECHARTS_CHART_TYPES } from '../output/echarts/viz-option';
 import type { ChartType } from '../output/chart-helpers';
-import { mergeDashboardTileChartConfig, normalizeDashboardChartType } from './dashboard-chart-config';
+import { encodedTileResult, mergeDashboardTileChartConfig, normalizeDashboardChartType } from './dashboard-chart-config';
 import { formatDriverNumber } from './driver-probe';
 
 type LayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
@@ -130,7 +130,7 @@ export function drawCanvasTile(item: LayoutItem | undefined, tile: RunTile | und
     const top = tile.driver.dimensions[0];
     return `${title}<p>${escapeHtml(tile.driver.summary)}</p>${top ? `<ol>${top.members.slice(0, 5).map((member) => `<li>${escapeHtml(member.label)}: ${escapeHtml(formatDriverNumber(member.delta, true))}</li>`).join('')}</ol>` : ''}`;
   }
-  const result = tile.result as QueryResult | undefined;
+  const result = encodedTileResult(item as never, tile.result as QueryResult | undefined);
   if (!result || result.rows.length === 0) return `${title}<p class="muted">No rows.</p>`;
   const chartType = normalizeDashboardChartType(item.viz.type) as ChartType;
   if (chartType === 'kpi' || (result.rows.length === 1 && result.columns.length <= 2)) {

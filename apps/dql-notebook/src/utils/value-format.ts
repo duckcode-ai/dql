@@ -71,6 +71,10 @@ export interface DisplayColumnMeta {
   unit?: string;
   decimals?: number;
   grain?: string;
+  /** Author's choice for this field: short numbers (1.2K). */
+  notation?: 'compact';
+  /** Author's choice for this field: exactly this many decimals. */
+  fixedDecimals?: number;
 }
 
 function kindFromMeta(meta: DisplayColumnMeta): DisplayValueKind {
@@ -95,6 +99,9 @@ export function formatDisplayValue(
     return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: options.meta.decimals ?? 1 }).format(numeric)} pp`;
   }
   const kind = options.meta ? kindFromMeta(options.meta) : inferDisplayValueKind(column, values, options.format);
+  // A field's own format, set on the tile's shelves, wins over the view's.
+  const compact = options.meta?.notation === 'compact' ? true : options.meta?.fixedDecimals !== undefined ? false : Boolean(options.compact);
+  const fixed = options.meta?.fixedDecimals;
 
   if (kind === 'year') {
     const year = typeof value === 'string' && (ISO_DATE_RE.test(value) || ISO_TIMESTAMP_RE.test(value))
@@ -119,17 +126,18 @@ export function formatDisplayValue(
         // A Dataset measure owns its currency. Legacy results without a
         // governed unit retain the established USD fallback.
         currency: options.meta?.unit && /^[A-Z]{3}$/.test(options.meta.unit) ? options.meta.unit : 'USD',
-        ...(options.compact
-          ? { notation: 'compact', maximumFractionDigits: 1 }
-          : { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        ...(compact
+          ? { notation: 'compact', maximumFractionDigits: fixed ?? 1 }
+          : { minimumFractionDigits: fixed ?? 2, maximumFractionDigits: fixed ?? 2 }),
       }).format(numeric);
     }
     if (kind === 'percent') {
       // A declared fraction is a fraction whatever its magnitude; only an undeclared value is guessed.
       const normalized = options.meta?.unit === 'fraction' ? numeric : Math.abs(numeric) <= 1 ? numeric : numeric / 100;
-      return new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: options.meta?.decimals ?? 2 }).format(normalized);
+      return new Intl.NumberFormat('en-US', { style: 'percent', ...(fixed !== undefined ? { minimumFractionDigits: fixed } : {}), maximumFractionDigits: fixed ?? options.meta?.decimals ?? 2 }).format(normalized);
     }
-    return new Intl.NumberFormat('en-US', numberOptions(Boolean(options.compact), kind === 'integer')).format(numeric);
+    if (fixed !== undefined && !compact) return new Intl.NumberFormat('en-US', { minimumFractionDigits: fixed, maximumFractionDigits: fixed }).format(numeric);
+    return new Intl.NumberFormat('en-US', numberOptions(compact, kind === 'integer')).format(numeric);
   }
   if (kind === 'boolean') return value ? 'Yes' : 'No';
   if (kind === 'json' || typeof value === 'object') return JSON.stringify(value);

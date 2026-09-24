@@ -24,7 +24,7 @@ import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '..
 import { classifyColumns } from '../../utils/semantic-fields';
 import { NODE_TYPE_COLORS, TYPE_LABELS, TYPE_TITLES } from '../lineage/lineage-constants';
 import { themes, type ThemeMode as NotebookThemeMode } from '../../themes/notebook-theme';
-import { mergeDashboardTileChartConfig, normalizeDashboardChartType, summarizeDashboardKpiResult } from './dashboard-chart-config';
+import { encodedTileResult, mergeDashboardTileChartConfig, normalizeDashboardChartType, summarizeDashboardKpiResult } from './dashboard-chart-config';
 import {
   chartToDashboardViz, coerceLayoutIntent, coerceReviewStatus, coerceTrustState, compactChartConfig,
   componentForDashboardViz, displayWithVisualization, getDashboardItemBlockId, getDqlGenUi, isRecord,
@@ -2605,6 +2605,8 @@ export function TileBody({
       ? <AiPinSummary pin={tile.aiPin} themeMode={themeMode} />
       : <span>No result.</span>;
   }
+  // The author's field names and formats from the tile's shelves (RFC 0009).
+  const displayResult = encodedTileResult(item, tile.result);
 
   const datasetVisualizationError = datasetTileVisualizationDisplayError(item);
   if (datasetVisualizationError) {
@@ -2617,8 +2619,8 @@ export function TileBody({
   const chartConfig = mergeDashboardTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);
   const chart = String(chartConfig.chart ?? tile.viz?.type ?? '').toLowerCase();
   const hierarchy = tile.dataset?.hierarchy;
-  const hierarchyCandidates = (hierarchy?.candidates ?? []).filter((candidate) => rowValueExists(tile.result!.rows, candidate.fromAlias));
-  const selectableFields = crossFilterFields.filter((field) => tile.result!.columns.includes(field));
+  const hierarchyCandidates = (hierarchy?.candidates ?? []).filter((candidate) => rowValueExists(displayResult.rows, candidate.fromAlias));
+  const selectableFields = crossFilterFields.filter((field) => displayResult.columns.includes(field));
   const markActions = datasetMarkActions(selectableFields, hierarchyCandidates);
   const selectedMarkAction = markActions.find((action) => action.id === markActionId) ?? markActions[0];
   const selectResultRow = selectedMarkAction
@@ -2635,24 +2637,24 @@ export function TileBody({
     }
     : undefined;
   let dataView: JSX.Element;
-  const groupedDatasetKpi = chart === 'kpi' && Boolean(item.query?.dimensions?.length) && tile.result.rows.length > 1;
+  const groupedDatasetKpi = chart === 'kpi' && Boolean(item.query?.dimensions?.length) && displayResult.rows.length > 1;
   if (groupedDatasetKpi) {
     dataView = (
       <div style={{ width: '100%', alignSelf: 'stretch', display: 'grid', gap: 6 }}>
         <small style={{ color: 'var(--text-secondary)', lineHeight: 1.35 }}>This Dataset tile is grouped. Its values are shown at the selected grain instead of being summed into a KPI.</small>
-        <TableOutput result={tile.result} themeMode={themeMode} initialPageSize={10} onRowClick={selectResultRow} />
+        <TableOutput result={displayResult} themeMode={themeMode} initialPageSize={10} onRowClick={selectResultRow} />
       </div>
     );
   } else if (chart === 'table' || item.viz.type === 'table' || item.viz.type === 'pivot') {
     if (tile.tileType !== 'aiPin' && (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable')) {
-      dataView = <GeneratedEvidenceTable result={tile.result} genUi={genUi} themeMode={themeMode} />;
+      dataView = <GeneratedEvidenceTable result={displayResult} genUi={genUi} themeMode={themeMode} />;
     } else {
-      dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} initialPageSize={10} onRowClick={selectResultRow} /></div>;
+      dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={displayResult} themeMode={themeMode} initialPageSize={10} onRowClick={selectResultRow} /></div>;
     }
   } else {
     const chartResult = chart === 'kpi'
-      ? summarizeDashboardKpiResult(tile.result, chartConfig.y)
-      : tile.result;
+      ? summarizeDashboardKpiResult(displayResult, chartConfig.y)
+      : displayResult;
     // The tile header is the App title. Passing the same title into the shared
     // chart renderer duplicated it inside the plot and consumed scarce height.
     dataView = (

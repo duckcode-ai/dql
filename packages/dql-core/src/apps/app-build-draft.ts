@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DashboardDocument, DashboardFilter, DashboardGridItem, DashboardGridLayout } from './dashboard-document.js';
 import { datasetTileVisualizationCompatibility } from './tile-query.js';
 import { readDashboardVizStyle } from './viz-style.js';
+import { encodingQueryIssues, readDashboardVizEncoding } from './viz-encoding.js';
 import { MAX_TILE_DESCRIPTION, MAX_TILE_OWNER, readDashboardCanvas, readDashboardNarrative } from './dashboard-document.js';
 import type { DashboardCanvas, DashboardNarrative } from './dashboard-document.js';
 import { settleGridLayout } from './grid-layout.js';
@@ -673,6 +674,13 @@ function assertAppBuildDraftPolicy(draft: Omit<AppBuildDraft, 'proposalHash'> | 
       if (tile.viz.style !== undefined) {
         const problems: string[] = [];
         readDashboardVizStyle(tile.viz.style, `Tile ${page.id}/${tile.i} viz.style`, (message) => problems.push(message));
+        if (problems.length) throw new Error(problems.join('; '));
+      }
+      if (tile.viz.encoding !== undefined) {
+        const problems: string[] = [];
+        const encoding = readDashboardVizEncoding(tile.viz.encoding, `Tile ${page.id}/${tile.i} viz.encoding`, (message) => problems.push(message));
+        if (encoding && !tile.query) problems.push(`Tile ${page.id}/${tile.i} viz.encoding needs a Dataset field query.`);
+        if (encoding && tile.query) problems.push(...encodingQueryIssues(encoding, tile.query).map((issue) => `Tile ${page.id}/${tile.i}: ${issue}`));
         if (problems.length) throw new Error(problems.join('; '));
       }
       for (const [field, max] of [['description', MAX_TILE_DESCRIPTION], ['owner', MAX_TILE_OWNER]] as const) {

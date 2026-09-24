@@ -305,7 +305,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
                           </span>
                         );
                       })()}
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{col}</span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }} title={metaOf(col)?.label ? col : undefined}>{metaOf(col)?.label ?? col}</span>
                       <SortArrow dir={sortCol === col ? sortDir : null} color={sortCol === col ? t.accent : t.textMuted} />
                     </span>
                   </th>

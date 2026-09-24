@@ -69,6 +69,12 @@ export interface CellChartConfig {
   colorPalette?: 'dql' | 'default' | 'warm' | 'cool' | 'mono' | 'pastel' | 'corporate';
   maxItems?: number;
   format?: 'number' | 'currency' | 'percent' | 'duration';  // KPI/single-value display format
+  /** Bars run along x (vertical) or y (horizontal); from the tile's shelves (RFC 0009). */
+  orientation?: 'vertical' | 'horizontal';
+  /** Measures whose values are drawn as labels on their marks. */
+  labelColumns?: string[];
+  /** Extra measures shown in the tooltip. */
+  tooltipColumns?: string[];
 }
 
 export type FilterOperation =
@@ -570,6 +576,12 @@ export interface ResultColumnMeta {
   decimals?: number;
   ref?: string;
   grain?: string;
+  /** The name readers see, set by the author on the tile's shelves (RFC 0009). */
+  label?: string;
+  /** Short numbers (1.2K), chosen by the author for this field. */
+  notation?: 'compact';
+  /** Exact decimals chosen by the author for this field. */
+  fixedDecimals?: number;
 }
 
 export interface QueryResult {

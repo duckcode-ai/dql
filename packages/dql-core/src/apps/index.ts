@@ -189,3 +189,8 @@ export { evaluateMonitors, readAppMonitors, MAX_MONITORS_PER_SCHEDULE } from './
 export type { AppMonitor, AppMonitorCondition, MonitorEvaluation, MonitorPreviousValue, MonitorStatus } from './monitors.js';
 export { diffDashboardPages, diffAppDeliveries, renderLayoutDiffSvg, NUMBER_ASPECTS } from './app-diff.js';
 export type { PageDiff, PageAspect, TileAspect, TileBox, TileChange, TileChangeKind } from './app-diff.js';
+export {
+  SHELVES, SHELF_LABELS, addFieldByClick, chartFromEncoding, defaultShelfFor, encodingFromQuery, encodingHas, encodingQueryIssues,
+  encodingChartColumns, fieldKey, isMeasureRef, placeOnShelf, queryFromEncoding, readDashboardVizEncoding, refName, removeField, removeFromShelf, shelfAccepts, shelfContents,
+} from './viz-encoding.js';
+export type { DashboardVizEncoding, EncodedChart, EncodedChartColumns, FieldFormatKind, ShelfFieldRef, ShelfFieldSettings, ShelfId } from './viz-encoding.js';

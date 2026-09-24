@@ -82,7 +82,7 @@ export function buildVizOption({ chartType, result, themeMode, config, animate =
 
   if (chartType === 'pie' || chartType === 'donut') return pieOption(base, result, labelCol, valueCol, chartType === 'donut', tokens, palette, format, config);
   if (chartType === 'funnel') return funnelOption(base, result, labelCol, valueCol, tokens, palette, format, config);
-  if (chartType === 'scatter') return scatterOption(base, result, tokens, format);
+  if (chartType === 'scatter') return scatterOption(base, result, tokens, format, palette, config);
   if (chartType === 'heatmap') return heatmapOption(base, result, themeMode, tokens, format);
   return cartesianOption(base, chartType, result, labelCol, valueCol, style, tokens, format, config);
 }
@@ -148,16 +148,22 @@ function cartesianOption(
   if (timeLabels && (!style.sort || style.sort === 'none')) categories = chronological(categories);
   if (!isLine) categories = categories.slice(0, config?.maxItems ?? DEFAULT_MAX_CATEGORIES);
   // Long category lists read better as horizontal bars; dates stay on x.
-  const horizontal = !isLine && !timeAxis;
+  // Shelves (RFC 0009) set the orientation: a dimension on Rows lists
+  // down (horizontal bars). Lines always run along x.
+  const horizontal = config?.orientation && !isLine ? config.orientation === 'horizontal' : !isLine && !timeAxis;
   const categoryLabels = categories.map((value) => formatCategoryLabel(value, labelCol, 16));
 
   const labelsMode = style.labels ?? 'none';
   const lastIndex = categories.length - 1;
+  const labelColumns = new Set(config?.labelColumns ?? []);
   const seriesOptions = series.map((entry, seriesIndex) => {
     const topOfStack = !stacked || seriesIndex === series.length - 1;
+    // A measure on the Label shelf shows every value of its own series.
+    const shelfLabels = labelColumns.has(colorCol ? valueCol : entry.name);
+    const seriesFormat = colorCol ? format : numberFormatter(result, entry.name, style, config);
     const data = categories.map((category, index) => {
       const value = entry.values.get(category) ?? null;
-      const showLabel = labelsMode === 'all' || (labelsMode === 'last' && index === lastIndex && topOfStack);
+      const showLabel = shelfLabels || labelsMode === 'all' || (labelsMode === 'last' && index === lastIndex && topOfStack);
       if (value === null) {
         // Unavailable is not zero: no mark, a dash where the value would be.
         return isLine
@@ -170,7 +176,7 @@ function cartesianOption(
       return showLabel ? { value, label: { show: true } } : value;
     });
     const common = {
-      name: colorCol ? entry.name : prettyName(entry.name),
+      name: colorCol ? entry.name : columnName(result, entry.name),
       data,
       emphasis: { focus: 'series' as const },
       label: {
@@ -178,7 +184,7 @@ function cartesianOption(
         color: tokens.text,
         fontSize: 11,
         position: (isLine ? 'top' : horizontal ? 'right' : 'top') as 'top' | 'right',
-        formatter: (params: { value: unknown }) => format(Number(params.value)),
+        formatter: (params: { value: unknown }) => seriesFormat(Number(params.value)),
       },
     };
     if (isLine) {
@@ -232,6 +238,10 @@ function cartesianOption(
       trigger: 'axis',
       axisPointer: { type: isLine ? 'line' : 'shadow', lineStyle: { color: tokens.axis } },
       valueFormatter: (value: unknown) => (value === null || value === undefined ? 'Unavailable' : format(Number(value))),
+      // The Tooltip shelf adds measures the chart does not draw.
+      ...(config?.tooltipColumns?.length ? {
+        formatter: (params: unknown) => axisTooltip(params, categories, rowForCategory, series.map((entry) => entry.name), colorCol, result, style, config),
+      } : {}),
     },
     xAxis: horizontal ? valueAxis : categoryAxis,
     yAxis: horizontal ? categoryAxis : valueAxis,
@@ -375,31 +385,75 @@ function funnelOption(
 
 // ─── Two measures, and magnitude over two categories ─────────────────────────
 
-function scatterOption(base: EChartsOption, result: QueryResult, tokens: Tokens, format: (value: number) => string): VizOptionOutput | undefined {
+function scatterOption(
+  base: EChartsOption,
+  result: QueryResult,
+  tokens: Tokens,
+  format: (value: number) => string,
+  palette: string[],
+  config?: CellChartConfig,
+): VizOptionOutput | undefined {
   const measures = measureColumns(result);
-  if (measures.length < 2) return undefined;
-  const [xCol, yCol] = measures as [string, string];
-  const points = result.rows.flatMap((row) => {
+  // Shelves name the axes; otherwise the first two measures.
+  const xCol = config?.x && measures.includes(config.x) ? config.x : measures[0];
+  const yCol = config?.y && measures.includes(config.y) && config.y !== xCol ? config.y : measures.find((measure) => measure !== xCol);
+  if (!xCol || !yCol) return undefined;
+  const sizeCol = config?.size && result.columns.includes(config.size) ? config.size : undefined;
+  const colorCol = config?.color && result.columns.includes(config.color) ? config.color : undefined;
+  const labelCol = categoryColumns(result).find((column) => column !== colorCol);
+  const sizes = sizeCol ? result.rows.map((row) => chartNumericValue(row[sizeCol])).filter((value): value is number => value !== null && value > 0) : [];
+  const maxSize = sizes.length ? Math.max(...sizes) : 0;
+  // Bubble area follows the size measure: radius grows with its square root.
+  const symbolSize = (value: number | null) => (sizeCol && maxSize > 0 && value !== null && value > 0 ? 6 + 26 * Math.sqrt(value / maxSize) : 8);
+  const groups = new Map<string, Array<{ value: [number, number]; name: string; symbolSize: number; row: Record<string, unknown> }>>();
+  for (const row of result.rows) {
     const x = chartNumericValue(row[xCol]);
     const y = chartNumericValue(row[yCol]);
-    return x === null || y === null ? [] : [[x, y]];
-  });
-  const axis = (name: string) => ({
+    if (x === null || y === null) continue;
+    const group = colorCol ? String(row[colorCol] ?? '') : '';
+    const points = groups.get(group) ?? [];
+    points.push({ value: [x, y], name: labelCol ? String(row[labelCol] ?? '') : '', symbolSize: symbolSize(sizeCol ? chartNumericValue(row[sizeCol]) : null), row });
+    groups.set(group, points);
+  }
+  const xFormat = numberFormatter(result, xCol, {}, config);
+  const yFormat = numberFormatter(result, yCol, {}, config);
+  const axis = (name: string, formatValue: (value: number) => string) => ({
     type: 'value' as const,
-    name: prettyName(name),
+    name: columnName(result, name),
     nameTextStyle: { color: tokens.muted, fontSize: 11 },
-    axisLabel: { color: tokens.muted, fontSize: 11, formatter: (value: number) => format(value) },
+    axisLabel: { color: tokens.muted, fontSize: 11, formatter: (value: number) => formatValue(value) },
     splitLine: { lineStyle: { color: tokens.grid } },
   });
+  const tooltipLines = (point: { name: string; row: Record<string, unknown> }) => [
+    point.name ? `<strong>${escapeHtmlText(formatCategoryLabel(point.name, labelCol ?? '', 40))}</strong>` : '',
+    `${escapeHtmlText(columnName(result, xCol))}: ${escapeHtmlText(xFormat(Number(point.row[xCol])))}`,
+    `${escapeHtmlText(columnName(result, yCol))}: ${escapeHtmlText(yFormat(Number(point.row[yCol])))}`,
+    ...(sizeCol ? [`${escapeHtmlText(columnName(result, sizeCol))}: ${escapeHtmlText(numberFormatter(result, sizeCol, {}, config)(Number(point.row[sizeCol])))}`] : []),
+    ...(config?.tooltipColumns ?? []).filter((column) => result.columns.includes(column)).map((column) => `${escapeHtmlText(columnName(result, column))}: ${escapeHtmlText(numberFormatter(result, column, {}, config)(Number(point.row[column])))}`),
+  ].filter(Boolean).join('<br/>');
+  const showLegend = colorCol !== undefined && groups.size > 1;
   const option: EChartsOption = {
     ...base,
-    grid: { left: 8, right: 24, top: 24, bottom: 8, containLabel: true },
-    tooltip: { ...(base.tooltip as object), trigger: 'item' },
-    xAxis: axis(xCol),
-    yAxis: axis(yCol),
-    series: [{ type: 'scatter', symbolSize: 8, itemStyle: { opacity: 0.85, borderColor: tokens.surface, borderWidth: 1 }, data: points }],
+    grid: { left: 8, right: 24, top: showLegend ? 36 : 24, bottom: 8, containLabel: true },
+    legend: showLegend ? legendOption('top', tokens) : { show: false },
+    tooltip: {
+      ...(base.tooltip as object),
+      trigger: 'item',
+      formatter: (params: unknown) => {
+        const data = (params as { data?: { name: string; row: Record<string, unknown> } }).data;
+        return data ? tooltipLines(data) : '';
+      },
+    },
+    xAxis: axis(xCol, xFormat),
+    yAxis: axis(yCol, yFormat),
+    series: Array.from(groups).slice(0, MAX_SERIES).map(([name, points], index) => ({
+      type: 'scatter' as const,
+      name: name || columnName(result, yCol),
+      itemStyle: { color: palette[index % palette.length], opacity: 0.85, borderColor: tokens.surface, borderWidth: 1 },
+      data: points,
+    })),
   };
-  return { option, categories: [], rowForCategory: new Map(), categoryLabels: [], droppedSeries: 0 };
+  return { option, categories: [], rowForCategory: new Map(), categoryLabels: [], droppedSeries: Math.max(0, groups.size - MAX_SERIES) };
 }
 
 function heatmapOption(base: EChartsOption, result: QueryResult, themeMode: ThemeMode, tokens: Tokens, format: (value: number) => string): VizOptionOutput | undefined {
@@ -453,6 +507,11 @@ function heatmapOption(base: EChartsOption, result: QueryResult, themeMode: Them
 // ─── Shared ──────────────────────────────────────────────────────────────────
 
 function seriesMeasures(result: QueryResult, labelCol: string, valueCol: string, chartType: ChartType, config?: CellChartConfig): string[] {
+  // Measures on the value shelf are the series, in shelf order.
+  if (config?.orientation && config.metrics?.length) {
+    const onShelf = config.metrics.filter((metric) => result.columns.includes(metric));
+    if (onShelf.length) return onShelf;
+  }
   if (config?.y && result.columns.includes(config.y) && chartType === 'bar') return [config.y];
   const measures = measureColumns(result).filter((column) => column !== labelCol);
   if (chartType === 'bar' && !config?.style?.stack) return [valueCol];
@@ -501,4 +560,45 @@ export function chronological(categories: string[]): string[] {
     .map((value, index) => ({ value, key: keys[index]!, index }))
     .sort((a, b) => a.key - b.key || a.index - b.index)
     .map((entry) => entry.value);
+}
+
+/** A result column's name for readers: the author's label, or the column tidied. */
+function columnName(result: QueryResult, column: string): string {
+  return metaFor(result, column)?.label ?? prettyName(column);
+}
+
+function escapeHtmlText(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** An axis tooltip with the drawn series and the Tooltip shelf's extra measures. */
+function axisTooltip(
+  params: unknown,
+  categories: string[],
+  rowForCategory: Map<string, Record<string, unknown>>,
+  seriesNames: string[],
+  colorCol: string | undefined,
+  result: QueryResult,
+  style: DashboardVizStyle,
+  config: CellChartConfig | undefined,
+): string {
+  const list = (Array.isArray(params) ? params : [params]) as Array<{ dataIndex: number; seriesIndex: number; value: unknown; marker?: string; seriesName?: string }>;
+  const index = list[0]?.dataIndex ?? 0;
+  const category = categories[index];
+  if (category === undefined) return '';
+  const row = rowForCategory.get(category) ?? {};
+  const lines = [`<strong>${escapeHtmlText(formatCategoryLabel(category, '', 40))}</strong>`];
+  for (const entry of list) {
+    const name = seriesNames[entry.seriesIndex] ?? entry.seriesName ?? '';
+    const raw = typeof entry.value === 'object' && entry.value !== null ? (entry.value as { value?: unknown }).value : entry.value;
+    const formatValue = numberFormatter(result, colorCol ? (config?.y ?? name) : name, style, config);
+    const text = raw === null || raw === undefined ? 'Unavailable' : formatValue(Number(raw));
+    lines.push(`${entry.marker ?? ''}${escapeHtmlText(colorCol ? name : columnName(result, name))}: ${escapeHtmlText(text)}`);
+  }
+  for (const column of config?.tooltipColumns ?? []) {
+    if (!result.columns.includes(column) || seriesNames.includes(column)) continue;
+    const value = chartNumericValue(row[column]);
+    lines.push(`${escapeHtmlText(columnName(result, column))}: ${escapeHtmlText(value === null ? 'Unavailable' : numberFormatter(result, column, style, config)(value))}`);
+  }
+  return lines.join('<br/>');
 }
