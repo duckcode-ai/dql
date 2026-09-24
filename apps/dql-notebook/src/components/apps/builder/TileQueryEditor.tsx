@@ -34,6 +34,8 @@ export function TileQueryEditor({
   disabled,
   onChange,
   idPrefix,
+  shelves = false,
+  filterField: requestedFilterField,
 }: {
   descriptor: DatasetDescriptor;
   query: TileQuery;
@@ -41,6 +43,10 @@ export function TileQueryEditor({
   onChange: (next: TileQuery) => string | void;
   /** Keeps radio groups independent when two editors are on screen. */
   idPrefix: string;
+  /** Shelves own the measures and grouping (RFC 0009); this editor keeps the rest. */
+  shelves?: boolean;
+  /** Preselect a field in the filter builder, e.g. from a shelf field's "Filter…". */
+  filterField?: string;
 }): JSX.Element {
   const fields = useMemo(() => datasetEditorFields(descriptor), [descriptor]);
   const detail = query.detail === true;
@@ -49,6 +55,12 @@ export function TileQueryEditor({
   const [filterField, setFilterField] = useState(fields.filterable[0]?.name ?? '');
   const [filterOp, setFilterOp] = useState<TileFilterOperator>(() => filterOperatorsFor(fields.filterable[0])[0] ?? 'eq');
   const [filterValue, setFilterValue] = useState('');
+  useEffect(() => {
+    const field = fields.filterable.find((candidate) => candidate.name === requestedFilterField);
+    if (!field) return;
+    setFilterField(field.name);
+    setFilterOp(filterOperatorsFor(field)[0] ?? 'eq');
+  }, [requestedFilterField]);
   const [havingMeasure, setHavingMeasure] = useState(() => query.measures[0]?.measure ?? '');
   const [havingOp, setHavingOp] = useState<TileFilterOperator>('gt');
   const [havingValue, setHavingValue] = useState('');
@@ -222,7 +234,7 @@ export function TileQueryEditor({
     </fieldset>
 
     {!detail ? <>
-      <fieldset><legend>Measures</legend>
+      {!shelves ? <><fieldset><legend>Measures</legend>
         <div className="dataset-measure-list">
           {fields.measures.map((measure) => {
             const suggested = measure.status !== 'approved';
@@ -244,7 +256,7 @@ export function TileQueryEditor({
         {grouped?.role === 'time' ? <label><span>Time grain</span><select value={groupDimension?.timeGrain ?? grouped.time?.grains[0] ?? ''} disabled={disabled} onChange={(event) => changeGrain(event.target.value)}>
           {(grouped.time?.grains ?? []).map((grain) => <option key={grain} value={grain}>{humanize(grain)}</option>)}
         </select></label> : null}
-      </div>
+      </div></> : null}
 
       {!query.comparison ? <div className="dataset-editor-row dataset-sort-row">
         <label><span>Sort by</span><select value={primarySort?.alias ?? ''} disabled={disabled || outputs.length === 0} onChange={(event) => changeSort(event.target.value, primarySort?.direction ?? 'desc')}>

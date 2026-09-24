@@ -32,6 +32,16 @@ describe('shelves for a Dataset tile (RFC 0009 step 1)', () => {
     expect(encoding.color).toEqual({ dimension: 'region' });
     encoding = addFieldByClick(encoding, { dimension: 'channel' }, false);
     expect(encoding.detail).toEqual([{ dimension: 'channel' }]);
+    // Detail would put several rows behind one point of the line: a table says so.
+    expect(chartFromEncoding(encoding, isTime)).toMatchObject({ kind: 'table', reason: expect.stringContaining('Detail adds rows') });
+  });
+
+  it('turns a category chart into a line per category when a date is added', () => {
+    let encoding = addFieldByClick(empty, { measure: 'revenue' }, false);
+    encoding = addFieldByClick(encoding, { dimension: 'customer' }, false);
+    encoding = addFieldByClick(encoding, { dimension: 'order_date' }, true);
+    expect(encoding).toEqual({ version: 1, columns: [{ dimension: 'order_date' }], rows: [{ measure: 'revenue' }], color: { dimension: 'customer' } });
+    expect(chartFromEncoding(encoding, isTime)).toMatchObject({ kind: 'cartesian', line: true, category: 'order_date' });
   });
 
   it('lists a category down Rows with the measures across Columns (horizontal bars)', () => {

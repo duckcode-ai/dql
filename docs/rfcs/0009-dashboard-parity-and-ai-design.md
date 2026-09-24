@@ -3,10 +3,10 @@
 | Field              | Value                                                                 |
 | ------------------ | --------------------------------------------------------------------- |
 | **Author(s)**      | @KKranthi6881                                                         |
-| **Status**         | Proposed                                                              |
+| **Status**         | Accepted; building step by step                                       |
 | **Created**        | 2026-09-24                                                            |
 | **Builds on**      | RFC 0007 (Datasets and tile queries), RFC 0008 (App Builder commercial) |
-| **Implementation** | not started                                                           |
+| **Implementation** | branch `claude/app-builder-commercial`                                |
 
 ## Summary
 
@@ -260,6 +260,12 @@ Power BI:
   target, maps).
 - **Milestone B:** steps 5 and 6, and the rest of steps 3 and 4.
 - **Milestone C:** steps 7, 8 and 9.
+
+## Progress
+
+| Step | State | Notes |
+| ---- | ----- | ----- |
+| 1. Builder UX v2 | Done | Tiles carry `viz.encoding`: Columns, Rows, Colour, Size, Label, Tooltip, Detail, and a per-field name and number format. The checked query is derived from the shelves and still validated against the Dataset contract; pages and drafts refuse shelves naming fields the query lacks, and tiles without shelves draw exactly as before. Studio's new-tile and selected-tile editors show the shelves: fields arrive by drag from the Data pane or by click (a date runs along Columns, a category lists down Rows or splits a date chart by Colour, a measure takes the other axis), move by drag or from their menu, and the menu sets time grain, sort, filter, number format (compact, currency, percent, decimals) and name. The renderer follows the shelves (orientation, one series per measure, colour split, bubble size, labels, tooltip measures, names and formats in tables, charts, HTML pages and exports), and a line draws single points as dots. Detail with a bar, line or heatmap reads as a table with the reason, because one mark would have to merge several rows. Not in this step: aggregation choice per measure (step 3) and a keyboard path that places a Data-pane field on a named shelf directly (fields can be clicked in, then moved from their menu). |
 
 ## Measuring outcomes
 

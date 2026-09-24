@@ -359,9 +359,13 @@ export function defaultShelfFor(encoding: DashboardVizEncoding, ref: ShelfFieldR
 export function addFieldByClick(encoding: DashboardVizEncoding, ref: ShelfFieldRef, isTime: boolean): DashboardVizEncoding {
   const shelf = defaultShelfFor(encoding, ref, isTime);
   let next = placeOnShelf(encoding, shelf, ref);
-  // A date on Columns sends the measures there to Rows (a line over time).
+  // A date on Columns sends the measures there to Rows (a line over time),
+  // and a category already on an axis becomes the series split (Colour),
+  // then Detail: revenue by customer plus a date reads as a line per customer.
   if (shelf === 'columns' && !isMeasureRef(ref)) {
     for (const measure of next.columns.filter(isMeasureRef)) next = placeOnShelf(next, 'rows', measure);
+    const categories = [...next.columns, ...next.rows].filter((entry) => !isMeasureRef(entry) && fieldKey(entry) !== fieldKey(ref));
+    for (const category of categories) next = placeOnShelf(next, next.color ? 'detail' : 'color', category);
   }
   // The first category on Rows sends the measures there to Columns (bars).
   if (shelf === 'rows' && !isMeasureRef(ref) && !next.columns.some((entry) => !isMeasureRef(entry))) {
@@ -394,6 +398,17 @@ export type EncodedChart =
  * RFC 0009 step 2 ranks alternatives; this picks the direct reading.
  */
 export function chartFromEncoding(encoding: DashboardVizEncoding, isTime: (dimension: string) => boolean): EncodedChart {
+  const chart = drawnChart(encoding, isTime);
+  // Detail adds rows. A scatter draws each row as its own point; a bar, line
+  // or cell has one mark per category, so several rows would have to be
+  // merged into one number, and that number could be wrong.
+  if (encoding.detail?.length && (chart.kind === 'cartesian' || chart.kind === 'heatmap')) {
+    return { kind: 'table', reason: 'Detail adds rows that a bar, line or heatmap cannot show one by one, so this reads as a table. Use Detail with a scatter, or move the field to Colour.' };
+  }
+  return chart;
+}
+
+function drawnChart(encoding: DashboardVizEncoding, isTime: (dimension: string) => boolean): EncodedChart {
   const colDims = encoding.columns.filter((ref) => !isMeasureRef(ref)).map(refName);
   const rowDims = encoding.rows.filter((ref) => !isMeasureRef(ref)).map(refName);
   const colMeasures = encoding.columns.filter(isMeasureRef).map(refName);

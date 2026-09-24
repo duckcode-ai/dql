@@ -41,7 +41,8 @@ import { AiSidePanel } from '../agent/AiSidePanel';
 import { DatasetSourceAuthoringDialog, DatasetSourceRebindReviewDialog } from './builder/DatasetProposalDialog';
 import { DatasetTileBuilder } from './builder/DatasetTileBuilder';
 import { DataPanel, type DataPanelTarget } from './builder/DataPanel';
-import { DraftTileCard, DraftTileInspector, type DraftTileState } from './builder/DraftTile';
+import { DraftTileCard, DraftTileInspector, draftVisualization, type DraftTileState } from './builder/DraftTile';
+import { encodedChartConfig, encodedTileResult } from './dashboard-chart-config';
 import { ProposedTileCard } from './builder/ProposedTile';
 import { ChartStylePanel } from './builder/ChartStylePanel';
 import { DriverView } from './DriverView';
@@ -67,7 +68,10 @@ import {
 } from './builder/canvas-interactions';
 import { firstFreeGridCell, moveGridItem, nudgeGridItem, placeGridCopy, resizeGridItem, settleGridLayout } from '@duckcodeailabs/dql-core/apps/grid-layout';
 import { projectProposal, type ProposedPage } from './builder/proposal-preview';
-import { EMPTY_TILE_QUERY, autoTileView, defaultTileTitle, tileVisualization, toggleFieldInQuery } from './builder/field-query';
+import { EMPTY_TILE_QUERY, autoTileView, defaultTileTitle, descriptorTimeField, descriptorTimeGrain, isTimeField, tileVisualization, toggleFieldInQuery, vizTypeForEncoding } from './builder/field-query';
+import { addFieldByClick, encodingFromQuery, encodingHas, queryFromEncoding, removeField } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import type { ShelfChange } from './builder/ShelfEditor';
+import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import { FiltersPanel, mergeStudioDateRanges, linkedComponentCount, type StudioFilterConfiguration } from './builder/GlobalFilterBar';
 import { DatasetInteractionInspector, DatasetTileQueryInspector } from './builder/InteractionLayer';
 import { humanize, messageOf } from './builder/studio-ui';
@@ -1489,6 +1493,8 @@ export function AppStudioV2({
     datasetTitle?: string,
     /** Visualization the author already saw while building the tile. */
     datasetVisualization?: AppStudioBuildDraft['pages'][number]['layout']['items'][number]['viz']['type'],
+    /** The shelves the author built the tile on (RFC 0009). */
+    datasetEncoding?: DashboardVizEncoding,
   ): Promise<boolean> => {
     if (!draft || !activePage) return false;
     const source = kind === 'heading' || kind === 'text'
@@ -1529,9 +1535,14 @@ export function AppStudioV2({
         const composedPage = result.draft.pages.find((page) => page.id === activePage.id);
         const addedTile = composedPage?.layout.items.find((item) => item.i === addedTileId);
         const followUp: AppStudioDraftOperation[] = [];
-        if (datasetVisualization && addedTile && addedTile.viz.type !== datasetVisualization) {
-          // Keep the chart the author built (a date reads as a line).
-          followUp.push({ type: 'update_tile', pageId: activePage.id, tileId: addedTile.i, patch: { viz: { ...addedTile.viz, type: datasetVisualization } } });
+        if (addedTile && ((datasetVisualization && addedTile.viz.type !== datasetVisualization) || datasetEncoding)) {
+          // Keep the chart the author built (a date reads as a line), on the
+          // shelves they built it on.
+          followUp.push({ type: 'update_tile', pageId: activePage.id, tileId: addedTile.i, patch: { viz: {
+            ...addedTile.viz,
+            ...(datasetVisualization ? { type: datasetVisualization } : {}),
+            ...(datasetEncoding && addedTile.query && !addedTile.query.detail ? { encoding: datasetEncoding } : {}),
+          } } });
         }
         if (composedPage && addedTile) {
           // The new tile fills the first gap it fits instead of going under the page.
@@ -2823,7 +2834,7 @@ export function AppStudioV2({
     : tileTarget
       ? { kind: 'tile', title: tileTarget.title || humanize(tileTarget.i), query: tileTarget.query! }
       : { kind: 'none' };
-  const emptyDraft = (item: AppBlockRecommendation): DraftTileState => ({ sourceKey: item.id, query: EMPTY_TILE_QUERY, view: 'kpi', viewChosen: false, title: '' });
+  const emptyDraft = (item: AppBlockRecommendation): DraftTileState => ({ sourceKey: item.id, query: EMPTY_TILE_QUERY, encoding: { version: 1, columns: [], rows: [] }, view: 'kpi', viewChosen: false, title: '' });
   const openAddTile = () => {
     setStudioView('edit');
     setSelectedTileId(null);
@@ -2842,6 +2853,34 @@ export function AppStudioV2({
   /** A field click builds the new tile, or edits the selected Dataset tile. */
   const pickField = (field: DatasetField) => {
     if (!activeDatasetItem || !activeDescriptor || !activePage) return;
+    if (tileTarget?.query && !tileTarget.query.detail) {
+      // A click puts the field on the shelf a Tableau author expects, or
+      // takes it off every shelf when it is already there (RFC 0009).
+      const ref = field.kind === 'measure' ? { measure: field.name } : { dimension: field.name };
+      const current = tileTarget.viz.encoding ?? encodingFromQuery(tileTarget.query, tileTarget.viz.type);
+      const encoding = encodingHas(current, ref) ? removeField(current, ref) : addFieldByClick(current, ref, isTimeField(field));
+      const query = queryFromEncoding(encoding, tileTarget.query, descriptorTimeGrain(activeDescriptor));
+      if (!query.measures.length) {
+        setSavedMessage('A tile needs at least one measure');
+        return;
+      }
+      const validation = validateTileQuery(activeDescriptor, query);
+      if (!tileQueryValidationRuns(validation)) {
+        setError(validation.diagnostics[0]?.message ?? 'The Dataset does not cover that field combination.');
+        return;
+      }
+      const type = vizTypeForEncoding(encoding, descriptorTimeField(activeDescriptor), tileTarget.viz.type);
+      const viz = datasetTileVisualizationCompatibility(query, type).compatible ? type : 'table';
+      // A title DQL generated from the fields follows the fields; a title the
+      // author wrote is never touched.
+      const generatedTitle = (tileTarget.title ?? '').trim().toLowerCase() === defaultTileTitle(tileTarget.query, humanize).toLowerCase();
+      void mutate([{ type: 'update_tile', pageId: activePage.id, tileId: tileTarget.i, patch: {
+        query,
+        viz: { ...tileTarget.viz, type: viz as typeof tileTarget.viz.type, encoding },
+        ...(generatedTitle ? { title: defaultTileTitle(query, humanize) } : {}),
+      } }]);
+      return;
+    }
     if (tileTarget?.query) {
       const query = toggleFieldInQuery(tileTarget.query, field);
       if (!query.measures.length && !query.detail) {
@@ -2853,28 +2892,16 @@ export function AppStudioV2({
         setError(validation.diagnostics[0]?.message ?? 'The Dataset does not cover that field combination.');
         return;
       }
-      const currentViz = tileTarget.viz.type;
-      // Gaining or losing the only grouping changes what the tile is (a
-      // number vs a chart), so the view follows; otherwise the author's
-      // chart type stays when it still fits.
-      const groupingChanged = (tileTarget.query.dimensions.length === 0) !== (query.dimensions.length === 0);
-      const viz = !groupingChanged && datasetTileVisualizationCompatibility(query, currentViz).compatible
-        ? currentViz
-        : tileVisualization(query, autoTileView(query));
-      // A title DQL generated from the fields follows the fields; a title the
-      // author wrote is never touched.
-      const generatedTitle = (tileTarget.title ?? '').trim().toLowerCase() === defaultTileTitle(tileTarget.query, humanize).toLowerCase();
-      void mutate([{ type: 'update_tile', pageId: activePage.id, tileId: tileTarget.i, patch: {
-        query,
-        ...(viz !== currentViz ? { viz: { ...tileTarget.viz, type: viz } } : {}),
-        ...(generatedTitle ? { title: defaultTileTitle(query, humanize) } : {}),
-      } }]);
+      void mutate([{ type: 'update_tile', pageId: activePage.id, tileId: tileTarget.i, patch: { query } }]);
       return;
     }
     const base = draftTile && draftTile.sourceKey === activeDatasetItem.id ? draftTile : emptyDraft(activeDatasetItem);
-    const query = toggleFieldInQuery(base.query, field);
-    const keepView = base.viewChosen && datasetTileVisualizationCompatibility(query, tileVisualization(query, base.view)).compatible;
-    setDraftTile({ ...base, query, view: keepView ? base.view : autoTileView(query), viewChosen: keepView });
+    const ref = field.kind === 'measure' ? { measure: field.name } : { dimension: field.name };
+    const encoding = encodingHas(base.encoding, ref) ? removeField(base.encoding, ref) : addFieldByClick(base.encoding, ref, isTimeField(field));
+    const query = queryFromEncoding(encoding, base.query, descriptorTimeGrain(activeDescriptor));
+    const next = { ...base, encoding, query };
+    const keepView = base.viewChosen && datasetTileVisualizationCompatibility(query, draftVisualization(activeDescriptor, next)).compatible;
+    setDraftTile({ ...next, view: keepView ? base.view : autoTileView(query, encoding, descriptorTimeField(activeDescriptor)), viewChosen: keepView });
     setSelectedTileId(null);
     setCopilotOpen(false);
     setSettingsOpen(false);
@@ -2887,7 +2914,9 @@ export function AppStudioV2({
   const commitDraftTile = async () => {
     if (!draftTile || !activeDatasetItem) return;
     const title = draftTile.title.trim() || defaultTileTitle(draftTile.query, humanize);
-    const added = await addComponent(draftTile.view, activeDatasetItem, draftTile.query, title, tileVisualization(draftTile.query, draftTile.view));
+    const added = activeDescriptor
+      ? await addComponent(draftTile.view, activeDatasetItem, draftTile.query, title, draftVisualization(activeDescriptor, draftTile) as AppStudioBuildDraft['pages'][number]['layout']['items'][number]['viz']['type'], draftTile.encoding)
+      : await addComponent(draftTile.view, activeDatasetItem, draftTile.query, title, tileVisualization(draftTile.query, draftTile.view));
     if (added) setDraftTile(null);
   };
   const askAiAboutTile = (tileId: string) => {
@@ -3747,6 +3776,19 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
     setVisualizationFeedback(null);
     onUpdate({ query });
   };
+  // Shelves (RFC 0009): the query follows them, the contract checks it, and
+  // the chart type follows what the shelves draw.
+  const tileEncoding = tile.query ? (tile.viz.encoding ?? encodingFromQuery(tile.query, tile.viz.type)) : undefined;
+  const updateShelves = ({ encoding, query }: ShelfChange): string | void => {
+    if (!dataset) return 'This tile has no Dataset.';
+    if (!query.measures.length) return 'A tile needs at least one measure. Add another before removing this one.';
+    const validation = validateTileQuery(dataset, query);
+    if (!tileQueryValidationRuns(validation)) return validation.diagnostics[0]?.message ?? 'The Dataset does not cover that field combination.';
+    const type = vizTypeForEncoding(encoding, descriptorTimeField(dataset), tile.viz.type);
+    const compatibility = datasetTileVisualizationCompatibility(query, type);
+    setVisualizationFeedback(compatibility.compatible ? null : `${compatibility.message} Shown as a Table.`);
+    onUpdate({ query, viz: { ...tile.viz, type: (compatibility.compatible ? type : 'table') as typeof tile.viz.type, encoding } });
+  };
   const updateVisualization = (type: typeof tile.viz.type) => {
     if (tile.query && dataset) {
       const visualization = datasetTileVisualizationCompatibility(tile.query, type);
@@ -3781,7 +3823,7 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
     <section><label>Responsive size</label><div className="size-buttons">{[['Compact', 3, 2], ['Standard', 6, 4], ['Wide', 12, 4], ['Tall', 6, 7]].map(([label, w, h]) => <button key={label} type="button" onClick={() => onUpdate({ w: Number(w), h: Number(h) })}>{label}</button>)}</div></section>
     </> : null}
     {dataTile && tab === 'data' ? <>
-    {tile.query && dataset ? <DatasetTileQueryInspector descriptor={dataset} query={tile.query} visualization={tile.viz.type} disabled={disabled} onChange={updateDatasetQuery} onOpenSources={onOpenSources} /> : null}
+    {tile.query && dataset && tileEncoding ? <DatasetTileQueryInspector descriptor={dataset} query={tile.query} visualization={tile.viz.type} encoding={tileEncoding} disabled={disabled} onChange={updateDatasetQuery} onShelves={updateShelves} onOpenSources={onOpenSources} /> : null}
     <section className="data-trust"><label>Data & trust</label><div><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /><strong>{humanize(tile.trustState ?? 'draft_ready')}</strong></div><p>{tile.query && dataset ? `Dataset: ${dataset.label} · ${dataset.kind === 'semantic' ? 'governed semantic source' : 'governed block source'}` : tile.block ? `${tile.trustState === 'certified' ? 'Certified' : 'Review-required'} block: ${'blockId' in tile.block ? tile.block.blockId : tile.block.ref}` : tile.semantic ? `Governed semantic query: ${tile.semantic.id}` : tile.draftAnalysis ? `Review-required DQL: ${tile.draftAnalysis.ref}` : 'Local narrative component'}</p>{tile.sourceEvidence?.slice(0, 2).map((evidence, index) => <small key={`${evidence.source}-${index}`}>{evidence.reason}</small>)}{run ? <small>{run.status === 'ok' ? `Settled on ${run.result?.rowCount ?? run.result?.rows.length ?? 0} rows` : run.error}</small> : null}{grainKeyCheck ? <small>Full-source key check: {grainKeyCheck}</small> : null}{run?.dataset?.cacheDelivery ? <div className="dataset-cache-delivery"><small>Cached {new Date(run.dataset.cacheDelivery.cachedAt).toLocaleString()} · this is not fresh publication or reusable-block evidence.</small><button type="button" disabled={disabled} onClick={onRefreshDatasetTile}>Refresh live data</button></div> : null}{tile.query ? <details className="dataset-dql-receipt"><summary>View execution evidence</summary>{currentDatasetEvidence ? <DatasetTileExecutionEvidence presentation={currentDatasetEvidence} /> : <p>{run ? 'This execution evidence no longer matches the selected Dataset source or query. Run a governed preview to inspect the current Dataset query, executed SQL, binding evidence, and provenance.' : 'Run a governed preview to inspect the current Dataset query, executed SQL, binding evidence, and provenance.'}</p>}</details> : null}{tile.query ? <div className="dataset-reusable-block"><strong>Reusable block</strong><p>Save this settled result as a separate review draft. This App tile stays unchanged and the new block is not certified.</p><button type="button" disabled={disabled || savingDatasetTileAsBlock || replacingDatasetTileWithBlock || !currentDatasetEvidence || Boolean(run?.dataset?.cacheDelivery)} onClick={onSaveDatasetTileAsBlock}>{savingDatasetTileAsBlock ? 'Saving review draft…' : 'Save as reusable review draft'}</button>{savedDatasetReviewDraft ? <div className="dataset-review-replacement"><small>Saved review draft: {savedDatasetReviewDraft.path}</small>{savedDatasetReviewDraft.replacementEligible ? <button type="button" disabled={disabled || savingDatasetTileAsBlock || replacingDatasetTileWithBlock || !currentDatasetEvidence || Boolean(run?.dataset?.cacheDelivery)} onClick={onReplaceDatasetTileWithBlock}>{replacingDatasetTileWithBlock ? 'Proving equivalence…' : 'Replace with this review draft'}</button> : <small>{savedDatasetReviewDraft.replacementMessage ?? 'This saved draft is fixed-value only and cannot replace the interactive Dataset tile.'}</small>}</div> : null}{!currentDatasetEvidence ? <small>Run the current Dataset tile before saving it.</small> : null}{run?.dataset?.cacheDelivery ? <small>Refresh live data before saving or replacing this tile.</small> : null}</div> : null}</section>
     {tile.semantic && !tile.query ? <section className="dataset-reusable-block"><strong>Convert to Dataset query</strong><p>Preview an exact field-query mapping for this legacy semantic tile. DQL runs both paths in one fresh read scope before it can apply the change. The original semantic payload is retained as provenance; this does not certify the source.</p><button type="button" disabled={disabled || previewingLegacySemanticConversion || acceptingLegacySemanticConversion} onClick={onPreviewLegacySemanticConversion}>{previewingLegacySemanticConversion ? 'Proving conversion…' : 'Preview Dataset conversion'}</button>{semanticTileConversionPreview ? <div className="dataset-review-replacement"><small>Mapped source: {semanticTileConversionPreview.candidate.sourceId}</small><small>Mapped query: {semanticTileConversionPreview.candidate.query.measures.map((measure) => measure.measure).join(', ')}{semanticTileConversionPreview.candidate.query.dimensions.length ? ` by ${semanticTileConversionPreview.candidate.query.dimensions.map((dimension) => dimension.field).join(', ')}` : ''}</small><button type="button" disabled={disabled || previewingLegacySemanticConversion || acceptingLegacySemanticConversion} onClick={onAcceptLegacySemanticConversion}>{acceptingLegacySemanticConversion ? 'Rechecking and applying…' : 'Apply Dataset conversion'}</button></div> : <small>Preview first. Unsupported bindings, source drift, or an incomplete comparison stay with the original semantic tile.</small>}</section> : null}
     </> : null}
@@ -4034,14 +4076,18 @@ export function StudioTilePreview({
   if (visualization && !visualization.compatible) {
     return <div className="preview-state error"><strong>Dataset visualization needs attention</strong><span>{visualization.message} Choose Table or change the Dataset field selection before running this component.</span></div>;
   }
-  const chart = tile.viz.type === 'single_value' ? 'kpi' : tile.viz.type;
+  const encodedTable = encodedChartConfig(tile).chart === 'table';
+  const chart = encodedTable ? 'table' : tile.viz.type === 'single_value' ? 'kpi' : tile.viz.type;
   const chartConfig = {
     ...(run.chartConfig ?? {}),
     ...(tile.viz.options ?? {}),
     chart,
     // The draft's own style wins: the author sees the change before any rerun.
     ...(tile.viz.style ? { style: tile.viz.style, ...(tile.viz.style.palette ? { colorPalette: tile.viz.style.palette } : {}) } : {}),
+    // So do its shelves (RFC 0009): axes, series, labels and tooltip.
+    ...encodedChartConfig(tile),
   } as CellChartConfig;
+  const shownResult = encodedTileResult(tile, run.result);
   const hierarchy = run.dataset?.hierarchy;
   const hierarchyCandidates = (hierarchy?.candidates ?? []).filter((candidate) => (
     run.result!.rows.some((row) => row[candidate.fromAlias] !== undefined && row[candidate.fromAlias] !== null)
@@ -4067,8 +4113,8 @@ export function StudioTilePreview({
     <div ref={frameRef} className="live-component-preview" onClick={(event) => event.stopPropagation()}>
       <div ref={bodyRef} className="live-component-body">
         {chart === 'table' || chart === 'pivot'
-          ? <TableOutput result={run.result} themeMode={themeMode} maxHeight={placed ? chartHeight : height} initialPageSize={10} onRowClick={onRowSelect} />
-          : <ChartOutput result={run.result} themeMode={themeMode} chartConfig={{ ...chartConfig, title: undefined }} availableHeight={chartHeight} availableWidth={width} onMarkSelect={onRowSelect} />}
+          ? <TableOutput result={shownResult} themeMode={themeMode} maxHeight={placed ? chartHeight : height} initialPageSize={10} onRowClick={onRowSelect} />
+          : <ChartOutput result={shownResult} themeMode={themeMode} chartConfig={{ ...chartConfig, title: undefined }} availableHeight={chartHeight} availableWidth={width} onMarkSelect={onRowSelect} />}
       </div>
       {selectableFields.length ? <div className={`dataset-mark-controls marks ${selectedForTile.length ? 'has-selection' : ''}`} aria-label="Cross-filter selection">
         <span>Select a result mark</span>

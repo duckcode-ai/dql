@@ -1,3 +1,4 @@
+import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import type { DashboardVizStyle } from '@duckcodeailabs/dql-core/apps/viz-style';
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
 import { normalizeDqlArtifactReference, type DqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
@@ -2412,7 +2413,7 @@ export interface DashboardDocumentResponse {
         };
         /** Declarative, server-validated Dataset field selection. */
         query?: TileQuery;
-        viz: { type: string; options?: Record<string, unknown>; style?: DashboardVizStyle };
+        viz: { type: string; options?: Record<string, unknown>; style?: DashboardVizStyle; encoding?: DashboardVizEncoding };
         display?: DashboardDisplayMetadata;
         filterBindings?: DashboardTileFilterBinding[];
         parameterBindings?: DashboardTileParameterBinding[];

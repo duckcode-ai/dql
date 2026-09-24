@@ -20,6 +20,9 @@ export function encodedChartConfig(item: DashboardTileChartInput): Partial<CellC
   const encoding = item.viz.encoding;
   if (!encoding || !item.query) return {};
   const columns = encodingChartColumns(encoding, item.query, timeDimension(item.query));
+  // Shelves that read as a table are drawn as a table, whatever chart type
+  // the page stores: a chart would have to merge rows into one mark.
+  if (columns.chart.kind === 'table' && (item.viz.type ?? 'table') !== 'table') return { chart: 'table' };
   return {
     ...(columns.x ? { x: columns.x } : {}),
     ...(columns.y ? { y: columns.y } : {}),
@@ -96,7 +99,7 @@ export function mergeDashboardTileChartConfig(
     // The dashboard document owns the tile presentation. A reusable block may
     // carry a default chart, but that must not turn an explicitly-authored KPI
     // tile back into the block's bar/line/table visualization.
-    chart: normalizeDashboardChartType(options.chart ?? item.viz.type ?? base?.chart),
+    chart: normalizeDashboardChartType(encodedChartConfig(item).chart ?? options.chart ?? item.viz.type ?? base?.chart),
     y: encodedChartConfig(item).y ?? options.y ?? valueField ?? base?.y,
     title: options.title ?? base?.title ?? item.title,
     colorPalette: options.colorPalette ?? item.viz.style?.palette ?? base?.colorPalette ?? 'dql',

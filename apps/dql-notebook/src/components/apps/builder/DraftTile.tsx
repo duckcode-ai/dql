@@ -17,18 +17,30 @@ import type { ThemeMode } from '../../../themes/notebook-theme';
 import { ChartOutput } from '../../output/ChartOutput';
 import { TableOutput } from '../../output/TableOutput';
 import { TileQueryEditor } from './TileQueryEditor';
-import { defaultTileTitle, tileVisualization, toggleFieldInQuery, type TileView } from './field-query';
+import { autoTileView, defaultTileTitle, descriptorTimeField, tileVisualization, vizTypeForEncoding, type TileView } from './field-query';
+import { ShelfEditor, type ShelfChange } from './ShelfEditor';
+import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import { encodedChartConfig, encodedTileResult } from '../dashboard-chart-config';
 import { humanize } from './studio-ui';
 
 export type DraftTileState = {
   /** Catalog item id of the Dataset the tile is built from. */
   sourceKey: string;
   query: TileQuery;
+  /** The shelves the tile is built on (RFC 0009); the query follows them. */
+  encoding: DashboardVizEncoding;
   view: TileView;
   /** True once the author picks a view; field picks stop changing it. */
   viewChosen: boolean;
   title: string;
 };
+
+/** The chart type a draft is added as: its view, drawn the way its shelves read. */
+export function draftVisualization(descriptor: DatasetDescriptor, draft: DraftTileState): string {
+  if (draft.view !== 'chart') return tileVisualization(draft.query, draft.view);
+  const type = vizTypeForEncoding(draft.encoding, descriptorTimeField(descriptor));
+  return type === 'single_value' || type === 'table' ? tileVisualization(draft.query, 'chart') : type;
+}
 
 type PreviewState =
   | { state: 'idle' }
@@ -62,7 +74,7 @@ export function draftTileBlocker(descriptor: DatasetDescriptor, draft: DraftTile
   if (!draft.query.measures.length && !draft.query.detail) return 'Pick at least one measure.';
   const validation = validateTileQuery(descriptor, draft.query);
   if (!tileQueryValidationRuns(validation)) return validation.diagnostics[0]?.message ?? 'This field combination is not covered by the Dataset.';
-  const compatibility = datasetTileVisualizationCompatibility(draft.query, tileVisualization(draft.query, draft.view));
+  const compatibility = datasetTileVisualizationCompatibility(draft.query, draftVisualization(descriptor, draft));
   return compatibility.compatible ? undefined : compatibility.message;
 }
 
@@ -81,6 +93,7 @@ export function DatasetQueryPreview({
   runnable = true,
   height = 260,
   onStatus,
+  encoding,
 }: {
   sourceId?: string;
   descriptor?: DatasetDescriptor;
@@ -90,6 +103,8 @@ export function DatasetQueryPreview({
   runnable?: boolean;
   height?: number;
   onStatus?: (status: string, tone: 'ok' | 'error' | 'idle') => void;
+  /** Shelves to draw the preview with, as the added tile will be drawn. */
+  encoding?: DashboardVizEncoding;
 }): JSX.Element {
   const [preview, setPreview] = useState<PreviewState>({ state: 'idle' });
   const latest = useRef(0);
@@ -137,8 +152,10 @@ export function DatasetQueryPreview({
   }, [preview]);
   if (preview.state === 'failed') return <div className="draft-empty warn"><strong>This query did not run</strong><span>{preview.message}</span></div>;
   if (preview.state !== 'ready') return <div className="draft-empty loading"><span>{sourceId ? 'Running against live data…' : 'Runs when applied'}</span></div>;
-  if (visualization === 'table' || visualization === 'pivot') return <TableOutput result={preview.result} themeMode={themeMode} maxHeight={height + 20} initialPageSize={10} />;
-  return <ChartOutput result={preview.result} themeMode={themeMode} chartConfig={{ chart: visualization === 'single_value' || visualization === 'kpi' ? 'kpi' : visualization } as CellChartConfig} availableHeight={height} />;
+  const shelved = { query, viz: { type: visualization, ...(encoding ? { encoding } : {}) } };
+  const shown = encodedTileResult(shelved, preview.result);
+  if (visualization === 'table' || visualization === 'pivot') return <TableOutput result={shown} themeMode={themeMode} maxHeight={height + 20} initialPageSize={10} />;
+  return <ChartOutput result={shown} themeMode={themeMode} chartConfig={{ ...encodedChartConfig(shelved), chart: visualization === 'single_value' || visualization === 'kpi' ? 'kpi' : visualization.replace(/_/g, '-') } as CellChartConfig} availableHeight={height} />;
 }
 
 /** The new tile on the canvas, drawn live as fields are picked. */
@@ -155,7 +172,7 @@ export function DraftTileCard({
 }): JSX.Element {
   const [status, setStatus] = useState<{ text: string; tone: 'ok' | 'error' | 'idle' }>({ text: 'Starting…', tone: 'idle' });
   const blocker = draftTileBlocker(descriptor, draft);
-  const visualization = tileVisualization(draft.query, draft.view);
+  const visualization = draftVisualization(descriptor, draft);
   const title = draft.title.trim() || defaultTileTitle(draft.query, humanize);
   const shownStatus = blocker ? (draft.query.measures.length ? 'Not runnable yet' : 'Waiting for a value') : status.text;
   return <article className="studio-component-card draft-tile" aria-label={`New tile: ${title}`} style={{ '--studio-tile-width': 12 } as React.CSSProperties}>
@@ -169,7 +186,7 @@ export function DraftTileCard({
         ? <div className="draft-empty"><Plus size={20} /><strong>Pick a measure to start</strong><span>Click a measure in the Data panel. The tile runs as soon as it has one value.</span></div>
         : blocker
           ? <div className="draft-empty warn"><strong>Not runnable yet</strong><span>{blocker}</span></div>
-          : <DatasetQueryPreview sourceId={sourceId} descriptor={descriptor} query={draft.query} visualization={visualization} themeMode={themeMode} onStatus={(text, tone) => setStatus({ text, tone })} />}
+          : <DatasetQueryPreview sourceId={sourceId} descriptor={descriptor} query={draft.query} visualization={visualization} encoding={draft.encoding} themeMode={themeMode} onStatus={(text, tone) => setStatus({ text, tone })} />}
     </div>
   </article>;
 }
@@ -193,31 +210,30 @@ export function DraftTileInspector({
   onAdd: () => void;
 }): JSX.Element {
   const blocker = draftTileBlocker(descriptor, draft);
-  const removeField = (name: string) => {
-    const field = datasetMeasureField(descriptor, name) ?? datasetPhysicalField(descriptor, name);
-    if (field) onChange({ ...draft, query: toggleFieldInQuery(draft.query, field) });
-  };
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [filterField, setFilterField] = useState<string | undefined>();
+  const isTime = descriptorTimeField(descriptor);
   const views: Array<[TileView, string]> = [['kpi', 'KPI'], ['chart', 'Chart'], ['table', 'Table']];
+  const changeShelves = ({ encoding, query }: ShelfChange): string | void => {
+    const keepView = draft.viewChosen && datasetTileVisualizationCompatibility(query, draftVisualization(descriptor, { ...draft, encoding, query })).compatible;
+    onChange({ ...draft, encoding, query, view: keepView ? draft.view : autoTileView(query, encoding, isTime), viewChosen: keepView });
+  };
   return <div className="inspector-body draft-inspector">
     <section className="inspector-title"><label htmlFor="draft-tile-title">Title</label><input id="draft-tile-title" value={draft.title} placeholder={defaultTileTitle(draft.query, humanize)} onChange={(event) => onChange({ ...draft, title: event.target.value })} /></section>
     <section><label>Dataset</label><div className="static-field">{datasetLabel}</div></section>
-    <section><label>Values</label><div className="pill-row">
-      {draft.query.measures.map((measure) => <span key={measure.measure} className="field-pill measure">{humanize(measure.measure)}<button type="button" aria-label={`Remove ${humanize(measure.measure)}`} onClick={() => removeField(measure.measure)}><X size={12} /></button></span>)}
-      {!draft.query.measures.length ? <small className="field-help">Click a measure in the Data panel.</small> : null}
-    </div></section>
-    <section><label>Group by</label><div className="pill-row">
-      {draft.query.dimensions.map((dimension) => <span key={dimension.field} className="field-pill">{humanize(dimension.field)}{dimension.timeGrain ? ` · ${dimension.timeGrain}` : ''}<button type="button" aria-label={`Remove ${humanize(dimension.field)}`} onClick={() => removeField(dimension.field)}><X size={12} /></button></span>)}
-      {!draft.query.dimensions.length ? <small className="field-help">None — shows one number. Click a date or category to group.</small> : null}
-    </div></section>
+    {draft.query.detail ? null : <section>
+      <ShelfEditor descriptor={descriptor} encoding={draft.encoding} query={draft.query} disabled={disabled} onChange={changeShelves} onFilterField={(field) => { setFilterField(field); setMoreOpen(true); }} />
+      <small className="field-help">Drag fields from the Data panel onto a shelf, or click one to add it.</small>
+    </section>}
     <section><label>Show as</label><div className="segmented" role="radiogroup" aria-label="Show as">
       {views.map(([view, label]) => {
         const compatible = datasetTileVisualizationCompatibility(draft.query, tileVisualization(draft.query, view)).compatible;
         return <button key={view} type="button" role="radio" aria-checked={draft.view === view} className={draft.view === view ? 'on' : ''} disabled={!compatible} title={compatible ? undefined : 'These fields cannot show this way'} onClick={() => onChange({ ...draft, view, viewChosen: true })}>{label}</button>;
       })}
     </div>{!draft.viewChosen ? <small className="field-help">Chosen from the fields. Pick one to keep it.</small> : null}</section>
-    <details className="draft-more">
+    <details className="draft-more" open={moreOpen} onToggle={(event) => setMoreOpen((event.target as HTMLDetailsElement).open)}>
       <summary>Filters, sort and more</summary>
-      <TileQueryEditor descriptor={descriptor} query={draft.query} disabled={disabled} onChange={(query) => onChange({ ...draft, query })} idPrefix="draft-tile" />
+      <TileQueryEditor descriptor={descriptor} query={draft.query} disabled={disabled} onChange={(query) => onChange({ ...draft, query, ...(query.detail ? {} : {}) })} idPrefix="draft-tile" shelves={!draft.query.detail} filterField={filterField} />
     </details>
     {blocker && draft.query.measures.length ? <small className="dataset-builder-error" role="alert">{blocker}</small> : null}
     <footer className="inspector-footer">

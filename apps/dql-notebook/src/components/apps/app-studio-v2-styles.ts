@@ -1236,6 +1236,38 @@ export const APP_STUDIO_V2_STYLES = `
 .preview-skeleton .sk-bars i { flex:1; border-radius:4px 4px 0 0; }
 .preview-skeleton .sk-line { flex:1; width:100%; min-height:96px; }
 .preview-skeleton .sk-line path { fill:none; stroke:var(--border-default); stroke-width:3; vector-effect:non-scaling-stroke; animation:studio-skeleton 1.4s ease-in-out infinite; }
+/* RFC 0009 step 1: shelves for Dataset tiles. */
+.shelf-editor { display:grid; gap:6px; }
+.shelf { display:grid; grid-template-columns:60px minmax(0,1fr); align-items:start; gap:8px; }
+.shelf-name { padding-top:7px; color:var(--text-secondary); font-size:12px; font-weight:500; }
+.shelf-pills { list-style:none; margin:0; padding:3px; min-height:32px; display:flex; flex-wrap:wrap; align-items:center; gap:4px; border:1px dashed var(--border-default); border-radius:8px; background:var(--bg-1); }
+.shelf.over .shelf-pills { border-style:solid; border-color:var(--accent); background:var(--accent-dim); }
+.shelf-pill { position:relative; display:inline-flex; align-items:center; gap:4px; min-height:24px; padding:0 2px 0 8px; border-radius:999px; background:var(--bg-0); color:var(--text-primary); font-size:12px; font-weight:500; cursor:grab; }
+.shelf-pill.measure { background:var(--accent-dim); color:var(--accent); }
+.shelf-pill { max-width:100%; }
+.shelf-pill svg { flex:none; }
+.shelf-pill-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.shelf-pill em { color:var(--text-secondary); font-style:normal; font-weight:400; }
+.shelf-pill > button { width:20px; height:20px; display:grid; place-items:center; padding:0; border:0; border-radius:999px; background:transparent; color:inherit; cursor:pointer; }
+.shelf-pill > button:hover, .shelf-pill > button[aria-expanded="true"] { background:color-mix(in srgb,currentColor 12%,transparent); }
+.shelf-pill > button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.shelf-empty { padding:3px 6px; color:var(--text-tertiary); font-size:12px; }
+.shelf-marks { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:8px; border:1px solid var(--border-subtle); border-radius:8px; }
+.shelf.mark { grid-template-columns:minmax(0,1fr); gap:2px; }
+.shelf.mark .shelf-name { padding-top:0; font-size:11px; }
+.shelf.mark .shelf-pills { min-height:28px; }
+.shelf-reading { margin:0; color:var(--text-secondary); font-size:12px; }
+.shelf-menu { position:absolute; top:28px; left:0; z-index:50; width:268px; padding:10px; display:grid; gap:10px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); box-shadow:0 12px 32px rgba(15,23,42,.16); color:var(--text-primary); cursor:default; }
+.shelf-menu-group { display:grid; gap:4px; margin:0; }
+.shelf-menu-label { color:var(--text-secondary); font-size:11px; font-weight:500; }
+.shelf-menu-chips, .shelf-menu-actions { display:flex; flex-wrap:wrap; gap:4px; }
+.shelf-menu-chips button, .shelf-menu-actions button, .shelf-menu-row button { display:inline-flex; align-items:center; gap:4px; height:24px; padding:0 8px; border:1px solid var(--border-default); border-radius:999px; background:var(--bg-1); color:var(--text-primary); font-size:12px; font-weight:500; cursor:pointer; }
+.shelf-menu-chips button.on { border-color:var(--accent); background:var(--accent-dim); color:var(--accent); }
+.shelf-menu-actions .danger { color:var(--status-error); }
+.shelf-menu-row { display:flex; gap:6px; }
+.shelf-menu-row select, .shelf-menu-row input { flex:1; min-width:0; height:28px; padding:0 8px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); color:var(--text-primary); font-size:12px; }
+.shelf-menu-row input[type="number"] { flex:0 0 64px; }
+.shelf-menu button:focus-visible, .shelf-menu select:focus-visible, .shelf-menu input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 @keyframes studio-skeleton { 50% { opacity:.45; } }
 @media (prefers-reduced-motion:reduce) { .studio-canvas-frame, .policy-toggle i:after, .studio-review-toggle i:after, .dql-studio-v2-loading .loading-mark, .preview-state.loading .preview-loading-mark, .preview-skeleton i, .preview-skeleton path { transition:none; animation:none; } }
 `;

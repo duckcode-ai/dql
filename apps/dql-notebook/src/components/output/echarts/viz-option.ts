@@ -173,6 +173,15 @@ function cartesianOption(
       if (isLine && index === lastIndex) {
         return { value, symbol: 'circle', symbolSize: 8, itemStyle: { borderColor: tokens.surface, borderWidth: 2 }, ...(showLabel ? { label: { show: true } } : {}) };
       }
+      // A point with no neighbour on either side draws no line segment, so it
+      // is drawn as a dot (a customer with sales in one month only).
+      if (isLine) {
+        const before = index > 0 ? entry.values.get(categories[index - 1]!) ?? null : null;
+        const after = index < lastIndex ? entry.values.get(categories[index + 1]!) ?? null : null;
+        if (before === null && after === null) {
+          return { value, symbol: 'circle', symbolSize: 7, ...(showLabel ? { label: { show: true } } : {}) };
+        }
+      }
       return showLabel ? { value, label: { show: true } } : value;
     });
     const common = {

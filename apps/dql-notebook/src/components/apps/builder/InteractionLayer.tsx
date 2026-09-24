@@ -5,23 +5,33 @@ import { datasetMeasureField, datasetPhysicalField, type DatasetDescriptor, type
 import { toggleFieldInQuery } from './field-query';
 import { datasetTileVisualizationCompatibility, tileQueryOutputAliases, tileQueryValidationRuns, validateTileQuery, type TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
 import { TileQueryEditor } from '../builder/TileQueryEditor';
+import { ShelfEditor, type ShelfChange } from './ShelfEditor';
+import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import { humanize } from './studio-ui';
 
 export function DatasetTileQueryInspector({
   descriptor,
   query,
   visualization,
+  encoding,
   disabled,
   onChange,
+  onShelves,
   onOpenSources,
 }: {
   descriptor: DatasetDescriptor;
   query: TileQuery;
   visualization: string;
+  /** The tile's shelves, or the shelves it already draws as (RFC 0009). */
+  encoding: DashboardVizEncoding;
   disabled: boolean;
   onChange: (next: TileQuery, recovery?: { visualization: 'table'; message: string }) => void;
+  /** Saves a shelf change; returns a refusal when the contract does not run it. */
+  onShelves: (change: ShelfChange) => string | void;
   onOpenSources: () => void;
 }): JSX.Element {
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [filterField, setFilterField] = useState<string | undefined>();
   // Saved tiles change only through a query the contract runs. A refused
   // edit leaves the tile as it was and says why.
   const commit = (next: TileQuery): string | void => {
@@ -54,20 +64,21 @@ export function DatasetTileQueryInspector({
   return <section className="dataset-query-inspector">
     <div className="inspector-field"><label>Dataset</label><div className="static-field">{descriptor.label}</div></div>
     {query.detail ? <div className="inspector-field"><label>Rows</label><p className="field-help">Row details: {query.detailColumns?.length ?? 0} columns. Change them under Filters, sort and more.</p></div> : <>
-      <div className="inspector-field"><label>Values</label><div className="pill-row">
-        {query.measures.map((measure) => <span key={measure.measure} className="field-pill measure">{humanize(measure.measure)}<button type="button" disabled={disabled} aria-label={`Remove ${humanize(measure.measure)}`} onClick={() => remove(measure.measure)}><X size={12} /></button></span>)}
-      </div></div>
-      <div className="inspector-field"><label>Group by</label><div className="pill-row">
-        {query.dimensions.map((dimension) => <span key={dimension.field} className="field-pill">{humanize(dimension.field)}{dimension.timeGrain ? ` · ${dimension.timeGrain}` : ''}<button type="button" disabled={disabled} aria-label={`Remove ${humanize(dimension.field)}`} onClick={() => remove(dimension.field)}><X size={12} /></button></span>)}
-        {!query.dimensions.length ? <small className="field-help">None — one number.</small> : null}
-      </div></div>
-      <small className="field-help">Click fields in the Data panel to add or remove them.</small>
+      <ShelfEditor
+        descriptor={descriptor}
+        encoding={encoding}
+        query={query}
+        disabled={disabled}
+        onChange={onShelves}
+        onFilterField={(field) => { setFilterField(field); setMoreOpen(true); }}
+      />
+      <small className="field-help">Drag fields from the Data panel onto a shelf, or click one to add it.</small>
     </>}
     {refusal ? <small className="dataset-builder-error" role="alert">{refusal}</small> : null}
-    <details className="draft-more">
+    <details className="draft-more" open={moreOpen} onToggle={(event) => setMoreOpen((event.target as HTMLDetailsElement).open)}>
       <summary>Filters, sort and more</summary>
       <p className="field-help">{descriptor.label} · changes rerun this tile against the same source revision.</p>
-      <TileQueryEditor descriptor={descriptor} query={query} disabled={disabled} onChange={commit} idPrefix={`dataset-inspector-${descriptor.id}`} />
+      <TileQueryEditor descriptor={descriptor} query={query} disabled={disabled} onChange={commit} idPrefix={`dataset-inspector-${descriptor.id}`} shelves={!query.detail} filterField={filterField} />
       <button type="button" className="dataset-change-source" disabled={disabled} onClick={onOpenSources}><Blocks size={12} /> Choose another Dataset</button>
     </details>
   </section>;

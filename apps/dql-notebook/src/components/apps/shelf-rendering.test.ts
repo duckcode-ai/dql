@@ -99,4 +99,29 @@ describe('charts drawn from shelves (RFC 0009 step 1)', () => {
     expect(encodedTileResult(plain, byRegion)).toBe(byRegion);
     expect(mergeDashboardTileChartConfig(plain).orientation).toBeUndefined();
   });
+
+  it('draws a point with no neighbour as a dot, so a sparse line is never blank', () => {
+    const sparse: QueryResult = {
+      columns: ['order_date_month', 'customer', 'revenue'],
+      rows: [
+        { order_date_month: '2026-01-01', customer: 'C-1', revenue: 60 },
+        { order_date_month: '2026-02-01', customer: 'C-2', revenue: 30 },
+        { order_date_month: '2026-03-01', customer: 'C-3', revenue: 25 },
+      ],
+      rowCount: 3, executionTime: 1,
+    };
+    const item = {
+      i: 'l', query: { dimensions: [{ field: 'order_date', timeGrain: 'month' }, { field: 'customer' }], measures: [{ measure: 'revenue' }] },
+      viz: { type: 'line', encoding: { version: 1, columns: [{ dimension: 'order_date' }], rows: [{ measure: 'revenue' }], color: { dimension: 'customer' } } } as never,
+    };
+    const drawn = option(item as never, sparse);
+    const c2 = drawn.series.find((entry: any) => entry.name === 'C-2');
+    expect(c2.data).toEqual([null, expect.objectContaining({ value: 30, symbol: 'circle' }), null]);
+  });
+
+  it('draws shelves that read as a table as a table, whatever chart type is stored', () => {
+    const item = tile({ version: 1, columns: [{ dimension: 'region' }], rows: [{ measure: 'revenue' }], detail: [{ dimension: 'channel' }] }, ['revenue'], 'line');
+    (item.query.dimensions as Array<{ field: string }>).push({ field: 'channel' });
+    expect(mergeDashboardTileChartConfig(item).chart).toBe('table');
+  });
 });

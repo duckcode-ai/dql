@@ -1,5 +1,6 @@
 import type { DatasetDescriptor, DatasetField, DatasetPhysicalField } from '@duckcodeailabs/dql-core/datasets/descriptor';
 import { datasetTileVisualizationCompatibility, type TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
+import { chartFromEncoding, type DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 
 /**
  * Click-a-field tile building. A measure click adds or removes a value; a
@@ -81,9 +82,14 @@ export function toggleFieldInQuery(query: TileQuery, field: DatasetField): TileQ
   };
 }
 
-/** The view a picked set of fields reads best as. */
-export function autoTileView(query: TileQuery): TileView {
+/** The view a picked set of fields reads best as; shelves decide when there are any. */
+export function autoTileView(query: TileQuery, encoding?: DashboardVizEncoding, isTime: (field: string) => boolean = () => false): TileView {
   if (query.detail) return 'table';
+  if (encoding) {
+    const chart = chartFromEncoding(encoding, isTime);
+    if (chart.kind === 'kpi') return 'kpi';
+    return chart.kind === 'table' ? 'table' : 'chart';
+  }
   if (query.dimensions.length === 0) return query.measures.length === 1 ? 'kpi' : 'table';
   const compatibility = datasetTileVisualizationCompatibility(query, 'bar');
   return compatibility.compatible ? 'chart' : 'table';
@@ -103,4 +109,40 @@ export function defaultTileTitle(query: TileQuery, label: (name: string) => stri
   if (!query.dimensions.length) return head;
   const groups = query.dimensions.map((dimension) => dimension.timeGrain ? label(dimension.timeGrain) : label(dimension.field));
   return `${head} by ${groups.join(' and ').toLowerCase()}`;
+}
+
+/** Whether a Dataset dimension is a time field. */
+export function descriptorTimeField(descriptor: DatasetDescriptor): (name: string) => boolean {
+  return (name) => {
+    const field = descriptor.fields.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
+    return Boolean(field && isTimeField(field));
+  };
+}
+
+/** The grain a newly placed time field groups by. */
+export function descriptorTimeGrain(descriptor: DatasetDescriptor): (name: string) => string | undefined {
+  return (name) => {
+    const field = descriptor.fields.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
+    return field && isTimeField(field) ? defaultTimeGrain(field) : undefined;
+  };
+}
+
+const BAR_TYPES = new Set(['bar', 'grouped_bar', 'stacked_bar']);
+const LINE_TYPES = new Set(['line', 'area']);
+const ONE_MEASURE_TYPES = new Set(['pie', 'donut', 'funnel']);
+
+/**
+ * The chart type shelves draw as. The author's chart type stays when it still
+ * reads the same shelves (stacked bars stay stacked, an area stays an area).
+ */
+export function vizTypeForEncoding(encoding: DashboardVizEncoding, isTime: (field: string) => boolean, current?: string): string {
+  const chart = chartFromEncoding(encoding, isTime);
+  const type = (current ?? '').replace(/-/g, '_');
+  if (chart.kind === 'kpi') return 'single_value';
+  if (chart.kind === 'table') return 'table';
+  if (chart.kind === 'scatter') return 'scatter';
+  if (chart.kind === 'heatmap') return 'heatmap';
+  if (BAR_TYPES.has(type) || LINE_TYPES.has(type)) return type;
+  if (ONE_MEASURE_TYPES.has(type) && chart.measures.length === 1 && !encoding.color) return type;
+  return chart.line ? 'line' : 'bar';
 }

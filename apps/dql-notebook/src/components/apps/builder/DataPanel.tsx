@@ -5,6 +5,7 @@ import type { DatasetDescriptor, DatasetField } from '@duckcodeailabs/dql-core/d
 import type { TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
 import { groupDatasetFields, queryFieldNames } from './field-query';
 import { humanize } from './studio-ui';
+import { writeFieldDrag } from './ShelfEditor';
 
 export type DataPanelTarget =
   | { kind: 'none' }
@@ -48,8 +49,10 @@ export function DataPanel({
       className={`data-field ${on ? 'on' : ''}`}
       disabled={disabled || locked}
       aria-pressed={on}
-      title={locked ? 'Suggested field — it needs review in the Dataset before tiles can use it.' : on ? `Remove ${humanize(field.name)}` : `Add ${humanize(field.name)}`}
+      title={locked ? 'Suggested field — it needs review in the Dataset before tiles can use it.' : on ? `Remove ${humanize(field.name)}` : `Add ${humanize(field.name)}, or drag it onto a shelf`}
       onClick={() => onPickField(field)}
+      draggable={!disabled && !locked}
+      onDragStart={(event) => writeFieldDrag(event, field.kind === 'measure' ? { measure: field.name } : { dimension: field.name })}
     >
       <span className="glyph">{glyph}</span>
       <span className="name">{humanize(field.name)}</span>
