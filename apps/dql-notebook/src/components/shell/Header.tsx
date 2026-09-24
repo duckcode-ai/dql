@@ -80,7 +80,7 @@ function DQLLogo({ t }: { t: Theme }) {
       <span
         style={{
           color: '#ffffff',
-          fontSize: 10,
+          fontSize: 11,
           fontWeight: 700,
           fontFamily: t.fontMono,
           letterSpacing: '-0.5px',
@@ -343,7 +343,7 @@ export function Header() {
         {state.activeFile && isEditorView && (
           <span
             style={{
-              fontSize: 10,
+              fontSize: 11,
               fontWeight: 600,
               color: state.activeFile.type === 'block' ? '#e3b341' : t.accent,
               background: `${state.activeFile.type === 'block' ? '#e3b341' : t.accent}18`,
@@ -488,10 +488,10 @@ export function Header() {
                 flexShrink: 0,
               }}
             />
-            <span style={{ fontFamily: t.fontMono, fontSize: 10, letterSpacing: '0.04em' }}>
+            <span style={{ fontFamily: t.fontMono, fontSize: 11, letterSpacing: '0.04em' }}>
               {currentTheme.label}
             </span>
-            <span style={{ fontSize: 8, color: t.textMuted }}>▾</span>
+            <span style={{ fontSize: 11, color: t.textMuted }}>▾</span>
           </button>
           {themeMenuOpen && (
             <div
@@ -699,7 +699,7 @@ function ExportMenuItem({
       <span style={{ fontSize: 12, fontWeight: 500, color: t.textPrimary, fontFamily: t.font }}>
         {label}
       </span>
-      <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>{description}</span>
+      <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>{description}</span>
     </button>
   );
 }

@@ -210,7 +210,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
         </div>
 
         {/* Row count */}
-        <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
           {filterText
             ? `Showing ${rangeStart}–${rangeEnd} of ${sortedRows.length} matching (${result.rows.length} total)`
             : `Showing ${rangeStart}–${rangeEnd} of ${result.rows.length} ${result.rows.length === 1 ? 'row' : 'rows'}`}
@@ -228,7 +228,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
           onChange={(e) => { setPageSize(Number(e.target.value)); setPage(0); }}
           style={{
             background: t.inputBg, border: `1px solid ${t.inputBorder}`, borderRadius: 3,
-            color: t.textSecondary, fontSize: 10, fontFamily: t.font, padding: '2px 4px', outline: 'none',
+            color: t.textSecondary, fontSize: 11, fontFamily: t.font, padding: '2px 4px', outline: 'none',
           }}
         >
           {PAGE_SIZES.map((s) => (
@@ -241,7 +241,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
           <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <PagBtn disabled={safePage === 0} onClick={() => setPage(0)} t={t}>«</PagBtn>
             <PagBtn disabled={safePage === 0} onClick={() => setPage(safePage - 1)} t={t}>‹</PagBtn>
-            <span style={{ fontSize: 10, color: t.textSecondary, fontFamily: t.font, padding: '0 4px' }}>
+            <span style={{ fontSize: 11, color: t.textSecondary, fontFamily: t.font, padding: '0 4px' }}>
               {safePage + 1}/{totalPages}
             </span>
             <PagBtn disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)} t={t}>›</PagBtn>
@@ -287,7 +287,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
                           <span
                             title={kind}
                             style={{
-                              fontSize: 9,
+                              fontSize: 11,
                               fontFamily: t.fontMono,
                               fontWeight: 700,
                               color: badge.color,
@@ -362,7 +362,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
         style={{
           padding: '5px 10px',
           color: t.textMuted,
-          fontSize: 10,
+          fontSize: 11,
           fontFamily: t.font,
           borderTop: `1px solid ${t.tableBorder}`,
           background: `${t.tableHeaderBg}60`,
@@ -376,7 +376,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
             <PagBtn disabled={safePage === 0} onClick={() => setPage(safePage - 1)} t={t}>‹</PagBtn>
             {renderPageLinks(totalPages, safePage).map((p, i) =>
               p === '…' ? (
-                <span key={`gap-${i}`} style={{ color: t.textMuted, fontSize: 10, padding: '0 2px' }}>…</span>
+                <span key={`gap-${i}`} style={{ color: t.textMuted, fontSize: 11, padding: '0 2px' }}>…</span>
               ) : (
                 <button
                   key={p}
@@ -385,7 +385,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
                     background: p - 1 === safePage ? `${t.accent}20` : 'transparent',
                     border: 'none',
                     color: p - 1 === safePage ? t.accent : t.textSecondary,
-                    fontSize: 10,
+                    fontSize: 11,
                     fontFamily: t.font,
                     fontWeight: p - 1 === safePage ? 700 : 400,
                     padding: '1px 6px',
@@ -404,7 +404,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
         <div style={{ flex: 1 }} />
         <span
           style={{
-            fontSize: 10,
+            fontSize: 11,
             color: t.textSecondary,
             fontFamily: t.font,
             marginLeft: 6,
@@ -442,7 +442,7 @@ function ExportBtn({ label, onClick, t }: { label: string; onClick: () => void; 
         border: `1px solid ${hovered ? t.btnBorder : 'transparent'}`,
         borderRadius: 3, cursor: 'pointer',
         color: hovered ? t.textSecondary : t.textMuted,
-        fontSize: 10, fontFamily: t.font, fontWeight: 600,
+        fontSize: 11, fontFamily: t.font, fontWeight: 600,
         padding: '2px 6px', transition: 'all 0.15s',
         display: 'flex', alignItems: 'center', gap: 3,
       }}

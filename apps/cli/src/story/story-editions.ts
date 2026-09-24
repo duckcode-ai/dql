@@ -13,8 +13,14 @@ export interface StoryEdition {
   runId: string;
   createdAt: string;
   resultFingerprint: string;
-  /** Editions compare only within one filter scope. */
+  /** The run's filter fingerprint, kept for older readers. */
   filterFingerprint: string;
+  /**
+   * Editions compare only within one scope: the page's effective filter and
+   * parameter values. Unlike the run's filter fingerprint it does not change
+   * with how a run was requested, so the same filters always meet again.
+   */
+  scope?: string;
   values: Record<string, { display: string; value: number | string | null; label: string }>;
 }
 
@@ -50,6 +56,7 @@ export function recordStoryEdition(input: {
   runId: string;
   resultFingerprint: string;
   filterFingerprint: string;
+  scope: string;
   now?: Date;
 }): StoryEdition | null {
   if (input.narrative.presentation !== 'story') return null;
@@ -60,7 +67,7 @@ export function recordStoryEdition(input: {
     if (binding) values[key] = { display: binding.display, value: binding.value, label: binding.label };
   }
   const existing = listStoryEditions(input.projectRoot, input.appId, input.dashboardId);
-  const latest = [...existing].reverse().find((edition) => edition.filterFingerprint === input.filterFingerprint);
+  const latest = [...existing].reverse().find((edition) => edition.scope === input.scope);
   // An edition marks a change in the data, not in how a value is printed.
   const sameValues = (left: StoryEdition['values'], right: StoryEdition['values']) => {
     const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
@@ -72,6 +79,7 @@ export function recordStoryEdition(input: {
     createdAt: (input.now ?? new Date()).toISOString(),
     resultFingerprint: input.resultFingerprint,
     filterFingerprint: input.filterFingerprint,
+    scope: input.scope,
     values,
   };
   const next = [...existing, edition].slice(-MAX_STORY_EDITIONS);
@@ -81,4 +89,23 @@ export function recordStoryEdition(input: {
   writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
   renameSync(temp, path);
   return edition;
+}
+
+/**
+ * The scope an edition belongs to: the page's declared filters and
+ * parameters with their effective values (defaults applied), plus any
+ * cross-filter or drill. Order-independent and stable across runs.
+ */
+export function storyEditionScope(
+  dashboard: { filters?: Array<{ id: string }>; params?: Array<{ id: string }> },
+  effectiveValues: Record<string, unknown>,
+  interactions: unknown[] = [],
+): string {
+  const ids = [...(dashboard.filters ?? []), ...(dashboard.params ?? [])].map((entry) => entry.id).sort();
+  const values = ids.map((id) => {
+    const value = effectiveValues[id];
+    const normalized = Array.isArray(value) ? [...value].map(String).sort() : value === undefined || value === '' ? null : value;
+    return [id, normalized];
+  });
+  return `scope:${createHash('sha256').update(JSON.stringify({ values, interactions })).digest('hex')}`;
 }

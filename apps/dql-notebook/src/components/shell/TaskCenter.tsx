@@ -116,11 +116,11 @@ export function TaskCenter() {
                   <span style={{ flex: 1, color: t.textPrimary, fontSize: 11.5, fontWeight: 650 }}>
                     {operationLabel(operation.type)}
                   </span>
-                  <span style={{ color: statusColor, fontSize: 10 }}>
+                  <span style={{ color: statusColor, fontSize: 11 }}>
                     {presentation.statusLabel}
                   </span>
                 </div>
-                <div style={{ color: presentation.tone === 'failure' ? t.error : presentation.tone === 'attention' ? t.warning : t.textSecondary, fontSize: 10.5, lineHeight: 1.4 }}>
+                <div style={{ color: presentation.tone === 'failure' ? t.error : presentation.tone === 'attention' ? t.warning : t.textSecondary, fontSize: 11, lineHeight: 1.4 }}>
                   {presentation.message}
                 </div>
                 {active && (
@@ -132,7 +132,7 @@ export function TaskCenter() {
                       <button
                         type="button"
                         onClick={() => void cancel(operation.id)}
-                        style={{ border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer', fontSize: 10, padding: 0 }}
+                        style={{ border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer', fontSize: 11, padding: 0 }}
                       >
                         Cancel
                       </button>
@@ -140,7 +140,7 @@ export function TaskCenter() {
                   </div>
                 )}
                 {operation.type === 'block_certification' && (
-                  <div style={{ color: t.textMuted, fontSize: 9.5 }}>
+                  <div style={{ color: t.textMuted, fontSize: 11 }}>
                     {presentation.guidance
                       ?? (presentation.tone === 'success'
                         ? 'Certification is complete.'
@@ -148,7 +148,7 @@ export function TaskCenter() {
                   </div>
                 )}
                 {(operation.type === 'agent_run' || operation.type === 'app_ai_build') && (
-                  <div style={{ color: t.textMuted, fontSize: 9.5 }}>
+                  <div style={{ color: t.textMuted, fontSize: 11 }}>
                     {active
                       ? 'This continues while you work on another page.'
                       : operation.status === 'succeeded'

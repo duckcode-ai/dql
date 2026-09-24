@@ -2582,6 +2582,8 @@ export interface DashboardRunResponse {
   runId: string;
   snapshotId: string;
   filterFingerprint: string;
+  /** The page's effective filters as one stable id: story editions compare within it. */
+  editionScope?: string;
   resultFingerprint: string;
   personaFingerprint: string;
   /** A bounded visible/affected-tile refresh has no reusable dashboard receipt. */
@@ -2850,6 +2852,8 @@ export interface StoryEditionV1 {
   createdAt: string;
   resultFingerprint: string;
   filterFingerprint: string;
+  /** Present on editions recorded since the evaluation fix; see DashboardRunResponse.editionScope. */
+  scope?: string;
   values: Record<string, { display: string; value: number | string | null; label: string }>;
 }
 

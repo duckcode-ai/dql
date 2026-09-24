@@ -33,4 +33,17 @@ describe('story editions (RFC 0008 step 8)', () => {
     expect(summary.changes).toEqual([]);
     expect(storyEditionSummary([], null, catalog)).toEqual({ changes: [] });
   });
+
+  it('finds earlier editions by filter scope, not by run fingerprint (evaluation F3)', () => {
+    const scoped = [
+      { runId: 'r1', createdAt: '2026-09-21T00:00:00Z', resultFingerprint: 'a', filterFingerprint: 'run-f1', scope: 'scope:all', values: { 'kpi.revenue': { display: '$130', value: 130, label: 'Revenue' } } },
+      { runId: 'r2', createdAt: '2026-09-22T00:00:00Z', resultFingerprint: 'b', filterFingerprint: 'run-f2', scope: 'scope:all', values: { 'kpi.revenue': { display: '$100', value: 100, label: 'Revenue' } } },
+    ];
+    const now = { 'kpi.revenue': { key: 'kpi.revenue', tileId: 'kpi', label: 'Revenue', kind: 'number' as const, value: 100, display: '$100' } };
+    // This run fingerprinted its filters differently from both editions.
+    const summary = storyEditionSummary(scoped, { runId: 'r3', resultFingerprint: 'b', filterFingerprint: 'run-f3', editionScope: 'scope:all' }, now);
+    expect(summary.current?.runId).toBe('r2');
+    expect(summary.previous?.runId).toBe('r1');
+    expect(summary.changes).toEqual([{ key: 'kpi.revenue', label: 'Revenue', before: '$130', after: '$100' }]);
+  });
 });

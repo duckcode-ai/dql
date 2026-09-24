@@ -8232,6 +8232,32 @@ function appBuildSourceFingerprint(draft: AppBuildDraft): string {
   return `sha256:${createHash('sha256').update(JSON.stringify(sources)).digest('hex')}`;
 }
 
+/** App fields a Studio draft owns; every other field of a published App survives a republish. */
+const DRAFT_OWNED_APP_FIELDS = new Set([
+  'version', 'id', 'name', 'description', 'visibility', 'publicationIntent', 'ownerDomain',
+  'usesDomains', 'requiredExports', 'domain', 'audience', 'lifecycle', 'homepage',
+]);
+
+function mergeRepublishedAppDocument(appDir: string, generated: AppDocument): AppDocument {
+  const path = join(appDir, 'dql.app.json');
+  let existing: Record<string, unknown>;
+  try {
+    existing = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+  } catch {
+    return generated;
+  }
+  const merged: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(existing)) if (!DRAFT_OWNED_APP_FIELDS.has(key)) merged[key] = value;
+  for (const [key, value] of Object.entries(generated)) {
+    if (value !== undefined && (DRAFT_OWNED_APP_FIELDS.has(key) || !(key in existing))) merged[key] = value;
+  }
+  const parsed = parseAppDocument(JSON.stringify(merged), path);
+  if (!parsed.document || parsed.errors.length) {
+    throw new Error(`The published App's dql.app.json could not be kept on republish: ${parsed.errors.map((error) => error.message).join('; ')}`);
+  }
+  return merged as unknown as AppDocument;
+}
+
 export function publishStoredAppBuildDraft(
   projectRoot: string,
   draft: AppBuildDraft,
@@ -8298,11 +8324,20 @@ export function publishStoredAppBuildDraft(
     version: page.version === 3 ? 3 as const : 2 as const,
     metadata: { ...page.metadata, visibility: 'shared' as const, lifecycle },
   }));
-  mkdirSync(dashboardDir, { recursive: true });
-  mkdirSync(join(stage, 'notebooks'), { recursive: true });
-  mkdirSync(join(stage, 'drafts'), { recursive: true });
+  // Republishing replaces only what the draft owns: its pages and the App's
+  // identity and lifecycle. Everything else in the App folder (schedules and
+  // alerts, members, roles, policies, RLS bindings, notebooks, drafts, other
+  // files) is kept as it was.
+  const published = draft.baseApp ? mergeRepublishedAppDocument(destination, app) : app;
   try {
-    writeFileSync(join(stage, 'dql.app.json'), JSON.stringify(app, null, 2) + '\n', 'utf-8');
+    if (draft.baseApp) {
+      cpSync(destination, stage, { recursive: true });
+      rmSync(dashboardDir, { recursive: true, force: true });
+    }
+    mkdirSync(dashboardDir, { recursive: true });
+    mkdirSync(join(stage, 'notebooks'), { recursive: true });
+    mkdirSync(join(stage, 'drafts'), { recursive: true });
+    writeFileSync(join(stage, 'dql.app.json'), JSON.stringify(published, null, 2) + '\n', 'utf-8');
     for (const page of committedPages) {
       writeFileSync(join(dashboardDir, `${page.id}.dqld`), JSON.stringify(page, null, 2) + '\n', 'utf-8');
     }

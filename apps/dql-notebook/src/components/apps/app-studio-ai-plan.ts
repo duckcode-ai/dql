@@ -128,7 +128,13 @@ export function operationsForSelectedAppStudioSources(
   const proposedSources = proposal.operations
     .filter((operation): operation is Extract<AppStudioDraftOperation, { type: 'upsert_source' }> => operation.type === 'upsert_source')
     .map((operation) => operation.source);
+  // Only tiles the proposal adds can be left out by source selection, the
+  // same rule the server applies: an add-mode proposal carries the page's
+  // existing tiles, and those must never show as "will be removed". Proposals
+  // without `proposedTileIds` rebuilt the whole page.
+  const proposedTileIds = proposal.proposedTileIds ? new Set(proposal.proposedTileIds) : undefined;
   const keepTile = (tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number]) => {
+    if (proposedTileIds && !proposedTileIds.has(tile.i)) return true;
     const sourceId = sourceIdForTile(tile, proposedSources);
     return !sourceId || selectedSourceIds.has(sourceId);
   };
@@ -156,7 +162,11 @@ export function operationsForSelectedAppStudioSources(
     if (operation.type === 'upsert_source') return selectedSourceIds.has(operation.source.id) ? [operation] : [];
     if (operation.type === 'upsert_page') {
       const items = operation.page.layout.items.filter(keepTile);
-      const filters = operation.page.filters?.filter((filter) => items.some((tile) => tile.filterBindings?.some((binding) => binding.filter === filter.id)));
+      const dropped = operation.page.layout.items.filter((tile) => !keepTile(tile));
+      // A filter goes only when every tile bound to it was left out; filters
+      // bound to kept tiles, or to no tile, stay.
+      const bound = (filterId: string, tiles: typeof items) => tiles.some((tile) => tile.filterBindings?.some((binding) => binding.filter === filterId));
+      const filters = operation.page.filters?.filter((filter) => bound(filter.id, items) || !bound(filter.id, dropped));
       const responsive = operation.page.layout.responsive
         ? Object.fromEntries(Object.entries(operation.page.layout.responsive).map(([breakpoint, layout]) => [breakpoint, layout ? { ...layout, items: layout.items.filter(keepTile) } : layout])) as typeof operation.page.layout.responsive
         : undefined;

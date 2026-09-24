@@ -547,7 +547,7 @@ import {
   type SemanticTileConversionPreviewRequest,
   type SemanticTileConversionPreviewResponse,
 } from './apps-api.js';
-import { listStoryEditions, recordStoryEdition } from './story/story-editions.js';
+import { listStoryEditions, recordStoryEdition, storyEditionScope } from './story/story-editions.js';
 import { addPageMonitor, listPageMonitors, MonitorStoreError, removePageMonitor } from './schedule/app-monitor-store.js';
 import { loadOrCreateSnapshotKey, readSnapshotPublicKey, signSnapshot, snapshotBodyIssues, snapshotFigures, snapshotFileName } from './snapshot/app-snapshot.js';
 import { dashboardDriverProbeItem, expandDashboardDriverItems, foldDashboardDriverTiles, withDriverFilterScopes } from './datasets/dashboard-drivers.js';
@@ -20674,6 +20674,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           expiresAt: Date.now() + 15 * 60_000,
         };
         if (!staleRun && !partialRun) dashboardRunEvidence.set(runId, runEvidence);
+        const editionScope = storyEditionScope(loaded.dashboard, dashboardVariables, [...datasetCrossFilters, ...Array.from(datasetDrills.values())]);
         // A complete run of a published story page is an edition: readers can
         // see what changed since the last one. Recording never fails a run.
         if (runSurface === 'apps' && !mcpRequest && !staleRun && !partialRun && !incompleteRun && loaded.dashboard.narrative?.presentation === 'story') {
@@ -20687,6 +20688,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               runId,
               resultFingerprint,
               filterFingerprint,
+              scope: editionScope,
             });
           } catch (error) {
             console.warn(`[dql] Could not record a story edition for ${appId}/${dashboardId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -20820,6 +20822,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           runId,
           snapshotId: runSnapshot.snapshotId,
           filterFingerprint,
+          editionScope,
           resultFingerprint,
           personaFingerprint,
           filterOptions,

@@ -2064,7 +2064,7 @@ export function canAskDatasetChart(
   return Boolean(!editable && hasHandler && runId && tile?.tileType === 'dataset' && tile.status === 'ok');
 }
 
-/** Data-driven one-line insight under a tile (leader + share), computed from results. */
+/** Data-driven one-line insight under a tile (the leader), computed from results. */
 function TileInsightCaption({ item, tile, themeMode }: { item: DashboardLayoutItem; tile?: DashboardRunResponse['tiles'][number]; themeMode: ThemeMode }): JSX.Element | null {
   const t = themes[themeMode];
   const caption = useMemo(() => computeTileInsight(tile, item), [item, tile]);
@@ -2078,6 +2078,9 @@ function TileInsightCaption({ item, tile, themeMode }: { item: DashboardLayoutIt
 }
 
 export function computeTileInsight(tile?: DashboardRunResponse['tiles'][number], item?: DashboardLayoutItem): string | null {
+  // A driver tile's rows repeat the same periods once per breakdown, so no
+  // caption can be computed from them; its own checked summary is the caption.
+  if (tile?.driver || item?.driver) return tile?.driver?.summary ?? null;
   const rows = tile?.result?.rows;
   const columns = tile?.result?.columns;
   if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(columns) || columns.length === 0) return null;
@@ -2100,25 +2103,21 @@ export function computeTileInsight(tile?: DashboardRunResponse['tiles'][number],
     return v !== undefined ? `${metricLabel}: ${formatMetric(v)}.` : null;
   }
   const ranked = (rows as Array<Record<string, unknown>>)
-    .map((r) => ({
-      label: labelCol ? formatDashboardValue(labelCol, r[labelCol], labelSamples) : 'top',
-      value: toNum(r[valueCol]) ?? 0,
-    }))
+    .flatMap((r) => {
+      const value = toNum(r[valueCol]);
+      return value === undefined ? [] : [{ label: labelCol ? formatDashboardValue(labelCol, r[labelCol], labelSamples) : 'top', value }];
+    })
     .sort((a, b) => b.value - a.value);
-  const total = ranked.reduce((s, e) => s + e.value, 0);
   const top = ranked[0];
   if (!top) return null;
   const formattedTopValue = formatMetric(top.value);
-  // Grouped Dataset rows are not additive by default: a customer COUNT
-  // DISTINCT and a ratio-of-sums are both wrong when summed across months.
-  // Keep the caption at the result's actual grain instead of fabricating a
-  // share from the visible rows (which may also be a limited Top-N result).
+  // No share of a total: the visible rows are not known to add up (a COUNT
+  // DISTINCT or a ratio does not, a Top-N result is not the whole, and a row
+  // set may repeat a period per breakdown), so a percent would be made up.
   if (item?.query?.dimensions?.length) {
     return `${top.label} reports ${metricLabel} at ${formattedTopValue} for this grouped Dataset result.`;
   }
-  return total > 0
-    ? `${top.label} leads ${metricLabel} at ${formattedTopValue} (${Math.round((top.value / total) * 100)}%).`
-    : `${top.label} leads ${metricLabel} at ${formattedTopValue}.`;
+  return `${top.label} leads ${metricLabel} at ${formattedTopValue}.`;
 }
 
 /**

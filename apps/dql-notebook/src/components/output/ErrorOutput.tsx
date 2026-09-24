@@ -101,7 +101,7 @@ export function ErrorOutput({
 
         <span
           style={{
-            fontSize: 10,
+            fontSize: 11,
             fontWeight: 700,
             fontFamily: t.fontMono,
             letterSpacing: '0.06em',
@@ -120,7 +120,7 @@ export function ErrorOutput({
         {parsed.line !== undefined && (
           <span
             style={{
-              fontSize: 10,
+              fontSize: 11,
               fontWeight: 600,
               fontFamily: t.fontMono,
               color: t.textSecondary,

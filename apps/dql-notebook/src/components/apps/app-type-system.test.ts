@@ -61,3 +61,20 @@ describe('inline App styles', () => {
     expect(sizes.filter((size) => !TYPE_SCALE.includes(size))).toEqual([]);
   });
 });
+
+/**
+ * Shared components the App reader also draws (result tables, chart legends,
+ * the header). They keep their own scale but never go below 11px: an
+ * evaluation found 8–10px theme caret, table headers and row counts.
+ */
+const SHARED_READER_SOURCES = [
+  '../output/TableOutput.tsx', '../output/ResultView.tsx', '../output/ChartOutput.tsx', '../output/ErrorOutput.tsx',
+  '../shell/Header.tsx', '../shell/TaskCenter.tsx', '../shell/ActivityBar.tsx',
+].map((file) => [file, readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8')] as const);
+
+describe('shared components in the reader', () => {
+  it.each(SHARED_READER_SOURCES)('%s has no inline type below 11px', (_file, source) => {
+    const sizes = [...source.matchAll(/fontSize: ?(\d+(?:\.\d+)?)(?![\d.])/g)].map((match) => Number(match[1]));
+    expect(sizes.filter((size) => size < 11)).toEqual([]);
+  });
+});

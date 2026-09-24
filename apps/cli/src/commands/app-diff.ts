@@ -127,8 +127,16 @@ export function buildAppDiffReport(before: Map<string, string>, after: Map<strin
       pages.push({ ...diff, file, problems: pageAfter.problems });
     }
     const deliveries = diffAppDeliveries(appBefore.document, appAfter.document);
+    // An alert on a tile this change removes would stop being checked.
+    const removedTiles = new Map(pages.flatMap((page) => page.tiles.filter((tile) => tile.kind === 'removed').map((tile) => [`${page.pageId}/${tile.tileId}`, tile.title] as const)));
+    const orphanedAlerts = (appAfter.document?.schedules ?? []).flatMap((schedule) => (schedule.monitors ?? []).flatMap((monitor) => {
+      const tileId = monitor.binding.split('.')[0]!;
+      const title = removedTiles.get(`${schedule.dashboard}/${tileId}`);
+      return title ? [`Alert "${monitor.label ?? monitor.id}" watches "${title}", which this change removes; it would stop being checked.`] : [];
+    }));
     const appTextChanged = was?.app !== now?.app;
-    if (!pages.length && !deliveries.length && !appAfter.problems.length && !(appTextChanged && (!was?.app || !now?.app))) continue;
+    const appProblems = [...appAfter.problems, ...orphanedAlerts];
+    if (!pages.length && !deliveries.length && !appProblems.length && !(appTextChanged && (!was?.app || !now?.app))) continue;
     const appDoc = appAfter.document ?? appBefore.document;
     apps.push({
       appId: appDoc?.id ?? dir.split('/').pop() ?? dir,
@@ -136,7 +144,7 @@ export function buildAppDiffReport(before: Map<string, string>, after: Map<strin
       status: !was?.app ? 'added' : !now?.app ? 'removed' : 'changed',
       deliveries,
       pages,
-      problems: appAfter.problems,
+      problems: appProblems,
     });
   }
   const numberChanges = apps.reduce((sum, app) => sum + app.pages.reduce((count, page) => count + page.tiles.filter((tile) => tile.changesNumbers).length, 0), 0);
@@ -195,7 +203,7 @@ export function renderAppDiffMarkdown(report: AppDiffReport): string {
     for (const problem of app.problems) lines.push(`- ❌ ${problem}`);
     lines.push('');
   }
-  lines.push('_Tiles marked "can change" have a new query, source, filter or driver. Nothing was run; check them on a page run before merging._');
+  lines.push('_Tiles marked "can change" are new, or have a new query, source, filter or driver. Nothing was run; check them on a page run before merging._');
   return lines.join('\n');
 }
 
@@ -229,7 +237,7 @@ figure{margin:0;overflow-x:auto}figure svg{max-width:100%;height:auto}figcaption
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--muted);font-weight:500}tr.removed td:first-child{text-decoration:line-through;color:var(--muted)}td strong{color:var(--amber);font-weight:600}
 .aspects{margin:0;color:var(--muted)}.problem{margin:0;padding:8px 10px;border-left:3px solid var(--red);background:#fbeeee;color:var(--ink)}.deliveries{margin:0;padding-left:18px}
 footer{color:var(--muted);font-size:12px}
-</style></head><body><main><header><h1>App changes</h1><p><code>${esc(report.base)}</code> → <code>${esc(report.head)}</code></p><div class="summary"><span>${pages} ${pages === 1 ? 'page' : 'pages'} changed</span><span class="${report.numberChanges ? 'warn' : ''}">${report.numberChanges} ${report.numberChanges === 1 ? 'tile' : 'tiles'} can show different numbers</span>${report.problems ? `<span class="bad">${report.problems} ${report.problems === 1 ? 'problem' : 'problems'}</span>` : ''}</div></header>${body || '<p>No App changes.</p>'}<footer>Tiles that can show different numbers have a new query, source, filter or driver. This report runs nothing; check those tiles on a page run before merging. Made by <code>dql app diff</code>.</footer></main></body></html>\n`;
+</style></head><body><main><header><h1>App changes</h1><p><code>${esc(report.base)}</code> → <code>${esc(report.head)}</code></p><div class="summary"><span>${pages} ${pages === 1 ? 'page' : 'pages'} changed</span><span class="${report.numberChanges ? 'warn' : ''}">${report.numberChanges} ${report.numberChanges === 1 ? 'tile' : 'tiles'} can show different numbers</span>${report.problems ? `<span class="bad">${report.problems} ${report.problems === 1 ? 'problem' : 'problems'}</span>` : ''}</div></header>${body || '<p>No App changes.</p>'}<footer>Tiles that can show different numbers are new, or have a new query, source, filter or driver. This report runs nothing; check those tiles on a page run before merging. Made by <code>dql app diff</code>.</footer></main></body></html>\n`;
 }
 
 export async function runAppDiff(rest: string[], flags: CLIFlags): Promise<void> {

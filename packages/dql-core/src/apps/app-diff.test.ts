@@ -34,7 +34,7 @@ describe('App review diff (RFC 0008 step 10)', () => {
     expect(byId.revenue).toMatchObject({ kind: 'changed', aspects: ['title', 'size'], changesNumbers: false, title: 'Revenue (net)' });
     expect(byId.note).toMatchObject({ kind: 'changed', aspects: ['text'], changesNumbers: false });
     expect(byId.margin).toMatchObject({ kind: 'added', changesNumbers: true, after: { x: 0, y: 4, w: 6, h: 4 } });
-    expect(byId.old_table).toMatchObject({ kind: 'removed', changesNumbers: true });
+    expect(byId.old_table).toMatchObject({ kind: 'removed', changesNumbers: false });
     // Changes that move numbers are listed first.
     expect(diff.tiles[0]!.tileId).toBe('by_region');
     expect(diffDashboardPages(before, before)).toMatchObject({ status: 'unchanged', tiles: [], page: [] });

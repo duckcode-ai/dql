@@ -266,7 +266,7 @@ export function ActivityBar() {
             <div style={{ height: 1, margin: expanded ? '8px 10px 2px' : '8px 12px', background: t.headerBorder }} />
           ) : null}
           {expanded ? (
-            <div style={{ fontSize: 10, fontWeight: 600, color: t.textMuted, letterSpacing: '0.04em', padding: '4px 12px 2px' }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: t.textMuted, letterSpacing: '0.04em', padding: '4px 12px 2px' }}>
               {group.label}
             </div>
           ) : null}

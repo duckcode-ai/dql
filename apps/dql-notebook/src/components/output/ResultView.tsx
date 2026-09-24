@@ -234,7 +234,7 @@ export function ResultView({
             onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), chart: event.target.value, decisionSource: 'user', rationale: 'Selected manually.' }))}
             title="Chart type"
             style={{
-              fontFamily: t.font, fontSize: 10.5, fontWeight: 600, color: t.textSecondary,
+              fontFamily: t.font, fontSize: 11, fontWeight: 600, color: t.textSecondary,
               background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5,
               padding: '1px 4px', cursor: 'pointer',
             }}
@@ -246,38 +246,38 @@ export function ResultView({
         ) : null}
         {chartable && view === 'chart' ? (
           <>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: t.textMuted, fontSize: 10.5 }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: t.textMuted, fontSize: 11 }}>
               X
               <select
                 aria-label="X-axis field"
                 value={effectiveChart.x ?? ''}
                 onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), x: event.target.value, decisionSource: 'user', rationale: 'Axis selected manually.' }))}
-                style={{ fontFamily: t.font, fontSize: 10.5, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
+                style={{ fontFamily: t.font, fontSize: 11, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
               >
                 {result.columns.map((column) => <option key={column} value={column}>{column}</option>)}
               </select>
             </label>
             {numericColumns.length > 0 ? (
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: t.textMuted, fontSize: 10.5 }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: t.textMuted, fontSize: 11 }}>
                 Y
                 <select
                   aria-label="Y-axis field"
                   value={effectiveChart.y ?? ''}
                   onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), y: event.target.value, decisionSource: 'user', rationale: 'Axis selected manually.' }))}
-                  style={{ fontFamily: t.font, fontSize: 10.5, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
+                  style={{ fontFamily: t.font, fontSize: 11, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
                 >
                   {numericColumns.map((column) => <option key={column} value={column}>{column}</option>)}
                 </select>
               </label>
             ) : null}
             {effectiveChart.chart === 'sankey' ? (
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: t.textMuted, fontSize: 10.5 }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: t.textMuted, fontSize: 11 }}>
                 Target
                 <select
                   aria-label="Sankey target field"
                   value={effectiveChart.color ?? ''}
                   onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), color: event.target.value, decisionSource: 'user', rationale: 'Sankey target selected manually.' }))}
-                  style={{ fontFamily: t.font, fontSize: 10.5, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
+                  style={{ fontFamily: t.font, fontSize: 11, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
                 >
                   {result.columns.filter((column) => !numericColumns.includes(column) && column !== effectiveChart.x).map((column) => <option key={column} value={column}>{column}</option>)}
                 </select>
@@ -286,11 +286,11 @@ export function ResultView({
           </>
         ) : null}
         {chartable && view === 'chart' && effectiveChart.rationale ? (
-          <span title={effectiveChart.rationale} style={{ fontSize: 10.5, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 230 }}>
+          <span title={effectiveChart.rationale} style={{ fontSize: 11, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 230 }}>
             Smart chart · {effectiveChart.chart}
           </span>
         ) : null}
-        <span style={{ marginLeft: 'auto', fontSize: 10.5, color: t.textMuted, alignSelf: 'center' }}>{result.rowCount ?? result.rows.length} rows</span>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: t.textMuted, alignSelf: 'center' }}>{result.rowCount ?? result.rows.length} rows</span>
       </div>
       <div style={{ padding: embedded ? 12 : 8, minHeight: chartable && view === 'chart' ? 200 : undefined, maxHeight: contentMaxHeight ?? (embedded ? 380 : 320), overflow: 'auto' }}>
         {isEmpty
@@ -307,7 +307,7 @@ export function ResultView({
             : <>
                 {hiddenTechnicalColumns.length > 0 ? (
                   <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
-                    <button type="button" onClick={() => setShowTechnicalFields((value) => !value)} style={{ border: 'none', background: 'transparent', color: t.accent, cursor: 'pointer', fontSize: 10.5, padding: 0 }}>
+                    <button type="button" onClick={() => setShowTechnicalFields((value) => !value)} style={{ border: 'none', background: 'transparent', color: t.accent, cursor: 'pointer', fontSize: 11, padding: 0 }}>
                       {showTechnicalFields ? 'Hide technical fields' : 'Show IDs'}
                     </button>
                   </div>

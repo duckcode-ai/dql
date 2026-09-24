@@ -434,6 +434,43 @@ describe('Apps command center API helpers', () => {
     expect(existsSync(join(root, '.dql/local/app-build-staging', draft.id))).toBe(false);
   });
 
+  it('keeps alerts, governance and other App files when a published App is republished (evaluation I1)', () => {
+    const root = createProject();
+    const first = createStoredAppBuildDraft(root, {
+      appId: 'revenue-studio', name: 'Revenue Studio', goal: 'Revenue Studio', domain: 'finance',
+      authoringMode: 'manual', sourcePolicy: 'governed_only',
+    });
+    publishStoredAppBuildDraft(root, markStoredAppBuildDraftPreflighted(root, first));
+    const appDir = join(root, 'apps/revenue-studio');
+    const appPath = join(appDir, 'dql.app.json');
+    const app = JSON.parse(readFileSync(appPath, 'utf-8'));
+    app.schedules = [{
+      id: 'alerts-overview', cron: '0 8 * * *', dashboard: 'overview', deliver: [], digest: false,
+      monitors: [{ id: 'low', binding: 'kpi.revenue', when: { kind: 'threshold', op: '<', value: 100 } }],
+    }];
+    app.members = [...app.members, { userId: 'ana@local', displayName: 'Ana', roles: ['viewer'] }];
+    writeFileSync(appPath, JSON.stringify(app, null, 2) + '\n');
+    writeFileSync(join(appDir, 'notebooks', 'analysis.dqlnb'), '{"cells":[]}\n');
+    writeFileSync(join(appDir, 'drafts', 'note.md'), 'kept\n');
+    writeFileSync(join(appDir, 'dashboards', 'retired.dqld'), readFileSync(join(appDir, 'dashboards', 'overview.dqld'), 'utf-8').replace('"id": "overview"', '"id": "retired"'));
+
+    const edit = createStoredAppBuildDraft(root, {
+      baseAppId: 'revenue-studio', name: 'Revenue Studio v2', goal: 'Revenue Studio', authoringMode: 'manual', sourcePolicy: 'governed_only',
+    });
+    const withoutRetired = { ...edit, pages: edit.pages.filter((page) => page.id !== 'retired') };
+    publishStoredAppBuildDraft(root, markStoredAppBuildDraftPreflighted(root, withoutRetired));
+
+    const republished = JSON.parse(readFileSync(appPath, 'utf-8'));
+    expect(republished.name).toBe('Revenue Studio v2');
+    expect(republished.schedules).toEqual(app.schedules);
+    expect(republished.members).toEqual(expect.arrayContaining([expect.objectContaining({ userId: 'ana@local' })]));
+    expect(readFileSync(join(appDir, 'notebooks', 'analysis.dqlnb'), 'utf-8')).toBe('{"cells":[]}\n');
+    expect(readFileSync(join(appDir, 'drafts', 'note.md'), 'utf-8')).toBe('kept\n');
+    // Pages belong to the draft: one removed there is removed here.
+    expect(existsSync(join(appDir, 'dashboards', 'retired.dqld'))).toBe(false);
+    expect(existsSync(join(appDir, 'dashboards', 'overview.dqld'))).toBe(true);
+  });
+
   it('rehydrates published source bindings for safe editing and returns every page from the App route', async () => {
     const root = createProject();
     const created = createAppPackage(root, {

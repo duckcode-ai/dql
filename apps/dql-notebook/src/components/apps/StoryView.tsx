@@ -50,12 +50,17 @@ export interface StoryEditionSummary {
  */
 export function storyEditionSummary(
   editions: StoryEditionV1[],
-  run: { runId: string; resultFingerprint: string; filterFingerprint: string } | null,
+  run: { runId: string; resultFingerprint: string; filterFingerprint: string; editionScope?: string } | null,
   catalog: StoryBindingCatalog,
 ): StoryEditionSummary {
   if (!run) return { changes: [] };
+  // Editions compare within the page's effective filters. The run's filter
+  // fingerprint also changes with how a run was requested, so it is used
+  // only by servers that predate the scope.
+  const scopeOf = (edition: StoryEditionV1) => edition.scope ?? edition.filterFingerprint;
+  const runScope = run.editionScope ?? run.filterFingerprint;
   const scoped = editions
-    .filter((edition) => edition.filterFingerprint === run.filterFingerprint)
+    .filter((edition) => scopeOf(edition) === runScope)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   // Editions are matched by the values the story shows, not by run or
   // result fingerprints, which can differ for the same data.

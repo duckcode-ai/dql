@@ -353,7 +353,36 @@ describe('App dashboard interaction contract', () => {
     expect(computeTileInsight({
       status: 'ok',
       result: { columns: ['type', 'revenue'], rows, rowCount: 2, executionTime: 4 },
-    } as any)).toBe('food and drink leads Revenue at $9.8K (60%).');
+    } as any)).toBe('food and drink leads Revenue at $9.8K.');
+  });
+
+  it('never states a share of a total the rows do not prove (RFC 0008 evaluation P0)', async () => {
+    const { computeTileInsight } = await dashboardHelpers();
+    // A driver tile's folded rows repeat March once per breakdown: summing
+    // them made "$30 (25%)" of a $40 March. Its checked summary is used instead.
+    const driverTile = {
+      status: 'ok',
+      tileType: 'driver',
+      driver: { summary: 'Revenue rose by 10. The largest move was US (region): +10, 100% of the change.', dimensions: [] },
+      result: {
+        columns: ['dimension', 'member', 'current'],
+        rows: [
+          { dimension: 'region', member: 'US', current: 30 }, { dimension: 'region', member: 'CA', current: 10 },
+          { dimension: 'customer', member: 'C-001', current: 30 }, { dimension: 'customer', member: 'C-002', current: 10 },
+          { dimension: 'order', member: 'O-1', current: 30 }, { dimension: 'order', member: 'O-2', current: 10 },
+        ],
+        rowCount: 6,
+        executionTime: 1,
+      },
+    } as any;
+    expect(computeTileInsight(driverTile, { i: 'why', x: 0, y: 0, w: 6, h: 4, viz: { type: 'waterfall' }, driver: {} } as any))
+      .toBe('Revenue rose by 10. The largest move was US (region): +10, 100% of the change.');
+    // A block's distinct counts do not add up across rows, so no percent is shown.
+    const distinct = computeTileInsight({
+      status: 'ok',
+      result: { columns: ['month', 'customers'], rows: [{ month: 'Jan', customers: 2 }, { month: 'Feb', customers: 2 }], rowCount: 2, executionTime: 1 },
+    } as any);
+    expect(distinct).not.toMatch(/%/);
   });
 
   it('keeps grouped Dataset insight at its displayed grain and uses governed percent metadata', async () => {

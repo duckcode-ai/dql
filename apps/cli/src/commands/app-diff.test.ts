@@ -55,19 +55,31 @@ describe('dql app diff (RFC 0008 step 10)', () => {
     const byTitle = Object.fromEntries(page!.tiles.map((tile) => [tile.title, tile]));
     expect(byTitle['Revenue by region']).toMatchObject({ kind: 'changed', aspects: ['query', 'size'], changesNumbers: true });
     expect(byTitle['Revenue (net)']).toMatchObject({ kind: 'changed', aspects: ['title'], changesNumbers: false });
-    expect(byTitle.Orders).toMatchObject({ kind: 'removed', changesNumbers: true });
-    expect(report.numberChanges).toBe(2);
+    expect(byTitle.Orders).toMatchObject({ kind: 'removed', changesNumbers: false });
+    expect(report.numberChanges).toBe(1);
 
     const text = renderAppDiffText(report);
     expect(text).toContain('~ Revenue by region: query, size  <- numbers can change');
-    expect(text).toContain('- Orders (removed)  <- numbers can change');
-    expect(text).toContain('1 page changed · 2 tiles can show different numbers — check them on a run.');
+    expect(text).toContain('- Orders (removed)\n');
+    expect(text).toContain('1 page changed · 1 tile can show different numbers — check them on a run.');
     const markdown = renderAppDiffMarkdown(report);
     expect(markdown).toContain('| Revenue by region | query, size | can change |');
     const html = renderAppDiffHtml(report);
     expect(html).toContain("default-src 'none'");
     expect(html).not.toMatch(/<script/i);
     expect(html).toContain('<svg');
+  });
+
+  it('reports an alert that watches a tile the change removes', () => {
+    const { repo, project } = repository();
+    edit(join(project, 'apps/commerce-pilot/dql.app.json'), (app) => {
+      app.schedules = [{ id: 'daily', cron: '0 8 * * *', dashboard: 'overview', deliver: [], monitors: [{ id: 'low-orders', binding: 'order-lines-dataset-kpi-2.order_count', when: { kind: 'threshold', op: '<', value: 5 }, label: 'Few orders' }] }];
+    });
+    git(repo, 'commit', '-q', '-am', 'alert on orders');
+    edit(pagePath(project), (page) => { page.layout.items = page.layout.items.filter((item: { i: string }) => item.i !== 'order-lines-dataset-kpi-2'); });
+    const report = buildAppDiffReport(readAppFiles(repo, project, 'HEAD'), readAppFiles(repo, project, null), { base: 'HEAD', head: 'working tree' });
+    expect(report.apps[0]!.problems).toEqual(['Alert "Few orders" watches "Orders", which this change removes; it would stop being checked.']);
+    expect(report.problems).toBe(1);
   });
 
   it('compares two commits and reports a page that no longer loads as a problem', () => {

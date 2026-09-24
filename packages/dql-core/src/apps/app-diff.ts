@@ -40,7 +40,10 @@ export interface TileChange {
   title: string;
   kind: TileChangeKind;
   aspects: TileAspect[];
-  /** True when the change can move the tile's numbers. */
+  /**
+   * True when a reviewer should check this tile's numbers on a run: a new
+   * data tile, or a change to its query, source, filters or driver.
+   */
   changesNumbers: boolean;
   before?: TileBox;
   after?: TileBox;
@@ -101,7 +104,8 @@ export function diffDashboardPages(before: DashboardDocument | null, after: Dash
     }
   }
   for (const item of beforeItems) {
-    if (!afterById.has(item.i)) tiles.push({ tileId: item.i, title: titleOf(item), kind: 'removed', aspects: [], changesNumbers: !item.text, before: box(item) });
+    // A removed tile shows no numbers, so none of its numbers can change.
+    if (!afterById.has(item.i)) tiles.push({ tileId: item.i, title: titleOf(item), kind: 'removed', aspects: [], changesNumbers: false, before: box(item) });
   }
   const pageAspects: PageAspect[] = [];
   if (before && after) {

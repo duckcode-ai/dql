@@ -117,6 +117,36 @@ describe('App Studio AI plan review (AGT-025, UI-022)', () => {
     });
   });
 
+  it('never drops a tile that was already on the page when adding (RFC 0008 evaluation, D1)', () => {
+    // An add-mode proposal carries the page's existing tiles. The existing
+    // semantic tile's source is not among the proposal's selected sources, but
+    // only tiles the proposal adds may be left out.
+    const proposal = {
+      id: 'proposal-add', draftId: 'draft-1', baseRevision: 3, baseProposalHash: 'sha256:base', clarifications: [],
+      mode: 'add', proposedTileIds: ['aov', 'aov-trend'],
+      summary: { requirements: 1, covered: 1, gaps: 0, certifiedSources: 1, semanticSources: 0 },
+      operations: [
+        { type: 'upsert_source', source: { id: 'dataset:orders', kind: 'certified_block', sourceRef: 'orders', trustState: 'certified', reviewStatus: 'not_required' } },
+        { type: 'upsert_source', source: { id: 'dataset:other', kind: 'certified_block', sourceRef: 'other', trustState: 'certified', reviewStatus: 'not_required' } },
+        { type: 'upsert_page', page: {
+          version: 3, id: 'overview', metadata: { title: 'Overview' },
+          filters: [{ id: 'region', type: 'select', label: 'Region' }, { id: 'segment', type: 'select', label: 'Segment' }],
+          layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [
+            { i: 'semantic-totals', x: 0, y: 0, w: 6, h: 4, viz: { type: 'table' }, semantic: { id: 'commerce', metricId: 'revenue' }, filterBindings: [{ filter: 'region' }] },
+            { i: 'aov', x: 0, y: 4, w: 6, h: 2, viz: { type: 'kpi' }, sourceId: 'dataset:orders', query: { measures: [{ measure: 'aov' }] } },
+            { i: 'aov-trend', x: 6, y: 4, w: 6, h: 4, viz: { type: 'line' }, sourceId: 'dataset:other', query: { measures: [{ measure: 'aov' }] }, filterBindings: [{ filter: 'segment' }] },
+          ] },
+        } },
+      ],
+    } as unknown as AppStudioAiProposal;
+    const operations = operationsForSelectedAppStudioSources(proposal, new Set(['dataset:orders']));
+    const page = operations.find((operation) => operation.type === 'upsert_page');
+    const items = page?.type === 'upsert_page' ? page.page.layout.items.map((item) => item.i) : [];
+    expect(items).toEqual(['semantic-totals', 'aov']);
+    // The existing tile's filter stays; the filter only the left-out new tile used goes.
+    expect(page?.type === 'upsert_page' ? page.page.filters?.map((filter) => filter.id) : []).toEqual(['region']);
+  });
+
   it('keeps additional governed source discovery in the review and excludes duplicate proposals', () => {
     const summary = {
       pages: [], components: [], frame: undefined,

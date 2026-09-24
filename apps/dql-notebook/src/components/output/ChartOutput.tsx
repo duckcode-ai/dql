@@ -166,7 +166,7 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
         {valueCols.map((col, ci) => (
           <div key={col} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <div style={{ width: 10, height: 10, borderRadius: 2, background: palette[ci % palette.length] }} />
-            <span style={{ fontSize: 10, fontFamily: t.font, color: t.textSecondary }}>{col}</span>
+            <span style={{ fontSize: 11, fontFamily: t.font, color: t.textSecondary }}>{col}</span>
           </div>
         ))}
       </div>
@@ -232,7 +232,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
         {valueCols.map((col, ci) => (
           <div key={col} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <div style={{ width: 10, height: 10, borderRadius: 2, background: palette[ci % palette.length] }} />
-            <span style={{ fontSize: 10, fontFamily: t.font, color: t.textSecondary }}>{col}</span>
+            <span style={{ fontSize: 11, fontFamily: t.font, color: t.textSecondary }}>{col}</span>
           </div>
         ))}
       </div>
@@ -415,7 +415,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
           {categories.slice(0, 12).map((cat, ci) => (
             <div key={cat} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <div style={{ width: 8, height: 8, borderRadius: '50%', background: palette[ci % palette.length] }} />
-              <span style={{ fontSize: 10, fontFamily: t.font, color: t.textSecondary }}>{cat}</span>
+              <span style={{ fontSize: 11, fontFamily: t.font, color: t.textSecondary }}>{cat}</span>
             </div>
           ))}
         </div>
@@ -1099,19 +1099,19 @@ function ChartConfigPopover({
         <span style={{ fontSize: 11, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>Chart Settings</span>
         <button onClick={onClose} style={{ background: 'none', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14 }}>&times;</button>
       </div>
-      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+      <label style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
         Title
         <input value={config.title ?? ''} onChange={(e) => onChange({ title: e.target.value || undefined })} placeholder="Chart title" style={{ ...inputStyle, marginTop: 2 }} />
       </label>
-      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+      <label style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
         X-axis label
         <input value={config.xLabel ?? ''} onChange={(e) => onChange({ xLabel: e.target.value || undefined })} placeholder="Auto" style={{ ...inputStyle, marginTop: 2 }} />
       </label>
-      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+      <label style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
         Y-axis label
         <input value={config.yLabel ?? ''} onChange={(e) => onChange({ yLabel: e.target.value || undefined })} placeholder="Auto" style={{ ...inputStyle, marginTop: 2 }} />
       </label>
-      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+      <label style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
         Legend
         <select value={config.legendPosition ?? 'top'} onChange={(e) => onChange({ legendPosition: e.target.value as CellChartConfig['legendPosition'] })} style={{ ...inputStyle, marginTop: 2 }}>
           <option value="top">Top</option>
@@ -1121,7 +1121,7 @@ function ChartConfigPopover({
           <option value="none">Hidden</option>
         </select>
       </label>
-      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+      <label style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
         Color palette
         <select value={selectedPaletteOption(config.colorPalette)} onChange={(e) => onChange({ colorPalette: e.target.value as CellChartConfig['colorPalette'] })} style={{ ...inputStyle, marginTop: 2 }}>
           {CHART_PALETTE_OPTIONS.map((option) => (
@@ -1129,7 +1129,7 @@ function ChartConfigPopover({
           ))}
         </select>
       </label>
-      <label style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
+      <label style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
         Max items
         <input type="number" value={config.maxItems ?? DEFAULT_MAX_ITEMS} min={5} max={200} onChange={(e) => onChange({ maxItems: parseInt(e.target.value) || DEFAULT_MAX_ITEMS })} style={{ ...inputStyle, marginTop: 2 }} />
       </label>
