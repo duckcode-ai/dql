@@ -5,7 +5,8 @@
  *
  * - certified: a certified source ran exactly as reviewed
  * - governed:  a governed semantic query (metrics and dimensions from the
- *              model), not individually certified
+ *              model), or a checked calculation over certified measures;
+ *              not individually certified
  * - review:    not certified yet, adapted, out of date, or AI-generated
  * - blocked:   governance or the source stopped this tile from showing data
  *
@@ -78,6 +79,12 @@ export function readerTileTrust(item: ReaderTrustItem, tile?: ReaderTrustTile): 
   if (dataset) {
     const outcome = dataset.validation?.outcome;
     if (outcome === 'rejected') return trust('blocked', 'The Dataset contract rejected this query.');
+    const calculated = Boolean((item.query as { calculations?: unknown[] } | undefined)?.calculations?.length);
+    if (dataset.trust === 'certified' && outcome !== 'needs_review' && calculated) {
+      // Checked arithmetic over certified measures is governed, not certified:
+      // nobody reviewed this formula. Promoting it into the Dataset certifies it.
+      return trust('governed', 'Calculated on a certified Dataset: checked arithmetic over its certified measures.');
+    }
     if (dataset.trust === 'certified' && outcome !== 'needs_review') {
       return outcome === 'adapted'
         ? trust('certified', 'Certified Dataset; the query was adapted within its contract.')

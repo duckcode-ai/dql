@@ -7,6 +7,7 @@ import {
 } from '../datasets/descriptor.js';
 import { datasetAggregateComponentRequirements } from '../datasets/component-proof.js';
 import { sha256Hex } from './sha256-sync.js';
+import { checkTileCalculations, normalizeTileCalculations, tileCalcMeasureReferences } from './tile-calcs.js';
 
 import type {
   TileFilterOperator,
@@ -19,6 +20,9 @@ import type {
 } from './tile-query-types.js';
 
 export type {
+  TileCalcExpr,
+  TileCalculation,
+  TileQuickCalcKind,
   TileFilterOperator,
   TileQueryDimension,
   TileQueryMeasure,
@@ -124,6 +128,7 @@ export interface TileQueryDiagnostic {
     | 'INVALID_COMPARISON'
     | 'HIERARCHY_DRILL_UNSUPPORTED'
     | 'INVALID_LIMIT'
+    | 'INVALID_CALCULATION'
     | 'INVALID_QUERY';
   message: string;
   field?: string;
@@ -199,6 +204,7 @@ export function tileQueryOutputAliases(query: TileQuery): Array<{ alias: string;
       kind: 'dimension' as const,
     })),
     ...query.measures.map((measure) => ({ alias: measure.alias ?? measure.measure, kind: 'measure' as const })),
+    ...(query.calculations ?? []).map((calculation) => ({ alias: calculation.id, kind: 'measure' as const })),
   ];
 }
 
@@ -218,13 +224,15 @@ export function tileQueryIsTopNIntent(query: TileQuery): boolean {
 export function normalizeTileQuery(value: unknown): TileQuery | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
-  if (!hasOnlyKeys(raw, ['dimensions', 'measures', 'filters', 'having', 'comparison', 'orderBy', 'limit', 'detail', 'detailColumns', 'respectsGlobalFilters'])) return undefined;
+  if (!hasOnlyKeys(raw, ['dimensions', 'measures', 'calculations', 'filters', 'having', 'comparison', 'orderBy', 'limit', 'detail', 'detailColumns', 'respectsGlobalFilters'])) return undefined;
   if (hasOwn(raw, 'filters') && !Array.isArray(raw.filters)) return undefined;
   if (hasOwn(raw, 'having') && !Array.isArray(raw.having)) return undefined;
   if (hasOwn(raw, 'orderBy') && !Array.isArray(raw.orderBy)) return undefined;
   const dimensions = normalizeDimensions(raw.dimensions);
   const measures = normalizeMeasures(raw.measures);
   if (!dimensions || !measures) return undefined;
+  const calculations = raw.calculations === undefined ? undefined : normalizeTileCalculations(raw.calculations);
+  if (raw.calculations !== undefined && !calculations) return undefined;
   const filters = normalizeFilters(raw.filters);
   const having = normalizeFilters(raw.having);
   if ((raw.filters !== undefined && !filters) || (raw.having !== undefined && !having)) return undefined;
@@ -241,6 +249,7 @@ export function normalizeTileQuery(value: unknown): TileQuery | undefined {
   return {
     dimensions,
     measures,
+    ...(calculations?.length ? { calculations } : {}),
     ...(filters?.length ? { filters } : {}),
     ...(having?.length ? { having } : {}),
     ...(comparison ? { comparison } : {}),
@@ -265,15 +274,19 @@ export function validateTileQuery(descriptor: DatasetDescriptor, query: TileQuer
     diagnostics.push({ code: 'INVALID_TIME_GRAIN', message: `Dataset ${descriptor.label} declares an unknown time grain ${descriptor.grain.timeGrain}; use one of ${TIME_GRAINS.join(', ')}.` });
     return { outcome: 'rejected', diagnostics, adaptations: [] };
   }
-  const aggregateSafety = aggregateDatasetQuerySafety(descriptor, query);
-  const aggregateComponents = datasetAggregateComponentRequirements(descriptor, query);
+  // Measures a calculation reads are checked exactly like selected ones, so a
+  // formula cannot reach a measure the tile could not select directly.
+  diagnostics.push(...checkTileCalculations(descriptor, query).diagnostics);
+  const measureQuery = tileQueryMeasureScope(descriptor, query);
+  const aggregateSafety = aggregateDatasetQuerySafety(descriptor, measureQuery);
+  const aggregateComponents = datasetAggregateComponentRequirements(descriptor, measureQuery);
   diagnostics.push(...aggregateSafety.diagnostics);
   const requiredOperations = new Set<string>();
   if (query.dimensions.length > 0) requiredOperations.add('group');
   if (query.filters?.length) requiredOperations.add('filter');
   if (query.having?.length) requiredOperations.add('having');
   if (query.comparison) requiredOperations.add('compare');
-  if (tileQueryIsTopNIntent(query)) requiredOperations.add('rank');
+  if (tileQueryIsTopNIntent(query) || query.calculations?.some((calculation) => calculation.quick?.kind === 'rank')) requiredOperations.add('rank');
   if (query.detail) requiredOperations.add('detail');
   if (query.dimensions.some((dimension) => dimension.timeGrain)) requiredOperations.add('trend');
   for (const operation of requiredOperations) {
@@ -330,7 +343,7 @@ export function validateTileQuery(descriptor: DatasetDescriptor, query: TileQuer
       diagnostics.push({ code: 'INVALID_DETAIL_FIELD', message: 'Choose at least one approved physical column for detail rows.' });
     }
   }
-  if (!query.detail && query.measures.length === 0) {
+  if (!query.detail && query.measures.length === 0 && !query.calculations?.some((calculation) => calculation.expr)) {
     diagnostics.push({ code: 'INVALID_QUERY', message: 'Select at least one approved measure, or switch to detail rows.' });
   }
   for (const dimension of query.dimensions) {
@@ -362,7 +375,7 @@ export function validateTileQuery(descriptor: DatasetDescriptor, query: TileQuer
     }
   }
   const timeRollup = query.dimensions.find((dimension) => Boolean(dimension.timeGrain) && descriptor.grain.timeGrain && timeGrainIndex(dimension.timeGrain!) > timeGrainIndex(descriptor.grain.timeGrain!));
-  for (const selection of query.measures) {
+  for (const selection of measureQuery.measures) {
     const measure = datasetMeasureField(descriptor, selection.measure);
     if (!measure) {
       diagnostics.push({ code: 'UNKNOWN_MEASURE', field: selection.measure, message: `Unknown approved measure ${selection.measure}.` });
@@ -543,12 +556,35 @@ export function applyDatasetHierarchyDrill(input: {
           : { ...order },
       ),
     } : {}),
+    // Quick calculations that ran along or within the drilled level follow it down.
+    ...(input.query.calculations ? {
+      calculations: input.query.calculations.map((calculation) => {
+        if (!calculation.quick) return structuredClone(calculation);
+        const follow = (alias: string | undefined) => (alias && alias.toLowerCase() === sourceAlias.toLowerCase() ? targetAlias : alias);
+        const along = follow(calculation.quick.along);
+        const within = follow(calculation.quick.within);
+        return { ...structuredClone(calculation), quick: { ...calculation.quick, ...(along ? { along } : {}), ...(within ? { within } : {}) } };
+      }),
+    } : {}),
   };
   return { status: 'ready', hierarchyId, fromField: from.name, toField: next.name, query };
 }
 
 export function datasetHierarchyFields(descriptor: DatasetDescriptor, hierarchyId: string): DatasetPhysicalField[] {
   return hierarchyLevels(descriptor, hierarchyId.trim());
+}
+
+/**
+ * The query with every Dataset measure its calculated measures read added as
+ * hidden selections. Contract checks and aggregate-component evidence run on
+ * this scope so a formula reaches no measure the tile could not select.
+ */
+export function tileQueryMeasureScope(descriptor: DatasetDescriptor, query: TileQuery): TileQuery {
+  const selected = new Set(query.measures.map((selection) => (datasetMeasureField(descriptor, selection.measure)?.name ?? selection.measure).toLowerCase()));
+  const hidden = tileCalcMeasureReferences(query).filter((name) => !selected.has((datasetMeasureField(descriptor, name)?.name ?? name).toLowerCase()));
+  return hidden.length
+    ? { ...query, measures: [...query.measures, ...hidden.map((measure) => ({ measure, alias: `__calc_${measure.replace(/[^A-Za-z0-9_]/g, '_')}` }))] }
+    : query;
 }
 
 /**
@@ -563,7 +599,7 @@ export function datasetQueryRequiresAggregateComponentEvidence(
   descriptor: DatasetDescriptor,
   query: TileQuery,
 ): boolean {
-  return aggregateDatasetQuerySafety(descriptor, query).reaggregates;
+  return aggregateDatasetQuerySafety(descriptor, tileQueryMeasureScope(descriptor, query)).reaggregates;
 }
 
 type AggregateDatasetQuerySafety = {

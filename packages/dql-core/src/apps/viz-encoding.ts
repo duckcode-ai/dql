@@ -186,7 +186,10 @@ export function shelfContents(encoding: DashboardVizEncoding): Record<ShelfId, S
 /** Problems when an encoding names a field its query does not select. */
 export function encodingQueryIssues(encoding: DashboardVizEncoding, query: TileQuery): string[] {
   const dimensions = new Set(query.dimensions.map((dimension) => dimension.field.toLowerCase()));
-  const measures = new Set(query.measures.map((measure) => measure.measure.toLowerCase()));
+  const measures = new Set([
+    ...query.measures.map((measure) => measure.measure.toLowerCase()),
+    ...(query.calculations ?? []).map((calculation) => calculation.id.toLowerCase()),
+  ]);
   const issues: string[] = [];
   for (const [shelf, refs] of Object.entries(shelfContents(encoding)) as Array<[ShelfId, ShelfFieldRef[]]>) {
     for (const ref of refs) {
@@ -227,19 +230,38 @@ export function queryFromEncoding(
     const grain = timeGrainFor(field);
     return { field, ...(grain ? { timeGrain: grain } : {}) };
   });
-  const measures: TileQueryMeasure[] = measureRefs.map((name) => (
-    previous.measures.find((measure) => measure.measure.toLowerCase() === name.toLowerCase()) ?? { measure: name }
-  ));
+  // A calculation's pill names its output; it stays a calculation, and a
+  // quick calculation keeps the measure it runs over selected.
+  const calculationsById = new Map((previous.calculations ?? []).map((calculation) => [calculation.id.toLowerCase(), calculation]));
+  const keptCalculations = new Set<string>();
+  const keep = (id: string) => {
+    const calculation = calculationsById.get(id.toLowerCase());
+    if (!calculation || keptCalculations.has(calculation.id.toLowerCase())) return;
+    keptCalculations.add(calculation.id.toLowerCase());
+    if (calculation.quick) {
+      if (calculationsById.has(calculation.quick.of.toLowerCase())) keep(calculation.quick.of);
+      else if (!measureRefs.some((name) => name.toLowerCase() === calculation.quick!.of.toLowerCase())) measureRefs.push(calculation.quick.of);
+    }
+  };
+  for (const name of [...measureRefs]) keep(name);
+  const measures: TileQueryMeasure[] = measureRefs
+    .filter((name) => !calculationsById.has(name.toLowerCase()))
+    .map((name) => (
+      previous.measures.find((measure) => measure.measure.toLowerCase() === name.toLowerCase() || measure.alias?.toLowerCase() === name.toLowerCase()) ?? { measure: name }
+    ));
+  const calculations = (previous.calculations ?? []).filter((calculation) => keptCalculations.has(calculation.id.toLowerCase()));
   const aliases = new Set([
     ...dimensions.map((dimension) => (dimension.alias ?? (dimension.timeGrain ? `${dimension.field}_${dimension.timeGrain}` : dimension.field)).toLowerCase()),
     ...measures.map((measure) => (measure.alias ?? measure.measure).toLowerCase()),
+    ...calculations.map((calculation) => calculation.id.toLowerCase()),
   ]);
-  const { orderBy, detail: _detail, detailColumns: _detailColumns, ...rest } = previous;
+  const { orderBy, detail: _detail, detailColumns: _detailColumns, calculations: _calculations, ...rest } = previous;
   const keptOrder = orderBy?.filter((entry) => aliases.has(entry.alias.toLowerCase()));
   return {
     ...rest,
     dimensions,
     measures,
+    ...(calculations.length ? { calculations } : {}),
     ...(keptOrder?.length ? { orderBy: keptOrder } : {}),
   };
 }
@@ -254,7 +276,12 @@ type VizType = string | undefined;
  */
 export function encodingFromQuery(query: TileQuery, viz: VizType): DashboardVizEncoding {
   const dims = query.dimensions.map((dimension) => ({ dimension: dimension.field }));
-  const measures = query.measures.map((measure) => ({ measure: measure.measure }));
+  // A quick calculation takes the place of the measure it runs over, as its pill does.
+  const replaced = new Set((query.calculations ?? []).flatMap((calculation) => (calculation.quick ? [calculation.quick.of.toLowerCase()] : [])));
+  const measures = [
+    ...query.measures.filter((measure) => !replaced.has((measure.alias ?? measure.measure).toLowerCase())).map((measure) => ({ measure: measure.measure })),
+    ...(query.calculations ?? []).filter((calculation) => !replaced.has(calculation.id.toLowerCase())).map((calculation) => ({ measure: calculation.id })),
+  ];
   const type = (viz ?? '').toLowerCase().replace(/-/g, '_');
   if (type === 'scatter' && measures.length >= 2) {
     return { version: 1, columns: [measures[0]!], rows: [measures[1]!], ...(measures[2] ? { size: measures[2] } : {}), ...(dims.length ? { detail: dims } : {}) };
@@ -433,7 +460,8 @@ function drawnChart(encoding: DashboardVizEncoding, isTime: (dimension: string) 
 export function outputAlias(query: TileQuery, ref: ShelfFieldRef): string | undefined {
   if (isMeasureRef(ref)) {
     const measure = query.measures.find((entry) => entry.measure.toLowerCase() === ref.measure.toLowerCase());
-    return measure ? measure.alias ?? measure.measure : undefined;
+    if (measure) return measure.alias ?? measure.measure;
+    return query.calculations?.find((calculation) => calculation.id.toLowerCase() === ref.measure.toLowerCase())?.id;
   }
   const dimension = query.dimensions.find((entry) => entry.field.toLowerCase() === ref.dimension.toLowerCase());
   if (!dimension) return undefined;

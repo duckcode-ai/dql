@@ -125,12 +125,15 @@ export function exploreByQuery(base: TileQuery, path: ExploreStep[], field: Expl
   const grains = field.grains ?? [];
   const grain = time ? (['month', 'week', 'day', 'quarter', 'year'].find((candidate) => grains.includes(candidate)) ?? grains[0] ?? 'month') : undefined;
   const measures = base.measures.length ? base.measures : [];
-  const firstMeasure = measures[0];
+  // Calculated measures hold at any grouping; quick calculations belong to the tile's own layout.
+  const calculations = (base.calculations ?? []).filter((calculation) => calculation.expr);
+  const firstAlias = measures[0] ? measures[0].alias ?? measures[0].measure : calculations[0]?.id;
   return {
     dimensions: [{ field: field.name, ...(grain ? { timeGrain: grain } : {}) }],
     measures,
+    ...(calculations.length ? { calculations } : {}),
     filters: [...(base.filters ?? []), ...path.flatMap((step) => step.filters)],
-    ...(!time && firstMeasure ? { orderBy: [{ alias: firstMeasure.alias ?? firstMeasure.measure, direction: 'desc' as const }], limit: 50 } : {}),
+    ...(!time && firstAlias ? { orderBy: [{ alias: firstAlias, direction: 'desc' as const }], limit: 50 } : {}),
     ...(base.respectsGlobalFilters !== undefined ? { respectsGlobalFilters: base.respectsGlobalFilters } : {}),
   };
 }

@@ -57,9 +57,56 @@ export interface TileQueryComparison {
   zeroDenominatorPolicy: 'null' | 'not_applicable';
 }
 
+/**
+ * A calculated measure's typed expression (RFC 0009 step 3). It names Dataset
+ * measures, never columns or SQL: `{ measure }` is that measure's own governed
+ * aggregate, optionally restricted to rows matching `where` ("revenue where
+ * region is US"); numbers are constants. Division of two measures is a ratio
+ * of their aggregates, never an average of row ratios.
+ */
+export type TileCalcExpr =
+  | { measure: string; where?: TileQueryFilter[] }
+  | { number: number }
+  | { op: '+' | '-' | '*' | '/'; left: TileCalcExpr; right: TileCalcExpr };
+
+export type TileQuickCalcKind =
+  | 'percent_of_total'
+  | 'running_total'
+  | 'difference'
+  | 'percent_difference'
+  | 'rank'
+  | 'moving_average'
+  | 'year_over_year';
+
+/**
+ * One calculation on a tile. Exactly one of `expr` (a calculated measure,
+ * computed with the tile's grouping) or `quick` (a table calculation over the
+ * tile's result, computed as a window over its rows) is set. `id` is the
+ * output column the calculation adds.
+ */
+export interface TileCalculation {
+  id: string;
+  label?: string;
+  expr?: TileCalcExpr;
+  quick?: {
+    kind: TileQuickCalcKind;
+    /** The measure or calculated measure output this runs over. */
+    of: string;
+    /** Dimension output the calculation runs along; defaults to the date, else the first dimension. */
+    along?: string;
+    /** Percent of total and rank: restart for each value of this dimension output; the whole table when absent. */
+    within?: string;
+    /** Moving average: periods in the window, 2–24 (default 3). */
+    window?: number;
+  };
+  format?: { kind: 'number' | 'currency' | 'percent'; currency?: string; decimals?: number };
+}
+
 export interface TileQuery {
   dimensions: TileQueryDimension[];
   measures: TileQueryMeasure[];
+  /** Calculated measures and quick table calculations, in output order after `measures`. */
+  calculations?: TileCalculation[];
   filters?: TileQueryFilter[];
   having?: TileQueryFilter[];
   comparison?: TileQueryComparison;

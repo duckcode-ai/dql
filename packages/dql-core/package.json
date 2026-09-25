@@ -55,6 +55,10 @@
       "types": "./dist/apps/viz-encoding.d.ts",
       "import": "./dist/apps/viz-encoding.js"
     },
+    "./apps/tile-calcs": {
+      "types": "./dist/apps/tile-calcs.d.ts",
+      "import": "./dist/apps/tile-calcs.js"
+    },
     "./apps/show-me": {
       "types": "./dist/apps/show-me.d.ts",
       "import": "./dist/apps/show-me.js"

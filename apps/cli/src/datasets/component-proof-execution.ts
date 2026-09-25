@@ -11,6 +11,7 @@ import {
   type AggregationSafetyProofV1,
   type DatasetAggregateComponentProofV1,
   type DatasetDescriptor,
+  tileQueryMeasureScope,
   type TileQuery,
 } from '@duckcodeailabs/dql-core';
 import {
@@ -244,7 +245,7 @@ export function inspectDatasetAggregateComponentProof(input: {
   sourceSql: string;
   driver: string;
 }): DatasetAggregateComponentProofInspection {
-  const requirements = datasetAggregateComponentRequirements(input.descriptor, input.query);
+  const requirements = datasetAggregateComponentRequirements(input.descriptor, tileQueryMeasureScope(input.descriptor, input.query));
   if (!requirements.supported) {
     throw new DatasetAggregateComponentProofError(
       'DATASET_AGGREGATE_COMPONENT_UNSUPPORTED',

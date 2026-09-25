@@ -83,8 +83,34 @@ export {
   tileQueryValidationRuns,
   tileQueryHash,
   tileQueryMeasure,
+  tileQueryMeasureScope,
   validateTileQuery,
 } from './tile-query.js';
+export {
+  MAX_TILE_CALCULATIONS,
+  QUICK_CALC_KINDS,
+  QUICK_CALC_LABELS,
+  checkTileCalculations,
+  formatTileCalcExpr,
+  measureCalcFacts,
+  normalizeTileCalculations,
+  parseTileFormula,
+  quickCalcVerdict,
+  tileCalcMeasureReferences,
+  tileCalculationOutputs,
+  uniqueCalculationId,
+} from './tile-calcs.js';
+export type {
+  TileCalcCheck,
+  TileCalcDiagnostic,
+  TileCalcExpr,
+  TileCalcFacts,
+  TileCalcOutput,
+  TileCalcUnit,
+  TileCalculation,
+  TileFormulaParse,
+  TileQuickCalcKind,
+} from './tile-calcs.js';
 export type {
   DatasetTileVisualizationCompatibility,
   DatasetTileVisualizationIssueCode,

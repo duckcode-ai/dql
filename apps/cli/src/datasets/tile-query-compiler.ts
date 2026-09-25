@@ -11,9 +11,14 @@ import {
   renderDatasetAggregateExpression,
   tileQueryIsTopNIntent,
   tileQueryHash,
+  tileQueryMeasureScope,
   tileQueryValidationRuns,
   validateTileQuery,
+  checkTileCalculations,
   type DatasetDescriptor,
+  type DatasetMeasureField,
+  type TileCalcExpr,
+  type TileCalculation,
   type DatasetAggregateComponentProofV1,
   type DatasetMeasureAggregation,
   type TileFilterOperator,
@@ -47,7 +52,9 @@ export interface CompiledDatasetTileQuery {
     type?: 'string' | 'number' | 'boolean' | 'date' | 'timestamp';
     aggregation?: DatasetMeasureAggregation;
     timeGrain?: string;
-    format?: { kind: 'number' | 'currency' | 'percent'; currency?: string };
+    format?: { kind: 'number' | 'currency' | 'percent'; currency?: string; decimals?: number };
+    /** A tile calculation: its words for the receipt ("revenue / orders"). */
+    calculation?: { kind: 'measure' | 'quick'; description: string };
   }>;
   queryFingerprint: string;
   filterFingerprint: string;
@@ -114,7 +121,7 @@ export function compileDatasetTileQuery(input: {
   const aggregateEvidenceRequired = input.aggregateSourceDetected === true
     || datasetQueryRequiresAggregateComponentEvidence(input.descriptor, effectiveQuery);
   if (aggregateEvidenceRequired) {
-    const requirements = datasetAggregateComponentRequirements(input.descriptor, effectiveQuery);
+    const requirements = datasetAggregateComponentRequirements(input.descriptor, tileQueryMeasureScope(input.descriptor, effectiveQuery));
     if (!requirements.supported || !datasetAggregateComponentProofCovers(input.aggregateComponentProof, requirements.requirements, {
       ...input.aggregateComponentBinding,
       contractFingerprint: input.descriptor.contractRef.fingerprint,
@@ -224,9 +231,25 @@ export function compileDatasetTileQuery(input: {
     const expression = compileMeasure(measure, physicalExpression);
     return { alias, expression, format: measure.format, logicalMeasure: measure };
   });
+  // Calculations (RFC 0009 step 3). Calculated measures are aggregates at the
+  // tile's grouping; quick calculations are windows over its grouped rows.
+  const calculationOutputs = new Map(checkTileCalculations(input.descriptor, input.query).outputs.map((output) => [output.id.toLowerCase(), output]));
+  const calculations = (input.query.calculations ?? []).map((calculation) => {
+    const output = calculationOutputs.get(calculation.id.toLowerCase());
+    if (!output) throw new TileQueryCompilationError('DATASET_CALCULATION_INVALID', `Calculation ${calculation.id} did not pass its checks.`);
+    return { calculation, output, alias: safeAlias(calculation.id) };
+  });
+  const calculatedMeasures = calculations
+    .filter((entry) => entry.calculation.expr)
+    .map((entry) => ({
+      ...entry,
+      expression: compileCalcExpression(entry.calculation.expr!, input.descriptor, physicalExpression, (filter, expression, type) => compileFilter(filter, expression, dialect.ilike.bind(dialect), addBoundValue, type, input.driver)),
+    }));
+  const quickCalculations = calculations.filter((entry) => entry.calculation.quick);
   const aliasExpressions = new Map<string, string>([
     ...dimensions.map((dimension): [string, string] => [dimension.alias.toLowerCase(), dimension.expression]),
     ...measures.map((measure): [string, string] => [measure.alias.toLowerCase(), measure.expression]),
+    ...calculations.map((entry): [string, string] => [entry.alias.toLowerCase(), entry.alias]),
   ]);
   // HAVING refers to the approved logical measure identity. Presentation
   // aliases are deliberately excluded: an alias collision must never redirect
@@ -250,6 +273,7 @@ export function compileDatasetTileQuery(input: {
   const selectColumns = [
     ...dimensions.map((dimension) => `${dimension.expression} AS ${quote(dimension.alias)}`),
     ...measures.map((measure) => `${measure.expression} AS ${quote(measure.alias)}`),
+    ...calculatedMeasures.map((entry) => `${entry.expression} AS ${quote(entry.alias)}`),
   ];
   const orderBy = (input.query.orderBy ?? []).map((order) => {
     const alias = safeAlias(order.alias);
@@ -270,16 +294,44 @@ export function compileDatasetTileQuery(input: {
       orderedAliases.add(dimension.alias.toLowerCase());
     }
   }
-  const sql = [
-    `WITH ds AS (${sourceSql})`,
-    `SELECT ${selectPrefix}${selectColumns.join(', ')}`,
+  const grouped = [
     'FROM ds',
     ...(whereClauses.length ? [`WHERE ${whereClauses.join(' AND ')}`] : []),
     ...(dimensions.length ? [`GROUP BY ${dimensions.map((dimension) => dimension.expression).join(', ')}`] : []),
     ...(havingClauses.length ? [`HAVING ${havingClauses.join(' AND ')}`] : []),
+  ];
+  const tail = [
     ...(orderBy.length ? [`ORDER BY ${orderBy.join(', ')}`] : []),
     ...(dialect.limitAtEnd && limit ? [dialect.limitClause(limit)] : []),
-  ].join('\n');
+  ];
+  let sql: string;
+  if (quickCalculations.length === 0) {
+    sql = [`WITH ds AS (${sourceSql})`, `SELECT ${selectPrefix}${selectColumns.join(', ')}`, ...grouped, ...tail].join('\n');
+  } else {
+    // Quick calculations run over the grouped rows, before the row limit, so a
+    // share of total or a rank covers every group, not only the rows shown.
+    const windowed = compileQuickCalculations({
+      calculations: quickCalculations,
+      dimensions,
+      driver: input.driver,
+      quote,
+    });
+    const outputs = [
+      ...dimensions.map((dimension) => dimension.alias),
+      ...measures.map((measure) => measure.alias),
+      ...calculatedMeasures.map((entry) => entry.alias),
+    ].map((alias) => `b.${quote(alias)} AS ${quote(alias)}`);
+    sql = [
+      `WITH ds AS (${sourceSql}),`,
+      `__base AS (SELECT ${selectColumns.join(', ')}`,
+      ...grouped,
+      ')',
+      `SELECT ${selectPrefix}${[...outputs, ...windowed.columns].join(', ')}`,
+      'FROM __base b',
+      ...windowed.joins,
+      ...tail,
+    ].join('\n');
+  }
   return compiledResult(sql, sqlParams, variables, [
     ...dimensions.map((dimension) => ({
       alias: dimension.alias,
@@ -295,7 +347,134 @@ export function compileDatasetTileQuery(input: {
       aggregation: measure.logicalMeasure.aggregation,
       ...(measure.format ? { format: measure.format } : {}),
     })),
+    ...calculations.map((entry) => ({
+      alias: entry.alias,
+      role: 'measure' as const,
+      ref: `calculation:${entry.alias}`,
+      format: entry.output.format,
+      calculation: { kind: entry.output.kind, description: entry.output.description },
+    })),
   ], input.query, appliedFilters, validation);
+}
+
+/**
+ * A calculated measure's SQL. Every measure reference is that measure's own
+ * governed aggregate; division is a ratio of aggregates with a NULL for a zero
+ * denominator; a `where` restricts the aggregate's input rows with a CASE.
+ */
+function compileCalcExpression(
+  expr: TileCalcExpr,
+  descriptor: DatasetDescriptor,
+  physicalExpression: (name: string) => string,
+  condition: (filter: TileQueryFilter, expression: string, type: 'string' | 'number' | 'boolean' | 'date' | 'timestamp') => string,
+): string {
+  if ('number' in expr) {
+    if (!Number.isFinite(expr.number)) throw new TileQueryCompilationError('DATASET_CALCULATION_INVALID', 'A calculation constant must be a finite number.');
+    return expr.number < 0 ? `(${String(expr.number)})` : String(expr.number);
+  }
+  if ('measure' in expr) {
+    const measure = datasetMeasureField(descriptor, expr.measure);
+    if (!measure) throw new TileQueryCompilationError('DATASET_MEASURE_DRIFT', `Dataset measure ${expr.measure} no longer resolves.`);
+    if (!expr.where?.length) return compileMeasure(measure, physicalExpression);
+    const when = expr.where.map((filter) => {
+      const field = datasetPhysicalField(descriptor, filter.field);
+      if (!field) throw new TileQueryCompilationError('DATASET_FIELD_DRIFT', `Dataset field ${filter.field} no longer resolves.`);
+      return condition(filter, physicalExpression(field.name), field.type);
+    }).join(' AND ');
+    return compileRestrictedMeasure(measure, physicalExpression, when);
+  }
+  const left = compileCalcExpression(expr.left, descriptor, physicalExpression, condition);
+  const right = compileCalcExpression(expr.right, descriptor, physicalExpression, condition);
+  if (expr.op === '/') return `((1.0 * ${left}) / NULLIF(${right}, 0))`;
+  return `(${left} ${expr.op} ${right})`;
+}
+
+function compileRestrictedMeasure(
+  measure: DatasetMeasureField,
+  physicalExpression: (name: string) => string,
+  when: string,
+): string {
+  const only = (column: string) => `CASE WHEN ${when} THEN ${physicalExpression(column)} END`;
+  if (measure.expression) {
+    throw new TileQueryCompilationError('DATASET_CALCULATION_INVALID', `${measure.name} is a formula measure and cannot be restricted to some rows.`);
+  }
+  if (measure.aggregation === 'ratio') {
+    const numerator = only(requiredMeasureInput(measure.numerator, measure.name));
+    const denominator = only(requiredMeasureInput(measure.denominator, measure.name));
+    return `((1.0 * SUM(${numerator})) / NULLIF(SUM(${denominator}), 0))`;
+  }
+  const input = only(requiredMeasureInput(measure.from, measure.name));
+  if (measure.aggregation === 'count_distinct') return `COUNT(DISTINCT ${input})`;
+  if (measure.aggregation === 'sum' || measure.aggregation === 'count' || measure.aggregation === 'avg' || measure.aggregation === 'min' || measure.aggregation === 'max') {
+    return `${measure.aggregation.toUpperCase()}(${input})`;
+  }
+  throw new TileQueryCompilationError('DATASET_MEASURE_UNSUPPORTED', `Measure ${measure.name} uses an unsupported aggregation.`);
+}
+
+/**
+ * Window expressions for quick calculations over the grouped rows `b`. A
+ * calculation runs along one dimension (ordered) and restarts for each value
+ * of the others; percent of total and rank cover the whole table unless
+ * `within` names a dimension to restart on. Year over year joins each row to
+ * the same period a year earlier rather than counting rows back, so a missing
+ * month never shifts the comparison.
+ */
+function compileQuickCalculations(input: {
+  calculations: Array<{ calculation: TileCalculation; alias: string }>;
+  dimensions: Array<{ alias: string; timeGrain?: string }>;
+  driver: string;
+  quote: (identifier: string) => string;
+}): { columns: string[]; joins: string[] } {
+  const { quote } = input;
+  const column = (table: string, alias: string) => `${table}.${quote(alias)}`;
+  const find = (alias: string | undefined) => (alias ? input.dimensions.find((dimension) => dimension.alias.toLowerCase() === alias.toLowerCase()) : undefined);
+  const columns: string[] = [];
+  const joins: string[] = [];
+  input.calculations.forEach(({ calculation, alias }, index) => {
+    const quick = calculation.quick!;
+    const value = column('b', safeAlias(quick.of));
+    const within = find(quick.within);
+    const along = find(quick.along) ?? input.dimensions.find((dimension) => dimension.timeGrain) ?? input.dimensions[0];
+    const partitionOf = (dimensions: Array<{ alias: string }>) => (dimensions.length ? `PARTITION BY ${dimensions.map((dimension) => column('b', dimension.alias)).join(', ')} ` : '');
+    let expression: string;
+    if (quick.kind === 'percent_of_total') {
+      expression = `((1.0 * ${value}) / NULLIF(SUM(${value}) OVER (${partitionOf(within ? [within] : []).trim()}), 0))`;
+    } else if (quick.kind === 'rank') {
+      expression = `RANK() OVER (${partitionOf(within ? [within] : [])}ORDER BY ${value} DESC NULLS LAST)`;
+    } else {
+      if (!along) throw new TileQueryCompilationError('DATASET_CALCULATION_INVALID', `${calculation.id} needs a dimension to run along.`);
+      const others = input.dimensions.filter((dimension) => dimension !== along);
+      const window = `${partitionOf(others)}ORDER BY ${column('b', along.alias)} ASC`;
+      if (quick.kind === 'running_total') {
+        expression = `SUM(${value}) OVER (${window} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`;
+      } else if (quick.kind === 'difference') {
+        expression = `(${value} - LAG(${value}) OVER (${window}))`;
+      } else if (quick.kind === 'percent_difference') {
+        const previous = `LAG(${value}) OVER (${window})`;
+        expression = `((1.0 * (${value} - ${previous})) / NULLIF(ABS(${previous}), 0))`;
+      } else if (quick.kind === 'moving_average') {
+        expression = `AVG(${value}) OVER (${window} ROWS BETWEEN ${(quick.window ?? 3) - 1} PRECEDING AND CURRENT ROW)`;
+      } else {
+        const prior = `__yoy_${index + 1}`;
+        const grain = along.timeGrain;
+        if (grain !== 'month' && grain !== 'quarter' && grain !== 'year') {
+          throw new TileQueryCompilationError('DATASET_CALCULATION_INVALID', 'Year over year needs a date by month, quarter or year.');
+        }
+        const part = (table: string, name: 'YEAR' | 'MONTH' | 'QUARTER') => `EXTRACT(${name} FROM ${column(table, along.alias)})`;
+        const matches = [
+          `${part(prior, 'YEAR')} = ${part('b', 'YEAR')} - 1`,
+          ...(grain === 'month' ? [`${part(prior, 'MONTH')} = ${part('b', 'MONTH')}`] : []),
+          ...(grain === 'quarter' ? [`${part(prior, 'QUARTER')} = ${part('b', 'QUARTER')}`] : []),
+          ...others.map((dimension) => `(${column(prior, dimension.alias)} = ${column('b', dimension.alias)} OR (${column(prior, dimension.alias)} IS NULL AND ${column('b', dimension.alias)} IS NULL))`),
+        ];
+        joins.push(`LEFT JOIN __base ${prior} ON ${matches.join(' AND ')}`);
+        const before = column(prior, safeAlias(quick.of));
+        expression = `((1.0 * (${value} - ${before})) / NULLIF(ABS(${before}), 0))`;
+      }
+    }
+    columns.push(`${expression} AS ${quote(alias)}`);
+  });
+  return { columns, joins };
 }
 
 /**

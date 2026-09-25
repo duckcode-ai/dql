@@ -518,6 +518,7 @@ export const APP_STUDIO_V2_STYLES = `
 .trust-dot.certified { background:var(--status-success); }
 .trust-dot.review_required { background:var(--status-warning); }
 .trust-dot.draft_ready { background:var(--accent); }
+.trust-dot.governed { background:var(--trust-governed, #3659c9); }
 .tile-heading { padding:22px 16px; font-size:20px; font-weight:600; }
 .tile-text { padding:16px; font-size:14px; color:var(--text-secondary); line-height:1.55; }
 .preview-kpi { padding:18px; display:grid; gap:4px; }
@@ -1339,6 +1340,37 @@ export const APP_STUDIO_V2_STYLES = `
 .shelf-menu-row select, .shelf-menu-row input { flex:1; min-width:0; height:28px; padding:0 8px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); color:var(--text-primary); font-size:12px; }
 .shelf-menu-row input[type="number"] { flex:0 0 64px; }
 .shelf-menu button:focus-visible, .shelf-menu select:focus-visible, .shelf-menu input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+/* RFC 0009 step 3: calculations. */
+.shelf-pill.calc { background:color-mix(in srgb,var(--accent) 16%,var(--bg-2)); }
+.shelf-calcs { display:grid; grid-template-columns:60px minmax(0,1fr); align-items:start; gap:8px; }
+.shelf-calcs .shelf-name { padding-top:4px; }
+.shelf-calc-list { display:flex; flex-wrap:wrap; gap:4px; }
+.shelf-calc, .shelf-calc-add { display:inline-flex; align-items:center; gap:4px; height:24px; padding:0 8px; border:1px solid var(--border-default); border-radius:999px; background:var(--bg-1); color:var(--text-primary); font-size:12px; font-weight:500; cursor:pointer; }
+.shelf-calc { border-color:transparent; background:var(--accent-dim); color:var(--accent); }
+.shelf-calc-add { border-style:dashed; color:var(--text-secondary); }
+.shelf-calc:hover, .shelf-calc-add:hover { border-color:var(--border-strong); color:var(--text-primary); }
+.shelf-calc:focus-visible, .shelf-calc-add:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.calc-editor { display:grid; gap:8px; padding:10px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); }
+.calc-editor-row { display:grid; gap:4px; }
+.calc-editor-row label { color:var(--text-secondary); font-size:11px; font-weight:500; }
+.calc-editor-row input, .calc-editor-row textarea { width:100%; box-sizing:border-box; padding:6px 8px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); color:var(--text-primary); font-size:13px; }
+.calc-editor-row textarea { resize:vertical; min-height:44px; font-family:var(--font-mono, ui-monospace, monospace); line-height:1.45; }
+.calc-editor-row textarea[aria-invalid="true"] { border-color:var(--status-error); }
+.calc-editor-row input:focus-visible, .calc-editor-row textarea:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.calc-editor-measures { display:flex; flex-wrap:wrap; gap:4px; }
+.calc-editor-measures button { height:22px; padding:0 8px; border:1px solid var(--border-subtle); border-radius:999px; background:var(--bg-1); color:var(--text-secondary); font-size:11px; cursor:pointer; }
+.calc-editor-measures button:hover { color:var(--text-primary); border-color:var(--border-strong); }
+.calc-editor-check { margin:0; color:var(--text-secondary); font-size:12px; line-height:1.45; }
+.calc-editor-check.error { color:var(--status-error); }
+.calc-editor-check.ok { color:var(--text-primary); }
+.calc-editor-check.ok svg { color:var(--accent); vertical-align:-2px; }
+.calc-editor-check code { font-family:var(--font-mono, ui-monospace, monospace); font-size:11px; color:var(--text-primary); }
+.calc-editor-actions { display:flex; justify-content:flex-end; gap:6px; }
+.calc-editor-actions button { height:28px; padding:0 12px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-1); color:var(--text-primary); font-size:12px; font-weight:500; cursor:pointer; }
+.calc-editor-actions button.primary { border-color:var(--accent); background:var(--accent); color:var(--accent-fg, #fff); }
+.calc-editor-actions button:disabled { opacity:.5; cursor:not-allowed; }
+.shelf-menu-chips button.unfit { border-style:dashed; background:transparent; color:var(--text-tertiary); cursor:not-allowed; }
+.shelf-menu-note { color:var(--text-secondary); font-size:11px; line-height:1.4; }
 @keyframes studio-skeleton { 50% { opacity:.45; } }
 @media (prefers-reduced-motion:reduce) { .studio-canvas-frame, .policy-toggle i:after, .studio-review-toggle i:after, .dql-studio-v2-loading .loading-mark, .preview-state.loading .preview-loading-mark, .preview-skeleton i, .preview-skeleton path { transition:none; animation:none; } }
 `;

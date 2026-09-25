@@ -242,3 +242,71 @@ describe('aggregate Dataset rollups', () => {
     }
   });
 });
+
+describe('tile calculations (RFC 0009 step 3)', () => {
+  const byMonth: TileQuery = {
+    dimensions: [{ field: 'region' }, { field: 'ordered_at', timeGrain: 'month' }],
+    measures: [{ measure: 'revenue' }],
+    calculations: [
+      { id: 'per_order', expr: { op: '/', left: { measure: 'revenue' }, right: { measure: 'orders' } } },
+      { id: 'us_revenue', expr: { measure: 'revenue', where: [{ field: 'region', op: 'eq', values: ['US'] }] } },
+      { id: 'share', quick: { kind: 'percent_of_total', of: 'revenue' } },
+      { id: 'running', quick: { kind: 'running_total', of: 'revenue' } },
+      { id: 'yoy', quick: { kind: 'year_over_year', of: 'revenue' } },
+    ],
+    orderBy: [{ alias: 'share', direction: 'desc' }],
+    limit: 5,
+  };
+
+  it('compiles calculated measures into the grouping and quick calculations into windows over it', () => {
+    const compiled = compile('duckdb', byMonth);
+    expect(compiled.sql).toBe([
+      'WITH ds AS (SELECT * FROM order_lines),',
+      `__base AS (SELECT ds."region" AS "region", DATE_TRUNC('month', ds."ordered_at") AS "ordered_at_month", SUM(ds."net_amount") AS "revenue", ((1.0 * SUM(ds."net_amount")) / NULLIF(COUNT(DISTINCT ds."order_line_id"), 0)) AS "per_order", SUM(CASE WHEN ds."region" = $1 THEN ds."net_amount" END) AS "us_revenue"`,
+      'FROM ds',
+      `GROUP BY ds."region", DATE_TRUNC('month', ds."ordered_at")`,
+      ')',
+      'SELECT b."region" AS "region", b."ordered_at_month" AS "ordered_at_month", b."revenue" AS "revenue", b."per_order" AS "per_order", b."us_revenue" AS "us_revenue", '
+        + '((1.0 * b."revenue") / NULLIF(SUM(b."revenue") OVER (), 0)) AS "share", '
+        + 'SUM(b."revenue") OVER (PARTITION BY b."region" ORDER BY b."ordered_at_month" ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS "running", '
+        + '((1.0 * (b."revenue" - __yoy_3."revenue")) / NULLIF(ABS(__yoy_3."revenue"), 0)) AS "yoy"',
+      'FROM __base b',
+      'LEFT JOIN __base __yoy_3 ON EXTRACT(YEAR FROM __yoy_3."ordered_at_month") = EXTRACT(YEAR FROM b."ordered_at_month") - 1 AND EXTRACT(MONTH FROM __yoy_3."ordered_at_month") = EXTRACT(MONTH FROM b."ordered_at_month") AND (__yoy_3."region" = b."region" OR (__yoy_3."region" IS NULL AND b."region" IS NULL))',
+      'ORDER BY "share" DESC, "region" ASC, "ordered_at_month" ASC',
+      'LIMIT 5',
+    ].join('\n'));
+    expect(compiled.variables).toMatchObject({ __dataset_tile_region_1: 'US' });
+    expect(compiled.columns.slice(3).map((column) => [column.alias, column.format?.kind, column.calculation?.description])).toEqual([
+      ['per_order', 'number', 'revenue / orders'],
+      ['us_revenue', 'number', "revenue where region = 'US'"],
+      ['share', 'percent', 'Percent of total of revenue'],
+      ['running', 'number', 'Running total of revenue along ordered_at_month'],
+      ['yoy', 'percent', 'Year over year change of revenue along ordered_at_month'],
+    ]);
+  });
+
+  it('keeps one SELECT when there are only calculated measures', () => {
+    const compiled = compile('duckdb', { dimensions: [{ field: 'region' }], measures: [], calculations: [{ id: 'rate', expr: { op: '/', left: { measure: 'revenue' }, right: { measure: 'margin_rate' } } }] });
+    expect(compiled.sql).toBe([
+      'WITH ds AS (SELECT * FROM order_lines)',
+      'SELECT ds."region" AS "region", ((1.0 * SUM(ds."net_amount")) / NULLIF(((1.0 * SUM(ds."margin_amount")) / NULLIF(SUM(ds."net_amount"), 0)), 0)) AS "rate"',
+      'FROM ds',
+      'GROUP BY ds."region"',
+    ].join('\n'));
+  });
+
+  it('draws the same windows in every supported dialect', () => {
+    const query: TileQuery = { dimensions: [{ field: 'ordered_at', timeGrain: 'month' }], measures: [{ measure: 'revenue' }], calculations: [{ id: 'avg3', quick: { kind: 'moving_average', of: 'revenue' } }, { id: 'pos', quick: { kind: 'rank', of: 'revenue' } }] };
+    expect(compile('snowflake', query).sql).toContain('AVG(b."revenue") OVER (ORDER BY b."ordered_at_month" ASC ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS "avg3", RANK() OVER (ORDER BY b."revenue" DESC NULLS LAST) AS "pos"');
+    expect(compile('bigquery', query).sql).toContain('AVG(b.`revenue`) OVER (ORDER BY b.`ordered_at_month` ASC ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS `avg3`');
+  });
+
+  it('refuses a calculation the checker refuses, with its rule', () => {
+    expect(() => compile('duckdb', { ...grouped, having: undefined, filters: undefined, calculations: [{ id: 'share', quick: { kind: 'percent_of_total', of: 'margin_rate' } }] }))
+      .toThrowError(expect.objectContaining({ code: 'DATASET_QUERY_REJECTED', message: expect.stringContaining('margin_rate is a ratio or average') }));
+  });
+
+  it('fingerprints the calculations with the query', () => {
+    expect(compile('duckdb', byMonth).queryFingerprint).not.toBe(compile('duckdb', { ...byMonth, orderBy: undefined, calculations: byMonth.calculations!.slice(0, 1) }).queryFingerprint);
+  });
+});

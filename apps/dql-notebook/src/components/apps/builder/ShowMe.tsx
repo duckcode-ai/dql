@@ -26,7 +26,7 @@ import {
   type ShowMeSuggestion,
 } from '@duckcodeailabs/dql-core/apps/show-me';
 import type { QueryResult } from '../../../store/types';
-import { humanize } from './studio-ui';
+import { shelfFieldLabel } from './field-labels';
 
 const ICONS: Record<ShowMeChart, typeof Gauge> = {
   kpi: Gauge,
@@ -72,9 +72,9 @@ export function tileShowMe(
       const values = result.rows.map((row) => Number(row[name])).filter((value) => Number.isFinite(value));
       return values.length ? values.every((value) => value >= 0) : undefined;
     },
-  });
+  }, query);
   const input = showMeInputFromEncoding(encoding, facts);
-  const label = (kind: 'dimension' | 'measure', name: string) => encoding.fields?.[`${kind}:${name}`]?.label ?? humanize(name);
+  const label = (kind: 'dimension' | 'measure', name: string) => shelfFieldLabel(encoding, query, kind === 'measure' ? { measure: name } : { dimension: name });
   return showMe({
     dimensions: input.dimensions.map((field) => ({ ...field, label: label('dimension', field.name) })),
     measures: input.measures.map((field) => ({ ...field, label: label('measure', field.name) })),

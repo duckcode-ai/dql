@@ -216,6 +216,7 @@ import {
   modelAreaLocalId,
   DEFAULT_MODEL_AREA_ID,
   validateDatasetGrainProof,
+  checkTileCalculations,
 } from '@duckcodeailabs/dql-core';
 import {
   prepareDatasetDeclarationPatch,
@@ -29189,6 +29190,18 @@ function decorateDatasetResult(
         });
       }
     }
+  }
+  // Calculations carry their own format and the words the receipt shows.
+  for (const output of checkTileCalculations(descriptor, query).outputs) {
+    expected.set(normalizeDatasetPresentationColumn(output.id), {
+      name: output.id,
+      kind: output.format.kind,
+      ref: `calculation:${output.id}`,
+      ...(output.format.kind === 'percent' ? { unit: 'fraction' } : output.format.currency ? { unit: output.format.currency } : {}),
+      ...(output.format.decimals !== undefined ? { decimals: output.format.decimals } : {}),
+      label: output.label,
+      calculation: { kind: output.kind, description: output.description },
+    });
   }
   const columnsMeta = columns.flatMap((column) => {
     const expectedMeta = expected.get(normalizeDatasetPresentationColumn(column));

@@ -200,6 +200,8 @@ function cartesianOption(
       name: colorCol ? entry.name : columnName(result, entry.name),
       data,
       emphasis: { focus: 'series' as const },
+      // Each measure keeps its own format in the tooltip: a share next to a price reads 41% and $60.
+      ...(colorCol ? {} : { tooltip: { valueFormatter: (value: unknown) => (value === null || value === undefined ? 'Unavailable' : seriesFormat(Number(value))) } }),
       label: {
         show: false,
         color: tokens.text,
@@ -233,7 +235,14 @@ function cartesianOption(
       },
     };
   });
-  const marks = markLayers(style, categories, labelCol, horizontal, tokens, format);
+  // Measures of different units on one axis: the axis names no unit rather
+  // than one measure's (a price read as 6,000%). Each series' tooltip and
+  // labels keep their own.
+  const units = colorCol ? [] : unique(series.map((entry) => { const meta = metaFor(result, entry.name); return meta ? `${meta.kind}:${meta.unit ?? ''}` : ''; }));
+  const axisFormat = units.length > 1 && !style.format
+    ? (value: number) => new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 }).format(value)
+    : format;
+  const marks = markLayers(style, categories, labelCol, horizontal, tokens, axisFormat);
   if (seriesOptions[0]) Object.assign(seriesOptions[0], marks);
 
   const categoryAxis = {
@@ -246,7 +255,7 @@ function cartesianOption(
   };
   const valueAxis = {
     type: 'value' as const,
-    axisLabel: { color: tokens.muted, fontSize: 11, formatter: (value: number) => format(value) },
+    axisLabel: { color: tokens.muted, fontSize: 11, formatter: (value: number) => axisFormat(value) },
     splitLine: { lineStyle: { color: tokens.grid } },
   };
   const showLegend = series.length > 1 && style.legend !== 'none';

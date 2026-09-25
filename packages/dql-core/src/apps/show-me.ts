@@ -16,6 +16,7 @@
 import type { DatasetDescriptor } from '../datasets/descriptor.js';
 import type { TileQuery } from './tile-query-types.js';
 import { isMeasureRef, refName, type DashboardVizEncoding, type ShelfFieldRef } from './viz-encoding.js';
+import { checkTileCalculations } from './tile-calcs.js';
 
 export type ShowMeChart =
   | 'kpi' | 'line' | 'area' | 'bar' | 'column' | 'grouped_bar' | 'stacked_bar'
@@ -438,7 +439,10 @@ export function showMeInputFromEncoding(encoding: DashboardVizEncoding, facts: S
 export function showMeInputFromQuery(query: TileQuery, facts: ShowMeFacts): ShowMeInput {
   return {
     dimensions: query.dimensions.map((entry) => ({ ...facts.dimension(entry.field), name: entry.field })),
-    measures: query.measures.map((entry) => ({ ...facts.measure(entry.measure), name: entry.measure })),
+    measures: [
+      ...query.measures.map((entry) => ({ ...facts.measure(entry.measure), name: entry.measure })),
+      ...(query.calculations ?? []).map((calculation) => ({ ...facts.measure(calculation.id), name: calculation.id })),
+    ],
     ...(query.detail ? { rowDetail: true } : {}),
     ...(query.comparison ? { comparison: true } : {}),
   };
@@ -452,8 +456,12 @@ export function showMeInputFromQuery(query: TileQuery, facts: ShowMeFacts): Show
 export function showMeFactsFromDescriptor(
   descriptor: DatasetDescriptor,
   observed: { cardinality?: (dimension: string) => number | undefined; nonNegative?: (measure: string) => boolean | undefined } = {},
+  /** The tile's query, so its calculations are known by their output names. */
+  query?: TileQuery,
 ): ShowMeFacts {
   const find = (name: string) => descriptor.fields.find((field) => field.name.toLowerCase() === name.toLowerCase());
+  const calculations = new Map((query?.calculations?.length ? checkTileCalculations(descriptor, query).outputs : [])
+    .map((output) => [output.id.toLowerCase(), output]));
   return {
     dimension: (name) => {
       const field = find(name);
@@ -464,6 +472,16 @@ export function showMeFactsFromDescriptor(
     measure: (name) => {
       const field = find(name);
       const nonNegative = observed.nonNegative?.(name);
+      const calculation = calculations.get(name.toLowerCase());
+      if (calculation && (!field || field.kind !== 'measure')) {
+        const unit = calculation.facts.unit;
+        return {
+          additive: calculation.facts.additive.entities,
+          additiveOverTime: calculation.facts.additive.time,
+          unit: unit.kind === 'currency' ? `currency:${unit.currency ?? ''}` : unit.kind === 'ratio' ? 'percent' : unit.kind,
+          ...(nonNegative !== undefined ? { nonNegative } : {}),
+        };
+      }
       if (!field || field.kind !== 'measure') return nonNegative !== undefined ? { nonNegative } : {};
       const unit = field.format?.kind === 'currency'
         ? `currency:${field.format.currency ?? ''}`

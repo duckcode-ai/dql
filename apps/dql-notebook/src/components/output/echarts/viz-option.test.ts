@@ -140,3 +140,31 @@ describe('buildVizOption (RFC 0008 step 4)', () => {
     expect(svg).toContain('&lt;script');
   });
 });
+
+describe('series with different units', () => {
+  it('formats each measure in the tooltip with its own unit', () => {
+    const result = {
+      columns: ['order_date_month', 'revenue_per_order', 'share'],
+      rows: [{ order_date_month: '2026-01-01', revenue_per_order: 60, share: 0.41 }],
+      columnsMeta: [
+        { name: 'order_date_month', kind: 'date' },
+        { name: 'revenue_per_order', kind: 'currency', unit: 'USD', label: 'Revenue per order' },
+        { name: 'share', kind: 'percent', unit: 'fraction', label: 'Percent of total' },
+      ],
+    } as unknown as QueryResult;
+    const option = buildVizOption({ chartType: 'grouped-bar', result, themeMode: 'paper', config: { chart: 'grouped-bar', x: 'order_date_month', metrics: ['share', 'revenue_per_order'] } })!.option as { series: Array<{ name: string; data: unknown[]; tooltip?: { valueFormatter: (value: unknown) => string } }> };
+    expect(option.series.map((series) => [series.name, series.tooltip?.valueFormatter(series.data[0])])).toEqual([['Percent of total', '41%'], ['Revenue per order', '$60.0']]);
+  });
+});
+
+describe('an axis shared by different units', () => {
+  it('names no unit on the axis', () => {
+    const result = {
+      columns: ['m', 'price', 'share'],
+      rows: [{ m: '2026-01-01', price: 60, share: 0.41 }],
+      columnsMeta: [{ name: 'm', kind: 'date' }, { name: 'price', kind: 'currency', unit: 'USD' }, { name: 'share', kind: 'percent', unit: 'fraction' }],
+    } as unknown as QueryResult;
+    const option = buildVizOption({ chartType: 'grouped-bar', result, themeMode: 'paper', config: { chart: 'grouped-bar', x: 'm', metrics: ['share', 'price'] } })!.option as { yAxis: { axisLabel: { formatter: (value: number) => string } } };
+    expect(option.yAxis.axisLabel.formatter(60)).toBe('60');
+  });
+});

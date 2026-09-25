@@ -1,4 +1,6 @@
 import type { DashboardDocumentResponse, DashboardRunResponse } from '../../api/client';
+import type { TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
+import { QUICK_CALC_LABELS, formatTileCalcExpr } from '@duckcodeailabs/dql-core/apps/tile-calcs';
 import {
   readerTileTrust as coreReaderTileTrust,
   isDataTileForTrust as coreIsDataTileForTrust,
@@ -77,6 +79,8 @@ export function readerTileReceipt(
   push('Source', source);
   push('Source file', tile?.artifact?.sourcePath ?? tile?.citation?.path ?? tile?.blockPath);
   push('Owner', item.owner);
+  // Every calculation's expression, so a reader can see how a number was made.
+  push('Calculations', calculationWords(item.query as TileQuery | undefined).join(' · ') || undefined);
   const applied = tile?.filters?.applied ?? [];
   push('Filters', applied.length
     ? applied.map((filter) => `${filter.field ?? filter.filter ?? 'filter'} ${filter.op && filter.op !== '=' && filter.op !== 'in' ? `${filter.op} ` : ''}${formatFilterValue(filter.values)}`).join(' · ')
@@ -90,6 +94,16 @@ export function readerTileReceipt(
   push('Snapshot', short(run?.snapshotId), true);
   push('Run', short(run?.runId), true);
   return rows;
+}
+
+function calculationWords(query: TileQuery | undefined): string[] {
+  return (query?.calculations ?? []).map((calculation) => {
+    const name = calculation.label ?? calculation.id;
+    if (calculation.expr) return `${name} = ${formatTileCalcExpr(calculation.expr)}`;
+    const quick = calculation.quick!;
+    const words = `${QUICK_CALC_LABELS[quick.kind]} of ${quick.of}${quick.within ? ` within each ${quick.within}` : ''}`;
+    return calculation.label ? `${calculation.label} = ${words.toLowerCase()}` : words;
+  });
 }
 
 function formatFilterValue(value: unknown): string {

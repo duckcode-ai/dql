@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react';
-import { ArrowDown, ArrowUp, CalendarDays, Hash, MoreHorizontal, Type, X } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from 'react';
+import { ArrowDown, ArrowUp, CalendarDays, Hash, MoreHorizontal, Plus, SquareFunction, Type, X } from 'lucide-react';
 import type { DatasetDescriptor } from '@duckcodeailabs/dql-core/datasets/descriptor';
 import type { TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
 import {
@@ -20,6 +20,19 @@ import {
   type ShelfId,
 } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import { applyShowMe } from '@duckcodeailabs/dql-core/apps/show-me';
+import {
+  QUICK_CALC_KINDS,
+  QUICK_CALC_LABELS,
+  checkTileCalculations,
+  formatTileCalcExpr,
+  measureCalcFacts,
+  quickCalcVerdict,
+  uniqueCalculationId,
+  type TileCalculation,
+  type TileQuickCalcKind,
+} from '@duckcodeailabs/dql-core/apps/tile-calcs';
+import { CalculationEditor } from './CalculationEditor';
+import { shelfFieldLabel } from './field-labels';
 import type { QueryResult } from '../../../store/types';
 import { descriptorTimeField, descriptorTimeGrain, isTimeField } from './field-query';
 import { ShowMePanel, currentShowMeChart, tileShowMe } from './ShowMe';
@@ -115,15 +128,29 @@ export function ShelfEditor({
   const [menu, setMenu] = useState<{ shelf: ShelfId; ref: ShelfFieldRef } | null>(null);
   const [over, setOver] = useState<ShelfId | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
+  const [calcEditor, setCalcEditor] = useState<{ editing?: TileCalculation } | null>(null);
   const isTime = descriptorTimeField(descriptor);
   const timeGrainFor = descriptorTimeGrain(descriptor);
   const contents = shelfContents(encoding);
   useEffect(() => setRefusal(null), [JSON.stringify(encoding)]);
 
-  const apply = (next: DashboardVizEncoding, nextQuery?: TileQuery, nextVisualization?: string) => {
+  const apply = (next: DashboardVizEncoding, nextQuery?: TileQuery, nextVisualization?: string): string | null => {
     const message = onChange({ encoding: next, query: nextQuery ?? queryFromEncoding(next, query, timeGrainFor), ...(nextVisualization ? { visualization: nextVisualization } : {}) });
     setRefusal(message || null);
+    return message || null;
   };
+  const calculationFor = (ref: ShelfFieldRef) => (isMeasureRef(ref) ? query.calculations?.find((calculation) => calculation.id.toLowerCase() === ref.measure.toLowerCase()) : undefined);
+  const saveCalculation = (calculation: TileCalculation) => {
+    const exists = query.calculations?.some((entry) => entry.id === calculation.id);
+    const calculations = exists
+      ? (query.calculations ?? []).map((entry) => (entry.id === calculation.id ? calculation : entry))
+      : [...(query.calculations ?? []), calculation];
+    // A new calculation joins the measures' axis; editing one keeps it where it is.
+    const measureShelf: ShelfId = encoding.columns.some(isMeasureRef) && !encoding.rows.some(isMeasureRef) ? 'columns' : 'rows';
+    const next = exists ? encoding : placeOnShelf(encoding, measureShelf, { measure: calculation.id });
+    if (!apply(next, queryFromEncoding(next, { ...query, calculations }, timeGrainFor))) setCalcEditor(null);
+  };
+  const formulas = (query.calculations ?? []).filter((calculation) => calculation.expr);
   const dropOn = (shelf: ShelfId, event: DragEvent) => {
     event.preventDefault();
     setOver(null);
@@ -141,7 +168,7 @@ export function ShelfEditor({
     apply(placeOnShelf(base, shelf, payload.ref));
   };
 
-  const fieldLabel = (ref: ShelfFieldRef) => encoding.fields?.[fieldKey(ref)]?.label ?? humanize(refName(ref));
+  const fieldLabel = (ref: ShelfFieldRef): string => shelfFieldLabel(encoding, query, ref);
   const grainOf = (ref: ShelfFieldRef) => (isMeasureRef(ref) ? undefined : query.dimensions.find((dimension) => dimension.field.toLowerCase() === ref.dimension.toLowerCase())?.timeGrain);
 
   const renderShelf = (shelf: ShelfId, compact = false) => {
@@ -160,14 +187,16 @@ export function ShelfEditor({
             const measure = isMeasureRef(ref);
             const grain = grainOf(ref);
             const time = !measure && isTime(refName(ref));
+            const calculation = calculationFor(ref);
             return (
               <li
                 key={fieldKey(ref)}
-                className={`shelf-pill ${measure ? 'measure' : 'dimension'}`}
+                className={`shelf-pill ${measure ? 'measure' : 'dimension'}${calculation ? ' calc' : ''}`}
                 draggable={!disabled}
                 onDragStart={(event) => writeFieldDrag(event, ref, shelf)}
+                title={calculation?.expr ? formatTileCalcExpr(calculation.expr) : undefined}
               >
-                {measure ? <Hash size={11} aria-hidden="true" /> : time ? <CalendarDays size={11} aria-hidden="true" /> : <Type size={11} aria-hidden="true" />}
+                {calculation ? <SquareFunction size={11} aria-label="Calculation" /> : measure ? <Hash size={11} aria-hidden="true" /> : time ? <CalendarDays size={11} aria-hidden="true" /> : <Type size={11} aria-hidden="true" />}
                 <span className="shelf-pill-name">{fieldLabel(ref)}{grain ? <em> · {humanize(grain)}</em> : null}</span>
                 <button type="button" className="shelf-pill-menu" disabled={disabled} aria-haspopup="menu" aria-expanded={menu?.shelf === shelf && fieldKey(menu.ref) === fieldKey(ref)} aria-label={`Options for ${fieldLabel(ref)} on ${SHELF_LABELS[shelf]}`} onClick={() => setMenu((current) => (current?.shelf === shelf && fieldKey(current.ref) === fieldKey(ref) ? null : { shelf, ref }))}>
                   <MoreHorizontal size={12} />
@@ -185,6 +214,8 @@ export function ShelfEditor({
                     label={fieldLabel(ref)}
                     onClose={() => setMenu(null)}
                     onEncoding={(next, nextQuery) => { setMenu(null); apply(next, nextQuery); }}
+                    onEditFormula={calculation?.expr ? () => { setMenu(null); setCalcEditor({ editing: calculation }); } : undefined}
+                    timeGrainFor={timeGrainFor}
                     onFilter={onFilterField ? () => { setMenu(null); onFilterField(refName(ref)); } : undefined}
                   />
                 ) : null}
@@ -203,6 +234,29 @@ export function ShelfEditor({
       <div className="shelf-marks" role="group" aria-label="Marks">
         {MARKS.map((shelf) => renderShelf(shelf, true))}
       </div>
+      <div className="shelf-calcs" role="group" aria-label="Formulas">
+        <span className="shelf-name">Formulas</span>
+        <div className="shelf-calc-list">
+          {formulas.map((calculation) => (
+            <button key={calculation.id} type="button" className="shelf-calc" disabled={disabled} title={formatTileCalcExpr(calculation.expr!)} aria-label={`Edit ${fieldLabel({ measure: calculation.id })}: ${formatTileCalcExpr(calculation.expr!)}`} onClick={() => setCalcEditor({ editing: calculation })}>
+              <SquareFunction size={11} aria-hidden="true" /> {fieldLabel({ measure: calculation.id })}
+            </button>
+          ))}
+          <button type="button" className="shelf-calc-add" disabled={disabled} aria-expanded={Boolean(calcEditor && !calcEditor.editing)} onClick={() => setCalcEditor((current) => (current && !current.editing ? null : {}))}>
+            <Plus size={11} aria-hidden="true" /> New formula
+          </button>
+        </div>
+      </div>
+      {calcEditor ? (
+        <CalculationEditor
+          key={calcEditor.editing?.id ?? 'new'}
+          descriptor={descriptor}
+          query={query}
+          {...(calcEditor.editing ? { editing: calcEditor.editing } : {})}
+          onSave={saveCalculation}
+          onCancel={() => setCalcEditor(null)}
+        />
+      ) : null}
       <p className="shelf-reading" aria-live="polite">{describeEncodedChart(encoding, isTime, visualization)}</p>
       {refusal ? <small className="dataset-builder-error" role="alert">{refusal}</small> : null}
       {visualization !== undefined ? (
@@ -227,6 +281,8 @@ function FieldMenu({
   onClose,
   onEncoding,
   onFilter,
+  onEditFormula,
+  timeGrainFor,
 }: {
   descriptor: DatasetDescriptor;
   encoding: DashboardVizEncoding;
@@ -237,6 +293,8 @@ function FieldMenu({
   onClose: () => void;
   onEncoding: (next: DashboardVizEncoding, nextQuery?: TileQuery) => void;
   onFilter?: () => void;
+  onEditFormula?: () => void;
+  timeGrainFor: (field: string) => string | undefined;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
   const key = fieldKey(fieldRef);
@@ -249,8 +307,48 @@ function FieldMenu({
   const alias = measure
     ? query.measures.find((entry) => entry.measure.toLowerCase() === refName(fieldRef).toLowerCase())?.alias ?? refName(fieldRef)
     : dimension?.alias ?? (dimension?.timeGrain ? `${dimension.field}_${dimension.timeGrain}` : refName(fieldRef));
+  const quick = measure ? quickCalcState(descriptor, query, fieldRef) : null;
+  const setQuick = (kind: TileQuickCalcKind | null, window?: number) => {
+    if (!quick) return;
+    const current = quick.calculation;
+    // Back to the measure itself: its pill takes the calculation's place.
+    const sourceRef: ShelfFieldRef = { measure: quick.sourceRef };
+    if (kind === null) {
+      onEncoding(...replaced(sourceRef, current ? (query.calculations ?? []).filter((entry) => entry.id !== current.id) : query.calculations));
+      return;
+    }
+    // The column is named for what it now holds; the pill follows it.
+    const others = (query.calculations ?? []).filter((entry) => entry.id !== current?.id);
+    const id = current?.quick?.kind === kind ? current.id : uniqueCalculationId({ ...query, calculations: others }, `${quick.sourceAlias}_${kind}`);
+    const calculation: TileCalculation = { id, quick: { kind, of: quick.sourceAlias, ...(kind === 'moving_average' && window ? { window } : {}) } };
+    const calculations = [...others, calculation];
+    onEncoding(...replaced({ measure: id }, calculations));
+  };
+  const replaced = (to: ShelfFieldRef, calculations: TileCalculation[] | undefined): [DashboardVizEncoding, TileQuery] => {
+    // Quick calculations only ever swap one measure pill for another.
+    const swap = <T extends ShelfFieldRef>(entry: T): T => (fieldKey(entry) === key ? to as T : entry);
+    const next: DashboardVizEncoding = {
+      ...encoding,
+      columns: encoding.columns.map(swap),
+      rows: encoding.rows.map(swap),
+      ...(encoding.color ? { color: swap(encoding.color) } : {}),
+      ...(encoding.size ? { size: swap(encoding.size) } : {}),
+      ...(encoding.label ? { label: encoding.label.map(swap) } : {}),
+      ...(encoding.tooltip ? { tooltip: encoding.tooltip.map(swap) } : {}),
+    };
+    const { calculations: _old, ...rest } = query;
+    return [next, queryFromEncoding(next, calculations?.length ? { ...rest, calculations } : rest, timeGrainFor)];
+  };
   const sorted = query.orderBy?.[0]?.alias.toLowerCase() === alias.toLowerCase() ? query.orderBy[0]!.direction : null;
 
+  // Keep the menu on screen: a pill near the inspector's right edge opens it leftwards.
+  const [shift, setShift] = useState(0);
+  useLayoutEffect(() => {
+    const box = ref.current?.getBoundingClientRect();
+    if (!box) return;
+    const overflow = box.right - (window.innerWidth - 8);
+    if (overflow > 0) setShift(-Math.min(overflow, Math.max(0, box.left - 8)));
+  }, []);
   useEffect(() => {
     const close = (event: MouseEvent | KeyboardEvent) => {
       if (event instanceof KeyboardEvent ? event.key === 'Escape' : !ref.current?.contains(event.target as Node)) onClose();
@@ -282,7 +380,7 @@ function FieldMenu({
   };
 
   return (
-    <div className="shelf-menu" role="menu" aria-label={`${label} options`} ref={ref}>
+    <div className="shelf-menu" role="menu" aria-label={`${label} options`} ref={ref} style={shift ? { transform: `translateX(${shift}px)` } : undefined}>
       <div className="shelf-menu-group" role="group" aria-label="Move to">
         <span className="shelf-menu-label">Move to</span>
         <div className="shelf-menu-chips">
@@ -315,6 +413,35 @@ function FieldMenu({
           {sorted ? <button type="button" role="menuitem" onClick={() => sortBy(null)}>Clear</button> : null}
         </div>
       </div>
+      {quick ? (
+        <div className="shelf-menu-group" role="group" aria-label="Quick calculation">
+          <span className="shelf-menu-label">Quick calculation</span>
+          <div className="shelf-menu-chips">
+            {quick.options.map((option) => (
+              <button
+                key={option.kind}
+                type="button"
+                role="menuitemradio"
+                aria-checked={quick.current === option.kind}
+                className={`${quick.current === option.kind ? 'on' : ''}${option.refusal ? ' unfit' : ''}`}
+                aria-disabled={Boolean(option.refusal)}
+                title={option.refusal ?? QUICK_CALC_LABELS[option.kind]}
+                onClick={() => { if (!option.refusal) setQuick(quick.current === option.kind ? null : option.kind); }}
+              >{QUICK_CALC_SHORT[option.kind]}</button>
+            ))}
+            {quick.current ? <button type="button" role="menuitem" onClick={() => setQuick(null)}>None</button> : null}
+          </div>
+          {quick.current === 'moving_average' ? (
+            <div className="shelf-menu-row">
+              <label className="shelf-menu-label" htmlFor={`window-${key}`}>Periods</label>
+              <select id={`window-${key}`} value={quick.calculation?.quick?.window ?? 3} onChange={(event) => setQuick('moving_average', Number(event.target.value))}>
+                {[2, 3, 4, 6, 12].map((periods) => <option key={periods} value={periods}>{periods}</option>)}
+              </select>
+            </div>
+          ) : null}
+          {quick.refusalNote ? <small className="shelf-menu-note">{quick.refusalNote}</small> : null}
+        </div>
+      ) : null}
       {measure ? (
         <div className="shelf-menu-group" role="group" aria-label="Number format">
           <label className="shelf-menu-label" htmlFor={`format-${key}`}>Number format</label>
@@ -341,9 +468,64 @@ function FieldMenu({
         </div>
       </form>
       <div className="shelf-menu-actions">
+        {onEditFormula ? <button type="button" role="menuitem" onClick={onEditFormula}>Edit formula…</button> : null}
         {onFilter && !measure ? <button type="button" role="menuitem" onClick={onFilter}>Filter…</button> : null}
         <button type="button" role="menuitem" className="danger" onClick={() => onEncoding(removeField(encoding, fieldRef))}>Remove from tile</button>
       </div>
     </div>
   );
+}
+
+const QUICK_CALC_SHORT: Record<TileQuickCalcKind, string> = {
+  percent_of_total: '% of total',
+  running_total: 'Running total',
+  difference: 'Difference',
+  percent_difference: '% difference',
+  rank: 'Rank',
+  moving_average: 'Moving average',
+  year_over_year: 'Year over year',
+};
+
+/**
+ * The quick calculations a measure pill offers, each with the rule that rules
+ * it out on this tile. A pill that already is a quick calculation offers the
+ * same list over its measure, with its own kind selected.
+ */
+export function quickCalcState(descriptor: DatasetDescriptor, query: TileQuery, ref: ShelfFieldRef): {
+  calculation?: TileCalculation;
+  current: TileQuickCalcKind | null;
+  sourceAlias: string;
+  sourceRef: string;
+  options: Array<{ kind: TileQuickCalcKind; refusal?: string }>;
+  refusalNote?: string;
+} | null {
+  if (!isMeasureRef(ref)) return null;
+  const own = query.calculations?.find((calculation) => calculation.id.toLowerCase() === ref.measure.toLowerCase());
+  const sourceAlias = own?.quick ? own.quick.of : own ? own.id : (query.measures.find((entry) => entry.measure.toLowerCase() === ref.measure.toLowerCase())?.alias ?? ref.measure);
+  const sourceCalculation = query.calculations?.find((calculation) => calculation.id.toLowerCase() === sourceAlias.toLowerCase());
+  const sourceMeasure = query.measures.find((entry) => (entry.alias ?? entry.measure).toLowerCase() === sourceAlias.toLowerCase());
+  const measureField = sourceMeasure ? descriptor.fields.find((field) => field.kind === 'measure' && field.name.toLowerCase() === sourceMeasure.measure.toLowerCase()) : undefined;
+  const facts = sourceCalculation
+    ? checkTileCalculations(descriptor, query).outputs.find((output) => output.id === sourceCalculation.id)?.facts
+    : measureField?.kind === 'measure' ? measureCalcFacts(measureField) : undefined;
+  if (!facts) return null;
+  const dimensions = query.dimensions.map((dimension) => ({
+    alias: dimension.alias ?? (dimension.timeGrain ? `${dimension.field}_${dimension.timeGrain}` : dimension.field),
+    field: dimension.field,
+    ...(dimension.timeGrain ? { timeGrain: dimension.timeGrain } : {}),
+  }));
+  const source = { label: humanize(sourceAlias), facts };
+  const options = QUICK_CALC_KINDS.map((kind) => {
+    const verdict = quickCalcVerdict(kind, source, dimensions);
+    return { kind, ...(verdict.refusal ? { refusal: verdict.refusal } : {}) };
+  });
+  const refused = options.filter((option) => option.refusal);
+  return {
+    ...(own ? { calculation: own } : {}),
+    current: own?.quick?.kind ?? null,
+    sourceAlias,
+    sourceRef: sourceCalculation ? sourceCalculation.id : sourceMeasure?.measure ?? sourceAlias,
+    options,
+    ...(refused.length === 1 ? { refusalNote: refused[0]!.refusal } : refused.length > 1 ? { refusalNote: `${refused.length} are not available for ${humanize(sourceAlias)}; hover one to see why.` } : {}),
+  };
 }
