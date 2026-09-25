@@ -86,7 +86,9 @@ export function datasetTileVisualizationCompatibility(
     };
   }
   if (!SCALAR_DATASET_VISUALIZATIONS.has(normalizedVisualization)) return { compatible: true };
-  if (query.measures.length !== 1) {
+  // One number: one selected measure or one calculated measure.
+  const measureOutputs = query.measures.length + (query.calculations?.length ?? 0);
+  if (measureOutputs !== 1) {
     return {
       compatible: false,
       code: 'SCALAR_MEASURE_COUNT',
@@ -94,11 +96,13 @@ export function datasetTileVisualizationCompatibility(
       recoveryVisualization: 'table',
     };
   }
-  if (query.dimensions.length > 0) {
+  // A KPI may carry one date: it shows the latest period, its change and the trend.
+  const trend = query.dimensions.length === 1 && Boolean(query.dimensions[0]!.timeGrain);
+  if (query.dimensions.length > 0 && !trend) {
     return {
       compatible: false,
       code: 'SCALAR_GROUPING_UNSUPPORTED',
-      message: 'A Single Value or KPI Dataset tile cannot group by a field. Use a Table to show grouped results.',
+      message: 'A Single Value or KPI Dataset tile can group only by one date, for its trend. Use a Table to show grouped results.',
       recoveryVisualization: 'table',
     };
   }

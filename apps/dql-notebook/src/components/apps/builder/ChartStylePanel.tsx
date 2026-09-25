@@ -68,7 +68,7 @@ export function styleMarksFromRows(lines: Line[], bands: Band[], notes: Note[]):
  * the tile, the same fields the App AI writes, so a hand-styled chart and an
  * AI-styled chart are stored and rendered the same way.
  */
-export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChange, measureColumns = [], onTotals }: {
+export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChange, measureColumns = [], onTotals, kpiUnit }: {
   vizType: string;
   style?: DashboardVizStyle;
   /** The number format a tile saved before `viz.style` existed. */
@@ -79,6 +79,8 @@ export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChan
   measureColumns?: Array<{ name: string; label: string }>;
   /** Pivots: totals change the tile's query too, so the caller saves them. */
   onTotals?: (totals: PivotTotals) => void;
+  /** KPIs: the measure's unit, so a rate's target is typed as a percent. */
+  kpiUnit?: string;
 }): JSX.Element {
   const current = style ?? {};
   const cartesian = CARTESIAN.has(vizType);
@@ -88,6 +90,18 @@ export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChan
     kind: format.kind,
     rules: (format.rules ?? []).map((rule) => ({ op: rule.op, value: String(rule.value), to: rule.to !== undefined ? String(rule.to) : '', tone: rule.tone })),
   })));
+  const percentTarget = kpiUnit === 'percent';
+  const [kpiTarget, setKpiTarget] = useState(() => (current.kpi?.target === undefined ? '' : String(percentTarget ? Math.round(current.kpi.target * 10000) / 100 : current.kpi.target)));
+  const [kpiLabel, setKpiLabel] = useState(current.kpi?.targetLabel ?? '');
+  const commitKpi = (patch: { better?: 'higher' | 'lower' } = {}) => {
+    const typed = kpiTarget.trim() === '' ? NaN : Number(kpiTarget);
+    const kpi = {
+      ...(Number.isFinite(typed) ? { target: percentTarget ? typed / 100 : typed } : {}),
+      ...(kpiLabel.trim() ? { targetLabel: kpiLabel.trim().slice(0, 60) } : {}),
+      ...((patch.better ?? current.kpi?.better) === 'lower' ? { better: 'lower' as const } : {}),
+    };
+    onChange(compactVizStyle({ ...current, kpi: Object.keys(kpi).length ? kpi : undefined }));
+  };
   const commitFormats = (next = formats) => {
     const conditional = conditionalFromRows(next);
     onChange(compactVizStyle({ ...current, conditional }));
@@ -205,6 +219,24 @@ export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChan
       </div>)}
       <button type="button" className="chart-style-add" disabled={disabled} onClick={() => setNotes([...notes, { at: '', text: '' }])}>Add note</button>
       <small className="field-help">Notes are saved in the page file in git and appear on every run.</small>
+    </div> : null}
+
+    {vizType === 'single_value' || vizType === 'kpi' ? <div
+      className="chart-style-marks"
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) commitKpi(); }}
+    >
+      <span className="chart-style-heading">Target</span>
+      <div className="chart-style-row">
+        <input aria-label={percentTarget ? 'Target, in percent' : 'Target value'} inputMode="decimal" placeholder={percentTarget ? 'Target %' : 'Target'} disabled={disabled} value={kpiTarget} onChange={(event) => setKpiTarget(event.target.value)} />
+        <input aria-label="Target name" placeholder="Plan" disabled={disabled} value={kpiLabel} onChange={(event) => setKpiLabel(event.target.value)} />
+      </div>
+      <div className="chart-style-row">
+        <select aria-label="Which way is better" disabled={disabled} value={current.kpi?.better ?? 'higher'} onChange={(event) => commitKpi({ better: event.target.value as 'higher' | 'lower' })}>
+          <option value="higher">Higher is better</option>
+          <option value="lower">Lower is better</option>
+        </select>
+      </div>
+      <small className="field-help">Put a date on the shelves to show the latest period, its change and the trend.</small>
     </div> : null}
 
     {vizType === 'pivot' && onTotals ? (() => {

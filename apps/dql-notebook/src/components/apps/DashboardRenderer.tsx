@@ -89,6 +89,7 @@ import { datasetTileVisualizationCompatibility } from '@duckcodeailabs/dql-core/
 import { pivotLayout } from '@duckcodeailabs/dql-core/apps/pivot';
 import { encodingFromQuery } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import { PivotTable } from './PivotTable';
+import { KpiCard, usesKpiCard } from './KpiCard';
 
 const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
   .then((module) => ({ default: module.UnifiedAgentRunPanel })));
@@ -2688,7 +2689,10 @@ export function TileBody({
     : undefined;
   let dataView: JSX.Element;
   const groupedDatasetKpi = chart === 'kpi' && Boolean(item.query?.dimensions?.length) && displayResult.rows.length > 1;
-  if (groupedDatasetKpi) {
+  if (chart === 'kpi' && item.query && usesKpiCard(item.query, item.viz.style)) {
+    // A KPI with a date or a target: the latest period, its change, the trend and the target (RFC 0009 step 4).
+    dataView = <KpiCard result={displayResult} query={item.query} style={item.viz.style} label={item.title ?? 'This KPI'} />;
+  } else if (groupedDatasetKpi) {
     dataView = (
       <div style={{ width: '100%', alignSelf: 'stretch', display: 'grid', gap: 6 }}>
         <small style={{ color: 'var(--text-secondary)', lineHeight: 1.35 }}>This Dataset tile is grouped. Its values are shown at the selected grain instead of being summed into a KPI.</small>

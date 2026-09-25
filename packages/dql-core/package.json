@@ -55,6 +55,10 @@
       "types": "./dist/apps/viz-encoding.d.ts",
       "import": "./dist/apps/viz-encoding.js"
     },
+    "./apps/kpi": {
+      "types": "./dist/apps/kpi.d.ts",
+      "import": "./dist/apps/kpi.js"
+    },
     "./apps/pivot": {
       "types": "./dist/apps/pivot.d.ts",
       "import": "./dist/apps/pivot.js"

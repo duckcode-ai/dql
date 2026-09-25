@@ -110,7 +110,7 @@ describe('App dashboard interaction contract', () => {
     expect(datasetTileVisualizationDisplayError({
       ...base,
       query: { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }] },
-    })).toContain('cannot group by a field');
+    })).toContain('can group only by one date');
     expect(datasetTileVisualizationDisplayError({
       ...base,
       query: { dimensions: [], measures: [{ measure: 'revenue' }] },

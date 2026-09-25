@@ -375,7 +375,7 @@ describe('parseDashboardDocument', () => {
       },
     }));
     expect(grouped.document).toBeNull();
-    expect(grouped.errors.map((error) => error.message).join('\n')).toContain('cannot group by a field');
+    expect(grouped.errors.map((error) => error.message).join('\n')).toContain('can group only by one date');
   });
 
   it('preserves exact Dataset component inclusions and rejects foreign tile references', () => {

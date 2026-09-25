@@ -2242,7 +2242,7 @@ describe('Apps command center API helpers', () => {
     });
     expect(groupedScalarRejected.status).toBe(409);
     expect((groupedScalarRejected.payload as any).error).toContain('APP_BUILD_DATASET_VISUALIZATION_INVALID');
-    expect((groupedScalarRejected.payload as any).error).toContain('cannot group by a field');
+    expect((groupedScalarRejected.payload as any).error).toContain('can group only by one date');
   });
 
   it('AGT-026 persists several query-bound Dataset tiles from one source without false requirement coverage', async () => {

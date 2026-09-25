@@ -1,6 +1,6 @@
 import type { DatasetDescriptor, DatasetField, DatasetPhysicalField } from '@duckcodeailabs/dql-core/datasets/descriptor';
 import { datasetTileVisualizationCompatibility, type TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
-import { chartFromEncoding, type DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import { chartFromEncoding, refName, type DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 
 /**
  * Click-a-field tile building. A measure click adds or removes a value; a
@@ -141,6 +141,12 @@ export function vizTypeForEncoding(encoding: DashboardVizEncoding, isTime: (fiel
   // A pivot stays a pivot while it has a dimension to list.
   if (type === 'pivot' && [...encoding.rows, ...encoding.columns, ...(encoding.color ? [encoding.color] : []), ...(encoding.detail ?? [])].some((ref) => 'dimension' in ref)) return 'pivot';
   if (chart.kind === 'kpi') return 'single_value';
+  // A KPI keeps its date as a trend: one measure and one date, nothing else.
+  if ((type === 'single_value' || type === 'kpi') && !encoding.color && !encoding.detail?.length) {
+    const refs = [...encoding.columns, ...encoding.rows];
+    const dims = refs.filter((ref) => 'dimension' in ref);
+    if (refs.length - dims.length === 1 && dims.length === 1 && isTime(refName(dims[0]!))) return 'single_value';
+  }
   if (chart.kind === 'table') return 'table';
   if (chart.kind === 'scatter') return 'scatter';
   if (chart.kind === 'heatmap') return 'heatmap';

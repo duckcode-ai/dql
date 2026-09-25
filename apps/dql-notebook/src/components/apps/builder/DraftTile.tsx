@@ -22,6 +22,11 @@ import { ShelfEditor, type ShelfChange } from './ShelfEditor';
 import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import { encodedChartConfig, encodedTileResult } from '../dashboard-chart-config';
 import { humanize } from './studio-ui';
+import { checkTileCalculations } from '@duckcodeailabs/dql-core/apps/tile-calcs';
+import { pivotLayout, withPivotRollups } from '@duckcodeailabs/dql-core/apps/pivot';
+import { encodingFromQuery } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import { PivotTable } from '../PivotTable';
+import { KpiCard, usesKpiCard } from '../KpiCard';
 
 export type DraftTileState = {
   /** Catalog item id of the Dataset the tile is built from. */
@@ -68,12 +73,23 @@ export function draftColumnsMeta(descriptor: DatasetDescriptor, query: TileQuery
     const name = dimension.alias ?? columns.find((column) => column === `${dimension.field}_${dimension.timeGrain}`) ?? dimension.field;
     if (columns.includes(name)) meta.push({ name, kind: 'date', grain: dimension.timeGrain });
   }
+  // Calculations carry their own format and name, as the page run gives them.
+  for (const output of checkTileCalculations(descriptor, query).outputs) {
+    if (!columns.includes(output.id)) continue;
+    meta.push({
+      name: output.id,
+      kind: output.format.kind,
+      label: output.label,
+      ...(output.format.kind === 'percent' ? { unit: 'fraction' } : output.format.currency ? { unit: output.format.currency } : {}),
+      ...(output.format.decimals !== undefined ? { decimals: output.format.decimals } : {}),
+    });
+  }
   return meta;
 }
 
 /** Why the draft cannot be added yet, or undefined when it can. */
 export function draftTileBlocker(descriptor: DatasetDescriptor, draft: DraftTileState): string | undefined {
-  if (!draft.query.measures.length && !draft.query.detail) return 'Pick at least one measure.';
+  if (!draft.query.measures.length && !draft.query.detail && !draft.query.calculations?.some((calculation) => calculation.expr)) return 'Pick at least one measure.';
   const validation = validateTileQuery(descriptor, draft.query);
   if (!tileQueryValidationRuns(validation)) return validation.diagnostics[0]?.message ?? 'This field combination is not covered by the Dataset.';
   const compatibility = datasetTileVisualizationCompatibility(draft.query, draftVisualization(descriptor, draft));
@@ -113,7 +129,11 @@ export function DatasetQueryPreview({
 }): JSX.Element {
   const [preview, setPreview] = useState<PreviewState>({ state: 'idle' });
   const latest = useRef(0);
-  const key = JSON.stringify(query);
+  // A pivot previews with its totals, as the added tile will run.
+  const runQuery = visualization === 'pivot' && !query.detail
+    ? withPivotRollups((({ limit: _limit, ...rest }) => rest)(query), encoding ?? encodingFromQuery(query, 'pivot'), undefined)
+    : query;
+  const key = JSON.stringify(runQuery);
   useEffect(() => {
     if (!sourceId || !runnable) {
       setPreview({ state: 'idle' });
@@ -124,7 +144,7 @@ export function DatasetQueryPreview({
     const timer = window.setTimeout(() => {
       setPreview({ state: 'running' });
       const started = performance.now();
-      void api.previewDatasetTileQuery({ sourceId, query }, controller.signal).then((response: DatasetTileQueryPreview) => {
+      void api.previewDatasetTileQuery({ sourceId, query: runQuery }, controller.signal).then((response: DatasetTileQueryPreview) => {
         if (ticket !== latest.current) return;
         if (!response.ok) {
           setPreview({ state: 'failed', message: response.error || 'This field query did not return a result.' });
@@ -136,7 +156,7 @@ export function DatasetQueryPreview({
         setPreview({
           state: 'ready',
           ms: Math.round(performance.now() - started),
-          result: { columns, rows, rowCount: response.result?.rowCount ?? rows.length, ...(descriptor ? { columnsMeta: draftColumnsMeta(descriptor, query, columns) } : {}) },
+          result: { columns, rows, rowCount: response.result?.rowCount ?? rows.length, ...(descriptor ? { columnsMeta: draftColumnsMeta(descriptor, runQuery, columns) } : {}) },
         });
       }).catch(() => {
         // Superseded by a newer edit.
@@ -162,7 +182,9 @@ export function DatasetQueryPreview({
   if (preview.state !== 'ready') return <div className="draft-empty loading"><span>{sourceId ? 'Running against live data…' : 'Runs when applied'}</span></div>;
   const shelved = { query, viz: { type: visualization, ...(encoding ? { encoding } : {}) } };
   const shown = encodedTileResult(shelved, preview.result);
+  if (visualization === 'pivot' && !query.detail) return <PivotTable result={shown} layout={pivotLayout(encoding ?? encodingFromQuery(query, 'pivot'), query)} themeMode={themeMode} maxHeight={height + 20} />;
   if (visualization === 'table' || visualization === 'pivot') return <TableOutput result={shown} themeMode={themeMode} maxHeight={height + 20} initialPageSize={10} />;
+  if ((visualization === 'single_value' || visualization === 'kpi') && usesKpiCard(query, undefined)) return <KpiCard result={shown} query={query} label="This KPI" />;
   return <ChartOutput result={shown} themeMode={themeMode} chartConfig={{ ...encodedChartConfig(shelved), chart: visualization === 'single_value' || visualization === 'kpi' ? 'kpi' : visualization.replace(/_/g, '-') } as CellChartConfig} availableHeight={height} />;
 }
 

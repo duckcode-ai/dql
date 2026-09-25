@@ -155,10 +155,15 @@ function unitClash(measures: ShowMeMeasure[]): string {
 }
 
 function kpi(c: Context): Fit {
-  if (c.dims.length) return { unavailable: `A KPI shows one number. Remove ${list(c.dims)} to show one.` };
+  // A date alone is the KPI's trend: the latest period, its change and a sparkline.
+  const trend = c.dims.length === 1 && c.time ? c.time : undefined;
+  if (c.dims.length && !trend) return { unavailable: `A KPI shows one number. Remove ${list(c.cats.length ? c.cats : c.dims)} to show one.` };
   if (c.measures.length !== 1) return { unavailable: `A KPI shows one number, and the shelves hold ${plural(c.measures.length, 'measure')}. Add one KPI tile for each.` };
   if (c.comparison) return { unavailable: 'A period comparison returns current, prior and change; a table or chart shows them together.' };
   const [only] = c.measures as [ShowMeMeasure];
+  if (trend) {
+    return { score: 50, reason: `${named(only)} for the latest ${named(trend).toLowerCase()}, its change from the one before, and the trend.`, encoding: encoding({ columns: [dim(trend)], rows: [measure(only)] }) };
+  }
   return { score: 100, reason: `${named(only)} as one number.`, encoding: encoding({ columns: [], rows: [measure(only)] }) };
 }
 

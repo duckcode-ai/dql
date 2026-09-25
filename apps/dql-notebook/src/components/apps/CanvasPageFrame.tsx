@@ -18,6 +18,7 @@ import { formatDisplayValue } from '../../utils/value-format';
 import { pivotLayout } from '@duckcodeailabs/dql-core/apps/pivot';
 import { encodingFromQuery } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import { pivotHtml } from './PivotTable';
+import { kpiHtml, usesKpiCard } from './KpiCard';
 
 type LayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 type RunTile = DashboardRunResponse['tiles'][number];
@@ -213,7 +214,7 @@ export function CanvasPageFrame({
 function canvasDocument(body: string, variables: string, dark = false): string {
   // The frame's colour scheme matches the host's: a light scheme inside a dark
   // page is painted white behind the page's light text (RFC 0009 evaluation).
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="${dark ? 'dark' : 'light'}"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"><style>:root{${variables};color-scheme:${dark ? 'dark' : 'light'}}html,body{margin:0;background:transparent}body{padding:4px;font:400 15px/1.55 var(--dql-font);color:var(--dql-ink);font-variant-numeric:tabular-nums}.dql-value{font-weight:600}.dql-value.missing{color:var(--dql-muted)}.dql-tile{margin:8px 0;padding:12px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface);overflow:hidden}.dql-tile svg{display:block;width:100%;max-width:640px;height:auto}.dql-tile-live svg{max-width:none;width:100%;height:100%}.dql-tile-title{margin:0 0 8px;font-size:13px;font-weight:600}.dql-tile-kpi{font:600 32px/1.2 var(--dql-font-display)}.dql-tile table{width:100%;border-collapse:collapse;font-size:13px}.dql-tile th,.dql-tile td{padding:4px 8px;border-bottom:1px solid var(--dql-line);text-align:left}.dql-tile td.num{text-align:right}.dql-tile .dql-pivot th{text-align:left;font-weight:600}.dql-tile .dql-pivot th.num{text-align:right}.dql-tile .dql-pivot tr.subtotal td,.dql-tile .dql-pivot tr.total td{font-weight:600}.dql-cf-tone{font-weight:600}.dql-cf-tone.good{color:var(--status-success,#0b7a75)}.dql-cf-tone.warning{color:var(--status-warning,#b26b1f)}.dql-cf-tone.bad{color:var(--status-error,#c14545)}.dql-tile .muted{color:var(--dql-muted);font-size:12px}.dql-tile ol{margin:6px 0 0;padding-left:18px}</style></head><body>${body}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="${dark ? 'dark' : 'light'}"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"><style>:root{${variables};color-scheme:${dark ? 'dark' : 'light'}}html,body{margin:0;background:transparent}body{padding:4px;font:400 15px/1.55 var(--dql-font);color:var(--dql-ink);font-variant-numeric:tabular-nums}.dql-value{font-weight:600}.dql-value.missing{color:var(--dql-muted)}.dql-tile{margin:8px 0;padding:12px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface);overflow:hidden}.dql-tile svg{display:block;width:100%;max-width:640px;height:auto}.dql-tile-live svg{max-width:none;width:100%;height:100%}.dql-tile-title{margin:0 0 8px;font-size:13px;font-weight:600}.dql-tile-kpi{font:600 32px/1.2 var(--dql-font-display)}.dql-kpi-change{margin:4px 0;font-size:12px;font-weight:600}.dql-kpi-change.up{color:var(--trust-governed,#3659c9)}.dql-kpi-change.down{color:var(--status-warning,#b26b1f)}.dql-kpi-target{margin:4px 0 0;font-size:12px}.dql-kpi-target.met strong{color:var(--status-success,#0b7a75)}.dql-kpi-target.missed strong{color:var(--status-warning,#b26b1f)}.dql-tile table{width:100%;border-collapse:collapse;font-size:13px}.dql-tile th,.dql-tile td{padding:4px 8px;border-bottom:1px solid var(--dql-line);text-align:left}.dql-tile td.num{text-align:right}.dql-tile .dql-pivot th{text-align:left;font-weight:600}.dql-tile .dql-pivot th.num{text-align:right}.dql-tile .dql-pivot tr.subtotal td,.dql-tile .dql-pivot tr.total td{font-weight:600}.dql-cf-tone{font-weight:600}.dql-cf-tone.good{color:var(--status-success,#0b7a75)}.dql-cf-tone.warning{color:var(--status-warning,#b26b1f)}.dql-cf-tone.bad{color:var(--status-error,#c14545)}.dql-tile .muted{color:var(--dql-muted);font-size:12px}.dql-tile ol{margin:6px 0 0;padding-left:18px}</style></head><body>${body}</body></html>`;
 }
 
 function themeVariables(node: HTMLElement | null): string {
@@ -248,6 +249,10 @@ export function drawCanvasTile(item: LayoutItem | undefined, tile: RunTile | und
   const result = encodedTileResult(item as never, tile.result as QueryResult | undefined);
   if (!result || result.rows.length === 0) return `${title}<p class="muted">No rows.</p>`;
   const chartType = normalizeDashboardChartType(item.viz.type) as ChartType;
+  if (chartType === 'kpi' && item.query && usesKpiCard(item.query, item.viz.style)) {
+    const html = kpiHtml(result, item.query, item.viz.style, item.title ?? 'This KPI');
+    if (html) return `${title}${html}`;
+  }
   if (chartType === 'kpi' || (result.rows.length === 1 && result.columns.length <= 2)) {
     const binding = Object.values(catalog).find((entry) => entry.tileId === item.i && entry.kind === 'number');
     return `${title}<div class="dql-tile-kpi">${escapeHtml(binding?.display ?? '—')}</div>`;

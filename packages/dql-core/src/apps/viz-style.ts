@@ -9,6 +9,7 @@
  */
 import { readConditionalFormats, type DashboardConditionalFormat } from './conditional-format.js';
 import type { PivotTotals } from './pivot.js';
+import { readKpiStyle, type DashboardKpiStyle } from './kpi.js';
 
 export type { DashboardConditionalFormat } from './conditional-format.js';
 
@@ -34,6 +35,8 @@ export interface DashboardVizStyle {
   conditional?: DashboardConditionalFormat[];
   /** Pivots: which totals to show. Each is on unless set to false. */
   totals?: PivotTotals;
+  /** KPIs: a target and which direction is better. */
+  kpi?: DashboardKpiStyle;
 }
 
 export interface DashboardVizReferenceLine { value: number; label?: string }
@@ -149,6 +152,9 @@ export function readDashboardVizStyle(
 
   const conditional = readConditionalFormats(record.conditional, `${path}.conditional`, err);
   if (conditional) style.conditional = conditional;
+
+  const kpi = readKpiStyle(record.kpi, `${path}.kpi`, err);
+  if (kpi) style.kpi = kpi;
 
   if (record.totals !== undefined) {
     const totals = record.totals as Record<string, unknown> | null;

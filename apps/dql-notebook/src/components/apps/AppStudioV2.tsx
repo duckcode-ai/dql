@@ -77,6 +77,7 @@ import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-enc
 import { applyShowMe, showMeFactsFromDescriptor, showMeFirstChoice, showMeInputFromQuery } from '@duckcodeailabs/dql-core/apps/show-me';
 import { pivotLayout, withPivotRollups, withoutRollups, type PivotTotals } from '@duckcodeailabs/dql-core/apps/pivot';
 import { PivotTable } from './PivotTable';
+import { KpiCard, usesKpiCard } from './KpiCard';
 
 /** A pivot shows every group; a row limit would cut its totals off. */
 function withoutRowLimit(query: TileQuery): TileQuery {
@@ -3925,6 +3926,7 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
       style={tile.viz.style}
       legacyFormat={typeof options.format === 'string' ? options.format : undefined}
       measureColumns={numberColumns}
+      {...(numberColumns[0] ? { kpiUnit: (run?.status === 'ok' ? run.result?.columnsMeta?.find((meta) => meta.name === numberColumns[0]!.name)?.kind : undefined) } : {})}
       {...(tile.query && tileEncoding && tile.viz.type === 'pivot' ? {
         onTotals: (totals: PivotTotals) => {
           const message = updateShelves({ encoding: tileEncoding, query: tile.query!, visualization: 'pivot' }, compactVizStyle({ ...(tile.viz.style ?? {}), totals }));
@@ -4213,7 +4215,9 @@ export function StudioTilePreview({
   return (
     <div ref={frameRef} className="live-component-preview" onClick={(event) => event.stopPropagation()}>
       <div ref={bodyRef} className="live-component-body">
-        {chart === 'pivot' && tile.query && !tile.query.detail
+        {chart === 'kpi' && tile.query && usesKpiCard(tile.query, tile.viz.style)
+          ? <KpiCard result={shownResult} query={tile.query} style={tile.viz.style} label={tile.title ?? 'This KPI'} />
+          : chart === 'pivot' && tile.query && !tile.query.detail
           ? <PivotTable result={shownResult} layout={pivotLayout(tile.viz.encoding ?? encodingFromQuery(tile.query, 'pivot'), tile.query)} themeMode={themeMode} conditionalFormats={tile.viz.style?.conditional} maxHeight={placed ? chartHeight : height} {...(onRowSelect ? { onCellClick: onRowSelect } : {})} />
           : chart === 'table' || chart === 'pivot'
           ? <TableOutput result={shownResult} themeMode={themeMode} maxHeight={placed ? chartHeight : height} initialPageSize={10} onRowClick={onRowSelect} conditionalFormats={tile.viz.style?.conditional} />

@@ -86,6 +86,8 @@ export {
   tileQueryMeasureScope,
   validateTileQuery,
 } from './tile-query.js';
+export { isPartialPeriod, readKpiStyle, summarizeKpi } from './kpi.js';
+export type { DashboardKpiStyle, KpiPoint, KpiSummary } from './kpi.js';
 export {
   MAX_PIVOT_COLUMNS,
   MAX_PIVOT_ROWS,

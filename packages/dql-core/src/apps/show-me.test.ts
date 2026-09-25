@@ -112,8 +112,10 @@ describe('Show Me (RFC 0009 step 2)', () => {
             : suggestion.chart === 'heatmap' ? 'heatmap'
               : 'cartesian';
         // A pivot is drawn as a pivot from its shelves, whatever a chart would read them as.
-        if (suggestion.chart !== 'pivot') expect({ chart: suggestion.chart, kind: drawn.kind }).toEqual({ chart: suggestion.chart, kind: expected });
-        if (drawn.kind === 'cartesian' && suggestion.chart !== 'pivot') {
+        // A KPI with a date draws its trend as a sparkline under the number.
+        const kpiTrend = suggestion.chart === 'kpi' && suggestion.encoding!.columns.length > 0;
+        if (suggestion.chart !== 'pivot' && !kpiTrend) expect({ chart: suggestion.chart, kind: drawn.kind }).toEqual({ chart: suggestion.chart, kind: expected });
+        if (drawn.kind === 'cartesian' && suggestion.chart !== 'pivot' && !kpiTrend) {
           // Bars over time are stored as bars; the line reading applies to line and area only.
           if (suggestion.chart === 'line' || suggestion.chart === 'area') expect(drawn.line).toBe(true);
           else if (!isTime(drawn.category)) expect(drawn.line).toBe(false);
@@ -142,7 +144,7 @@ describe('Show Me (RFC 0009 step 2)', () => {
     expect(reason(input(['order_date', 'customer'], ['revenue']), 'line')).toContain('Customer has 40 values; more than 8 lines');
     expect(reason(input(['order_date'], ['balance']), 'area')).toContain('does not add up across periods');
     expect(reason(input(['region'], ['revenue']), 'line')).toBe('A line joins points in time order, and Region is not a date. Bars compare categories.');
-    expect(reason(input(['order_date'], ['revenue']), 'kpi')).toBe('A KPI shows one number. Remove Order Date to show one.');
+    expect(reason(input(['region'], ['revenue']), 'kpi')).toBe('A KPI shows one number. Remove Region to show one.');
     expect(reason(input([], ['revenue'], { comparison: true }), 'kpi')).toContain('period comparison');
     expect(reason(input(['region'], ['revenue'], { rowDetail: true }), 'bar')).toContain('Row details');
     // Unavailable charts follow the available ones.
@@ -161,7 +163,7 @@ describe('Show Me (RFC 0009 step 2)', () => {
 
   it('ranks the alternatives after the first choice', () => {
     const order = (fields: ShowMeInput) => showMe(fields).filter((entry) => entry.available).map((entry) => entry.chart);
-    expect(order(input(['order_date'], ['revenue']))).toEqual(['line', 'area', 'column', 'table', 'pivot']);
+    expect(order(input(['order_date'], ['revenue']))).toEqual(['line', 'area', 'column', 'kpi', 'table', 'pivot']);
     expect(order(input(['segment'], ['revenue']))).toEqual(['bar', 'column', 'donut', 'pie', 'funnel', 'table', 'pivot']);
     expect(order(input(['region', 'segment'], ['revenue']))).toEqual(['stacked_bar', 'heatmap', 'grouped_bar', 'pivot', 'table']);
   });
