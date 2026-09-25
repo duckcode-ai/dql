@@ -55,6 +55,14 @@
       "types": "./dist/apps/viz-encoding.d.ts",
       "import": "./dist/apps/viz-encoding.js"
     },
+    "./apps/pivot": {
+      "types": "./dist/apps/pivot.d.ts",
+      "import": "./dist/apps/pivot.js"
+    },
+    "./apps/conditional-format": {
+      "types": "./dist/apps/conditional-format.d.ts",
+      "import": "./dist/apps/conditional-format.js"
+    },
     "./apps/tile-calcs": {
       "types": "./dist/apps/tile-calcs.d.ts",
       "import": "./dist/apps/tile-calcs.js"

@@ -13,6 +13,7 @@ import {
   PieChart,
   ScatterChart,
   Table2,
+  TableProperties,
 } from 'lucide-react';
 import type { DatasetDescriptor } from '@duckcodeailabs/dql-core/datasets/descriptor';
 import type { TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
@@ -42,6 +43,7 @@ const ICONS: Record<ShowMeChart, typeof Gauge> = {
   scatter: ScatterChart,
   heatmap: Grid3x3,
   table: Table2,
+  pivot: TableProperties,
 };
 
 /**
@@ -88,7 +90,8 @@ export function currentShowMeChart(visualization: string | undefined, encoding: 
   const type = (visualization ?? '').toLowerCase().replace(/-/g, '_');
   const drawn = chartFromEncoding(encoding, isTime);
   if (type === 'single_value' || type === 'kpi') return 'kpi';
-  if (type === 'table' || type === 'pivot' || drawn.kind === 'table') return 'table';
+  if (type === 'pivot') return 'pivot';
+  if (type === 'table' || drawn.kind === 'table') return 'table';
   if (type === 'bar') return drawn.kind === 'cartesian' && drawn.orientation === 'vertical' ? 'column' : 'bar';
   return (SHOW_ME_CHARTS as readonly string[]).includes(type) ? type as ShowMeChart : undefined;
 }

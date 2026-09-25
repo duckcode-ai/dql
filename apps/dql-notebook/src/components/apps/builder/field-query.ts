@@ -138,6 +138,8 @@ const ONE_MEASURE_TYPES = new Set(['pie', 'donut', 'funnel']);
 export function vizTypeForEncoding(encoding: DashboardVizEncoding, isTime: (field: string) => boolean, current?: string): string {
   const chart = chartFromEncoding(encoding, isTime);
   const type = (current ?? '').replace(/-/g, '_');
+  // A pivot stays a pivot while it has a dimension to list.
+  if (type === 'pivot' && [...encoding.rows, ...encoding.columns, ...(encoding.color ? [encoding.color] : []), ...(encoding.detail ?? [])].some((ref) => 'dimension' in ref)) return 'pivot';
   if (chart.kind === 'kpi') return 'single_value';
   if (chart.kind === 'table') return 'table';
   if (chart.kind === 'scatter') return 'scatter';

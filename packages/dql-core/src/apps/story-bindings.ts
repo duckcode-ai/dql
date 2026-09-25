@@ -74,9 +74,13 @@ export function buildStoryBindingCatalog(tiles: StoryBindingTileInput[], titles:
       }
       continue;
     }
-    const rows = (tile.result?.rows ?? []).filter((row) => row && typeof row === 'object');
+    // A pivot's total rows are totals, not members; its flag columns are not figures.
+    const rows = (tile.result?.rows ?? []).filter((row) => row && typeof row === 'object'
+      && !Object.entries(row).some(([column, value]) => column.startsWith('__total_') && Number(value) === 1));
     if (rows.length === 0) continue;
-    const columns = (tile.result?.columns ?? Object.keys(rows[0]!)).map((column) => (typeof column === 'string' ? column : String((column as { name?: unknown })?.name ?? column)));
+    const columns = (tile.result?.columns ?? Object.keys(rows[0]!))
+      .map((column) => (typeof column === 'string' ? column : String((column as { name?: unknown })?.name ?? column)))
+      .filter((column) => !column.startsWith('__total_'));
     const meta = new Map((tile.result?.columnsMeta ?? []).filter((entry) => typeof entry?.name === 'string').map((entry) => [entry.name!, entry]));
     const numeric = columns.filter((column) => rows.some((row) => toNumber(row[column]) !== null) && rows.every((row) => row[column] === null || row[column] === undefined || toNumber(row[column]) !== null));
     const labelColumn = columns.find((column) => !numeric.includes(column) && rows.some((row) => typeof row[column] === 'string' || row[column] instanceof Date));

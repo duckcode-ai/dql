@@ -161,4 +161,60 @@ describe('tile calculations on real DuckDB', () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
+
+  duckDbIt('recompute pivot totals in the warehouse, so a distinct count total is not a sum of cells', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-tile-totals-'));
+    const connection: ConnectionConfig = { driver: 'duckdb', filepath: join(root, 'totals.duckdb'), moduleSearchPaths: [connectorRoot!] };
+    const executor = new QueryExecutor();
+    try {
+      await executor.executeQuery('CREATE TABLE order_lines (order_line_id VARCHAR, ordered_at TIMESTAMP, region VARCHAR, customer_id VARCHAR, net_amount DOUBLE)', [], {}, connection);
+      // Customers C1 and C2 buy in both regions and both months.
+      const lines = [
+        ['OL-1', '2026-01-10', 'US', 'C1', 10], ['OL-2', '2026-01-11', 'US', 'C2', 20], ['OL-3', '2026-02-10', 'US', 'C1', 30],
+        ['OL-4', '2026-01-12', 'EU', 'C1', 5], ['OL-5', '2026-02-12', 'EU', 'C2', 15], ['OL-6', '2026-02-13', 'EU', 'C3', 25],
+      ] as const;
+      await executor.executeQuery(`INSERT INTO order_lines VALUES ${lines.map(([id, at, region, customer, amount]) => `('${id}', TIMESTAMP '${at} 09:00:00', '${region}', '${customer}', ${amount})`).join(', ')}`, [], {}, connection);
+      const withCustomers = {
+        ...descriptor,
+        fields: [
+          ...descriptor.fields,
+          { kind: 'physical', name: 'customer_id', qualifiedId: 'ol.customer_id', type: 'string', role: 'dimension', status: 'approved' },
+          { kind: 'measure', name: 'customers', qualifiedId: 'ol.m.customers', aggregation: 'count_distinct', from: 'customer_id', dependsOn: ['customer_id'], additivity: { entities: 'non_additive', time: 'non_additive' }, allowedAggs: ['count_distinct'], status: 'approved' },
+        ],
+      } as unknown as DatasetDescriptor;
+      const compiled = compileDatasetTileQuery({
+        descriptor: withCustomers,
+        query: {
+          dimensions: [{ field: 'region' }, { field: 'ordered_at', timeGrain: 'month' }],
+          measures: [{ measure: 'revenue' }, { measure: 'customers' }],
+          calculations: [{ id: 'per_customer', expr: { op: '/', left: { measure: 'revenue' }, right: { measure: 'customers' } } }],
+          rollups: [['region'], ['ordered_at_month'], []],
+        },
+        driver: 'duckdb',
+        sourceSql: 'SELECT * FROM order_lines',
+      });
+      const result = await executor.executeQuery(compiled.sql, compiled.sqlParams, compiled.variables, connection);
+      const rows = result.rows as Array<Record<string, unknown>>;
+      const find = (region: string | null, month: string | null) => rows.find((row) => {
+        const rowMonth = row.ordered_at_month === null ? null : new Date(String(row.ordered_at_month instanceof Date ? row.ordered_at_month.toISOString() : row.ordered_at_month)).toISOString().slice(0, 7);
+        const regionTotal = Number(row.__total_region) === 1;
+        const monthTotal = Number(row.__total_ordered_at_month) === 1;
+        return (region === null ? regionTotal : !regionTotal && row.region === region) && (month === null ? monthTotal : !monthTotal && rowMonth === month);
+      });
+      // 4 cells, 2 region totals, 2 month totals, 1 grand total.
+      expect(rows).toHaveLength(9);
+      expect(Number(find('US', '2026-01')?.customers)).toBe(2);
+      expect(Number(find('US', null)?.customers)).toBe(2);
+      expect(Number(find('EU', null)?.customers)).toBe(3);
+      // Summing the region totals would say 5; the warehouse counts 3 customers.
+      expect(Number(find(null, null)?.customers)).toBe(3);
+      expect(Number(find(null, null)?.revenue)).toBe(105);
+      expect(Number(find(null, '2026-02')?.customers)).toBe(3);
+      // A ratio's total is the ratio of totals, not an average of ratios.
+      expect(Number(find(null, null)?.per_customer)).toBeCloseTo(105 / 3, 9);
+    } finally {
+      await executor.disconnect();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

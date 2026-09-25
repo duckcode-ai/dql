@@ -86,6 +86,9 @@ import {
 } from './dataset-tile-evidence';
 import { datasetComparisonSummary } from './app-dataset-comparison';
 import { datasetTileVisualizationCompatibility } from '@duckcodeailabs/dql-core/apps/tile-query';
+import { pivotLayout } from '@duckcodeailabs/dql-core/apps/pivot';
+import { encodingFromQuery } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import { PivotTable } from './PivotTable';
 
 const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
   .then((module) => ({ default: module.UnifiedAgentRunPanel })));
@@ -2692,11 +2695,15 @@ export function TileBody({
         <TableOutput result={displayResult} themeMode={themeMode} initialPageSize={10} onRowClick={selectResultRow} />
       </div>
     );
+  } else if (item.viz.type === 'pivot' && item.query && !item.query.detail) {
+    // A pivot's totals are the warehouse's own, one query level each (RFC 0009 step 4).
+    const layout = pivotLayout(item.viz.encoding ?? encodingFromQuery(item.query, 'pivot'), item.query);
+    dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><PivotTable result={displayResult} layout={layout} themeMode={themeMode} conditionalFormats={item.viz.style?.conditional} {...(selectResultRow ? { onCellClick: selectResultRow } : {})} /></div>;
   } else if (chart === 'table' || item.viz.type === 'table' || item.viz.type === 'pivot') {
     if (tile.tileType !== 'aiPin' && (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable')) {
       dataView = <GeneratedEvidenceTable result={displayResult} genUi={genUi} themeMode={themeMode} />;
     } else {
-      dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={displayResult} themeMode={themeMode} initialPageSize={10} onRowClick={selectResultRow} /></div>;
+      dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={displayResult} themeMode={themeMode} initialPageSize={10} onRowClick={selectResultRow} conditionalFormats={item.viz.style?.conditional} /></div>;
     }
   } else {
     const chartResult = chart === 'kpi'

@@ -181,6 +181,7 @@ body{padding:24px clamp(16px,4vw,40px);font:400 14px/1.55 var(--dql-font);font-v
 .snap table{width:100%;border-collapse:collapse;font-size:12px}
 .snap th,.snap td{padding:4px 8px;border-bottom:1px solid var(--snap-line);text-align:left}
 .snap td.num{text-align:right}
+.snap .dql-cf-tone{font-weight:600}.snap .dql-cf-tone.good{color:#0b7a75}.snap .dql-cf-tone.warning{color:#b26b1f}.snap .dql-cf-tone.bad{color:#c14545}
 .snap .muted{color:var(--snap-muted);font-size:12px}
 .snap-text{grid-column:1/-1;max-width:760px}
 .snap-story{max-width:760px;display:grid;gap:14px;font-size:16px;line-height:1.65}

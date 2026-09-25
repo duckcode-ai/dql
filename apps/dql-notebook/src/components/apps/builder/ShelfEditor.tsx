@@ -87,7 +87,12 @@ export function describeEncodedChart(encoding: DashboardVizEncoding, isTime: (fi
   if (chart.kind === 'heatmap') return `A heatmap of ${humanize(chart.value)} by ${humanize(chart.x)} and ${humanize(chart.y)}.`;
   // The stored chart type decides the marks; the shelves decide the axis.
   const type = (visualization ?? '').replace(/-/g, '_');
-  if (type === 'table' || type === 'pivot') return 'A table of every value.';
+  if (type === 'table') return 'A table of every value.';
+  if (type === 'pivot') {
+    const across = encoding.columns.filter((ref) => !isMeasureRef(ref)).map((ref) => humanize(refName(ref)));
+    const down = encoding.rows.filter((ref) => !isMeasureRef(ref)).map((ref) => humanize(refName(ref)));
+    return `A pivot: ${down.length ? down.join(' › ') : 'one row'} down the side${across.length ? `, ${across.join(' › ')} across` : ''}, with totals recomputed from the rows.`;
+  }
   if (type === 'pie' || type === 'donut' || type === 'funnel') return `A ${type} of ${humanize(chart.measures[0] ?? '')} by ${humanize(chart.category)}.`;
   const bars = type === 'bar' || type === 'grouped_bar' || type === 'stacked_bar';
   const marks = type === 'stacked_bar' ? 'Stacked bars' : type === 'grouped_bar' ? 'Side-by-side bars' : chart.orientation === 'horizontal' ? 'Horizontal bars' : 'Bars';

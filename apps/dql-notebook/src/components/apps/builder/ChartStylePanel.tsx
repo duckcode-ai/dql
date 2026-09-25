@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { DashboardVizStyle } from '@duckcodeailabs/dql-core/apps/viz-style';
+import {
+  CONDITIONAL_OP_SYMBOLS,
+  CONDITIONAL_TONE_LABELS,
+  type ConditionalRuleOp,
+  type ConditionalTone,
+  type DashboardConditionalFormat,
+} from '@duckcodeailabs/dql-core/apps/conditional-format';
+import { pivotTotalsWithDefaults, type PivotTotals } from '@duckcodeailabs/dql-core/apps/pivot';
 
 const CARTESIAN = new Set(['bar', 'grouped_bar', 'stacked_bar', 'line', 'area']);
 const HAS_LEGEND = new Set(['bar', 'grouped_bar', 'stacked_bar', 'line', 'area', 'pie', 'donut']);
@@ -7,6 +15,25 @@ const HAS_LEGEND = new Set(['bar', 'grouped_bar', 'stacked_bar', 'line', 'area',
 type Line = { value: string; label: string };
 type Band = { from: string; to: string; label: string };
 type Note = { at: string; text: string };
+type RuleRow = { op: ConditionalRuleOp; value: string; to: string; tone: ConditionalTone };
+type FormatRow = { column: string; kind: DashboardConditionalFormat['kind']; rules: RuleRow[] };
+const TABULAR = new Set(['table', 'pivot']);
+
+/** Rows in the panel become formats; a rule without a number is left out until it has one. */
+export function conditionalFromRows(rows: FormatRow[]): DashboardConditionalFormat[] {
+  return rows.flatMap((row): DashboardConditionalFormat[] => {
+    if (!row.column) return [];
+    if (row.kind !== 'rules') return [{ column: row.column, kind: row.kind }];
+    const rules = row.rules.flatMap((rule): NonNullable<DashboardConditionalFormat['rules']> => {
+      const value = rule.value.trim() === '' ? NaN : Number(rule.value);
+      const to = rule.to.trim() === '' ? NaN : Number(rule.to);
+      if (!Number.isFinite(value)) return [];
+      if (rule.op === 'between') return Number.isFinite(to) ? [{ op: rule.op, value: Math.min(value, to), to: Math.max(value, to), tone: rule.tone }] : [];
+      return [{ op: rule.op, value, tone: rule.tone }];
+    });
+    return rules.length ? [{ column: row.column, kind: 'rules' as const, rules }] : [];
+  });
+}
 
 /** Drop empty fields so an untouched style stays out of the page file. */
 export function compactVizStyle(style: DashboardVizStyle): DashboardVizStyle | undefined {
@@ -41,16 +68,30 @@ export function styleMarksFromRows(lines: Line[], bands: Band[], notes: Note[]):
  * the tile, the same fields the App AI writes, so a hand-styled chart and an
  * AI-styled chart are stored and rendered the same way.
  */
-export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChange }: {
+export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChange, measureColumns = [], onTotals }: {
   vizType: string;
   style?: DashboardVizStyle;
   /** The number format a tile saved before `viz.style` existed. */
   legacyFormat?: string;
   disabled: boolean;
   onChange: (style: DashboardVizStyle | undefined) => void;
+  /** Number columns a table or pivot can format: output name and the name readers see. */
+  measureColumns?: Array<{ name: string; label: string }>;
+  /** Pivots: totals change the tile's query too, so the caller saves them. */
+  onTotals?: (totals: PivotTotals) => void;
 }): JSX.Element {
   const current = style ?? {};
   const cartesian = CARTESIAN.has(vizType);
+  const tabular = TABULAR.has(vizType);
+  const [formats, setFormats] = useState<FormatRow[]>(() => (current.conditional ?? []).map((format) => ({
+    column: format.column,
+    kind: format.kind,
+    rules: (format.rules ?? []).map((rule) => ({ op: rule.op, value: String(rule.value), to: rule.to !== undefined ? String(rule.to) : '', tone: rule.tone })),
+  })));
+  const commitFormats = (next = formats) => {
+    const conditional = conditionalFromRows(next);
+    onChange(compactVizStyle({ ...current, conditional }));
+  };
   // The rows start from the saved style once per tile (the caller keys this
   // panel by tile). A save must never reset a row the author is still typing.
   const [lines, setLines] = useState<Line[]>(() => (current.referenceLines ?? []).map((line) => ({ value: String(line.value), label: line.label ?? '' })));
@@ -164,6 +205,68 @@ export function ChartStylePanel({ vizType, style, legacyFormat, disabled, onChan
       </div>)}
       <button type="button" className="chart-style-add" disabled={disabled} onClick={() => setNotes([...notes, { at: '', text: '' }])}>Add note</button>
       <small className="field-help">Notes are saved in the page file in git and appear on every run.</small>
+    </div> : null}
+
+    {vizType === 'pivot' && onTotals ? (() => {
+      const totals = pivotTotalsWithDefaults(current.totals);
+      const toggle = (key: keyof PivotTotals, on: boolean) => onTotals({ ...(current.totals ?? {}), [key]: on });
+      return <fieldset className="chart-style-totals">
+        <legend className="chart-style-heading">Totals</legend>
+        <label className="chart-style-check" htmlFor="pivot-total-rows"><input id="pivot-total-rows" type="checkbox" disabled={disabled} checked={totals.rows} onChange={(event) => toggle('rows', event.target.checked)} /> Total row</label>
+        <label className="chart-style-check" htmlFor="pivot-total-columns"><input id="pivot-total-columns" type="checkbox" disabled={disabled} checked={totals.columns} onChange={(event) => toggle('columns', event.target.checked)} /> Total column</label>
+        <label className="chart-style-check" htmlFor="pivot-subtotals"><input id="pivot-subtotals" type="checkbox" disabled={disabled} checked={totals.subtotals} onChange={(event) => toggle('subtotals', event.target.checked)} /> Subtotals</label>
+        <small className="field-help">Totals are recomputed from the rows by the warehouse, so a distinct count or a rate totals correctly.</small>
+      </fieldset>;
+    })() : null}
+
+    {tabular ? <div
+      className="chart-style-marks"
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) commitFormats(); }}
+    >
+      <span className="chart-style-heading">Conditional formatting</span>
+      {formats.map((row, index) => {
+        const setRow = (patch: Partial<FormatRow>, commit = false) => {
+          const next = formats.map((item, i) => (i === index ? { ...item, ...patch } : item));
+          setFormats(next);
+          if (commit) commitFormats(next);
+        };
+        return <div key={`format-${index}`} className="chart-style-format">
+          <div className="chart-style-row">
+            <select aria-label="Column to format" disabled={disabled} value={row.column} onChange={(event) => setRow({ column: event.target.value }, true)}>
+              <option value="">Choose a number</option>
+              {measureColumns.map((column) => <option key={column.name} value={column.name}>{column.label}</option>)}
+            </select>
+            <select aria-label="How to format it" disabled={disabled} value={row.kind} onChange={(event) => {
+              const kind = event.target.value as FormatRow['kind'];
+              setRow({ kind, rules: kind === 'rules' && !row.rules.length ? [{ op: 'gte', value: '', to: '', tone: 'good' }] : row.rules }, kind !== 'rules');
+            }}>
+              <option value="scale">Colour scale</option>
+              <option value="bars">Data bars</option>
+              <option value="rules">Rules</option>
+            </select>
+            <button type="button" aria-label="Remove formatting" disabled={disabled} onClick={() => { const next = formats.filter((_, i) => i !== index); setFormats(next); commitFormats(next); }}>×</button>
+          </div>
+          {row.kind === 'rules' ? <>
+            {row.rules.map((rule, ruleIndex) => {
+              const setRule = (patch: Partial<RuleRow>, commit = false) => setRow({ rules: row.rules.map((item, i) => (i === ruleIndex ? { ...item, ...patch } : item)) }, commit);
+              return <div key={`rule-${ruleIndex}`} className="chart-style-row chart-style-rule">
+                <select aria-label="Condition" disabled={disabled} value={rule.op} onChange={(event) => setRule({ op: event.target.value as ConditionalRuleOp }, true)}>
+                  {(Object.keys(CONDITIONAL_OP_SYMBOLS) as ConditionalRuleOp[]).map((op) => <option key={op} value={op}>{CONDITIONAL_OP_SYMBOLS[op]}</option>)}
+                </select>
+                <input aria-label="Value" inputMode="decimal" placeholder="Value" disabled={disabled} value={rule.value} onChange={(event) => setRule({ value: event.target.value })} />
+                {rule.op === 'between' ? <input aria-label="Up to" inputMode="decimal" placeholder="To" disabled={disabled} value={rule.to} onChange={(event) => setRule({ to: event.target.value })} /> : null}
+                <select aria-label="Show as" disabled={disabled} value={rule.tone} onChange={(event) => setRule({ tone: event.target.value as ConditionalTone }, true)}>
+                  {(Object.keys(CONDITIONAL_TONE_LABELS) as ConditionalTone[]).map((tone) => <option key={tone} value={tone}>{CONDITIONAL_TONE_LABELS[tone]}</option>)}
+                </select>
+                <button type="button" aria-label="Remove rule" disabled={disabled} onClick={() => setRow({ rules: row.rules.filter((_, i) => i !== ruleIndex) }, true)}>×</button>
+              </div>;
+            })}
+            <button type="button" className="chart-style-add" disabled={disabled || row.rules.length >= 8} onClick={() => setRow({ rules: [...row.rules, { op: 'lt', value: '', to: '', tone: 'bad' }] })}>Add rule</button>
+          </> : null}
+        </div>;
+      })}
+      <button type="button" className="chart-style-add" disabled={disabled || !measureColumns.length || formats.length >= 12} onClick={() => setFormats([...formats, { column: measureColumns[0]?.name ?? '', kind: 'scale', rules: [] }])}>Add formatting</button>
+      <small className="field-help">Rules are checked in order; the first that matches marks the cell with its icon and name.</small>
     </div> : null}
   </section>;
 }

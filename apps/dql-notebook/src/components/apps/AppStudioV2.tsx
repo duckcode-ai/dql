@@ -44,7 +44,7 @@ import { DataPanel, type DataPanelTarget } from './builder/DataPanel';
 import { DraftTileCard, DraftTileInspector, draftVisualization, type DraftTileState } from './builder/DraftTile';
 import { encodedChartConfig, encodedTileResult } from './dashboard-chart-config';
 import { ProposedTileCard } from './builder/ProposedTile';
-import { ChartStylePanel } from './builder/ChartStylePanel';
+import { ChartStylePanel, compactVizStyle } from './builder/ChartStylePanel';
 import { DriverView } from './DriverView';
 import { StoryView } from './StoryView';
 import { StoryEditor } from './builder/StoryEditor';
@@ -75,6 +75,14 @@ import { addFieldByClick, encodingFromQuery, encodingHas, queryFromEncoding, rem
 import type { ShelfChange } from './builder/ShelfEditor';
 import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import { applyShowMe, showMeFactsFromDescriptor, showMeFirstChoice, showMeInputFromQuery } from '@duckcodeailabs/dql-core/apps/show-me';
+import { pivotLayout, withPivotRollups, withoutRollups, type PivotTotals } from '@duckcodeailabs/dql-core/apps/pivot';
+import { PivotTable } from './PivotTable';
+
+/** A pivot shows every group; a row limit would cut its totals off. */
+function withoutRowLimit(query: TileQuery): TileQuery {
+  const { limit: _limit, ...rest } = query;
+  return rest;
+}
 import { useMarkInteractions } from './useMarkInteractions';
 import { numberReceiptInfo } from './NumberReceipt';
 import type { MarkPointer } from '../output/echarts/EChartsChart';
@@ -2981,8 +2989,11 @@ export function AppStudioV2({
   const commitDraftTile = async () => {
     if (!draftTile || !activeDatasetItem) return;
     const title = draftTile.title.trim() || defaultTileTitle(draftTile.query, humanize);
+    const visualization = activeDescriptor ? draftVisualization(activeDescriptor, draftTile) : undefined;
+    // A new pivot asks for its totals from the start.
+    const query = visualization === 'pivot' ? withPivotRollups(withoutRowLimit(draftTile.query), draftTile.encoding, undefined) : draftTile.query;
     const added = activeDescriptor
-      ? await addComponent(draftTile.view, activeDatasetItem, draftTile.query, title, draftVisualization(activeDescriptor, draftTile) as AppStudioBuildDraft['pages'][number]['layout']['items'][number]['viz']['type'], draftTile.encoding)
+      ? await addComponent(draftTile.view, activeDatasetItem, query, title, visualization as AppStudioBuildDraft['pages'][number]['layout']['items'][number]['viz']['type'], draftTile.encoding)
       : await addComponent(draftTile.view, activeDatasetItem, draftTile.query, title, tileVisualization(draftTile.query, draftTile.view));
     if (added) setDraftTile(null);
   };
@@ -3848,16 +3859,24 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
   // Shelves (RFC 0009): the query follows them, the contract checks it, and
   // the chart type follows what the shelves draw.
   const tileEncoding = tile.query ? (tile.viz.encoding ?? encodingFromQuery(tile.query, tile.viz.type)) : undefined;
-  const updateShelves = ({ encoding, query, visualization }: ShelfChange): string | void => {
+  // Numbers a table or pivot can format: the result's number columns, by the names readers see.
+  const numberColumns = (run?.status === 'ok' ? run.result?.columnsMeta ?? [] : [])
+    .filter((meta) => ['currency', 'percent', 'number', 'count'].includes(meta.kind))
+    .map((meta) => ({ name: meta.name, label: tileEncoding?.fields?.[`measure:${meta.name}`]?.label ?? meta.label ?? humanize(meta.name) }));
+  const updateShelves = ({ encoding, query: shelfQuery, visualization }: ShelfChange, style = tile.viz.style): string | void => {
     if (!dataset) return 'This tile has no Dataset.';
-    if (!query.measures.length) return 'A tile needs at least one measure. Add another before removing this one.';
-    const validation = validateTileQuery(dataset, query);
-    if (!tileQueryValidationRuns(validation)) return validation.diagnostics[0]?.message ?? 'The Dataset does not cover that field combination.';
+    if (!shelfQuery.measures.length && !shelfQuery.calculations?.some((calculation) => calculation.expr)) return 'A tile needs at least one measure. Add another before removing this one.';
     // A Show Me pick names its chart; a moved field keeps the chart when the shelves still read that way.
     const type = visualization ?? vizTypeForEncoding(encoding, descriptorTimeField(dataset), tile.viz.type);
+    // A pivot asks the warehouse for its totals and shows every group.
+    const pivot = type === 'pivot';
+    const query = pivot ? withPivotRollups(withoutRowLimit(shelfQuery), encoding, style?.totals) : withoutRollups(shelfQuery);
+    const validation = validateTileQuery(dataset, query);
+    if (!tileQueryValidationRuns(validation)) return validation.diagnostics[0]?.message ?? 'The Dataset does not cover that field combination.';
     const compatibility = datasetTileVisualizationCompatibility(query, type);
     setVisualizationFeedback(compatibility.compatible ? null : `${compatibility.message} Shown as a Table.`);
-    onUpdate({ query, viz: { ...tile.viz, type: (compatibility.compatible ? type : 'table') as typeof tile.viz.type, encoding } });
+    const { style: _style, ...viz } = tile.viz;
+    onUpdate({ query, viz: { ...viz, ...(style ? { style } : {}), type: (compatibility.compatible ? type : 'table') as typeof tile.viz.type, encoding } });
   };
   const updateVisualization = (type: typeof tile.viz.type) => {
     if (tile.query && dataset) {
@@ -3899,12 +3918,19 @@ export function ComponentInspector({ initialTab = 'data', tile, run, pageId, pag
     </> : null}
     {dataTile && tab === 'visual' ? <>
     {tile.query && dataset && tileEncoding ? <section><ShowMePanel suggestions={tileShowMe(dataset, tileEncoding, tile.query, run?.status === 'ok' ? run.result : undefined)} current={currentShowMeChart(tile.viz.type, tileEncoding, descriptorTimeField(dataset))} disabled={disabled} onPick={(suggestion) => { const encoding = applyShowMe(tileEncoding, suggestion); const message = updateShelves({ encoding, query: queryFromEncoding(encoding, tile.query!, descriptorTimeGrain(dataset)), visualization: suggestion.viz }); if (message) setVisualizationFeedback(message); }} />{visualizationFeedback ? <small className="dataset-interaction-message" role="status">{visualizationFeedback}</small> : null}</section> : <section><label>Chart</label><div className="chart-type-grid" role="radiogroup" aria-label="Chart type">{CHART_TYPE_OPTIONS.map(([type, label]) => { const active = tile.viz.type === type || (type === 'single_value' && tile.viz.type === 'kpi'); return <button key={type} type="button" role="radio" aria-checked={active} className={active ? 'on' : ''} disabled={disabled} onClick={() => { if (!active) updateVisualization(type); }}>{chartTypeIcon(type)}<span>{label}</span></button>; })}</div>{savedDatasetVisualization && !savedDatasetVisualization.compatible ? <small className="dataset-builder-error" role="alert">{savedDatasetVisualization.message} Choose Table to keep all selected fields visible.</small> : null}{visualizationFeedback ? <small className="dataset-interaction-message" role="status">{visualizationFeedback}</small> : null}</section>}
-    {!tile.text ? <section className="field-mapping"><label>Field mapping</label><div><span>X / category</span><select value={String(options.x ?? '')} onChange={(event) => setOption('x', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><div><span>Y / value</span><select value={String(options.y ?? '')} onChange={(event) => setOption('y', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><small className="field-help">Run preview to load the exact result fields.</small></section> : null}
+    {!tile.text && !(tile.query && tileEncoding) ? <section className="field-mapping"><label>Field mapping</label><div><span>X / category</span><select value={String(options.x ?? '')} onChange={(event) => setOption('x', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><div><span>Y / value</span><select value={String(options.y ?? '')} onChange={(event) => setOption('y', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><small className="field-help">Run preview to load the exact result fields.</small></section> : null}
     {!tile.text ? <ChartStylePanel
       key={tile.i}
       vizType={tile.viz.type}
       style={tile.viz.style}
       legacyFormat={typeof options.format === 'string' ? options.format : undefined}
+      measureColumns={numberColumns}
+      {...(tile.query && tileEncoding && tile.viz.type === 'pivot' ? {
+        onTotals: (totals: PivotTotals) => {
+          const message = updateShelves({ encoding: tileEncoding, query: tile.query!, visualization: 'pivot' }, compactVizStyle({ ...(tile.viz.style ?? {}), totals }));
+          if (message) setVisualizationFeedback(message);
+        },
+      } : {})}
       disabled={disabled}
       onChange={(style) => {
         const { style: _previous, ...viz } = tile.viz;
@@ -4187,8 +4213,10 @@ export function StudioTilePreview({
   return (
     <div ref={frameRef} className="live-component-preview" onClick={(event) => event.stopPropagation()}>
       <div ref={bodyRef} className="live-component-body">
-        {chart === 'table' || chart === 'pivot'
-          ? <TableOutput result={shownResult} themeMode={themeMode} maxHeight={placed ? chartHeight : height} initialPageSize={10} onRowClick={onRowSelect} />
+        {chart === 'pivot' && tile.query && !tile.query.detail
+          ? <PivotTable result={shownResult} layout={pivotLayout(tile.viz.encoding ?? encodingFromQuery(tile.query, 'pivot'), tile.query)} themeMode={themeMode} conditionalFormats={tile.viz.style?.conditional} maxHeight={placed ? chartHeight : height} {...(onRowSelect ? { onCellClick: onRowSelect } : {})} />
+          : chart === 'table' || chart === 'pivot'
+          ? <TableOutput result={shownResult} themeMode={themeMode} maxHeight={placed ? chartHeight : height} initialPageSize={10} onRowClick={onRowSelect} conditionalFormats={tile.viz.style?.conditional} />
           : <ChartOutput result={shownResult} themeMode={themeMode} chartConfig={{ ...chartConfig, title: undefined }} availableHeight={chartHeight} availableWidth={width} onMarkSelect={onRowSelect} />}
       </div>
       {selectableFields.length ? <div className={`dataset-mark-controls marks ${selectedForTile.length ? 'has-selection' : ''}`} aria-label="Cross-filter selection">

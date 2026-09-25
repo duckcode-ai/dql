@@ -310,3 +310,22 @@ describe('tile calculations (RFC 0009 step 3)', () => {
     expect(compile('duckdb', byMonth).queryFingerprint).not.toBe(compile('duckdb', { ...byMonth, orderBy: undefined, calculations: byMonth.calculations!.slice(0, 1) }).queryFingerprint);
   });
 });
+
+describe('pivot totals (RFC 0009 step 4)', () => {
+  it('asks the warehouse for each total level with GROUPING SETS and flags totalled dimensions', () => {
+    const compiled = compile('duckdb', { dimensions: [{ field: 'region' }, { field: 'ordered_at', timeGrain: 'month' }], measures: [{ measure: 'orders' }], rollups: [['region'], []] });
+    expect(compiled.sql).toBe([
+      'WITH ds AS (SELECT * FROM order_lines)',
+      `SELECT ds."region" AS "region", DATE_TRUNC('month', ds."ordered_at") AS "ordered_at_month", COUNT(DISTINCT ds."order_line_id") AS "orders", GROUPING(ds."region") AS "__total_region", GROUPING(DATE_TRUNC('month', ds."ordered_at")) AS "__total_ordered_at_month"`,
+      'FROM ds',
+      `GROUP BY GROUPING SETS ((ds."region", DATE_TRUNC('month', ds."ordered_at")), (ds."region"), ())`,
+    ].join('\n'));
+    expect(compile('bigquery', { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }], rollups: [[]] }).sql)
+      .toContain('GROUP BY GROUPING SETS ((ds.`region`), ())');
+  });
+
+  it('refuses totals with a row limit', () => {
+    expect(() => compile('duckdb', { dimensions: [{ field: 'region' }], measures: [{ measure: 'revenue' }], rollups: [[]], limit: 5 }))
+      .toThrowError(expect.objectContaining({ message: expect.stringContaining('remove the row limit') }));
+  });
+});

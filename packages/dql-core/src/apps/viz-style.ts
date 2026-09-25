@@ -7,6 +7,11 @@
  * There is deliberately no second y-axis: two measures on different scales
  * are indexed to one axis or split into two tiles.
  */
+import { readConditionalFormats, type DashboardConditionalFormat } from './conditional-format.js';
+import type { PivotTotals } from './pivot.js';
+
+export type { DashboardConditionalFormat } from './conditional-format.js';
+
 export interface DashboardVizStyle {
   /** Value labels on marks: none, only the last point or bar, or every mark. */
   labels?: 'none' | 'last' | 'all';
@@ -25,6 +30,10 @@ export interface DashboardVizStyle {
   bands?: DashboardVizBand[];
   /** Notes pinned to a category or date on the x axis, kept in git. */
   annotations?: DashboardVizAnnotation[];
+  /** Tables and pivots: colour scales, data bars and threshold rules per measure. */
+  conditional?: DashboardConditionalFormat[];
+  /** Pivots: which totals to show. Each is on unless set to false. */
+  totals?: PivotTotals;
 }
 
 export interface DashboardVizReferenceLine { value: number; label?: string }
@@ -137,6 +146,24 @@ export function readDashboardVizStyle(
     return [{ at, text }];
   });
   if (annotations.length) style.annotations = annotations;
+
+  const conditional = readConditionalFormats(record.conditional, `${path}.conditional`, err);
+  if (conditional) style.conditional = conditional;
+
+  if (record.totals !== undefined) {
+    const totals = record.totals as Record<string, unknown> | null;
+    if (!totals || typeof totals !== 'object' || Array.isArray(totals)) {
+      err(`${path}.totals must be an object`);
+    } else {
+      const picked: PivotTotals = {};
+      for (const key of ['rows', 'columns', 'subtotals'] as const) {
+        if (totals[key] === undefined) continue;
+        if (typeof totals[key] === 'boolean') picked[key] = totals[key] as boolean;
+        else err(`${path}.totals.${key} must be true or false`);
+      }
+      if (Object.keys(picked).length) style.totals = picked;
+    }
+  }
 
   return Object.keys(style).length > 0 ? style : undefined;
 }

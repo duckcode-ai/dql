@@ -87,6 +87,29 @@ export {
   validateTileQuery,
 } from './tile-query.js';
 export {
+  MAX_PIVOT_COLUMNS,
+  MAX_PIVOT_ROWS,
+  PIVOT_TOTAL_FLAG,
+  buildPivotGrid,
+  pivotLayout,
+  pivotRollups,
+  pivotTotalFlag,
+  pivotTotalsWithDefaults,
+  withPivotRollups,
+  withoutRollups,
+} from './pivot.js';
+export type { PivotGrid, PivotHeader, PivotLayout, PivotRow, PivotTotals } from './pivot.js';
+export {
+  CONDITIONAL_OP_SYMBOLS,
+  CONDITIONAL_TONE_LABELS,
+  MAX_CONDITIONAL_FORMATS,
+  conditionalCell,
+  conditionalStats,
+  describeConditionalRule,
+  readConditionalFormats,
+} from './conditional-format.js';
+export type { ConditionalCell, ConditionalRule, ConditionalRuleOp, ConditionalStats, ConditionalTone, DashboardConditionalFormat } from './conditional-format.js';
+export {
   MAX_TILE_CALCULATIONS,
   QUICK_CALC_KINDS,
   QUICK_CALC_LABELS,

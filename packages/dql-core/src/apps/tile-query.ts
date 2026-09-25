@@ -129,6 +129,7 @@ export interface TileQueryDiagnostic {
     | 'HIERARCHY_DRILL_UNSUPPORTED'
     | 'INVALID_LIMIT'
     | 'INVALID_CALCULATION'
+    | 'INVALID_TOTALS'
     | 'INVALID_QUERY';
   message: string;
   field?: string;
@@ -224,7 +225,7 @@ export function tileQueryIsTopNIntent(query: TileQuery): boolean {
 export function normalizeTileQuery(value: unknown): TileQuery | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
-  if (!hasOnlyKeys(raw, ['dimensions', 'measures', 'calculations', 'filters', 'having', 'comparison', 'orderBy', 'limit', 'detail', 'detailColumns', 'respectsGlobalFilters'])) return undefined;
+  if (!hasOnlyKeys(raw, ['dimensions', 'measures', 'calculations', 'rollups', 'filters', 'having', 'comparison', 'orderBy', 'limit', 'detail', 'detailColumns', 'respectsGlobalFilters'])) return undefined;
   if (hasOwn(raw, 'filters') && !Array.isArray(raw.filters)) return undefined;
   if (hasOwn(raw, 'having') && !Array.isArray(raw.having)) return undefined;
   if (hasOwn(raw, 'orderBy') && !Array.isArray(raw.orderBy)) return undefined;
@@ -233,6 +234,8 @@ export function normalizeTileQuery(value: unknown): TileQuery | undefined {
   if (!dimensions || !measures) return undefined;
   const calculations = raw.calculations === undefined ? undefined : normalizeTileCalculations(raw.calculations);
   if (raw.calculations !== undefined && !calculations) return undefined;
+  const rollups = raw.rollups === undefined ? undefined : normalizeRollups(raw.rollups);
+  if (raw.rollups !== undefined && !rollups) return undefined;
   const filters = normalizeFilters(raw.filters);
   const having = normalizeFilters(raw.having);
   if ((raw.filters !== undefined && !filters) || (raw.having !== undefined && !having)) return undefined;
@@ -250,6 +253,7 @@ export function normalizeTileQuery(value: unknown): TileQuery | undefined {
     dimensions,
     measures,
     ...(calculations?.length ? { calculations } : {}),
+    ...(rollups?.length ? { rollups } : {}),
     ...(filters?.length ? { filters } : {}),
     ...(having?.length ? { having } : {}),
     ...(comparison ? { comparison } : {}),
@@ -277,6 +281,7 @@ export function validateTileQuery(descriptor: DatasetDescriptor, query: TileQuer
   // Measures a calculation reads are checked exactly like selected ones, so a
   // formula cannot reach a measure the tile could not select directly.
   diagnostics.push(...checkTileCalculations(descriptor, query).diagnostics);
+  diagnostics.push(...rollupDiagnostics(descriptor, query));
   const measureQuery = tileQueryMeasureScope(descriptor, query);
   const aggregateSafety = aggregateDatasetQuerySafety(descriptor, measureQuery);
   const aggregateComponents = datasetAggregateComponentRequirements(descriptor, measureQuery);
@@ -555,6 +560,9 @@ export function applyDatasetHierarchyDrill(input: {
           ? { ...order, alias: targetAlias }
           : { ...order },
       ),
+    } : {}),
+    ...(input.query.rollups ? {
+      rollups: input.query.rollups.map((set) => set.map((alias) => (alias.toLowerCase() === sourceAlias.toLowerCase() ? targetAlias : alias))),
     } : {}),
     // Quick calculations that ran along or within the drilled level follow it down.
     ...(input.query.calculations ? {
@@ -980,6 +988,47 @@ function normalizeDetailColumns(value: unknown): string[] | undefined {
     columns.push(column);
   }
   return columns;
+}
+
+function normalizeRollups(value: unknown): string[][] | undefined {
+  if (!Array.isArray(value) || value.length > 16) return undefined;
+  const rollups: string[][] = [];
+  for (const entry of value) {
+    if (!Array.isArray(entry) || entry.length > 12) return undefined;
+    const set: string[] = [];
+    for (const alias of entry) {
+      if (typeof alias !== 'string' || !safeIdentifier(alias.trim())) return undefined;
+      set.push(alias.trim());
+    }
+    rollups.push(set);
+  }
+  return rollups;
+}
+
+/**
+ * Totals are recomputed at each level by the warehouse; they refuse what
+ * would make a level wrong or cut: quick calculations (windows would mix
+ * levels), a measure filter (it would drop total rows), a row limit (it would
+ * cut totals off at random) and an already-aggregated Dataset.
+ */
+function rollupDiagnostics(descriptor: DatasetDescriptor, query: TileQuery): TileQueryDiagnostic[] {
+  if (!query.rollups?.length) return [];
+  const refuse = (message: string): TileQueryDiagnostic => ({ code: 'INVALID_TOTALS', message });
+  const out: TileQueryDiagnostic[] = [];
+  const aliases = new Set(query.dimensions.map((dimension) => tileDimensionAlias(dimension).toLowerCase()));
+  if (descriptor.kind === 'semantic' || descriptor.execution.route === 'semantic') out.push(refuse(`${descriptor.label} is defined in a semantic model; its totals come from the model, not from this tile.`));
+  if (query.detail || query.comparison) out.push(refuse('Totals need a grouped tile without a period comparison.'));
+  if (!query.dimensions.length) out.push(refuse('Totals need at least one dimension to total across.'));
+  if (query.calculations?.some((calculation) => calculation.quick)) out.push(refuse('A table with totals cannot also hold quick calculations; each total level would mix them. Use a calculated measure instead.'));
+  if (query.having?.length) out.push(refuse('A table with totals cannot filter on a measure; the filter would drop total rows.'));
+  if (query.limit !== undefined) out.push(refuse('A table with totals shows every group; remove the row limit.'));
+  if (descriptor.grain.aggregate) out.push(refuse(`${descriptor.label} is already aggregated; totals would add up its rows again.`));
+  for (const set of query.rollups) {
+    const unknown = set.find((alias) => !aliases.has(alias.toLowerCase()));
+    if (unknown) out.push(refuse(`The total level names ${unknown}, which is not a dimension on this tile.`));
+    if (new Set(set.map((alias) => alias.toLowerCase())).size !== set.length) out.push(refuse('A total level names a dimension twice.'));
+  }
+  return out;
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

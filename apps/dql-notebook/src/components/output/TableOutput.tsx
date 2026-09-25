@@ -3,6 +3,13 @@ import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme'
 import type { QueryResult } from '../../store/types';
 import { inferColumnKind, type ColumnKind } from '../../utils/column-kind';
 import { formatDisplayValue } from '../../utils/value-format';
+import {
+  CONDITIONAL_TONE_LABELS,
+  conditionalCell,
+  conditionalStats,
+  type ConditionalTone,
+  type DashboardConditionalFormat,
+} from '@duckcodeailabs/dql-core/apps/conditional-format';
 
 interface TableOutputProps {
   result: QueryResult;
@@ -14,6 +21,29 @@ interface TableOutputProps {
   /** Optional App-level selection hook. It receives the actual settled row;
    * callers remain responsible for matching it to an explicit field mapping. */
   onRowClick?: (row: Record<string, unknown>, pointer?: { x: number; y: number }) => void;
+  /** Colour scales, data bars and threshold rules per measure column (App tiles). */
+  conditionalFormats?: DashboardConditionalFormat[];
+}
+
+const TONE_COLORS: Record<ConditionalTone, string> = {
+  good: 'var(--status-success)',
+  warning: 'var(--status-warning)',
+  bad: 'var(--status-error)',
+  neutral: 'var(--text-secondary)',
+};
+
+/** A rule's state as an icon with its name: colour is never the only signal. */
+export function ConditionalToneIcon({ tone }: { tone: ConditionalTone }): JSX.Element {
+  const color = TONE_COLORS[tone];
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" role="img" aria-label={CONDITIONAL_TONE_LABELS[tone]} style={{ flex: 'none', marginRight: 6, verticalAlign: '-2px' }}>
+      <title>{CONDITIONAL_TONE_LABELS[tone]}</title>
+      {tone === 'good' ? <><circle cx="8" cy="8" r="7" fill={color} /><path d="M4.8 8.2l2.1 2.1 4.3-4.6" fill="none" stroke="var(--bg-2, #fff)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></>
+        : tone === 'warning' ? <><path d="M8 1.5l7 12.5H1z" fill={color} /><path d="M8 6v3.6M8 11.6v.4" stroke="var(--bg-2, #fff)" strokeWidth="1.8" strokeLinecap="round" /></>
+        : tone === 'bad' ? <><circle cx="8" cy="8" r="7" fill={color} /><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="var(--bg-2, #fff)" strokeWidth="1.8" strokeLinecap="round" /></>
+        : <circle cx="8" cy="8" r="4" fill={color} />}
+    </svg>
+  );
 }
 
 const PAGE_SIZES = [10, 25, 50, 100, 500] as const;
@@ -102,7 +132,7 @@ function SortArrow({ dir, color }: { dir: SortDir; color: string }) {
 
 // ─── TableOutput ──────────────────────────────────────────────────────────────
 
-export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSize = 50, onRowClick }: TableOutputProps) {
+export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSize = 50, onRowClick, conditionalFormats }: TableOutputProps) {
   const t = themes[themeMode];
   const [hoveredRow, setHoveredRow] = useState<number | null>(null);
   const [sortCol, setSortCol] = useState<string | null>(null);
@@ -160,6 +190,10 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
   const columnValues = useMemo(() => new Map(
     result.columns.map((column) => [column, result.rows.map((row) => row[column])]),
   ), [result.columns, result.rows]);
+  // Scales and bars are drawn against every row, not the page shown.
+  const conditional = useMemo(() => new Map((conditionalFormats ?? [])
+    .filter((format) => result.columns.includes(format.column))
+    .map((format) => [format.column, { format, stats: conditionalStats(columnValues.get(format.column) ?? []) }])), [conditionalFormats, result.columns, columnValues]);
 
   // Track scroll to drop a soft shadow under the sticky header.
   const [scrolled, setScrolled] = useState(false);
@@ -330,13 +364,16 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
                     const value = row[col];
                     const isNull = value === null || value === undefined;
                     const numericAlign = isNumeric(value);
+                    const rule = conditional.get(col);
+                    const cell = rule ? conditionalCell(rule.format, value, rule.stats) : undefined;
                     return (
                       <td
                         key={col}
                         style={{
                           padding: '7px 14px',
                           borderBottom: `1px solid ${t.tableBorder}`,
-                          background: isHovered ? t.tableRowHover : baseBg,
+                          background: cell?.background && !isHovered ? cell.background : isHovered ? t.tableRowHover : baseBg,
+                          ...(cell?.bar ? { backgroundImage: `linear-gradient(90deg, ${cell.bar.color} ${cell.bar.width}%, transparent ${cell.bar.width}%)` } : {}),
                           color: isNull ? t.textMuted : t.textPrimary,
                           fontStyle: isNull ? 'italic' : 'normal',
                           fontVariantNumeric: numericAlign ? 'tabular-nums' : 'normal',
@@ -346,6 +383,7 @@ export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSiz
                           transition: 'background 0.1s',
                         }}
                       >
+                        {cell?.tone ? <ConditionalToneIcon tone={cell.tone} /> : null}
                         {isNull ? '—' : formatDisplayValue(col, value, columnValues.get(col) ?? [], { meta: metaOf(col) })}
                       </td>
                     );

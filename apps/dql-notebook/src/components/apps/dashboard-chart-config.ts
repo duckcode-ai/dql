@@ -18,7 +18,8 @@ const timeDimension = (query: TileQuery) => (dimension: string) => query.dimensi
  */
 export function encodedChartConfig(item: DashboardTileChartInput): Partial<CellChartConfig> {
   const encoding = item.viz.encoding;
-  if (!encoding || !item.query) return {};
+  // A pivot lays out its own rows and columns from the shelves.
+  if (!encoding || !item.query || item.viz.type === 'pivot') return {};
   const columns = encodingChartColumns(encoding, item.query, timeDimension(item.query));
   // Shelves that read as a table are drawn as a table, whatever chart type
   // the page stores: a chart would have to merge rows into one mark.

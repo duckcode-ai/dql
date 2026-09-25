@@ -107,6 +107,12 @@ export interface TileQuery {
   measures: TileQueryMeasure[];
   /** Calculated measures and quick table calculations, in output order after `measures`. */
   calculations?: TileCalculation[];
+  /**
+   * Total levels a pivot asks for (RFC 0009 step 4). Each entry lists the
+   * dimension outputs kept; the others are totalled. Compiled to GROUPING
+   * SETS, so totals are recomputed from rows, never summed from cells.
+   */
+  rollups?: string[][];
   filters?: TileQueryFilter[];
   having?: TileQueryFilter[];
   comparison?: TileQueryComparison;

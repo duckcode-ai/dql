@@ -1165,6 +1165,12 @@ export const APP_STUDIO_V2_STYLES = `
 .chart-style-heading { font-size:12px; font-weight:500; color:var(--text-primary); }
 .chart-style-row { display:flex; gap:6px; align-items:center; }
 .chart-style-row button { flex:none; width:28px; height:28px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); color:var(--text-secondary); cursor:pointer; }
+.chart-style-row select { min-width:0; flex:1; box-sizing:border-box; height:28px; border:1px solid var(--border-default); border-radius:8px; background:var(--bg-2); color:var(--text-primary); font:inherit; font-size:12px; padding:0 6px; }
+.chart-style-format { display:grid; gap:4px; }
+.chart-style-totals { display:grid; gap:4px; margin:0; padding:8px 0 0; border:0; border-top:1px solid var(--border-subtle); }
+.chart-style-totals legend { padding:0; margin-bottom:4px; }
+.chart-style-rule { padding-left:12px; }
+.chart-style-rule select:first-child { flex:0 0 72px; }
 .chart-style-add { justify-self:start; border:0; background:transparent; color:var(--accent); font:inherit; font-size:12px; font-weight:500; padding:0; cursor:pointer; }
 .proposal-keep { margin-left:auto; display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:500; color:var(--text-secondary); cursor:pointer; }
 .proposal-keep input { accent-color:var(--accent); }

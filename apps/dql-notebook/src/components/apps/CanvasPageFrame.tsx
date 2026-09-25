@@ -13,6 +13,11 @@ import { encodedTileResult, mergeDashboardTileChartConfig, normalizeDashboardCha
 import { formatDriverNumber } from './driver-probe';
 import { readerTileTrust } from './reader-trust';
 import { NumberReceiptPopover, type NumberReceiptInfo } from './NumberReceipt';
+import { CONDITIONAL_TONE_LABELS, conditionalCell, conditionalStats, type ConditionalTone, type DashboardConditionalFormat } from '@duckcodeailabs/dql-core/apps/conditional-format';
+import { formatDisplayValue } from '../../utils/value-format';
+import { pivotLayout } from '@duckcodeailabs/dql-core/apps/pivot';
+import { encodingFromQuery } from '@duckcodeailabs/dql-core/apps/viz-encoding';
+import { pivotHtml } from './PivotTable';
 
 type LayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 type RunTile = DashboardRunResponse['tiles'][number];
@@ -208,7 +213,7 @@ export function CanvasPageFrame({
 function canvasDocument(body: string, variables: string, dark = false): string {
   // The frame's colour scheme matches the host's: a light scheme inside a dark
   // page is painted white behind the page's light text (RFC 0009 evaluation).
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="${dark ? 'dark' : 'light'}"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"><style>:root{${variables};color-scheme:${dark ? 'dark' : 'light'}}html,body{margin:0;background:transparent}body{padding:4px;font:400 15px/1.55 var(--dql-font);color:var(--dql-ink);font-variant-numeric:tabular-nums}.dql-value{font-weight:600}.dql-value.missing{color:var(--dql-muted)}.dql-tile{margin:8px 0;padding:12px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface);overflow:hidden}.dql-tile svg{display:block;width:100%;max-width:640px;height:auto}.dql-tile-live svg{max-width:none;width:100%;height:100%}.dql-tile-title{margin:0 0 8px;font-size:13px;font-weight:600}.dql-tile-kpi{font:600 32px/1.2 var(--dql-font-display)}.dql-tile table{width:100%;border-collapse:collapse;font-size:13px}.dql-tile th,.dql-tile td{padding:4px 8px;border-bottom:1px solid var(--dql-line);text-align:left}.dql-tile td.num{text-align:right}.dql-tile .muted{color:var(--dql-muted);font-size:12px}.dql-tile ol{margin:6px 0 0;padding-left:18px}</style></head><body>${body}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="${dark ? 'dark' : 'light'}"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'"><style>:root{${variables};color-scheme:${dark ? 'dark' : 'light'}}html,body{margin:0;background:transparent}body{padding:4px;font:400 15px/1.55 var(--dql-font);color:var(--dql-ink);font-variant-numeric:tabular-nums}.dql-value{font-weight:600}.dql-value.missing{color:var(--dql-muted)}.dql-tile{margin:8px 0;padding:12px;border:1px solid var(--dql-line);border-radius:12px;background:var(--dql-surface);overflow:hidden}.dql-tile svg{display:block;width:100%;max-width:640px;height:auto}.dql-tile-live svg{max-width:none;width:100%;height:100%}.dql-tile-title{margin:0 0 8px;font-size:13px;font-weight:600}.dql-tile-kpi{font:600 32px/1.2 var(--dql-font-display)}.dql-tile table{width:100%;border-collapse:collapse;font-size:13px}.dql-tile th,.dql-tile td{padding:4px 8px;border-bottom:1px solid var(--dql-line);text-align:left}.dql-tile td.num{text-align:right}.dql-tile .dql-pivot th{text-align:left;font-weight:600}.dql-tile .dql-pivot th.num{text-align:right}.dql-tile .dql-pivot tr.subtotal td,.dql-tile .dql-pivot tr.total td{font-weight:600}.dql-cf-tone{font-weight:600}.dql-cf-tone.good{color:var(--status-success,#0b7a75)}.dql-cf-tone.warning{color:var(--status-warning,#b26b1f)}.dql-cf-tone.bad{color:var(--status-error,#c14545)}.dql-tile .muted{color:var(--dql-muted);font-size:12px}.dql-tile ol{margin:6px 0 0;padding-left:18px}</style></head><body>${body}</body></html>`;
 }
 
 function themeVariables(node: HTMLElement | null): string {
@@ -247,11 +252,42 @@ export function drawCanvasTile(item: LayoutItem | undefined, tile: RunTile | und
     const binding = Object.values(catalog).find((entry) => entry.tileId === item.i && entry.kind === 'number');
     return `${title}<div class="dql-tile-kpi">${escapeHtml(binding?.display ?? '—')}</div>`;
   }
+  if (item.viz.type === 'pivot' && item.query && !item.query.detail) {
+    return `${title}${pivotHtml(result, pivotLayout(item.viz.encoding ?? encodingFromQuery(item.query, 'pivot'), item.query), item.viz.style?.conditional)}`;
+  }
   const built = canvasTileChart(item, tile, themeMode);
   if (built) return `${title}${renderOptionToSvg(built, Math.max(280, width), height ?? 280)}`;
+  return `${title}${staticTableHtml(result, item.viz.style?.conditional)}`;
+}
+
+const TONE_MARKS: Record<ConditionalTone, string> = { good: '✓', warning: '!', bad: '✕', neutral: '•' };
+
+/**
+ * A table as static markup, formatted as the live table formats it (names,
+ * units, conditional formats). A rule's state is a mark with its name, never
+ * colour alone.
+ */
+export function staticTableHtml(result: QueryResult, conditionalFormats?: DashboardConditionalFormat[], limit = 15): string {
   const columns = result.columns.slice(0, 8);
+  const meta = (column: string) => result.columnsMeta?.find((entry) => entry.name === column);
   const numeric = new Set(columns.filter((column) => result.rows.every((row) => row[column] === null || typeof row[column] === 'number')));
-  return `${title}<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.replace(/_/g, ' '))}</th>`).join('')}</tr></thead><tbody>${result.rows.slice(0, 15).map((row) => `<tr>${columns.map((column) => `<td${numeric.has(column) ? ' class="num"' : ''}>${escapeHtml(row[column] === null || row[column] === undefined ? '—' : String(row[column]))}</td>`).join('')}</tr>`).join('')}</tbody></table>${result.rows.length > 15 ? `<p class="muted">${escapeHtml(`First ${15} of ${result.rows.length} rows`)}</p>` : ''}`;
+  const values = new Map(columns.map((column) => [column, result.rows.map((row) => row[column])]));
+  const formats = new Map((conditionalFormats ?? []).filter((format) => columns.includes(format.column)).map((format) => [format.column, { format, stats: conditionalStats(values.get(format.column) ?? []) }]));
+  const cell = (row: Record<string, unknown>, column: string) => {
+    const value = row[column];
+    const text = value === null || value === undefined ? '—' : formatDisplayValue(column, value, values.get(column) ?? [], { meta: meta(column) });
+    const rule = formats.get(column);
+    const look = rule ? conditionalCell(rule.format, value, rule.stats) : undefined;
+    const style = [
+      look?.background ? `background:${look.background}` : '',
+      look?.bar ? `background-image:linear-gradient(90deg, ${look.bar.color} ${look.bar.width}%, transparent ${look.bar.width}%)` : '',
+    ].filter(Boolean).join(';');
+    const mark = look?.tone ? `<span class="dql-cf-tone ${look.tone}" title="${escapeHtml(CONDITIONAL_TONE_LABELS[look.tone])}" aria-label="${escapeHtml(CONDITIONAL_TONE_LABELS[look.tone])}">${TONE_MARKS[look.tone]}</span> ` : '';
+    return `<td${numeric.has(column) ? ' class="num"' : ''}${style ? ` style="${escapeHtml(style)}"` : ''}>${mark}${escapeHtml(text)}</td>`;
+  };
+  const head = columns.map((column) => `<th>${escapeHtml(meta(column)?.label ?? column.replace(/_/g, ' '))}</th>`).join('');
+  const body = result.rows.slice(0, limit).map((row) => `<tr>${columns.map((column) => cell(row, column)).join('')}</tr>`).join('');
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>${result.rows.length > limit ? `<p class="muted">${escapeHtml(`First ${limit} of ${result.rows.length} rows`)}</p>` : ''}`;
 }
 
 /** The chart a tile draws on a Custom layout, or null for a KPI, table, driver or empty result. */

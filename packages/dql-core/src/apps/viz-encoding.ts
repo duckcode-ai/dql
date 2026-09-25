@@ -255,7 +255,8 @@ export function queryFromEncoding(
     ...measures.map((measure) => (measure.alias ?? measure.measure).toLowerCase()),
     ...calculations.map((calculation) => calculation.id.toLowerCase()),
   ]);
-  const { orderBy, detail: _detail, detailColumns: _detailColumns, calculations: _calculations, ...rest } = previous;
+  // Totals follow the pivot's shelves; the caller recomputes them for a pivot.
+  const { orderBy, detail: _detail, detailColumns: _detailColumns, calculations: _calculations, rollups: _rollups, ...rest } = previous;
   const keptOrder = orderBy?.filter((entry) => aliases.has(entry.alias.toLowerCase()));
   return {
     ...rest,

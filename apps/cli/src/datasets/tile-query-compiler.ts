@@ -270,10 +270,23 @@ export function compileDatasetTileQuery(input: {
   });
   const limit = resolveLimit(input.query.limit, input.parameters);
   const selectPrefix = !dialect.limitAtEnd && limit ? `TOP ${limit} ` : '';
+  // Totals (RFC 0009 step 4): each level is regrouped by the warehouse, and a
+  // flag per dimension says which rows total it, so a total of a distinct
+  // count or a rate is recomputed, never summed from cells.
+  const rollups = input.query.rollups?.length ? input.query.rollups : undefined;
+  const dimensionByAlias = new Map(dimensions.map((dimension) => [dimension.alias.toLowerCase(), dimension]));
+  const groupingSets = rollups
+    ? [dimensions, ...rollups.map((set) => set.map((alias) => {
+      const dimension = dimensionByAlias.get(alias.toLowerCase());
+      if (!dimension) throw new TileQueryCompilationError('DATASET_TOTALS_INVALID', `The total level names ${alias}, which is not a dimension on this tile.`);
+      return dimension;
+    }))]
+    : undefined;
   const selectColumns = [
     ...dimensions.map((dimension) => `${dimension.expression} AS ${quote(dimension.alias)}`),
     ...measures.map((measure) => `${measure.expression} AS ${quote(measure.alias)}`),
     ...calculatedMeasures.map((entry) => `${entry.expression} AS ${quote(entry.alias)}`),
+    ...(rollups ? dimensions.map((dimension) => `GROUPING(${dimension.expression}) AS ${quote(`__total_${dimension.alias}`)}`) : []),
   ];
   const orderBy = (input.query.orderBy ?? []).map((order) => {
     const alias = safeAlias(order.alias);
@@ -297,7 +310,9 @@ export function compileDatasetTileQuery(input: {
   const grouped = [
     'FROM ds',
     ...(whereClauses.length ? [`WHERE ${whereClauses.join(' AND ')}`] : []),
-    ...(dimensions.length ? [`GROUP BY ${dimensions.map((dimension) => dimension.expression).join(', ')}`] : []),
+    ...(groupingSets
+      ? [`GROUP BY GROUPING SETS (${groupingSets.map((set) => `(${set.map((dimension) => dimension.expression).join(', ')})`).join(', ')})`]
+      : dimensions.length ? [`GROUP BY ${dimensions.map((dimension) => dimension.expression).join(', ')}`] : []),
     ...(havingClauses.length ? [`HAVING ${havingClauses.join(' AND ')}`] : []),
   ];
   const tail = [
@@ -354,6 +369,12 @@ export function compileDatasetTileQuery(input: {
       format: entry.output.format,
       calculation: { kind: entry.output.kind, description: entry.output.description },
     })),
+    ...(rollups ? dimensions.map((dimension) => ({
+      alias: `__total_${dimension.alias}`,
+      role: 'dimension' as const,
+      ref: `total:${dimension.alias}`,
+      type: 'number' as const,
+    })) : []),
   ], input.query, appliedFilters, validation);
 }
 

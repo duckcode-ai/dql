@@ -111,8 +111,9 @@ describe('Show Me (RFC 0009 step 2)', () => {
           : suggestion.chart === 'scatter' ? 'scatter'
             : suggestion.chart === 'heatmap' ? 'heatmap'
               : 'cartesian';
-        expect({ chart: suggestion.chart, kind: drawn.kind }).toEqual({ chart: suggestion.chart, kind: expected });
-        if (drawn.kind === 'cartesian') {
+        // A pivot is drawn as a pivot from its shelves, whatever a chart would read them as.
+        if (suggestion.chart !== 'pivot') expect({ chart: suggestion.chart, kind: drawn.kind }).toEqual({ chart: suggestion.chart, kind: expected });
+        if (drawn.kind === 'cartesian' && suggestion.chart !== 'pivot') {
           // Bars over time are stored as bars; the line reading applies to line and area only.
           if (suggestion.chart === 'line' || suggestion.chart === 'area') expect(drawn.line).toBe(true);
           else if (!isTime(drawn.category)) expect(drawn.line).toBe(false);
@@ -160,9 +161,9 @@ describe('Show Me (RFC 0009 step 2)', () => {
 
   it('ranks the alternatives after the first choice', () => {
     const order = (fields: ShowMeInput) => showMe(fields).filter((entry) => entry.available).map((entry) => entry.chart);
-    expect(order(input(['order_date'], ['revenue']))).toEqual(['line', 'area', 'column', 'table']);
-    expect(order(input(['segment'], ['revenue']))).toEqual(['bar', 'column', 'donut', 'pie', 'funnel', 'table']);
-    expect(order(input(['region', 'segment'], ['revenue']))).toEqual(['stacked_bar', 'heatmap', 'grouped_bar', 'table']);
+    expect(order(input(['order_date'], ['revenue']))).toEqual(['line', 'area', 'column', 'table', 'pivot']);
+    expect(order(input(['segment'], ['revenue']))).toEqual(['bar', 'column', 'donut', 'pie', 'funnel', 'table', 'pivot']);
+    expect(order(input(['region', 'segment'], ['revenue']))).toEqual(['stacked_bar', 'heatmap', 'grouped_bar', 'pivot', 'table']);
   });
 
   it('reads the fields off the shelves and the facts off the Dataset contract', () => {

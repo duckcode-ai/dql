@@ -20,16 +20,16 @@ import { checkTileCalculations } from './tile-calcs.js';
 
 export type ShowMeChart =
   | 'kpi' | 'line' | 'area' | 'bar' | 'column' | 'grouped_bar' | 'stacked_bar'
-  | 'donut' | 'pie' | 'funnel' | 'scatter' | 'heatmap' | 'table';
+  | 'donut' | 'pie' | 'funnel' | 'scatter' | 'heatmap' | 'table' | 'pivot';
 
 /** The `viz.type` a chart is stored as. Horizontal and vertical bars are both `bar`; the shelves set the direction. */
 export type ShowMeVizType =
   | 'single_value' | 'line' | 'area' | 'bar' | 'grouped_bar' | 'stacked_bar'
-  | 'donut' | 'pie' | 'funnel' | 'scatter' | 'heatmap' | 'table';
+  | 'donut' | 'pie' | 'funnel' | 'scatter' | 'heatmap' | 'table' | 'pivot';
 
 /** Display order when charts tie, and for charts that do not fit. */
 export const SHOW_ME_CHARTS: readonly ShowMeChart[] = [
-  'kpi', 'line', 'area', 'bar', 'column', 'grouped_bar', 'stacked_bar', 'donut', 'pie', 'funnel', 'scatter', 'heatmap', 'table',
+  'kpi', 'line', 'area', 'bar', 'column', 'grouped_bar', 'stacked_bar', 'donut', 'pie', 'funnel', 'scatter', 'heatmap', 'table', 'pivot',
 ];
 
 export const SHOW_ME_LABELS: Record<ShowMeChart, string> = {
@@ -46,6 +46,7 @@ export const SHOW_ME_LABELS: Record<ShowMeChart, string> = {
   scatter: 'Scatter',
   heatmap: 'Heatmap',
   table: 'Table',
+  pivot: 'Pivot',
 };
 
 const VIZ: Record<ShowMeChart, ShowMeVizType> = {
@@ -62,6 +63,7 @@ const VIZ: Record<ShowMeChart, ShowMeVizType> = {
   scatter: 'scatter',
   heatmap: 'heatmap',
   table: 'table',
+  pivot: 'pivot',
 };
 
 /** Lines or bar colours beyond this cannot be told apart. */
@@ -341,6 +343,26 @@ function heatmap(c: Context): Fit {
   };
 }
 
+/**
+ * A pivot: rows down the side, one dimension across, measures in the cells,
+ * with totals the warehouse recomputes. It reads well when two or more
+ * dimensions cross; a date runs across.
+ */
+function pivot(c: Context): Fit {
+  if (c.comparison) return { unavailable: 'A period comparison already lays out current, prior and change.' };
+  if (!c.dims.length) return { unavailable: 'A pivot needs a dimension to list down the side.' };
+  const across = c.time ?? (c.dims.length > 1 ? c.dims[c.dims.length - 1]! : undefined);
+  const down = c.dims.filter((field) => field !== across);
+  const why = c.dims.length === 1
+    ? `${named(c.dims[0]!)} down the side with a total row.`
+    : `${list(down)} down the side and ${named(across!)} across, with subtotals and totals recomputed from the rows.`;
+  return {
+    score: c.dims.length >= 2 ? 58 : 15,
+    reason: why,
+    encoding: encoding({ columns: across ? [dim(across)] : [], rows: [...down.map(dim), ...c.measures.map(measure)] }),
+  };
+}
+
 function table(c: Context, rowDetail: boolean): Fit {
   if (rowDetail) return { score: 100, reason: 'Row details are individual rows, not totals; only a table shows them one by one.' };
   if (!c.measures.length) return { score: 100, reason: c.dims.length ? `Lists the values of ${list(c.dims)}. Add a measure to draw a chart.` : 'Add fields to the shelves.' };
@@ -381,6 +403,7 @@ export function showMe(input: ShowMeInput): ShowMeSuggestion[] {
     scatter: () => scatter(context),
     heatmap: () => heatmap(context),
     table: () => table(context, Boolean(input.rowDetail)),
+    pivot: () => pivot(context),
   };
   const blocked = input.rowDetail
     ? 'Row details are individual rows, not totals; only a table shows them.'
