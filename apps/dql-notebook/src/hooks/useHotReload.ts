@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDispatch } from '../store/NotebookStore';
 import { api } from '../api/client';
-import { streamServerEvents } from '../api/server-auth';
+import { isViewerLink, streamServerEvents } from '../api/server-auth';
 
 interface WatchEvent {
   type: 'file-changed' | 'file-added' | 'file-deleted' | 'semantic-reload';
@@ -22,6 +22,8 @@ export function useHotReload() {
   const streamRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    // A read-only link reads one App; it does not follow project files.
+    if (isViewerLink()) return undefined;
     let alive = true;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let filesTimer: ReturnType<typeof setTimeout> | null = null;

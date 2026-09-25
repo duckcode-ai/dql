@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   hasServerToken,
+  isViewerLink,
   rememberServerToken,
   SERVER_AUTH_REQUIRED_EVENT,
   serverTokenFromAccessInput,
@@ -42,6 +43,20 @@ export function ServerAccessGate() {
   };
 
   const hadToken = hasServerToken();
+  // A read-only page link that stopped working has nothing to paste: only
+  // the person who shared it can make a new one.
+  if (isViewerLink()) {
+    return (
+      <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, background: t.modalOverlay }}>
+        <div role="dialog" aria-modal="true" aria-labelledby="dql-viewer-link-title" style={{ width: '100%', maxWidth: 440, background: t.modalBg, border: `1px solid ${t.cellBorder}`, borderRadius: 10, padding: 20, fontFamily: t.font, color: t.textPrimary, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <h2 id="dql-viewer-link-title" style={{ fontSize: 16, fontWeight: 600 }}>This link no longer works</h2>
+          <p style={{ fontSize: 13, lineHeight: 1.5, color: t.textSecondary }}>
+            Read-only links last 14 days, and all of them end when the server's access token changes. Ask the person who shared this page for a new link.
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, background: t.modalOverlay }}>
       <div

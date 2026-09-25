@@ -735,6 +735,7 @@ import { prepareBlockInvocation } from './block-invocation.js';
 import { redactConnections, resolveSecretReferences, storeConnectionSecrets } from './connection-secrets.js';
 import { authorizeHostRequest, currentPrincipal, hostActor, installHostPersonaSlots, resolveHostPrincipal, withRequestContext, type DqlHostHooks } from './host/request-context.js';
 import { routeAction } from './host/route-actions.js';
+import { isViewerToken, mintViewerToken, readViewerToken, viewerDecision, viewerLinkBlockedReason, viewerPrincipal } from './host/viewer-links.js';
 import { boundAgentSchemaColumns, mergeAgentSchemaCompleteness } from './ask-schema-context.js';
 
 export const APP_SOURCE_REUSABLE_TAG = 'app-source';
@@ -4870,8 +4871,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     .filter(Boolean));
   const hostHooks = opts.hostHooks;
   const hostIdentity = typeof hostHooks?.resolvePrincipal === 'function';
-  // Each signed-in person keeps their own App persona ("view as").
-  if (hostIdentity) installHostPersonaSlots(defaultPersonaRegistry);
+  // Each signed-in person — and each read-only link — keeps its own App
+  // persona ("view as"), apart from the owner's.
+  if (hostIdentity || !loopback) installHostPersonaSlots(defaultPersonaRegistry);
   if (!loopback && !authToken && !hostIdentity) {
     throw new Error('Non-loopback DQL server binding requires DQL_SERVER_TOKEN (or LocalServerOptions.authToken).');
   }
@@ -13130,18 +13132,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       res.end();
       return;
     }
+    // A read-only link names one App (RFC 0010 HH-2); it never carries the
+    // server's own token.
+    let viewerAppId: string | undefined;
     if (!hostIdentity && !loopback && path.startsWith('/api/') && path !== '/api/health') {
       const authorization = req.headers.authorization ?? '';
-      if (authorization !== `Bearer ${authToken}`) {
+      const bearer = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
+      const viewer = authToken && isViewerToken(bearer) ? readViewerToken(authToken, bearer) : null;
+      if (viewer) {
+        viewerAppId = viewer.appId;
+      } else if (authorization !== `Bearer ${authToken}`) {
         res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8', 'WWW-Authenticate': 'Bearer' });
-        res.end(serializeJSON({ error: 'A valid DQL server bearer token is required.' }));
+        res.end(serializeJSON({ error: isViewerToken(bearer) ? 'This link has expired or was changed. Ask for a new link.' : 'A valid DQL server bearer token is required.' }));
         return;
       }
     }
 
     // RFC 0010 HH-1: when a host says who is asking, every API request runs
     // as that person, and a request the host cannot place is refused.
-    let requestPrincipal: Awaited<ReturnType<typeof resolveHostPrincipal>> = null;
+    let requestPrincipal: Awaited<ReturnType<typeof resolveHostPrincipal>> = viewerAppId ? viewerPrincipal(viewerAppId) : null;
+    if (viewerAppId) {
+      const route = routeAction(req.method, path);
+      // Checked on every request: row rules added after the link was made still close it.
+      const blocked = viewerLinkBlockedReason(loadRuntimeApp(projectRoot, viewerAppId));
+      const decision = blocked ? { allow: false, reason: blocked } : viewerDecision(viewerAppId, route, req.method, path);
+      if (!decision.allow) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: decision.reason, code: 'PERMISSION_DENIED', action: route.action, resource: route.resource }));
+        return;
+      }
+    }
     if (hostIdentity && path.startsWith('/api/') && path !== '/api/health') {
       requestPrincipal = await resolveHostPrincipal(hostHooks!, req);
       if (!requestPrincipal) {
@@ -16181,7 +16201,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         const principal = currentPrincipal();
         res.end(serializeJSON(principal
-          ? { owner: hostActor(), principal: { id: principal.id, kind: principal.kind, displayName: principal.displayName, email: principal.email, groups: principal.groups ?? [] } }
+          ? {
+            owner: hostActor() ?? principal.displayName ?? principal.id,
+            principal: { id: principal.id, kind: principal.kind, displayName: principal.displayName, email: principal.email, groups: principal.groups ?? [] },
+            ...(viewerAppId ? { viewer: { appId: viewerAppId } } : {}),
+          }
           : { owner: resolveLocalOwner(projectRoot) }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -17645,11 +17669,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // server is reachable only from this computer; a server shared on the
     // network is reached through its allowed origins with the access token the
     // asking browser already holds.
+    // A page link shared on the network opens that App read-only: it carries
+    // a signed viewer token for the App, never this server's own token.
     if (req.method === 'GET' && path === '/api/server/share') {
+      const appId = url.searchParams.get('app')?.trim();
+      const viewerBlocked = appId && !loopback && !hostIdentity ? viewerLinkBlockedReason(loadRuntimeApp(projectRoot, appId)) : null;
+      const viewer = !loopback && !hostIdentity && authToken && appId && !viewerBlocked ? mintViewerToken(authToken, appId) : null;
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(serializeJSON(loopback
         ? { network: false, origins: [] }
-        : { network: true, origins: [...allowedOrigins], ...(authToken ? { token: authToken } : {}) }));
+        : { network: true, origins: [...allowedOrigins], ...(viewer ? { viewer } : {}), ...(viewerBlocked ? { viewerBlocked } : {}) }));
       return;
     }
 

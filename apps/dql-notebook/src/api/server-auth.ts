@@ -45,6 +45,30 @@ export function withServerAuthorization(headers?: HeadersInit): Headers {
   return resolved;
 }
 
+const VIEWER_TOKEN_PREFIX = 'dqlv1.';
+
+/**
+ * When this tab was opened from a read-only page link (RFC 0010): the one
+ * App it may read, and until when. The server checks the signature; this
+ * only decides what the tab shows.
+ */
+export function viewerLink(token: string | undefined = serverToken): { appId: string; expiresAt: string } | null {
+  if (!token?.startsWith(VIEWER_TOKEN_PREFIX)) return null;
+  try {
+    const body = token.split('.')[1] ?? '';
+    const json = atob(body.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(body.length / 4) * 4, '='));
+    const payload = JSON.parse(json) as { a?: unknown; e?: unknown };
+    if (typeof payload.a !== 'string' || typeof payload.e !== 'number') return null;
+    return { appId: payload.a, expiresAt: new Date(payload.e * 1000).toISOString() };
+  } catch {
+    return null;
+  }
+}
+
+export function isViewerLink(): boolean {
+  return viewerLink() !== null;
+}
+
 /** Whether this tab holds a LAN access token (from its link or pasted in). */
 export function hasServerToken(): boolean {
   return Boolean(serverToken);

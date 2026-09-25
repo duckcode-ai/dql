@@ -25,18 +25,20 @@ async function copyText(text: string): Promise<boolean> {
 
 /**
  * Links to this page (RFC 0008 step 10). A link opens the page in the
- * reader; on a server shared over the network it also works from other
- * devices. Sending the page outside the network is a signed export.
+ * reader; on a server shared over the network, the network link is
+ * read-only (RFC 0010): it opens this App and nothing else, for a limited
+ * time, and never carries the server's own access token. Sending the page
+ * outside the network is a signed export.
  */
 export function ShareLinkMenu({ appId, pageId }: { appId: string; pageId: string }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const [share, setShare] = useState<{ network: boolean; origins: string[]; token?: string } | null>(null);
+  const [share, setShare] = useState<{ network: boolean; origins: string[]; viewer?: { token: string; expiresAt: string }; viewerBlocked?: string } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
     let alive = true;
-    void api.getShareOrigins().then((result) => { if (alive) setShare(result); });
+    void api.getShareOrigins(appId).then((result) => { if (alive) setShare(result); });
     const close = (event: MouseEvent | KeyboardEvent) => {
       if (event instanceof KeyboardEvent ? event.key === 'Escape' : !rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
@@ -47,14 +49,14 @@ export function ShareLinkMenu({ appId, pageId }: { appId: string; pageId: string
       document.removeEventListener('mousedown', close);
       document.removeEventListener('keydown', close);
     };
-  }, [open]);
+  }, [open, appId]);
   const link = { appId, pageId };
   const here = window.location.origin;
   const local = isLoopbackOrigin(here);
   const rows: Array<{ label: string; url: string }> = [
     { label: local ? 'On this computer' : 'This address', url: appPageUrl(here, link) },
-    ...(share?.network
-      ? share.origins.filter((origin) => origin !== here).slice(0, 3).map((origin) => ({ label: `On your network (${new URL(origin).host})`, url: appPageUrl(origin, link, share.token) }))
+    ...(share?.network && share.viewer
+      ? share.origins.filter((origin) => origin !== here).slice(0, 3).map((origin) => ({ label: `Read-only, on your network (${new URL(origin).host})`, url: appPageUrl(origin, link, share.viewer?.token) }))
       : []),
   ];
   const copy = async (url: string) => {
@@ -85,7 +87,9 @@ export function ShareLinkMenu({ appId, pageId }: { appId: string; pageId: string
           ))}
           {share === null ? <p className="dql-alerts-note">Checking where this page can be opened…</p>
             : share.network
-              ? <p className="dql-alerts-note">Network links carry this server's access token: anyone with the link can open this project from your network, so share it only with people who may see it.</p>
+              ? <p className="dql-alerts-note">{share.viewer
+                ? `Network links are read-only: they open this App's pages and nothing else in the project, until ${new Date(share.viewer.expiresAt).toLocaleDateString()}. Changing the server token ends every link.`
+                : share.viewerBlocked ?? 'This page can be opened on your network only by people who already have the server access link.'}</p>
               : <p className="dql-alerts-note">This link opens only on this computer. To share on your network, start the notebook with <code>--host 0.0.0.0</code> (it needs <code>DQL_SERVER_TOKEN</code> and <code>DQL_ALLOWED_ORIGINS</code>). To send the page to anyone, use Export → Signed HTML.</p>}
           <p className="dql-alerts-note">The page opens with its default filters.</p>
         </div>

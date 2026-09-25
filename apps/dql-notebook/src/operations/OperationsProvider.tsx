@@ -5,7 +5,7 @@ import {
   type LocalOperation,
 } from '../api/client';
 import { useNotebookStore } from '../store/NotebookStore';
-import { streamServerEvents } from '../api/server-auth';
+import { isViewerLink, streamServerEvents } from '../api/server-auth';
 import {
   blockCertificationOperationsForReconciliation,
   isTerminalOperation,
@@ -32,6 +32,7 @@ export function OperationsProvider({ children }: { children: React.ReactNode }) 
   const handledTerminalOperations = useRef(new Set<string>());
   const trackedOperationIds = useRef(new Set<string>());
   const dispatch = useNotebookStore((state) => state.dispatch);
+  const readOnlyLink = isViewerLink();
   const query = useQuery({
     queryKey: OPERATIONS_QUERY_KEY,
     queryFn: async () => {
@@ -42,11 +43,14 @@ export function OperationsProvider({ children }: { children: React.ReactNode }) 
     staleTime: 15_000,
     refetchOnWindowFocus: false,
     // Polling is a recovery path if the authenticated event stream is dropped.
-    refetchInterval: 1_500,
+    // A read-only link has no operations to follow.
+    enabled: !readOnlyLink,
+    refetchInterval: readOnlyLink ? false : 1_500,
   });
   const operations = query.data ?? [];
 
   useEffect(() => {
+    if (readOnlyLink) return undefined;
     let alive = true;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let controller: AbortController | undefined;

@@ -4,6 +4,8 @@ import { ThemeProvider, TooltipProvider } from '@duckcodeailabs/dql-ui';
 import { NotebookProvider, useNotebookStore } from './store/NotebookStore';
 import { AppShell } from './components/shell/AppShell';
 import { ServerAccessGate } from './components/shell/ServerAccessGate';
+import { ViewerShell } from './components/shell/ViewerShell';
+import { isViewerLink } from './api/server-auth';
 import { themes } from './themes/notebook-theme';
 import { api } from './api/client';
 import { useHotReload } from './hooks/useHotReload';
@@ -75,13 +77,18 @@ function AppInner() {
     document.documentElement.setAttribute('data-theme', luna);
   }, [themeMode]);
 
+  // A read-only page link (RFC 0010) shows one App's reader and loads
+  // nothing else from the project.
+  const readOnlyLink = isViewerLink();
   const notebooksQuery = useQuery({
     queryKey: ['notebooks'],
     queryFn: () => api.listNotebooks(),
+    enabled: !readOnlyLink,
   });
   const domainsQuery = useQuery({
     queryKey: ['authored-domains'],
     queryFn: () => api.getDomains(),
+    enabled: !readOnlyLink,
   });
 
   // Load independent startup resources without blocking the first workspace
@@ -103,7 +110,7 @@ function AppInner() {
   return (
     <ThemeProvider theme={themeMode} applyGlobal>
       <TooltipProvider delayDuration={200} skipDelayDuration={400}>
-        <AppShell />
+        {readOnlyLink ? <ViewerShell /> : <AppShell />}
         <ServerAccessGate />
       </TooltipProvider>
     </ThemeProvider>

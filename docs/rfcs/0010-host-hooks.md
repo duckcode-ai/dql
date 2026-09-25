@@ -209,7 +209,8 @@ identical.
 | Slice | Status |
 |---|---|
 | HH-1 | Implemented 2026-09-25 on `claude/oss-security-fixes` (`apps/cli/src/host/`, tests in `host-hooks.test.ts`); awaiting independent verification |
-| HH-2 | Implemented 2026-09-25. `authorize` runs for every placed API request, and a refusal answers 403 with `PERMISSION_DENIED`, the action and the resource. The persona registry keeps one "view as" persona per signed-in person (`PersonaRegistry.useSlots`). With a host and no App persona, App policies see the person's own groups (never the owner default), and row rules read the person's attributes as `{user.<name>}`, which a request cannot override. Cache and proof keys include the person, only with a host. Tests: `route-actions.test.ts`, `host-hooks.test.ts`, `governance-runtime.test.ts`, `dql-project` `persona.test.ts`. Read-only viewer links: next |
+| HH-2 | Implemented 2026-09-25. `authorize` runs for every placed API request, and a refusal answers 403 with `PERMISSION_DENIED`, the action and the resource. The persona registry keeps one "view as" persona per signed-in person (`PersonaRegistry.useSlots`). With a host and no App persona, App policies see the person's own groups (never the owner default), and row rules read the person's attributes as `{user.<name>}`, which a request cannot override. Cache and proof keys include the person, only with a host. Tests: `route-actions.test.ts`, `host-hooks.test.ts`, `governance-runtime.test.ts`, `dql-project` `persona.test.ts`. |
+| HH-2 viewer links | Implemented 2026-09-25 (`apps/cli/src/host/viewer-links.ts`). On a server shared on the network without a host, the Share menu's network link carries a signed viewer token instead of the server token. The token names one App and expires in 14 days. Its key is derived from the server token, so changing that token ends every link. A link may view, run and export its App's pages (and run that App's Dataset tiles and filter lists) and nothing else: no other App, no App list, Studio, settings, lineage, SQL, AI questions, alerts or sharing on. It sees the App as the owner publishes it (no "view as"). Apps that narrow rows per member (`rlsBindings`) cannot be shared by link; this is checked when the link is made and on every request. The UI opened from a link shows only that App's reader. Tests: `viewer-links.test.ts` (tokens, permissions, a real network-bound server), notebook `server-auth.test.ts`. Checked in the built CLI on a network-bound server. |
 
 ## Backward compatibility
 
@@ -238,7 +239,7 @@ Nothing changes for projects or for `dql notebook` with no hooks.
 
 1. **Scope of `routeAction` for HH-2.** Should the first cut cover only routes that change state and routes that read data, with everything else treated as `project.read`?
 2. **Store migration.** When a host supplies Postgres stores, do we provide a one-time import from existing SQLite files, or start empty?
-3. **Viewer links.** The App share-link menu currently puts the server token in network links. Should a read-only viewer link come from HH-2's action map (only `app.view` and page runs allowed), or be removed until a host supplies sign-in?
+3. ~~**Viewer links.**~~ Resolved in HH-2: network links are signed, read-only, one-App viewer links (see Progress).
 
 ## Adoption signal
 

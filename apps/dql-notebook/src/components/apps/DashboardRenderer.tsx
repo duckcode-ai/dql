@@ -13,6 +13,7 @@ import {
   type StoryEditionV1,
   type DashboardStoryBrief,
 } from '../../api/client';
+import { isViewerLink } from '../../api/server-auth';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
 import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
@@ -222,6 +223,7 @@ export function DashboardRenderer({
   const [tileRanAt, setTileRanAt] = useState<Record<string, number>>({});
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [trustLens, setTrustLens] = useState(false);
+  const readOnlyLink = isViewerLink();
   /** The open "Why did it move?" panel, if any. */
   const [driverPanel, setDriverPanel] = useState<{
     item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
@@ -1175,8 +1177,9 @@ export function DashboardRenderer({
           onToggle={() => setTrustLens((current) => !current)}
           actions={(
             <>
-              <ShareLinkMenu appId={appId} pageId={dashboard.id} />
-              <PageAlertsMenu appId={appId} dashboardId={dashboard.id} runId={run && !run.partial && !run.incomplete ? run.runId : null} catalog={runCatalog} />
+              {/* A read-only link can export what it sees, but not share on or set alerts. */}
+              {readOnlyLink ? null : <ShareLinkMenu appId={appId} pageId={dashboard.id} />}
+              {readOnlyLink ? null : <PageAlertsMenu appId={appId} dashboardId={dashboard.id} runId={run && !run.partial && !run.incomplete ? run.runId : null} catalog={runCatalog} />}
               <SnapshotExportMenu disabledReason={snapshotBlockedReason} onExport={exportSnapshot} />
             </>
           )}
@@ -2407,7 +2410,7 @@ function BusinessStoryPanel({
         {story.caveat ? <span style={dashboardStoryChipStyle}>{story.caveat}</span> : null}
         <span style={{ flex: 1 }} />
         <button type="button" onClick={onEvidence} style={storyActionButtonStyle}>View evidence</button>
-        <button type="button" onClick={onResearch} style={storyActionButtonStyle}>Research deeper</button>
+        {isViewerLink() ? null : <button type="button" onClick={onResearch} style={storyActionButtonStyle}>Research deeper</button>}
       </div>
     </section>
   );
@@ -2631,7 +2634,7 @@ export function TileBody({
     <div style={{ display: 'grid', gap: 8, justifyItems: 'center', textAlign: 'center', padding: 8 }}>
       <span>{tile.error ?? 'Tile failed.'}</span>
       {tile.repair?.status === 'failed' ? <small>{tile.repair.message}</small> : null}
-      {onRetry ? (
+      {onRetry && !isViewerLink() ? (
         <button
           type="button"
           disabled={retrying || retryDisabled}

@@ -55,6 +55,7 @@ import {
   type LocalAppInvestigation,
   type AppStudioBuildDraft,
 } from '../../api/client';
+import { isViewerLink } from '../../api/server-auth';
 import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
 import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH } from '../agent/AiSidePanel';
@@ -316,20 +317,25 @@ export function AppsView(): JSX.Element {
     setExplainOpen(open);
     if (!open) setExplainExpanded(false);
   }, []);
+  // A read-only page link reads one App: no library, drafts or personas.
+  const readOnlyLink = isViewerLink();
   const appsQuery = useQuery({
     queryKey: ['apps'],
     queryFn: () => api.listAppsStrict(),
     staleTime: 30_000,
+    enabled: !readOnlyLink,
   });
   const appBuildsQuery = useQuery({
     queryKey: ['app-builds'],
     queryFn: () => api.listAppBuilds(),
     staleTime: 10_000,
+    enabled: !readOnlyLink,
   });
   const personaQuery = useQuery({
     queryKey: ['persona'],
     queryFn: () => api.getPersona(),
     staleTime: 60_000,
+    enabled: !readOnlyLink,
   });
 
   useEffect(() => {
@@ -2162,6 +2168,7 @@ function AppWorkspaceSurface({
   onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
   onOpenLineageNode: (nodeId: string) => void;
 }) {
+  const readOnlyLink = isViewerLink();
   const dispatch = useDispatch();
   const workspaceAppId = metadataApp?.id ?? app?.id ?? null;
   const workspaceAppName = metadataApp?.name ?? app?.name ?? null;
@@ -2371,7 +2378,8 @@ function AppWorkspaceSurface({
     setChartAnswer(null);
     setActiveInvestigation(null);
   }, [workspaceAppId, dashboardDoc?.dashboard.id]);
-  const copilotAvailable = Boolean(workspaceAppId && dashboardDoc && (section === 'dashboards' || section === 'research'));
+  // A read-only link does not ask the owner's AI provider anything.
+  const copilotAvailable = !readOnlyLink && Boolean(workspaceAppId && dashboardDoc && (section === 'dashboards' || section === 'research'));
   const copilotVisible = copilotAvailable && explainOpen;
   const markAction = (status: 'copied' | 'downloaded' | 'ready') => {
     setShareStatus(status);
@@ -2452,19 +2460,21 @@ function AppWorkspaceSurface({
   return (
     <div className="dql-app-workspace">
       <div className="dql-app-view-topbar">
-        <button type="button" className="dql-app-back dql-app-back-label" onClick={onBack} title="Back to apps">
-          <ArrowLeft size={14} />
-          <span>Apps</span>
-        </button>
+        {readOnlyLink ? null : (
+          <button type="button" className="dql-app-back dql-app-back-label" onClick={onBack} title="Back to apps">
+            <ArrowLeft size={14} />
+            <span>Apps</span>
+          </button>
+        )}
         <span className="dql-app-crumb"><b>{workspaceAppId ?? 'app'}</b></span>
         <StatusSeal tone={certification.allCertified ? 'certified' : 'draft'}>
           {certification.allCertified ? 'All certified' : `${certifiedCount} of ${certification.total} certified`}
         </StatusSeal>
         {draftCount > 0 ? <StatusSeal tone="draft">{draftCount} draft</StatusSeal> : null}
 
-        <span className="dql-app-topbar-divider" aria-hidden="true" />
+        {readOnlyLink ? null : <span className="dql-app-topbar-divider" aria-hidden="true" />}
 
-        <div className="dql-app-modeseg" role="group" aria-label="App mode">
+        {readOnlyLink ? null : <div className="dql-app-modeseg" role="group" aria-label="App mode">
           <button
             type="button"
             className={!isEditable ? 'on' : ''}
@@ -2482,10 +2492,10 @@ function AppWorkspaceSurface({
           >
             <Pencil size={12} /> Edit
           </button>
-        </div>
+        </div>}
 
         <div className="dql-app-view-actions">
-          <PersonaSwitcher app={metadataApp} />
+          {readOnlyLink ? null : <PersonaSwitcher app={metadataApp} />}
           {isEditable ? (
             semanticTileIds.length > 0 ? (
               <button
@@ -2508,9 +2518,11 @@ function AppWorkspaceSurface({
               <ShieldCheck size={14} /> {promoteStatus === 'running' ? 'Checking' : 'Publish to Project'}
             </button>
           ) : null}
-          <button type="button" className="dql-apps-btn dql-apps-btn-line dql-apps-btn-icon" title={shareStatus === 'copied' ? 'Copied handoff' : 'Share local app handoff'} onClick={() => void copyShareLink()}>
-            {shareStatus === 'copied' ? <Check size={15} /> : <Share2 size={15} />}
-          </button>
+          {readOnlyLink ? null : (
+            <button type="button" className="dql-apps-btn dql-apps-btn-line dql-apps-btn-icon" title={shareStatus === 'copied' ? 'Copied handoff' : 'Share local app handoff'} onClick={() => void copyShareLink()}>
+              {shareStatus === 'copied' ? <Check size={15} /> : <Share2 size={15} />}
+            </button>
+          )}
           <button type="button" className="dql-apps-btn dql-apps-btn-line dql-apps-btn-icon" title={shareStatus === 'downloaded' ? 'Brief saved' : 'Download app brief'} onClick={downloadBrief}>
             {shareStatus === 'downloaded' ? <Check size={15} /> : <Download size={15} />}
           </button>
@@ -2591,7 +2603,7 @@ function AppWorkspaceSurface({
                 <Bot size={15} />
               </button>
             ) : null}
-            {onDashboards ? (
+            {onDashboards && !readOnlyLink ? (
               <>
                 <button
                   type="button"

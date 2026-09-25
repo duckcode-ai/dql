@@ -4,6 +4,7 @@ import {
   reportServerAuthRejected,
   serverTokenFromAccessInput,
   serverTokenFromHash,
+  viewerLink,
   wasServerAuthRejected,
   withServerAuthorization,
 } from './server-auth';
@@ -38,5 +39,15 @@ describe('LAN server authentication', () => {
   it('preserves caller headers when no browser token was initialized', () => {
     const headers = withServerAuthorization({ 'Content-Type': 'application/json' });
     expect(headers.get('Content-Type')).toBe('application/json');
+  });
+});
+
+describe('read-only page links (RFC 0010)', () => {
+  it('name the App a viewer token opens, and nothing for the server token', () => {
+    const body = btoa(JSON.stringify({ a: 'commerce-pilot', e: 1791585530 })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    expect(viewerLink(`dqlv1.${body}.signature`)).toEqual({ appId: 'commerce-pilot', expiresAt: '2026-10-09T22:38:50.000Z' });
+    expect(viewerLink('server-token-abc')).toBeNull();
+    expect(viewerLink('dqlv1.not-json.sig')).toBeNull();
+    expect(viewerLink(undefined)).toBeNull();
   });
 });

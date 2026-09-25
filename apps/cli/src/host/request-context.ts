@@ -22,8 +22,11 @@ export interface DqlPrincipal {
   groups?: string[];
   /** Values row rules can read later (RFC 0010 HH-3), e.g. region. */
   attributes?: Record<string, string | number | boolean | string[]>;
-  /** 'host' when a hook supplied it; 'local' for the local owner. */
-  source: 'local' | 'host';
+  /**
+   * 'host' when a hook supplied it; 'link' for a read-only page link, which
+   * sees its one App as the owner publishes it; 'local' for the local owner.
+   */
+  source: 'local' | 'host' | 'link';
 }
 
 export interface DqlRequestContext {
@@ -148,7 +151,7 @@ const personaSlots = new Map<string, { value: unknown }>();
 export function installHostPersonaSlots(registry: { useSlots(resolver: (() => { value: any } | undefined) | null): void }): void {
   registry.useSlots(() => {
     const principal = currentPrincipal();
-    if (!principal || principal.source !== 'host') return undefined;
+    if (!principal || principal.source === 'local') return undefined;
     let slot = personaSlots.get(principal.id);
     if (!slot) {
       slot = { value: null };

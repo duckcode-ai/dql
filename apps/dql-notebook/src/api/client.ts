@@ -8547,9 +8547,10 @@ export const api = {
   },
 
   /** Where page links can be opened: this computer only, or the network origins and token. */
-  async getShareOrigins(): Promise<{ network: boolean; origins: string[]; token?: string }> {
+  /** Where a page can be opened, and a read-only link token for its App when shared on the network. */
+  async getShareOrigins(appId?: string): Promise<{ network: boolean; origins: string[]; viewer?: { token: string; expiresAt: string }; viewerBlocked?: string }> {
     try {
-      return await request<{ network: boolean; origins: string[]; token?: string }>('/api/server/share');
+      return await request<{ network: boolean; origins: string[]; viewer?: { token: string; expiresAt: string }; viewerBlocked?: string }>(`/api/server/share${appId ? `?app=${encodeURIComponent(appId)}` : ''}`);
     } catch {
       return { network: false, origins: [] };
     }

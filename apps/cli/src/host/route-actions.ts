@@ -89,9 +89,12 @@ function actionFor(method: string, path: string): DqlAction {
 
   // Apps: readers view and run pages; authors change them; publishing is its own step.
   if (under(path, '/api/apps')) {
+    // The list of every App is the project's, not one App's.
+    if (path === '/api/apps') return read ? 'project.read' : 'app.author';
     if (!read && /\/(promote|publish-to-project)$/.test(path)) return 'app.publish';
     if (!read && /^\/api\/apps\/[^/]+\/ask$/.test(path)) return 'ask';
-    if (read || /^\/api\/apps\/[^/]+\/dashboards\/[^/]+\/run$/.test(path)) return 'app.view';
+    // Running a page, and its story drawn from that run, are reading it.
+    if (read || /^\/api\/apps\/[^/]+\/dashboards\/[^/]+\/(run|story)$/.test(path)) return 'app.view';
     return 'app.author';
   }
   if (under(path, '/api/app-builds')) {
