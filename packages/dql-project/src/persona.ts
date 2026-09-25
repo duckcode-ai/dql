@@ -7,7 +7,9 @@
  * — read by the dql-governance PolicyEngine and the @rls deferred resolver.
  *
  * Rules:
- * - Single active persona per process. Switching is explicit.
+ * - Single active persona per process. Switching is explicit. A host that
+ *   serves several people (RFC 0010) installs a slot resolver so each person
+ *   has their own active persona; one person's switch never reaches another.
  * - The registry never writes auth state to disk; persistence (last-used
  *   persona) is the UI's job, not the library's.
  * - When no persona is set, the default owner context applies (full access,
@@ -44,6 +46,11 @@ export interface UserContextLike {
 
 type Listener = (next: ActivePersona | null) => void;
 
+/** Where the active persona lives for the current caller. */
+export interface PersonaSlot {
+  value: ActivePersona | null;
+}
+
 /**
  * Process-wide persona registry. Designed to be a single instance per
  * process (use `defaultPersonaRegistry`). Tests can construct fresh
@@ -52,15 +59,29 @@ type Listener = (next: ActivePersona | null) => void;
 export class PersonaRegistry {
   private current: ActivePersona | null = null;
   private readonly listeners = new Set<Listener>();
+  private slotResolver: (() => PersonaSlot | undefined) | null = null;
+
+  /**
+   * Keep the active persona per caller instead of per process: the resolver
+   * returns the slot for whoever is calling now (e.g. the signed-in person
+   * of the current request), or undefined to use the process-wide persona.
+   * Pass null to go back to one persona per process.
+   */
+  useSlots(resolver: (() => PersonaSlot | undefined) | null): void {
+    this.slotResolver = resolver;
+  }
 
   /** Currently active persona, or null when no App is bound. */
   get active(): ActivePersona | null {
-    return this.current;
+    const slot = this.slotResolver?.();
+    return slot ? slot.value : this.current;
   }
 
   /** Set the active persona to a fully-resolved record. */
   set(next: ActivePersona | null): void {
-    this.current = next;
+    const slot = this.slotResolver?.();
+    if (slot) slot.value = next;
+    else this.current = next;
     for (const cb of this.listeners) cb(next);
   }
 
@@ -71,8 +92,7 @@ export class PersonaRegistry {
   setFromApp(app: AppDocument, userId: string): ActivePersona | null {
     const member = app.members.find((m) => m.userId === userId);
     if (!member) {
-      this.current = null;
-      for (const cb of this.listeners) cb(null);
+      this.set(null);
       return null;
     }
     const persona = personaFromMember(app, member);
@@ -93,12 +113,13 @@ export class PersonaRegistry {
 
   /** Build the dql-governance UserContext shape. Owner default if unset. */
   toUserContext(ownerFallback: UserContextLike = OWNER_DEFAULT): UserContextLike {
-    if (!this.current) return ownerFallback;
+    const current = this.active;
+    if (!current) return ownerFallback;
     return {
-      userId: this.current.userId,
-      roles: this.current.roles,
-      department: typeof this.current.attributes.department === 'string'
-        ? (this.current.attributes.department as string)
+      userId: current.userId,
+      roles: current.roles,
+      department: typeof current.attributes.department === 'string'
+        ? (current.attributes.department as string)
         : undefined,
     };
   }
@@ -109,8 +130,7 @@ export class PersonaRegistry {
    * fail-closed (reject the query) rather than leak unfiltered data.
    */
   resolveUserVar(name: string): string | number | boolean | undefined {
-    if (!this.current) return undefined;
-    return this.current.rlsContext[name];
+    return this.active?.rlsContext[name];
   }
 }
 

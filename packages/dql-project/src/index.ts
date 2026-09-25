@@ -95,7 +95,7 @@ export {
   personaFromMember,
   OWNER_DEFAULT,
 } from './persona.js';
-export type { ActivePersona, UserContextLike } from './persona.js';
+export type { ActivePersona, PersonaSlot, UserContextLike } from './persona.js';
 
 export {
   personaVariables,

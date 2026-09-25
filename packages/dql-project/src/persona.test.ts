@@ -71,3 +71,29 @@ describe('PersonaRegistry', () => {
     expect(r.toUserContext().department).toBe('finance');
   });
 });
+
+describe('PersonaRegistry slots (one persona per caller)', () => {
+  const persona = (userId: string) => ({ userId, roles: ['viewer'], attributes: {}, rlsContext: {} });
+
+  it('reads and writes the caller\'s slot, and falls back to the process persona without one', () => {
+    const r = new PersonaRegistry();
+    const slots = { a: { value: null }, b: { value: null } } as Record<string, { value: ReturnType<typeof persona> | null }>;
+    let caller: string | undefined;
+    r.useSlots(() => (caller ? slots[caller] : undefined));
+
+    caller = 'a';
+    r.set(persona('a@x.test'));
+    caller = 'b';
+    expect(r.active).toBeNull();
+    expect(r.toUserContext()).toBe(OWNER_DEFAULT);
+    caller = undefined;
+    expect(r.active).toBeNull();
+    r.set(persona('local@x.test'));
+    caller = 'a';
+    expect(r.active?.userId).toBe('a@x.test');
+    expect(r.toUserContext().userId).toBe('a@x.test');
+
+    r.useSlots(null);
+    expect(r.active?.userId).toBe('local@x.test');
+  });
+});

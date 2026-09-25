@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { defaultPersonaRegistry } from '@duckcodeailabs/dql-project';
-import { activePersonaPolicyFingerprint } from './governance-runtime.js';
+import { activePersonaPolicyFingerprint, assertAppAccess, DQLAccessDeniedError, runtimeVariables } from './governance-runtime.js';
+import { installHostPersonaSlots, withRequestContext } from './host/request-context.js';
 
 const persona = (overrides: Record<string, unknown> = {}) => ({
   userId: 'ana@example.test', roles: ['analyst'], attributes: {}, rlsContext: { region: 'EU' }, appId: 'sales', ...overrides,
@@ -29,5 +30,49 @@ describe('active persona policy fingerprint', () => {
     expect(activePersonaPolicyFingerprint()).toBe(first);
     defaultPersonaRegistry.set(null);
     expect(activePersonaPolicyFingerprint()).not.toBe(first);
+  });
+});
+
+describe('a signed-in person from a host (RFC 0010 HH-2)', () => {
+  const maria = { id: 'u-maria', kind: 'person' as const, email: 'maria@insurer.example', groups: ['claims'], attributes: { region: 'EU' }, source: 'host' as const };
+  const dev = { id: 'u-dev', kind: 'person' as const, email: 'dev@insurer.example', groups: ['growth'], attributes: { region: 'US' }, source: 'host' as const };
+  const as = <T>(principal: typeof maria, work: () => T): T => withRequestContext({ principal, requestId: principal.id }, work);
+  const claimsOnly = {
+    id: 'claims', domain: 'claims',
+    policies: [{ id: 'claims-team', domain: 'claims', minClassification: 'public', allowedRoles: ['claims'], allowedUsers: [], accessLevel: 'execute', enabled: true }],
+  } as never;
+
+  afterEach(() => {
+    defaultPersonaRegistry.useSlots(null);
+    defaultPersonaRegistry.set(null);
+  });
+
+  it('keeps each person\'s App persona to themselves', () => {
+    installHostPersonaSlots(defaultPersonaRegistry);
+    as(maria, () => defaultPersonaRegistry.set(persona({ userId: 'maria@insurer.example' }) as never));
+    expect(as(maria, () => defaultPersonaRegistry.active?.userId)).toBe('maria@insurer.example');
+    expect(as(dev, () => defaultPersonaRegistry.active)).toBeNull();
+    expect(defaultPersonaRegistry.active).toBeNull();
+    as(dev, () => defaultPersonaRegistry.clear());
+    expect(as(maria, () => defaultPersonaRegistry.active?.userId)).toBe('maria@insurer.example');
+  });
+
+  it('narrows rows by the person\'s own values, which a request cannot override', () => {
+    const vars = as(maria, () => runtimeVariables({ 'user.region': 'US', region: 'US', limit: 5 }));
+    expect(vars).toMatchObject({ 'user.region': 'EU', region: 'EU', 'user.id': 'maria@insurer.example', 'user.email': 'maria@insurer.example', 'user.roles': ['claims'], limit: 5 });
+    expect(runtimeVariables({ region: 'US' })).toEqual({ region: 'US' });
+  });
+
+  it('checks App policies against the person\'s groups, never the owner\'s full access', () => {
+    expect(() => as(maria, () => assertAppAccess({ app: claimsOnly }))).not.toThrow();
+    expect(() => as(dev, () => assertAppAccess({ app: claimsOnly }))).toThrow(DQLAccessDeniedError);
+    expect(() => assertAppAccess({ app: claimsOnly })).toThrow(DQLAccessDeniedError);
+  });
+
+  it('keys cached and proven results by person, and leaves a local project\'s keys unchanged', () => {
+    const local = activePersonaPolicyFingerprint();
+    const [a, b] = [as(maria, activePersonaPolicyFingerprint), as(dev, activePersonaPolicyFingerprint)];
+    expect(new Set([local, a, b]).size).toBe(3);
+    expect(activePersonaPolicyFingerprint()).toBe(local);
   });
 });

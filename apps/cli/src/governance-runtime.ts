@@ -7,9 +7,11 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { PolicyEngine, type AccessLevel, type AccessPolicy, type DataClassification } from '@duckcodeailabs/dql-governance';
 import {
+  OWNER_DEFAULT,
   defaultPersonaRegistry,
   mergePersonaVariables,
 } from '@duckcodeailabs/dql-project';
+import { hostPrincipalPolicyIdentity, hostPrincipalVariables, hostUserContext } from './host/request-context.js';
 
 export class DQLAccessDeniedError extends Error {
   constructor(message: string) {
@@ -19,7 +21,11 @@ export class DQLAccessDeniedError extends Error {
 }
 
 export function runtimeVariables(base: Record<string, unknown> | undefined): Record<string, unknown> {
-  return mergePersonaVariables(base ?? {}, defaultPersonaRegistry.active);
+  const persona = defaultPersonaRegistry.active;
+  // A signed-in person with no App persona still narrows by their own values
+  // (RFC 0010 HH-2); without a host this is today's behaviour exactly.
+  const host = persona ? undefined : hostPrincipalVariables();
+  return host ? { ...(base ?? {}), ...host } : mergePersonaVariables(base ?? {}, persona);
 }
 
 export function activePersonaAppId(): string | undefined {
@@ -37,6 +43,7 @@ export function activePersonaPolicyFingerprint(): string {
   const sorted = (record: Record<string, unknown> | undefined) => Object.fromEntries(
     Object.entries(record ?? {}).sort(([left], [right]) => left.localeCompare(right)),
   );
+  const host = hostPrincipalPolicyIdentity();
   return createHash('sha256').update(JSON.stringify({
     version: 1,
     appId: persona?.appId ?? 'global',
@@ -44,6 +51,8 @@ export function activePersonaPolicyFingerprint(): string {
     roles: [...(persona?.roles ?? [])].sort(),
     rlsContext: sorted(persona?.rlsContext),
     attributes: sorted(persona?.attributes),
+    // Only with a host, so a local project's existing keys stay the same.
+    ...(host ? { principal: host } : {}),
   })).digest('hex');
 }
 
@@ -64,7 +73,7 @@ export function assertAppAccess(opts: {
 }): void {
   const app = opts.app;
   if (!app) return;
-  const user = defaultPersonaRegistry.toUserContext();
+  const user = defaultPersonaRegistry.toUserContext(hostUserContext() ?? OWNER_DEFAULT);
   const engine = new PolicyEngine(app.policies.map(toAccessPolicy));
   const result = engine.checkAccess(
     user,

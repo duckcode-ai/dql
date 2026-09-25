@@ -1,0 +1,51 @@
+import { describe, expect, it } from 'vitest';
+import { routeAction } from './route-actions.js';
+
+describe('what each API request does (RFC 0010 HH-2)', () => {
+  it.each([
+    ['GET', '/api/identity', 'project.read', 'project'],
+    ['GET', '/api/connections', 'project.read', 'project'],
+    ['PUT', '/api/connections', 'connection.manage', 'project'],
+    ['POST', '/api/connections/warehouse/metadata-scope', 'connection.manage', 'connection'],
+    ['POST', '/api/test-connection', 'connection.manage', 'project'],
+    ['POST', '/api/settings/providers', 'settings.manage', 'project'],
+    ['POST', '/api/persona', 'app.author', 'project'],
+    ['POST', '/api/git/commit', 'git.review', 'project'],
+    ['POST', '/api/block-studio/certify', 'dataset.certify', 'project'],
+    ['POST', '/api/app-datasets/tables/create', 'dataset.certify', 'project'],
+    ['POST', '/api/app-datasets/tables/draft', 'dataset.author', 'project'],
+    ['POST', '/api/app-datasets/run', 'app.view', 'project'],
+    ['POST', '/api/agent/hints/h-1/review', 'hint.review', 'hint'],
+    ['POST', '/api/agent/hints/h-1/lifecycle', 'hint.review', 'hint'],
+    ['PATCH', '/api/agent/hints/h-1', 'hint.review', 'hint'],
+    ['POST', '/api/agent/learnings/correction', 'ask', 'project'],
+    ['GET', '/api/apps/claims', 'app.view', 'app'],
+    ['POST', '/api/apps/claims/dashboards/overview/run', 'app.view', 'app'],
+    ['POST', '/api/apps/claims/ask', 'ask', 'app'],
+    ['POST', '/api/apps/claims/promote', 'app.publish', 'app'],
+    ['PUT', '/api/apps/claims/dashboards/overview', 'app.author', 'app'],
+    ['GET', '/api/apps/claims/dashboards/overview/snapshot', 'export', 'app'],
+    ['POST', '/api/app-builds/b-1/publish-to-project', 'app.publish', 'app-build'],
+    ['POST', '/api/app-builds/b-1/dashboards/p/run', 'app.author', 'app-build'],
+    ['POST', '/api/agent-runs', 'ask', 'project'],
+    ['POST', '/api/semantic-query', 'ask', 'project'],
+    ['POST', '/api/notebook/research', 'research', 'project'],
+    ['POST', '/api/query', 'query.run', 'project'],
+    ['POST', '/api/notebook/execute', 'query.run', 'project'],
+    ['GET', '/api/ask-traces/0123456789abcdef0123456789abcdef/export', 'export', 'project'],
+    ['POST', '/api/modeling/entities', 'dataset.author', 'project'],
+    ['POST', '/api/notebooks', 'project.write', 'project'],
+    ['DELETE', '/api/something-new', 'project.write', 'project'],
+    ['GET', '/api/something-new', 'project.read', 'project'],
+  ])('%s %s is %s on a %s', (method, path, action, type) => {
+    const route = routeAction(method, path);
+    expect(route.action).toBe(action);
+    expect(route.resource.type).toBe(type);
+  });
+
+  it('names the App, draft, hint or connection it acts on', () => {
+    expect(routeAction('GET', '/api/apps/claims%20ops/dashboards').resource).toEqual({ type: 'app', id: 'claims ops' });
+    expect(routeAction('GET', '/api/app-builds/b-1').resource).toEqual({ type: 'app-build', id: 'b-1' });
+    expect(routeAction('GET', '/api/apps').resource).toEqual({ type: 'project' });
+  });
+});

@@ -613,7 +613,7 @@ import {
   loadRuntimeApp,
   runtimeVariables,
 } from './governance-runtime.js';
-import { LocalAppStorage, LocalNotebookResearchStorage, defaultLocalAppsDbPath, defaultNotebookResearchDbPath } from '@duckcodeailabs/dql-project';
+import { LocalAppStorage, LocalNotebookResearchStorage, defaultLocalAppsDbPath, defaultNotebookResearchDbPath, defaultPersonaRegistry } from '@duckcodeailabs/dql-project';
 import type { BlockRecord, LocalAppPreviewDatasetBindingEvidence, NotebookResearchDiagnostics, NotebookResearchDqlArtifact, NotebookResearchDqlPromotion, NotebookResearchDqlPromotionAction, NotebookResearchIntent, NotebookResearchNextActionFilter, NotebookResearchPlan, NotebookResearchReadinessFilter, NotebookResearchRun, NotebookResearchRunListResult, NotebookResearchSort, NotebookResearchSourceCellInput, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
 import {
   Certifier,
@@ -733,7 +733,8 @@ import {
 } from "./notebook-datasets.js";
 import { prepareBlockInvocation } from './block-invocation.js';
 import { redactConnections, resolveSecretReferences, storeConnectionSecrets } from './connection-secrets.js';
-import { currentPrincipal, hostActor, resolveHostPrincipal, withRequestContext, type DqlHostHooks } from './host/request-context.js';
+import { authorizeHostRequest, currentPrincipal, hostActor, installHostPersonaSlots, resolveHostPrincipal, withRequestContext, type DqlHostHooks } from './host/request-context.js';
+import { routeAction } from './host/route-actions.js';
 import { boundAgentSchemaColumns, mergeAgentSchemaCompleteness } from './ask-schema-context.js';
 
 export const APP_SOURCE_REUSABLE_TAG = 'app-source';
@@ -4869,6 +4870,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     .filter(Boolean));
   const hostHooks = opts.hostHooks;
   const hostIdentity = typeof hostHooks?.resolvePrincipal === 'function';
+  // Each signed-in person keeps their own App persona ("view as").
+  if (hostIdentity) installHostPersonaSlots(defaultPersonaRegistry);
   if (!loopback && !authToken && !hostIdentity) {
     throw new Error('Non-loopback DQL server binding requires DQL_SERVER_TOKEN (or LocalServerOptions.authToken).');
   }
@@ -13144,6 +13147,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       if (!requestPrincipal) {
         res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: 'Sign in to use DQL.' }));
+        return;
+      }
+      // HH-2: and only for what the host lets this person do.
+      const route = routeAction(req.method, path);
+      const decision = await authorizeHostRequest(hostHooks!, requestPrincipal, route);
+      if (!decision.allow) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: decision.reason ?? 'You do not have permission to do this.',
+          code: 'PERMISSION_DENIED',
+          action: route.action,
+          resource: route.resource,
+        }));
         return;
       }
     }

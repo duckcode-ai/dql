@@ -162,16 +162,17 @@ program imports a supported API rather than a file path.
 
 ### Action vocabulary (for `authorize`)
 
-`project.read`, `project.write`, `connection.manage`, `dataset.author`,
-`dataset.certify`, `hint.review`, `app.author`, `app.publish`, `app.view`,
-`ask`, `research`, `export`, `schedule.manage`, `git.review`,
-`settings.manage`, `tool.<name>`.
+`project.read`, `project.write`, `connection.manage`, `settings.manage`,
+`dataset.author`, `dataset.certify`, `hint.review`, `app.view`,
+`app.author`, `app.publish`, `ask`, `research`, `query.run` (SQL the
+person writes), `export`, `schedule.manage`, `git.review`, `tool.<name>`.
 
-Each route is tagged with one action and one resource
-(`project`, `domain:<id>`, `dataset:<id>`, `app:<id>`, `block:<id>`). The
-route table in `local-runtime.ts` grows a small `routeAction(method, path)`
-map. It starts with the routes that change state and the routes that read
-data.
+Each request maps to one action and one resource (`project`, `app`,
+`app-build`, `hint`, `connection`, each with an id where the path names
+one) through `routeAction(method, path)` in `apps/cli/src/host/route-actions.ts`.
+Specific rules come first. Anything else is `project.read` for GET and
+`project.write` otherwise, so a new route is never more open than the
+project itself.
 
 ### Privacy boundary
 
@@ -208,6 +209,7 @@ identical.
 | Slice | Status |
 |---|---|
 | HH-1 | Implemented 2026-09-25 on `claude/oss-security-fixes` (`apps/cli/src/host/`, tests in `host-hooks.test.ts`); awaiting independent verification |
+| HH-2 | Implemented 2026-09-25. `authorize` runs for every placed API request, and a refusal answers 403 with `PERMISSION_DENIED`, the action and the resource. The persona registry keeps one "view as" persona per signed-in person (`PersonaRegistry.useSlots`). With a host and no App persona, App policies see the person's own groups (never the owner default), and row rules read the person's attributes as `{user.<name>}`, which a request cannot override. Cache and proof keys include the person, only with a host. Tests: `route-actions.test.ts`, `host-hooks.test.ts`, `governance-runtime.test.ts`, `dql-project` `persona.test.ts`. Read-only viewer links: next |
 
 ## Backward compatibility
 

@@ -6,7 +6,9 @@ export { startLocalServer, type LocalServerOptions } from '../local-runtime.js';
 export {
   currentPrincipal,
   currentRequestContext,
+  type DqlDecision,
   type DqlHostHooks,
   type DqlPrincipal,
   type DqlRequestContext,
 } from './request-context.js';
+export { routeAction, type DqlAction, type DqlResource, type DqlRouteAction } from './route-actions.js';

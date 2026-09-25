@@ -132,3 +132,33 @@ describe('host principal (RFC 0010 HH-1)', () => {
     expect(captured.hint.author).toBe('local-analyst');
   });
 });
+
+describe('what a signed-in person may do (RFC 0010 HH-2)', () => {
+  it('asks the host about each request and refuses with its reason, naming the action', async () => {
+    const asked: Array<{ person: string; action: string; resource: unknown }> = [];
+    const base = await start({
+      ...headerHost,
+      authorize: (principal, action, resource) => {
+        asked.push({ person: principal.id, action, resource });
+        if (action === 'settings.manage') throw new Error('policy store down');
+        if (principal.id === 'u-dev' && action === 'connection.manage') return { allow: false, reason: 'Only admins change connections.' };
+        return { allow: true };
+      },
+    });
+    const asDev = { 'Content-Type': 'application/json', 'x-test-person': 'dev' };
+
+    const refused = await fetch(`${base}/api/connections`, { method: 'PUT', headers: asDev, body: JSON.stringify({ connections: {} }) });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: 'Only admins change connections.', code: 'PERMISSION_DENIED', action: 'connection.manage', resource: { type: 'project' } });
+
+    const broken = await fetch(`${base}/api/settings/providers`, { method: 'POST', headers: { ...asDev, 'x-test-person': 'maria' }, body: '{}' });
+    expect(broken.status).toBe(403);
+    expect(await broken.json()).toMatchObject({ error: 'You do not have permission to do this.', action: 'settings.manage' });
+
+    expect((await fetch(`${base}/api/identity`, { headers: asDev })).status).toBe(200);
+    await fetch(`${base}/api/apps/claims`, { headers: asDev });
+    expect(asked).toContainEqual({ person: 'u-dev', action: 'app.view', resource: { type: 'app', id: 'claims' } });
+    expect((await fetch(`${base}/api/health`)).status).toBe(200);
+    expect(asked.some((entry) => entry.action === 'project.read' && entry.person === 'u-dev')).toBe(true);
+  });
+});
