@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { IncomingMessage } from 'node:http';
 import type { DqlAction, DqlResource, DqlRouteAction } from './route-actions.js';
+import type { DqlRowPolicy } from './row-policy.js';
 
 export type { DqlAction, DqlResource, DqlRouteAction } from './route-actions.js';
 
@@ -55,6 +56,13 @@ export interface DqlHostHooks {
    * do everything, as with the shared token.
    */
   authorize?(principal: DqlPrincipal, action: DqlAction, resource: DqlResource): Promise<DqlDecision> | DqlDecision;
+  /**
+   * What each statement may read (RFC 0010 HH-3). Every query the server
+   * sends to a warehouse — Datasets, page tiles, AI-written SQL, notebook
+   * cells, proofs — passes here first; return it, a narrowed rewrite, or a
+   * refusal. See `row-policy.ts`.
+   */
+  rowPolicy?: DqlRowPolicy;
   /**
    * Certify with every enterprise gate required (grain, outputs, pattern,
    * lineage, cadence). With a host, the host decides this, not the request.

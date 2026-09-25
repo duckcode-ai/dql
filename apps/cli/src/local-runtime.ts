@@ -735,6 +735,7 @@ import { prepareBlockInvocation } from './block-invocation.js';
 import { redactConnections, resolveSecretReferences, storeConnectionSecrets } from './connection-secrets.js';
 import { authorizeHostRequest, currentPrincipal, hostActor, installHostPersonaSlots, resolveHostPrincipal, withRequestContext, type DqlHostHooks } from './host/request-context.js';
 import { routeAction } from './host/route-actions.js';
+import { withRowPolicy } from './host/row-policy.js';
 import { isViewerToken, mintViewerToken, readViewerToken, viewerDecision, viewerLinkBlockedReason, viewerPrincipal } from './host/viewer-links.js';
 import { boundAgentSchemaColumns, mergeAgentSchemaCompleteness } from './ask-schema-context.js';
 
@@ -4839,7 +4840,10 @@ async function executePreparedArtifactTraceBoundary<T>(input: {
 
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
-  const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
+  const { rootDir, executor: rawExecutor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
+  // RFC 0010 HH-3: with a host row policy, every statement the server sends
+  // to a warehouse passes it first — this one executor is the only path.
+  const executor = opts.hostHooks?.rowPolicy ? withRowPolicy(rawExecutor, opts.hostHooks.rowPolicy) : rawExecutor;
   // Validate before creating listeners, project state, or a connection.  A
   // malformed embedding/CLI option must fail safely rather than silently
   // starting an ambiguous rollout mode.
@@ -18199,7 +18203,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
       try {
         const active = requireActiveConnection();
-        const run = async (sql: string) => (await executor.executePositional(sql, [], active, { maxRows: 5_000, maxBytes: 16 * 1024 * 1024, batchSize: 1_000, deadlineMs: 60_000 })).rows as Array<Record<string, unknown>>;
+        const run = async (sql: string, purpose: 'data' | 'metadata' = 'data') => (await executor.executePositional(sql, [], active, { maxRows: 5_000, maxBytes: 16 * 1024 * 1024, batchSize: 1_000, deadlineMs: 60_000, purpose })).rows as Array<Record<string, unknown>>;
         const listing = await listWarehouseTables({ projectRoot, driver: active.driver, run });
         if (req.method === 'GET' && path === '/api/app-datasets/tables') {
           reply(200, {
@@ -36208,7 +36212,7 @@ async function introspectSchema(
        ${searchPredicate}
        ORDER BY table_schema, table_name
        LIMIT ${limit} OFFSET ${offset}`,
-      [], {}, connection,
+      [], {}, connection, { purpose: 'metadata' },
     );
     tables = catalogRows.rows.map((row) => {
       const schema = String(row['table_schema'] ?? row['TABLE_SCHEMA'] ?? 'default');
@@ -36868,7 +36872,7 @@ export async function resolveSemanticTableMapping(
        FROM information_schema.tables
        WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')
        ORDER BY table_schema, table_name`,
-      [], {}, connection,
+      [], {}, connection, { purpose: 'metadata' },
     );
     return buildSemanticTableMapping(semanticLayer, tablesResult.rows);
   } catch {

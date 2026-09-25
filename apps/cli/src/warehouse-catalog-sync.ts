@@ -24,7 +24,8 @@ import type { ConnectionConfig, QueryExecutor } from '@duckcodeailabs/dql-connec
 import { sqliteColumnsOneByOne, type ConnectionMetadataScopeV1 } from './warehouse-metadata.js';
 
 const MAX_ROWS = 50_000;
-const QUERY_OPTIONS = { maxRows: MAX_ROWS, maxBytes: 32 * 1024 * 1024, batchSize: 1_000, deadlineMs: 60_000 };
+// Schema reads only: a host's row policy (RFC 0010) can tell them from data.
+const QUERY_OPTIONS = { maxRows: MAX_ROWS, maxBytes: 32 * 1024 * 1024, batchSize: 1_000, deadlineMs: 60_000, purpose: 'metadata' as const };
 
 type Row = Record<string, unknown>;
 interface CatalogQuery { kind: 'columns' | 'tables' | 'views' | 'keys' | 'primary_keys' | 'foreign_keys'; sql: string; catalogOrDatabase: string }

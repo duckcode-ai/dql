@@ -5,6 +5,7 @@ export {
   ConnectorQueryError,
   type QueryBatch,
   type QueryExecutionOptions,
+  type QueryPurpose,
   type QueryResult,
   type ColumnMeta,
   type ColumnType,

@@ -187,6 +187,8 @@ export async function syncWarehouseMetadata(input: {
       maxBytes: MAX_METADATA_BYTES_PER_QUERY,
       batchSize: 1_000,
       deadlineMs: METADATA_QUERY_DEADLINE_MS,
+      // Schema only: a host's row policy (RFC 0010) can tell it from data.
+      purpose: 'metadata' as const,
     };
     let result: Awaited<ReturnType<QueryExecutor['executePositional']>>;
     try {
@@ -702,12 +704,14 @@ function discoveryQueryOptions(): {
   maxBytes: number;
   batchSize: number;
   deadlineMs: number;
+  purpose: 'metadata';
 } {
   return {
     maxRows: MAX_DISCOVERY_SCHEMAS,
     maxBytes: 2 * 1024 * 1024,
     batchSize: 500,
     deadlineMs: DISCOVERY_DEADLINE_MS,
+    purpose: 'metadata',
   };
 }
 

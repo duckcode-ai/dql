@@ -12,3 +12,9 @@ export {
   type DqlRequestContext,
 } from './request-context.js';
 export { routeAction, type DqlAction, type DqlResource, type DqlRouteAction } from './route-actions.js';
+export {
+  RowPolicyRefusedError,
+  type DqlQueryContext,
+  type DqlRowPolicy,
+  type DqlRowPolicyResult,
+} from './row-policy.js';

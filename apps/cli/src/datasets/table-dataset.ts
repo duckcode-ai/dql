@@ -26,7 +26,8 @@ export interface WarehouseTableSummary {
   rowCountEstimate?: number;
 }
 
-type RunSql = (sql: string) => Promise<Array<Record<string, unknown>>>;
+/** Runs one statement; `metadata` marks a schema read (RFC 0010 row policies can tell it apart). */
+type RunSql = (sql: string, purpose?: 'data' | 'metadata') => Promise<Array<Record<string, unknown>>>;
 
 /** Dialects whose information schema lists tables and columns without extra scoping. */
 const LIVE_LISTING = new Set(['duckdb', 'file', 'postgresql', 'redshift', 'snowflake', 'mysql']);
@@ -69,7 +70,7 @@ export async function listWarehouseTables(input: { projectRoot: string; driver: 
     `WHERE LOWER(table_schema) NOT IN (${SYSTEM_SCHEMAS.map((schema) => `'${schema}'`).join(', ')})`,
     'ORDER BY table_schema, table_name, ordinal_position',
     `LIMIT ${MAX_COLUMNS}`,
-  ].join('\n'));
+  ].join('\n'), 'metadata');
   const byTable = new Map<string, WarehouseTableSummary>();
   for (const row of rows) {
     const pick = (key: string) => String(row[key] ?? row[key.toUpperCase()] ?? '');

@@ -8,8 +8,16 @@ export interface ColumnMeta {
 
 export type Row = Record<string, unknown>;
 
+/**
+ * What a statement is for: reading rows (`data`) or only the warehouse's
+ * schema (`metadata`). A host's row policy (RFC 0010) can treat them apart.
+ */
+export type QueryPurpose = 'data' | 'metadata';
+
 export interface QueryExecutionOptions {
   signal?: AbortSignal;
+  /** Defaults to `data`. */
+  purpose?: QueryPurpose;
   /** Maximum rows returned to the caller. Connectors must enforce this. */
   maxRows?: number;
   /** Maximum serialized bytes returned to the caller. Connectors must enforce this. */
