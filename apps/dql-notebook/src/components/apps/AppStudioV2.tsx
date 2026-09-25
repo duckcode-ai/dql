@@ -77,6 +77,7 @@ import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-enc
 import { applyShowMe, showMeFactsFromDescriptor, showMeFirstChoice, showMeInputFromQuery } from '@duckcodeailabs/dql-core/apps/show-me';
 import { pivotLayout, withPivotRollups, withoutRollups, type PivotTotals } from '@duckcodeailabs/dql-core/apps/pivot';
 import { PivotTable } from './PivotTable';
+import { TableDatasetDialog } from './builder/TableDatasetDialog';
 import { KpiCard, usesKpiCard } from './KpiCard';
 
 /** A pivot shows every group; a row limit would cut its totals off. */
@@ -316,7 +317,7 @@ export function AppStudioLaunchSurface({
     <div className="dql-studio-v2-intro">
       <span className="eyebrow"><Sparkles size={14} /> DQL App Studio 2.0</span>
       <h1 id="app-studio-home-title">Start with the decision.<br />Shape the experience together.</h1>
-      <p>AI and manual authoring use one private draft, one responsive canvas, and one governed path to Project publication.</p>
+      <p>Build with AI or by hand. Everything stays a private draft until you publish it.</p>
     </div>
     <div className="dql-studio-v2-start-card">
       <div className="mode-switch" role="tablist" aria-label="Authoring mode">
@@ -329,7 +330,7 @@ export function AppStudioLaunchSurface({
           ? <textarea value={config.prompt} onChange={(event) => onChange({ prompt: event.target.value })} placeholder="Build a weekly revenue health App for finance leaders with trends, drivers, and customer detail." rows={4} />
           : <input value={config.name} onChange={(event) => onChange({ name: event.target.value })} placeholder="Revenue Operations" />}
       </label>
-      {config.mode === 'ai' ? <div className="ai-launch-explainer"><span><Sparkles size={16} /></span><div><strong>AI selects governed data and creates an editable first draft</strong><small>Next, review the actual blocks, semantic sources, components, and gaps before applying anything.</small></div></div> : null}
+      {config.mode === 'ai' ? <div className="ai-launch-explainer"><span><Sparkles size={16} /></span><div><strong>AI picks your certified data and drafts a first version</strong><small>You review the data it chose and every tile before anything is applied.</small></div></div> : null}
       <details className="launch-options" open={config.mode === 'manual'}>
         <summary><span>Starting layout</span><strong>{TEMPLATE_OPTIONS.find((option) => option.id === config.template)?.title ?? 'Operational Dashboard'}</strong><ChevronDown size={15} /></summary>
         <div className="template-grid">
@@ -337,8 +338,8 @@ export function AppStudioLaunchSurface({
         </div>
       </details>
       <section className="studio-source-policy-row" aria-label="App source policy">
-        <header><span className="policy-mark"><ShieldCheck size={17} /></span><p><strong>Governed sources only</strong><small>Certified blocks and governed semantic sources. Recommended for every App.</small></p></header>
-        <label className="studio-review-toggle"><input type="checkbox" checked={config.sourcePolicy === 'include_review_required'} onChange={(event) => onChange({ sourcePolicy: event.target.checked ? 'include_review_required' : 'governed_only' })} /><i aria-hidden="true" /><span><strong>Also allow review-required analysis</strong><small>Stays local and cannot publish until replaced, promoted, or removed.</small></span></label>
+        <header><span className="policy-mark"><ShieldCheck size={17} /></span><p><strong>Only certified data</strong><small>Every number comes from data someone owns and checked. Recommended.</small></p></header>
+        <label className="studio-review-toggle"><input type="checkbox" checked={config.sourcePolicy === 'include_review_required'} onChange={(event) => onChange({ sourcePolicy: event.target.checked ? 'include_review_required' : 'governed_only' })} /><i aria-hidden="true" /><span><strong>Also let me try data that needs review</strong><small>Useful while exploring; a page that uses it cannot publish until that data is certified.</small></span></label>
       </section>
       {error ? <div className="studio-error" role="alert">{error}</div> : null}
       <button type="button" className="launch-action" onClick={onSubmit} disabled={busy || !canSubmit}>{busy ? 'Preparing local draft…' : config.mode === 'ai' ? <><Sparkles size={17} /> Generate editable App</> : <><LayoutDashboard size={17} /> Open blank Studio</>}</button>
@@ -415,6 +416,9 @@ export function AppStudioV2({
   const [catalogNextCursor, setCatalogNextCursor] = useState<string | undefined>();
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [catalogRefreshNonce, setCatalogRefreshNonce] = useState(0);
+  // Start from a table: the dialog, and the new Dataset to open once the catalog lists it.
+  const [tableDialogOpen, setTableDialogOpen] = useState(false);
+  const [pendingDatasetSourceId, setPendingDatasetSourceId] = useState<string | null>(null);
   const [datasetTilesEnabled, setDatasetTilesEnabled] = useState(false);
   const [enablingDatasets, setEnablingDatasets] = useState(false);
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -735,8 +739,9 @@ export function AppStudioV2({
   useEffect(() => {
     if (!proposal && !autopilotReview) setProposalPageId(null);
   }, [proposal, autopilotReview]);
+  // Pages that only need a fresh run are run by Publish itself, so they are not fixes for the author.
   const publishStepCount = useMemo(
-    () => draft ? publicationBlockerCount(draft, publishIssues) : 0,
+    () => draft ? publicationBlockerCount(draft, publishIssues) - pagesNeedingSettledPreview(draft).length : 0,
     [draft, publishIssues],
   );
 
@@ -759,7 +764,7 @@ export function AppStudioV2({
       const result = await api.createAppBuild({
         baseAppId: baseAppId ?? undefined,
         name: name.trim() || undefined,
-        goal: prompt.trim() || name.trim() || 'Create a governed analytical App',
+        goal: prompt.trim() || name.trim() || 'A dashboard of live, checked numbers',
         audience,
         domain,
         authoringMode: mode,
@@ -2371,6 +2376,25 @@ export function AppStudioV2({
     await publish(false, current);
   };
 
+  // One Publish button: pages that only need a fresh run are run first, so
+  // the review lists only what needs the author.
+  const publishFromToolbar = async () => {
+    if (!draft) return;
+    const stale = pagesNeedingSettledPreview(draft);
+    if (!stale.length) {
+      await publish(false);
+      return;
+    }
+    let current = draft;
+    for (const page of stale) {
+      const recorded = await runPreviewForDraft(current, page.id, previewVariablesForPage(page), undefined, { refresh: true });
+      if (!recorded) return;
+      current = recorded;
+    }
+    setPublishIssues([]);
+    await publish(false, current);
+  };
+
   const applyFilterValue = (filter: NonNullable<AppStudioBuildDraft['pages'][number]['filters']>[number], value: unknown) => {
     if (!draft || !activePage) return;
     const pageId = activePage.id;
@@ -2665,11 +2689,22 @@ export function AppStudioV2({
     },
   });
 
+  // Open a Dataset just started from a table once the catalog lists it.
+  // chooseDataset is declared after the early return below, so it is reached through a ref.
+  const chooseDatasetRef = useRef<((item: AppBlockRecommendation) => void) | null>(null);
+  useEffect(() => {
+    if (!pendingDatasetSourceId) return;
+    const item = catalog.find((candidate) => candidate.capabilities?.dataset && (candidate.sourceId ?? candidate.id) === pendingDatasetSourceId);
+    if (!item || !chooseDatasetRef.current) return;
+    setPendingDatasetSourceId(null);
+    chooseDatasetRef.current(item);
+  }, [catalog, pendingDatasetSourceId]);
+
   if (!draft) {
     return <div className="dql-studio-v2-loading">
       <style>{APP_STUDIO_V2_STYLES}</style>
       <button type="button" className="icon" onClick={onBack} aria-label="Back to Apps"><ArrowLeft size={18} /></button>
-      <div><span className="loading-mark"><LayoutDashboard size={20} /></span><strong>{error ? 'Studio could not open' : initialDraftId ? 'Opening your local draft…' : baseAppId ? 'Preparing a safe edit draft…' : 'Preparing your Build Frame…'}</strong><small>{error ?? 'Keeping all work local until you explicitly publish it to the Project.'}</small>{error ? <button type="button" onClick={() => { immediateStartRef.current = false; void createDraft(); }}>Try again</button> : null}</div>
+      <div><span className="loading-mark"><LayoutDashboard size={20} /></span><strong>{error ? 'Studio could not open' : initialDraftId ? 'Opening your local draft…' : baseAppId ? 'Preparing a safe edit draft…' : 'Opening Studio…'}</strong><small>{error ?? 'Your work stays private until you publish it.'}</small>{error ? <button type="button" onClick={() => { immediateStartRef.current = false; void createDraft(); }}>Try again</button> : null}</div>
     </div>;
   }
 
@@ -2901,6 +2936,8 @@ export function AppStudioV2({
     ?? null;
   const activeDescriptor = activeDatasetItem?.capabilities?.dataset as DatasetDescriptor | undefined;
   const fieldsAvailable = datasetTilesEnabled && datasetItems.length > 0;
+  // The Data pane opens even with no Dataset yet: its empty state starts one from a table.
+  const dataPaneOpen = datasetTilesEnabled;
   const tileTarget = !draftTile && selectedDatasetTile && activeDatasetItem
     && (activeDatasetItem.sourceId ?? activeDatasetItem.id) === selectedDatasetTile.sourceId
     ? selectedDatasetTile
@@ -2987,6 +3024,7 @@ export function AppStudioV2({
     setSelectedTileId(null);
     setDraftTile((current) => current ? emptyDraft(item) : null);
   };
+  chooseDatasetRef.current = chooseDataset;
   const commitDraftTile = async () => {
     if (!draftTile || !activeDatasetItem) return;
     const title = draftTile.title.trim() || defaultTileTitle(draftTile.query, humanize);
@@ -3082,7 +3120,7 @@ export function AppStudioV2({
           </div>
           <button type="button" className="preview" onClick={() => void runPreview()} disabled={previewing || busy} aria-label={previewing ? 'Running preview' : 'Run preview'} title="Run every tile on this page again"><Play size={13} /><span>{previewing ? 'Running…' : 'Run'}</span></button>
           <button type="button" className={`copilot ${copilotOpen ? 'on' : ''}`} onClick={() => { if (!copilotOpen) setAiScope(selectedDatasetTile ? 'tile' : 'page'); setCopilotOpen((open) => !open); }} aria-pressed={copilotOpen} aria-label="Ask AI"><Sparkles size={14} /><span>Ask AI</span></button>
-          <button type="button" className="publish" onClick={() => void publish(false)} disabled={busy} aria-label={`Review and publish to Project${publishStepCount ? `, ${publishStepCount} ${publishStepCount === 1 ? 'fix' : 'fixes'} needed` : ''}`}><span>Publish</span>{publishStepCount ? <small>{publishStepCount} {publishStepCount === 1 ? 'fix' : 'fixes'}</small> : null}</button>
+          <button type="button" className="publish" onClick={() => void publishFromToolbar()} disabled={busy} aria-label={`Review and publish to Project${publishStepCount ? `, ${publishStepCount} ${publishStepCount === 1 ? 'fix' : 'fixes'} needed` : ''}`}><span>Publish</span>{publishStepCount ? <small>{publishStepCount} {publishStepCount === 1 ? 'fix' : 'fixes'}</small> : null}</button>
           <button type="button" className="ghost-icon overflow-button" aria-label="More draft actions" aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)}><MoreHorizontal size={17} /></button>
           {actionsOpen ? <div className="studio-overflow-menu" role="menu">
             <small>Preview size</small>
@@ -3105,8 +3143,8 @@ export function AppStudioV2({
         <section className={`left-content ${panelOpen ? 'open' : ''}`}>
           <button type="button" className="mobile-drawer-close" onClick={() => setPanelOpen(false)} aria-label="Close Studio drawer"><X size={16} /></button>
           {panel === 'pages' ? <PagesPanel draft={draft} activePageId={activePage?.id} onOpen={setActivePageId} onAdd={() => void addPage()} template={draft.template} onApplyTemplate={(nextTemplate) => void applyTemplate(nextTemplate)} /> : null}
-          {panel === 'sources' && fieldsAvailable && dataView === 'fields' ? <DataPanel datasets={datasetItems} active={activeDatasetItem} target={dataPanelTarget} disabled={busy || previewing} onChooseDataset={chooseDataset} onPickField={pickField} onBrowseSources={() => setDataView('sources')} onAddContent={(kind) => void addComponent(kind, null)} /> : null}
-          {panel === 'sources' && (!fieldsAvailable || dataView === 'sources') ? <>{fieldsAvailable ? <button type="button" className="panel-back" onClick={() => setDataView('fields')}><ArrowLeft size={13} /> Dataset fields</button> : null}<SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} datasetTilesEnabled={datasetTilesEnabled} enablingDatasets={enablingDatasets} onEnableDatasets={() => void enableDatasetTiles()} sourceFeedback={sourceFeedback} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddDataset={(item, kind, query, title) => void addComponent(kind, item, query, title)} onAuthorDataset={openDatasetAuthoring} onRefreshDatasetBinding={(sourceId) => void refreshDatasetBinding(sourceId)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /></> : null}
+          {panel === 'sources' && dataPaneOpen && dataView === 'fields' ? <DataPanel datasets={datasetItems} active={activeDatasetItem} target={dataPanelTarget} disabled={busy || previewing} loading={catalogLoading} onChooseDataset={chooseDataset} onPickField={pickField} onBrowseSources={() => setDataView('sources')} onStartFromTable={() => setTableDialogOpen(true)} onAddContent={(kind) => void addComponent(kind, null)} /> : null}
+          {panel === 'sources' && (!dataPaneOpen || dataView === 'sources') ? <>{dataPaneOpen ? <button type="button" className="panel-back" onClick={() => setDataView('fields')}><ArrowLeft size={13} /> Dataset fields</button> : null}<SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} datasetTilesEnabled={datasetTilesEnabled} enablingDatasets={enablingDatasets} onEnableDatasets={() => void enableDatasetTiles()} sourceFeedback={sourceFeedback} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddDataset={(item, kind, query, title) => void addComponent(kind, item, query, title)} onAuthorDataset={openDatasetAuthoring} onRefreshDatasetBinding={(sourceId) => void refreshDatasetBinding(sourceId)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /></> : null}
           {panel === 'filters' ? <FiltersPanel draft={draft} activePageId={activePage?.id} catalog={catalog} candidates={filterCandidates} runtimeFilterFields={runtimeFilterFields} previewRunsByPage={previewRunsByPage} previewing={previewing} disabled={busy || previewing} onRunPreview={() => void runPreview()} onSave={(configuration) => void saveFilter(configuration)} onRemove={(id) => void removeFilter(id)} /> : null}
         </section>
       </aside> : null}
@@ -3170,7 +3208,7 @@ export function AppStudioV2({
                   item.change === 'removed' ? <span className="proposal-badge removed">WILL BE REMOVED</span> : projectedPage.linkedTileIds.has(item.tile.i) ? <span className="proposal-badge link">PROPOSED LINK</span> : null,
                 ))
                 : canvasItems.map((tile) => renderTile(tile, '', null, breakpoint === 'wide'))}
-              {!visibleItems.length && !draftTile && !projectedPage ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>This page is empty</strong><p>{editing ? 'Pick a governed Dataset in the Data panel, then choose the fields you want to see. You can also ask AI to draft the page.' : 'Switch to Edit to add tiles to this page.'}</p>{editing ? <div className="empty-actions"><button type="button" className="primary" onClick={openAddTile}><Plus size={14} /> Add tile</button><button type="button" onClick={() => { setAiScope('page'); setCopilotOpen(true); }}><Sparkles size={14} /> Draft with AI</button></div> : null}</div> : null}
+              {!visibleItems.length && !draftTile && !projectedPage ? <div className="empty-canvas"><span><Plus size={22} /></span><strong>This page is empty</strong><p>{editing ? 'Choose your data in the Data panel, then click the numbers and fields you want to see. You can also ask AI to draft the page.' : 'Switch to Edit to add tiles to this page.'}</p>{editing ? <div className="empty-actions"><button type="button" className="primary" onClick={openAddTile}><Plus size={14} /> Add tile</button><button type="button" onClick={() => { setAiScope('page'); setCopilotOpen(true); }}><Sparkles size={14} /> Draft with AI</button></div> : null}</div> : null}
             </div>
             {canArrange && visibleItems.length ? <p id="studio-canvas-keys" className="studio-canvas-keys">Drag a tile by its header or resize it from its edges. With a tile selected: arrow keys move it, Shift + arrows resize, {modifierKeyLabel()}D duplicates, Delete removes, {modifierKeyLabel()}Z undoes.</p> : null}
             </>}
@@ -3367,6 +3405,17 @@ export function AppStudioV2({
         onConfirm={() => void refreshDatasetBinding(datasetRebindPrompt.sourceId, true)}
       /> : null}
       {markOverlays}
+      {tableDialogOpen ? <TableDatasetDialog
+        {...((draft.frame as { domain?: string }).domain ? { domain: (draft.frame as { domain?: string }).domain! } : {})}
+        onClose={() => setTableDialogOpen(false)}
+        onCreated={(sourceId) => {
+          setTableDialogOpen(false);
+          setPanel('sources');
+          setDataView('fields');
+          if (sourceId) setPendingDatasetSourceId(sourceId);
+          setCatalogRefreshNonce((current) => current + 1);
+        }}
+      /> : null}
       {deleteConfirmOpen ? <div className="proposal-scrim" role="dialog" aria-modal="true" aria-label="Delete local App draft"><section className="studio-delete-card"><span className="delete-mark"><Trash2 size={18} /></span><h2>Delete this local draft?</h2><p><strong>{draft.name}</strong> will leave the App list. Its pages, components, and local history move to a recovery bundle so you can Undo.</p><footer><button type="button" onClick={() => setDeleteConfirmOpen(false)} disabled={busy}>Cancel</button><button type="button" className="danger" onClick={() => void deleteLocalDraft()} disabled={busy}>{busy ? 'Deleting…' : 'Delete draft'}</button></footer></section></div> : null}
     </div>
   );
@@ -3433,7 +3482,7 @@ function PublishReadinessDialog({
     <section className="studio-readiness-card">
       <header>
         <span className={ready ? 'ready' : ''}>{ready ? <Check size={19} /> : <ShieldCheck size={19} />}</span>
-        <div><h2 id="publish-readiness-title">{ready ? 'Ready to publish' : `${blockerCount} ${blockerCount === 1 ? 'fix' : 'fixes'} before publishing`}</h2><p>{ready ? 'Every governed publication check passed.' : 'Complete the actions below. Each action updates this review automatically; there is no separate recheck loop.'}</p></div>
+        <div><h2 id="publish-readiness-title">{ready ? 'Ready to publish' : `${blockerCount} ${blockerCount === 1 ? 'fix' : 'fixes'} before publishing`}</h2><p>{ready ? 'Every check passed.' : 'Finish the items below; this review updates as you go.'}</p></div>
         <button type="button" className="icon" onClick={onClose} aria-label="Close publish checklist"><X size={16} /></button>
       </header>
       <div className="readiness-body">
@@ -3469,7 +3518,7 @@ function PublishReadinessDialog({
           <span className="step-mark"><Settings2 size={15} /></span>
           <div><strong>{issue.title}</strong><p>{issue.detail}</p><div className="readiness-actions">{issue.action === 'filters' ? <button type="button" className="primary" onClick={onOpenFilters}><Filter size={13} /> Open Filters</button> : issue.action === 'refresh_sources' ? <button type="button" className="primary" onClick={onRefreshSources} disabled={busy}><ShieldCheck size={13} /> Accept current certified source</button> : issue.action === 'preview' ? <button type="button" className="primary" onClick={onRunAllPreviews} disabled={busy}><Play size={13} /> {busy ? 'Refreshing previews…' : 'Refresh all page previews'}</button> : <button type="button" className="primary" onClick={onOpenSources}><Blocks size={13} /> Replace or remove source</button>}</div></div>
         </section>)}
-        {ready ? <div className="readiness-ready"><Check size={18} /><div><strong>Governed checks passed</strong><span>The published package will be Git-reviewable and no files are auto-staged or committed.</span></div></div> : null}
+        {ready ? <div className="readiness-ready"><Check size={18} /><div><strong>All checks passed</strong><span>Publishing saves the App as files in your project, ready to review in git. Nothing is committed for you.</span></div></div> : null}
       </div>
       <footer><button type="button" onClick={onClose} disabled={busy}>Back to editing</button>{ready ? <button type="button" className="primary" onClick={onRetry} disabled={busy}>{busy ? 'Publishing…' : 'Publish to Project'}</button> : <span className="readiness-footer-hint">Choose a fix above. This review updates as you work.</span>}</footer>
     </section>
@@ -3772,7 +3821,7 @@ function SourcesPanel({
     </div>
     {loading ? <div className="source-panel-state"><Sparkles size={16} /><div><strong>Finding governed sources</strong><small>Matching certified blocks and semantic data to this App decision.</small></div></div> : null}
     {!loading && error ? <div className="source-panel-state error"><X size={16} /><div><strong>Sources could not load</strong><small>{error}</small></div></div> : null}
-    {!loading && !error && visibleItems.length === 0 ? <div className="source-panel-state"><Search size={16} /><div><strong>{query.trim() || viewFilter !== 'all' ? 'No source matches these filters' : 'No governed source matched yet'}</strong><small>{query.trim() || viewFilter !== 'all' ? 'Clear the search or choose All to see every governed source.' : 'Refine the business decision or enable the review-required lane for additional local options.'}</small></div></div> : null}
+    {!loading && !error && visibleItems.length === 0 ? <div className="source-panel-state"><Search size={16} /><div><strong>{query.trim() || viewFilter !== 'all' ? 'No source matches these filters' : 'No certified data yet'}</strong><small>{query.trim() || viewFilter !== 'all' ? 'Clear the search or choose All to see every governed source.' : 'Start from a table in the Data tab, or allow data that needs review while you explore.'}</small></div></div> : null}
     <div className="source-catalog-list">{visibleItems.map((item) => {
       const kind = recommendedComponentKind(item);
       const isSelected = selected?.id === item.id;

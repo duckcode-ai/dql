@@ -217,6 +217,7 @@ import {
   DEFAULT_MODEL_AREA_ID,
   validateDatasetGrainProof,
   checkTileCalculations,
+  renderTableDatasetBlock,
 } from '@duckcodeailabs/dql-core';
 import {
   prepareDatasetDeclarationPatch,
@@ -717,6 +718,7 @@ import {
   type ConnectionMetadataScopeV1,
 } from './warehouse-metadata.js';
 import { syncWarehouseCatalog } from './warehouse-catalog-sync.js';
+import { TableDatasetError, applyTableDatasetChoices, draftTableDataset, listWarehouseTables } from './datasets/table-dataset.js';
 import {
   discoverWarehouseModel,
   observedJoinsFromQueries,
@@ -13201,10 +13203,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const acknowledgedVersion = prefs.setup?.acknowledgedVersion ?? null;
       const dbtAppliedVersion = prefs.setup?.dbtAppliedVersion ?? null;
       const shouldOpen = acknowledgedVersion !== runtimeVersion;
-      const configuredDbtSource = projectConfig.dbt?.repoUrl ?? projectConfig.dbt?.projectDir;
-      const configuredDbtRoot = findDbtProjectPath(projectRoot, projectConfig);
-      const dbtConfigured = existsSync(join(configuredDbtRoot, 'dbt_project.yml'))
-        || Boolean(configuredDbtSource && !/\{\{[^}]+\}\}/.test(configuredDbtSource));
+      const dbtConfigured = dbtProjectConfigured(projectRoot, projectConfig);
       const requiresDbtReapply = Boolean(
         shouldOpen
         && acknowledgedVersion
@@ -13227,10 +13226,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'POST' && path === '/api/onboarding/acknowledge') {
       const requestId = apiRequestId('onboarding-acknowledge');
       const prefs = readUserPrefs(userPrefsPath);
-      const configuredDbtSource = projectConfig.dbt?.repoUrl ?? projectConfig.dbt?.projectDir;
-      const configuredDbtRoot = findDbtProjectPath(projectRoot, projectConfig);
-      const dbtConfigured = existsSync(join(configuredDbtRoot, 'dbt_project.yml'))
-        || Boolean(configuredDbtSource && !/\{\{[^}]+\}\}/.test(configuredDbtSource));
+      const dbtConfigured = dbtProjectConfigured(projectRoot, projectConfig);
       const isVersionUpgrade = Boolean(
         prefs.setup?.acknowledgedVersion
         && prefs.setup.acknowledgedVersion !== runtimeVersion,
@@ -13260,9 +13256,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const requestId = apiRequestId('onboarding-status');
       const dbtProjectDir = findDbtProjectPath(projectRoot, projectConfig);
       const manifestPath = resolve(dbtProjectDir, projectConfig.dbt?.manifestPath ?? 'target/manifest.json');
-      const configuredDbtSource = projectConfig.dbt?.repoUrl ?? projectConfig.dbt?.projectDir;
-      const dbtConfigured = existsSync(join(dbtProjectDir, 'dbt_project.yml'))
-        || Boolean(configuredDbtSource && !/\{\{[^}]+\}\}/.test(configuredDbtSource));
+      const dbtConfigured = dbtProjectConfigured(projectRoot, projectConfig);
       const configuredProfilesDir = projectConfig.dbt?.profilesDir ? resolve(projectRoot, projectConfig.dbt.profilesDir) : undefined;
       const profilePath = findDbtProfilePaths(projectRoot, dbtProjectDir, configuredProfilesDir)[0];
       const registry = loadDomainPackageRegistry(projectRoot);
@@ -18105,6 +18099,101 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Start from a table (RFC 0009, "15-minute first page"): list the
+    // database's tables, propose a Dataset for one (checked against its rows),
+    // and save the author's choice as an ordinary Dataset block they own,
+    // through the same save-and-certify path as any saved block.
+    if (path === '/api/app-datasets/tables' || path === '/api/app-datasets/tables/draft' || path === '/api/app-datasets/tables/create') {
+      const reply = (status: number, body: Record<string, unknown>) => {
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(body));
+      };
+      try {
+        const active = requireActiveConnection();
+        const run = async (sql: string) => (await executor.executePositional(sql, [], active, { maxRows: 5_000, maxBytes: 16 * 1024 * 1024, batchSize: 1_000, deadlineMs: 60_000 })).rows as Array<Record<string, unknown>>;
+        const listing = await listWarehouseTables({ projectRoot, driver: active.driver, run });
+        if (req.method === 'GET' && path === '/api/app-datasets/tables') {
+          reply(200, {
+            ok: true,
+            source: listing.source,
+            tables: listing.tables.map(({ columns, ...table }) => ({ ...table, columnCount: columns.length })),
+          });
+          return;
+        }
+        if (req.method !== 'POST') {
+          reply(405, { ok: false, error: 'Use POST.' });
+          return;
+        }
+        const body = await readJSON(req) as Record<string, unknown>;
+        const table = listing.tables.find((candidate) => candidate.id === body.tableId);
+        if (!table) {
+          reply(404, { ok: false, error: 'That table is not in this database any more. Refresh the list.' });
+          return;
+        }
+        const drafted = await draftTableDataset({ table, driver: active.driver, run });
+        if (path === '/api/app-datasets/tables/draft') {
+          reply(200, { ok: true, table: { id: table.id, name: table.name, relation: table.relation }, rows: drafted.rows, proposal: drafted.proposal });
+          return;
+        }
+        const proposal = applyTableDatasetChoices(drafted.proposal, body.measures);
+        if (!proposal.key) {
+          reply(422, { ok: false, code: 'TABLE_DATASET_KEY_REQUIRED', error: `No column in ${table.name} is filled and different on every row, so DQL cannot count its rows safely. Choose a table with an id column.` });
+          return;
+        }
+        const blockName = (typeof body.name === 'string' ? body.name : '').replace(/["\\\n\r]/g, '').trim().slice(0, 80) || proposal.name;
+        const domain = (typeof body.domain === 'string' ? body.domain : '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'general';
+        const owner = resolveLocalOwner(projectRoot) ?? 'local';
+        const dialect = getDialect(active.driver);
+        const source = renderTableDatasetBlock({ proposal, blockName, domain, owner, columnSql: (name) => dialect.quoteIdentifier(name) });
+        const created = createBlockArtifacts(projectRoot, {
+          name: blockName,
+          domain,
+          owner,
+          content: source,
+          description: `${proposal.name} from ${table.name}, one row per ${proposal.key.entity.replace(/_/g, ' ')}.`,
+          tags: ['app-datasets', 'from-table'],
+          gitMetadata: readGitMetadata(projectRoot),
+        });
+        // The author who saves it owns it: it is certified when it compiles
+        // and runs, as a saved block is; its row identity is checked against
+        // the complete table before any tile trusts it.
+        let status: 'certified' | 'draft' = 'draft';
+        let blockers: string[] = [];
+        try {
+          const saved = readFileSync(join(projectRoot, created.path), 'utf-8');
+          const verdict = await certifyBlockStudioSource(saved, created.path);
+          blockers = Array.from(new Set(verdict.checklist.blockers));
+          if (verdict.certification.certified && blockers.length === 0) {
+            setBlockStudioStatus(projectRoot, created.path, 'certified');
+            status = 'certified';
+          }
+        } catch (error) {
+          blockers = [error instanceof Error ? error.message : String(error)];
+        }
+        await refreshLocalMetadataCatalog(projectRoot);
+        const found = queryAppSourceCatalog(projectRoot, { query: blockName, sourcePolicy: 'include_review_required', limit: 50 })
+          .items.find((item) => item.sourcePath === created.path);
+        let keyChecked = false;
+        if (found && status === 'certified') {
+          try {
+            await validateDatasetSourceGrain({ sourceId: found.sourceId });
+            keyChecked = true;
+          } catch {
+            // The first tile run checks it again; a failed check keeps the Dataset in review.
+          }
+        }
+        reply(201, { ok: true, path: created.path, status, blockers, keyChecked, ...(found ? { sourceId: found.sourceId } : {}) });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        reply(error instanceof TableDatasetError ? 409 : message === 'BLOCK_EXISTS' ? 409 : 400, {
+          ok: false,
+          ...(error instanceof TableDatasetError ? { code: error.code } : {}),
+          error: message === 'BLOCK_EXISTS' ? 'A Dataset with that name already exists. Choose another name.' : message,
+        });
       }
       return;
     }
@@ -40759,6 +40848,19 @@ function resolveBlockWriteTarget(
   }
   const relativePath = safeDomain ? `blocks/${safeDomain}/${folder}${slug}.dql` : `blocks/${folder}${slug}.dql`;
   return { relativePath, absPath: join(projectRoot, relativePath) };
+}
+
+/**
+ * Whether the project has a dbt project to read: a dbt_project.yml where DQL
+ * looks, a repository URL, or a configured folder that exists. A placeholder
+ * folder that does not exist (create-dql-app writes one) is not a dbt
+ * project; treating it as one hid the no-dbt path in Setup.
+ */
+function dbtProjectConfigured(projectRoot: string, projectConfig: ProjectConfig): boolean {
+  const template = /\{\{[^}]+\}\}/;
+  return existsSync(join(findDbtProjectPath(projectRoot, projectConfig), 'dbt_project.yml'))
+    || Boolean(projectConfig.dbt?.repoUrl && !template.test(projectConfig.dbt.repoUrl))
+    || Boolean(projectConfig.dbt?.projectDir && !template.test(projectConfig.dbt.projectDir) && existsSync(resolve(projectRoot, projectConfig.dbt.projectDir)));
 }
 
 export function createBlockArtifacts(

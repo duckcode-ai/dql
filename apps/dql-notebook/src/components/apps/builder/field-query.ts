@@ -26,11 +26,14 @@ export function groupDatasetFields(descriptor: DatasetDescriptor, search = ''): 
     || field.name.toLowerCase().includes(needle)
     || field.name.replace(/_/g, ' ').toLowerCase().includes(needle);
   const groups: FieldGroups = { measures: [], time: [], dimensions: [], review: [] };
+  // A number column that a measure adds up is shown once, as that measure.
+  const measureInputs = new Set(descriptor.fields.flatMap((field) => (field.kind === 'measure' ? field.dependsOn.map((name) => name.toLowerCase()) : [])));
   for (const field of descriptor.fields) {
     if (!matches(field)) continue;
     if (field.status !== 'approved') groups.review.push(field);
     else if (field.kind === 'measure') groups.measures.push(field);
     else if (field.role === 'time' || field.type === 'date' || field.type === 'timestamp') groups.time.push(field);
+    else if (field.role === 'attribute' && field.type === 'number' && measureInputs.has(field.name.toLowerCase())) continue;
     else groups.dimensions.push(field);
   }
   return groups;

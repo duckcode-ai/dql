@@ -1,5 +1,16 @@
 import type { DashboardVizEncoding } from '@duckcodeailabs/dql-core/apps/viz-encoding';
 import type { DashboardVizStyle } from '@duckcodeailabs/dql-core/apps/viz-style';
+import type { TableDatasetProposal } from '@duckcodeailabs/dql-core/datasets/table-draft';
+
+export interface WarehouseTableSummary {
+  id: string;
+  name: string;
+  schema?: string;
+  relation: string;
+  kind: string;
+  columnCount: number;
+  rowCountEstimate?: number;
+}
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
 import { normalizeDqlArtifactReference, type DqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
@@ -8458,6 +8469,33 @@ export const api = {
       return await request('/api/app-datasets/field-values', { method: 'POST', body: JSON.stringify({ sourceId, field }) });
     } catch (error) {
       return { ok: false, values: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+
+  /** Start from a table: the database's tables (RFC 0009, first page). */
+  async listWarehouseTables(): Promise<{ ok: boolean; source?: 'catalog' | 'live'; tables: WarehouseTableSummary[]; error?: string; code?: string }> {
+    try {
+      return await request('/api/app-datasets/tables');
+    } catch (error) {
+      return { ok: false, tables: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+
+  /** What DQL proposes for one table, checked against its rows. */
+  async draftTableDataset(tableId: string): Promise<{ ok: boolean; rows?: number; proposal?: TableDatasetProposal; table?: { id: string; name: string; relation: string }; error?: string }> {
+    try {
+      return await request('/api/app-datasets/tables/draft', { method: 'POST', body: JSON.stringify({ tableId }) });
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  },
+
+  /** Save the author's choice as a Dataset they own. */
+  async createTableDataset(input: { tableId: string; name: string; domain?: string; measures: Array<{ name: string; include: boolean; format: string; currency?: string }> }): Promise<{ ok: boolean; status?: 'certified' | 'draft'; sourceId?: string; path?: string; blockers?: string[]; keyChecked?: boolean; error?: string }> {
+    try {
+      return await request('/api/app-datasets/tables/create', { method: 'POST', body: JSON.stringify(input) });
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
 

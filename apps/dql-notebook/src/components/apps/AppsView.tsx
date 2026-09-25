@@ -134,7 +134,7 @@ interface AgentSkillCard {
   description: string;
 }
 
-const DEFAULT_PROMPT = 'Build an analytics app from my certified DQL blocks and available warehouse tables.';
+const DEFAULT_PROMPT = 'A weekly revenue dashboard: revenue by month, the top regions, and the latest orders.';
 const ACTIVE_APP_BUILD_STORAGE_KEY = 'dql.apps.active-ai-build.v1';
 const APP_DASHBOARD_FILTER_VALUES_STORAGE_PREFIX = 'dql.apps.dashboard-filter-values.v1:';
 
@@ -731,7 +731,7 @@ export function AppsView(): JSX.Element {
     setBuilderMode(config.mode === 'ai' ? 'ai' : 'classic');
     setBuilderExploreGaps(config.sourcePolicy === 'include_review_required');
     setBuilderTemplate(config.template);
-    setBuilderPrompt(config.mode === 'ai' ? config.prompt : 'Create a governed analytical App');
+    setBuilderPrompt(config.mode === 'ai' ? config.prompt : 'A dashboard of live, checked numbers');
     setBuilderName(config.mode === 'manual' ? config.name : '');
     setBuilderDomain((current) => resolveAuthoredDomainId(current, state.authoredDomains));
     setBuilderAudience('stakeholders');

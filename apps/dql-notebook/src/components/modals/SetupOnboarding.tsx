@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, ArrowRight, Boxes, FileText, MessageCircleQuestion, Sparkles } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Boxes, FileText, LayoutDashboard, MessageCircleQuestion, Sparkles } from 'lucide-react';
 import { api, type ProviderSettings, type SetupLaunchResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
@@ -8,7 +8,7 @@ import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
 import { DbtProjectEditor, type DbtProjectConfigured } from '../settings/DbtProjectEditor';
 
 type SetupState = 'missing' | 'configured' | 'passed';
-type SetupTarget = 'domains' | 'ask' | 'notebook';
+type SetupTarget = 'domains' | 'ask' | 'notebook' | 'apps';
 
 function hasRealConnection(connections: Record<string, unknown>): boolean {
   return Object.values(connections).some((value) => {
@@ -257,7 +257,8 @@ export function SetupOnboarding({
                 {aiState === 'missing' || aiSkipped ? <div style={{ fontSize: 12, color: t.textMuted, marginTop: 7 }}>AI is not configured. Deterministic and non-AI workflows remain available; return to Settings when you want governed Ask.</div> : null}
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 11 }}>
-                <StartCard icon={<Boxes size={17} />} title="Build your domain" body="Add models, relationships, business terms, and skills." action="Open Modeling" onClick={() => finishTo('domains')} t={t} primary />
+                <StartCard icon={<LayoutDashboard size={17} />} title="Build a dashboard" body="Pick a table from your database and publish a page with live, checked numbers." action="Build an App" onClick={() => finishTo('apps')} t={t} primary />
+                <StartCard icon={<Boxes size={17} />} title="Build your domain" body="Add models, relationships, business terms, and skills." action="Open Modeling" onClick={() => finishTo('domains')} t={t} />
                 <StartCard icon={<MessageCircleQuestion size={17} />} title="Ask" body={aiState === 'missing' || aiSkipped ? 'Open Ask in limited mode; configure AI before a governed model answer.' : 'Ask a business question grounded in your governed context.'} action="Open Ask" onClick={() => finishTo('ask')} t={t} />
                 <StartCard icon={<FileText size={17} />} title="Research notebook" body="Work with SQL, DQL, and charts, then save reusable blocks." action="New notebook" onClick={() => finishTo('notebook')} t={t} />
               </div>

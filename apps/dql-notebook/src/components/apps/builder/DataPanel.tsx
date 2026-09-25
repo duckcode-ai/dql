@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CalendarDays, Check, ChevronDown, Hash, Heading, Search, ShieldCheck, Type, X } from 'lucide-react';
+import { CalendarDays, Check, ChevronDown, Hash, Heading, Search, ShieldCheck, Table2, Type, X } from 'lucide-react';
 import type { AppBlockRecommendation } from '../../../api/client';
 import type { DatasetDescriptor, DatasetField } from '@duckcodeailabs/dql-core/datasets/descriptor';
 import type { TileQuery } from '@duckcodeailabs/dql-core/apps/tile-query';
@@ -25,7 +25,9 @@ export function DataPanel({
   onChooseDataset,
   onPickField,
   onBrowseSources,
+  onStartFromTable,
   onAddContent,
+  loading = false,
 }: {
   datasets: AppBlockRecommendation[];
   active: AppBlockRecommendation | null;
@@ -34,7 +36,11 @@ export function DataPanel({
   onChooseDataset: (item: AppBlockRecommendation) => void;
   onPickField: (field: DatasetField) => void;
   onBrowseSources: () => void;
+  /** Start a Dataset from a table in the database. */
+  onStartFromTable?: () => void;
   onAddContent: (kind: 'heading' | 'text') => void;
+  /** The list of Datasets is still loading. */
+  loading?: boolean;
 }): JSX.Element {
   const [search, setSearch] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -63,11 +69,11 @@ export function DataPanel({
   const measureGlyph = <span className="sigma">Σ</span>;
   return <div className="data-panel">
     <div className="dataset-picker">
-      <button type="button" className="dataset-current" aria-expanded={pickerOpen} onClick={() => setPickerOpen((open) => !open)} disabled={!datasets.length}>
+      <button type="button" className="dataset-current" aria-expanded={pickerOpen} onClick={() => setPickerOpen((open) => !open)} disabled={!datasets.length && !onStartFromTable}>
         <span className="dataset-icon"><TableGlyph /></span>
         <span className="dataset-text">
-          <strong>{active ? humanize(active.name) : 'Choose a Dataset'}</strong>
-          {active ? <small className={active.status === 'certified' ? 'certified' : 'review'}>{active.status === 'certified' ? <><ShieldCheck size={11} /> Certified</> : 'Needs review'}{descriptor?.grain.description ? ` · ${descriptor.grain.description}` : descriptor ? ` · ${descriptor.fields.length} fields` : ''}</small> : <small>{datasets.length} available</small>}
+          <strong>{active ? humanize(active.name) : datasets.length ? 'Choose your data' : 'No data yet'}</strong>
+          {active ? <small className={active.status === 'certified' ? 'certified' : 'review'}>{active.status === 'certified' ? <><ShieldCheck size={11} /> Certified</> : 'Needs review'}{descriptor ? ` · ${descriptor.fields.length} fields` : ''}</small> : <small>{datasets.length ? `${datasets.length} available` : 'Start from a table'}</small>}
         </span>
         <ChevronDown size={14} />
       </button>
@@ -77,7 +83,8 @@ export function DataPanel({
           {item.id === active?.id ? <Check size={13} /> : null}
         </button>)}
         <hr />
-        <button type="button" role="menuitem" onClick={() => { setPickerOpen(false); onBrowseSources(); }}><span><strong>Blocks and all sources…</strong><small>Certified blocks, metrics, review lane</small></span></button>
+        {onStartFromTable ? <button type="button" role="menuitem" onClick={() => { setPickerOpen(false); onStartFromTable(); }}><span><strong>Start from a table…</strong><small>Pick a table in your database</small></span></button> : null}
+        <button type="button" role="menuitem" onClick={() => { setPickerOpen(false); onBrowseSources(); }}><span><strong>Saved queries and all sources…</strong><small>Blocks, metrics and data that needs review</small></span></button>
       </div> : null}
     </div>
 
@@ -99,7 +106,15 @@ export function DataPanel({
       {groups.dimensions.length ? <section><h3>Dimensions</h3>{groups.dimensions.map((field) => fieldRow(field, field.kind === 'physical' && field.role === 'key' ? 'key' : '', field.kind === 'physical' && field.role === 'key' ? <Hash size={13} /> : <span className="aa">Aa</span>))}</section> : null}
       {groups.review.length ? <section><h3>Needs review</h3>{groups.review.map((field) => fieldRow(field, '', field.kind === 'measure' ? measureGlyph : <span className="aa">Aa</span>, true))}</section> : null}
       {!groups.measures.length && !groups.time.length && !groups.dimensions.length && !groups.review.length ? <p className="field-empty">No field matches “{search}”.</p> : null}
-    </div> : <p className="field-empty">{datasets.length ? 'Choose a Dataset to see its fields.' : 'No governed Dataset is available yet.'} <button type="button" onClick={onBrowseSources}>Browse all sources</button></p>}
+    </div> : datasets.length || loading ? <p className="field-empty">{loading && !datasets.length ? 'Looking for your data…' : 'Choose your data to see its fields.'} <button type="button" onClick={onBrowseSources}>Browse all sources</button></p> : (
+      <div className="data-start">
+        <Table2 size={20} aria-hidden="true" />
+        <strong>Start with a table</strong>
+        <p>Pick a table in your database. DQL suggests what to add up, count and group by; you check it once, then build tiles from it.</p>
+        {onStartFromTable ? <button type="button" className="primary" disabled={disabled} onClick={onStartFromTable}>Start from a table</button> : null}
+        <button type="button" className="link" onClick={onBrowseSources}>Use a saved query instead</button>
+      </div>
+    )}
 
     <div className="panel-section-label"><span>Page elements</span><small>No data needed</small></div>
     <div className="content-quick-add compact">

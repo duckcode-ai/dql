@@ -78,3 +78,12 @@ export type {
   DatasetAggregateComponentRequirementDiagnostic,
   DatasetAggregateComponentRequirements,
 } from './component-proof.js';
+export {
+  applyTableProfile,
+  proposeTableDataset,
+  renderTableDatasetBlock,
+  tableColumnKind,
+  tableProfileColumns,
+  wordsFor,
+} from './table-draft.js';
+export type { TableColumnInput, TableColumnKind, TableDatasetField, TableDatasetMeasure, TableDatasetProposal, TableProfile } from './table-draft.js';

@@ -79,6 +79,10 @@
       "types": "./dist/apps/reader-trust.d.ts",
       "import": "./dist/apps/reader-trust.js"
     },
+    "./datasets/table-draft": {
+      "types": "./dist/datasets/table-draft.d.ts",
+      "import": "./dist/datasets/table-draft.js"
+    },
     "./datasets/descriptor": {
       "types": "./dist/datasets/descriptor.d.ts",
       "import": "./dist/datasets/descriptor.js"
