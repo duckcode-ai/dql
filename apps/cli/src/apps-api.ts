@@ -8,6 +8,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync,
 import { createHash, randomUUID } from 'node:crypto';
 import { join, dirname, relative, basename } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { hostActor } from './host/request-context.js';
 import type {
   AgentAnswer,
   AgentResultPayload,
@@ -1246,7 +1247,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         runId,
         snapshotId: verified.snapshotId,
         expectedDashboardFingerprint: cleanString(body.expectedDashboardFingerprint),
-        reviewer: cleanString(body.reviewer) || 'local-reviewer',
+        reviewer: hostActor() ?? (cleanString(body.reviewer) || 'local-reviewer'),
       });
       sendJson(res, result.ok ? 200 : 409, result);
     } catch (err) {

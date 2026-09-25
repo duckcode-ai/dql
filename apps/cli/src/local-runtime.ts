@@ -733,6 +733,7 @@ import {
 } from "./notebook-datasets.js";
 import { prepareBlockInvocation } from './block-invocation.js';
 import { redactConnections, resolveSecretReferences, storeConnectionSecrets } from './connection-secrets.js';
+import { currentPrincipal, hostActor, resolveHostPrincipal, withRequestContext, type DqlHostHooks } from './host/request-context.js';
 import { boundAgentSchemaColumns, mergeAgentSchemaCompleteness } from './ask-schema-context.js';
 
 export const APP_SOURCE_REUSABLE_TAG = 'app-source';
@@ -1006,6 +1007,12 @@ export interface LocalServerOptions {
   host?: string;
   /** Required for non-loopback bindings. Defaults to `DQL_SERVER_TOKEN`. */
   authToken?: string;
+  /**
+   * RFC 0010: a program embedding DQL says who is asking. With
+   * `resolvePrincipal`, every `/api/` request (except `/api/health`) runs as
+   * the person it returns, and it replaces the shared-token check.
+   */
+  hostHooks?: DqlHostHooks;
   /** Exact browser origins allowed for non-loopback API access. */
   allowedOrigins?: string[];
   /**
@@ -4860,7 +4867,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const allowedOrigins = new Set((opts.allowedOrigins ?? (process.env.DQL_ALLOWED_ORIGINS ?? '').split(','))
     .map((value) => value.trim().replace(/\/$/, ''))
     .filter(Boolean));
-  if (!loopback && !authToken) {
+  const hostHooks = opts.hostHooks;
+  const hostIdentity = typeof hostHooks?.resolvePrincipal === 'function';
+  if (!loopback && !authToken && !hostIdentity) {
     throw new Error('Non-loopback DQL server binding requires DQL_SERVER_TOKEN (or LocalServerOptions.authToken).');
   }
   if (!loopback && allowedOrigins.size === 0) {
@@ -13118,7 +13127,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       res.end();
       return;
     }
-    if (!loopback && path.startsWith('/api/') && path !== '/api/health') {
+    if (!hostIdentity && !loopback && path.startsWith('/api/') && path !== '/api/health') {
       const authorization = req.headers.authorization ?? '';
       if (authorization !== `Bearer ${authToken}`) {
         res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8', 'WWW-Authenticate': 'Bearer' });
@@ -13126,6 +13135,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         return;
       }
     }
+
+    // RFC 0010 HH-1: when a host says who is asking, every API request runs
+    // as that person, and a request the host cannot place is refused.
+    let requestPrincipal: Awaited<ReturnType<typeof resolveHostPrincipal>> = null;
+    if (hostIdentity && path.startsWith('/api/') && path !== '/api/health') {
+      requestPrincipal = await resolveHostPrincipal(hostHooks!, req);
+      if (!requestPrincipal) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Sign in to use DQL.' }));
+        return;
+      }
+    }
+    return withRequestContext(requestPrincipal ? { principal: requestPrincipal, requestId: randomUUID() } : undefined, async () => {
 
     // Existing `dql notebook` runtimes cannot hand their in-memory capability
     // to a later CLI process. A short-lived challenge is therefore issued only
@@ -16141,7 +16163,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/identity') {
       try {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ owner: resolveLocalOwner(projectRoot) }));
+        const principal = currentPrincipal();
+        res.end(serializeJSON(principal
+          ? { owner: hostActor(), principal: { id: principal.id, kind: principal.kind, displayName: principal.displayName, email: principal.email, groups: principal.groups ?? [] } }
+          : { owner: resolveLocalOwner(projectRoot) }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -17432,9 +17457,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const hintId = decodeURIComponent(hintLifecycleMatch[1]);
         const body = await readJSON(req).catch(() => null) as Record<string, unknown> | null;
         const action = body?.action;
-        const reviewer = typeof body?.reviewer === 'string' && body.reviewer.trim()
+        const reviewer = hostActor() ?? (typeof body?.reviewer === 'string' && body.reviewer.trim()
           ? body.reviewer.trim()
-          : (resolveLocalOwner(projectRoot) ?? 'local');
+          : (resolveLocalOwner(projectRoot) ?? 'local'));
         const note = typeof body?.note === 'string' && body.note.trim() ? body.note.trim() : undefined;
         let result;
         if (action === 'retire') {
@@ -17484,9 +17509,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: "decision must be 'approved' or 'rejected'." }));
           return;
         }
-        const reviewer = typeof body?.reviewer === 'string' && body.reviewer.trim()
+        const reviewer = hostActor() ?? (typeof body?.reviewer === 'string' && body.reviewer.trim()
           ? body.reviewer.trim()
-          : (resolveLocalOwner(projectRoot) ?? 'local');
+          : (resolveLocalOwner(projectRoot) ?? 'local'));
         const note = typeof body?.note === 'string' && body.note.trim() ? body.note.trim() : undefined;
         const snapshotId = projectSnapshot().snapshotId;
         const reviewed = await reviewGovernedHint(projectRoot, {
@@ -17538,7 +17563,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
       const wrongSql = typeof body.wrongSql === 'string' ? body.wrongSql.trim() : '';
       const rationale = typeof body.rationale === 'string' && body.rationale.trim() ? body.rationale.trim() : undefined;
-      const author = typeof body.author === 'string' ? body.author : (resolveLocalOwner(projectRoot) ?? undefined);
+      const author = hostActor() ?? (typeof body.author === 'string' ? body.author : (resolveLocalOwner(projectRoot) ?? undefined));
       try {
         // dbt-first manifest v3 requires reviewable provenance before a correction
         // may be recorded at all. The client cannot know most of it, so derive it
@@ -18161,7 +18186,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         const blockName = (typeof body.name === 'string' ? body.name : '').replace(/["\\\n\r]/g, '').trim().slice(0, 80) || proposal.name;
         const domain = (typeof body.domain === 'string' ? body.domain : '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'general';
-        const owner = resolveLocalOwner(projectRoot) ?? 'local';
+        const owner = hostActor() ?? resolveLocalOwner(projectRoot) ?? 'local';
         const dialect = getDialect(active.driver);
         const source = renderTableDatasetBlock({ proposal, blockName, domain, owner, columnSql: (name) => dialect.quoteIdentifier(name) });
         const created = createBlockArtifacts(projectRoot, {
@@ -23187,7 +23212,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
         operationCoordinator.run(operation.id, async (signal, report) => {
           const result = await certifyBlockStudioSource(draftSource, draftPath, {
-            enterprise: body.enterprise === true,
+            enterprise: hostIdentity ? hostHooks?.enterpriseCertification === true : body.enterprise === true,
             reportProgress: (progress) => {
               if (signal.aborted) throw Object.assign(new Error('Certification cancelled.'), { code: 'OPERATION_CANCELLED' });
               report(progress);
@@ -23316,7 +23341,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         // Read-only certification assessment for repair/review workflows. It
         // deliberately does not write source, receipts, learning, or indexes.
-        const result = await certifyBlockStudioSource(source, null, { enterprise: body.enterprise === true });
+        const result = await certifyBlockStudioSource(source, null, { enterprise: hostIdentity ? hostHooks?.enterpriseCertification === true : body.enterprise === true });
         const blockers = Array.from(new Set(result.checklist.blockers));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
@@ -23345,7 +23370,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // a successful run are the gate; grain/outputs/pattern/lineage/cadence are
         // AI-filled advisory warnings, not hard blockers. Enterprise-grade certification
         // (all of those required) is an opt-in for the cloud tier — request it explicitly.
-        const result = await certifyBlockStudioSource(source, blockPath, { enterprise: body.enterprise === true });
+        const result = await certifyBlockStudioSource(source, blockPath, { enterprise: hostIdentity ? hostHooks?.enterpriseCertification === true : body.enterprise === true });
         const blockers = Array.from(new Set(result.checklist.blockers));
         if (!result.certification.certified || blockers.length > 0) {
           if (blockPath && result.preview) writeBlockStudioRunSummary(projectRoot, blockPath, source, result.preview.result);
@@ -27709,6 +27734,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       'Content-Length': content.byteLength,
     });
     res.end(content);
+    });
     })().catch((error) => {
       // API-007/E2E-014: no rejected request promise may terminate the local
       // notebook process. Route-specific handlers should still return their
@@ -32110,7 +32136,7 @@ export function buildProposeReadiness(
   const summary: ProposeSummary = propose({
     projectRoot,
     dbtManifestPath: manifestPath,
-    owner: options.owner || resolveLocalOwner(projectRoot, { persist: false }),
+    owner: options.owner || hostActor() || resolveLocalOwner(projectRoot, { persist: false }),
     limit: options.limit,
     dryRun: true,
     config: proposeConfig,
@@ -32411,7 +32437,7 @@ export function buildSemanticCompostingChangeset(
 
   const minSupport = Math.max(2, Math.floor(options.minSupport ?? 2));
   const limit = Number.isFinite(options.limit) && Number(options.limit) > 0 ? Math.floor(Number(options.limit)) : 10;
-  const owner = options.owner?.trim() || resolveLocalOwner(projectRoot, { persist: false });
+  const owner = options.owner?.trim() || hostActor() || resolveLocalOwner(projectRoot, { persist: false });
   const existingMetricNames = new Set(
     Object.entries(manifest.metrics ?? {})
       .filter(([, metric]) => !isSemanticDraftMetricPath(metric.filePath))
@@ -33098,7 +33124,7 @@ export async function generateProposeDrafts(
     dbtManifestPath: manifestPath,
     // Stamp the resolved local OSS owner when none was passed so drafts are not
     // born with a "Missing owner" Certifier strike.
-    owner: options.owner || resolveLocalOwner(projectRoot),
+    owner: options.owner || hostActor() || resolveLocalOwner(projectRoot),
     config: projectConfig.propose,
     onlySlugs: slugs,
     enrichedBySlug,
@@ -33138,7 +33164,7 @@ export async function buildProposeCandidatePreview(
 
   return buildProposePreview(projectRoot, manifestPath, slug, {
     config: projectConfig.propose,
-    owner: owner || resolveLocalOwner(projectRoot),
+    owner: owner || hostActor() || resolveLocalOwner(projectRoot),
     enriched,
   });
 }
@@ -33358,7 +33384,7 @@ export function applyProjectWarehouseDiscovery(projectRoot: string, report: Ware
   const domains = report.domains.filter((domain) => entities.some((entity) => entity.domain === domain.id));
   // Reading the owner must not write it: that would change the project's
   // sources under the batch being applied.
-  const changes = warehouseDiscoveryChanges({ ...report, domains, entities, relationships }, { owner: resolveLocalOwner(projectRoot, { persist: false }) ?? undefined });
+  const changes = warehouseDiscoveryChanges({ ...report, domains, entities, relationships }, { owner: hostActor() ?? resolveLocalOwner(projectRoot, { persist: false }) ?? undefined });
   if (changes.length === 0) return { changes: 0, paths: [] };
   const preview = previewModelingChanges(projectRoot, changes);
   const applied = applyModelingChanges(projectRoot, changes, preview.fingerprint);

@@ -93,6 +93,9 @@ export interface DqlHostHooks {
   /** Who is asking. null → 401. Replaces the shared-token check when present. */
   resolvePrincipal?(req: IncomingMessage): Promise<DqlPrincipal | null>;
 
+  /** Certify with every enterprise gate required; with a host, the host decides, not the request. */
+  enterpriseCertification?: boolean;
+
   /** May this principal do this? Called at route dispatch and before tool calls. */
   authorize?(principal: DqlPrincipal, action: DqlAction, resource: DqlResource): Promise<DqlDecision>;
 
@@ -152,7 +155,7 @@ program imports a supported API rather than a file path.
    - `resolvePrincipal` returning null gives a 401;
    - a `DqlRefusal` from `rowPolicy` or `credentials` is shown to the person, never retried with broader rights.
 2. **Never fall back to a service credential.** If `credentials` refuses (for example, the person's warehouse token has expired), the answer is "reconnect", not a quiet retry as the service account.
-3. **The request body no longer names actors.** Certification, reviews, ownership and authorship are stamped from `currentPrincipal()`. When a principal exists, request fields such as `reviewer`, `author` and `owner` are ignored. The rule set a certification uses (`enterprise`) comes from the host, not the request.
+3. **With a host, the request body no longer names actors.** Reviews, correction authors and the default owner of new content are stamped from the host's principal, and request fields such as `reviewer` and `author` are ignored. A content `owner` the author types (for example a team) stays content metadata; only its default comes from the person. The rule set a certification uses (`enterprise`) comes from the host, not the request. With no hooks, today's behaviour is kept exactly: the local owner, and names from the body. Recording who certified what is part of the audit sink (HH-6).
 4. **One query path.** Every warehouse query goes through `ExecutionService.execute` or `executePreparedAgenticSqlBoundary`, including AI-written SQL. That path calls `rowPolicy` exactly once. A test enumerates direct `executeQuery` call sites and fails when a new one appears outside the allowlist.
 5. **Caches are keyed by access.** The Dataset result cache already includes the persona policy fingerprint. It adds the principal's policy fingerprint, the hash of what `rowPolicy` returned, and the credential id.
 6. **Records carry the person.** Runs, threads, memory items and trace spans record `principal.id`. With no hooks this is the local owner, so existing SQLite files gain a column with a default.
@@ -191,7 +194,7 @@ identical.
 
 | Slice | Contents | Check |
 |---|---|---|
-| HH-1 | Request context, `resolvePrincipal`, `currentPrincipal()`; actors stamped from the principal; `startLocalServer` exported | A test server with a fake `resolvePrincipal` gets `certifiedBy` and review actors from the principal and ignores body-supplied ones; the no-hooks suite passes unchanged |
+| HH-1 | Request context, `resolvePrincipal`, `currentPrincipal()`; actors stamped from the principal; certification mode from the host; `startLocalServer` exported as `@duckcodeailabs/dql-cli/host` | A test server with a fake `resolvePrincipal` refuses unplaced requests (401, health open), answers overlapping requests as their own people, and records the principal as correction author and hint reviewer despite other names in the body; with no hooks, `/api/identity` and body-supplied names are unchanged |
 | HH-2 | `authorize` at route dispatch; the persona registry reads the request context | Two concurrent requests with different principals see different App access; switching the persona in one request does not affect the other |
 | HH-3 | One query path plus `rowPolicy`; cache keys by access | Call-site allowlist test; two principals, same question, different rows, from both a certified Dataset and AI-written SQL; a `rowPolicy` refusal stops the query |
 | HH-4 | `credentials` and a connector factory registry (the documented plugin seam) | Pool keyed by credential id; a refusal gives "reconnect", never a service-account retry |
@@ -199,6 +202,12 @@ identical.
 | HH-6 | Store interfaces and injection (runs, memory, conversations, traces, audit); OTLP trace export | Stores swapped for in-memory fakes in tests; a principal id on every record |
 | HH-7 | `tools` gateway around MCP and native tool calls; MCP HTTP transport with a host authenticator | A gateway that refuses `tool.run_sql` blocks it in both paths |
 | HH-8 | `schedules`, `delivery`, `signing`, `git` | A schedule runs as its owner's principal; a delivery sink receives the digest |
+
+## Progress
+
+| Slice | Status |
+|---|---|
+| HH-1 | Implemented 2026-09-25 on `claude/oss-security-fixes` (`apps/cli/src/host/`, tests in `host-hooks.test.ts`); awaiting independent verification |
 
 ## Backward compatibility
 

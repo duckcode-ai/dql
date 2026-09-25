@@ -7,6 +7,14 @@
   "bin": {
     "dql": "./dist/index.js"
   },
+  "exports": {
+    "./host": {
+      "types": "./dist/host/index.d.ts",
+      "import": "./dist/host/index.js"
+    },
+    "./package.json": "./package.json",
+    "./dist/*": "./dist/*"
+  },
   "scripts": {
     "build": "pnpm --filter @duckcodeailabs/dql-notebook-app build && rm -rf dist tsconfig.tsbuildinfo && tsc -b && node ./scripts/copy-runtime-assets.mjs",
     "dev": "tsx src/index.ts",
