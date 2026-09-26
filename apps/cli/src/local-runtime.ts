@@ -552,7 +552,7 @@ import {
 } from './apps-api.js';
 import { listStoryEditions, recordStoryEdition, storyEditionScope } from './story/story-editions.js';
 import { addPageMonitor, listPageMonitors, MonitorStoreError, removePageMonitor } from './schedule/app-monitor-store.js';
-import { loadOrCreateSnapshotKey, readSnapshotPublicKey, signSnapshot, snapshotBodyIssues, snapshotFigures, snapshotFileName } from './snapshot/app-snapshot.js';
+import { loadOrCreateSnapshotKey, localSnapshotSigner, readSnapshotPublicKey, signSnapshotWith, snapshotBodyIssues, snapshotFigures, snapshotFileName } from './snapshot/app-snapshot.js';
 import { dashboardDriverProbeItem, dashboardExploreProbeItem, expandDashboardDriverItems, foldDashboardDriverTiles, withDriverFilterScopes } from './datasets/dashboard-drivers.js';
 import { compileDatasetTileQuery, type CompiledDatasetTileQuery } from './datasets/tile-query-compiler.js';
 import { summarizeDatasetChartFacts } from './datasets/dataset-chart-fact-summary.js';
@@ -734,7 +734,9 @@ import {
 } from "./notebook-datasets.js";
 import { prepareBlockInvocation } from './block-invocation.js';
 import { redactConnections, resolveSecretReferences, storeConnectionSecrets } from './connection-secrets.js';
-import { authorizeHostRequest, currentPrincipal, hostActor, hostModelProvider, installHostPersonaSlots, resolveHostPrincipal, resultValuesMayReachModel, setHostModelHooks, withRequestContext, type DqlHostHooks } from './host/request-context.js';
+import { authorizeHostRequest, currentHostGitHooks, currentPrincipal, hostActor, hostGitAuthor, hostModelProvider, installHostPersonaSlots, resolveHostPrincipal, resultValuesMayReachModel, setHostGitHooks, setHostModelHooks, withRequestContext, type DqlHostHooks } from './host/request-context.js';
+import { isRunPass, issueRunPass, redeemRunPass, revokeRunPass } from './host/schedule-runs.js';
+import { setDeliverySink } from './schedule/notifiers/index.js';
 import { routeAction } from './host/route-actions.js';
 import { withHostQueryHooks } from './host/row-policy.js';
 import { auditActor, auditRequest, otlpHeadersFromEnv, withAnswerAudit, withTraceExport } from './host/observability.js';
@@ -4879,6 +4881,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const hostHooks = opts.hostHooks;
   // RFC 0010 HH-5: the host's model and privacy boundary, for provider selection.
   setHostModelHooks(hostHooks);
+  // HH-8: the host's delivery, and its git host for review requests.
+  setDeliverySink(hostHooks?.delivery ?? null);
+  setHostGitHooks(hostHooks?.git);
   // HH-7: every tool an agent runs in this process passes the host's gate.
   setAgentToolGate(hostHooks?.tools
     ? (call, next) => hostHooks.tools!({ ...call, principal: currentPrincipal() ?? null }, next)
@@ -13161,10 +13166,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // is reported to the host's audit sink, with who it was once known.
     const auditWho: { principal: import('./host/request-context.js').DqlPrincipal | null; actor: string | null; requestId?: string } = { principal: null, actor: null };
     if (hostHooks?.audit && path.startsWith('/api/')) auditRequest(hostHooks.audit, req, res, path, routeAction(req.method, path), () => auditWho);
+    // HH-8: a scheduled page run carries its schedule owner through a pass
+    // this server issued, from this machine only, for that App's page runs.
+    const presentedBearer = (req.headers.authorization ?? '').startsWith('Bearer ') ? (req.headers.authorization ?? '').slice('Bearer '.length).trim() : '';
+    const runPass = isRunPass(presentedBearer) && isLoopbackRemoteAddress(req.socket.remoteAddress) ? redeemRunPass(presentedBearer, req.method, path) : null;
+    if (isRunPass(presentedBearer) && !runPass) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ error: 'This scheduled run is no longer valid.' }));
+      return;
+    }
+
     // A read-only link names one App (RFC 0010 HH-2); it never carries the
     // server's own token.
     let viewerAppId: string | undefined;
-    if (!hostIdentity && !loopback && path.startsWith('/api/') && path !== '/api/health') {
+    if (!runPass && !hostIdentity && !loopback && path.startsWith('/api/') && path !== '/api/health') {
       const authorization = req.headers.authorization ?? '';
       const bearer = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
       const viewer = authToken && isViewerToken(bearer) ? readViewerToken(authToken, bearer) : null;
@@ -13179,7 +13194,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     // RFC 0010 HH-1: when a host says who is asking, every API request runs
     // as that person, and a request the host cannot place is refused.
-    let requestPrincipal: Awaited<ReturnType<typeof resolveHostPrincipal>> = viewerAppId ? viewerPrincipal(viewerAppId) : null;
+    let requestPrincipal: Awaited<ReturnType<typeof resolveHostPrincipal>> = viewerAppId ? viewerPrincipal(viewerAppId) : runPass?.principal ?? null;
     if (requestPrincipal) Object.assign(auditWho, { principal: requestPrincipal, actor: auditActor(requestPrincipal) });
     if (viewerAppId) {
       const route = routeAction(req.method, path);
@@ -13193,7 +13208,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
     }
     if (hostIdentity && path.startsWith('/api/') && path !== '/api/health') {
-      requestPrincipal = await resolveHostPrincipal(hostHooks!, req);
+      if (!runPass) requestPrincipal = await resolveHostPrincipal(hostHooks!, req);
       if (!requestPrincipal) {
         res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: 'Sign in to use DQL.' }));
@@ -17715,6 +17730,42 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // RFC 0010 HH-8: an outside scheduler runs one App schedule as its owner.
+    // The page runs through the full-page run route under a short pass, so
+    // every check a reader's run gets applies, then delivery follows.
+    const scheduleRunRoute = path.match(/^\/api\/apps\/([^/]+)\/schedules\/([^/]+)\/run$/);
+    if (req.method === 'POST' && scheduleRunRoute) {
+      const appId = decodeURIComponent(scheduleRunRoute[1]!);
+      const scheduleId = decodeURIComponent(scheduleRunRoute[2]!);
+      // Loaded here: the scheduler imports this module.
+      const { listAppSchedules, runScheduledApp } = await import('./schedule/service.js');
+      const { createRuntimePageRunner } = await import('./schedule/app-page-run.js');
+      const schedule = listAppSchedules(projectRoot).find((entry) => entry.appId === appId && entry.scheduleId === scheduleId);
+      if (!schedule) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: `No schedule "${scheduleId}" in App "${appId}".` }));
+        return;
+      }
+      const pass = issueRunPass(currentPrincipal() ?? null, appId);
+      try {
+        const record = await runScheduledApp(schedule, {
+          projectRoot,
+          executor,
+          connection: requireActiveConnection(),
+          pageRunner: createRuntimePageRunner(`http://127.0.0.1:${req.socket.localPort}`, fetch, pass),
+          log: { log: () => undefined, error: () => undefined, warn: () => undefined } as unknown as Console,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: !record.error, appId, scheduleId, startedAt: record.startedAt, ...(record.error ? { error: record.error } : {}), tiles: record.queries.length, failedTiles: record.queries.filter((query) => query.error).length, notifications: record.notifications ?? [] }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      } finally {
+        revokeRunPass(pass);
+      }
+      return;
+    }
+
     // The project's snapshot signing key, public half only (RFC 0008 step 10).
     if (req.method === 'GET' && path === '/api/apps/snapshot-key') {
       const key = readSnapshotPublicKey(projectRoot);
@@ -17753,8 +17804,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const state = evidence.tileTrust?.[id];
           return state ? [state] : [];
         });
-        const key = loadOrCreateSnapshotKey(projectRoot);
-        const signed = signSnapshot({
+        // HH-8: a host's key service signs when it has one; the export names who made it.
+        const signer = hostHooks?.signing ?? localSnapshotSigner(loadOrCreateSnapshotKey(projectRoot));
+        const signedBy = hostActor();
+        const signed = await signSnapshotWith({
+          ...(signedBy ? { signedBy } : {}),
           appId,
           appTitle: manifest.apps?.[appId]?.name ?? appId,
           pageId: dashboardId,
@@ -17764,13 +17818,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           figures: snapshotFigures(evidence.storyBindings),
           trust: { certified: trusts.filter((state: string) => state === 'certified').length, total: trusts.length },
           body: pageBody,
-        }, key);
+        }, signer);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           ok: true,
           html: signed.html,
           fileName: snapshotFileName(appId, dashboardId, signed.manifest.createdAt),
-          keyId: key.id,
+          keyId: signer.id,
           contentSha256: signed.manifest.contentSha256,
           figures: signed.manifest.figures.length,
         }));
@@ -43679,7 +43733,9 @@ async function gitCommit(
   if (staged.code === 0 && !staged.stdout.trim()) {
     return { ok: false, error: 'Nothing is selected to keep. Include the changes you want to commit first.' };
   }
-  const res = await execGit(gitRoot, ['commit', '-m', trimmed]);
+  // RFC 0010 HH-8: with a host, the signed-in person authors the commit.
+  const author = hostGitAuthor();
+  const res = await execGit(gitRoot, author ? ['commit', '--author', author, '-m', trimmed] : ['commit', '-m', trimmed]);
   if (res.code !== 0) return { ok: false, error: gitErrorOutput(res) };
   const hashRes = await execGit(gitRoot, ['rev-parse', 'HEAD']);
   return { ok: true, hash: hashRes.code === 0 ? hashRes.stdout.trim() : undefined };
@@ -43740,6 +43796,18 @@ function gitHubCompareUrl(remoteUrl: string | null, branch: string, base: string
  * calls merge. Existing staged changes outside the requested files are blocked
  * so a review cannot accidentally include unrelated work.
  */
+/** A host's review request (HH-8), or null to use the GitHub CLI as before. */
+async function openHostPullRequest(input: { gitRoot: string; branch: string; base: string; title: string; body: string }): Promise<{ ok: true; url: string } | { ok: false; error: string } | null> {
+  const open = currentHostGitHooks()?.openPullRequest;
+  if (!open) return null;
+  try {
+    const { url } = await open({ ...input, principal: currentPrincipal() ?? null });
+    return { ok: true, url };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 async function gitCreateReview(cwd: string, input: { paths: string[]; title: string; body: string; base: string }): Promise<{
   ok: boolean; error?: string; branch?: string; hash?: string; prUrl?: string; warning?: string;
 }> {
@@ -43777,6 +43845,8 @@ async function gitCreateReview(cwd: string, input: { paths: string[]; title: str
 
   const remote = await readGitRemote(gitRoot);
   const compareUrl = gitHubCompareUrl(remote.url, branch, base);
+  const hostPr = await openHostPullRequest({ gitRoot, branch, base, title, body: input.body.trim() || `Review governed analytics changes: ${title}` });
+  if (hostPr) return hostPr.ok ? { ok: true, branch, hash: commit.hash, prUrl: hostPr.url } : { ok: true, branch, hash: commit.hash, prUrl: compareUrl, warning: `Branch pushed. The review request could not be opened: ${hostPr.error}` };
   const pr = await execGh(gitRoot, ['pr', 'create', '--base', base, '--head', branch, '--title', title, '--body', input.body.trim() || `Review governed analytics changes: ${title}`]);
   if (pr.code === 0) {
     const prUrl = (pr.stdout.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0]) ?? compareUrl;
@@ -43808,6 +43878,8 @@ async function gitOpenReview(cwd: string, input: { title: string; body: string; 
   const remote = await readGitRemote(gitRoot);
   if (!remote.url) return { ok: false, error: 'Add a Git remote before requesting review.' };
   const compareUrl = gitHubCompareUrl(remote.url, branch, base);
+  const hostPr = await openHostPullRequest({ gitRoot, branch, base, title, body: input.body.trim() || `Review governed analytics changes: ${title}` });
+  if (hostPr) return hostPr.ok ? { ok: true, branch, prUrl: hostPr.url } : { ok: true, branch, prUrl: compareUrl, warning: `The review request could not be opened: ${hostPr.error}` };
   const pr = await execGh(gitRoot, [
     'pr', 'create', '--base', base, '--head', branch, '--title', title,
     '--body', input.body.trim() || `Review governed analytics changes: ${title}`,

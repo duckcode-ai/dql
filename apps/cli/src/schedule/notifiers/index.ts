@@ -15,11 +15,37 @@ export interface NotificationDispatchResult {
   error?: string;
 }
 
+/**
+ * A host's delivery (RFC 0010 HH-8): its own mail, Slack app or signed
+ * webhooks in place of DQL's senders. Each target is handed over as it is;
+ * the host reports whether it went out.
+ */
+export type DeliverySink = (message: { type: string; recipients: string[]; payload: NotifierPayload }) => Promise<{ delivered: boolean; error?: string }>;
+
+let deliverySink: DeliverySink | null = null;
+/** Install the process's delivery sink, or remove it with null. */
+export function setDeliverySink(sink: DeliverySink | null): void {
+  deliverySink = sink;
+}
+
 export async function dispatchNotifications(
   notifications: DeliveryTarget[],
   payload: NotifierPayload,
   projectRoot: string,
 ): Promise<NotificationDispatchResult[]> {
+  if (deliverySink) {
+    const sink = deliverySink;
+    const delivered: NotificationDispatchResult[] = [];
+    for (const n of notifications) {
+      try {
+        const result = await sink({ type: n.type, recipients: n.recipients, payload });
+        delivered.push({ type: n.type, recipients: n.recipients, delivered: result.delivered === true, ...(result.error ? { error: result.error } : {}) });
+      } catch (error) {
+        delivered.push({ type: n.type, recipients: n.recipients, delivered: false, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return delivered;
+  }
   const notifiers: Record<string, Notifier> = {
     email: createEmailNotifier(),
     slack: createSlackNotifier(),

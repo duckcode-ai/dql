@@ -100,6 +100,23 @@ export interface DqlHostHooks {
    * result; throw to refuse. Queries a tool runs still pass `rowPolicy`.
    */
   tools?(call: { name: string; args: unknown; principal: DqlPrincipal | null }, next: () => Promise<unknown>): Promise<unknown>;
+  /**
+   * Delivery (HH-8): the host's mail, Slack app or signed webhooks in place
+   * of DQL's senders for digests and alerts.
+   */
+  delivery?: import('../schedule/notifiers/index.js').DeliverySink;
+  /**
+   * Signing (HH-8): a key service that signs exported snapshots with an
+   * Ed25519 key it never hands out; exports then name who exported them.
+   */
+  signing?: import('../snapshot/app-snapshot.js').SnapshotSigner;
+  /**
+   * Git (HH-8): commits are authored as the signed-in person (when they have
+   * an email); `openPullRequest` replaces the GitHub CLI for review requests.
+   */
+  git?: {
+    openPullRequest?(input: { gitRoot: string; branch: string; base: string; title: string; body: string; principal: DqlPrincipal | null }): Promise<{ url: string }>;
+  };
   /** Each finished Ask trace, strictly redacted, as a bundle and as OTLP (HH-6). */
   traces?: DqlTraceSink;
   /**
@@ -137,6 +154,22 @@ const requestContext = new AsyncLocalStorage<DqlRequestContext>();
 let hostModelHooks: Pick<DqlHostHooks, 'modelProvider' | 'isInBoundary'> = {};
 export function setHostModelHooks(hooks: Pick<DqlHostHooks, 'modelProvider' | 'isInBoundary'> | undefined): void {
   hostModelHooks = { ...(hooks?.modelProvider ? { modelProvider: hooks.modelProvider } : {}), ...(hooks?.isInBoundary ? { isInBoundary: hooks.isInBoundary } : {}) };
+}
+
+let hostGitHooks: DqlHostHooks['git'] | undefined;
+export function setHostGitHooks(hooks: DqlHostHooks['git'] | undefined): void {
+  hostGitHooks = hooks;
+}
+export function currentHostGitHooks(): DqlHostHooks['git'] | undefined {
+  return hostGitHooks;
+}
+
+/** `Name <email>` for the signed-in person, to author commits; undefined without an email. */
+export function hostGitAuthor(): string | undefined {
+  const principal = currentPrincipal();
+  if (!principal || principal.source !== 'host' || !principal.email) return undefined;
+  const name = (principal.displayName || principal.email).replace(/[<>\n]/g, '').trim();
+  return `${name} <${principal.email.replace(/[<>\s]/g, '')}>`;
 }
 
 /** The host's model for the person asking, if the host supplies one. */

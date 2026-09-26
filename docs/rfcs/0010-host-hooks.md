@@ -269,6 +269,22 @@ Not built: a person column on stored runs, threads and memory, and a hint-store 
 
 Not built: an MCP HTTP transport with a host authenticator. Tests: `tool-gate.test.ts`, `host-hooks.test.ts`.
 
+### HH-8 — schedules, delivery, signing and git
+- **Schedules:** `POST /api/apps/:app/schedules/:schedule/run` (action `schedule.manage`) lets an outside scheduler run one App schedule as its owner. The page runs through the reader's full-page run route under a pass (`schedule-runs.ts`). The pass is random, accepted only from this machine and only for that App's page runs, lasts two minutes, and is revoked when the run ends. Permission checks and row policy therefore apply as the owner.
+- **Delivery:** `delivery` replaces DQL's email, Slack and webhook senders for digests and alerts.
+- **Signing:** `signing` is a key service (for example a KMS or HSM Ed25519 key) that signs exported snapshots without handing out the private key. Exports record `signedBy`, and the existing verifier accepts them.
+- **Git:** commits are authored as the signed-in person when they have an email. `git.openPullRequest` replaces the GitHub CLI for review requests.
+
+Not built: moving the `dql notebook` block scheduler onto this route. Tests: `delivery-signing-git.test.ts`, `route-actions.test.ts`.
+
+### Needs a live check before release
+1. Claude on Amazon Bedrock (in-region and Geo profile model ids, long answers, tool use) with real AWS credentials, and from an ECS task role.
+2. Claude on Google Vertex AI (regional, `us`/`eu` multi-region and global endpoints; streaming) with a real service account and from the metadata server.
+3. OTLP trace export to a real collector (for example the AWS Distro for OpenTelemetry or the Google Cloud telemetry endpoint).
+4. `credentials` against a real per-user warehouse sign-in (Snowflake External OAuth or Databricks OAuth).
+5. A snapshot signed by a real KMS/HSM Ed25519 key.
+6. `git.openPullRequest` through a GitHub App, and delivery through a real Slack app and mail service.
+
 ## Backward compatibility
 
 Nothing changes for projects or for `dql notebook` with no hooks.

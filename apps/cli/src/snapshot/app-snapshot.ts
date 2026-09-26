@@ -36,6 +36,8 @@ export interface SnapshotManifest {
   /** sha256 of the file's bytes before the signature comment. */
   contentSha256: string;
   key: { id: string; publicKey: string; algorithm: 'ed25519' };
+  /** Who exported it, when a host named them (RFC 0010 HH-8). */
+  signedBy?: string;
 }
 
 export interface SnapshotSignature {
@@ -249,6 +251,58 @@ export function buildSnapshotDocument(input: SnapshotInput, key: Pick<SnapshotKe
     '</footer>',
     '</div></body></html>',
   ].join('\n');
+}
+
+/**
+ * What signs snapshots (RFC 0010 HH-8): the project's local Ed25519 key by
+ * default, or a host's key service (for example a cloud KMS or HSM key that
+ * signs Ed25519) that never hands out the private key.
+ */
+export interface SnapshotSigner {
+  id: string;
+  /** SPKI DER, base64, of an Ed25519 public key. */
+  publicKeyBase64: string;
+  sign(data: Buffer): Promise<Buffer> | Buffer;
+}
+
+/** The project's local key as a signer. */
+export function localSnapshotSigner(key: SnapshotKey): SnapshotSigner {
+  return { id: key.id, publicKeyBase64: key.publicKeyBase64, sign: (data) => sign(null, data, key.privateKey) };
+}
+
+/** Sign a snapshot with any signer, naming who exported it when known. */
+export async function signSnapshotWith(input: SnapshotInput & { signedBy?: string }, signer: SnapshotSigner): Promise<{ html: string; manifest: SnapshotManifest }> {
+  const { manifest, document } = snapshotManifest(input, signer);
+  const signature = Buffer.from(await signer.sign(Buffer.from(canonicalJson(manifest), 'utf-8'))).toString('base64');
+  return sealSnapshot(document, manifest, signature);
+}
+
+function snapshotManifest(input: SnapshotInput & { signedBy?: string }, key: Pick<SnapshotSigner, 'id' | 'publicKeyBase64'>): { manifest: SnapshotManifest; document: string } {
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const document = buildSnapshotDocument({ ...input, createdAt }, key);
+  const manifest: SnapshotManifest = {
+    version: 1,
+    kind: 'dql-app-snapshot',
+    app: { id: input.appId, title: input.appTitle },
+    page: { id: input.pageId, title: input.pageTitle },
+    run: input.run,
+    filters: input.filters,
+    figures: input.figures,
+    trust: input.trust,
+    createdAt,
+    contentSha256: createHash('sha256').update(document, 'utf-8').digest('hex'),
+    key: { id: key.id, publicKey: key.publicKeyBase64, algorithm: 'ed25519' },
+    ...(input.signedBy ? { signedBy: input.signedBy } : {}),
+  };
+  return { manifest, document };
+}
+
+function sealSnapshot(document: string, manifest: SnapshotManifest, signature: string): { html: string; manifest: SnapshotManifest } {
+  const block: SnapshotSignature = { manifest, signature };
+  return {
+    html: `${document}\n${SNAPSHOT_SIGNATURE_PREFIX}${Buffer.from(JSON.stringify(block), 'utf-8').toString('base64')}-->\n`,
+    manifest,
+  };
 }
 
 /** Sign a snapshot document; the signature is appended as a trailing comment. */

@@ -86,6 +86,7 @@ function actionFor(method: string, path: string): DqlAction {
   // Taking data out.
   if (/\/export$/.test(path) || /^\/api\/apps\/[^/]+\/dashboards\/[^/]+\/snapshot$/.test(path)) return 'export';
   if (!read && /\/monitors(\/|$)/.test(path)) return 'schedule.manage';
+  if (!read && /^\/api\/apps\/[^/]+\/schedules\/[^/]+\/run$/.test(path)) return 'schedule.manage';
 
   // Apps: readers view and run pages; authors change them; publishing is its own step.
   if (under(path, '/api/apps')) {
