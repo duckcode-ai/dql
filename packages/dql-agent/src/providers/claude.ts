@@ -13,6 +13,7 @@ import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
 import { fetchProviderHttpDispatch, providerDispatchLimit, type ProviderHttpTransport } from './dispatch.js';
 import { adoptProseAsFinishNarration, admittedToolNames } from '../agentic/tool-loop.js';
+import { runGatedTool } from '../agentic/tool-gate.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 
@@ -715,7 +716,7 @@ options: ProviderToolLoopOptions = {},
       } else {
         try {
           assertMayStartToolCall(options, call.name);
-          output = await tool.run(call.input ?? {});
+          output = await runGatedTool(tool, call.input ?? {});
         } catch (err) {
           const code = toolLoopErrorCode(err);
           output = {

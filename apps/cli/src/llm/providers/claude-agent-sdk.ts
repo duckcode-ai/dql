@@ -5,6 +5,7 @@ import { DQLContext, findProjectRoot } from '@duckcodeailabs/dql-mcp';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal } from '../types.js';
 import { buildAgentTools, type AgentTool } from '../tools.js';
 import { blockProposalDqlMetadata } from '../proposal-metadata.js';
+import { runGatedTool } from '@duckcodeailabs/dql-agent';
 
 const MODEL = 'claude-opus-4-7';
 const MAX_TOOL_ITERATIONS = 16;
@@ -151,7 +152,7 @@ async function runToolLoop(
         isError = true;
       } else {
         try {
-          output = await tool.run(tu.input);
+          output = await runGatedTool(tool, tu.input);
         } catch (err) {
           output = { error: err instanceof Error ? err.message : String(err) };
           isError = true;

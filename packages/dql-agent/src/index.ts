@@ -2072,3 +2072,5 @@ export {
   CANVAS_DRAFT_SYSTEM_PROMPT,
 } from './canvas-draft.js';
 export type { CanvasDraftInput, CanvasDraftResult } from './canvas-draft.js';
+
+export { runGatedTool, setAgentToolGate, type AgentToolCall, type AgentToolGate } from './agentic/tool-gate.js';

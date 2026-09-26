@@ -13,6 +13,7 @@ import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
 import { fetchProviderHttpDispatch, providerDispatchLimit } from './dispatch.js';
 import { adoptProseAsFinishNarration, admittedToolNames } from '../agentic/tool-loop.js';
+import { runGatedTool } from '../agentic/tool-gate.js';
 
 /**
  * Translate reasoning effort into the Chat Completions `reasoning_effort` param.
@@ -360,7 +361,7 @@ export class OpenAIProvider implements AgentProvider {
         } else {
           try {
             assertMayStartToolCall(options, call.name);
-            output = await tool.run(args);
+            output = await runGatedTool(tool, args);
           } catch (err) {
             const code = toolLoopErrorCode(err);
             output = {

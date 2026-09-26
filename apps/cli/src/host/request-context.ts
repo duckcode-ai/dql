@@ -93,6 +93,13 @@ export interface DqlHostHooks {
    * it nothing is recorded; central audit is the host's. See `observability.ts`.
    */
   audit?: DqlAuditSink;
+  /**
+   * Every tool an agent runs inside the server (HH-7) — catalog lookups,
+   * governed queries, SQL runs, `finish_answer` — passes here with the person
+   * asking. Call `next()` to run it; return something else to reshape the
+   * result; throw to refuse. Queries a tool runs still pass `rowPolicy`.
+   */
+  tools?(call: { name: string; args: unknown; principal: DqlPrincipal | null }, next: () => Promise<unknown>): Promise<unknown>;
   /** Each finished Ask trace, strictly redacted, as a bundle and as OTLP (HH-6). */
   traces?: DqlTraceSink;
   /**

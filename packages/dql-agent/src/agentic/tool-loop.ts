@@ -29,6 +29,7 @@ import type {
   ProviderToolLoopOptions,
 } from '../providers/types.js';
 import { assertProviderPayloadAllowed, boundProviderResultRows } from '../provider-egress.js';
+import { runGatedTool } from './tool-gate.js';
 
 export interface AgenticToolLoopOptions extends ProviderToolLoopOptions {
   /**
@@ -269,7 +270,7 @@ function guardToolOutput(
   return {
     ...tool,
     run: async (args) => {
-      const output = await tool.run(args);
+      const output = await runGatedTool(tool, args);
       const maxResultRows = policy.allowedResultRowTools?.[tool.name] ?? 0;
       const budgetGroup = policy.resultRowBudgetGroupByTool?.[tool.name] ?? tool.name;
       const cumulativeLimit = policy.cumulativeResultRowBudgets?.[budgetGroup] ?? maxResultRows;
@@ -508,7 +509,7 @@ export async function runTextProtocolToolLoopDetailed(
     } else {
       try {
         assertMayStartToolCall(options, call.name);
-        output = await tool.run(call.input ?? {});
+        output = await runGatedTool(tool, call.input ?? {});
       } catch (err) {
         const code = toolLoopErrorCode(err);
         output = {
@@ -619,7 +620,7 @@ export async function runTextProtocolToolLoopDetailed(
         } else {
           try {
             assertMayStartToolCall(options, terminalCall.name);
-            terminalOutput = await terminalTool.run(terminalCall.input ?? {});
+            terminalOutput = await runGatedTool(terminalTool, terminalCall.input ?? {});
           } catch (err) {
             const code = toolLoopErrorCode(err);
             terminalOutput = {
@@ -698,7 +699,7 @@ export async function runTextProtocolToolLoopDetailed(
         } else {
           try {
             assertMayStartToolCall(options, terminalCall.name);
-            terminalOutput = await terminalTool.run(terminalCall.input ?? {});
+            terminalOutput = await runGatedTool(terminalTool, terminalCall.input ?? {});
           } catch (err) {
             const code = toolLoopErrorCode(err);
             terminalOutput = {
@@ -785,7 +786,7 @@ export async function adoptProseAsFinishNarration(
   let output: unknown;
   let isError = false;
   try {
-    output = await finish.run(input);
+    output = await runGatedTool(finish, input);
   } catch (error) {
     output = { error: error instanceof Error ? error.message : String(error) };
     isError = true;

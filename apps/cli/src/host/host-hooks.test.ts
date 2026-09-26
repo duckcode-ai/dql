@@ -189,3 +189,57 @@ describe('the model and the privacy boundary (RFC 0010 HH-5)', () => {
     expect(resultValuesMayReachModel(bedrock, () => true)).toBe(false);
   });
 });
+
+describe('one place every tool runs (RFC 0010 HH-7)', () => {
+  it('passes each tool call to the host with the person asking, and only with a host', async () => {
+    const { runGatedTool } = await import('@duckcodeailabs/dql-agent');
+    const calls: Array<{ name: string; principal: string | null }> = [];
+    await start({
+      ...headerHost,
+      tools: async (call, next) => {
+        calls.push({ name: call.name, principal: call.principal?.id ?? null });
+        if (call.name === 'run_sql') throw new Error('SQL tools are off for this workspace.');
+        return next();
+      },
+    });
+    const catalog = { name: 'search_catalog', run: async () => ['orders'] };
+    const sql = { name: 'run_sql', run: async () => [{ n: 1 }] };
+    await withRequestContext({ principal: PEOPLE.maria!, requestId: 'r' }, async () => {
+      expect(await runGatedTool(catalog, {})).toEqual(['orders']);
+      await expect(runGatedTool(sql, {})).rejects.toThrow('SQL tools are off');
+    });
+    expect(calls).toEqual([{ name: 'search_catalog', principal: 'u-maria' }, { name: 'run_sql', principal: 'u-maria' }]);
+
+    await start();
+    expect(await runGatedTool(sql, {})).toEqual([{ n: 1 }]);
+  });
+
+  it('has no tool run outside the gate', async () => {
+    const { readdirSync, readFileSync: read, statSync } = await import('node:fs');
+    const { dirname: dir, join: joinPath, relative, resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const repo = resolve(dir(fileURLToPath(import.meta.url)), '../../../..');
+    const files: string[] = [];
+    const walk = (at: string) => {
+      for (const name of readdirSync(at)) {
+        const path = joinPath(at, name);
+        if (statSync(path).isDirectory()) { if (name !== 'node_modules' && name !== 'dist') walk(path); }
+        else if (name.endsWith('.ts') && !name.endsWith('.test.ts') && !name.endsWith('.d.ts')) files.push(path);
+      }
+    };
+    walk(joinPath(repo, 'apps/cli/src'));
+    walk(joinPath(repo, 'packages/dql-agent/src'));
+    const ungated = files
+      .filter((file) => /\b(tool|finish|terminalTool)\.run\(/.test(read(file, 'utf-8')))
+      .map((file) => relative(repo, file).replaceAll('\\', '/'))
+      .sort();
+    // The gate itself, and wrappers that decorate a tool inside a gated call;
+    // `dql agent eval` replays cassettes in the CLI, not the server.
+    expect(ungated).toEqual([
+      'apps/cli/src/commands/agent-eval-cassette.ts',
+      'apps/cli/src/llm/answer-loop-tools.ts',
+      'packages/dql-agent/src/agentic/ledger-tools.ts',
+      'packages/dql-agent/src/agentic/tool-gate.ts',
+    ]);
+  });
+});

@@ -21,6 +21,7 @@ import {
   openAiMcpTools,
 } from '../mcp-config.js';
 import { getEffectiveProviderConfig } from '../../settings/provider-settings.js';
+import { runGatedTool } from '@duckcodeailabs/dql-agent';
 
 const MAX_TOOL_ITERATIONS = 16;
 
@@ -165,7 +166,7 @@ async function runOpenAIResponsesAgent(input: {
         isError = true;
       } else {
         try {
-          output = await tool.run(args);
+          output = await runGatedTool(tool, args);
         } catch (error) {
           output = { error: error instanceof Error ? error.message : String(error) };
           isError = true;
@@ -253,7 +254,7 @@ async function runAnthropicMessagesAgent(input: {
         isError = true;
       } else {
         try {
-          output = await tool.run(args);
+          output = await runGatedTool(tool, args);
         } catch (error) {
           output = { error: error instanceof Error ? error.message : String(error) };
           isError = true;

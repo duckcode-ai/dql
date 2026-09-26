@@ -5,6 +5,7 @@ import {
   physicalRelationIdentity,
   physicalRelationText,
   type PhysicalRelationBindingV1,
+  setAgentToolGate,
 } from '@duckcodeailabs/dql-agent';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync, execSync } from "node:child_process";
@@ -4878,6 +4879,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const hostHooks = opts.hostHooks;
   // RFC 0010 HH-5: the host's model and privacy boundary, for provider selection.
   setHostModelHooks(hostHooks);
+  // HH-7: every tool an agent runs in this process passes the host's gate.
+  setAgentToolGate(hostHooks?.tools
+    ? (call, next) => hostHooks.tools!({ ...call, principal: currentPrincipal() ?? null }, next)
+    : null);
   const hostIdentity = typeof hostHooks?.resolvePrincipal === 'function';
   // Each signed-in person — and each read-only link — keeps its own App
   // persona ("view as"), apart from the owner's.

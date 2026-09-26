@@ -206,24 +206,68 @@ identical.
 
 ## Progress
 
-| Slice | Status |
-|---|---|
-| HH-1 | Implemented 2026-09-25 on `claude/oss-security-fixes` (`apps/cli/src/host/`, tests in `host-hooks.test.ts`); awaiting independent verification |
-| HH-2 | Implemented 2026-09-25. `authorize` runs for every placed API request, and a refusal answers 403 with `PERMISSION_DENIED`, the action and the resource. The persona registry keeps one "view as" persona per signed-in person (`PersonaRegistry.useSlots`). With a host and no App persona, App policies see the person's own groups (never the owner default), and row rules read the person's attributes as `{user.<name>}`, which a request cannot override. Cache and proof keys include the person, only with a host. Tests: `route-actions.test.ts`, `host-hooks.test.ts`, `governance-runtime.test.ts`, `dql-project` `persona.test.ts`. |
-| HH-2 viewer links | Implemented 2026-09-25 (`apps/cli/src/host/viewer-links.ts`). On a server shared on the network without a host, the Share menu's network link carries a signed viewer token instead of the server token. The token names one App and expires in 14 days. Its key is derived from the server token, so changing that token ends every link. A link may view, run and export its App's pages (and run that App's Dataset tiles and filter lists) and nothing else: no other App, no App list, Studio, settings, lineage, SQL, AI questions, alerts or sharing on. It sees the App as the owner publishes it (no "view as"). Apps that narrow rows per member (`rlsBindings`) cannot be shared by link; this is checked when the link is made and on every request. The UI opened from a link shows only that App's reader. Tests: `viewer-links.test.ts` (tokens, permissions, a real network-bound server), notebook `server-auth.test.ts`. Checked in the built CLI on a network-bound server. |
-| HH-3 | Implemented 2026-09-25 (`apps/cli/src/host/row-policy.ts`). With `hostHooks.rowPolicy`, the server wraps its one executor (`withRowPolicy`), so every statement — `executeQuery`, `executePositional`, a connector from `getConnector`, its `stream`, and DuckDB consistent read scopes used by proofs — passes the policy once before it runs. The policy gets the principal (null for work DQL starts itself), the SQL and values, the tables it reads (parser-based, quoted and schema-qualified names resolved, plus file readers), the connection and a purpose. Schema reads (catalog sync, discovery, table listing) are tagged `metadata`. A refusal, an error or an empty answer runs nothing and reaches the person as `ROW_POLICY_REFUSED` with the policy's reason. A test fails if server code creates its own executor, pool or connector (allowlist: one-shot CLI commands, the `dql notebook` block scheduler until HH-8, `dql agent` tools), or if `dql-agent`/`dql-mcp` depend on connectors. Checked on real DuckDB: an admin, a CA and a US person run the same certified Dataset question and the same hand-written SQL and get all, CA-only and US-only rows; a person without a region is refused with the reason and no rows. |
-| HH-4 | Implemented 2026-09-25 (`hostHooks.credentials`, in `apps/cli/src/host/row-policy.ts` `withHostQueryHooks`). Before any statement runs, the host lays the person's own connection settings over the configured connection: their warehouse token, user, role, or target (any field but `driver`). The row policy then sees that final connection. Connections are pooled by their full settings, so each person's credentials get their own connection. A refusal, an error or an empty answer stops the query with `CREDENTIALS_REQUIRED` and the host's message ("reconnect"), and never retries with the service credential. Principal null (work DQL starts itself) is the host's call. Not in this slice: a connector registry replacing the closed driver switch; per-person connection idle eviction. Tests: unit (credentials before policy, driver kept, refusals run nothing), and real DuckDB where each person's sign-in reaches a warehouse holding only their rows: the same SQL returns CA-only and US-only rows, and a lapsed sign-in gets "reconnect" with no rows. |
-| HH-5 | Implemented 2026-09-25, **needs a live check against AWS and Google**. dql-agent gains a provider transport (`ProviderHttpTransport`) and Claude through Amazon Bedrock and Google Vertex AI (`providers/claude-cloud.ts`, no cloud SDKs):
-| HH-6 | Implemented 2026-09-25 (`apps/cli/src/host/observability.ts`).
-- **Audit:** `hostHooks.audit` receives one event per API request that changed something or was refused (who, action, resource, method, path, status, outcome, request id). It also receives one per finished answer (run id, status, trust label, sha256 fingerprints of its SQL, its sources), with no question text, SQL or result values. Without the hook nothing is recorded.
-- **Traces:** each finished Ask trace becomes the strict redacted bundle the export route serves. It goes to `hostHooks.traces` and/or, as OpenInference OTLP/JSON, to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` with `OTEL_EXPORTER_OTLP_HEADERS`. Export never slows or fails an answer; failures are counted.
-- **Stores:** `hostHooks.stores.runs|memory|conversations` replace the project's SQLite files for hosts running several copies.
+All slices below are on `claude/oss-security-fixes`, implemented 2026-09-25 and awaiting independent verification. Items marked **needs a live check** were built from the vendors' public documentation and tested on recorded replies, not against the live service.
 
-Not in this slice: a person column on stored runs, threads and memory rows; a hint store factory; OTLP export checked against a live collector (needs a live check). Tests: `observability.test.ts` (audit over a real server, answer events without SQL or values, trace export to a sink and a collector, failures counted). |
-- **Bedrock** sends the Messages request to InvokeModel with the `bedrock-2023-05-31` body, signed with AWS Signature Version 4. The signing matches AWS's published "get-vanilla" test vector. Credentials come from environment variables or the container endpoint (ECS task roles, EKS Pod Identity), or from the host. Answers come back whole, because Bedrock streams in its own event framing.
-- **Vertex** sends to `rawPredict`/`streamRawPredict` on the regional or global host with the `vertex-2023-10-16` body and a Google token. The token comes from `GOOGLE_OAUTH_ACCESS_TOKEN`, the metadata server (Cloud Run, GKE, GCE) or the host. Vertex streams Anthropic's own SSE.
+### HH-1 — who is asking
+`apps/cli/src/host/`. With `resolvePrincipal`, every API request except health runs as the person the host names. Unplaced requests get 401. Reviews, correction authors and the default owner of new content come from the person, never the request body. The certification rule set comes from the host. `@duckcodeailabs/dql-cli/host` exports the supported API. Tests: `host-hooks.test.ts`.
 
-The server gains two hooks. `hostHooks.modelProvider` is consulted first in provider selection; every runtime path (Ask, App builder, governed answers, story drafts) goes through it. `hostHooks.isInBoundary` decides whether result values may reach a model, replacing the Ollama-on-loopback rule; an error means no. Not in this slice: picking Bedrock or Vertex in the OSS Settings page (region and project fields). Tests: `claude-cloud.test.ts` (test vector, both transports, provider end to end on recorded replies), `host-hooks.test.ts`. |
+### HH-2 — what each person may do
+- **Permission checks:** every placed request maps to an action and resource (`route-actions.ts`) and goes to `authorize`. A refusal answers 403 `PERMISSION_DENIED` with the action.
+- **View as:** personas are kept per person (`PersonaRegistry.useSlots`).
+- **People without a persona:** App policies check their own groups, never the owner default. Row rules read their attributes as `{user.<name>}`.
+- **Caches:** cache and proof keys include the person, only when a host is present.
+
+Tests: `route-actions.test.ts`, `host-hooks.test.ts`, `governance-runtime.test.ts`, dql-project `persona.test.ts`.
+
+### HH-2 — read-only page links
+`viewer-links.ts`.
+- **What the link is:** on a network-shared server without a host, the Share menu's network link carries a signed viewer token for one App. It lasts 14 days, and changing the server token ends every link.
+- **What it can do:** view, run and export that App's pages, and nothing else. It sees the App as the owner publishes it.
+- **Apps it can't open:** Apps with per-member row rules cannot be shared by link. This is checked both when the link is made and on every request.
+- **What the viewer sees:** the UI shows only that App's reader.
+
+Checked in the built CLI. Tests: `viewer-links.test.ts`, notebook `server-auth.test.ts`.
+
+### HH-3 — one query path
+`row-policy.ts`.
+- **Single entry point:** with `rowPolicy`, the server wraps its one executor. Every statement passes the policy once first: executor calls, connectors, streams, and DuckDB read scopes.
+- **What the policy is told:** the person, SQL, values, tables (parser-based), connection and purpose. Schema reads are tagged `metadata`.
+- **Refusals:** a refusal answers `ROW_POLICY_REFUSED` and runs nothing.
+- **Guard test:** a source scan fails if server code creates another executor or connector.
+
+Checked on real DuckDB: an admin, a CA user and a US user get all rows, CA only and US only; a user with no region is refused.
+
+### HH-4 — the person's own warehouse sign-in
+`credentials` in `withHostQueryHooks`.
+- **Order:** before any statement, the host lays the person's settings (token, user, role or target) over the connection. The row policy then sees the final connection.
+- **Pooling:** connections are pooled by their full settings.
+- **Refusals:** a refusal answers `CREDENTIALS_REQUIRED` ("reconnect"), and there is never a service-credential retry.
+
+Checked on real DuckDB with per-person warehouses. Not built: a connector registry, and idle eviction of per-person connections.
+
+### HH-5 — Claude on Bedrock and Vertex, and the privacy boundary (**needs a live check**)
+`packages/dql-agent/src/providers/claude-cloud.ts`, with no cloud SDKs.
+- **Bedrock:** InvokeModel with the `bedrock-2023-05-31` body, signed with AWS SigV4. The signing matches AWS's published "get-vanilla" test vector. Credentials come from the environment, the ECS/EKS container endpoint, or the host. Answers come back whole.
+- **Vertex:** `rawPredict` and `streamRawPredict` with the `vertex-2023-10-16` body and a Google token from the environment, the metadata server, or the host.
+- **Server hooks:** `modelProvider` is consulted first in provider selection. `isInBoundary` decides whether result values may reach a model, replacing the Ollama-on-loopback rule; an error means no.
+
+Not built: choosing Bedrock or Vertex in the Settings page. Tests: `claude-cloud.test.ts`, `host-hooks.test.ts`.
+
+### HH-6 — audit, traces and stores
+`observability.ts`.
+- **Audit:** `audit` receives one event per request that changed something or was refused (who, action, resource, status, outcome). It also receives one per finished answer: trust label, SQL fingerprints and sources, with no question, SQL or values.
+- **Traces:** each finished Ask trace, as the strict redacted bundle, goes to `traces` and/or as OTLP/JSON to `OTEL_EXPORTER_OTLP_(TRACES_)ENDPOINT` (**needs a live check** with a collector). Export never slows or fails an answer.
+- **Stores:** `stores.runs|memory|conversations` replace the project's SQLite files.
+
+Not built: a person column on stored runs, threads and memory, and a hint-store factory. Tests: `observability.test.ts`.
+
+### HH-7 — one place every tool runs
+`packages/dql-agent/src/agentic/tool-gate.ts`.
+- **What passes the gate:** every tool an agent runs in the server, with the person asking. That covers the providers' native loops, the agent loops including `finish_answer`, and the CLI chat runners.
+- **What the host can do:** check, log, reshape or refuse (throw) each call.
+- **Guard test:** a source scan fails if a tool runs outside the gate.
+
+Not built: an MCP HTTP transport with a host authenticator. Tests: `tool-gate.test.ts`, `host-hooks.test.ts`.
 
 ## Backward compatibility
 
