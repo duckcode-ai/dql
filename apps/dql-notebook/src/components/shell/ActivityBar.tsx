@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { Activity, Boxes, MessageCircle, Settings } from 'lucide-react';
+import { Activity, Boxes, ExternalLink, MessageCircle, Settings } from 'lucide-react';
+import { navItemAllowed, useHostPage, useHostUi } from '../../host/host-ui';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -109,6 +110,8 @@ function RailItem({ title, icon, active, expanded, onClick, t }: RailItemProps) 
 }
 
 export function ActivityBar() {
+  const hostUi = useHostUi();
+  const hostPage = useHostPage();
   const state = useNotebookStore(useShallow((store) => ({
     mainView: store.mainView,
     sidebarOpen: store.sidebarOpen,
@@ -186,6 +189,13 @@ export function ActivityBar() {
     },
   ];
 
+  // RFC 0010 HH-9: with a host, only what this person's role can use, plus
+  // the host's own pages. Without a host nothing changes.
+  const visibleNavGroups = navGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => navItemAllowed(hostUi, String(item.key))) }))
+    .filter((group) => group.items.length > 0);
+  const hostNavLinks = hostUi.host ? hostUi.links.filter((link) => link.placement === 'nav') : [];
+
   const bottomItems: Array<{
     key: string;
     title: string;
@@ -260,7 +270,7 @@ export function ActivityBar() {
         </Tooltip>
       </div>
 
-      {navGroups.map((group, groupIndex) => (
+      {visibleNavGroups.map((group, groupIndex) => (
         <React.Fragment key={group.label}>
           {groupIndex > 0 ? (
             <div style={{ height: 1, margin: expanded ? '8px 10px 2px' : '8px 12px', background: t.headerBorder }} />
@@ -283,6 +293,23 @@ export function ActivityBar() {
           ))}
         </React.Fragment>
       ))}
+
+      {hostNavLinks.length ? (
+        <>
+          <div style={{ height: 1, margin: expanded ? '8px 10px 2px' : '8px 12px', background: t.headerBorder }} />
+          {hostNavLinks.map((link) => (
+            <RailItem
+              key={`host-${link.id}`}
+              title={link.label}
+              icon={<ExternalLink size={16} strokeWidth={1.75} />}
+              active={state.mainView === 'host_page' && hostPage.page?.id === link.id}
+              expanded={expanded}
+              onClick={() => { hostPage.openPage(link); dispatch({ type: 'SET_MAIN_VIEW', view: 'host_page' }); }}
+              t={t}
+            />
+          ))}
+        </>
+      ) : null}
 
       <div style={{ flex: 1 }} />
 

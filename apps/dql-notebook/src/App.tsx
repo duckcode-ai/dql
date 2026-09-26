@@ -4,6 +4,7 @@ import { ThemeProvider, TooltipProvider } from '@duckcodeailabs/dql-ui';
 import { NotebookProvider, useNotebookStore } from './store/NotebookStore';
 import { AppShell } from './components/shell/AppShell';
 import { ServerAccessGate } from './components/shell/ServerAccessGate';
+import { HostUiProvider } from './host/host-ui';
 import { ViewerShell } from './components/shell/ViewerShell';
 import { isViewerLink } from './api/server-auth';
 import { themes } from './themes/notebook-theme';
@@ -122,7 +123,9 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <NotebookProvider>
         <OperationsProvider>
+          <HostUiProvider>
           <AppInner />
+        </HostUiProvider>
         </OperationsProvider>
       </NotebookProvider>
     </QueryClientProvider>

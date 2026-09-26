@@ -92,14 +92,23 @@ export function rememberServerToken(token: string): void {
 
 export const SERVER_AUTH_REQUIRED_EVENT = 'dql:server-auth-required';
 let serverAuthRejected = false;
+let redirectingToSignIn = false;
 
 /**
  * A LAN server refuses every API call without its token. Without this the
  * page loads and then waits forever: a tab opened without the full access
  * link (a new tab, a bookmark, a link a chat app shortened) has no token.
  */
-export function reportServerAuthRejected(status: number): boolean {
+export function reportServerAuthRejected(status: number, signInUrl?: string | null): boolean {
   if (status !== 401) return false;
+  // RFC 0010 HH-9: a host that signs people in names where to go, as the
+  // X-DQL-Sign-In header on its 401. Go there once, and come back here.
+  if (signInUrl && signInUrl.startsWith('/') && !signInUrl.startsWith('//') && typeof window !== 'undefined' && !redirectingToSignIn) {
+    redirectingToSignIn = true;
+    const back = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    window.location.assign(`${signInUrl}${signInUrl.includes('?') ? '&' : '?'}returnTo=${encodeURIComponent(back)}`);
+    return true;
+  }
   serverAuthRejected = true;
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(SERVER_AUTH_REQUIRED_EVENT));
   return true;
@@ -112,7 +121,7 @@ export function wasServerAuthRejected(): boolean {
 /** `fetch` for a same-origin DQL API path, with the tab's token. */
 export async function authorizedFetch(input: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(input, { ...init, headers: withServerAuthorization(init?.headers) });
-  reportServerAuthRejected(response.status);
+  reportServerAuthRejected(response.status, response.headers.get('x-dql-sign-in'));
   return response;
 }
 
@@ -136,7 +145,7 @@ export async function streamServerEvents(
     cache: 'no-store',
     signal,
   });
-  reportServerAuthRejected(response.status);
+  reportServerAuthRejected(response.status, response.headers.get('x-dql-sign-in'));
   if (!response.ok) throw new Error(`Event stream failed with HTTP ${response.status}.`);
   if (!response.body) throw new Error('Event stream response did not include a body.');
 

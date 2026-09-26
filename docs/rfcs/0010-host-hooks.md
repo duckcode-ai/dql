@@ -286,6 +286,19 @@ Not built: moving the `dql notebook` block scheduler onto this route. Tests: `de
 
 Tests: `route-actions.test.ts`, `privacy-boundary.test.ts`, `per-person.test.ts`.
 
+### HH-9 — the host around DQL's own screens
+A host serves every role with DQL's app. It does not rebuild Ask, Apps or notebooks; it adds to them.
+- **`ui(principal)`** returns what the host adds for this person: `signOutUrl`, an `environment` label, `links` (placed in the account `menu` or the side `nav`), and `answerActions` (buttons on an answer that needs review, such as "Ask an analyst to check this"). Only same-origin paths are kept, at most 12 links and 4 actions.
+- **`GET /api/host/ui`** answers `{ host: false }` without a host. With one, it answers the person, those additions and `capabilities`, which say whether each action is allowed (Ask, authoring, certifying, publishing, git review, settings and others). The same `authorize` hook still guards every route, so `capabilities` only decides what the app shows.
+- **In the app:**
+  - Navigation hides screens the person may not use.
+  - The header shows the person, the environment and sign-out.
+  - A host `nav` link opens the host's page inside DQL's main area, with `embed=1` added so the page leaves out its own frame.
+  - An answer that needs review offers the host's answer actions, which POST `{ runId, question, trustState }` to the host's path.
+- **Sign-in:** a host's 401 may carry `X-DQL-Sign-In: <same-origin path>`. The app then goes there once, with `returnTo` set to the current page, instead of asking for an access link.
+
+Without a host nothing changes. Tests: `per-person.test.ts` (route), `host-ui.test.tsx` (app).
+
 ### Entry point
 `@duckcodeailabs/dql-cli/host` also exports `startProjectRuntime`: the full server with its UI for one project, as `dql notebook` runs it, taking `hostHooks`, `allowedOrigins` and a host-managed `connection`. The first host (DQL Enterprise) starts every workspace this way; its end-to-end test drives this branch's server through sign-in, roles, row rules and DuckDB for five people.
 

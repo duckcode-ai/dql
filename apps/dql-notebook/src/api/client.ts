@@ -4000,7 +4000,7 @@ async function requestUncached<T>(path: string, options?: RequestInit): Promise<
     throw new Error(`Unable to reach the local DQL notebook server. Check that it is still running, then retry.${detail}`);
   }
   if (!res.ok) {
-    reportServerAuthRejected(res.status);
+    reportServerAuthRejected(res.status, res.headers.get('x-dql-sign-in'));
     const text = await res.text().catch(() => '');
     throw formatRequestError(res, text);
   }

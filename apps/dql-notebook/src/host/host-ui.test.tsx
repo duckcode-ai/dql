@@ -1,0 +1,112 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { renderToStaticMarkup } from 'react-dom/server';
+import type { AgentRun } from '../api/client';
+import { HostAnswerActions, answerNeedsReview } from '../components/agent/HostAnswerActions';
+import { HostPersonMenu } from '../components/shell/HostPersonMenu';
+import { themes } from '../themes/notebook-theme';
+import { HostUiProvider, hostAllows, hostPageSrc, navItemAllowed, type HostUi, type HostUiState } from './host-ui';
+
+const NO_HOST: HostUiState = { host: false };
+
+function hosted(overrides: Partial<HostUi> = {}): HostUi {
+  return {
+    host: true,
+    person: { id: 'u_priya', name: 'Priya Shah', email: 'priya@harbor.example', kind: 'person' },
+    capabilities: { ask: true, 'query.run': true },
+    signOutUrl: '/auth/logout',
+    environment: 'Production',
+    links: [{ id: 'requests', label: 'My requests', href: '/e/requests', placement: 'nav' }],
+    answerActions: [
+      { id: 'certify', label: 'Ask an analyst to check this', url: '/enterprise/api/requests' },
+      { id: 'note', label: 'Add a note', url: '/enterprise/api/notes' },
+    ],
+    ...overrides,
+  };
+}
+
+function run(overrides: Partial<AgentRun> = {}): AgentRun {
+  return { id: 'run_1', question: 'Claims paid last month?', status: 'needs_review', trustState: 'review_required', ...overrides } as AgentRun;
+}
+
+const t = themes.dark;
+
+function render(state: HostUiState, node: JSX.Element): string {
+  return renderToStaticMarkup(<HostUiProvider initial={state}>{node}</HostUiProvider>);
+}
+
+describe('host UI (RFC 0010 HH-9)', () => {
+  it('without a host the local owner may do everything, as before', () => {
+    for (const action of ['ask', 'dataset.certify', 'settings.manage']) expect(hostAllows(NO_HOST, action)).toBe(true);
+    for (const key of ['ask', 'files', 'block_library', 'git', 'settings', 'apps']) expect(navItemAllowed(NO_HOST, key)).toBe(true);
+  });
+
+  it('with a host, screens follow what the person may do', () => {
+    const priya = hosted();
+    expect(hostAllows(priya, 'ask')).toBe(true);
+    expect(hostAllows(priya, 'dataset.certify')).toBe(false);
+    expect(navItemAllowed(priya, 'ask')).toBe(true);
+    expect(navItemAllowed(priya, 'files')).toBe(false);
+    expect(navItemAllowed(priya, 'block_library')).toBe(false);
+    expect(navItemAllowed(priya, 'settings')).toBe(false);
+    // Screens with no rule (Apps, Home) stay; their own routes check access.
+    expect(navItemAllowed(priya, 'apps')).toBe(true);
+    // Settings opens for either settings or connection managers.
+    expect(navItemAllowed(hosted({ capabilities: { 'connection.manage': true } }), 'settings')).toBe(true);
+  });
+
+  it('opens host pages embedded', () => {
+    expect(hostPageSrc('/e/requests')).toBe('/e/requests?embed=1');
+    expect(hostPageSrc('/e/reviews?state=open')).toBe('/e/reviews?state=open&embed=1');
+  });
+
+  it('shows the person and sign-out only under a host', () => {
+    expect(render(NO_HOST, <HostPersonMenu />)).toBe('');
+    const html = render(hosted(), <HostPersonMenu />);
+    expect(html).toContain('Account: Priya Shah');
+    expect(html).toContain('>PS<');
+    expect(html).toContain('Production');
+  });
+
+  it('offers the host answer actions only on answers that need review', () => {
+    expect(answerNeedsReview(run())).toBe(true);
+    expect(answerNeedsReview(run({ status: 'completed', trustState: 'certified' } as Partial<AgentRun>))).toBe(false);
+
+    expect(render(NO_HOST, <HostAnswerActions run={run()} t={t} />)).toBe('');
+    expect(render(hosted({ answerActions: [] }), <HostAnswerActions run={run()} t={t} />)).toBe('');
+    expect(render(hosted(), <HostAnswerActions run={run({ status: 'completed', trustState: 'certified' } as Partial<AgentRun>)} t={t} />)).toBe('');
+
+    const html = render(hosted(), <HostAnswerActions run={run()} t={t} />);
+    expect(html).toContain('data-testid="host-answer-actions"');
+    expect(html).toContain('Ask an analyst to check this');
+    expect(html).toContain('Add a note');
+  });
+});
+
+describe('host sign-in on a refused request', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('goes to the host sign-in once and comes back to the same page', async () => {
+    vi.resetModules();
+    const assign = vi.fn();
+    vi.stubGlobal('window', {
+      location: { pathname: '/', search: '?x=1', hash: '#view=apps', assign },
+      dispatchEvent: vi.fn(),
+    });
+    const { reportServerAuthRejected } = await import('../api/server-auth');
+    expect(reportServerAuthRejected(401, '/auth/login')).toBe(true);
+    expect(assign).toHaveBeenCalledWith(`/auth/login?returnTo=${encodeURIComponent('/?x=1#view=apps')}`);
+    reportServerAuthRejected(401, '/auth/login');
+    expect(assign).toHaveBeenCalledTimes(1);
+  });
+
+  it('never follows a sign-in link to another site', async () => {
+    vi.resetModules();
+    const assign = vi.fn();
+    vi.stubGlobal('window', { location: { pathname: '/', search: '', hash: '', assign }, dispatchEvent: vi.fn() });
+    const { reportServerAuthRejected, wasServerAuthRejected } = await import('../api/server-auth');
+    reportServerAuthRejected(401, '//evil.example/login');
+    reportServerAuthRejected(401, 'https://evil.example/login');
+    expect(assign).not.toHaveBeenCalled();
+    expect(wasServerAuthRejected()).toBe(true);
+  });
+});

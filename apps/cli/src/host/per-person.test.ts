@@ -95,3 +95,40 @@ describe('the host decides audience and Research', () => {
     expect(seen.audiences).toEqual(['stakeholder', 'analyst']);
   });
 });
+
+describe('what the app shows around its screens (HH-9)', () => {
+  it('describes the person, what they may do, and the host additions; only same-origin links', async () => {
+    const call = await start({
+      authorize: (principal, action) => ({ allow: principal.id === 'u-dan' || ['project.read', 'ask', 'app.view', 'export'].includes(action) }),
+      ui: () => ({
+        signOutUrl: '/auth/logout',
+        environment: 'Claims · Production',
+        links: [
+          { id: 'requests', label: 'My requests', href: '/e/requests', placement: 'nav' },
+          { id: 'evil', label: 'Elsewhere', href: 'https://evil.example/x', placement: 'menu' },
+          { id: 'proto', label: 'Protocol-relative', href: '//evil.example', placement: 'menu' },
+        ],
+        answerActions: [{ id: 'certify', label: 'Make this a certified answer', url: '/enterprise/api/requests' }, { id: 'bad', label: 'x', url: 'https://evil.example' }],
+      }),
+    });
+    const priyaUi = await call('priya', 'GET', '/api/host/ui');
+    expect(priyaUi.body).toMatchObject({
+      host: true,
+      person: { id: 'u-priya', name: 'priya@harbor.example' },
+      signOutUrl: '/auth/logout',
+      environment: 'Claims · Production',
+      links: [{ id: 'requests', label: 'My requests', href: '/e/requests', placement: 'nav' }],
+      answerActions: [{ id: 'certify', label: 'Make this a certified answer', url: '/enterprise/api/requests' }],
+    });
+    expect(priyaUi.body.capabilities).toMatchObject({ ask: true, 'dataset.author': false, 'dataset.certify': false, 'settings.manage': false });
+    expect((await call('dan', 'GET', '/api/host/ui')).body.capabilities).toMatchObject({ 'dataset.author': true, 'settings.manage': true });
+  });
+
+  it('says there is no host when there is none', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-no-host-'));
+    roots.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'no_host' }));
+    const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { servers.push(created); } });
+    expect(await (await fetch(`http://127.0.0.1:${port}/api/host/ui`)).json()).toEqual({ host: false });
+  });
+});

@@ -737,7 +737,7 @@ import { redactConnections, resolveSecretReferences, storeConnectionSecrets } fr
 import { authorizeHostRequest, currentHostGitHooks, currentPrincipal, hostActor, hostGitAuthor, hostModelProvider, installHostPersonaSlots, resolveHostPrincipal, resultValuesMayReachModel, setHostGitHooks, setHostModelHooks, withRequestContext, type DqlHostHooks } from './host/request-context.js';
 import { isRunPass, issueRunPass, redeemRunPass, revokeRunPass } from './host/schedule-runs.js';
 import { setDeliverySink } from './schedule/notifiers/index.js';
-import { routeAction } from './host/route-actions.js';
+import { routeAction, type DqlAction } from './host/route-actions.js';
 import { withHostQueryHooks } from './host/row-policy.js';
 import { auditActor, auditRequest, otlpHeadersFromEnv, withAnswerAudit, withTraceExport } from './host/observability.js';
 import { isViewerToken, mintViewerToken, readViewerToken, viewerDecision, viewerLinkBlockedReason, viewerPrincipal } from './host/viewer-links.js';
@@ -16304,6 +16304,48 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             ...(viewerAppId ? { viewer: { appId: viewerAppId } } : {}),
           }
           : { owner: resolveLocalOwner(projectRoot) }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // RFC 0010 HH-9: what the DQL app shows around its screens for this
+    // person — who they are, what they may do, and the host's additions.
+    // Without a host: { host: false } and the app is unchanged.
+    if (req.method === 'GET' && path === '/api/host/ui') {
+      try {
+        const principal = currentPrincipal();
+        if (!hostIdentity || !principal || principal.source !== 'host') {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(serializeJSON({ host: false }));
+          return;
+        }
+        const actions: DqlAction[] = ['project.write', 'dataset.author', 'dataset.certify', 'hint.review', 'app.author', 'app.publish', 'ask', 'research', 'query.run', 'export', 'schedule.manage', 'git.review', 'connection.manage', 'settings.manage'];
+        const capabilities: Record<string, boolean> = {};
+        for (const action of actions) {
+          capabilities[action] = (await authorizeHostRequest(hostHooks!, principal, { action, resource: { type: 'project' } })).allow;
+        }
+        let extras: import('./host/request-context.js').DqlHostUi = {};
+        try {
+          extras = (await hostHooks?.ui?.(principal)) ?? {};
+        } catch {
+          extras = {};
+        }
+        const sameOrigin = (href: unknown): href is string => typeof href === 'string' && href.startsWith('/') && !href.startsWith('//');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(serializeJSON({
+          host: true,
+          person: { id: principal.id, name: principal.displayName ?? principal.email ?? principal.id, ...(principal.email ? { email: principal.email } : {}), kind: principal.kind },
+          capabilities,
+          ...(sameOrigin(extras.signOutUrl) ? { signOutUrl: extras.signOutUrl } : {}),
+          ...(typeof extras.environment === 'string' ? { environment: extras.environment.slice(0, 80) } : {}),
+          links: (extras.links ?? []).filter((link) => sameOrigin(link.href) && typeof link.label === 'string').slice(0, 12)
+            .map((link) => ({ id: String(link.id), label: link.label.slice(0, 60), href: link.href, placement: link.placement === 'nav' ? 'nav' : 'menu' })),
+          answerActions: (extras.answerActions ?? []).filter((action) => sameOrigin(action.url) && typeof action.label === 'string').slice(0, 4)
+            .map((action) => ({ id: String(action.id), label: action.label.slice(0, 60), url: action.url, ...(action.description ? { description: String(action.description).slice(0, 200) } : {}) })),
+        }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));

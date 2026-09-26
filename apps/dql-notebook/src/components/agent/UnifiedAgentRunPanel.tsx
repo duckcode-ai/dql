@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { HostAnswerActions } from './HostAnswerActions';
 import { createPortal } from 'react-dom';
 import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import {
@@ -2494,6 +2495,9 @@ function RunCard({
           <span style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.45 }}>{completedGuidance.detail}</span>
         </div>
       ) : null}
+
+      {/* RFC 0010 HH-9: the host's actions on an answer that needs review. */}
+      <HostAnswerActions run={run} t={t} />
 
       {(pinnable || showResearchDeeper || run.nextActions.length > 0) ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>

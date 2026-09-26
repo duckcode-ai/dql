@@ -124,6 +124,13 @@ export interface DqlHostHooks {
    * stakeholder.
    */
   audience?(principal: DqlPrincipal): Promise<'stakeholder' | 'analyst' | undefined> | 'stakeholder' | 'analyst' | undefined;
+  /**
+   * What the DQL app shows around its own screens for this person (HH-9):
+   * links to the host's own pages, the host's sign-out, and actions the host
+   * offers on answers that need review (for example "Make this a certified
+   * answer"). The app's screens stay DQL's; the host only adds to them.
+   */
+  ui?(principal: DqlPrincipal): Promise<DqlHostUi> | DqlHostUi;
   /** Each finished Ask trace, strictly redacted, as a bundle and as OTLP (HH-6). */
   traces?: DqlTraceSink;
   /**
@@ -140,6 +147,22 @@ export interface DqlHostHooks {
    * lineage, cadence). With a host, the host decides this, not the request.
    */
   enterpriseCertification?: boolean;
+}
+
+/** The host's additions to the DQL app for one person (HH-9). */
+export interface DqlHostUi {
+  /** Where "Sign out" goes. */
+  signOutUrl?: string;
+  /** Links to the host's own pages, in the person menu or the navigation. */
+  links?: Array<{ id: string; label: string; href: string; placement: 'menu' | 'nav' }>;
+  /**
+   * Offered on an answer that needs review. DQL posts
+   * `{ runId, question, threadId?, trustState }` to `url` (same origin) and
+   * shows the `message` the host answers with.
+   */
+  answerActions?: Array<{ id: string; label: string; url: string; description?: string }>;
+  /** A name for the environment, e.g. "Claims · Production". */
+  environment?: string;
 }
 
 /** The run store surface the server uses (dql-agent's SQLite store satisfies it). */

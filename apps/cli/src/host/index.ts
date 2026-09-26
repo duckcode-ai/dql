@@ -11,6 +11,7 @@ export {
   type DqlDecision,
   type DqlModelProvider,
   type DqlHostHooks,
+  type DqlHostUi,
   type DqlPrincipal,
   type DqlRequestContext,
   type DqlRunStore,

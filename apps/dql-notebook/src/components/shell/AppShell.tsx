@@ -1,4 +1,5 @@
 import React, { lazy, Suspense, useCallback, useRef, useState, useEffect } from 'react';
+import { HostPageView } from './HostPageView';
 import { readAppPageLink, withAppPageLink } from '../apps/app-links';
 import { useShallow } from 'zustand/react/shallow';
 import { CommandPalette } from '../palette/CommandPalette';
@@ -348,6 +349,8 @@ export function AppShell() {
               >
                 <AgentLogPage />
               </FullPageSection>
+            ) : state.mainView === 'host_page' ? (
+              <HostPageView />
             ) : state.mainView === 'ask_observability' ? (
               <AskObservabilityPage />
             ) : state.mainView === 'ask_trace' && state.askTraceRunId ? (

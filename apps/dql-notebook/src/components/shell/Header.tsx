@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { notebookStoreApi, useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
+import { HostPersonMenu } from './HostPersonMenu';
 import { api } from '../../api/client';
 import { serializeDqlNotebook } from '../../utils/parse-workbook';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
@@ -661,6 +662,9 @@ export function Header() {
           )}
         </div>
         )}
+
+        {/* RFC 0010 HH-9: the signed-in person and the host's links (only with a host). */}
+        <HostPersonMenu />
       </div>
     </div>
   );
