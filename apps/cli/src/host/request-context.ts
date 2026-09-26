@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { IncomingMessage } from 'node:http';
 import type { DqlAction, DqlResource, DqlRouteAction } from './route-actions.js';
 import type { DqlCredentialsHook, DqlRowPolicy } from './row-policy.js';
+import type { DqlAuditSink, DqlTraceSink } from './observability.js';
 
 export type { DqlAction, DqlResource, DqlRouteAction } from './route-actions.js';
 
@@ -87,11 +88,35 @@ export interface DqlHostHooks {
    */
   isInBoundary?(model: { id: string; name: string; model?: string; baseUrl?: string }): boolean;
   /**
+   * Audit (RFC 0010 HH-6): one event per API request that changed something
+   * or was refused, and one per finished answer. No result values. Without
+   * it nothing is recorded; central audit is the host's. See `observability.ts`.
+   */
+  audit?: DqlAuditSink;
+  /** Each finished Ask trace, strictly redacted, as a bundle and as OTLP (HH-6). */
+  traces?: DqlTraceSink;
+  /**
+   * Where state lives (HH-6), for hosts that run several copies of DQL on
+   * shared storage. Each defaults to today's SQLite file in the project.
+   */
+  stores?: {
+    runs?: DqlRunStore;
+    memory?: (projectRoot: string) => DqlMemoryStore;
+    conversations?: (defaultPath: string) => DqlConversationStore;
+  };
+  /**
    * Certify with every enterprise gate required (grain, outputs, pattern,
    * lineage, cadence). With a host, the host decides this, not the request.
    */
   enterpriseCertification?: boolean;
 }
+
+/** The run store surface the server uses (dql-agent's SQLite store satisfies it). */
+export type DqlRunStore = Pick<import('@duckcodeailabs/dql-agent').SqliteAgentRunStore, 'save' | 'get' | 'list' | 'getProgress' | 'saveProgress' | 'claimRequest' | 'requestClaim' | 'count'>;
+/** The memory store surface (dql-agent's MemoryStore satisfies it). */
+export type DqlMemoryStore = Pick<import('@duckcodeailabs/dql-agent').MemoryStore, keyof import('@duckcodeailabs/dql-agent').MemoryStore>;
+/** The conversation store surface (dql-agent's ConversationStore satisfies it). */
+export type DqlConversationStore = Pick<import('@duckcodeailabs/dql-agent').ConversationStore, keyof import('@duckcodeailabs/dql-agent').ConversationStore>;
 
 /** The generate/stream surface DQL needs from a model; dql-agent's AgentProvider satisfies it. */
 export type DqlModelProvider = import('@duckcodeailabs/dql-agent').AgentProvider;

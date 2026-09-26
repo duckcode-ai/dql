@@ -736,6 +736,7 @@ import { redactConnections, resolveSecretReferences, storeConnectionSecrets } fr
 import { authorizeHostRequest, currentPrincipal, hostActor, hostModelProvider, installHostPersonaSlots, resolveHostPrincipal, resultValuesMayReachModel, setHostModelHooks, withRequestContext, type DqlHostHooks } from './host/request-context.js';
 import { routeAction } from './host/route-actions.js';
 import { withHostQueryHooks } from './host/row-policy.js';
+import { auditActor, auditRequest, otlpHeadersFromEnv, withAnswerAudit, withTraceExport } from './host/observability.js';
 import { isViewerToken, mintViewerToken, readViewerToken, viewerDecision, viewerLinkBlockedReason, viewerPrincipal } from './host/viewer-links.js';
 import { boundAgentSchemaColumns, mergeAgentSchemaCompleteness } from './ask-schema-context.js';
 
@@ -8705,14 +8706,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // P0: one row per run with retention + old-run compaction. The legacy JSON
   // store rewrote the entire file (123 MB observed) twice per answered question;
   // existing history is imported once and the JSON renamed to *.migrated.
-  const agentRunStore = new SqliteAgentRunStore({
+  // RFC 0010 HH-6: a host may keep runs elsewhere and hear of each finished answer.
+  const openMemoryStore = (): MemoryStore => (hostHooks?.stores?.memory?.(projectRoot) ?? new MemoryStore(defaultMemoryPath(projectRoot))) as MemoryStore;
+  const baseAgentRunStore = hostHooks?.stores?.runs ?? new SqliteAgentRunStore({
     path: defaultAgentRunSqlitePath(projectRoot),
     legacyJsonPath: defaultAgentRunStorePath(projectRoot),
   });
+  const agentRunStore = hostHooks?.audit
+    ? withAnswerAudit(baseAgentRunStore, hostHooks.audit, () => ({ principal: currentPrincipal() ?? null, actor: auditActor(currentPrincipal()) }))
+    : baseAgentRunStore;
   // OBS-002: traces intentionally live outside agent-runs.sqlite. A corrupt,
   // oversized, or schema-newer trace store must not make Ask unavailable.
-  const askTraceStore = new AskTraceSqliteStoreV1({
+  // HH-6: each finished trace, strictly redacted, also goes to the host's
+  // sink and/or an OpenTelemetry collector when one is configured.
+  const askTraceStore = withTraceExport(new AskTraceSqliteStoreV1({
     path: defaultAskTraceSqlitePath(projectRoot),
+  }), {
+    ...(hostHooks?.traces ? { sink: hostHooks.traces } : {}),
+    ...((process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? process.env.OTEL_EXPORTER_OTLP_ENDPOINT)?.trim()
+      ? { otlpEndpoint: (process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? process.env.OTEL_EXPORTER_OTLP_ENDPOINT)!.trim(), otlpHeaders: otlpHeadersFromEnv(process.env.OTEL_EXPORTER_OTLP_HEADERS) }
+      : {}),
   });
   const conversationStorePath = await prepareConversationPath(projectRoot);
   // A run may outlive its streaming browser connection, so cancellation is
@@ -8745,7 +8758,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const getConversationStore = (): ConversationStore | null => {
     if (conversationStoreInstance !== undefined) return conversationStoreInstance;
     try {
-      conversationStoreInstance = new ConversationStore(conversationStorePath);
+      conversationStoreInstance = (hostHooks?.stores?.conversations?.(conversationStorePath) ?? new ConversationStore(conversationStorePath)) as ConversationStore;
     } catch {
       conversationStoreInstance = null;
     }
@@ -13139,6 +13152,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       res.end();
       return;
     }
+    // RFC 0010 HH-6: every API request that changes something or is refused
+    // is reported to the host's audit sink, with who it was once known.
+    const auditWho: { principal: import('./host/request-context.js').DqlPrincipal | null; actor: string | null; requestId?: string } = { principal: null, actor: null };
+    if (hostHooks?.audit && path.startsWith('/api/')) auditRequest(hostHooks.audit, req, res, path, routeAction(req.method, path), () => auditWho);
     // A read-only link names one App (RFC 0010 HH-2); it never carries the
     // server's own token.
     let viewerAppId: string | undefined;
@@ -13158,6 +13175,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // RFC 0010 HH-1: when a host says who is asking, every API request runs
     // as that person, and a request the host cannot place is refused.
     let requestPrincipal: Awaited<ReturnType<typeof resolveHostPrincipal>> = viewerAppId ? viewerPrincipal(viewerAppId) : null;
+    if (requestPrincipal) Object.assign(auditWho, { principal: requestPrincipal, actor: auditActor(requestPrincipal) });
     if (viewerAppId) {
       const route = routeAction(req.method, path);
       // Checked on every request: row rules added after the link was made still close it.
@@ -13176,6 +13194,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({ error: 'Sign in to use DQL.' }));
         return;
       }
+      Object.assign(auditWho, { principal: requestPrincipal, actor: auditActor(requestPrincipal) });
       // HH-2: and only for what the host lets this person do.
       const route = routeAction(req.method, path);
       const decision = await authorizeHostRequest(hostHooks!, requestPrincipal, route);
@@ -13190,7 +13209,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         return;
       }
     }
-    return withRequestContext(requestPrincipal ? { principal: requestPrincipal, requestId: randomUUID() } : undefined, async () => {
+    const requestId = randomUUID();
+    if (requestPrincipal) Object.assign(auditWho, { principal: requestPrincipal, actor: auditActor(requestPrincipal), requestId });
+    return withRequestContext(requestPrincipal ? { principal: requestPrincipal, requestId } : undefined, async () => {
 
     // Existing `dql notebook` runtimes cannot hand their in-memory capability
     // to a later CLI process. A short-lived challenge is therefore issued only
@@ -17243,7 +17264,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }
             const scopeRaw = agentRunString(record.scope);
             const scope = scopeRaw === 'notebook' || scopeRaw === 'project' || scopeRaw === 'user' ? scopeRaw : 'project';
-            const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+            const memory = openMemoryStore();
             try {
               const saved = memory.upsert({
                 scope,
@@ -17295,7 +17316,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     if (req.method === 'GET' && path === '/api/agent/memory') {
-      const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+      const memory = openMemoryStore();
       try {
         const scope = url.searchParams.get('scope') ?? undefined;
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -17313,7 +17334,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({ error: 'scope, title, and content are required.' }));
         return;
       }
-      const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+      const memory = openMemoryStore();
       try {
         const saved = memory.upsert({
           id: typeof body.id === 'string' ? body.id : undefined,
@@ -17345,7 +17366,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({ error: 'id is required.' }));
         return;
       }
-      const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+      const memory = openMemoryStore();
       try {
         memory.delete(id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -23321,7 +23342,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               ? certifiedMetadata.outputs.filter((output): output is string => typeof output === 'string')
               : [];
             if (certifiedMetadata.name) {
-              const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+              const memory = openMemoryStore();
               memory.upsert({
                 id: `mem_certify_${certifiedMetadata.name}`,
                 scope: 'project',
@@ -23468,7 +23489,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             const learnedOutputs = Array.isArray(learned.outputs)
               ? learned.outputs.filter((o): o is string => typeof o === 'string')
               : [];
-            const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+            const memory = openMemoryStore();
             memory.upsert({
               id: `mem_certify_${learned.name}`,
               scope: 'project',
