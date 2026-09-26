@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { startLocalServer } from '../local-runtime.js';
-import { hostActor, normalizeHostPrincipal, withRequestContext, type DqlHostHooks, type DqlPrincipal } from './request-context.js';
+import { hostActor, hostModelProvider, normalizeHostPrincipal, resultValuesMayReachModel, setHostModelHooks, withRequestContext, type DqlHostHooks, type DqlPrincipal } from './request-context.js';
 
 /**
  * RFC 0010 HH-1: a host says who is asking, and DQL records that person —
@@ -160,5 +160,32 @@ describe('what a signed-in person may do (RFC 0010 HH-2)', () => {
     expect(asked).toContainEqual({ person: 'u-dev', action: 'app.view', resource: { type: 'app', id: 'claims' } });
     expect((await fetch(`${base}/api/health`)).status).toBe(200);
     expect(asked.some((entry) => entry.action === 'project.read' && entry.person === 'u-dev')).toBe(true);
+  });
+});
+
+describe('the model and the privacy boundary (RFC 0010 HH-5)', () => {
+  const fakeModel = { name: 'claude', available: async () => true, generate: async () => 'ok' } as unknown as import('./request-context.js').DqlModelProvider;
+  afterEach(() => setHostModelHooks(undefined));
+
+  it('uses the host\'s model for the person asking, and DQL\'s own settings otherwise', () => {
+    expect(hostModelProvider()).toBeUndefined();
+    const asked: Array<string | null> = [];
+    setHostModelHooks({ modelProvider: ({ principal }) => { asked.push(principal?.id ?? null); return principal ? { id: 'anthropic', provider: fakeModel } : undefined; } });
+    expect(withRequestContext({ principal: PEOPLE.maria!, requestId: 'r' }, () => hostModelProvider())).toEqual({ id: 'anthropic', provider: fakeModel });
+    expect(hostModelProvider()).toBeUndefined();
+    setHostModelHooks({ modelProvider: () => { throw new Error('model registry down'); } });
+    expect(hostModelProvider()).toBeUndefined();
+    expect(asked).toEqual(['u-maria', null]);
+  });
+
+  it('lets values reach a model only inside the boundary: this machine by default, the host\'s rule when set', () => {
+    const bedrock = { id: 'anthropic', name: 'claude', model: 'eu.anthropic.claude-sonnet-5-v1:0' };
+    expect(resultValuesMayReachModel(bedrock, () => false)).toBe(false);
+    expect(resultValuesMayReachModel({ id: 'ollama', name: 'ollama' }, () => true)).toBe(true);
+    setHostModelHooks({ isInBoundary: (model) => model.model?.startsWith('eu.') === true });
+    expect(resultValuesMayReachModel(bedrock, () => false)).toBe(true);
+    expect(resultValuesMayReachModel({ ...bedrock, model: 'global.anthropic.claude-sonnet-5' }, () => true)).toBe(false);
+    setHostModelHooks({ isInBoundary: () => { throw new Error('boom'); } });
+    expect(resultValuesMayReachModel(bedrock, () => true)).toBe(false);
   });
 });

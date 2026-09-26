@@ -7,6 +7,7 @@ export {
   currentPrincipal,
   currentRequestContext,
   type DqlDecision,
+  type DqlModelProvider,
   type DqlHostHooks,
   type DqlPrincipal,
   type DqlRequestContext,

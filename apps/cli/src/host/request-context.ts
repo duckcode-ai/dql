@@ -71,13 +71,66 @@ export interface DqlHostHooks {
    */
   credentials?: DqlCredentialsHook;
   /**
+   * The model for this person (RFC 0010 HH-5), e.g. Claude through Amazon
+   * Bedrock or Google Vertex in the customer's account
+   * (`createBedrockClaudeProvider`, `createVertexClaudeProvider` in
+   * dql-agent). Consulted before DQL's own provider settings; return
+   * undefined to use them. `id` names the provider family for receipts.
+   */
+  modelProvider?(input: { principal: DqlPrincipal | null }): { id: string; provider: DqlModelProvider } | undefined;
+  /**
+   * Whether result values may reach this model — the privacy boundary.
+   * Without it, only a model on this machine qualifies (Ollama on loopback).
+   * The commercial host's approved rule: the model runs in the customer's
+   * own cloud account, in a region their admin approved, with data
+   * retention off.
+   */
+  isInBoundary?(model: { id: string; name: string; model?: string; baseUrl?: string }): boolean;
+  /**
    * Certify with every enterprise gate required (grain, outputs, pattern,
    * lineage, cadence). With a host, the host decides this, not the request.
    */
   enterpriseCertification?: boolean;
 }
 
+/** The generate/stream surface DQL needs from a model; dql-agent's AgentProvider satisfies it. */
+export type DqlModelProvider = import('@duckcodeailabs/dql-agent').AgentProvider;
+
 const requestContext = new AsyncLocalStorage<DqlRequestContext>();
+
+/**
+ * The host's model hooks, for code outside a request's closure (provider
+ * selection is module-level). One host per process, set at server start.
+ */
+let hostModelHooks: Pick<DqlHostHooks, 'modelProvider' | 'isInBoundary'> = {};
+export function setHostModelHooks(hooks: Pick<DqlHostHooks, 'modelProvider' | 'isInBoundary'> | undefined): void {
+  hostModelHooks = { ...(hooks?.modelProvider ? { modelProvider: hooks.modelProvider } : {}), ...(hooks?.isInBoundary ? { isInBoundary: hooks.isInBoundary } : {}) };
+}
+
+/** The host's model for the person asking, if the host supplies one. */
+export function hostModelProvider(): { id: string; provider: DqlModelProvider } | undefined {
+  try {
+    return hostModelHooks.modelProvider?.({ principal: currentPrincipal() ?? null }) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether result values may reach this model. The host decides when it has
+ * a boundary rule (an error means no); otherwise only a model on this
+ * machine qualifies.
+ */
+export function resultValuesMayReachModel(model: { id: string; name: string; model?: string; baseUrl?: string }, isLocal: () => boolean): boolean {
+  if (hostModelHooks.isInBoundary) {
+    try {
+      return hostModelHooks.isInBoundary(model) === true;
+    } catch {
+      return false;
+    }
+  }
+  return isLocal();
+}
 
 /** Run `work` as `context`; without a context, just run it. */
 export function withRequestContext<T>(context: DqlRequestContext | undefined, work: () => T): T {

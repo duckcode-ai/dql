@@ -733,7 +733,7 @@ import {
 } from "./notebook-datasets.js";
 import { prepareBlockInvocation } from './block-invocation.js';
 import { redactConnections, resolveSecretReferences, storeConnectionSecrets } from './connection-secrets.js';
-import { authorizeHostRequest, currentPrincipal, hostActor, installHostPersonaSlots, resolveHostPrincipal, withRequestContext, type DqlHostHooks } from './host/request-context.js';
+import { authorizeHostRequest, currentPrincipal, hostActor, hostModelProvider, installHostPersonaSlots, resolveHostPrincipal, resultValuesMayReachModel, setHostModelHooks, withRequestContext, type DqlHostHooks } from './host/request-context.js';
 import { routeAction } from './host/route-actions.js';
 import { withHostQueryHooks } from './host/row-policy.js';
 import { isViewerToken, mintViewerToken, readViewerToken, viewerDecision, viewerLinkBlockedReason, viewerPrincipal } from './host/viewer-links.js';
@@ -4875,6 +4875,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     .map((value) => value.trim().replace(/\/$/, ''))
     .filter(Boolean));
   const hostHooks = opts.hostHooks;
+  // RFC 0010 HH-5: the host's model and privacy boundary, for provider selection.
+  setHostModelHooks(hostHooks);
   const hostIdentity = typeof hostHooks?.resolvePrincipal === 'function';
   // Each signed-in person — and each read-only link — keeps its own App
   // persona ("view as"), apart from the owner's.
@@ -17854,8 +17856,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const instruction = typeof body.instruction === 'string' ? body.instruction.trim().slice(0, 600) : '';
         const selected = await selectAssistProvider(projectRoot).catch(() => null);
         const providerConfig = selected ? getEffectiveProviderConfig(projectRoot, selected.id) : undefined;
-        // Result values reach the model only when it runs on this machine.
-        const localModel = selected?.id === 'ollama' && isLoopbackUrl(providerConfig?.baseUrl ?? 'http://127.0.0.1:11434');
+        // Result values reach the model only inside the privacy boundary: on
+        // this machine, or wherever the host's boundary rule allows (HH-5).
+        const localModel = selected
+          ? resultValuesMayReachModel(
+            { id: selected.id, name: selected.provider.name, ...(providerConfig?.model ? { model: providerConfig.model } : {}), ...(providerConfig?.baseUrl ? { baseUrl: providerConfig.baseUrl } : {}) },
+            () => selected.id === 'ollama' && isLoopbackUrl(providerConfig?.baseUrl ?? 'http://127.0.0.1:11434'),
+          )
+          : false;
         const model = providerConfig?.model;
         const input: StoryDraftInput = {
           pageTitle: page.metadata.title,
@@ -40047,6 +40055,10 @@ async function selectAssistProvider(
   if (cassetteProvider) {
     return { id: plannerProviderSettingsId(cassetteProvider) ?? 'ollama', provider: cassetteProvider };
   }
+  // RFC 0010 HH-5: a host's model (e.g. Claude on Bedrock or Vertex in the
+  // customer's account) comes before this project's provider settings.
+  const hosted = hostModelProvider();
+  if (hosted) return { id: hosted.id as ProviderSettingsId, provider: hosted.provider };
   const settings = listProviderSettings(projectRoot);
   const activeProvider = getActiveProvider(projectRoot);
   // Subscription CLI providers (Claude Code / Codex) carry no API key — they're

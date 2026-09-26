@@ -38,6 +38,21 @@ export { streamOrGenerate } from './types.js';
 export { PROVIDER_DISPATCH_PHYSICAL_CEILING, providerDispatchLimit, prepareProviderHttpDispatch, completeProviderHttpDispatch, fetchProviderHttpDispatch } from './dispatch.js';
 export { ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider, normalizeAnthropicBaseUrl, normalizeGeminiBaseUrl };
 export { runAnthropicNativeToolLoop, anthropicToolLoopPost, type AnthropicToolLoopTransport } from './claude.js';
+export {
+  bedrockClaudeTransport,
+  createBedrockClaudeProvider,
+  createVertexClaudeProvider,
+  defaultAwsCredentials,
+  defaultGoogleAccessToken,
+  signAwsRequest,
+  vertexClaudeTransport,
+  vertexHost,
+  type AwsCredentials,
+  type BedrockClaudeOptions,
+  type GoogleAccessToken,
+  type VertexClaudeOptions,
+} from './claude-cloud.js';
+export type { ProviderHttpTransport } from './dispatch.js';
 export type { ReasoningEffort, GeminiReasoningStyle, ThinkingMode } from './reasoning-effort.js';
 export {
   REASONING_EFFORTS,

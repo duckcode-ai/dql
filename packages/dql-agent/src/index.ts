@@ -1456,6 +1456,21 @@ export type {
   ValueIndexSnapshot,
 } from "./grounding/value-index.js";
 export {
+  bedrockClaudeTransport,
+  createBedrockClaudeProvider,
+  createVertexClaudeProvider,
+  defaultAwsCredentials,
+  defaultGoogleAccessToken,
+  signAwsRequest,
+  vertexClaudeTransport,
+  vertexHost,
+  type AwsCredentials,
+  type BedrockClaudeOptions,
+  type GoogleAccessToken,
+  type VertexClaudeOptions,
+  type ProviderHttpTransport,
+} from "./providers/index.js";
+export {
   ClaudeProvider,
   runAnthropicNativeToolLoop,
   type AnthropicToolLoopTransport,

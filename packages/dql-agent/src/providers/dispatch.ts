@@ -94,6 +94,16 @@ export function completeProviderHttpDispatch(input: {
  * this reports the actual transport settlement only. A 2xx response is not a
  * successful provider result until the provider has consumed/validated it.
  */
+/**
+ * Where and how one provider request is sent when it does not go to the
+ * provider's own public API — for example Claude on Amazon Bedrock or Google
+ * Vertex, which take a different URL, a reshaped body and their own
+ * signature. Given the request DQL would send, returns what to send instead.
+ */
+export interface ProviderHttpTransport {
+  prepare(input: { url: string; body: Record<string, unknown>; headers: Record<string, string> }): Promise<{ url: string; body: string; headers: Record<string, string> }>;
+}
+
 export async function fetchProviderHttpDispatch(input: {
   provider: ProviderName;
   operation: ProviderDispatchOperation;
@@ -102,12 +112,17 @@ export async function fetchProviderHttpDispatch(input: {
   options: ProviderRunOptions;
   url: string;
   init: Omit<RequestInit, 'body'>;
+  transport?: ProviderHttpTransport;
 }): Promise<Response> {
   const dispatchedBody = prepareProviderHttpDispatch(input);
   try {
-    const response = await fetch(input.url, {
+    const prepared = input.transport
+      ? await input.transport.prepare({ url: input.url, body: dispatchedBody, headers: { ...(input.init.headers as Record<string, string> | undefined) } })
+      : { url: input.url, body: JSON.stringify(dispatchedBody), headers: input.init.headers };
+    const response = await fetch(prepared.url, {
       ...input.init,
-      body: JSON.stringify(dispatchedBody),
+      headers: prepared.headers,
+      body: prepared.body,
     });
     completeProviderHttpDispatch(input, {
       outcome: response.ok ? 'ok' : 'error',

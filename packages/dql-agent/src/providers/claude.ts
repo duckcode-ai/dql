@@ -11,7 +11,7 @@ import type {
 import { DEFAULT_MAX_OUTPUT_TOKENS } from './types.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
-import { fetchProviderHttpDispatch, providerDispatchLimit } from './dispatch.js';
+import { fetchProviderHttpDispatch, providerDispatchLimit, type ProviderHttpTransport } from './dispatch.js';
 import { adoptProseAsFinishNarration, admittedToolNames } from '../agentic/tool-loop.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
@@ -108,6 +108,7 @@ export async function postMessages(
     options: ProviderRunOptions;
     nextAttempt(): number;
   },
+  transport?: ProviderHttpTransport,
 ): Promise<Response> {
   const send = (envelope: Record<string, unknown>): Promise<Response> => {
     const attemptIndex = dispatch.nextAttempt();
@@ -123,6 +124,7 @@ export async function postMessages(
         headers,
         signal: dispatch.options.signal,
       },
+      ...(transport ? { transport } : {}),
     });
   };
   const model = typeof baseBody.model === 'string' ? baseBody.model : '';
@@ -185,19 +187,30 @@ export class ClaudeProvider implements AgentProvider {
   private readonly apiKey?: string;
   private readonly baseUrl: string;
   private readonly defaultModel: string;
+  /** Claude on another cloud (Bedrock, Vertex): its URL, body and signature. */
+  private readonly transport?: ProviderHttpTransport;
+  /** False where the service's stream format is not Anthropic's (Bedrock): stream by one final delta. */
+  private readonly streaming: boolean;
 
-  constructor(opts: { apiKey?: string; baseUrl?: string; model?: string } = {}) {
-    this.apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
+  constructor(opts: { apiKey?: string; baseUrl?: string; model?: string; transport?: ProviderHttpTransport; streaming?: boolean } = {}) {
+    this.apiKey = opts.apiKey ?? (opts.transport ? undefined : process.env.ANTHROPIC_API_KEY);
     this.baseUrl = normalizeAnthropicBaseUrl(opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL);
     this.defaultModel = opts.model ?? 'claude-opus-4-7';
+    this.transport = opts.transport;
+    this.streaming = opts.streaming ?? true;
   }
 
   async available(): Promise<boolean> {
-    return Boolean(this.apiKey);
+    return Boolean(this.apiKey || this.transport);
+  }
+
+  private post(...args: Parameters<typeof postMessages>): Promise<Response> {
+    const [url, headers, body, reasoning, dispatch] = args;
+    return postMessages(url, headers, body, reasoning, dispatch, this.transport);
   }
 
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {
-    if (!this.apiKey) {
+    if (!this.apiKey && !this.transport) {
       throw new Error('claude: ANTHROPIC_API_KEY is not set');
     }
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
@@ -207,10 +220,10 @@ export class ClaudeProvider implements AgentProvider {
 
     const model = options.model ?? this.defaultModel;
     let dispatches = 0;
-    const res = await postMessages(
+    const res = await this.post(
       `${this.baseUrl}/v1/messages`,
       {
-        'x-api-key': this.apiKey,
+        'x-api-key': this.apiKey ?? '',
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
@@ -241,7 +254,7 @@ export class ClaudeProvider implements AgentProvider {
     tools: AgentToolDefinition[],
     options: ProviderToolLoopOptions = {},
   ): Promise<NativeToolLoopResult> {
-    if (!this.apiKey) {
+    if (!this.apiKey && !this.transport) {
       throw new Error('claude: ANTHROPIC_API_KEY is not set');
     }
     if (tools.length === 0) return this.generate(messages, options);
@@ -251,13 +264,13 @@ export class ClaudeProvider implements AgentProvider {
       defaultModel: this.defaultModel,
       defaultMaxTokens: 1024,
       headers: () => ({
-        'x-api-key': this.apiKey!,
+        'x-api-key': this.apiKey ?? '',
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       }),
       buildSystem: (text) => text || undefined,
       reasoning: anthropicReasoning,
-      post: postMessages,
+      post: (...args: Parameters<typeof postMessages>) => this.post(...args),
     }, messages, tools, options);
   }
 
@@ -266,17 +279,24 @@ export class ClaudeProvider implements AgentProvider {
     options: ProviderRunOptions,
     onDelta: (delta: string) => void,
   ): Promise<string> {
-    if (!this.apiKey) {
+    if (!this.apiKey && !this.transport) {
       throw new Error('claude: ANTHROPIC_API_KEY is not set');
+    }
+    if (!this.streaming) {
+      // The service streams in its own framing (Bedrock's event stream):
+      // answer whole, as one delta.
+      const text = await this.generate(messages, options);
+      if (text) onDelta(text);
+      return text;
     }
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
     const turns = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
     const model = options.model ?? this.defaultModel;
     let dispatches = 0;
-    const res = await postMessages(
+    const res = await this.post(
       `${this.baseUrl}/v1/messages`,
       {
-        'x-api-key': this.apiKey,
+        'x-api-key': this.apiKey ?? '',
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
