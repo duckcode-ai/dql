@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { IncomingMessage } from 'node:http';
 import type { DqlAction, DqlResource, DqlRouteAction } from './route-actions.js';
-import type { DqlRowPolicy } from './row-policy.js';
+import type { DqlCredentialsHook, DqlRowPolicy } from './row-policy.js';
 
 export type { DqlAction, DqlResource, DqlRouteAction } from './route-actions.js';
 
@@ -63,6 +63,13 @@ export interface DqlHostHooks {
    * refusal. See `row-policy.ts`.
    */
   rowPolicy?: DqlRowPolicy;
+  /**
+   * The connection as the person asking (RFC 0010 HH-4): their own warehouse
+   * token or role, laid over the configured connection before any statement
+   * runs. A refusal stops the query with "reconnect" — never a retry with the
+   * service credential. See `row-policy.ts`.
+   */
+  credentials?: DqlCredentialsHook;
   /**
    * Certify with every enterprise gate required (grain, outputs, pattern,
    * lineage, cadence). With a host, the host decides this, not the request.

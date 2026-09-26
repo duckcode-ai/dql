@@ -13,7 +13,11 @@ export {
 } from './request-context.js';
 export { routeAction, type DqlAction, type DqlResource, type DqlRouteAction } from './route-actions.js';
 export {
+  CredentialsRefusedError,
   RowPolicyRefusedError,
+  type DqlCredentialsContext,
+  type DqlCredentialsHook,
+  type DqlCredentialsResult,
   type DqlQueryContext,
   type DqlRowPolicy,
   type DqlRowPolicyResult,

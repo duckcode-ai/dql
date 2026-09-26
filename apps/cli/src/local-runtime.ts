@@ -735,7 +735,7 @@ import { prepareBlockInvocation } from './block-invocation.js';
 import { redactConnections, resolveSecretReferences, storeConnectionSecrets } from './connection-secrets.js';
 import { authorizeHostRequest, currentPrincipal, hostActor, installHostPersonaSlots, resolveHostPrincipal, withRequestContext, type DqlHostHooks } from './host/request-context.js';
 import { routeAction } from './host/route-actions.js';
-import { withRowPolicy } from './host/row-policy.js';
+import { withHostQueryHooks } from './host/row-policy.js';
 import { isViewerToken, mintViewerToken, readViewerToken, viewerDecision, viewerLinkBlockedReason, viewerPrincipal } from './host/viewer-links.js';
 import { boundAgentSchemaColumns, mergeAgentSchemaCompleteness } from './ask-schema-context.js';
 
@@ -4841,9 +4841,10 @@ async function executePreparedArtifactTraceBoundary<T>(input: {
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor: rawExecutor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
-  // RFC 0010 HH-3: with a host row policy, every statement the server sends
-  // to a warehouse passes it first — this one executor is the only path.
-  const executor = opts.hostHooks?.rowPolicy ? withRowPolicy(rawExecutor, opts.hostHooks.rowPolicy) : rawExecutor;
+  // RFC 0010 HH-3/HH-4: with host query hooks, every statement the server
+  // sends to a warehouse runs as the person's connection and passes the row
+  // policy first — this one executor is the only path.
+  const executor = withHostQueryHooks(rawExecutor, { rowPolicy: opts.hostHooks?.rowPolicy, credentials: opts.hostHooks?.credentials });
   // Validate before creating listeners, project state, or a connection.  A
   // malformed embedding/CLI option must fail safely rather than silently
   // starting an ambiguous rollout mode.

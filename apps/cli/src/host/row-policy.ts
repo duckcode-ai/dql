@@ -39,6 +39,54 @@ export type DqlRowPolicyResult = { sql: string; params?: unknown[] } | { refuse:
 
 export type DqlRowPolicy = (query: DqlQueryContext) => Promise<DqlRowPolicyResult> | DqlRowPolicyResult;
 
+/**
+ * WHOSE CREDENTIALS (RFC 0010, slice HH-4). Before any statement runs, the
+ * host may resolve the connection for the person asking: their own warehouse
+ * token (Snowflake External OAuth, Databricks OAuth, BigQuery end-user
+ * credentials, Redshift identity propagation), a per-person role, or a
+ * different target. The warehouse's own row and column rules then apply.
+ * Refusing — for example an expired token — stops the query with "reconnect";
+ * DQL never retries with the service credential. Connections are pooled by
+ * their full settings, so each person's credentials get their own connection.
+ */
+export interface DqlCredentialsContext {
+  principal: DqlPrincipal | null;
+  /** The configured connection, without the person's credentials yet. */
+  connection: ConnectionConfig;
+  purpose: QueryPurpose;
+}
+
+/** Settings to lay over the connection for this person (any field but `driver`), or a refusal. */
+export type DqlCredentialsResult = { connection: Partial<ConnectionConfig> } | { refuse: string };
+
+export type DqlCredentialsHook = (input: DqlCredentialsContext) => Promise<DqlCredentialsResult> | DqlCredentialsResult;
+
+export class CredentialsRefusedError extends Error {
+  readonly code = 'CREDENTIALS_REQUIRED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'CredentialsRefusedError';
+  }
+}
+
+/** The connection as this person, or a refusal; a hook error refuses too. */
+export async function resolvePersonConnection(hook: DqlCredentialsHook, config: ConnectionConfig, purpose: QueryPurpose = 'data'): Promise<ConnectionConfig> {
+  let answer: DqlCredentialsResult;
+  try {
+    answer = await hook({ principal: currentPrincipal() ?? null, connection: { ...config }, purpose });
+  } catch {
+    throw new CredentialsRefusedError('DQL could not get your warehouse sign-in. Reconnect and try again.');
+  }
+  if (answer && 'refuse' in answer) {
+    throw new CredentialsRefusedError(typeof answer.refuse === 'string' && answer.refuse.trim() ? answer.refuse.trim() : 'Reconnect to your warehouse to run this query.');
+  }
+  if (!answer || typeof answer.connection !== 'object' || answer.connection === null) {
+    throw new CredentialsRefusedError('DQL could not get your warehouse sign-in. Reconnect and try again.');
+  }
+  const { driver: _ignored, ...overlay } = answer.connection;
+  return { ...config, ...overlay } as ConnectionConfig;
+}
+
 export class RowPolicyRefusedError extends Error {
   readonly code = 'ROW_POLICY_REFUSED';
   constructor(message: string) {
@@ -95,7 +143,8 @@ export async function applyRowPolicy(
 }
 
 /** A connector whose statements — direct, streamed, or in a consistent read scope — pass the policy. */
-function guardConnector(connector: DatabaseConnector, policy: DqlRowPolicy, config: ConnectionConfig): DatabaseConnector {
+function guardConnector(connector: DatabaseConnector, policy: DqlRowPolicy | undefined, config: ConnectionConfig): DatabaseConnector {
+  if (!policy) return connector;
   const target = connector as DatabaseConnector & { openConsistentReadScope?: () => Promise<{ execute: DatabaseConnector['execute'] }> };
   return new Proxy(target, {
     get(object, property) {
@@ -137,20 +186,31 @@ function guardConnector(connector: DatabaseConnector, policy: DqlRowPolicy, conf
   });
 }
 
+export interface HostQueryHooks {
+  rowPolicy?: DqlRowPolicy;
+  credentials?: DqlCredentialsHook;
+}
+
 /**
- * The server's executor with the host's row policy in front of every
- * statement. `executeQuery` expands its parameters and then goes through
- * the same guarded `executePositional`, so each statement is checked once.
+ * The server's executor with the host's query hooks in front of every
+ * statement: first the person's connection (HH-4), then the row policy
+ * (HH-3), then the statement. `executeQuery` expands its parameters and
+ * then goes through the same guarded `executePositional`, so each
+ * statement is checked once.
  */
-export function withRowPolicy<T extends QueryExecutor>(executor: T, policy: DqlRowPolicy): T {
+export function withHostQueryHooks<T extends QueryExecutor>(executor: T, hooks: HostQueryHooks): T {
+  const { rowPolicy, credentials } = hooks;
+  if (!rowPolicy && !credentials) return executor;
+  const personConnection = (config: ConnectionConfig, purpose?: QueryPurpose) => (credentials ? resolvePersonConnection(credentials, config, purpose) : Promise.resolve(config));
   return new Proxy(executor, {
     get(target, property, receiver) {
       const own = Reflect.get(target, property, target);
       if (typeof own !== 'function') return own;
       if (property === 'executePositional') {
         return async (sql: string, paramValues: unknown[], config: ConnectionConfig, options?: QueryExecutionOptions) => {
-          const allowed = await applyRowPolicy(policy, sql, paramValues ?? [], config, options?.purpose);
-          return target.executePositional(allowed.sql, allowed.params, config, options);
+          const connection = await personConnection(config, options?.purpose);
+          const allowed = rowPolicy ? await applyRowPolicy(rowPolicy, sql, paramValues ?? [], connection, options?.purpose) : { sql, params: paramValues };
+          return target.executePositional(allowed.sql, allowed.params, connection, options);
         };
       }
       if (property === 'executeQuery') {
@@ -158,9 +218,17 @@ export function withRowPolicy<T extends QueryExecutor>(executor: T, policy: DqlR
         return (target.executeQuery as (...args: unknown[]) => unknown).bind(receiver);
       }
       if (property === 'getConnector') {
-        return async (config: ConnectionConfig) => guardConnector(await target.getConnector(config), policy, config);
+        return async (config: ConnectionConfig) => {
+          const connection = await personConnection(config);
+          return guardConnector(await target.getConnector(connection), rowPolicy, connection);
+        };
       }
       return own.bind(target);
     },
   });
+}
+
+/** The executor with only a row policy (HH-3). */
+export function withRowPolicy<T extends QueryExecutor>(executor: T, policy: DqlRowPolicy): T {
+  return withHostQueryHooks(executor, { rowPolicy: policy });
 }

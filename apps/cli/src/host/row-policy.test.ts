@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { QueryExecutor, type ConnectionConfig, type DatabaseConnector, type QueryResult } from '@duckcodeailabs/dql-connectors';
 import { startLocalServer } from '../local-runtime.js';
 import { withRequestContext, type DqlHostHooks, type DqlPrincipal } from './request-context.js';
-import { RowPolicyRefusedError, withRowPolicy, type DqlQueryContext, type DqlRowPolicy } from './row-policy.js';
+import { CredentialsRefusedError, RowPolicyRefusedError, withHostQueryHooks, withRowPolicy, type DqlCredentialsHook, type DqlQueryContext, type DqlRowPolicy } from './row-policy.js';
 
 /**
  * RFC 0010 HH-3: one query path. With a host row policy, every statement the
@@ -20,11 +20,14 @@ const maria: DqlPrincipal = { id: 'u-maria', kind: 'person', email: 'maria@insur
 
 class RecordingExecutor extends QueryExecutor {
   readonly ran: Array<{ via: string; sql: string; values?: unknown[] }> = [];
-  override async executePositional(sql: string, values: unknown[], _config?: ConnectionConfig, _options?: unknown): Promise<QueryResult> {
+  readonly configs: ConnectionConfig[] = [];
+  override async executePositional(sql: string, values: unknown[], config?: ConnectionConfig, _options?: unknown): Promise<QueryResult> {
+    if (config) this.configs.push(config);
     this.ran.push({ via: 'executor', sql, values });
     return EMPTY;
   }
-  override async getConnector(_config?: ConnectionConfig): Promise<DatabaseConnector> {
+  override async getConnector(config?: ConnectionConfig): Promise<DatabaseConnector> {
+    if (config) this.configs.push(config);
     const ran = this.ran;
     const connector = {
       driverName: 'duckdb',
@@ -123,6 +126,55 @@ describe('the one query path (RFC 0010 HH-3)', () => {
   });
 });
 
+describe('whose credentials (RFC 0010 HH-4)', () => {
+  const service: ConnectionConfig = { driver: 'snowflake', account: 'insurer', username: 'dql_service', password: 'service-secret', role: 'REPORTING' } as ConnectionConfig;
+  const tokens: Record<string, string> = { 'u-maria': 'maria-oauth-token' };
+  const credentials: DqlCredentialsHook = ({ principal, connection }) => {
+    if (!principal) return { connection: {} };
+    const token = tokens[principal.id];
+    if (!token) return { refuse: 'Reconnect to Snowflake to run this query.' };
+    return { connection: { authenticator: 'OAUTH', token, username: principal.email, password: undefined, role: 'ANALYST', driver: 'duckdb' as never, account: connection.account } };
+  };
+
+  it('runs each statement as the person, before the row policy, and keeps the driver', async () => {
+    const seen: DqlQueryContext[] = [];
+    const inner = new RecordingExecutor();
+    const executor = withHostQueryHooks(inner, { credentials, rowPolicy: (query) => { seen.push(query); return { sql: query.sql }; } });
+    await withRequestContext({ principal: maria, requestId: 'r1' }, async () => {
+      await executor.executePositional('SELECT 1', [], service);
+      await (await executor.getConnector(service)).execute('SELECT 2');
+    });
+    await executor.executePositional('SELECT 3', [], service);
+    expect(inner.configs[0]).toMatchObject({ driver: 'snowflake', authenticator: 'OAUTH', token: 'maria-oauth-token', username: 'maria@insurer.example', role: 'ANALYST' });
+    expect(inner.configs[0]?.password).toBeUndefined();
+    expect(inner.configs[1]).toMatchObject({ token: 'maria-oauth-token' });
+    expect(inner.configs[2]).toEqual(service);
+    expect(seen[0]?.connection.driver).toBe('snowflake');
+    expect(inner.ran.map((entry) => entry.sql)).toEqual(['SELECT 1', 'SELECT 2', 'SELECT 3']);
+  });
+
+  it('stops with "reconnect" and never falls back to the service credential', async () => {
+    const dev: DqlPrincipal = { id: 'u-dev', kind: 'person', email: 'dev@insurer.example', source: 'host' };
+    for (const hook of [credentials, (() => { throw new Error('vault down'); }) as DqlCredentialsHook, (() => ({})) as unknown as DqlCredentialsHook]) {
+      const inner = new RecordingExecutor();
+      const executor = withHostQueryHooks(inner, { credentials: hook });
+      await withRequestContext({ principal: dev, requestId: 'r2' }, async () => {
+        await expect(executor.executePositional('SELECT 1', [], service)).rejects.toBeInstanceOf(CredentialsRefusedError);
+        await expect(executor.getConnector(service)).rejects.toBeInstanceOf(CredentialsRefusedError);
+      });
+      expect(inner.ran).toEqual([]);
+      expect(inner.configs).toEqual([]);
+    }
+    const inner = new RecordingExecutor();
+    await withRequestContext({ principal: dev, requestId: 'r3' }, () => expect(withHostQueryHooks(inner, { credentials }).executePositional('SELECT 1', [], service)).rejects.toThrow('Reconnect to Snowflake to run this query.'));
+  });
+
+  it('leaves the executor untouched without host query hooks', () => {
+    const inner = new RecordingExecutor();
+    expect(withHostQueryHooks(inner, {})).toBe(inner);
+  });
+});
+
 const connectorRoot = process.env.DQL_APP_DATASETS_DUCKDB_CONNECTOR_ROOT?.trim();
 const duckDbIt = connectorRoot ? it : it.skip;
 const fixtureRoot = resolve(here, '../../test/fixtures/app-datasets-pilot');
@@ -203,6 +255,66 @@ describe('two people, the same questions, different rows (RFC 0010 HH-3)', () =>
       const refusedSql = await call('none', '/api/query', sql);
       expect(refusedSql.text).toContain('Your profile has no region');
       expect(refusedSql.text).not.toMatch(/"n":\s*\d/);
+    } finally {
+      await new Promise<void>((done) => (server ? server.close(() => done()) : done()));
+      await executor.disconnect();
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
+describe('each person on their own warehouse sign-in (RFC 0010 HH-4)', () => {
+  duckDbIt('runs the same SQL on each person\'s connection and refuses someone who must reconnect', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-credentials-'));
+    const warehouse = (name: string) => join(projectRoot, `${name}.duckdb`);
+    const connection: ConnectionConfig = { driver: 'duckdb', filepath: warehouse('shared'), moduleSearchPaths: [connectorRoot!] };
+    const executor = new QueryExecutor();
+    let server: Server | undefined;
+    const people: Record<string, DqlPrincipal> = {
+      ca: { id: 'u-ca', kind: 'person', email: 'ca@insurer.example', source: 'host' },
+      us: { id: 'u-us', kind: 'person', email: 'us@insurer.example', source: 'host' },
+      lapsed: { id: 'u-lapsed', kind: 'person', email: 'lapsed@insurer.example', source: 'host' },
+    };
+    // Each person's "sign-in" reaches a warehouse that holds only their rows,
+    // as a warehouse applying its own row rules to their token would.
+    const signIns: Record<string, string> = { 'u-ca': warehouse('ca'), 'u-us': warehouse('us') };
+    const hostHooks: DqlHostHooks = {
+      resolvePrincipal: (req) => people[String(req.headers['x-test-person'] ?? '')] ?? null,
+      credentials: ({ principal }) => {
+        if (!principal) return { connection: {} };
+        const filepath = signIns[principal.id];
+        return filepath ? { connection: { filepath } } : { refuse: 'Your warehouse sign-in expired. Reconnect to run this query.' };
+      },
+    };
+    try {
+      cpSync(fixtureRoot, projectRoot, { recursive: true });
+      mkdirSync(join(projectRoot, '.dql', 'connectors'), { recursive: true });
+      symlinkSync(join(connectorRoot!, 'node_modules'), join(projectRoot, '.dql', 'connectors', 'node_modules'), 'dir');
+      const setup = new QueryExecutor();
+      for (const [name, keep] of [['shared', null], ['ca', 'CA'], ['us', 'US']] as const) {
+        execFileSync(process.execPath, [seedWarehouse, '--seed', join(projectRoot, 'seeds', 'seed.json'), '--connector-root', connectorRoot!, '--out', warehouse(name)], { stdio: 'pipe' });
+        if (keep) await setup.executePositional(`DELETE FROM main.order_lines WHERE region <> '${keep}'`, [], { ...connection, filepath: warehouse(name) });
+      }
+      await setup.disconnect();
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor, connection, preferredPort: 0, hostHooks, captureServer: (created) => { server = created; } });
+      const ask = async (person: string) => {
+        const response = await fetch(`http://127.0.0.1:${port}/api/query`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-test-person': person },
+          body: JSON.stringify({ sql: 'SELECT region, COUNT(*) AS n FROM main.order_lines GROUP BY region ORDER BY region' }),
+        });
+        return response.text();
+      };
+      const ca = await ask('ca');
+      expect(ca).toContain('"CA"');
+      expect(ca).not.toContain('"US"');
+      const us = await ask('us');
+      expect(us).toContain('"US"');
+      expect(us).not.toContain('"CA"');
+      const lapsed = await ask('lapsed');
+      expect(lapsed).toContain('Your warehouse sign-in expired. Reconnect to run this query.');
+      expect(lapsed).not.toContain('"CA"');
+      expect(lapsed).not.toContain('"US"');
     } finally {
       await new Promise<void>((done) => (server ? server.close(() => done()) : done()));
       await executor.disconnect();
