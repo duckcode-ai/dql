@@ -148,6 +148,8 @@ export interface BedrockClaudeOptions {
   credentials?: () => Promise<AwsCredentials>;
   /** For tests and VPC endpoints: replaces https://bedrock-runtime.{region}.amazonaws.com. */
   endpoint?: string;
+  /** An Amazon Bedrock Guardrail applied to every call (its id or ARN, and version). */
+  guardrail?: { id: string; version: string };
   now?: () => Date;
 }
 
@@ -163,7 +165,11 @@ export function bedrockClaudeTransport(options: BedrockClaudeOptions): ProviderH
       const signed = signAwsRequest({
         method: 'POST',
         url,
-        headers: { ...cloudHeaders(headers), accept: 'application/json' },
+        headers: {
+          ...cloudHeaders(headers),
+          accept: 'application/json',
+          ...(options.guardrail ? { 'x-amzn-bedrock-guardrailidentifier': options.guardrail.id, 'x-amzn-bedrock-guardrailversion': options.guardrail.version } : {}),
+        },
         body: payload,
         region: options.region,
         service: 'bedrock',

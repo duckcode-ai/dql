@@ -67,6 +67,13 @@ describe('Claude on Amazon Bedrock', () => {
     expect(prepared.headers.authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\/20260925\/us-east-1\/bedrock\/aws4_request, SignedHeaders=accept;content-type;host;x-amz-date, Signature=[0-9a-f]{64}$/);
   });
 
+  it('applies a Bedrock Guardrail to every call, inside the signature', async () => {
+    const guarded = bedrockClaudeTransport({ region: 'us-east-1', credentials: async () => AWS_EXAMPLE, guardrail: { id: 'gr-abc123', version: '2' }, now: () => new Date('2026-09-25T12:00:00Z') });
+    const prepared = await guarded.prepare({ url: 'x', body: { model: 'm', max_tokens: 1, messages: [] }, headers: {} });
+    expect(prepared.headers).toMatchObject({ 'x-amzn-bedrock-guardrailidentifier': 'gr-abc123', 'x-amzn-bedrock-guardrailversion': '2' });
+    expect(prepared.headers.authorization).toContain('SignedHeaders=accept;content-type;host;x-amz-date;x-amzn-bedrock-guardrailidentifier;x-amzn-bedrock-guardrailversion');
+  });
+
   it('refuses a streamed request, which Bedrock frames its own way', async () => {
     await expect(transport.prepare({ url: 'x', body: { model: 'm', stream: true }, headers: {} })).rejects.toThrow('streaming');
   });

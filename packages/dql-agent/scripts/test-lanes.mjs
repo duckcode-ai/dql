@@ -55,7 +55,8 @@ const EXPECTED_TEST_FILES = 175;
 // observability, retrieval, semantic-proof, research-ledger, conversation and
 // provider-transport regressions total 1,891 non-skipped tests; a future
 // accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2317;
+// 2318 with the Bedrock Guardrail option (RFC 0010 HH-5 follow-up, +1 test).
+const EXPECTED_TESTS = 2318;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

@@ -250,6 +250,7 @@ Checked on real DuckDB with per-person warehouses. Not built: a connector regist
 - **Bedrock:** InvokeModel with the `bedrock-2023-05-31` body, signed with AWS SigV4. The signing matches AWS's published "get-vanilla" test vector. Credentials come from the environment, the ECS/EKS container endpoint, or the host. Answers come back whole.
 - **Vertex:** `rawPredict` and `streamRawPredict` with the `vertex-2023-10-16` body and a Google token from the environment, the metadata server, or the host.
 - **Server hooks:** `modelProvider` is consulted first in provider selection. `isInBoundary` decides whether result values may reach a model, replacing the Ollama-on-loopback rule; an error means no.
+- **Guardrails:** `guardrail: { id, version }` applies an Amazon Bedrock Guardrail to every call (signed request headers).
 
 Not built: choosing Bedrock or Vertex in the Settings page. Tests: `claude-cloud.test.ts`, `host-hooks.test.ts`.
 
@@ -276,6 +277,9 @@ Not built: an MCP HTTP transport with a host authenticator. Tests: `tool-gate.te
 - **Git:** commits are authored as the signed-in person when they have an email. `git.openPullRequest` replaces the GitHub CLI for review requests.
 
 Not built: moving the `dql notebook` block scheduler onto this route. Tests: `delivery-signing-git.test.ts`, `route-actions.test.ts`.
+
+### Entry point
+`@duckcodeailabs/dql-cli/host` also exports `startProjectRuntime`: the full server with its UI for one project, as `dql notebook` runs it, taking `hostHooks`, `allowedOrigins` and a host-managed `connection`. The first host (DQL Enterprise) starts every workspace this way; its end-to-end test drives this branch's server through sign-in, roles, row rules and DuckDB for five people.
 
 ### Needs a live check before release
 1. Claude on Amazon Bedrock (in-region and Geo profile model ids, long answers, tool use) with real AWS credentials, and from an ECS task role.
