@@ -19,7 +19,7 @@ export {
 } from './request-context.js';
 export type { DqlAuditEvent, DqlAuditSink, DqlTraceSink } from './observability.js';
 export type { DeliverySink } from '../schedule/notifiers/index.js';
-export type { SnapshotSigner } from '../snapshot/app-snapshot.js';
+export { snapshotKeyId, verifySnapshot, type SnapshotSigner } from '../snapshot/app-snapshot.js';
 export { routeAction, type DqlAction, type DqlResource, type DqlRouteAction } from './route-actions.js';
 export {
   CredentialsRefusedError,
