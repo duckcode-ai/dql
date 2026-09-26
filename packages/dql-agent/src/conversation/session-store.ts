@@ -58,6 +58,11 @@ export interface ConversationThread {
   archived: boolean;
   /** User-pinned conversation, surfaced ahead of the rest in the sidebar. */
   favorite: boolean;
+  /**
+   * Who the conversation belongs to, when a host said who is asking (RFC 0010).
+   * Unset for conversations from the local single-user notebook.
+   */
+  ownerId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -153,6 +158,8 @@ export interface ConversationTurn extends ConversationTurnInput {
 export interface ConversationTurnSearchOptions {
   query: string;
   threadId?: string;
+  /** Only this person's conversations. */
+  ownerId?: string;
   limit?: number;
 }
 
@@ -281,6 +288,8 @@ export class ConversationStore {
     this.ensureColumn('conversation_turns', 'narration_integrity_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('conversation_threads', 'summary_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('conversation_threads', 'favorite', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('conversation_threads', 'owner_id', 'TEXT');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_conversation_threads_owner ON conversation_threads(owner_id, archived, updated_at DESC)');
   }
 
   private ensureColumn(table: string, column: string, ddl: string): void {
@@ -289,7 +298,7 @@ export class ConversationStore {
     this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`).run();
   }
 
-  createThread(input: { id?: string; surface?: string; title?: string; notebookPath?: string } = {}): ConversationThread {
+  createThread(input: { id?: string; surface?: string; title?: string; notebookPath?: string; ownerId?: string } = {}): ConversationThread {
     const now = new Date().toISOString();
     // A caller may NAME a thread. `dql agent ask --thread my-session` is
     // documented as continuing a conversation, but nothing ever created the
@@ -311,15 +320,16 @@ export class ConversationStore {
       summaryTurnSeq: 0,
       archived: false,
       favorite: false,
+      ...(input.ownerId ? { ownerId: input.ownerId } : {}),
       createdAt: now,
       updatedAt: now,
     };
     this.db.prepare(`
       INSERT INTO conversation_threads (
         id, surface, title, notebook_path, working_state_json, rolling_summary, summary_json,
-        summary_turn_seq, archived, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, '{}', NULL, '{}', 0, 0, ?, ?)
-    `).run(thread.id, thread.surface, thread.title ?? null, thread.notebookPath ?? null, now, now);
+        summary_turn_seq, archived, owner_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, '{}', NULL, '{}', 0, 0, ?, ?, ?)
+    `).run(thread.id, thread.surface, thread.title ?? null, thread.notebookPath ?? null, input.ownerId ?? null, now, now);
     return thread;
   }
 
@@ -328,15 +338,20 @@ export class ConversationStore {
     return row ? rowToThread(row) : null;
   }
 
-  listThreads(options: { limit?: number; includeArchived?: boolean } = {}): ConversationThread[] {
+  /** `ownerId` lists only that person's conversations (a host's signed-in person). */
+  listThreads(options: { limit?: number; includeArchived?: boolean; ownerId?: string } = {}): ConversationThread[] {
     // Pinned conversations lead, then recency. Ordering here rather than in the
     // client keeps the `limit` meaningful: a favourite must not fall off the end
     // of the page simply because it has not been used lately.
-    const rows = options.includeArchived
-      ? this.db.prepare('SELECT * FROM conversation_threads ORDER BY favorite DESC, updated_at DESC LIMIT ?')
-          .all(options.limit ?? 50)
-      : this.db.prepare('SELECT * FROM conversation_threads WHERE archived = 0 ORDER BY favorite DESC, updated_at DESC LIMIT ?')
-          .all(options.limit ?? 50);
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (!options.includeArchived) where.push('archived = 0');
+    if (options.ownerId !== undefined) {
+      where.push('owner_id = ?');
+      params.push(options.ownerId);
+    }
+    const rows = this.db.prepare(`SELECT * FROM conversation_threads ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY favorite DESC, updated_at DESC LIMIT ?`)
+      .all(...params, options.limit ?? 50);
     return (rows as ThreadRow[]).map(rowToThread);
   }
 
@@ -555,6 +570,10 @@ export class ConversationStore {
       threadFilter = 'AND t.thread_id = ?';
       params.push(options.threadId);
     }
+    if (options.ownerId !== undefined) {
+      threadFilter += ' AND t.thread_id IN (SELECT id FROM conversation_threads WHERE owner_id = ?)';
+      params.push(options.ownerId);
+    }
     const rows = this.db.prepare(`
       SELECT t.*, bm25(conversation_turns_fts) AS rank
       FROM conversation_turns_fts AS f
@@ -729,6 +748,7 @@ type ThreadRow = {
   archived: number;
   /** Nullable on rows written before the column existed (see ensureColumn). */
   favorite?: number | null;
+  owner_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -773,6 +793,7 @@ function rowToThread(row: ThreadRow): ConversationThread {
     summaryTurnSeq: row.summary_turn_seq,
     archived: Boolean(row.archived),
     favorite: Boolean(row.favorite),
+    ...(row.owner_id ? { ownerId: row.owner_id } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

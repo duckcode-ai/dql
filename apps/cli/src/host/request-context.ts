@@ -117,6 +117,13 @@ export interface DqlHostHooks {
   git?: {
     openPullRequest?(input: { gitRoot: string; branch: string; base: string; title: string; body: string; principal: DqlPrincipal | null }): Promise<{ url: string }>;
   };
+  /**
+   * Whom answers are written for: a stakeholder (consumption only, no SQL or
+   * authoring handoffs) or an analyst. With this hook the host decides per
+   * person and the request body's `audience` is ignored; a hook error means
+   * stakeholder.
+   */
+  audience?(principal: DqlPrincipal): Promise<'stakeholder' | 'analyst' | undefined> | 'stakeholder' | 'analyst' | undefined;
   /** Each finished Ask trace, strictly redacted, as a bundle and as OTLP (HH-6). */
   traces?: DqlTraceSink;
   /**

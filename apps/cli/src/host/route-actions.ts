@@ -79,8 +79,17 @@ function actionFor(method: string, path: string): DqlAction {
   if (under(path, '/api/settings') || under(path, '/api/server') || under(path, '/api/semantic-runtime')) return read ? 'project.read' : 'settings.manage';
   if (under(path, '/api/git')) return read ? 'project.read' : 'git.review';
 
-  // Trust decisions.
-  if (!read && (/\/certify(\/|$)/.test(path) || path === '/api/app-datasets/tables/create')) return 'dataset.certify';
+  // Trust decisions. Every route that can leave something certified is a
+  // certification: the Block Studio job route, the older synchronous route,
+  // saving a notebook cell (which certifies what it saves), creating a
+  // Dataset from a table, and approving a semantic tile on an App page.
+  if (!read && (
+    /\/certify(\/|$)/.test(path)
+    || /^\/api\/block-studio\/certifications(\/|$)/.test(path)
+    || path === '/api/blocks/save-from-cell'
+    || path === '/api/app-datasets/tables/create'
+    || /^\/api\/apps\/[^/]+\/dashboards\/[^/]+\/approve-semantic$/.test(path)
+  )) return 'dataset.certify';
   if (!read && /^\/api\/agent\/hints\/[^/]+(\/(review|lifecycle))?$/.test(path)) return 'hint.review';
 
   // Taking data out.
@@ -103,8 +112,9 @@ function actionFor(method: string, path: string): DqlAction {
     return read ? 'project.read' : 'app.author';
   }
 
-  // Asking and investigating.
-  if (!read && (path === '/api/agent-runs' || under(path, '/api/ask') || path === '/api/semantic-query'
+  // Asking and investigating. Asking for certification is part of asking:
+  // the requester is whoever is signed in.
+  if (!read && (under(path, '/api/agent-runs') || under(path, '/api/ask') || path === '/api/semantic-query'
     || path === '/api/llm/run' || under(path, '/api/ai') || path === '/api/agent/learnings/correction')) return 'ask';
   if (!read && (under(path, '/api/research-plan') || under(path, '/api/notebook/research'))) return 'research';
   if (!read && under(path, '/api/agent')) return 'ask';

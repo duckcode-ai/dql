@@ -3184,17 +3184,36 @@ function humanizePriorMemberDimension(dimension: string): string {
   return last.endsWith('s') ? last : `${last}s`;
 }
 
+/**
+ * Conversations belong to the person a host placed (RFC 0010): with a signed-in
+ * person, each sees and continues only their own threads. The local
+ * single-user notebook has no owner and sees every thread, as before.
+ */
+function conversationOwnerId(): string | undefined {
+  const principal = currentPrincipal();
+  return principal && principal.source !== 'local' ? principal.id : undefined;
+}
+
+function conversationVisibleToCaller(thread: { ownerId?: string } | null | undefined): boolean {
+  if (!thread) return false;
+  const owner = conversationOwnerId();
+  return owner === undefined || thread.ownerId === owner;
+}
+
 /** Best-effort: persist a completed run as a conversation turn (never throws). */
 function recordConversationTurn(store: ConversationStore | null, threadId: string | undefined, run: AgentRun): void {
   if (!store || !threadId) return;
   try {
-    if (!store.getThread(threadId)) {
+    const existing = store.getThread(threadId);
+    if (existing && !conversationVisibleToCaller(existing)) return;
+    if (!existing) {
       // Open the named thread rather than discarding the turn. `dql agent ask
       // --thread <id>` documents itself as continuing a conversation, but the
       // CLI never created the thread and this guard then dropped every turn —
       // so a follow-up reached the analyst with no prior plan, no prior
       // measures, and no binding, and answered a different question.
-      store.createThread({ id: threadId, surface: 'cli' });
+      const ownerId = conversationOwnerId();
+      store.createThread({ id: threadId, surface: 'cli', ...(ownerId ? { ownerId } : {}) });
       if (!store.getThread(threadId)) return;
     }
     const turn = store.appendTurn(threadId, conversationTurnInputFromRun(run));
@@ -15581,13 +15600,42 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           remoteAddress: req.socket.remoteAddress,
         });
         if (traceSurface) parsed.request.traceSurface = traceSurface;
+        // RFC 0010: with a host, the host decides whom the answer is written
+        // for (never the request body), and Research asked through Ask needs
+        // the research permission, as it does on its own route.
+        const askingPrincipal = currentPrincipal();
+        if (hostHooks && askingPrincipal) {
+          if (hostHooks.audience) {
+            try {
+              const audience = await hostHooks.audience(askingPrincipal);
+              if (audience === 'stakeholder' || audience === 'analyst') parsed.request.audience = audience;
+              else delete parsed.request.audience;
+            } catch {
+              parsed.request.audience = 'stakeholder';
+            }
+          }
+          if (parsed.request.requestedMode === 'research') {
+            const decision = await authorizeHostRequest(hostHooks, askingPrincipal, { action: 'research', resource: { type: 'project' } });
+            if (!decision.allow) {
+              res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(serializeJSON({ error: decision.reason ?? 'You do not have permission to do this.', code: 'PERMISSION_DENIED', action: 'research', resource: { type: 'project' } }));
+              return;
+            }
+          }
+        }
         // The answer-loop cascade now proves certified/semantic/generated tiers
         // after retrieval and execution. Avoid pre-routing ordinary Ask runs from
         // token-overlap signals; explicit callers may still provide signals.
         // Thread-scoped runs: the persisted thread supplies prior turns (server
         // state wins; the client-built context stays the no-threadId fallback).
         const conversationStore = parsed.request.threadId ? getConversationStore() : null;
-        if (conversationStore && parsed.request.threadId && conversationStore.getThread(parsed.request.threadId)) {
+        const requestedThread = conversationStore && parsed.request.threadId ? conversationStore.getThread(parsed.request.threadId) : null;
+        if (requestedThread && !conversationVisibleToCaller(requestedThread)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Unknown thread id.' }));
+          return;
+        }
+        if (conversationStore && parsed.request.threadId && requestedThread) {
           parsed.request.conversationContext = await conversationContextFromThread(
             conversationStore,
             parsed.request.threadId,
@@ -15856,7 +15904,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               question,
               intent: 'ad_hoc_analysis',
               domain: record ? agentRunString(record.domain) : undefined,
-              owner: record ? agentRunString(record.owner) : undefined,
+              // With a host, the requester is the signed-in person, never a name in the body.
+              owner: hostActor() ?? (record ? agentRunString(record.owner) : undefined),
               generatedSql,
               dqlArtifact,
               context: {
@@ -17197,7 +17246,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const includeArchived = url.searchParams.get('archived') === '1';
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({
-            threads: store.listThreads({ limit: Number.isFinite(limit) ? limit : 50, includeArchived }),
+            threads: store.listThreads({ limit: Number.isFinite(limit) ? limit : 50, includeArchived, ...(conversationOwnerId() ? { ownerId: conversationOwnerId() } : {}) }),
             // Browser cache identity only. It is an opaque one-way fingerprint
             // and intentionally does not become conversation/trace evidence.
             projectIdentity: conversationProjectIdentity,
@@ -17207,10 +17256,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (req.method === 'POST' && path === '/api/agent/threads') {
           const body = await readJSON(req).catch(() => null);
           const record = agentRunRecord(body) ?? {};
+          const ownerId = conversationOwnerId();
           const thread = store.createThread({
             surface: agentRunString(record.surface),
             title: agentRunString(record.title),
             notebookPath: agentRunString(record.notebookPath),
+            ...(ownerId ? { ownerId } : {}),
           });
           res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ thread }));
@@ -17223,7 +17274,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({
             turns: query.trim()
-              ? store.searchTurns({ query, limit: Number.isFinite(limit) ? limit : 10 })
+              ? store.searchTurns({ query, limit: Number.isFinite(limit) ? limit : 10, ...(conversationOwnerId() ? { ownerId: conversationOwnerId() } : {}) })
               : [],
           }));
           return;
@@ -17233,7 +17284,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const threadId = decodeURIComponent(threadMatch[1]);
           const action = threadMatch[2];
           const thread = store.getThread(threadId);
-          if (!thread) {
+          // Someone else's conversation is indistinguishable from none.
+          if (!thread || !conversationVisibleToCaller(thread)) {
             res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(serializeJSON({ error: 'Unknown thread id.' }));
             return;
@@ -18343,7 +18395,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         let blockers: string[] = [];
         try {
           const saved = readFileSync(join(projectRoot, created.path), 'utf-8');
-          const verdict = await certifyBlockStudioSource(saved, created.path);
+          // With a host, the host decides whether every enterprise gate applies (as for Block Studio).
+          const verdict = await certifyBlockStudioSource(saved, created.path, { enterprise: hostIdentity ? hostHooks?.enterpriseCertification === true : false });
           blockers = Array.from(new Set(verdict.checklist.blockers));
           if (verdict.certification.certified && blockers.length === 0) {
             setBlockStudioStatus(projectRoot, created.path, 'certified');
@@ -21288,9 +21341,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               question,
               resolveProvider: async () => {
                 if (opts.datasetChartAnswerProviderFactory) {
-                  return opts.datasetChartAnswerProviderFactory({ projectRoot, question, context });
+                  // Host-only test seam: the test decides the provider and stands inside its own boundary.
+                  const provider = await opts.datasetChartAnswerProviderFactory({ projectRoot, question, context });
+                  return provider ? { provider, valuesMayReachProvider: true } : null;
                 }
-                return createBlockStudioAssistProvider(projectRoot);
+                const selected = await selectAssistProvider(projectRoot).catch(() => null);
+                if (!selected) return null;
+                const providerConfig = getEffectiveProviderConfig(projectRoot, selected.id);
+                // The chart context carries its displayed rows: they reach the
+                // model only inside the privacy boundary (HH-5), as for App stories.
+                const valuesMayReachProvider = resultValuesMayReachModel(
+                  { id: selected.id, name: selected.provider.name, ...(providerConfig?.model ? { model: providerConfig.model } : {}), ...(providerConfig?.baseUrl ? { baseUrl: providerConfig.baseUrl } : {}) },
+                  () => selected.id === 'ollama' && isLoopbackUrl(providerConfig?.baseUrl ?? 'http://127.0.0.1:11434'),
+                );
+                return { provider: selected.provider, valuesMayReachProvider };
               },
             });
             const afterProvider = await validateCurrentChartContext();
@@ -22699,7 +22763,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           | undefined;
         try {
           if (reviewRequired) throw new Error(blockers[0]);
-          const verdict = await certifyBlockStudioSource(source, created.path);
+          const verdict = await certifyBlockStudioSource(source, created.path, { enterprise: hostIdentity ? hostHooks?.enterpriseCertification === true : false });
           blockers = Array.from(new Set(verdict.checklist.blockers));
           certification = {
             certified: verdict.certification.certified && blockers.length === 0,
@@ -28911,17 +28975,34 @@ export interface DatasetChartAnswerResult {
  * new query. The provider receives only the exact server-owned context that
  * the caller has already revalidated against the current App/page/source.
  */
+export interface DatasetChartAnswerProvider {
+  provider: AgentProvider;
+  /** True only when the provider is inside the privacy boundary for result values. */
+  valuesMayReachProvider: boolean;
+}
+
 export async function answerDatasetChartQuestion(input: {
   context: AppAnalyticalContextV1;
   /** Current governed Dataset contract revalidated by the caller. */
   descriptor?: DatasetDescriptor;
   question: string;
-  resolveProvider: () => AgentProvider | null | Promise<AgentProvider | null>;
+  /**
+   * The model to phrase the answer, and whether this chart's result values may
+   * reach it. The chart context carries the displayed rows, so a model outside
+   * the privacy boundary (only a model on this machine, or wherever the host's
+   * boundary rule allows) never receives it; the answer is then the
+   * deterministic summary, written without a model.
+   */
+  resolveProvider: () => DatasetChartAnswerProvider | null | Promise<DatasetChartAnswerProvider | null>;
 }): Promise<DatasetChartAnswerResult> {
   const question = input.question.trim();
   const unavailable = () => ({
     mode: 'deterministic_context_summary' as const,
     answer: `Deterministic context summary (no configured AI provider is available): ${answerFromDatasetChartContext(input.context, input.descriptor)}`,
+  });
+  const outsideBoundary = () => ({
+    mode: 'deterministic_context_summary' as const,
+    answer: `Deterministic context summary (this chart's values stay out of the configured AI model, which is outside the privacy boundary): ${answerFromDatasetChartContext(input.context, input.descriptor)}`,
   });
   if (questionRequiresEvidenceOutsideDatasetChart(question)) {
     return {
@@ -28929,13 +29010,15 @@ export async function answerDatasetChartQuestion(input: {
       answer: 'This chart\'s current governed result cannot establish that answer. It can answer only from the displayed values, filters, and result columns; run or build another governed chart for the needed evidence.',
     };
   }
-  let provider: AgentProvider | null;
+  let resolved: DatasetChartAnswerProvider | null;
   try {
-    provider = await input.resolveProvider();
+    resolved = await input.resolveProvider();
   } catch {
     return unavailable();
   }
-  if (!provider) return unavailable();
+  if (!resolved) return unavailable();
+  if (!resolved.valuesMayReachProvider) return outsideBoundary();
+  const provider = resolved.provider;
   const messages: Parameters<AgentProvider['generate']>[0] = [
     {
       role: 'system',

@@ -278,6 +278,14 @@ Not built: an MCP HTTP transport with a host authenticator. Tests: `tool-gate.te
 
 Not built: moving the `dql notebook` block scheduler onto this route. Tests: `delivery-signing-git.test.ts`, `route-actions.test.ts`.
 
+### Fixes from the first host's review
+- **Certifying is a certification:** `/api/block-studio/certifications` (the route the UI uses), `/api/blocks/save-from-cell` (which certifies what it saves) and `approve-semantic` now map to `dataset.certify`; they had fallen through to `dataset.author`, so a person allowed only to author could certify. Creating a Dataset from a table and saving a cell apply the host's enterprise gates.
+- **Chart questions respect the privacy boundary:** asking about an App chart sends its displayed rows to a model only when `isInBoundary` (or, without a host, a model on this machine) allows it; otherwise the answer is the deterministic summary, written without a model.
+- **Who and for whom:** a certification request records the signed-in person, not a name in the body; Apps published or created with a host are owned by the signed-in person; the new `audience` hook decides whether answers are written for a stakeholder or an analyst (the body's `audience` is ignored); Research requested through Ask needs the `research` action.
+- **Conversations belong to a person:** with a host, threads record their owner and each person lists, searches, opens and continues only their own; someone else's thread answers 404. The local notebook is unchanged.
+
+Tests: `route-actions.test.ts`, `privacy-boundary.test.ts`, `per-person.test.ts`.
+
 ### Entry point
 `@duckcodeailabs/dql-cli/host` also exports `startProjectRuntime`: the full server with its UI for one project, as `dql notebook` runs it, taking `hostHooks`, `allowedOrigins` and a host-managed `connection`. The first host (DQL Enterprise) starts every workspace this way; its end-to-end test drives this branch's server through sign-in, roles, row rules and DuckDB for five people.
 

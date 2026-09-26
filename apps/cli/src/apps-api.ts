@@ -8287,7 +8287,8 @@ export function publishStoredAppBuildDraft(
 
   const stage = join(projectRoot, '.dql', 'local', 'app-build-staging', `${draft.id}-${Date.now()}`);
   const dashboardDir = join(stage, 'dashboards');
-  const owner = `${process.env.USER ?? 'owner'}@local`;
+  // With a host, the person publishing owns it; otherwise this machine's user.
+  const owner = hostActor() ?? `${process.env.USER ?? 'owner'}@local`;
   const domain = draft.pages[0]?.metadata.domain || 'general';
   const name = draft.name.trim() || draft.appId;
   const hasCertifiedAnalysis = draft.sources.some((source) => (
@@ -8868,7 +8869,7 @@ export function createAppPackage(
   const dashboardTitle = cleanString(input.dashboardTitle) || 'Overview';
   const dashboardId = slugify(dashboardTitle) || 'overview';
 
-  const owner = cleanString(input.owners?.[0]) || `${process.env.USER ?? 'owner'}@local`;
+  const owner = cleanString(input.owners?.[0]) || hostActor() || `${process.env.USER ?? 'owner'}@local`;
   const audience = cleanString(input.audience);
   const subdomain = cleanString(input.subdomain);
   const groups = normalizeTags(input.groups ?? []);
