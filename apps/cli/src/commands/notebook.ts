@@ -4,7 +4,8 @@ import type { Server } from 'node:http';
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
+import { QueryExecutor, type ConnectionConfig } from '@duckcodeailabs/dql-connectors';
+import type { DqlHostHooks } from '../host/request-context.js';
 import type { CLIFlags } from '../args.js';
 import type { AskAgentRuntimeMode, ProjectConfig } from '../local-runtime.js';
 import {
@@ -51,11 +52,21 @@ export interface ProjectRuntimeHandle {
  */
 export async function startProjectRuntime(
   projectRoot: string,
-  opts: { preferredPort?: number; host?: string; askAgentRuntimeMode?: AskAgentRuntimeMode } = {},
+  opts: {
+    preferredPort?: number;
+    host?: string;
+    askAgentRuntimeMode?: AskAgentRuntimeMode;
+    /** RFC 0010: run as a hosted runtime (see `@duckcodeailabs/dql-cli/host`). */
+    hostHooks?: DqlHostHooks;
+    /** Exact browser origins for a runtime behind a host's front door. */
+    allowedOrigins?: string[];
+    /** Replaces `defaultConnection` from dql.config.json, e.g. a host-managed connection. */
+    connection?: ConnectionConfig | null;
+  } = {},
 ): Promise<ProjectRuntimeHandle> {
   const config = loadProjectConfig(projectRoot);
   const executor = new QueryExecutor();
-  const connection = resolveNotebookConnection(config, projectRoot);
+  const connection = opts.connection !== undefined ? opts.connection : resolveNotebookConnection(config, projectRoot);
   const host = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const askTraceCapability = randomUUID();
   const instanceId = randomUUID();
@@ -68,6 +79,8 @@ export async function startProjectRuntime(
     preferredPort: opts.preferredPort ?? 0,
     host,
     askAgentRuntimeMode: opts.askAgentRuntimeMode,
+    ...(opts.hostHooks ? { hostHooks: opts.hostHooks } : {}),
+    ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     trustedCliTraceToken: askTraceCapability,
     instanceId,
     captureServer: (created) => { server = created; },
